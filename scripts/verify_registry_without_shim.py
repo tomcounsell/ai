@@ -35,17 +35,25 @@ enumeration `scripts/migrate_reflections_callables.py::default_targets()`
 rewrites, plus the owning-checkout level) and requires every copy that EXISTS to
 resolve cleanly, reporting per file.
 
-Exits 0 when every `callable:` entry in every existing copy imports. Every copy
-is examined even after one fails, so a single run reports the whole verdict;
-the exit is non-zero if any copy failed, naming each offending file and entry —
-and a copy that EXISTS but declares no `callable:` entries counts as a failure,
-since an empty check of a real registry is a silent pass that proves nothing.
+Exit codes — three, because the callers need to tell three things apart:
 
-"No registry copy exists at all" is a different thing and exits 0 with a
-warning. A machine that has not been installed yet has no callable that could
-contradict the claim, and failing there would block `/update`'s restart on a
-condition this probe has no evidence for — with no self-clearing path, which is
-the permanent-wedge shape this gate exists to avoid causing.
+- **0** — every `callable:` in every existing copy imported. Every copy is
+  examined even after one fails, so a single run reports the whole verdict.
+- **1** — at least one copy failed, naming each offending file and entry. A copy
+  that EXISTS but declares no `callable:` entries lands here too: an empty check
+  of a real registry is a silent pass that proves nothing.
+- **2** (``EXIT_NO_REGISTRY``) — nothing was probed, because no registry copy
+  exists at all. A distinct verdict rather than a failure: a machine with no
+  registry has no callable that could contradict the claim, and `/update`
+  blocking its service restart on it would wedge the cycle every 30 minutes
+  with no self-clearing path. It is not a pass either, so callers must not
+  quietly treat it as one. `run.py` Step 4.65 routes it to the operator warning
+  channel; `scripts/install_reflection_worker.sh` still refuses to install a
+  scheduler that has no registry to schedule.
+
+An exit code rather than a stdout token on purpose: the code survives a caller
+that captures only stderr, or only stdout, or neither, and it cannot drift out
+of agreement with a string constant on the reading side.
 
 Why this is committed rather than run ad hoc:
 `tests/unit/test_reflection_scheduler.py::test_all_callables_resolve` resolves
@@ -68,6 +76,10 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 BANNED_MODULE = "agent.sustainability"
+
+# Exit code for "no registry copy exists, so nothing was probed". Distinct from
+# both 0 (proven) and 1 (disproven) — see the module docstring.
+EXIT_NO_REGISTRY = 2
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -216,22 +228,23 @@ def main() -> int:
     copies = _registry_copies(_owning_checkout_root())
     existing = [p for p in copies if p.exists()]
     if not existing:
-        # Not a failure. This probe answers one question — "does every
-        # `callable:` still import?" — and with no registry there is no
-        # callable to contradict it. Failing here would gate `/update`'s
-        # service restart on a condition the probe has no evidence for, and
-        # since the sentinel has no self-clearing path that wedges the cycle
-        # every 30 minutes on a checkout that simply has not been installed
-        # yet: `config/reflections.yaml` is gitignored, `env_sync` has no
-        # in-repo fallback, and the vault is not a candidate under
-        # VALOR_LAUNCHD. Warn loudly and let the caller decide.
+        # Neither proven nor disproven — see EXIT_NO_REGISTRY. This probe
+        # answers one question, "does every `callable:` still import?", and with
+        # no registry there is no callable to contradict it. Exiting 1 would
+        # gate `/update`'s service restart on a condition with no evidence
+        # behind it, and the sentinel has no self-clearing path, so that wedges
+        # the cycle every 30 minutes on a checkout that simply has not been
+        # installed yet: `config/reflections.yaml` is gitignored, `env_sync` has
+        # no in-repo fallback, and the vault is not a candidate under
+        # VALOR_LAUNCHD. Exiting 0 would hand the callers a silent green. So it
+        # gets its own code, and each caller decides — `run.py` warns the
+        # operator, the installer refuses.
         print(
             "WARN: no reflections registry found, so nothing was probed; candidates were "
             + ", ".join(str(p) for p in copies),
             file=sys.stderr,
         )
-        print(f"OK: no registry present; {BANNED_MODULE} import ban vacuously holds")
-        return 0
+        return EXIT_NO_REGISTRY
 
     # Every copy is examined even after one fails. An operator fixing a
     # multi-machine registry drift needs the whole verdict in one run, and it is

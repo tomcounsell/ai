@@ -212,3 +212,55 @@ class TestCheckCopy:
         registry = _write(tmp_path / "r.yaml", "- just\n- a\n- list\n")
         assert probe._check_copy(registry, yaml, lambda dotted: object()) is None
         assert "expected a mapping" in capsys.readouterr().err
+
+
+class TestMainExitCodes:
+    """`main()` returns three distinct verdicts, and callers branch on all three.
+
+    The zero-candidates case is the one this file most needs to pin: it is the
+    only verdict whose *direction* was changed after the probe shipped, and the
+    mirror tests above cannot see it — they assert
+    `_registry_copies(None) == default_targets()`, which stays true no matter
+    what `_owning_checkout_root()` returns, and that locator returning `None`
+    (relative-paths worktrees, unfamiliar layouts) is exactly how a machine
+    reaches zero candidates.
+    """
+
+    def test_no_registry_copy_exits_with_its_own_code(self, probe, monkeypatch, tmp_path, capsys):
+        """Neither 0 nor 1: proving nothing is not passing, and is not failing."""
+        monkeypatch.setattr(
+            probe, "_registry_copies", lambda owning_root: [tmp_path / "absent.yaml"]
+        )
+
+        assert probe.main() == probe.EXIT_NO_REGISTRY
+        assert probe.EXIT_NO_REGISTRY not in (0, 1)
+        err = capsys.readouterr().err
+        assert "no reflections registry found" in err
+        assert "nothing was probed" in err
+
+    def test_a_resolvable_copy_still_exits_zero(self, probe, monkeypatch, tmp_path, capsys):
+        """Green control: the vacuous branch must not swallow a real pass."""
+        registry = _write(
+            tmp_path / "r.yaml", "reflections:\n  - name: a\n    callable: os.getcwd\n"
+        )
+        monkeypatch.setattr(probe, "_registry_copies", lambda owning_root: [registry])
+
+        assert probe.main() == 0
+        assert "1 callables resolved" in capsys.readouterr().out
+
+    def test_an_unresolvable_copy_still_exits_one(self, probe, monkeypatch, tmp_path, capsys):
+        """Red control: a real registry that cannot import is still a failure."""
+        registry = _write(
+            tmp_path / "r.yaml",
+            "reflections:\n  - name: a\n    callable: agent.sustainability.circuit_health_gate\n",
+        )
+        monkeypatch.setattr(probe, "_registry_copies", lambda owning_root: [registry])
+
+        assert probe.main() == 1
+        assert "did not resolve" in capsys.readouterr().err
+
+    def test_update_helper_mirrors_the_no_registry_exit_code(self, probe):
+        """Two files, no shared constant — this assertion is what keeps them equal."""
+        from scripts.update.reflections_callables import _PROBE_EXIT_NO_REGISTRY
+
+        assert _PROBE_EXIT_NO_REGISTRY == probe.EXIT_NO_REGISTRY

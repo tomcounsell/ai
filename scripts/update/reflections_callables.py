@@ -178,11 +178,23 @@ class RegistryProbeResult:
             ``success``. False means the shell half of ``/update`` will read a
             verdict this one does not agree with; see
             :func:`_write_probe_sentinel` for why only one direction is safe.
+        nothing_probed: ``True`` when the probe found no registry copy at all
+            (its exit code 2). ``success`` is ``True`` in that case — there is
+            no callable that could have failed — but it is a *vacuous* pass and
+            must not be reported as a clean one. ``run.py`` routes it to the
+            operator warning channel so the run does not render as a bare
+            green.
     """
 
     success: bool
     detail: str
     sentinel_recorded: bool = True
+    nothing_probed: bool = False
+
+
+# Mirrors ``scripts/verify_registry_without_shim.py::EXIT_NO_REGISTRY``. Pinned
+# by a test, since the two files share no importable constant.
+_PROBE_EXIT_NO_REGISTRY = 2
 
 
 def _write_probe_sentinel(project_dir: Path, failed: bool) -> bool:
@@ -293,6 +305,22 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
         return _probe_failure(project_dir, "registry probe timed out after 120s")
     except Exception as e:  # pragma: no cover - defensive
         return _probe_failure(project_dir, f"failed to invoke registry probe: {e}")
+
+    if proc.returncode == _PROBE_EXIT_NO_REGISTRY:
+        # Vacuous pass: no registry copy exists, so no callable could have
+        # failed. Clear the sentinel — blocking the restart on this would wedge
+        # the cycle with no self-clearing path — but carry the fact out, because
+        # a run that probed nothing must not render as a clean green. The
+        # probe's own explanation is on stderr, which the success path below
+        # does not read; take it from there deliberately.
+        recorded = _write_probe_sentinel(project_dir, failed=False)
+        warning = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return RegistryProbeResult(
+            success=True,
+            detail=warning[-1].strip() if warning else "no reflections registry found",
+            sentinel_recorded=recorded,
+            nothing_probed=True,
+        )
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()

@@ -1773,7 +1773,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log("Probing reflections-registry callables for importability...", v)
     result.registry_probe_result = reflections_callables.run_registry_probe(project_dir)
     probe_gate = result.registry_probe_result
-    if probe_gate.success:
+    if probe_gate.success and probe_gate.nothing_probed:
+        # A vacuous pass. The gate proved nothing, so it must not render as a
+        # clean green: without a `⚠️` bullet `extract_update_warnings` finds
+        # nothing, no fix session is queued, and the cycle reports `update OK`
+        # on a machine whose registry is missing entirely. The restart is NOT
+        # blocked — absence of a registry is no evidence a callable will not
+        # import, and the sentinel has no self-clearing path.
+        log(f"WARN: registry probe proved nothing — {probe_gate.detail}", v, always=True)
+        _append_warning(result, f"reflections registry probe proved nothing: {probe_gate.detail}")
+    elif probe_gate.success:
         log(f"  registry probe: {probe_gate.detail}", v)
     else:
         log(
@@ -1796,7 +1805,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # `RESTART BLOCKED` operator line, the `RESTART_FAILED` accounting, and
         # the bridge's deliberate exemption from a registry fault. The shell
         # already turns this fault into a non-zero terminal exit by the designed
-        # route. The one failure that has no such route is handled below.
+        # route, whenever the worker was actually due to restart —
+        # `RESTART_FAILED=1` is set inside `if $NEED_RESTART && ! $REGISTRY_PROBE_OK`,
+        # so a registry broken out-of-band with no worker-relevant commits still
+        # exits 0. Nothing is hidden on that branch: the `always=True` FAIL log
+        # prints and the warning above produces a `⚠️` bullet and a queued fix
+        # session. The one failure that has no route at all is handled below.
 
     # A failing probe whose sentinel did not reach disk is the ONE shape that
     # cannot be handled with a warning, and therefore the only in-process

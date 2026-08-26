@@ -355,9 +355,14 @@ def test_shell_latch_fails_closed_when_stat_is_unreadable(tmp_path):
 
     The earlier `|| echo 0` fell back to a value that can never satisfy `-ge`,
     so an anomalous `stat` silently discarded a real failing verdict as stale.
+
+    Stamped OLDER than this cycle on purpose, so the assertion is discriminating:
+    a working `stat` would call this sentinel stale and yield `true`. Only the
+    far-future fallback can produce `false` here, which is the exact branch
+    under test.
     """
     started = 1_700_000_000
-    _stamp_sentinel(tmp_path, started + 5)
+    _stamp_sentinel(tmp_path, started - 3600)
 
     assert _run_latch(tmp_path, started, break_stat=True) is False
 
