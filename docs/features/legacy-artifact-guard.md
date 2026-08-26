@@ -81,23 +81,27 @@ A third rule falls out of how git reports a clean result: an empty match set is
 signalled by an **exit status**, not by a printed count. There is no zero on
 stdout to compare against, so no check here compares a printed tally against a
 literal zero. Every helper branches on the exit status and treats anything
-other than "matched" or "clean" as a hard failure — a broken invocation must
-never read as "nothing found". Without that third branch a typo'd pathspec
-would make the whole guard silently vacuous, which is the worst failure mode
-available to a test like this.
+other than "matched" or "clean" as a hard failure — a broken invocation (a bad
+flag, or a call made outside a repository) must never read as "nothing found".
+That third branch catches a broken invocation specifically; it does not, and
+cannot, catch a search that runs cleanly but was typed wrong. A mistyped
+pathspec or a mistyped pattern still exits "clean" — git has no way to
+distinguish "found nothing because the artifact is gone" from "found nothing
+because the argument doesn't match anything real" — so that residual gap is
+closed only by keeping the tables and paths correct, not by the exit-status
+check.
 
 ## Scope: tracked Python only
 
 Every search is restricted to tracked `*.py`. This is the choice that makes the
 guard tractable rather than a churn machine.
 
-A whole-tree search for these strings also hits a generated dependency-graph
-asset under `site/` that still carries stale node entries, and roughly fifteen
-documents under `docs/` that legitimately discuss the migration in prose —
-including a completed plan that quotes a literal import line inside a
-verification row. None of those can reintroduce a runtime dependency.
-Restricting to tracked Python drops the exemption list from unbounded and
-growing to four distinct files plus the guard's own unavoidable self-reference.
+A whole-tree search for these strings also hits roughly fifteen documents
+under `docs/` that legitimately discuss the migration in prose — including a
+completed plan that quotes a literal import line inside a verification row.
+None of those can reintroduce a runtime dependency. Restricting to tracked
+Python drops the exemption list from unbounded and growing to four distinct
+files plus the guard's own unavoidable self-reference.
 
 A guard whose exemption list churns on every documentation edit is a guard
 people learn to ignore, and policing prose blocks writing honestly about the

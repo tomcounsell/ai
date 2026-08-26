@@ -64,14 +64,14 @@ class BannedModule(NamedTuple):
 
     dotted_path: str
     file_path: str
-    allowed: frozenset
+    allowed: frozenset[str]
 
 
 class BannedSymbol(NamedTuple):
     """A removed symbol name and the tracked files allowed to mention it."""
 
     symbol: str
-    allowed: frozenset
+    allowed: frozenset[str]
 
 
 BANNED_MODULES: tuple[BannedModule, ...] = (
@@ -220,6 +220,31 @@ def test_deleted_module_not_imported(row: BannedModule):
             f"Deleted module import path {row.dotted_path!r} is referenced by "
             f"tracked Python:\n{listed}\n" + _remedies(row.dotted_path, "BANNED_MODULES")
         )
+
+
+@pytest.mark.parametrize(
+    "row",
+    BANNED_MODULES,
+    ids=[row.dotted_path for row in BANNED_MODULES],
+)
+def test_banned_module_file_path_matches_dotted_path(row: BannedModule):
+    """A row's file path must be the mechanical translation of its import path.
+
+    ``_is_tracked`` reports a path absent from the git index as a clean
+    result — that's also what it reports for a path that never existed at
+    all. A row whose ``file_path`` was mistyped would make
+    ``test_deleted_module_file_absent`` permanently green with no signal:
+    the check would be querying a path that was never the real one. This
+    assertion keeps the two fields locked together so a future row can't
+    drift that way silently.
+    """
+    expected = row.dotted_path.replace(".", "/") + ".py"
+    assert row.file_path == expected, (
+        f"BANNED_MODULES row {row.dotted_path!r} has file_path {row.file_path!r}, "
+        f"but the mechanical translation of its import path is {expected!r}. "
+        f"A mismatch here means the file-absence check queries the wrong path "
+        f"and would stay green even if the real file reappeared."
+    )
 
 
 @pytest.mark.parametrize(
