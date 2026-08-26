@@ -29,15 +29,15 @@ vault source (``~/Desktop/Valor/reflections.yaml``), refreshed by
 ``env_sync.sync_reflections_yaml()`` (Step 1.66) on every ``/update``. Appending
 the entry only to the in-repo copy is silently clobbered the next time that copy
 step runs, so registration for real means appending the entry to the *vault*
-file. The target is resolved via
-``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which
-picks the vault ahead of the config copy **only when ``VALOR_LAUNCHD`` is
-unset** -- that resolver gates the vault candidate on the environment, not on
-checkout identity. Under ``VALOR_LAUNCHD=1`` it returns the soon-clobbered
-config copy even in the primary checkout, reproducing #1539's "looks wired,
-never lands" failure; a builder who hardcoded the config copy would reproduce it
-unconditionally. See ``_resolve_target``'s docstring for both reachable paths
-and issue #2855 for the fix. This step runs BEFORE Step 1.66's vault->config
+file. The target is resolved by :func:`_resolve_write_target`, a write-side
+resolver independent of the scheduler's read-side
+``agent.reflection_scheduler._resolve_registry_path()`` (issue #2855). The read
+side gates its vault candidate on ``VALOR_LAUNCHD`` because macOS TCC blocks
+``~/Desktop`` from launchd agents; applying that environment gate to a *write*
+sent registration to the soon-clobbered ``config/reflections.yaml`` instead,
+reproducing #1539's "looks wired, never lands" failure silently. The write side
+has no fallback level, so registration now either lands in the vault or fails
+loudly. This step runs BEFORE Step 1.66's vault->config
 copy (critique NIT) so the appended entry propagates into the per-machine
 ``config/reflections.yaml`` on the same cycle.
 
@@ -183,62 +183,44 @@ def _vault_reflections_path() -> Path:
     return Path.home() / "Desktop" / "Valor" / "reflections.yaml"
 
 
-def _resolve_target() -> Path:
-    """Resolve the registry file to write, prioritizing the vault (critique C6).
+def _resolve_write_target(vault_path: Path) -> Path:
+    """Resolve the registry file to WRITE. Always the vault (issue #2855).
 
-    Delegates to ``agent.reflection_scheduler._resolve_registry_path`` -- the
-    same resolver the scheduler reads at runtime. That resolver gained a
-    fourth fallback level (issue #2734): when *this* checkout's
-    ``config/reflections.yaml`` is absent, it reads the owning checkout's copy
-    instead of the vault. C6 -- "the entry lands where the scheduler will
-    actually look, not in the soon-clobbered config copy" -- holds only when
-    ``VALOR_LAUNCHD`` is unset. It is **not** guaranteed by running in the
-    primary checkout, and the resolver does not always prefer the vault.
+    This is the write-side resolver, deliberately independent of the
+    scheduler's read-side ``_resolve_registry_path``. Sharing that resolver is
+    what caused the silent-loss bug described below; splitting them is the
+    ``[ORDERED]`` No-Go in ``docs/plans/reflection-registry-schedule-contract.md``
+    (Risk 3), and this is that split.
 
-    The vault level is gated on the environment, not on checkout identity:
-    ``agent/reflection_scheduler.py`` appends the vault candidate only ``if not
-    os.environ.get("VALOR_LAUNCHD")`` (macOS TCC blocks ``~/Desktop`` access
-    from launchd agents). So there are two distinct ways to land on a
-    soon-clobbered ``config/reflections.yaml``:
+    Why the vault is unconditionally correct here: both callers have already
+    returned early unless ``vault_path.exists()`` and this machine owns the
+    ``valor`` project. That existence check reads ``~/Desktop``. If macOS TCC
+    were blocking this process from the vault -- the entire reason the read
+    side gates on ``VALOR_LAUNCHD`` -- the check would have failed and we would
+    have skipped before reaching this function. Reaching here is positive
+    evidence the vault is readable by this process, so the environment gate
+    that belongs on the read side must not be applied to the write.
 
-    - **Under ``VALOR_LAUNCHD=1``, even in the primary checkout.** The vault
-      candidate is skipped, control reaches the local-config level, and that
-      file exists in the primary checkout -- so this function returns the
-      config copy. The worker plist sets ``VALOR_LAUNCHD=1`` and a
-      worker-spawned ``claude -p`` session inherits it, so an agent running
-      ``/update`` hits this path. The write succeeds silently and Step 1.66's
-      vault->config copy discards it on the next cycle: #1539's "looks wired,
-      never lands" failure, with no error.
-    - **From a worktree under ``VALOR_LAUNCHD=1``**, where the local copy is
-      absent, the fourth owning-checkout level (issue #2734) resolves to the
-      *primary checkout's* copy, with the same silent-loss outcome.
+    The bug this replaces: the read-side resolver appends its vault candidate
+    the vault candidate was skipped, control fell through to the local-config
+    level, and ``config/reflections.yaml`` exists in the primary checkout -- so
+    registration wrote there. The worker plist sets ``VALOR_LAUNCHD=1`` and a
+    worker-spawned ``claude -p`` session inherits it, so an agent running
+    ``/update`` always hit this path. The write succeeded silently and Step
+    1.66's vault->config copy discarded it on the next cycle: #1539's "looks
+    wired, never lands" failure, with no error. From a worktree the fourth
+    owning-checkout level (issue #2734) resolved to the primary checkout's copy
+    with the same outcome.
 
-    Issue #2855 tracks the real fix. It is not attempted here because a
-    write-side caller must not share the scheduler's read-side resolver at all;
-    splitting them into distinct read and write functions is the ``[ORDERED]``
-    No-Go in ``docs/plans/reflection-registry-schedule-contract.md`` (Risk 3),
-    sequenced as a separate change. Until then, treat "unset ``VALOR_LAUNCHD``"
-    as a precondition of correct registration rather than an invariant this
-    module enforces.
+    Returning the vault makes both of those unreachable: there is no longer a
+    fallback level for a write to land on, so registration either lands where
+    the scheduler will read it or fails loudly.
 
-    ``_this_machine_owns_valor`` is **not** a second, independent leg. It fails
-    closed in a worktree only because ``config/projects.json`` is gitignored and
-    therefore absent there -- and ``scripts/update/run.py`` calls
-    ``env_sync.sync_projects_json(project_dir)`` at Step 1.65, which runs *before*
-    the registration steps, so a ``run.py --project-dir <worktree>`` invocation
-    would materialize that file and arm the ownership guard within the same run.
-    Treat the primary-checkout leg as the containment; do not relax it on the
-    assumption that ownership would catch a worktree caller. The containment must
-    not be relaxed without first splitting this shared resolver into distinct read
-    and write functions (the ``[ORDERED]`` No-Go in that plan; a separate,
-    sequenced change, not done here).
-
-    Imported lazily because the scheduler transitively imports heavy models;
-    the update step only needs it at call time.
+    ``_this_machine_owns_valor`` remains the containment against a non-owning
+    machine mutating the shared iCloud file; it is checked by the callers, not
+    here.
     """
-    from agent.reflection_scheduler import _resolve_registry_path
-
-    return _resolve_registry_path()
+    return vault_path
 
 
 def _this_machine_owns_valor(project_dir: Path) -> bool:
@@ -457,10 +439,7 @@ def remove_reflection(project_dir: Path, *, name: str) -> RegisterResult:
     if not _this_machine_owns_valor(project_dir):
         return RegisterResult(True, "skipped", "this machine does not own the 'valor' project")
 
-    try:
-        target = _resolve_target()
-    except Exception:  # pragma: no cover - defensive
-        target = vault_path
+    target = _resolve_write_target(vault_path)
 
     verdict = _remove_entry(target, name)
     if verdict == "absent":
@@ -531,13 +510,9 @@ def register_reflection(
     if not _this_machine_owns_valor(project_dir):
         return RegisterResult(True, "skipped", "this machine does not own the 'valor' project")
 
-    # Resolve via the scheduler's vault-first resolver (critique C6). With the
-    # vault present and not running under launchd, this returns the vault file.
-    try:
-        target = _resolve_target()
-    except Exception as e:  # pragma: no cover - defensive
-        target = vault_path
-        _ = e
+    # Write-side resolver (#2855): always the vault, never the scheduler's
+    # environment-gated read-side resolver.
+    target = _resolve_write_target(vault_path)
 
     entry_kwargs = {
         "name": name,
