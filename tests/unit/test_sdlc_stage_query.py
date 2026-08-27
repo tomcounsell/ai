@@ -651,7 +651,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch(
                 "tools.sdlc_stage_query._fetch_pr_merge_state",
-                return_value=("CLEAN", True),
+                return_value=("CLEAN", True, "OPEN"),
             ):
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     result = query_enriched(session_id="sid")
@@ -672,7 +672,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch(
                 "tools.sdlc_stage_query._fetch_pr_merge_state",
-                return_value=(None, None),
+                return_value=(None, None, None),
             ):
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     result = query_enriched(session_id="sid")
@@ -711,7 +711,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
-                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
                 ):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         result = query_enriched(session_id="sid")
@@ -729,7 +729,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
-                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
                 ):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         result = query_enriched(session_id="sid")
@@ -750,7 +750,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
-                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
                 ):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         result = query_enriched(session_id="sid")
@@ -768,7 +768,7 @@ class TestEnrichedPayload:
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
             with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
-                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
+                    "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
                 ):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         result = query_enriched(session_id="sid")
@@ -789,7 +789,9 @@ class TestEnrichedPayload:
         )
 
         with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
-            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
+            ):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
                         meta = _compute_meta({}, None, 1760)
@@ -805,7 +807,9 @@ class TestEnrichedPayload:
         plan_path.write_text("---\nstatus: Ready\nrevision_applied: true\n---\n\n# Plan\n")
 
         with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
-            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
+            ):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
                         meta = _compute_meta({}, None, 1760)
@@ -820,7 +824,9 @@ class TestEnrichedPayload:
         plan_path.write_text("---\nstatus: Ready\nrevision_applied_at: not-a-date\n---\n\n# Plan\n")
 
         with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
-            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
+            ):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
                         meta = _compute_meta({}, None, 1760)
@@ -929,7 +935,7 @@ class TestFetchPrMergeState:
         from tools.sdlc_stage_query import _fetch_pr_merge_state
 
         result = _fetch_pr_merge_state(None)
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_returns_none_tuple_on_gh_failure(self):
         from tools.sdlc_stage_query import _fetch_pr_merge_state
@@ -938,7 +944,7 @@ class TestFetchPrMergeState:
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
             result = _fetch_pr_merge_state(264)
 
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_parses_clean_merge_state_and_passing_ci(self):
         import json as _json
@@ -956,7 +962,7 @@ class TestFetchPrMergeState:
         )
         with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            merge_state, ci_passing = _fetch_pr_merge_state(264)
+            merge_state, ci_passing, _ = _fetch_pr_merge_state(264)
 
         assert merge_state == "CLEAN"
         assert ci_passing is True
@@ -977,7 +983,7 @@ class TestFetchPrMergeState:
         )
         with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            merge_state, ci_passing = _fetch_pr_merge_state(264)
+            merge_state, ci_passing, _ = _fetch_pr_merge_state(264)
 
         assert merge_state == "BLOCKED"
         assert ci_passing is False
@@ -996,7 +1002,7 @@ class TestFetchPrMergeState:
         )
         with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            merge_state, ci_passing = _fetch_pr_merge_state(264)
+            merge_state, ci_passing, _ = _fetch_pr_merge_state(264)
 
         assert merge_state == "CLEAN"
         assert ci_passing is True
@@ -1007,7 +1013,7 @@ class TestFetchPrMergeState:
         with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("not found")):
             result = _fetch_pr_merge_state(264)
 
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_fetch_pr_merge_state_threads_repo(self):
         """When repo= is passed, gh pr view includes --repo <slug>."""
@@ -1053,7 +1059,7 @@ class TestFetchPrMergeState:
             patch("tools.sdlc_stage_query.subprocess.run", side_effect=[first, second]) as mock_run,
             patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
         ):
-            merge_state, ci_passing = _fetch_pr_merge_state(2797)
+            merge_state, ci_passing, _ = _fetch_pr_merge_state(2797)
 
         assert merge_state == "CLEAN"
         assert ci_passing is True
@@ -1079,7 +1085,7 @@ class TestFetchPrMergeState:
             ) as mock_run,
             patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
         ):
-            merge_state, ci_passing = _fetch_pr_merge_state(2797)
+            merge_state, ci_passing, _ = _fetch_pr_merge_state(2797)
 
         assert merge_state == "UNKNOWN"
         assert mock_run.call_count == 2
@@ -1100,7 +1106,7 @@ class TestFetchPrMergeState:
             ) as mock_run,
             patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
         ):
-            merge_state, _ = _fetch_pr_merge_state(2797)
+            merge_state, _, _ = _fetch_pr_merge_state(2797)
 
         assert merge_state == "DIRTY"
         assert mock_run.call_count == 1
@@ -1205,7 +1211,9 @@ class TestResolveTargetRepo:
         with patch(
             "tools.sdlc_stage_query._resolve_target_repo_fallback", side_effect=fake_resolve
         ):
-            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)
+            ):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         from tools.sdlc_stage_query import _compute_meta
@@ -1238,7 +1246,7 @@ class TestResolveTargetRepo:
         monkeypatch.setattr(sdlc_utils, "_resolve_target_repo", fake_resolve)
         monkeypatch.delenv("GH_REPO", raising=False)
 
-        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)):
             with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     from tools.sdlc_stage_query import _compute_meta
@@ -1408,7 +1416,7 @@ class TestResolveIssueRecord:
                 "tools.sdlc_stage_query._resolve_target_repo_for_read",
                 return_value="owner/qse-ledger",
             ),
-            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)),
         ):
             result = query_enriched(issue_number=700504)
 
@@ -1555,7 +1563,7 @@ class TestComputeMetaTwoPassPrLookup:
             patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
             patch("tools.sdlc_stage_query.resolve_lane_slug", return_value=None),
             patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
-            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)),
             patch("subprocess.run", self._gh_stub(by_state, states_seen)),
         ):
             meta = _compute_meta({}, MagicMock(pr_number=None, slug=None), 2757)
@@ -1690,3 +1698,111 @@ class TestConcernRoundCountMetaProjection:
         """JSON round-trips through Redis can stringify; the counter must survive it."""
         result = self._enriched({"ISSUE": "completed", "_concern_round_count": "5"})
         assert result["_meta"]["concern_round_count"] == 5
+
+
+class TestPrStateAndLedgerLessResolution:
+    """`pr_state` and the ledger-less merged-PR rung (#2894, #2817).
+
+    `mergeStateStatus` reports UNKNOWN for merged, not-yet-computed, and
+    genuinely-unresolvable PRs alike, so it cannot answer "did this merge?".
+    `pr_state` can, and `agent.sdlc_router.guard_terminal_lane` keys on it.
+    """
+
+    def test_fetch_returns_pr_state(self):
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        proc = MagicMock(
+            returncode=0,
+            stdout=_json.dumps(
+                {"mergeStateStatus": "UNKNOWN", "statusCheckRollup": [], "state": "MERGED"}
+            ),
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
+            merge_state, _, pr_state = _fetch_pr_merge_state(2884)
+        assert merge_state == "UNKNOWN"
+        assert pr_state == "MERGED"
+
+    def test_merged_pr_skips_the_unknown_retry(self):
+        """A merged PR's UNKNOWN can never settle — retrying just sleeps."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        proc = MagicMock(
+            returncode=0,
+            stdout=_json.dumps(
+                {"mergeStateStatus": "UNKNOWN", "statusCheckRollup": [], "state": "MERGED"}
+            ),
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc) as run:
+            with patch("tools.sdlc_stage_query.time.sleep") as slept:
+                _fetch_pr_merge_state(2884)
+        assert run.call_count == 1, "merged PR must not trigger the UNKNOWN retry"
+        slept.assert_not_called()
+
+    def test_open_pr_still_retries_unknown(self):
+        """The transient-UNKNOWN retry must survive for genuinely open PRs."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        proc = MagicMock(
+            returncode=0,
+            stdout=_json.dumps(
+                {"mergeStateStatus": "UNKNOWN", "statusCheckRollup": [], "state": "OPEN"}
+            ),
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc) as run:
+            with patch("tools.sdlc_stage_query.time.sleep"):
+                _fetch_pr_merge_state(999)
+        assert run.call_count == 2
+
+    def test_ledger_less_lane_resolves_its_merged_pr(self):
+        """#2853: ledger emptied post-merge, so the router saw no pr_number."""
+        import tools.sdlc_stage_query as q
+
+        q._ledgerless_pr_cache.clear()
+        with (
+            patch.object(q, "_find_session_by_id", return_value=None),
+            patch.object(q, "_resolve_issue_record", return_value=None),
+            patch.object(q, "_lookup_pr", return_value=2884) as lookup,
+            patch.object(q, "_fetch_pr_merge_state", return_value=("UNKNOWN", None, "MERGED")),
+        ):
+            result = q.query_enriched(issue_number=2853)
+        assert result["stages"] == {}
+        assert result["_meta"]["pr_number"] == 2884
+        assert result["_meta"]["pr_state"] == "MERGED"
+        assert lookup.call_args.kwargs.get("state") == "merged"
+
+    def test_fresh_issue_costs_one_lookup_not_one_per_poll(self):
+        """The negative result is cached too — that is what protects the poll path."""
+        import tools.sdlc_stage_query as q
+
+        q._ledgerless_pr_cache.clear()
+        with (
+            patch.object(q, "_find_session_by_id", return_value=None),
+            patch.object(q, "_resolve_issue_record", return_value=None),
+            patch.object(q, "_lookup_pr", return_value=None) as lookup,
+        ):
+            for _ in range(5):
+                result = q.query_enriched(issue_number=99999)
+        assert result["_meta"]["pr_number"] is None
+        assert lookup.call_count == 1, (
+            f"fresh issue polled 5x should cost 1 lookup, cost {lookup.call_count}"
+        )
+
+    def test_lookup_failure_is_fail_open(self):
+        """A lookup problem must never manufacture terminality."""
+        import tools.sdlc_stage_query as q
+
+        q._ledgerless_pr_cache.clear()
+        with (
+            patch.object(q, "_find_session_by_id", return_value=None),
+            patch.object(q, "_resolve_issue_record", return_value=None),
+            patch.object(q, "_lookup_pr", side_effect=OSError("gh exploded")),
+        ):
+            result = q.query_enriched(issue_number=4242)
+        assert result["_meta"]["pr_number"] is None
+        assert result["_meta"]["pr_state"] is None
