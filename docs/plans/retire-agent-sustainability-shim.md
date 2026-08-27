@@ -540,21 +540,21 @@ Four files carry live references. Counts verified at plan time
 
 ## Success Criteria
 
-- [ ] `agent/sustainability.py` no longer exists.
-- [ ] No import statement anywhere under `agent/`, `reflections/`, `bridge/`,
+- [x] `agent/sustainability.py` no longer exists.
+- [x] No import statement anywhere under `agent/`, `reflections/`, `bridge/`,
       `worker/`, `tools/`, or `tests/` names `agent.sustainability`.
-- [ ] Zero definitions of `get_project_key` / `get_redis` remain under
+- [x] Zero definitions of `get_project_key` / `get_redis` remain under
       `reflections/agents/` or in `reflections/stall_advisory.py`; all six
       modules import the pair from `reflections.redis_access`. (Scoped
       deliberately: `reflections/utilities.py`, `reflections/docs_auditor.py`,
       and `agent/steering.py` keep their own and are out of scope.)
-- [ ] **Accepted scope widening:** the five `reflections/agents/*.py` helper
+- [x] **Accepted scope widening:** the five `reflections/agents/*.py` helper
       copies are folded onto the canonical module in this PR, not deferred — see
       Technical Approach for why this is judged rather than smuggled.
-- [ ] Every registry callable resolves with `agent.sustainability` banned from
+- [x] Every registry callable resolves with `agent.sustainability` banned from
       `sys.modules` (the issue's AC #2), proven by the committed
       `scripts/verify_registry_without_shim.py` run against the live registry.
-- [ ] `agent/agent_session_queue.py` changes exactly two locations — the import
+- [x] `agent/agent_session_queue.py` changes exactly two locations — the import
       at :2899 and the docstring at :948 — and nothing else. The changed-line
       count is **6**, not 4: the docstring edit is a 1-for-1 replacement (+1/-1),
       but the import sits at 32-space indentation inside `_worker_loop`, where
@@ -564,9 +564,9 @@ Four files carry live references. Counts verified at plan time
       parenthesized 3-line form (+3/-1). The two-location constraint (#2876
       coordination) is what matters and is unchanged; only the arithmetic moves.
       The Verification row asserts 6.
-- [ ] Targeted tests pass (see Verification).
-- [ ] `ruff check` and `ruff format --check` clean.
-- [ ] Documentation updated (`/do-docs`).
+- [x] Targeted tests pass (see Verification).
+- [x] `ruff check` and `ruff format --check` clean.
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
