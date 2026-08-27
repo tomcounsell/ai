@@ -27,7 +27,7 @@ def drip_project(monkeypatch):
     """Scope the drip to a unique per-test project + arm the recovery flag."""
     pk = f"test-drip-budget-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("VALOR_PROJECT_KEY", pk)
-    r = session_recovery_drip._get_redis()
+    r = session_recovery_drip.get_redis()
     # Plain coordination key (NOT Popoto-managed); short TTL so it self-cleans.
     r.set(f"{pk}:recovery:active", "1", ex=120)
     created: list[AgentSession] = []
