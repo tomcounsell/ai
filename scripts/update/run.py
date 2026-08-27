@@ -229,6 +229,127 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         print(line)
 
 
+def apply_registry_probe_verdict(
+    result: UpdateResult,
+    probe_gate: reflections_callables.RegistryProbeResult,
+    sentinel: Path,
+    v: bool = False,
+) -> bool:
+    """Turn a Step 4.65 probe verdict into warnings/errors on ``result``.
+
+    Returns ``True`` when the caller must suppress the service restart.
+
+    Extracted from Step 4.65 so the verdict routing is reachable by a test.
+    `run_update` is a two-thousand-line function that pulls git, installs
+    launchd services, and writes an iCloud vault; nothing drives it end to end,
+    which is why #3014 exists. That gap is tolerable for the restart-suppression
+    half, which the shell independently re-derives from the sentinel — but under
+    ``--verify`` there IS no sentinel and no shell, so the escalation below is
+    the only channel the verdict has, and an inverted predicate here would be
+    invisible. Hence a seam rather than a disclosed hole.
+
+    Three shapes, distinguished by WHY the sentinel does or does not agree:
+
+    1. Vacuous pass (``nothing_probed``). The gate proved nothing, so it must
+       not render as a clean green: without a ``⚠️`` bullet
+       ``extract_update_warnings`` finds nothing, no fix session is queued, and
+       the cycle reports ``update OK`` on a machine whose registry is missing
+       entirely. The restart is NOT suppressed — absence of a registry is no
+       evidence a callable will not import, and blocking on it would wedge the
+       cycle with no self-clearing path.
+    2. Ordinary failure. Suppresses the restart and warns, deliberately NOT
+       ``result.success = False``. Escalating here would destroy the mechanism
+       it looks like it duplicates: ``remote-update.sh`` is ``set -euo
+       pipefail`` and invokes ``run.py`` bare, so a non-zero exit aborts the
+       shell at that line and everything after it becomes unreachable — the
+       sentinel latch, the ``RESTART BLOCKED`` operator line, the
+       ``RESTART_FAILED`` accounting, and the bridge's deliberate exemption from
+       a registry fault. The shell already turns this fault into a non-zero
+       terminal exit by the designed route, whenever the worker was actually due
+       to restart: ``RESTART_FAILED=1`` is set inside ``if $NEED_RESTART && !
+       $REGISTRY_PROBE_OK``, so a registry broken out-of-band with no
+       worker-relevant commits still exits 0. Nothing is hidden — the
+       ``always=True`` FAIL log prints and the warning produces a ``⚠️`` bullet.
+    3. A failure the sentinel does not carry. The only in-process escalations,
+       and they split by why it is absent:
+       - ``sentinel_skipped`` (``--verify``): absent by design. There is no
+         shell half on this path — ``remote-update.sh`` runs ``run.py --cron``,
+         never ``--verify`` — so the "abort before the kickstart" reasoning does
+         not apply. What remains is that a human or agent running ``/update
+         --verify`` must not read a broken registry as a clean bill of health,
+         and one warning among many is not enough for that. So this is a hard
+         error and a non-zero exit: the loudest shape rather than the quietest.
+       - ``not sentinel_recorded``: absent by accident, the write or unlink did
+         not land. On the pass path a failed *clear* only over-blocks the next
+         cycle, so it stays a warning. On the failure path the shell reads
+         ``[ -f ]``, absence is its green light, and it restarts the worker
+         after this process has exited. Losing the shell's own ``RESTART
+         BLOCKED`` line to a ``set -e`` abort is the accepted cost: an abort
+         with no kickstart beats a green gate.
+
+    ``result.success`` is set directly rather than left to the ``if v:`` summary
+    block at the end of ``run_update``: that block is skipped under
+    ``--quiet``/``--json``, and these failures must exit non-zero on every
+    invocation shape. Matches the other hard-error sites in this file.
+    """
+    suppress_restart = False
+
+    if probe_gate.success and probe_gate.nothing_probed:
+        log(f"WARN: registry probe proved nothing — {probe_gate.detail}", v, always=True)
+        _append_warning(result, f"reflections registry probe proved nothing: {probe_gate.detail}")
+    elif probe_gate.success:
+        log(f"  registry probe: {probe_gate.detail}", v)
+    else:
+        log(
+            f"FAIL: reflections-registry callables did not import — skipping service restart\n"
+            f"  {probe_gate.detail}",
+            v,
+            always=True,
+        )
+        _append_warning(
+            result,
+            f"reflections registry callables unresolvable; service restart skipped: "
+            f"{probe_gate.detail}",
+        )
+        suppress_restart = True
+
+    if probe_gate.sentinel_skipped:
+        if not probe_gate.success:
+            # The checkout is named because it is not necessarily the one the
+            # operator is standing in: the probe resolves registry copies from
+            # the OWNING checkout when the current tree has none, so a --verify
+            # from a lane worktree reports on the main checkout's installed
+            # registry. Without the path in the message that sends someone
+            # hunting in the wrong tree.
+            _append_error(
+                result,
+                f"registry probe FAILED under --verify: {probe_gate.detail}. "
+                f"No sentinel was written under {sentinel.parent.parent} "
+                f"(--verify makes no changes, #3026), so this exit code is the "
+                f"whole verdict — the reflection worker will ImportError on every "
+                f"reflection until the named registry copy is fixed.",
+            )
+            result.success = False
+    elif not probe_gate.sentinel_recorded:
+        if probe_gate.success:
+            _append_warning(
+                result,
+                f"registry probe passed but could not clear {sentinel}; "
+                f"the next update's restart will be blocked until it is removed",
+            )
+        else:
+            _append_error(
+                result,
+                f"registry probe FAILED and could not stamp {sentinel} — "
+                f"the shell half of /update would read the absent sentinel as a pass "
+                f"and restart the worker onto an unresolvable registry. "
+                f"Aborting instead: {probe_gate.detail}",
+            )
+            result.success = False
+
+    return suppress_restart
+
+
 RECENT_ACTIVITY_WINDOW = (
     30 * 60
 )  # 30 minutes — session considered live if updated_at within this window
@@ -1879,98 +2000,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         project_dir, record_sentinel=not config.read_only
     )
     probe_gate = result.registry_probe_result
-    if probe_gate.success and probe_gate.nothing_probed:
-        # A vacuous pass. The gate proved nothing, so it must not render as a
-        # clean green: without a `⚠️` bullet `extract_update_warnings` finds
-        # nothing, no fix session is queued, and the cycle reports `update OK`
-        # on a machine whose registry is missing entirely. The restart is NOT
-        # blocked — absence of a registry is no evidence a callable will not
-        # import, and the sentinel has no self-clearing path.
-        log(f"WARN: registry probe proved nothing — {probe_gate.detail}", v, always=True)
-        _append_warning(result, f"reflections registry probe proved nothing: {probe_gate.detail}")
-    elif probe_gate.success:
-        log(f"  registry probe: {probe_gate.detail}", v)
-    else:
-        log(
-            f"FAIL: reflections-registry callables did not import — skipping service restart\n"
-            f"  {probe_gate.detail}",
-            v,
-            always=True,
-        )
-        _append_warning(
-            result,
-            f"reflections registry callables unresolvable; service restart skipped: "
-            f"{probe_gate.detail}",
-        )
+    # Routing lives in `apply_registry_probe_verdict` (module level, tested
+    # directly); see its docstring for the three shapes and each one's fail
+    # direction. It reports whether the restart must be suppressed rather than
+    # editing `config`, because `config` is a local rebind here that a helper
+    # cannot perform.
+    if apply_registry_probe_verdict(
+        result,
+        probe_gate,
+        project_dir / reflections_callables.PROBE_SENTINEL,
+        v,
+    ):
         config = replace(config, do_service_restart=False)
-        # Deliberately a warning, NOT `result.success = False`. Escalating the
-        # ordinary probe failure here would destroy the mechanism it looks like
-        # it duplicates: `remote-update.sh` is `set -euo pipefail` and invokes
-        # this file bare, so a non-zero exit aborts the shell at that line and
-        # everything after it becomes unreachable — the sentinel latch, the
-        # `RESTART BLOCKED` operator line, the `RESTART_FAILED` accounting, and
-        # the bridge's deliberate exemption from a registry fault. The shell
-        # already turns this fault into a non-zero terminal exit by the designed
-        # route, whenever the worker was actually due to restart —
-        # `RESTART_FAILED=1` is set inside `if $NEED_RESTART && ! $REGISTRY_PROBE_OK`,
-        # so a registry broken out-of-band with no worker-relevant commits still
-        # exits 0. Nothing is hidden on that branch: the `always=True` FAIL log
-        # prints and the warning above produces a `⚠️` bullet and a queued fix
-        # session. The failures that have no route at all are handled below.
-
-    # Sentinel accounting. Both branches below exist for the same reason: the
-    # sentinel is how a probe failure reaches a restarter this process cannot
-    # stop, so a failure that has no sentinel behind it needs a different
-    # channel, and `result.errors` (which makes `main()` return 1) is the only
-    # one left. They differ in why the sentinel is absent.
-    if probe_gate.sentinel_skipped:
-        # `--verify`: absent by design, per the `record_sentinel` rationale
-        # above. There is no shell half on this path — `remote-update.sh` runs
-        # `run.py --cron`, never `--verify` — so nothing downstream would read a
-        # sentinel even if one were written, and the "abort before the
-        # kickstart" reasoning simply does not apply. What remains is that a
-        # human or agent running `/update --verify` must not be able to read a
-        # broken registry as a clean bill of health, and a warning among other
-        # warnings is not enough for that. So a failing --verify probe is a hard
-        # error and a non-zero exit, which also makes it the loudest of the
-        # three shapes rather than the quietest.
-        if not probe_gate.success:
-            _append_error(
-                result,
-                f"registry probe FAILED under --verify: {probe_gate.detail}. "
-                f"No sentinel was written (--verify makes no changes, #3026), so "
-                f"this exit code is the whole verdict — the reflection worker "
-                f"will ImportError on every reflection until the registry is fixed.",
-            )
-            # Set directly rather than leaving it to the `if v:` summary block
-            # at the end of `run_update`: that block is skipped under
-            # --quiet/--json, and this must exit non-zero on every invocation
-            # shape. Matches the other hard-error sites in this file.
-            result.success = False
-    elif not probe_gate.sentinel_recorded:
-        # Absent by accident: the write or the unlink did not land. On the pass
-        # path a failed *clear* is the harmless direction — a stale sentinel
-        # only over-blocks — so it stays a warning. On the failure path the
-        # shell reads `[ -f ]`, absence is its green light, and it restarts the
-        # worker after this process has exited. Losing the shell's own
-        # `RESTART BLOCKED` line to a `set -e` abort is the accepted cost: an
-        # abort with no kickstart beats a green gate.
-        sentinel = project_dir / reflections_callables.PROBE_SENTINEL
-        if probe_gate.success:
-            _append_warning(
-                result,
-                f"registry probe passed but could not clear {sentinel}; "
-                f"the next update's restart will be blocked until it is removed",
-            )
-        else:
-            _append_error(
-                result,
-                f"registry probe FAILED and could not stamp {sentinel} — "
-                f"the shell half of /update would read the absent sentinel as a pass "
-                f"and restart the worker onto an unresolvable registry. "
-                f"Aborting instead: {probe_gate.detail}",
-            )
-            result.success = False  # set directly; see the --verify branch above
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or

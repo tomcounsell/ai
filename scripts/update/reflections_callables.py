@@ -250,7 +250,11 @@ def _write_probe_sentinel(project_dir: Path, failed: bool) -> bool:
     # Confirm against the filesystem rather than trusting the absence of an
     # exception: the directory could be read-only, the write could have been
     # made to a path the shell does not read, or an unlink could have raced.
-    return path.exists() is failed
+    # `==`, not `is`: `is` happens to work while both call sites pass bool
+    # literals, but a truthy non-bool (`failed=1`) would make this report
+    # "not recorded" unconditionally — which on the failure path escalates to a
+    # spurious hard exit in `run.py`.
+    return path.exists() == bool(failed)
 
 
 def run_registry_probe(project_dir: Path, *, record_sentinel: bool = True) -> RegistryProbeResult:
@@ -354,6 +358,18 @@ def run_registry_probe(project_dir: Path, *, record_sentinel: bool = True) -> Re
         # a run that probed nothing must not render as a clean green. The
         # probe's own explanation is on stderr, which the success path below
         # does not read; take it from there deliberately.
+        #
+        # The clear runs even over a sentinel an EARLIER cycle stamped, and that
+        # is knowingly accepted rather than overlooked. It is the one place this
+        # design moves blocked -> unblocked on absent evidence: cycle N stamps a
+        # failure, the registry then goes missing, cycle N+1 exits 2 and lifts
+        # cycle N's block. Leaving the sentinel in place instead would trade a
+        # bounded miss for an unbounded one — a machine with no registry has no
+        # route back to a passing probe, so the block would never lift. The miss
+        # is bounded because nothing silently proceeds on it:
+        # `com.valor.reflection-worker` is not among `remote-update.sh`'s
+        # kickstarts, `install_reflection_worker.sh` refuses outright on exit 2,
+        # and `nothing_probed` still forces the operator warning channel.
         recorded = record_sentinel and _write_probe_sentinel(project_dir, failed=False)
         warning = (proc.stderr or proc.stdout or "").strip().splitlines()
         return RegistryProbeResult(

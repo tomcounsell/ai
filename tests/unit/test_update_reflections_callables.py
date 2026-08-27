@@ -517,3 +517,123 @@ def test_remote_update_shell_consults_the_same_sentinel():
     assert PROBE_SENTINEL in shell, "remote-update.sh must check the sentinel run.py stamps"
     assert "REGISTRY_PROBE_OK" in shell
     assert "RESTART BLOCKED" in shell
+
+
+# ─── Step 4.65 verdict routing (run.py::apply_registry_probe_verdict) ────────
+#
+# The helper `run.py` extracted so this routing is reachable at all. Nothing
+# drives `run_update` end to end (#3014), and for the restart-suppression half
+# that is survivable because `remote-update.sh` re-derives the same verdict from
+# the sentinel. Under `--verify` there is no sentinel and no shell, so the
+# escalation here is the verdict's only channel and an inverted predicate would
+# be invisible. These tests pin the direction of all three shapes.
+
+
+def _verdict(**kw):
+    """A `RegistryProbeResult` with the field under test overridden."""
+    from scripts.update.reflections_callables import RegistryProbeResult
+
+    kw.setdefault("success", True)
+    kw.setdefault("detail", "detail text")
+    return RegistryProbeResult(**kw)
+
+
+def _apply(probe_gate, sentinel: Path):
+    from scripts.update.run import UpdateResult, apply_registry_probe_verdict
+
+    result = UpdateResult(success=True)
+    suppress = apply_registry_probe_verdict(result, probe_gate, sentinel)
+    return result, suppress
+
+
+def test_verify_failure_escalates_to_a_nonzero_exit(tmp_path):
+    """The round-11 seam: under --verify the exit code IS the verdict.
+
+    The sentinel is deliberately suppressed there, so a failure that only
+    warned would render as one bullet among many on a run an operator asked
+    for precisely to get a verdict.
+    """
+    result, suppress = _apply(
+        _verdict(success=False, sentinel_skipped=True, sentinel_recorded=False),
+        tmp_path / "data" / "registry-probe-failed",
+    )
+
+    assert result.success is False
+    assert result.errors, "a --verify failure must reach the error channel"
+    assert "--verify" in result.errors[0]
+    # The escalation names the checkout: the probe falls back to the OWNING
+    # checkout's registry when the current tree has none, so a --verify from a
+    # lane worktree reports on a copy outside it.
+    assert str(tmp_path) in result.errors[0]
+    assert suppress is True
+
+
+def test_verify_pass_is_silent_and_does_not_escalate(tmp_path):
+    """Green control for the case above: same --verify shape, passing probe.
+
+    Without this, an escalation that fired unconditionally — or a predicate
+    inverted to `if probe_gate.success:` — would still satisfy the red case.
+    """
+    result, suppress = _apply(
+        _verdict(success=True, sentinel_skipped=True, sentinel_recorded=False),
+        tmp_path / "data" / "registry-probe-failed",
+    )
+
+    assert result.success is True
+    assert not result.errors
+    assert not result.warnings
+    assert suppress is False
+
+
+def test_ordinary_failure_suppresses_the_restart_but_does_not_exit_nonzero(tmp_path):
+    """Shape 2: warn + block, deliberately NOT a hard error.
+
+    Escalating here aborts `remote-update.sh` at its `run.py` line under
+    `set -e`, making the sentinel latch and the `RESTART BLOCKED` line
+    unreachable — destroying the mechanism the escalation appears to duplicate.
+    """
+    result, suppress = _apply(
+        _verdict(success=False, sentinel_recorded=True),
+        tmp_path / "data" / "registry-probe-failed",
+    )
+
+    assert suppress is True, "an unresolvable registry must block the restart"
+    assert result.success is True, "the shell owns the non-zero exit on this path"
+    assert not result.errors
+    assert any("service restart skipped" in w for w in result.warnings)
+
+
+def test_unstamped_failure_escalates_but_a_failed_clear_only_warns(tmp_path):
+    """Shape 3b, both directions — the asymmetry is the whole point.
+
+    An unwritten failure sentinel is a false green for the shell (`[ -f ]`
+    absent == go), so it must abort. An uncleared pass sentinel only
+    over-blocks the next cycle, so it must not.
+    """
+    sentinel = tmp_path / "data" / "registry-probe-failed"
+
+    failed, _ = _apply(_verdict(success=False, sentinel_recorded=False), sentinel)
+    assert failed.success is False
+    assert any("could not stamp" in e for e in failed.errors)
+
+    passed, suppress = _apply(_verdict(success=True, sentinel_recorded=False), sentinel)
+    assert passed.success is True
+    assert not passed.errors
+    assert any("could not clear" in w for w in passed.warnings)
+    assert suppress is False
+
+
+def test_vacuous_pass_warns_without_blocking_the_restart(tmp_path):
+    """Shape 1: `nothing_probed` must render as neither green nor blocking.
+
+    Silent would report `update OK` on a machine with no registry at all;
+    blocking would wedge the cycle with no self-clearing path.
+    """
+    result, suppress = _apply(
+        _verdict(success=True, nothing_probed=True, sentinel_recorded=True),
+        tmp_path / "data" / "registry-probe-failed",
+    )
+
+    assert suppress is False
+    assert result.success is True
+    assert any("proved nothing" in w for w in result.warnings)
