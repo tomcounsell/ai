@@ -7,7 +7,7 @@ created: 2026-08-26
 tracking: https://github.com/tomcounsell/ai/issues/2894
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-26T11:57:02Z
+revision_applied_at: 2026-08-26T12:34:01Z
 ---
 
 # Wave 2: SDLC router terminal state and verdict integrity
@@ -290,6 +290,29 @@ Direction:
    should treat a lane as terminal on `MERGE == completed` **or** a resolvable PR in a merged
    state — so a lost ledger does not resurrect a shipped lane.
 
+   **The merged-PR half requires a fix in meta assembly, not in the router** (critique round
+   2 blocker). For a ledger-less lane the router is handed nothing to work with:
+   `tools/sdlc_stage_query.py::query_enriched` returns `{"stages": {}, "_meta": _default_meta()}`
+   at `:836-837` as soon as no session row is found, short-circuiting `_compute_meta`'s
+   two-pass merged-PR fallback at `:622-624`. Measured on lane #2853: `query_enriched(2853)`
+   → `stages={}`, `pr_number=None`, `pr_merge_state=None`, while `_lookup_pr(2853, state="merged")`
+   **does** return PR **2884**. The resolver works; it is simply never reached. WS-1 must add
+   a ledger-less merged-PR rung before that early return so `pr_number` and `pr_merge_state`
+   are populated for a shipped lane whose ledger has been evicted. This belongs in
+   `tools/sdlc_stage_query.py` — `tests/unit/test_architectural_constraints.py` forbids
+   `agent/sdlc_router.py` importing from `tools/`, so the router cannot resolve this itself.
+   Without this rung the #2853 replay success criterion below is unsatisfiable.
+
+   **Do not gate that rung on bare `session is None` — critique round 3.** That branch also
+   fires for every never-seen issue (`_resolve_issue_record:754-757` notes "the router polls
+   this path constantly"), so a naive rung would run a live `_lookup_pr` subprocess
+   (`:369-407`, 5s timeout, no memoization) on **every `next-skill` poll for a fresh issue** —
+   including this plan's own fresh-lane negative control. Gate it on positive evidence the
+   lane once existed (a durable signal: a branch, a plan doc, a prior dispatch record), or put
+   a TTL cache in front of the lookup. Fail-closed on evidence, exactly as WS-1's terminal
+   guard and WS-7's refusal do — a lookup is not free and "no session row" is not evidence of
+   anything.
+
    **`is_pipeline_complete` is NOT a drop-in — do not call it directly.** Its signature is
    `is_pipeline_complete(psm_states, outcome, pr_open=None) -> tuple[bool, str]`
    (`agent/pipeline_complete.py:35`), and it returns `(False, "outcome_not_success")` unless
@@ -437,6 +460,12 @@ consumers, not the two the issue names**:
 | `do-pr-review/sub-skills/post-review.md:221` | no | plan-checkbox commit misattributed and pushed |
 | **`docs/sdlc/do-patch.md:62`** | no | **missed by the issue.** `git commit -m "fix(#…)"` into pushed history, reachable **pre-PR** via `do-build/SKILL.md:128` routing test failures to `/do-patch` during BUILD — so no PR-body fallback exists there at all. This directly answers the issue's own open question about pre-PR stages. |
 | `agent/session_completion.py:232,240` | no | reads env **first** (`# Check env vars first (most authoritative)`), inverting #1731's precedence. **Currently has no callers** — latent, not firing. |
+| `do-pr-review/SKILL.md:56,101` and `docs/sdlc/do-pr-review.md:34` | n/a | **contract prose**, not executable reads — added in critique round 2, which caught that the anti-criterion could not reach 0 while these three hits went unnamed. They document the env var's role and must be rewritten alongside the code, or the sweep never zeroes. |
+
+**Full sweep accounting — all 18 hits, so the anti-criterion is reachable:**
+`checkout.md` 5 · `agent/sdk_client.py` 3 · `code-review.md` 3 · `session_completion.py` 2 ·
+`do-pr-review/SKILL.md` 2 · `docs/sdlc/do-pr-review.md` 1 · `docs/sdlc/do-patch.md` 1 ·
+`post-review.md` 1. Every one is in WS-4's scope; none may be left behind.
 
 Two findings that shrink the work: **`SDLC_TRACKING_ISSUE` has no live consumer anywhere** —
 only the dead function plus docs and tests — so it is a pure delete. And the guarded path in
@@ -517,8 +546,9 @@ a live design decision and named (b)'s weakness as "does nothing for the two alr
 lanes." **That weakness has evaporated** — #2734 and #2741 both closed on 2026-08-18 and
 their PRs merged. Prevention is all that remains, so (b) is now strictly cheaper than when the
 issue was written, and it avoids adding a new write path into the very state the verdict
-invariant protects. The detector — flagging a lane whose first dispatch snapshot has an empty
-stages map — becomes the highest-value half of the deliverable.
+invariant protects. The detector — flagging a lane that entered at a non-ISSUE stage on the
+positive-evidence predicate defined below, **not** on stages-map emptiness — becomes the
+highest-value half of the deliverable.
 
 **Recon reshaped the reproduction target.** The wedge is better characterized as **verdict
 recorded without a marker** than as "empty stages map": both ex-wedged lanes carry an APPROVED
@@ -609,6 +639,14 @@ force-completed.
 - **Wave 3.** #3017 (`SDLC_STAGES` omits PATCH, `models/agent_session.py:81`) will be
   extremely tempting while in these files. Leave it — Wave 3 is deliberately not running and
   touches the same surfaces.
+- **Writing an Open Question the task graph has already answered.** This plan did it three
+  times — OQ1 (caught as a round-1 blocker), OQ3 (round 2), OQ2 (round 3) — each time
+  committing to a direction in Technical Approach, Tasks, and Success Criteria while still
+  asking the reader to decide. A builder reading the task list has no way to learn that
+  sign-off is pending, and a reader answering the question finds the answer already built.
+  If the plan commits, the question is a **notification**; if it genuinely does not, the task
+  bullet and its Success Criterion must both be marked conditional. Check this before
+  re-critiquing rather than after.
 
 ## Risks
 
@@ -621,6 +659,16 @@ terminal predicate.
 control, encoded as tests before the guard lands. The guard keys on positive evidence of
 completion (`MERGE == completed`, or a resolvable merged PR state), never on absence of
 signal — the same fail-closed discipline WS-2 applies to staleness.
+
+**Post-ship signal and kill switch (critique round 3).** The mitigation above is all
+pre-ship; a false positive after ship is *silent*, because the guard preempts the dispatch
+table at `agent/sdlc_router.py:2032-2037` and a wrongly-halted lane is indistinguishable from
+a legitimately finished one. The router has no existing `DISABLE_` pattern, so today's only
+recovery is revert plus a fleet restart. Therefore: **log every terminal decision tagged with
+which evidence branch fired** (`MERGE == completed` vs. resolvable-merged-PR), so a false
+positive is greppable rather than invisible; and put the guard behind a named,
+env-overridable constant so it can be switched off on one machine without a revert. Treat the
+constant as provisional and tunable, per this repo's convention for magic numbers.
 
 ### Risk 2: Flipping the staleness default breaks lanes that relied on the fail-open
 **Impact:** Lanes whose `pr_head_sha` cannot be resolved would newly route to `/do-pr-review`
@@ -814,7 +862,8 @@ end-to-end and must be extended for the terminal decision and the widened verdic
       list is per-run and absolute. (#2832)
 - [ ] `_roster.json` records `independent:` and the gate surfaces it; a serial roster
       announces itself instead of reporting N/N as though N agents ran. (#2886)
-- [ ] Mid-pipeline entry at a non-ISSUE stage with an empty stages map is refused, and a
+- [ ] Mid-pipeline entry at a non-ISSUE stage is refused **on positive evidence** (plan doc, or
+      a verdict with no marker) rather than on stages-map emptiness, and a
       detector flags the shape. The verdict invariant (#2415) and #2554 precedence still hold
       — proven by a test that a verdict-less REVIEW/CRITIQUE cannot be force-completed. (#2851)
 - [ ] Archiving a plan document no longer makes a lane's CRITIQUE retroactively skippable.
@@ -861,7 +910,13 @@ end-to-end and must be extended for the terminal decision and the widened verdic
 files." That was wrong: a verdict-trail bound necessarily lives in the router, so WS-3 shares
 `agent/sdlc_router.py` with WS-1 and WS-2. It is now sequenced after both, and Open Question 1
 records that **PR 2 must merge after PR 1** rather than being independent of it. The remaining
-PR-2 workstreams (WS-5, WS-6) are genuinely disjoint and stay parallel.
+PR-2 workstreams (WS-5, WS-6) touch disjoint file sets — WS-5 edits `tools/critique_resume.py`
+and `docs/sdlc/do-plan-critique.md`, WS-6 edits `.claude/skills-global/do-plan-critique/SKILL.md`
+— but the task graph runs them **sequentially**, because both are assigned to the single
+`critique-builder` identity and Task 7 declares `Depends On: build-rundir`. That is
+sequential-but-independent, not parallel; corrected in critique round 2, which caught the
+prose claiming otherwise. If PR 2 needs to go faster, give WS-6 its own builder identity and
+drop Task 7's edge — the files permit it.
 
 Serialization order on the router: **WS-1 → WS-2 → WS-3.** WS-4 and WS-7 touch no router file
 and remain freely parallel.
@@ -890,7 +945,9 @@ and remain freely parallel.
 - **Parallel**: false
 - Encode #2817's four-cell pre-merge `/do-merge` matrix as the negative control FIRST.
 - Add the `Terminal` outcome type and the terminal guard in `evaluate_guards`.
-- Handle the emptied-ledger shape (`sdlc-2853`) so a lost ledger does not resurrect a lane.
+- Log every terminal decision tagged by which evidence branch fired, and put the guard behind a named env-overridable constant so a false positive is greppable and switchable without a revert (critique round 3, Risk 1).
+- Gate the `sdlc_stage_query.py` rung on positive evidence the lane once existed, or cache it — **not** on bare `session is None`, which fires on every poll for a fresh issue (critique round 3).
+- Handle the emptied-ledger shape (`sdlc-2853`) so a lost ledger does not resurrect a lane. **This requires a change in `tools/sdlc_stage_query.py`, not the router:** add a ledger-less merged-PR rung before `query_enriched`'s `return {"stages": {}, "_meta": _default_meta()}` at `:836-837`, which currently short-circuits `_compute_meta`'s merged fallback at `:622-624`. Verified: `_lookup_pr(2853, state="merged")` returns 2884, but `query_enriched(2853)` yields `pr_number=None`. Without this the #2853 replay criterion cannot pass.
 - Narrow the `primary is None` fallback so merged-and-done is success, not unresolvable mergeability.
 - Add `decision: "terminal"` to `sdlc-tool next-skill`; update both SKILL.md loops for a clean exit.
 - Fix the `_rule_ready_to_merge` docstring drift (parity-tested).
@@ -960,6 +1017,7 @@ and remain freely parallel.
 - **Parallel**: true
 - Delete the export from `agent/sdk_client.py:491-498`; `SDLC_TRACKING_ISSUE` is a pure delete (no live consumer).
 - Update all four un-guarded consumers, including `docs/sdlc/do-patch.md:62` and the dead `session_completion.py` path.
+- **Clear all 18 sweep hits across 8 files**, including the three contract-prose hits at `do-pr-review/SKILL.md:56,101` and `docs/sdlc/do-pr-review.md:34` — named in critique round 2, which caught that the anti-criterion could not reach 0 while they went unlisted. See the sweep accounting in WS-4's Technical Approach.
 - Close the `checkout.md:41-43` fall-through so it fails loudly.
 - Generalize `test_no_sdlc_issue_number_export` from `/do-sdlc` to all producers.
 
@@ -970,8 +1028,9 @@ and remain freely parallel.
 - **Assigned To**: entry-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Implement direction (b): refuse a non-ISSUE dispatch on an empty stages map; add the detector.
-- Close the plan-archival escape hatch in `find_plan_path` / `_qualifies_as_never_dispatched`.
+- Implement direction (b): refuse a non-ISSUE dispatch **on positive evidence of mid-pipeline entry** — a dispatch at a non-ISSUE stage combined with a recorded artifact implying skipped predecessors (a plan document, or a recorded verdict with no corresponding marker). **Never on stages-map emptiness alone**, which cannot separate a fresh issue from an evicted lane; see WS-7 Technical Approach. Add the detector, and have it report *which* signal was missing.
+- Thread an explicit recovery-attempted/failed signal through `meta` or `context` so the refusal can tell a failed ledger recovery from a genuinely fresh lane. Add a test covering the recovery-then-refuse ordering.
+- Close the plan-archival escape hatch in `find_plan_path` / `_qualifies_as_never_dispatched`. **This is mandatory scope, not optional** — see Open Question 3, which is a notification rather than a decision.
 - Pin the reproduction as **verdict-recorded-without-marker**, not "empty stages map".
 - Prove the verdict invariant and #2554 precedence still hold.
 
@@ -1034,12 +1093,33 @@ do not reintroduce it here.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | History & Consistency | WS-3 edits `agent/sdlc_router.py` (G2 at `:359-382`, per this plan's own Test Impact row "G2's arming condition changes (WS-3)"), but Team Orchestration names only WS-1/WS-2 as the pair that "must not run concurrently", task 5 `build-critique-bound` is `Parallel: true` / `Depends On: none`, and Open Question 1 asserts PR 2 is "Disjoint from PR 1's files". Three sections contradict each other, and the fan-out constraint's "commits never interleave" guarantee does not hold. | pending | `guard_g2_critique_cycle_cap` is defined at `agent/sdlc_router.py:359` — the same file `terminal-builder` edits for the `Terminal` outcome. Either add `Depends On: build-terminal, build-staleness` to task 5, or scope WS-3 to `agent/pipeline_state.py` + `agent/pipeline_graph.py` only and leave G2 untouched this wave; then correct the "Disjoint from PR 1's files" claim in Open Question 1 and the Test Impact row for `test_sdlc_router.py`. |
-| CONCERN | Risk & Robustness, History & Consistency | WS-1 step 3 says to "reuse its logic rather than writing a second predicate" for `is_pipeline_complete`, but that function is not a drop-in: its signature is `is_pipeline_complete(psm_states, outcome, pr_open=None)` and it returns `(False, "outcome_not_success")` unless `outcome == "success"` is passed, while `decide_next_dispatch(stage_states, meta, context)` has no `outcome` concept. It also has no branch expressing "resolvable merged PR state", which is the other half of the plan's own terminal predicate. Its existing production consumer `agent/session_runner/completion_guard.py:155` is never mentioned. | pending | Verified: `agent/pipeline_complete.py:35-86` imports only stdlib (so the no-`tools`-import constraint is safe), and its only non-MERGE branch is `docs_state == "completed" and merge_state != "completed"` gated on a caller-supplied `pr_open` bool — a different signal from "merged PR". State explicitly that the guard calls `is_pipeline_complete(stage_states, "success", pr_open=None)` for the MERGE-completed branch ONLY and writes a separate merged-PR check for the lost-ledger branch. Do not widen `is_pipeline_complete`'s contract: `completion_guard.py:155` is the PM final-delivery gate and would inherit any change. |
-| CONCERN | Risk & Robustness, History & Consistency, structural check | The `## Verification` anti-criterion row `grep -rnc "SDLC_ISSUE_NUMBER\\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/` with Expected "match count == 0" is not mechanically checkable: `grep -rnc` over multiple directories emits one count per file. Driver-measured: 411 output lines, real total 18. This row is WS-4's Risk-3 mitigation and the completion gate for the plan's self-declared least-reversible workstream. | pending | Replace the command with an aggregating form, e.g. `grep -rn "SDLC_ISSUE_NUMBER\\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/ \\| wc -l`, which reads **18** today (matching the Red-state proof table) and must reach 0. Note `grep -c` exits 1 on zero matches, so a `set -e` validator wrapper must tolerate that exit code. |
-| CONCERN | Risk & Robustness | WS-7's "refuse a non-ISSUE dispatch on an empty stages map" targets exactly the shape that `tools/sdlc_next_skill.py`'s ledger-recovery path already treats as *ambiguous* rather than illegitimate. The guard cannot distinguish "genuinely fresh issue" from "mid-pipeline lane whose Redis ledger was evicted and whose recovery failed", so it can convert a recoverable degraded state into a hard block. No task-9 test covers the recovery-then-refuse ordering. | pending | Verified call order: `_recover_stage_states_from_durable_signals` is defined at `tools/sdlc_next_skill.py:526` and invoked at `:712-718` (`if recovered: stage_states = recovered`), *before* `decide_next_dispatch(...)` at `:722`. The router therefore only ever sees an empty map when recovery already failed, and `stage_states` alone cannot separate the two causes — thread an explicit recovery-attempted/failed flag through `meta` or `context`, or document the hard-block as an accepted regression. |
-| CONCERN | Scope & Value | Open Question 1 frames the three-PR split as genuinely undecided ("Confirm this split, or direct a single PR"), but `## Step by Step Tasks` already hard-codes it: task 4 is named `validate-pr1` and depends only on `build-terminal, build-staleness`. A "single PR" answer therefore requires re-authoring the task graph, not a one-line answer. | pending | Task 4 (`validate-pr1`) and task 11 (`validate-all`) are the two checkpoints that presuppose the split; a single-PR answer deletes task 4 rather than renaming it. Either commit to the split in `## Solution` and demote Open Question 1 to a notification, or rename task 4 to a split-agnostic gate (e.g. `validate-router-seam`) so PR packaging is decided after the build graph. |
-| CONCERN | Scope & Value | Every `## Success Criteria` row is a unit-test assertion, a grep count, or a synthetic `decide_next_dispatch` call. None validates the plan's stated real pain ("burn tokens on live lanes right now") against a lane the recon actually measured, even though the plan names concrete evidence lanes and four measured misroute rows. | pending | The lost-ledger lane and its shape (`pr_number: null`, `plan_exists: false`) are already documented in WS-1 direction 3; add one criterion that runs `sdlc-tool next-skill` against that real lane post-fix and asserts `decision: "terminal"`. Note this does NOT conflict with the `## Rabbit Holes` entry forbidding live reproduction — that entry scopes only the #2884 CLI-path incident. |
+| BLOCKER | History & Consistency | WS-3 edits `agent/sdlc_router.py` (G2 at `:359-382`, per this plan's own Test Impact row "G2's arming condition changes (WS-3)"), but Team Orchestration names only WS-1/WS-2 as the pair that "must not run concurrently", task 5 `build-critique-bound` is `Parallel: true` / `Depends On: none`, and Open Question 1 asserts PR 2 is "Disjoint from PR 1's files". Three sections contradict each other, and the fan-out constraint's "commits never interleave" guarantee does not hold. | addressed in the round-1/round-2 revision passes | `guard_g2_critique_cycle_cap` is defined at `agent/sdlc_router.py:359` — the same file `terminal-builder` edits for the `Terminal` outcome. Either add `Depends On: build-terminal, build-staleness` to task 5, or scope WS-3 to `agent/pipeline_state.py` + `agent/pipeline_graph.py` only and leave G2 untouched this wave; then correct the "Disjoint from PR 1's files" claim in Open Question 1 and the Test Impact row for `test_sdlc_router.py`. |
+| CONCERN | Risk & Robustness, History & Consistency | WS-1 step 3 says to "reuse its logic rather than writing a second predicate" for `is_pipeline_complete`, but that function is not a drop-in: its signature is `is_pipeline_complete(psm_states, outcome, pr_open=None)` and it returns `(False, "outcome_not_success")` unless `outcome == "success"` is passed, while `decide_next_dispatch(stage_states, meta, context)` has no `outcome` concept. It also has no branch expressing "resolvable merged PR state", which is the other half of the plan's own terminal predicate. Its existing production consumer `agent/session_runner/completion_guard.py:155` is never mentioned. | r1: WS-1 now says it is NOT a drop-in (needs `outcome`, no merged-PR branch); extract shared helper instead | Verified: `agent/pipeline_complete.py:35-86` imports only stdlib (so the no-`tools`-import constraint is safe), and its only non-MERGE branch is `docs_state == "completed" and merge_state != "completed"` gated on a caller-supplied `pr_open` bool — a different signal from "merged PR". State explicitly that the guard calls `is_pipeline_complete(stage_states, "success", pr_open=None)` for the MERGE-completed branch ONLY and writes a separate merged-PR check for the lost-ledger branch. Do not widen `is_pipeline_complete`'s contract: `completion_guard.py:155` is the PM final-delivery gate and would inherit any change. |
+| CONCERN | Risk & Robustness, History & Consistency, structural check | The `## Verification` anti-criterion row `grep -rnc "SDLC_ISSUE_NUMBER\\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/` with Expected "match count == 0" is not mechanically checkable: `grep -rnc` over multiple directories emits one count per file. Driver-measured: 411 output lines, real total 18. This row is WS-4's Risk-3 mitigation and the completion gate for the plan's self-declared least-reversible workstream. | r1: row changed to `grep -rn ... | wc -l`; red-state proof table added (18) | Replace the command with an aggregating form, e.g. `grep -rn "SDLC_ISSUE_NUMBER\\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/ \\| wc -l`, which reads **18** today (matching the Red-state proof table) and must reach 0. Note `grep -c` exits 1 on zero matches, so a `set -e` validator wrapper must tolerate that exit code. |
+| CONCERN | Risk & Robustness | WS-7's "refuse a non-ISSUE dispatch on an empty stages map" targets exactly the shape that `tools/sdlc_next_skill.py`'s ledger-recovery path already treats as *ambiguous* rather than illegitimate. The guard cannot distinguish "genuinely fresh issue" from "mid-pipeline lane whose Redis ledger was evicted and whose recovery failed", so it can convert a recoverable degraded state into a hard block. No task-9 test covers the recovery-then-refuse ordering. | r1+r2: WS-7 refuses on positive evidence, never on emptiness; r2 added a recovery-attempted signal + ordering test | Verified call order: `_recover_stage_states_from_durable_signals` is defined at `tools/sdlc_next_skill.py:526` and invoked at `:712-718` (`if recovered: stage_states = recovered`), *before* `decide_next_dispatch(...)` at `:722`. The router therefore only ever sees an empty map when recovery already failed, and `stage_states` alone cannot separate the two causes — thread an explicit recovery-attempted/failed flag through `meta` or `context`, or document the hard-block as an accepted regression. |
+| CONCERN | Scope & Value | Open Question 1 frames the three-PR split as genuinely undecided ("Confirm this split, or direct a single PR"), but `## Step by Step Tasks` already hard-codes it: task 4 is named `validate-pr1` and depends only on `build-terminal, build-staleness`. A "single PR" answer therefore requires re-authoring the task graph, not a one-line answer. | r1: task 4 renamed `validate-router-seam` | Task 4 (`validate-pr1`) and task 11 (`validate-all`) are the two checkpoints that presuppose the split; a single-PR answer deletes task 4 rather than renaming it. Either commit to the split in `## Solution` and demote Open Question 1 to a notification, or rename task 4 to a split-agnostic gate (e.g. `validate-router-seam`) so PR packaging is decided after the build graph. |
+| CONCERN | Scope & Value | Every `## Success Criteria` row is a unit-test assertion, a grep count, or a synthetic `decide_next_dispatch` call. None validates the plan's stated real pain ("burn tokens on live lanes right now") against a lane the recon actually measured, even though the plan names concrete evidence lanes and four measured misroute rows. | r1: added replay criteria against #2734/#2741/#2853/#2636 and a fresh-lane negative control | The lost-ledger lane and its shape (`pr_number: null`, `plan_exists: false`) are already documented in WS-1 direction 3; add one criterion that runs `sdlc-tool next-skill` against that real lane post-fix and asserts `decision: "terminal"`. Note this does NOT conflict with the `## Rabbit Holes` entry forbidding live reproduction — that entry scopes only the #2884 CLI-path incident. |
+
+**Round 2** — FULL war room (Risk & Robustness, Scope & Value, History & Consistency) at plan hash `sha256:6c84b0a1…`, baseline `7eb250cc9`. Verdict: **NEEDS REVISION** (1 blocker, 4 concerns, 1 nit). All six round-1 findings were independently verified as genuinely fixed in the plan prose; the round-2 findings are new, except where a round-1 fix landed in one section but not in the task graph.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| BLOCKER | Risk & Robustness, driver-verified | The success criterion added in round 1 to ground the plan in real evidence — "Replay against the lanes recon actually measured", which requires lane **#2853** to return a terminal decision — is unsatisfiable by the mechanism WS-1 describes. WS-1 direction 3 defines terminal as `MERGE == completed` **or** "a resolvable PR in a merged state", but for a lane whose ledger has emptied the router receives **neither** signal, and no step in WS-1 adds one. Driver-measured at `7eb250cc9`: `query_enriched(2853)` returns `stages={}`, `pr_number=None`, `pr_merge_state=None`. | r2: WS-1 now adds a ledger-less merged-PR rung in tools/sdlc_stage_query.py before the :836-837 early return | The merged-PR resolver already exists and works — driver-verified: `_lookup_pr(2853, repo="tomcounsell/ai", state="merged")` returns **2884**, while `state="open"` returns `None`. The gap is that it is never reached: `tools/sdlc_stage_query.py::query_enriched` returns `{"stages": {}, "_meta": _default_meta()}` at `:836-837` when `_resolve_issue_record` finds no row, short-circuiting `_compute_meta` and its two-pass merged fallback at `:622-624`. So the fix belongs in the **meta-assembly path** (`tools/sdlc_stage_query.py`), not in `agent/sdlc_router.py` — the router cannot import from `tools/` (`tests/unit/test_architectural_constraints.py`). Either add a ledger-less merged-PR rung before that early return and thread `pr_number` / `pr_merge_state` into `_meta`, or downgrade the #2853 replay row to a documented known-gap. Do not leave a mandatory criterion whose data path does not exist. |
+| CONCERN | History & Consistency | Round 1's WS-7 correction landed **only in the Technical Approach prose**. Task 9's first bullet still instructs the builder to "refuse a non-ISSUE dispatch on an empty stages map", and Success Criteria `:817` still reads "an empty stages map is refused" — the exact pre-correction framing that WS-7 `:536` now explicitly rejects ("The refusal cannot key on 'empty stages map' alone — critique round 1 caught this"). A builder executing the task list literally builds the guard the critique already rejected, which would refuse every fresh lane at ISSUE. | r2: Task 9 bullet 1 and the Success Criterion both rewritten to the positive-evidence predicate | Rewrite Task 9 bullet 1 (`:973`) and the Success Criteria row (`:817`) to the corrected predicate from `:544-549`: refuse on **positive evidence** of mid-pipeline entry — a dispatch at a non-ISSUE stage combined with a recorded artifact implying skipped predecessors (a plan document, or a recorded verdict with no corresponding marker) — never on stages-map emptiness. Note `_recover_stage_states_from_durable_signals` (`tools/sdlc_next_skill.py:526`, invoked `:712-718`) runs before `decide_next_dispatch` at `:722`, so emptiness alone cannot separate a fresh issue from an evicted lane. |
+| CONCERN | Scope & Value | The plan-archival escape hatch is simultaneously **mandatory scope** and an **open question**. WS-7 says it "must be closed in the same change", Success Criteria `:820` makes it a hard gate, and Task 9 bullets it unconditionally — yet Open Question 3 asks whether it should be split into its own issue and fast-tracked ahead of the wave. This is the identical Open-Question-vs-task-graph contradiction round 1's BLOCKER caught for Open Question 1; that instance was fixed, this one recurs. The scope was also discovered by recon, not asked for by #2851's filed AC, and is not filed as an issue. | r2: OQ3 reframed from a live decision into a notification, while Task 9's bullet and the Success Criteria row were deliberately left unconditional as mandatory WS-7 scope | Task 9's bullet at `:974` ("Close the plan-archival escape hatch in `find_plan_path` / `_qualifies_as_never_dispatched`") and the Success Criteria row at `:820` carry no conditional language, so a builder has no way to discover that PM sign-off on OQ3 is pending. Either commit to closing it inside WS-7 and demote OQ3 to a notification (matching the OQ1 fix), or file it as its own issue and mark both the task bullet and the criterion conditional on that answer. `find_plan_path` (`tools/lane_identity.py:123-163`) searches only `docs/plans/`, which is the whole mechanism. |
+| CONCERN | History & Consistency | Team Orchestration `:864` states "The remaining PR-2 workstreams (WS-5, WS-6) are genuinely disjoint and stay parallel" and Open Question 1 `:1056` repeats it, but the task graph hard-serializes them: Task 7 (`build-roster`, WS-6) declares `Depends On: build-rundir` and `Parallel: false`, and Tasks 6 and 7 share the single agent identity `critique-builder`, which cannot execute two tasks concurrently regardless of the dependency edge. Same prose-vs-task-graph contradiction pattern round 1's BLOCKER flagged for WS-3. | r2: prose corrected to sequential-but-independent | Task 6 `:931-941` (`Assigned To: critique-builder`, `Parallel: true`) and Task 7 `:943-950` (`Assigned To: critique-builder`, `Depends On: build-rundir`, `Parallel: false`). Either drop the "genuinely disjoint / stay parallel" language and describe WS-5→WS-6 as sequential-but-independent (what the graph actually encodes), or assign WS-6 to a distinct builder identity and remove Task 7's dependency. Note WS-6 edits `.claude/skills-global/do-plan-critique/SKILL.md` while WS-5 edits `tools/critique_resume.py` + `docs/sdlc/do-plan-critique.md`, so the file sets really are disjoint — only the agent identity and the declared edge serialize them. |
+| CONCERN | structural check, driver-verified | The `## Verification` anti-criterion "ambient issue env fully removed" (Expected: `match count == 0`) cannot reach 0 given the files the tasks touch. Driver-measured at `7eb250cc9`: the sweep returns **18** hits across 8 files, but three of them live in `.claude/skills-global/do-pr-review/SKILL.md:56,101` and `docs/sdlc/do-pr-review.md:34` — files named **nowhere** in the plan: not in WS-4's consumer table, not in Task 8, not in the `## Documentation` checklist. This is the same class of defect round 1 caught in this row (a Risk-3 mitigation that is not mechanically achievable), one layer down. | r2: all 18 hits enumerated by file in WS-4; the 3 prose hits added to Task 8 | Verified per-file counts: `checkout.md` 5, `code-review.md` 3, `sdk_client.py` 3, `do-pr-review/SKILL.md` **2**, `session_completion.py` 2, `post-review.md` 1, `do-patch.md` 1, `docs/sdlc/do-pr-review.md` **1** = 18. The two unlisted files carry prose references (`$SDLC_ISSUE_NUMBER` named in an env-var list and in a "last resort only" instruction), so they are doc edits, not code changes — add both to Task 8's bullet list and to the `## Documentation` checklist, or scope the anti-criterion's grep to exclude prose-only surfaces. Leaving it as-is makes WS-4's completion gate unpassable. |
+| NIT | structural check | All six round-1 findings still carry `pending` in the `Addressed By` column, though the plan prose shows every one of them was actually addressed (verified independently by all three round-2 critics). Per `docs/sdlc/do-plan-critique.md`, the revision pass is what fills that column; leaving it at `pending` erases the audit trail of which revision answered which finding. | r2: this column filled | The revision pass should replace each `pending` with the section(s) it edited (e.g. `Team Orchestration + task 5 + OQ1` for the round-1 BLOCKER). Round 2 preserves round 1's table rather than overwriting the section, so both rounds' trails stay auditable. |
+
+**Round 3** — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), dispatched concurrently in a single message (`_roster.json` `independent: true`), at plan hash `sha256:46e56aa2…`, baseline `f3184a7df`. Verdict: **READY TO BUILD (with concerns)** (0 blockers, 4 concerns, 1 nit). Round 3 independently re-verified every round-1 and round-2 fix and found all of them landed in both the prose and the task graph; the round-2 BLOCKER's `tools/sdlc_stage_query.py` rung is confirmed present in WS-1 and Task 2. The findings below are new.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness | WS-1's ledger-less merged-PR rung is directed to land before `query_enriched`'s early return at `tools/sdlc_stage_query.py:836-837`, i.e. gated on bare `session is None`. That branch is not lost-ledger-specific: `_resolve_issue_record` (`:739-785`) returns `None` for any never-seen issue too, and its own docstring at `:754-757` says "A never-seen issue returns `None`… the router polls this path constantly". As directed, the rung fires a live `_lookup_pr` subprocess call (`:369-407`, `subprocess.run(..., timeout=5)`) on every `next-skill` poll for every brand-new issue — including this plan's own fresh-lane negative control. `_lookup_pr` has no memoization in the module (no `lru_cache` / cache hits on grep). | r3: WS-1 direction 3 and Task 2 now forbid gating on bare `session is None`; require positive evidence the lane once existed, or a TTL cache | Gate the rung on positive evidence the lane once existed rather than on the raw `session is None` check at `:836` — e.g. require `_resolve_target_repo_for_read(issue_number)` to succeed AND a resolvable `lane_branch_name(slug)` (the branch-head leg used inside `_lookup_pr` at `:404-407`) — or wrap `_lookup_pr` in a module-level TTL cache keyed on `(issue_number, repo, state)` before wiring it into this hot path. Either way, add a test that a fresh never-seen issue performs zero subprocess calls. |
+| CONCERN | Risk & Robustness | Risk 1's only mitigation is the pre-merge negative-control test suite; there is no post-ship operational signal for a false-positive terminal decision. `evaluate_guards` preempts the entire `DISPATCH_RULES` loop (verified `agent/sdlc_router.py:2032-2037`), so a false terminal silently halts dispatch for a lane and is indistinguishable in logs from a lane that legitimately finished — the exact "catastrophic and silent" shape Risk 1 names, addressed only for the pre-ship case. Grep found no `DISABLE_` / `KILL_SWITCH` / `_ENABLED` pattern in `agent/sdlc_router.py`, so live recovery needs a code revert plus a fleet restart, not a config flip. | r3: Risk 1 gains a post-ship signal — log terminal decisions tagged by evidence branch, and gate the guard behind a named env-overridable constant; added to Task 2 | Emit a log line or counter at the `evaluate_guards` terminal return path (`agent/sdlc_router.py:2032-2034`) tagged with which evidence branch fired — `MERGE == completed` vs. the WS-1 merged-PR rung — so the two failure classes are separable during an incident. Gate the guard behind a named, env-overridable constant (matching WS-3's own "no bare literals for tunables" instruction) so a misfire can be disabled without a revert-and-restart cycle. |
+| CONCERN | Scope & Value, History & Consistency | Open Question 2 still frames #2851's (a)-vs-(b) as a live decision ("If that workflow is one you actually use, (a) is the answer instead and the plan changes"), but WS-7's Technical Approach commits unconditionally ("**Direction (b): refuse mid-pipeline entry, plus a detector.**"), Task 9 bullet 1 implements only (b), and the WS-7 Success Criteria row hard-gates on the (b) predicate — none carrying language deferring to OQ2. This is the third instance of the open-question-vs-task-graph contradiction: round 1 caught it as a BLOCKER for OQ1, round 2 as a CONCERN for OQ3, and both were reframed. OQ2 was never touched. | r3: OQ2 reframed as a notification matching the OQ1/OQ3 fixes; the recurring pattern added to Rabbit Holes | Apply the OQ1/OQ3 fix pattern: demote OQ2 to a notification stating the plan has committed to (b) and asking only for confirmation or override, OR add an explicit "provisional pending OQ2" cross-reference to Task 9 bullet 1 and the WS-7 Success Criteria row. Do not leave a builder able to ship (b) with no signal that a PM ruling is outstanding. Note the three locations: WS-7 Technical Approach's direction sentence, Task 9 bullet 1, and the `## Success Criteria` mid-pipeline-entry row. |
+| CONCERN | History & Consistency | The round-2 table's plan-archival-escape-hatch row carries an `Addressed By` cell reading "r1: added replay criteria against #2734/#2741/#2853/#2636 and a fresh-lane negative control" — byte-identical to the round-1 table's unrelated "no real-lane validation" row, and tagged `r1` although a round-2-table row can only have been answered by the round-2 revision pass. A copy-paste artifact that corrupts the audit trail the column exists to preserve. | r3: cell replaced with the fix that actually landed (OQ3 reframe + unconditional Task 9 bullet and criterion) | Replace that one cell with the fix that actually landed: Open Question 3 was reframed from a live decision into a notification ("Notification, not a decision — the plan-archival escape hatch is in scope") while Task 9's bullet and the `## Success Criteria` row were deliberately left unconditional as mandatory WS-7 scope. Verified the duplication is exact between the two rows and that the OQ3 reframe and the unconditional criterion are both present. |
+| NIT | Scope & Value | WS-7's lead sentence still describes the detector as "flagging a lane whose first dispatch snapshot has an empty stages map" and calls that "the highest-value half of the deliverable" — the pre-correction framing the same section explicitly repudiates fifteen lines later ("The refusal cannot key on 'empty stages map' alone — critique round 1 caught this"). Task 9 already carries the corrected predicate, so this is a stale self-contradicting sentence rather than a functional gap, but it is the first thing a builder reads in the subsection. | r3: WS-7 lead sentence rewritten to the positive-evidence predicate | Rewrite the detector sentence to the corrected predicate already used later in the same section and in Task 9: "a dispatch at a non-ISSUE stage with a recorded artifact implying skipped predecessors", reporting which signal was missing. |
 
 ---
 
@@ -1061,17 +1141,25 @@ do not reintroduce it here.
 
    Confirm this split, or direct a single PR.
 
-2. **Is #2851's direction (b) the right call now that both wedged lanes have closed?** The
-   plan chose (b) — refuse mid-pipeline entry — because its only stated weakness has
-   evaporated and it avoids a new write path into the verdict substrate. But (b) removes a
-   capability the pipeline currently has: reviewing work planned outside the pipeline. If
-   that workflow is one you actually use, (a) is the answer instead and the plan changes.
+2. **Notification, not a decision — #2851 is built as direction (b).** WS-7, Task 9, and the
+   Success Criteria all commit to (b) unconditionally: refuse mid-pipeline entry, because its
+   only stated weakness ("does nothing for the two already-wedged lanes") evaporated when
+   #2734 and #2741 closed, and because it avoids a new write path into the verdict substrate.
+   Flagging it because (b) does remove a capability the pipeline currently has — reviewing
+   work planned outside the pipeline. **If you actually use that workflow, say so and the
+   plan changes to (a)**; otherwise no action is needed. Reframed in critique round 3, which
+   noted this was the *third* instance of the same open-question-vs-task-graph contradiction
+   (round 1 caught it as a blocker for OQ1, round 2 as a concern for OQ3). The lesson is
+   recorded in Rabbit Holes.
 
-3. **Should the plan-archival escape hatch be split out?** Recon found that archiving a plan
-   doc makes a lane's CRITIQUE retroactively skippable — an undesigned hole through the
-   verdict invariant, arguably more dangerous than #2851's deadlock and not filed as an
-   issue. It is folded into WS-7 here. It could equally be its own issue and fast-tracked
-   ahead of this wave.
+3. **Notification, not a decision — the plan-archival escape hatch is in scope.** Recon found
+   that archiving a plan doc makes a lane's CRITIQUE retroactively skippable, an undesigned
+   hole through the verdict invariant and arguably more dangerous than #2851's own deadlock.
+   It is **mandatory WS-7 scope** (Task 9, and a Success Criterion gates on it). Round 2 of
+   critique caught this being framed as an open question while simultaneously being required
+   — the same contradiction round 1 fixed for the PR split. Flagging it here only because it
+   is not filed as an issue and you may want one opened for the record; say so if you would
+   rather it were split out and fast-tracked ahead of this wave, and the plan changes.
 
 4. **How should #2895 be closed?** The structural fail-open reproduces and will get its
    demonstrated-red. The originally observed CLI-path incident does not reproduce and stays
