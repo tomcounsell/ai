@@ -103,8 +103,17 @@ issue with both a merged PR (an earlier round shipped) and a live open PR (a
 later round in flight), whose ledger has been evicted, would resolve to the
 historical merged PR, read `pr_state == "MERGED"`, and `guard_terminal_lane`
 would declare the lane finished while its open PR is still being worked — the
-plan's Risk 1, reachable through the one path where terminality is inferred
-rather than recorded.
+plan's Risk 1, as reachable through this ledger-less/inferred path.
+
+Risk 1 turned out to be reachable through the **recorded** path too: PATCH
+round 2 on this PR reproduced the identical false terminal with a live
+`session.pr_number` on record (see `sdlc-pipeline-state.md`'s PR-number
+resolution ladder). `_compute_meta` now applies the same open-before-merged
+check there — when the recorded PR resolves `pr_state == "MERGED"`, it runs
+one extra open-scoped `_lookup_pr` and switches to a different live open PR
+if one exists — so the two resolution paths (recorded and ledger-less) can no
+longer disagree about whether a lane with both a merged and an open PR is
+terminal.
 
 The result is cached (`_ledgerless_pr_cache`, TTL via `SDLC_LEDGERLESS_PR_TTL`,
 default 300s) and the cache stores the negative result too: the router polls
@@ -138,6 +147,7 @@ effect on the very next call in that process, no service restart required.
 | `agent/sdlc_router.py::_terminal_evidence` | The two-branch predicate (`merge_marker` / `merged_pr`) |
 | `agent/sdlc_router.py::_terminal_guard_enabled` | Live env-var read for the kill switch |
 | `tools/sdlc_stage_query.py::_ledger_less_merged_pr` | Ledger-less `pr_state` resolution, open-before-merged, cached fail-open |
+| `tools/sdlc_stage_query.py::_compute_meta` | Recorded-path `pr_state` resolution — same open-before-merged check applied when `session.pr_number` resolves `MERGED` |
 | `tools/sdlc_next_skill.py` | Emits `decision: "terminal"` as a third output shape alongside `dispatch`/`blocked` |
 | `.claude/skills-global/do-sdlc/SKILL.md` | Treats `decision: "terminal"` as a clean exit, distinct from a `blocked` error stop |
 | `tests/unit/sdlc_router_decision/test_sdlc_router_decision_terminal.py` | Guard behavior, kill switch, negative controls |
