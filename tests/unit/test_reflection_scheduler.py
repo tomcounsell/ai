@@ -756,13 +756,13 @@ class TestRegistryIntegrity:
     def test_all_callables_resolve(self):
         """Every function-type entry's `callable:` dotted path must resolve.
 
-        Guards the one-file-per-reflection refactor (#1028): the registry
-        references historical dotted paths (e.g. ``reflections.maintenance.run_*``,
-        ``agent.sustainability.*``) that now resolve through re-export shims to the
-        relocated per-reflection modules. A typo in any shim re-export, or a moved
-        module that forgot its shim, fails loudly here instead of silently halting
-        a reflection in production. Covers disabled entries too — a disabled
-        reflection's callable must still be importable.
+        Guards the one-file-per-reflection refactor (#1028): the registry names
+        each reflection's real module directly (``reflections.agents.*``,
+        ``reflections.maintenance.run_*``) now that the ``agent.sustainability``
+        compatibility shim has been retired (#2875). A typo in a registry path,
+        or a module moved without migrating the registry, fails loudly here
+        instead of silently halting a reflection in production. Covers disabled
+        entries too — a disabled reflection's callable must still be importable.
         """
         registry_path = _registry_path()
         with open(registry_path) as f:

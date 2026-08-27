@@ -138,7 +138,7 @@ def _project_key_env() -> str:
     """Project-scoped Redis key prefix from env, falling back to ``valor``.
 
     Used when no session is resolvable (the resolution-error path) — mirrors
-    ``reflections/agents/session_recovery_drip._get_project_key``.
+    ``reflections.redis_access.get_project_key``.
     """
     v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
     return v or "valor"

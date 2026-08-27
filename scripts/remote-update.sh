@@ -169,7 +169,55 @@ fi
 # (this script run directly by com.valor.update) it lands in logs/update.log
 # and, on problems, data/update.txt — there is no chat context at all here.
 # --no-pull: git pull already done above; orchestrator skips its own pull step
+#
+# UPDATE_RUN_STARTED_AT bounds the freshness of anything run.py stamps for this
+# shell to read back (currently just the registry-probe sentinel below). The
+# sentinel has no self-clearing path other than a later passing probe, so a
+# verdict about code some earlier cycle pulled would otherwise block every
+# subsequent cycle forever — including one that already fixed the registry but
+# died before reaching the clear. Same freshness discipline as RESTART_MARKER
+# above, keyed to this run rather than to a fixed age so it cannot drift out of
+# lockstep.
+UPDATE_RUN_STARTED_AT=$(date +%s)
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
+
+# ── Reflections-registry probe verdict (issue #2875) ─────────────────
+# Latched HERE, immediately after run.py, not at the point of use several
+# hundred lines below. run.py Step 4.65 imports every `callable:` in every
+# registry copy the reflection worker could resolve and stamps
+# data/registry-probe-failed on failure; that file is the only channel across
+# the process boundary. Reading it at the point of use leaves a multi-minute
+# window (dep sync, plist installs, the drain poll) in which any concurrent
+# `run.py --full` — which runs Step 4.65, restarts services, and does not honor
+# this script's lockfile — could clear this cycle's failing verdict on its way
+# past. Latching collapses that window to the next statement. (`--verify` is not
+# in that set: run.py passes `record_sentinel=False` under `read_only`, so a
+# verify run reads the registry and touches this file in neither direction.)
+#
+# Freshness bound: a sentinel older than this cycle's run.py is residue from
+# some other run, not a verdict about the code we just pulled. An unreadable
+# stat() on a file `[ -f ]` just proved exists is itself anomalous, so it fails
+# CLOSED (far-future mtime => treated as fresh => blocking) rather than open.
+# Note the bound is one-directional: it discards sentinels that are too OLD, and
+# therefore only ever relaxes a block. It is no defense against a concurrent
+# process CLEARING a fresh one; the latch above is.
+#
+# The markers below are load-bearing: tests/unit/test_update_reflections_callables.py
+# slices this exact fragment out and executes it against fabricated sentinels to
+# prove the gate's DIRECTION, which no source-substring assertion can. Keep the
+# fragment self-contained — it may read only PROJECT_DIR and UPDATE_RUN_STARTED_AT.
+# >>> registry-probe-latch
+REGISTRY_PROBE_OK=true
+REGISTRY_PROBE_SENTINEL="$PROJECT_DIR/data/registry-probe-failed"
+if [ -f "$REGISTRY_PROBE_SENTINEL" ]; then
+    REGISTRY_PROBE_MTIME=$(stat -f %m "$REGISTRY_PROBE_SENTINEL" 2>/dev/null || echo 9999999999)
+    if [ "$REGISTRY_PROBE_MTIME" -ge "$UPDATE_RUN_STARTED_AT" ]; then
+        REGISTRY_PROBE_OK=false
+    else
+        echo "[update] Ignoring registry-probe sentinel from before this cycle's run.py (stale)"
+    fi
+fi
+# <<< registry-probe-latch
 
 # ── Unload legacy reflections launchd service (issue #748) ───────────
 # The com.valor.reflections launchd service has been deleted (scripts/reflections.py
@@ -222,6 +270,26 @@ fi
 RESTART_FAILED=0
 WORKER_STATE="worker current"
 VERIFY_SINCE=0
+
+# REGISTRY_PROBE_OK (issue #2875) was latched right after run.py, above. Its
+# exact reach, since the obvious reading is wrong. There are three kickstarts
+# in this script and it gates exactly one:
+#   - the normal WORKER_LABEL kickstart (the NEED_RESTART branch below) — GATED;
+#   - the WORKER_LABEL recovery kickstart in the label-absent branch — ungated
+#     by design, because nothing is running there to preserve, and a worker up
+#     with broken reflections beats a worker that is down;
+#   - the BRIDGE_LABEL kickstart near the end — ungated by design: the bridge
+#     neither reads the registry nor shares its config surface, and freezing
+#     chat I/O is the wrong response to a registry fault.
+# The process that actually loads the reflections registry is none of the
+# three — it is com.valor.reflection-worker, whose only (re)install is run.py
+# Step 5's service.install_reflection_worker, suppressed in-process by Step
+# 4.65's own do_service_restart=False. See #3029 for the cron-path gap.
+#
+# So this particular gate buys one narrow thing: a machine whose registry does
+# not import is in an unknown config state, so we decline to advance the worker
+# onto newly pulled code and instead give the failure a loud line and a
+# non-zero terminal exit, same posture as RESTART_FAILED above.
 
 # ── Reload worker plist if present ───────────────────────────────────
 # Only restart the worker when the pull actually landed new commits that touch
@@ -299,7 +367,13 @@ PYEOF
         WORKER_ALIVE=true
     fi
     if launchctl list | grep -q "$WORKER_LABEL" || $WORKER_ALIVE; then
-        if $NEED_RESTART; then
+        if $NEED_RESTART && ! $REGISTRY_PROBE_OK; then
+            # Gate ordered BEFORE the drain: draining sessions to then not
+            # restart would burn the whole drain window for nothing.
+            echo "RESTART BLOCKED: reflections-registry callables did not import (data/registry-probe-failed) — worker NOT restarted; it keeps serving the registry it already resolved. Fix the registry, then re-run /update."
+            WORKER_STATE="worker restart BLOCKED (registry probe failed)"
+            RESTART_FAILED=1
+        elif $NEED_RESTART; then
             # Drain before restart (#2141): a PM turn legitimately runs 20+
             # minutes; killing it mid-turn discards the in-flight work and
             # orphans the harness. Poll until no sessions are running; on
@@ -344,7 +418,10 @@ PYEOF
         # Label absent AND no live worker process (#2141 liveness cross-check
         # above) — the worker is genuinely down. Bootstrapping here is
         # RECOVERY of a dead service, not a restart: nothing is running, so
-        # no drain is needed and the NEED_RESTART gate does not apply.
+        # no drain is needed and neither the NEED_RESTART gate nor the
+        # REGISTRY_PROBE_OK gate applies. Both gates exist to preserve a
+        # working worker; there is no working worker here to preserve, and a
+        # worker up with five broken reflections beats a worker that is down.
         # The grep can still false-negative in exotic cases; the bare
         # bootstrap then fails with `Bootstrap failed: 5: Input/output error`
         # (errno 5 = label already bootstrapped in target domain). EIO here

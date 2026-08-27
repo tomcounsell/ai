@@ -166,6 +166,7 @@ class UpdateResult:
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
+    registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -231,6 +232,135 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
 RECENT_ACTIVITY_WINDOW = (
     30 * 60
 )  # 30 minutes — session considered live if updated_at within this window
+
+
+def apply_registry_probe_verdict(
+    result: UpdateResult,
+    probe_gate: reflections_callables.RegistryProbeResult,
+    sentinel: Path,
+    v: bool = False,
+) -> bool:
+    """Turn a Step 4.65 probe verdict into warnings/errors on ``result``.
+
+    Returns ``True`` when the caller must suppress the service restart.
+
+    Extracted from Step 4.65 so the verdict routing is reachable by a test.
+    `run_update` is a two-thousand-line function that pulls git, installs
+    launchd services, and writes an iCloud vault; nothing drives it end to end,
+    which is why #3014 exists. That gap is tolerable for the restart-suppression
+    half, which the shell independently re-derives from the sentinel — but under
+    ``--verify`` there IS no sentinel and no shell, so the escalation below is
+    the only channel the verdict has, and an inverted predicate here would be
+    invisible. Hence a seam rather than a disclosed hole.
+
+    Three shapes, distinguished by WHY the sentinel does or does not agree:
+
+    1. Vacuous pass (``nothing_probed``). The gate proved nothing, so it must
+       not render as a clean green: without a ``⚠️`` bullet
+       ``extract_update_warnings`` finds nothing, no fix session is queued, and
+       the cycle reports ``update OK`` on a machine whose registry is missing
+       entirely. The restart is NOT suppressed — absence of a registry is no
+       evidence a callable will not import, and blocking on it would wedge the
+       cycle with no self-clearing path.
+    2. Ordinary failure. Suppresses the restart and warns, deliberately NOT
+       ``result.success = False``. Escalating here would destroy the mechanism
+       it looks like it duplicates: ``remote-update.sh`` is ``set -euo
+       pipefail`` and invokes ``run.py`` bare, so a non-zero exit aborts the
+       shell at that line and everything after it becomes unreachable — the
+       sentinel latch, the ``RESTART BLOCKED`` operator line, the
+       ``RESTART_FAILED`` accounting, and the bridge's deliberate exemption from
+       a registry fault. The shell already turns this fault into a non-zero
+       terminal exit by the designed route, whenever the worker was actually due
+       to restart: ``RESTART_FAILED=1`` is set inside ``if $NEED_RESTART && !
+       $REGISTRY_PROBE_OK``, so a registry broken out-of-band with no
+       worker-relevant commits still exits 0. Nothing is hidden — the
+       ``always=True`` FAIL log prints and the warning produces a ``⚠️`` bullet.
+    3. A failure the sentinel does not carry. The only in-process escalations,
+       and they split by why it is absent:
+       - ``sentinel_skipped`` (``--verify``): absent by design. There is no
+         shell half on this path — ``remote-update.sh`` runs ``run.py --cron``,
+         never ``--verify`` — so the "abort before the kickstart" reasoning does
+         not apply. What remains is that a human or agent running ``/update
+         --verify`` must not read a broken registry as a clean bill of health,
+         and one warning among many is not enough for that. So this is a hard
+         error and a non-zero exit: the loudest shape rather than the quietest.
+       - ``not sentinel_recorded``: absent by accident, the write or unlink did
+         not land. On the pass path a failed *clear* only over-blocks the next
+         cycle, so it stays a warning. On the failure path the shell reads
+         ``[ -f ]``, absence is its green light, and it restarts the worker
+         after this process has exited. Losing the shell's own ``RESTART
+         BLOCKED`` line to a ``set -e`` abort is the accepted cost: an abort
+         with no kickstart beats a green gate.
+
+    ``result.success`` is set directly rather than left to the ``if v:`` summary
+    block at the end of ``run_update``: that block is skipped under
+    ``--quiet``/``--json``, and these failures must exit non-zero on every
+    invocation shape. Matches the other hard-error sites in this file.
+    """
+    suppress_restart = False
+
+    if probe_gate.success and probe_gate.nothing_probed:
+        log(f"WARN: registry probe proved nothing — {probe_gate.detail}", v, always=True)
+        _append_warning(result, f"reflections registry probe proved nothing: {probe_gate.detail}")
+    elif probe_gate.success:
+        log(f"  registry probe: {probe_gate.detail}", v)
+    else:
+        log(
+            f"FAIL: reflections-registry callables did not import — skipping service restart\n"
+            f"  {probe_gate.detail}",
+            v,
+            always=True,
+        )
+        _append_warning(
+            result,
+            f"reflections registry callables unresolvable; service restart skipped: "
+            f"{probe_gate.detail}",
+        )
+        suppress_restart = True
+
+    if probe_gate.sentinel_skipped:
+        if not probe_gate.success:
+            # Two different trees are in play here, and the message keeps them
+            # apart rather than using one path to stand for both. `sentinel` is
+            # under `project_dir` — the tree the operator invoked `/update` in.
+            # The registry copy that actually failed may be in a DIFFERENT one:
+            # the probe falls back to the owning checkout when the current tree
+            # carries no `config/reflections.yaml`, which is what a `--verify`
+            # from a lane worktree hits. That path is not reconstructed here; it
+            # arrives already named inside `probe_gate.detail`, which on the
+            # probe's own resolve-failure path carries `FAIL: N of M registry
+            # copy(ies) did not resolve: <paths>` from stderr. Other shapes
+            # (timeout, missing script, bare exit code) name no copy, which is
+            # why the clause below points at the fault rather than at a path.
+            # Leading with `detail` is therefore what locates the fault; the
+            # sentinel clause only explains why there is no other channel.
+            _append_error(
+                result,
+                f"registry probe FAILED under --verify: {probe_gate.detail}. "
+                f"No sentinel was written at {sentinel} (--verify makes no "
+                f"changes, #3026), so this exit code is the whole verdict — the "
+                f"reflection worker is not safe to restart until the fault above "
+                f"is resolved.",
+            )
+            result.success = False
+    elif not probe_gate.sentinel_recorded:
+        if probe_gate.success:
+            _append_warning(
+                result,
+                f"registry probe passed but could not clear {sentinel}; "
+                f"the next update's restart will be blocked until it is removed",
+            )
+        else:
+            _append_error(
+                result,
+                f"registry probe FAILED and could not stamp {sentinel} — "
+                f"the shell half of /update would read the absent sentinel as a pass "
+                f"and restart the worker onto an unresolvable registry. "
+                f"Aborting instead: {probe_gate.detail}",
+            )
+            result.success = False
+
+    return suppress_restart
 
 
 def _cleanup_stale_sessions(
@@ -1094,6 +1224,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Two migration families share one table: the `agent.sustainability.*` shim
         # -> `reflections.agents.*` (#2875), and the `agent.agent_session_queue.*`
         # re-export hub -> `agent.session_health` / `agent.session_revival` (#2876).
+        # `agent/sustainability.py` is deleted, so the registry must never reacquire
+        # those paths; this step rewrites any that it still carries, which is what
+        # keeps it alive after its own migration is done.
         # Keep these strings family-agnostic: naming one family makes the log false
         # on a machine where the other fires, and an operator verifying #2876's
         # propagation gate reads exactly this output.
@@ -1120,6 +1253,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not rcr.success:
             log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
             _append_warning(result, f"reflection callable migration: {rcr.error}")
+            # Warning only HERE, but not fail-open overall: Step 4.65's probe
+            # independently checks whether the registry actually imports, and it
+            # is that probe — not this rewriter's exit status — that suppresses
+            # the service restart. A rewrite failure over a registry that was
+            # already clean is genuinely harmless and stays a warning; one that
+            # leaves the deleted shim named is caught downstream.
 
         # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
         # symlink — the launchd worker's reflection scheduler reads it, and a
@@ -1785,6 +1924,102 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # Suppress restart for the rest of this run. The existing bridge
             # process keeps running on the previously validated config.
             config = replace(config, do_service_restart=False)
+
+    # Step 4.65: Reflections-registry import probe — green-light gate for the
+    # in-process service restart below and, via the sentinel, for
+    # `remote-update.sh`'s worker kickstart. See the #3029 note further down for
+    # the restart it does NOT reach.
+    #
+    # Why a gate at all: while `agent/sustainability.py` existed it was the
+    # backstop, so a registry still naming the shim imported anyway. #2875
+    # deleted it. Restarting the worker against a registry whose callables do
+    # not import means five self-healing reflections raise ImportError inside
+    # `reflection_scheduler.run_reflection`'s broad `except`, which records
+    # `state.last_error` and keeps ticking with no alert.
+    #
+    # Why the probe and not `reflections_callables_result.success`: that flag
+    # only means "the Step 1.659 rewriter did not error". It is True for
+    # `action="noop"`, which also covers *no registry present* and covers a
+    # registry whose shim reference the line-anchored rewrite regex never
+    # matched (a flow-style `{callable: agent.sustainability.x}` entry returns
+    # early, BEFORE the import verification, and reports a clean noop). The
+    # probe checks the actual property the restart needs: every `callable:` in
+    # every existing registry copy imports with `agent.sustainability` banned.
+    # Under `--verify` the flag is not merely weak but absent: Step 1.659 sits
+    # inside the `read_only` skip block, so `reflections_callables_result` is
+    # None there and the probe is the only signal that exists at all.
+    #
+    # Why the probe still RUNS under `read_only` but writes no sentinel: the
+    # import check itself is pure — it shells out to
+    # `scripts/verify_registry_without_shim.py`, which only imports — so the
+    # diagnostic costs --verify nothing. The sentinel is the mutation, and it is
+    # passed `record_sentinel=not config.read_only` for two reasons. First,
+    # `data/registry-probe-failed` is machine-global state and #3026 makes
+    # `--verify` promise to leave none. Second and sharper: the sentinel's PASS
+    # path is an `unlink`, and `--verify` runs outside `remote-update.sh`'s
+    # lockfile, so a passing --verify from a scratch worktree could delete a
+    # failing verdict that script had just stamped — and absence is its green
+    # light. The shell's mtime freshness bound does not cover that direction; it
+    # only discards sentinels that are too OLD. Suppressing the I/O closes it.
+    # The cost is that a --verify probe failure has no sentinel to carry the
+    # verdict, so it is escalated straight to `result.errors` below instead.
+    #
+    # Why NOT gated on `config.do_service_restart`: `UpdateConfig.cron()` sets
+    # that False, yet the cron path restarts the worker anyway — in the SHELL,
+    # after this process exits (`scripts/remote-update.sh` runs `run.py --cron`
+    # and then `launchctl kickstart -k`, gated only on the diff touching
+    # `agent/`). Gating the check itself on `do_service_restart` therefore made
+    # it inert on the one path this change actually deploys through. So the
+    # probe always runs; `run_registry_probe` stamps `data/registry-probe-
+    # failed`, which `remote-update.sh` consults before its own kickstart, and
+    # a failure additionally suppresses the in-process restart below (same
+    # posture as Steps 4.6/4.7).
+    #
+    # What `do_service_restart=False` does and does not buy. The intended
+    # effect: it skips Step 5's in-process `service.install_*` calls, including
+    # `install_reflection_worker`, which is the one that reloads the registry.
+    #
+    # Collateral, because every remaining reader of the flag sits after this
+    # step: Step 4.7 stops validating the sdlc-tool wrapper, Steps 4.8/4.9 pass
+    # `write=False` to the memory and BYOB MCP registrars so they report drift
+    # instead of self-healing it, and the terminal `run_catchup_step` is skipped.
+    # All three are the same "we are not bringing services up on this run"
+    # posture the flag already means, and Steps 4.6/4.7 flip it for their own
+    # faults with the identical reach, so the fault does not widen — but the
+    # reach is the flag's, not this step's, and is stated here rather than
+    # implied.
+    #
+    # It does NOT universally mean "nothing restarts" — on `--full` with commits
+    # pulled, Step 5's `elif` branch calls `git.set_restart_requested()` and the
+    # worker self-exits into a launchd relaunch, ungated. That is harmless here
+    # because `com.valor.worker` never loads the reflections registry; the
+    # process that does is `com.valor.reflection-worker`, and its (re)install is
+    # exactly what this flag suppresses.
+    #
+    # Known gap, tracked as #3029: `install_reflection_worker` is the ONLY site
+    # that restarts `com.valor.reflection-worker`, and it sits under
+    # `do_service_restart`, which `UpdateConfig.cron()` sets False. On the
+    # routine cron path the registry is therefore migrated and probed green
+    # while the live scheduler — which calls `load()` once at start and never
+    # reloads — keeps whatever it read at process start. The probe gate is
+    # correct about what it blocks; it just has no restart to gate there.
+    log("Probing reflections-registry callables for importability...", v)
+    result.registry_probe_result = reflections_callables.run_registry_probe(
+        project_dir, record_sentinel=not config.read_only
+    )
+    probe_gate = result.registry_probe_result
+    # Routing lives in `apply_registry_probe_verdict` (module level, tested
+    # directly); see its docstring for the three shapes and each one's fail
+    # direction. It reports whether the restart must be suppressed rather than
+    # editing `config`, because `config` is a local rebind here that a helper
+    # cannot perform.
+    if apply_registry_probe_verdict(
+        result,
+        probe_gate,
+        project_dir / reflections_callables.PROBE_SENTINEL,
+        v,
+    ):
+        config = replace(config, do_service_restart=False)
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or

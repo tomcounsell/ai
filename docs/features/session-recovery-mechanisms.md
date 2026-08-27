@@ -171,8 +171,8 @@ The authoritative registry is `RECOVERY_OWNERSHIP` in `models/session_lifecycle.
 | `waiting_for_children` | worker | `_agent_session_hierarchy_health_check` finalizes stuck parents |
 | `active` | bridge-watchdog | `monitoring/session_watchdog.py` `check_all_sessions` + `check_stalled_sessions` |
 | `dormant` | bridge-watchdog | `monitoring/session_watchdog.py` via `check_stalled_sessions` activity check |
-| `paused` | bridge-watchdog | `agent/sustainability.py` `session_recovery_drip` (dripped after paused_circuit) |
-| `paused_circuit` | bridge-watchdog | `agent/sustainability.py` `session_recovery_drip` (dripped first) |
+| `paused` | bridge-watchdog | `reflections/agents/session_recovery_drip.py` `run` (dripped after paused_circuit) |
+| `paused_circuit` | bridge-watchdog | `reflections/agents/session_recovery_drip.py` `run` (dripped first) |
 | `superseded` | none | Transitional status; superseded sessions are finalized immediately |
 
 **Why the split exists:** The worker process owns execution lifecycle (pending, running, hierarchy). The bridge-hosted watchdog owns monitoring of sessions that are paused or waiting outside the execution loop (active, dormant, paused variants). This split emerged naturally from the bridge/worker separation (PR #826) and is now formally documented here.

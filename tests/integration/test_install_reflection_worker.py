@@ -76,6 +76,86 @@ def test_dry_run_env_parity(installer_src):
     assert "source" in installer_src and ".env" in installer_src
 
 
+_GATE_START = "# >>> registry-probe-gate"
+_GATE_END = "# <<< registry-probe-gate"
+
+
+def _gate_fragment(installer_src: str) -> str:
+    """Slice the live registry-probe gate out of the installer.
+
+    Executing the shipped fragment, rather than asserting substrings over it, is
+    the only way to prove a three-way gate branches in all three directions:
+    flipping `-eq 2` to `-ne 2` or dropping the `elif` leaves every substring
+    assertion in this file green. `remote-update.sh`'s latch is tested the same
+    way, on the same reasoning.
+    """
+    assert _GATE_START in installer_src and _GATE_END in installer_src, (
+        "the registry-probe-gate markers are load-bearing; tests slice the fragment "
+        "out of the shipped installer by them"
+    )
+    return installer_src.split(_GATE_START, 1)[1].split(_GATE_END, 1)[0]
+
+
+def _run_gate(installer_src: str, tmp_path: Path, probe_exit: int) -> tuple[int, str]:
+    """Run the gate against a stub interpreter that exits with `probe_exit`.
+
+    The generated script sets `-euo pipefail` because the installer does. The
+    whole reason to execute the fragment instead of asserting substrings over it
+    is fidelity to the shipped context, and the shell mode is part of that
+    context: under a default shell, a future edit inside the markers that trips
+    `errexit` or `nounset` would abort the real install while these tests stayed
+    green. Matches `_run_latch` in `tests/unit/test_update_reflections_callables.py`.
+    """
+    import subprocess
+
+    project = tmp_path / "project"
+    (project / ".venv" / "bin").mkdir(parents=True)
+    (project / "scripts").mkdir(parents=True)
+    (project / "scripts" / "verify_registry_without_shim.py").write_text("")
+    stub = project / ".venv" / "bin" / "python"
+    stub.write_text(f"#!/bin/sh\nexit {probe_exit}\n")
+    stub.chmod(0o755)
+
+    script = tmp_path / "gate.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        f'PROJECT_DIR="{project}"\n'
+        f"{_gate_fragment(installer_src)}\n"
+        "echo REACHED_END\n"
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    return proc.returncode, proc.stdout
+
+
+def test_gate_admits_a_resolvable_registry(installer_src, tmp_path):
+    """Green control: exit 0 falls through to the rest of the install."""
+    rc, out = _run_gate(installer_src, tmp_path, 0)
+    assert rc == 0
+    assert "REACHED_END" in out
+
+
+def test_gate_aborts_the_install_when_callables_do_not_resolve(installer_src, tmp_path):
+    rc, out = _run_gate(installer_src, tmp_path, 1)
+    assert rc == 1
+    assert "REACHED_END" not in out
+    assert "did not resolve" in out
+
+
+def test_gate_aborts_the_install_when_nothing_was_probed(installer_src, tmp_path):
+    """The deliberate asymmetry with Step 4.65: exit 2 is a hard error here.
+
+    `/update` treats the vacuous verdict as a warning and proceeds, because
+    blocking a periodic restart on it wedges the cycle. Installing a scheduler
+    with no registry to schedule has no such cost, so this caller refuses — and
+    with its own message, since the two failures need different operator action.
+    """
+    rc, out = _run_gate(installer_src, tmp_path, 2)
+    assert rc == 1
+    assert "REACHED_END" not in out
+    assert "no reflections registry found" in out
+    assert "did not resolve" not in out, "the two failures must not collapse into one message"
+
+
 def test_config_prep_moved_into_this_installer(installer_src):
     assert "reflection_machine_filter" in installer_src
     assert "reflections.yaml" in installer_src

@@ -40,6 +40,7 @@ import logging
 import subprocess
 
 from config.settings import settings
+from reflections.redis_access import get_project_key, get_redis
 
 logger = logging.getLogger("reflections.stall_advisory")
 
@@ -55,25 +56,6 @@ _CONSEC_KEY_TTL_SECS = 700
 # TTL on the per-session kill-attempt budget counter (~24h) so a long-lived
 # wedge does not exhaust its budget forever from an old incident.
 _BUDGET_KEY_TTL_SECS = 86400
-
-
-# ---------------------------------------------------------------------------
-# Module-local Redis / project-key helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_redis():
-    """Return the shared Popoto Redis connection (plain-key access)."""
-    from agent.sustainability import _get_redis as _su_get_redis
-
-    return _su_get_redis()
-
-
-def _get_project_key() -> str:
-    """Return the project-scoped Redis key prefix (e.g. ``valor``)."""
-    from agent.sustainability import _get_project_key as _su_get_project_key
-
-    return _su_get_project_key()
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +125,8 @@ def run_stall_advisory(params: dict | None = None) -> dict:
     r = None
     project_key = None
     try:
-        r = _get_redis()
-        project_key = _get_project_key()
+        r = get_redis()
+        project_key = get_project_key()
     except Exception as exc:
         logger.debug("stall_advisory: recovery context unavailable: %r", exc)
 

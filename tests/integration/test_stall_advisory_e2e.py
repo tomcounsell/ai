@@ -359,10 +359,10 @@ def recovery_redis():
     AgentSession records. Counters under {pk}:stall-recovery:* are plain keys
     (NOT Popoto-managed), so raw r.delete is permitted here.
     """
-    from agent.sustainability import _get_project_key, _get_redis
+    from reflections.redis_access import get_project_key, get_redis
 
-    r = _get_redis()
-    pk = _get_project_key()
+    r = get_redis()
+    pk = get_project_key()
     created: set[str] = set()
 
     def consec_key(sid: str) -> str:
