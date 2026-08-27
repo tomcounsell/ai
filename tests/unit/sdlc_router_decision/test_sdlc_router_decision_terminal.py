@@ -183,16 +183,27 @@ class TestNegativeControls:
         assert d.skill == SKILL_DO_PLAN
 
     def test_genuine_unresolvable_merge_state_still_blocks(self):
-        """The GH_REPO / SDLC_TARGET_REPO message must survive for real misconfig."""
+        """The GH_REPO / SDLC_TARGET_REPO message must survive for real misconfig.
+
+        #2894's core warning: a naive terminal fix makes the ``primary is None``
+        fallback reachable for merged lanes, and because a merged PR reports
+        ``mergeable: UNKNOWN`` every finished lane would emit a spurious
+        "go check your env" error. The terminal guard now absorbs merged-and-done
+        upstream, so this message must fire ONLY for a genuinely open PR whose
+        mergeability could not be resolved. That is this test.
+
+        REVIEW pending + an APPROVED verdict is a real no-rule state: row 8e
+        needs REVIEW completed, row 10 needs REVIEW settled, and row 7 needs no
+        verdict. Verified by enumeration rather than guessed.
+        """
         d = decide_next_dispatch(
-            _states(MERGE="pending", DOCS="pending"),
+            _states(REVIEW="pending", DOCS="pending", MERGE="pending"),
             _meta(
-                pr_merge_state="UNKNOWN",
+                pr_number=555,
                 pr_state="OPEN",
+                pr_merge_state="UNKNOWN",
                 ci_all_passing=None,
-                latest_review_verdict=None,
-                latest_critique_verdict=None,
-                plan_exists=False,
+                latest_review_verdict=APPROVED_VERDICT,
             ),
             {},
         )
