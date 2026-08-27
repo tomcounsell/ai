@@ -66,6 +66,7 @@ service restart when it fails.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -208,16 +209,42 @@ def _check_copy(
 
 
 def main() -> int:
+    """Run the probe, leaving `sys.meta_path` and `sys.path` exactly as found.
+
+    The restore is not tidiness. This function is called in-process by
+    `TestMainExitCodes`, and an un-disarmed `_BannedModuleFinder` stays armed for
+    every later test on that pytest worker — `test_sustainability_namespace.py`
+    then fails its `find_spec`/`import_module` assertions with an `ImportError`
+    whose text claims a registry callable still names the shim. That is a false
+    alarm of exactly the shape this probe exists to make impossible, and whether
+    it fires depends on file scheduling: red under `-n0` and under any run that
+    co-locates the two files on one worker, green when they land apart.
+    """
     # Install the ban FIRST, before any import that could touch the registry.
-    sys.meta_path.insert(0, _BannedModuleFinder())
+    finder = _BannedModuleFinder()
+    sys.meta_path.insert(0, finder)
     sys.modules.pop(BANNED_MODULE, None)
 
     # Repo root on sys.path so `import agent.*` works regardless of CWD and
     # without depending on the venv's editable-install `.pth`. Deliberately
     # AFTER the ban: the finder must be armed before any import is possible.
-    if str(_REPO_ROOT) not in sys.path:
+    repo_root_added = str(_REPO_ROOT) not in sys.path
+    if repo_root_added:
         sys.path.insert(0, str(_REPO_ROOT))
 
+    try:
+        return _run()
+    finally:
+        # Remove by identity, not by position: an import performed while the ban
+        # was armed may have inserted a finder of its own ahead of ours.
+        with contextlib.suppress(ValueError):
+            sys.meta_path.remove(finder)
+        if repo_root_added:
+            with contextlib.suppress(ValueError):
+                sys.path.remove(str(_REPO_ROOT))
+
+
+def _run() -> int:
     import yaml
 
     from agent.reflection_scheduler import (

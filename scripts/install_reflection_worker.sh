@@ -165,6 +165,7 @@ fi
 # either — the scheduler returns an empty reflection list for a missing path and
 # exits 0 — and `_copy_config_file` tolerates a missing vault with a WARNING, so
 # the path is genuinely reachable.
+# >>> registry-probe-gate
 echo "Verifying reflection registry callables resolve..."
 VALOR_LAUNCHD=1 "$PROJECT_DIR/.venv/bin/python" \
     "$PROJECT_DIR/scripts/verify_registry_without_shim.py" && PROBE_RC=0 || PROBE_RC=$?
@@ -175,6 +176,7 @@ elif [ "$PROBE_RC" -ne 0 ]; then
     echo "ERROR: reflection registry callables did not resolve. Fix the registry before installing."
     exit 1
 fi
+# <<< registry-probe-gate
 
 # Unload current version if present
 if launchctl list | grep -q "$LABEL"; then

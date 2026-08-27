@@ -24,23 +24,33 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _load(name: str, rel: str):
-    """Import a `scripts/` module by path — neither is an importable package."""
+    """Import a `scripts/` module by path — neither is an importable package.
+
+    Yields the module and then removes it from `sys.modules`. The entry has to
+    exist during `exec_module` (dataclasses and `typing` resolution look the
+    module up by name), but leaving it behind pollutes every later test on the
+    worker with a private name that shadows nothing today and could shadow
+    something tomorrow.
+    """
     spec = importlib.util.spec_from_file_location(name, _REPO_ROOT / rel)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop(name, None)
 
 
 @pytest.fixture(scope="module")
 def probe():
-    return _load("_probe_under_test", "scripts/verify_registry_without_shim.py")
+    yield from _load("_probe_under_test", "scripts/verify_registry_without_shim.py")
 
 
 @pytest.fixture(scope="module")
 def migrate():
-    return _load("_migrate_under_test", "scripts/migrate_reflections_callables.py")
+    yield from _load("_migrate_under_test", "scripts/migrate_reflections_callables.py")
 
 
 @pytest.fixture(autouse=True)
@@ -264,3 +274,66 @@ class TestMainExitCodes:
         from scripts.update.reflections_callables import _PROBE_EXIT_NO_REGISTRY
 
         assert _PROBE_EXIT_NO_REGISTRY == probe.EXIT_NO_REGISTRY
+
+
+class TestMainRestoresProcessGlobals:
+    """`main()` arms a `sys.meta_path` ban; called in-process it must disarm it.
+
+    `TestMainExitCodes` above calls `main()` three times inside the pytest
+    process. A finder left armed raises `ImportError` for anything under
+    `agent.sustainability` for the rest of that worker's life, which reddens
+    `tests/unit/test_sustainability_namespace.py` with an error message claiming
+    a registry callable still names a shim that no longer exists. Asserting the
+    two lists directly is what keeps the `finally` in place; the observable
+    symptom only appears under some file-scheduling orders, so it cannot be
+    relied on to catch a regression.
+    """
+
+    def _assert_restored(self, probe, call):
+        meta_before = list(sys.meta_path)
+        path_before = list(sys.path)
+        call()
+        assert list(sys.meta_path) == meta_before
+        assert list(sys.path) == path_before
+
+    def test_globals_restored_on_the_vacuous_verdict(self, probe, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(
+            probe, "_registry_copies", lambda owning_root: [tmp_path / "absent.yaml"]
+        )
+        self._assert_restored(probe, probe.main)
+        capsys.readouterr()
+
+    def test_globals_restored_on_a_pass(self, probe, monkeypatch, tmp_path, capsys):
+        registry = _write(
+            tmp_path / "r.yaml", "reflections:\n  - name: a\n    callable: os.getcwd\n"
+        )
+        monkeypatch.setattr(probe, "_registry_copies", lambda owning_root: [registry])
+        self._assert_restored(probe, probe.main)
+        capsys.readouterr()
+
+    def test_globals_restored_on_a_failure(self, probe, monkeypatch, tmp_path, capsys):
+        """The path that matters most: a raising probe must still disarm the ban."""
+        registry = _write(
+            tmp_path / "r.yaml",
+            "reflections:\n  - name: a\n    callable: agent.sustainability.circuit_health_gate\n",
+        )
+        monkeypatch.setattr(probe, "_registry_copies", lambda owning_root: [registry])
+        self._assert_restored(probe, probe.main)
+        capsys.readouterr()
+
+    def test_the_banned_module_is_importable_again_afterwards(
+        self, probe, monkeypatch, tmp_path, capsys
+    ):
+        """The symptom itself, not just the mechanism.
+
+        After `main()`, `find_spec` on the banned name must answer rather than
+        raise. The shim is deleted, so the answer is `None` — the point is that
+        asking is no longer an error.
+        """
+        monkeypatch.setattr(
+            probe, "_registry_copies", lambda owning_root: [tmp_path / "absent.yaml"]
+        )
+        probe.main()
+        capsys.readouterr()
+
+        assert importlib.util.find_spec(probe.BANNED_MODULE) is None

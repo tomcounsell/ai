@@ -238,6 +238,85 @@ def test_writable_failure_sentinel_reports_recorded(tmp_path, monkeypatch):
     assert (fake_repo / PROBE_SENTINEL).exists()
 
 
+def _stub_probe(project_dir: Path, exit_code: int, *, stdout: str = "", stderr: str = "") -> Path:
+    """Plant a probe script in `project_dir` that exits with a chosen code.
+
+    `run_registry_probe` prefers `project_dir/scripts/verify_registry_without_shim.py`
+    over the helper's own repo copy, so this drives the helper's exit-code
+    branching directly. Deliberate: what these cases pin is which verdict the
+    *helper* derives from each code, not how the probe picks candidates —
+    `tests/unit/test_verify_registry_without_shim.py::TestMainExitCodes` owns
+    that half, and forcing the real probe to see zero candidates would mean
+    reaching into the machine's own checkout.
+    """
+    script = project_dir / "scripts" / "verify_registry_without_shim.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "import sys\n"
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.stderr.write({stderr!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    return script
+
+
+def test_no_registry_exit_is_a_non_blocking_verdict_that_still_reports(tmp_path):
+    """Exit 2 must clear the sentinel and still refuse to look like a clean green.
+
+    Both halves matter and pull opposite ways. Blocking here would wedge an
+    uninstalled checkout's update cycle every 30 minutes, since nothing clears
+    the sentinel but a passing probe — hence `success=True` and the stale
+    sentinel removed. But a run that probed nothing is not a run that proved
+    something, so `nothing_probed` carries the distinction out to Step 4.65,
+    which routes it to the operator warning channel.
+    """
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "data").mkdir(parents=True)
+    stale = fake_repo / PROBE_SENTINEL
+    stale.write_text("from a previous failing run\n")
+    _stub_probe(
+        fake_repo,
+        2,
+        stderr="WARN: no reflections registry found, so nothing was probed; candidates: /nope\n",
+    )
+
+    result = run_registry_probe(fake_repo)
+
+    assert result.success is True
+    assert result.nothing_probed is True
+    assert not stale.exists(), "a verdict with no evidence behind it must not keep blocking"
+    # Read off stderr on purpose: the success path below reads only stdout, and
+    # this branch's entire explanation is written to stderr.
+    assert "no reflections registry found" in result.detail
+
+
+def test_an_ordinary_failure_is_not_mistaken_for_the_vacuous_verdict(tmp_path):
+    """Red control on the same axis: exit 1 still blocks and still stamps."""
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    _stub_probe(fake_repo, 1, stderr="FAIL: 1 of 1 registry copy(ies) did not resolve\n")
+
+    result = run_registry_probe(fake_repo)
+
+    assert result.success is False
+    assert result.nothing_probed is False
+    assert (fake_repo / PROBE_SENTINEL).exists()
+
+
+def test_a_real_pass_is_not_mistaken_for_the_vacuous_verdict(tmp_path):
+    """Green control: exit 0 passes with `nothing_probed` false, so the two differ."""
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    _stub_probe(fake_repo, 0, stdout="OK: 34 registry callables across 1 registry copy(ies)\n")
+
+    result = run_registry_probe(fake_repo)
+
+    assert result.success is True
+    assert result.nothing_probed is False
+    assert "34 registry callables" in result.detail
+    assert not (fake_repo / PROBE_SENTINEL).exists()
+
+
 def test_probe_subprocess_forces_launchd_candidate_set(tmp_path, monkeypatch):
     """Step 4.65 must probe the copies the reflection worker resolves, not the vault.
 
