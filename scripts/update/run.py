@@ -229,6 +229,11 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         print(line)
 
 
+RECENT_ACTIVITY_WINDOW = (
+    30 * 60
+)  # 30 minutes — session considered live if updated_at within this window
+
+
 def apply_registry_probe_verdict(
     result: UpdateResult,
     probe_gate: reflections_callables.RegistryProbeResult,
@@ -315,19 +320,25 @@ def apply_registry_probe_verdict(
 
     if probe_gate.sentinel_skipped:
         if not probe_gate.success:
-            # The checkout is named because it is not necessarily the one the
-            # operator is standing in: the probe resolves registry copies from
-            # the OWNING checkout when the current tree has none, so a --verify
-            # from a lane worktree reports on the main checkout's installed
-            # registry. Without the path in the message that sends someone
-            # hunting in the wrong tree.
+            # Two different trees are in play here, and the message keeps them
+            # apart rather than using one path to stand for both. `sentinel` is
+            # under `project_dir` — the tree the operator invoked `/update` in.
+            # The registry copy that actually failed may be in a DIFFERENT one:
+            # the probe falls back to the owning checkout when the current tree
+            # carries no `config/reflections.yaml`, which is what a `--verify`
+            # from a lane worktree hits. That path is not reconstructed here; it
+            # arrives already named inside `probe_gate.detail`, whose last line
+            # is the probe's own `FAIL: N of M registry copy(ies) did not
+            # resolve: <paths>` on stderr. Leading with `detail` is therefore
+            # what locates the fault; the sentinel clause only explains why
+            # there is no other channel.
             _append_error(
                 result,
                 f"registry probe FAILED under --verify: {probe_gate.detail}. "
-                f"No sentinel was written under {sentinel.parent.parent} "
-                f"(--verify makes no changes, #3026), so this exit code is the "
-                f"whole verdict — the reflection worker will ImportError on every "
-                f"reflection until the named registry copy is fixed.",
+                f"No sentinel was written at {sentinel} (--verify makes no "
+                f"changes, #3026), so this exit code is the whole verdict — the "
+                f"reflection worker will ImportError on every reflection until "
+                f"the registry copy named above is fixed.",
             )
             result.success = False
     elif not probe_gate.sentinel_recorded:
@@ -348,11 +359,6 @@ def apply_registry_probe_verdict(
             result.success = False
 
     return suppress_restart
-
-
-RECENT_ACTIVITY_WINDOW = (
-    30 * 60
-)  # 30 minutes — session considered live if updated_at within this window
 
 
 def _cleanup_stale_sessions(

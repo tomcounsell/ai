@@ -553,19 +553,31 @@ def test_verify_failure_escalates_to_a_nonzero_exit(tmp_path):
     warned would render as one bullet among many on a run an operator asked
     for precisely to get a verdict.
     """
+    sentinel = tmp_path / "data" / "registry-probe-failed"
     result, suppress = _apply(
-        _verdict(success=False, sentinel_skipped=True, sentinel_recorded=False),
-        tmp_path / "data" / "registry-probe-failed",
+        _verdict(
+            success=False,
+            detail="FAIL: 1 of 1 registry copy(ies) did not resolve: /elsewhere/reflections.yaml",
+            sentinel_skipped=True,
+            sentinel_recorded=False,
+        ),
+        sentinel,
     )
 
     assert result.success is False
     assert result.errors, "a --verify failure must reach the error channel"
     assert "--verify" in result.errors[0]
-    # The escalation names the checkout: the probe falls back to the OWNING
-    # checkout's registry when the current tree has none, so a --verify from a
-    # lane worktree reports on a copy outside it.
-    assert str(tmp_path) in result.errors[0]
     assert suppress is True
+
+    # The message keeps two different trees apart. The sentinel is under
+    # project_dir — where the operator ran /update. The registry copy that
+    # failed can be in another checkout entirely, because the probe falls back
+    # to the owning one when the current tree has no config/reflections.yaml;
+    # that path is passed through from `detail`, never reconstructed from the
+    # sentinel. Asserting both is what stops one path being used to make both
+    # claims, which is the shape round 13 caught.
+    assert str(sentinel) in result.errors[0]
+    assert "/elsewhere/reflections.yaml" in result.errors[0]
 
 
 def test_verify_pass_is_silent_and_does_not_escalate(tmp_path):
@@ -612,8 +624,9 @@ def test_unstamped_failure_escalates_but_a_failed_clear_only_warns(tmp_path):
     """
     sentinel = tmp_path / "data" / "registry-probe-failed"
 
-    failed, _ = _apply(_verdict(success=False, sentinel_recorded=False), sentinel)
+    failed, failed_suppress = _apply(_verdict(success=False, sentinel_recorded=False), sentinel)
     assert failed.success is False
+    assert failed_suppress is True, "an unresolvable registry blocks the restart here too"
     assert any("could not stamp" in e for e in failed.errors)
 
     passed, suppress = _apply(_verdict(success=True, sentinel_recorded=False), sentinel)
