@@ -450,16 +450,15 @@ async def scan_for_missed_messages(
                 # the recovery path. `strip_private` mirrors live intake's
                 # `safe_text`: the inbox is a durable no-TTL list, so <private>
                 # content must never reach it on this path either.
-                if project:
-                    shadow_append_inbox(
-                        project,
-                        chat_id=chat_id,
-                        message_id=message.id,
-                        sender_id=sender_id,
-                        sender_name=sender_name,
-                        text=strip_private(text),
-                        date=message.date,
-                    )
+                shadow_append_inbox(
+                    project,
+                    chat_id=chat_id,
+                    message_id=message.id,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    text=strip_private(text),
+                    date=message.date,
+                )
 
                 try:
                     await enqueue_agent_session_fn(
