@@ -335,6 +335,138 @@ def _review_artifact_posted(
         return False
 
 
+# Statuses that mean "no marker was ever written for this stage". A stage the
+# pipeline actually reached passes through `in_progress`, so anything still
+# sitting in an unstarted status (or absent from the map entirely) has no marker.
+_UNMARKED_STATUSES = frozenset({"", "pending", "ready"})
+
+
+def _mid_pipeline_entry_diagnostic(issue_number: int | None, raw: dict) -> str | None:
+    """Name the missing signals of a mid-pipeline entry, or return ``None``.
+
+    Issue #2851. A lane whose first ``sdlc-tool`` dispatch is at a non-ISSUE
+    stage skipped its predecessors, and completing REVIEW then dies in
+    :meth:`agent.pipeline_state.PipelineStateMachine._backfill_predecessors` on
+    the verdict invariant (#2415). That refusal is *correct* and this function
+    does not soften it -- `STATE_MACHINE_REJECTED` was merely undiagnosable, so
+    an operator could not tell a mid-pipeline entry apart from an ordinary
+    invariant violation. This is observability only: it makes nothing newly
+    skippable and nothing newly completable.
+
+    Keys on **positive evidence**, never on an empty stages map. Recon of
+    #2734/#2741 found the wedge is better characterised as *a verdict recorded
+    without a marker* than as "empty stages map", and emptiness is unusable as
+    a signal anyway: ``tools/sdlc_next_skill.py::_recover_stage_states_from_durable_signals``
+    runs BEFORE ``decide_next_dispatch``, so an empty map downstream means
+    ledger recovery already ran and failed -- indistinguishable from a genuinely
+    fresh issue. Firing on emptiness would flag every new lane at ISSUE.
+
+    The two admissible signals, both of which name what is missing so the state
+    is repairable rather than merely refused:
+
+    1. a stage with a recorded verdict but no marker -- a verdict is only ever
+       produced by a stage that ran, so the marker was lost or never written;
+    2. a plan document (live OR archived) with no PLAN marker -- the plan is
+       proof PLAN was owed. The archived rung matters because ``find_plan_path``
+       searches ``docs/plans/`` only, and a shipped lane's plan is moved to
+       ``docs/archive/plans-completed/``.
+
+    Both are gated on independent evidence that the lane did work at a non-ISSUE
+    stage, so a fresh lane -- no verdicts, no plan, nothing dispatched past
+    ISSUE -- is never flagged.
+
+    Best-effort by construction: it runs inside an error path and must never
+    raise into it, so a plan lookup that fails simply contributes no signal
+    rather than refusing (the fail-closed posture belongs to
+    :func:`_skip_precondition_error`, which grants a capability; this grants none).
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def _status(stage: str) -> str:
+        value = raw.get(stage)
+        return value.strip().lower() if isinstance(value, str) else ""
+
+    verdicts = raw.get("_verdicts")
+    verdicts = verdicts if isinstance(verdicts, dict) else {}
+    dispatches = raw.get("_sdlc_dispatches")
+    dispatches = dispatches if isinstance(dispatches, list) else []
+
+    # Evidence the lane did work past ISSUE. Absent this, anything below is
+    # explainable by a fresh lane and must not be reported.
+    non_issue_activity = (
+        any(k != "ISSUE" and v for k, v in verdicts.items())
+        or any(
+            isinstance(d, dict) and d.get("stage") and d.get("stage") != "ISSUE" for d in dispatches
+        )
+        or any(
+            k != "ISSUE" and not k.startswith("_") and _status(k) not in _UNMARKED_STATUSES
+            for k in raw
+        )
+    )
+    if not non_issue_activity:
+        return None
+
+    missing: list[str] = []
+
+    for stage, verdict in sorted(verdicts.items()):
+        if verdict and _status(stage) in _UNMARKED_STATUSES:
+            missing.append(
+                f"{stage} has a recorded verdict but no {stage} marker "
+                f"(status: {_status(stage) or 'absent from the stages map'})"
+            )
+
+    if _status("PLAN") in _UNMARKED_STATUSES:
+        plan_path = None
+        for lookup in ("find_plan_path", "find_archived_plan_path"):
+            try:
+                import tools.lane_identity as _lane_identity
+
+                plan_path = getattr(_lane_identity, lookup)(issue_number)
+            except Exception as e:  # noqa: BLE001 -- diagnostic only, never fatal
+                logger.debug(
+                    f"_mid_pipeline_entry_diagnostic: {lookup} failed for "
+                    f"issue #{issue_number}: {e} -- contributing no plan signal"
+                )
+                plan_path = None
+            if plan_path is not None:
+                missing.append(f"no PLAN marker but a plan document exists at {plan_path}")
+                break
+
+    if not missing:
+        return None
+
+    return (
+        f"MID_PIPELINE_ENTRY: issue #{issue_number} shows work at a non-ISSUE stage "
+        f"with predecessors that never recorded a marker -- " + "; ".join(missing) + ". "
+        "This lane entered the pipeline part-way through, so the backfill has no "
+        "honest spine to promote. Record the missing markers from the stage that "
+        "actually ran (`sdlc-tool stage-marker`), or re-dispatch that stage; do NOT "
+        "mint a verdict no tool produced."
+    )
+
+
+def _mid_pipeline_entry_for_ledger(issue_number: int | None, ledger) -> str | None:
+    """Read the durable stage record off ``ledger`` and run the detector on it.
+
+    Separated from :func:`_mid_pipeline_entry_diagnostic` so the pure predicate
+    stays testable without a substrate, and so the ledger read -- the only part
+    that can fail -- has one owner. Returns ``None`` on any failure: this runs
+    inside the ``STATE_MACHINE_REJECTED`` error path and a diagnostic that
+    raised would replace a correct refusal with a crash.
+    """
+    try:
+        from tools.sdlc_stage_query import _load_raw_states
+
+        return _mid_pipeline_entry_diagnostic(issue_number, _load_raw_states(ledger))
+    except Exception as e:  # noqa: BLE001 -- diagnostic only, never fatal
+        logger.debug(
+            f"_mid_pipeline_entry_for_ledger: detector failed for "
+            f"issue #{issue_number}: {e} -- refusal reported without it"
+        )
+        return None
+
+
 def _skip_precondition_error(
     stage: str, issue_number: int | None, ledger=None
 ) -> tuple[str, str] | None:
@@ -830,17 +962,27 @@ def _write_marker_impl(
                     # every time it printed. `finalize` re-narrates this
                     # accurately for its own callers; here we claim only what
                     # this function did.
+                    #
+                    # #2851: the refusal above is correct but generic, and a
+                    # mid-pipeline-entry lane reads identically to an ordinary
+                    # invariant violation. Attach the detector's named missing
+                    # signals when they are present so the state is repairable.
+                    entry_diagnostic = _mid_pipeline_entry_for_ledger(issue_number, sm._ledger)
                     print(
                         f"[ERROR] STATE_MACHINE_REJECTED: predecessor backfill for "
                         f"{stage} refused for issue #{issue_number}: {e} "
                         "Marker write refused; other state may already have been "
-                        "persisted by the caller — re-read with `sdlc-tool stage-query`.",
+                        "persisted by the caller — re-read with `sdlc-tool stage-query`."
+                        + (f" {entry_diagnostic}" if entry_diagnostic else ""),
                         file=sys.stderr,
                     )
-                    return {
+                    result = {
                         "error": "state_machine_rejected",
                         "reason": "STATE_MACHINE_REJECTED",
-                    }, 1
+                    }
+                    if entry_diagnostic:
+                        result["mid_pipeline_entry"] = entry_diagnostic
+                    return result, 1
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
 
