@@ -327,18 +327,20 @@ def apply_registry_probe_verdict(
             # the probe falls back to the owning checkout when the current tree
             # carries no `config/reflections.yaml`, which is what a `--verify`
             # from a lane worktree hits. That path is not reconstructed here; it
-            # arrives already named inside `probe_gate.detail`, whose last line
-            # is the probe's own `FAIL: N of M registry copy(ies) did not
-            # resolve: <paths>` on stderr. Leading with `detail` is therefore
-            # what locates the fault; the sentinel clause only explains why
-            # there is no other channel.
+            # arrives already named inside `probe_gate.detail`, which on the
+            # probe's own resolve-failure path carries `FAIL: N of M registry
+            # copy(ies) did not resolve: <paths>` from stderr. Other shapes
+            # (timeout, missing script, bare exit code) name no copy, which is
+            # why the clause below points at the fault rather than at a path.
+            # Leading with `detail` is therefore what locates the fault; the
+            # sentinel clause only explains why there is no other channel.
             _append_error(
                 result,
                 f"registry probe FAILED under --verify: {probe_gate.detail}. "
                 f"No sentinel was written at {sentinel} (--verify makes no "
                 f"changes, #3026), so this exit code is the whole verdict — the "
-                f"reflection worker will ImportError on every reflection until "
-                f"the registry copy named above is fixed.",
+                f"reflection worker is not safe to restart until the fault above "
+                f"is resolved.",
             )
             result.success = False
     elif not probe_gate.sentinel_recorded:

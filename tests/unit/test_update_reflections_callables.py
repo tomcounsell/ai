@@ -576,8 +576,40 @@ def test_verify_failure_escalates_to_a_nonzero_exit(tmp_path):
     # that path is passed through from `detail`, never reconstructed from the
     # sentinel. Asserting both is what stops one path being used to make both
     # claims, which is the shape round 13 caught.
+    #
+    # `detail` is the probe's resolve-failure shape here. It is not the only
+    # one — a timeout or a missing probe script names no copy at all, which is
+    # why the message's closing clause points at "the fault above" rather than
+    # promising a path (round 14).
     assert str(sentinel) in result.errors[0]
     assert "/elsewhere/reflections.yaml" in result.errors[0]
+
+
+def test_verify_failure_promises_no_path_it_cannot_deliver(tmp_path):
+    """The message must survive the `detail` shapes that name no registry copy.
+
+    Only the probe's resolve-failure path emits `FAIL: ... did not resolve:
+    <paths>`. A timeout, a missing probe script, and a bare `exit code N` all
+    name nothing — and a timeout is not even evidence about the registry, since
+    `run_registry_probe` is fail-closed precisely because a probe that did not
+    run proves nothing. A closing clause promising "the registry copy named
+    above" would be false on three of the four shapes.
+    """
+    result, _ = _apply(
+        _verdict(
+            success=False,
+            detail="registry probe timed out after 120s",
+            sentinel_skipped=True,
+            sentinel_recorded=False,
+        ),
+        tmp_path / "data" / "registry-probe-failed",
+    )
+
+    assert result.success is False, "fail-closed regardless of the detail shape"
+    message = result.errors[0]
+    assert "registry probe timed out" in message, "the real fault leads"
+    assert "named above" not in message
+    assert "ImportError" not in message, "a timeout is not evidence of an ImportError"
 
 
 def test_verify_pass_is_silent_and_does_not_escalate(tmp_path):
