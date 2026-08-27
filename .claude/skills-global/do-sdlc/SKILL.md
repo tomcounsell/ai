@@ -290,6 +290,7 @@ carries `decision`:
 
 ```json
 {"skill": "/do-build", "reason": "...", "row_id": "4a", "decision": "dispatch", "recorded": false, "recorded_reason": "NOT_PERSISTED_CALL_DISPATCH_RECORD"}
+{"decision": "terminal", "reason": "Pipeline complete — nothing to dispatch ...", "evidence": "merge_marker", "row_id": "T"}
 {"blocked": true, "decision": "blocked", "reason": "G4: stage oscillation ...", "guard_id": "G4"}
 {"blocked": true, "decision": "blocked", "reason": "ISSUE_LOCKED", "owner_run_id": "...", "owner_session_id": "...", "orphaned_lock": false}
 ```
@@ -302,10 +303,13 @@ that never grew, so it re-decides the same row until G4 blocks the lane for osci
 **How to use the output:**
 1. If `decision` is `"dispatch"`: record the dispatch via `sdlc-tool dispatch record` (see below),
    then invoke the returned `skill`.
-2. If `decision` is `"blocked"`: surface the `reason` to the human and wait. Do NOT loop or guess an
+2. If `decision` is `"terminal"`: the lane is **finished**. Report the pipeline complete, citing
+   `reason` and `evidence`. Do NOT record a dispatch, do NOT invoke a skill, and do NOT report it
+   as a failure — this is a success, not the `blocked` error stop below.
+3. If `decision` is `"blocked"`: surface the `reason` to the human and wait. Do NOT loop or guess an
    alternative skill — this holds identically for a G-guard block and for `ISSUE_LOCKED`, where
    you also report `owner_session_id`.
-3. If `decision` is `"error"`: log the `error` field and escalate to the human.
+4. If `decision` is `"error"`: log the `error` field and escalate to the human.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what
 skill you intend to invoke (enables G3 PR-lock detection):
@@ -349,6 +353,7 @@ Interpret the JSON from the tool result (same shapes as Step 4):
 - `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` → route it through
   [Run Identity & Lock Ownership](RUN_IDENTITY.md) before deciding whether this is actually your
   own lock. Only a genuinely foreign owner stops the loop.
+- `{"decision": "terminal", ...}` → **EXIT the loop cleanly.** The pipeline is complete; report it as done, citing `reason` and `evidence`. This is NOT the error stop below — do not report a guard, a blocker, or a failure, and do not record a dispatch.
 - `{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human, plus a summary of stages completed so far. Do not retry, do not guess an alternative skill.
 - `{"skill": "...", "decision": "dispatch", "recorded": false, ...}` → continue to 5b, which is what actually writes the dispatch. The router decides at most ONE skill per call; there is no parallel-pair shape.
 - Anything else (error key, empty) → STOP and surface the error.
@@ -468,6 +473,7 @@ disposition, including the transient-error class that must never become a pipeli
 ### 5e. Check exit conditions
 
 - Dispatched skill was `/do-merge` AND the subagent reports a merge → verify with `gh pr view {pr} --repo <resolved> --json state,mergedAt` from the tool result. If `MERGED`: **exit the loop, success.**
+- Router returned `terminal` → already exited cleanly in 5a. **Success**, not a stop condition.
 - Router returned `blocked` → already stopped in 5a.
 - Iteration cap reached → stop and report how far the pipeline got.
 - Otherwise → loop back to 5a. Brief one-line progress note per iteration (e.g. "CRITIQUE done (READY TO BUILD) → dispatching BUILD on sonnet").
@@ -476,7 +482,7 @@ disposition, including the transient-error class that must never become a pipeli
 
 On exit (any path), report:
 
-1. **Outcome**: merged / blocked (with guard + reason) / cap reached
+1. **Outcome**: merged / pipeline complete (terminal, with `evidence`) / blocked (with guard + reason) / cap reached
 2. **Stage trail**: each dispatch in order with its outcome and verdict
 3. **Artifacts**: issue, plan path, PR number, merge commit
 4. **Anything needing human attention**: unresolved blockers, skipped acknowledgments, follow-ups
@@ -493,6 +499,8 @@ the exact invocation). It is ownership-checked and best-effort: a wrong or alrea
 reported outcome.
 
 Do this on the exits nothing else observes: the **5d.4 REVIEW self-check HALT**, a **`blocked`**
-router decision (5a / 5e), and the **iteration cap** being reached. The **merged** exit needs no
+router decision (5a / 5e), a **`terminal`** router decision (this run may never have written a
+MERGE marker — the lane can be finished by evidence it inherited), and the **iteration cap**
+being reached. The **merged** exit needs no
 action from you — completing the MERGE stage releases the lease in the tool layer, on the marker
 write itself.

@@ -24,6 +24,9 @@ Do not run the supervisor loop (Step 5+) or the final-report/release steps; thos
 - **Dispatch via `sdlc-tool next-skill`** (Step 4 of the merged body). Record the dispatch with
   `sdlc-tool dispatch record` before invoking the returned skill. Surface `blocked` decisions to
   the PM; never guess an alternative skill.
+- **Terminal decision:** `{"decision": "terminal", ...}` means the lane is finished. Return
+  cleanly and report the pipeline complete with its `reason` and `evidence` — nothing to record,
+  nothing to invoke. This is a **success**, not the `blocked` escalation path.
 - **Live-ref cross-check:** `gh pr list --head session/{slug} --state open` queries live refs
   because the `--search` index lags GitHub (Step 3c of the merged body).
 - **Merge gate (row 10):** `/do-merge` fires only when REVIEW and DOCS are complete, the PR merge

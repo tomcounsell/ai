@@ -1794,3 +1794,83 @@ class TestPersistenceHonesty:
 
         assert rc == 1
         assert json.loads(capsys.readouterr().out)["decision"] == "error"
+
+
+class TestTerminalDecisionShape:
+    """Issues #2894/#2817: a finished lane gets its own output shape.
+
+    The router's terminal guard preempts the dispatch table on a shipped lane.
+    Before it existed, that lane fell through to ``Blocked(NO_RULE)`` and every
+    consumer read a successful pipeline as a routing bug. ``decision:
+    "terminal"`` is therefore a fourth shape, deliberately NOT a flavour of
+    ``blocked``: it carries no ``blocked`` key, and it is a SUCCESS, so the CLI
+    exits 0.
+    """
+
+    @staticmethod
+    def _patch_terminal(monkeypatch, states, meta=None):
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(acquired=True, owner_session_id=None),
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta or {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+    @pytest.mark.parametrize(
+        ("states", "meta", "evidence"),
+        [
+            ({"MERGE": STATUS_COMPLETED}, {}, "merge_marker"),
+            ({"BUILD": STATUS_COMPLETED}, {"pr_state": "MERGED", "pr_number": 4242}, "merged_pr"),
+        ],
+        ids=["merge-marker", "merged-pr"],
+    )
+    def test_terminal_ledger_emits_terminal_shape(self, monkeypatch, states, meta, evidence):
+        """Both terminal evidence branches surface through the CLI decision."""
+        self._patch_terminal(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28980, run_id="mine")
+
+        assert result["decision"] == "terminal", result
+        assert result["evidence"] == evidence, result
+        assert result["row_id"] == "T", result
+        assert result["reason"], result
+
+    def test_terminal_is_distinct_from_blocked_and_dispatch(self, monkeypatch):
+        """A shipped lane must not read as an escalation or a dispatch (#2817)."""
+        self._patch_terminal(monkeypatch, {"MERGE": STATUS_COMPLETED})
+
+        result = sdlc_next_skill.decide(issue_number=28981, run_id="mine")
+
+        assert "blocked" not in result
+        assert "guard_id" not in result
+        assert "error" not in result
+        assert "skill" not in result
+        assert "recorded" not in result
+
+    def test_cli_exits_0_on_terminal_payload(self, monkeypatch, capsys):
+        """Terminal is a successful outcome — only ``error`` exits 1."""
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "decide",
+            lambda **kwargs: {
+                "decision": "terminal",
+                "reason": "Pipeline complete",
+                "evidence": "merge_marker",
+                "row_id": "T",
+            },
+        )
+
+        rc = sdlc_next_skill.main(["--issue-number", "28982"])
+
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["decision"] == "terminal"
