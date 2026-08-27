@@ -1257,7 +1257,10 @@ def audit(
 
     Returns:
         Dict with ``status``, ``files_touched``, ``fixes_applied``,
-        ``issues_filed``, ``pr_url``.
+        ``issues_filed``, ``pr_url``, ``fixes_withheld``, ``withheld``.
+
+        Callers must branch on ``fixes_withheld > 0`` rather than trust
+        ``status``: a run that withheld every fix still reports success.
     """
     # The name existence oracle is a per-*run* snapshot: a long-lived process
     # must not answer from an index built before the last commit (#2759).

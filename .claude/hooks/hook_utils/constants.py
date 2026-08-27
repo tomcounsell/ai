@@ -2,9 +2,18 @@
 
 import json
 import os
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# Single definition of the stdin-payload parser (issue #2750). This module
+# previously carried its own read_hook_input() that caught JSONDecodeError
+# only: it was annotated -> dict but returned whatever json.loads produced,
+# so a payload of `null`, `[1,2]`, `"str"` or `42` reached callers as a
+# non-dict and blew up on the first .get(). The hook_target.py version guards
+# that and is the one every caller now gets. Re-exported rather than moved so
+# existing `from hook_utils.constants import read_hook_input` imports keep
+# working — there is exactly one implementation behind both names.
+from .hook_target import read_hook_input  # noqa: F401
 
 
 def get_project_dir() -> Path:
@@ -36,17 +45,6 @@ def ensure_session_log_dir(session_id: str) -> Path:
     session_dir = project_dir / "logs" / "sessions" / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
-
-
-def read_hook_input() -> dict:
-    """Read and parse JSON input from stdin."""
-    try:
-        raw_input = sys.stdin.read()
-        if not raw_input.strip():
-            return {}
-        return json.loads(raw_input)
-    except json.JSONDecodeError:
-        return {}
 
 
 def append_to_log(session_dir: Path, filename: str, entry: dict) -> None:

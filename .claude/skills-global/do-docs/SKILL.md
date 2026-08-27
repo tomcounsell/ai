@@ -296,9 +296,13 @@ After all edits are complete:
    from a cascade, run the push-ancestry guard so a worktree HEAD left detached at
    a PR branch head cannot register the open PR's ancestry as its merge:
    ```bash
-   sdlc-push-guard || { echo "Push refused: HEAD carries open-PR ancestry — checkout main / merge through gh pr merge"; exit 1; }
+   sdlc-push-guard --assume-head || { echo "Push refused: HEAD carries open-PR ancestry — checkout main / merge through gh pr merge"; exit 1; }
    git push
    ```
+   `--assume-head` is required here and is not optional decoration: this is an
+   explicit call with no pre-push stdin, and since #2800 the guard treats absent
+   stdin as "git had nothing to push" and exits 0. Without the flag this line is
+   a no-op that always passes.
    The guard only fires when HEAD is at/descended-from an OPEN PR head; a clean
    `main` checkout passes untouched. (The installed pre-push hook runs it too; this
    explicit call makes the protection independent of hook installation.)
