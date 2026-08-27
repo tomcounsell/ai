@@ -394,6 +394,30 @@ def _skip_precondition_error(
             f"{_SKIP_STAGE_SKILL.get(stage, stage)} instead.",
         )
 
+    # 1b. An ARCHIVED plan proves the stage applied, even though the live plans
+    # directory no longer holds it (#2851 recon). `find_plan_path` searches
+    # `docs/plans/` only, so moving a shipped lane's plan to the archive silently
+    # made its CRITIQUE retroactively skippable — a hole straight through the
+    # verdict invariant this precondition exists to defend. The question here is
+    # "did this stage ever apply?", which archiving does not change.
+    try:
+        from tools.lane_identity import find_archived_plan_path
+
+        archived_plan = find_archived_plan_path(issue_number)
+    except Exception as e:
+        return (
+            "PLAN_EXISTS_NOT_SKIPPABLE",
+            f"the archived-plan lookup for issue #{issue_number} failed ({e}); "
+            "refusing the skip rather than assuming no plan ever existed.",
+        )
+    if archived_plan is not None:
+        return (
+            "PLAN_EXISTS_NOT_SKIPPABLE",
+            f"issue #{issue_number} has an archived plan document ({archived_plan}), so "
+            f"{stage} applied and actually ran. Archiving a plan does not make its "
+            f"stages retroactively skippable.",
+        )
+
     # 2. A recorded verdict or dispatch is affirmative evidence the stage ran.
     try:
         from tools.sdlc_stage_query import _load_raw_states
