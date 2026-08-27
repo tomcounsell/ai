@@ -104,7 +104,7 @@
   <h2>The bridge only listens</h2>
   <p>The bridge connects to Telegram (via Telethon) and email (IMAP/SMTP), receives each incoming message, and hands it off. That is all it does. It claims the message, decides whether it resumes an existing session or starts a fresh one, and enqueues an <code>AgentSession</code> for the worker.</p>
   <p>The bridge knows nothing about the SDLC pipeline. Keeping ingestion deliberately dumb is what lets execution live somewhere else: a session can run on a different machine than the one that received the message.</p>
-  <div class="file-chips" data-files="file:bridge/telegram_bridge.py,file:bridge/dispatch.py,file:bridge/session_router.py"></div>
+  <div class="file-chips" data-files="file:bridge/telegram_bridge.py,file:bridge/dispatch.py"></div>
 </section>
 
 <section>

@@ -80,6 +80,13 @@ The guard is wired into both the installed pre-push hook body
 (`tools/doctor.py::install_pre_push_hook()`) and the `do-docs` cascade push step, so
 protection does not depend on hook installation.
 
+The two call sites declare the pushed SHA differently, and the difference is
+load-bearing. The hook pipes git's pre-push stdin protocol, so the guard reads
+the pushed SHA from it. The `do-docs` step has no such stdin and must pass
+`--assume-head` to have HEAD judged. Absent stdin on its own means "git had
+nothing to push" and exits 0 (#2800) — a bare `sdlc-push-guard` in an explicit
+call site is a guard that cannot fire.
+
 ## Configuration
 
 | Constant | Default | Override | Purpose |

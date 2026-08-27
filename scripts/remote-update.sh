@@ -171,11 +171,13 @@ fi
 # --no-pull: git pull already done above; orchestrator skips its own pull step
 #
 # UPDATE_RUN_STARTED_AT bounds the freshness of anything run.py stamps for this
-# shell to read back (currently just the registry-probe sentinel below). Without
-# it a stamp left by an out-of-band `run.py --verify` — which also runs Step 4.65
-# and is outside this script's lockfile — would block an unrelated later cycle
-# forever. Same freshness discipline as RESTART_MARKER above, keyed to this run
-# rather than to a fixed age so it cannot drift out of lockstep.
+# shell to read back (currently just the registry-probe sentinel below). The
+# sentinel has no self-clearing path other than a later passing probe, so a
+# verdict about code some earlier cycle pulled would otherwise block every
+# subsequent cycle forever — including one that already fixed the registry but
+# died before reaching the clear. Same freshness discipline as RESTART_MARKER
+# above, keyed to this run rather than to a fixed age so it cannot drift out of
+# lockstep.
 UPDATE_RUN_STARTED_AT=$(date +%s)
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
 
@@ -185,15 +187,20 @@ UPDATE_RUN_STARTED_AT=$(date +%s)
 # registry copy the reflection worker could resolve and stamps
 # data/registry-probe-failed on failure; that file is the only channel across
 # the process boundary. Reading it at the point of use leaves a multi-minute
-# window (dep sync, plist installs, the drain poll) in which an out-of-band
-# `run.py --verify` — which also runs Step 4.65 and does not honor this
-# script's lockfile — could clear this cycle's failing verdict on its way past.
-# Latching collapses that window to the next statement.
+# window (dep sync, plist installs, the drain poll) in which any concurrent
+# `run.py --full` — which runs Step 4.65, restarts services, and does not honor
+# this script's lockfile — could clear this cycle's failing verdict on its way
+# past. Latching collapses that window to the next statement. (`--verify` is not
+# in that set: run.py passes `record_sentinel=False` under `read_only`, so a
+# verify run reads the registry and touches this file in neither direction.)
 #
 # Freshness bound: a sentinel older than this cycle's run.py is residue from
 # some other run, not a verdict about the code we just pulled. An unreadable
 # stat() on a file `[ -f ]` just proved exists is itself anomalous, so it fails
 # CLOSED (far-future mtime => treated as fresh => blocking) rather than open.
+# Note the bound is one-directional: it discards sentinels that are too OLD, and
+# therefore only ever relaxes a block. It is no defense against a concurrent
+# process CLEARING a fresh one; the latch above is.
 #
 # The markers below are load-bearing: tests/unit/test_update_reflections_callables.py
 # slices this exact fragment out and executes it against fabricated sentinels to

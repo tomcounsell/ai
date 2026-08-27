@@ -153,6 +153,7 @@ def _write_liveness(
     pr_url: str | None,
     files_touched: int,
     vault_narratives_compared: int | None = None,
+    fixes_withheld: int = 0,
 ) -> None: ...
 ```
 

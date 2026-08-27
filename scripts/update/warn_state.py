@@ -50,7 +50,36 @@ def _load(project_dir: Path) -> dict:
         return {}
 
 
+# Read-only mode (issue #2898). When set, this module computes and returns its
+# verdicts exactly as normal but persists nothing.
+#
+# `should_emit` writes the signature the instant it returns True, which under a
+# read-only `--verify` run silently consumed the one emission the next
+# unattended cron cycle would have made: an operator's diagnostic run left the
+# durable record in logs/update.log silent about a machine that was still
+# broken.
+#
+# The switch lives on the writer rather than on each of the six `should_emit`
+# call sites deliberately. A per-call-site `persist=` argument is a checklist
+# that the next call site added has to remember to join; a gate inside `_save`
+# is honored by every present and future writer in this module for free.
+_READ_ONLY = False
+
+
+def set_read_only(value: bool) -> None:
+    """Suppress all state persistence in this module.
+
+    Called once by the `--verify` entry point. Verdicts are unaffected, so
+    `--verify` still reports accurately -- it just stops mutating the
+    suppression state that the scheduled runs depend on.
+    """
+    global _READ_ONLY
+    _READ_ONLY = value
+
+
 def _save(project_dir: Path, state: dict) -> None:
+    if _READ_ONLY:
+        return
     try:
         path = _state_path(project_dir)
         path.parent.mkdir(parents=True, exist_ok=True)

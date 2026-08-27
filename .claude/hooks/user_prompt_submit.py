@@ -183,7 +183,6 @@ def main():
             agent_session_id = sidecar.get("agent_session_id")
             if agent_session_id:
                 # Subsequent prompt in same session -- re-activate
-                import time
 
                 from models.agent_session import AgentSession
 
@@ -216,7 +215,6 @@ def main():
                                 current_status,
                             )
                         else:
-                            agent_session.updated_at = time.time()
                             agent_session.completed_at = None
                             transition_status(
                                 agent_session,

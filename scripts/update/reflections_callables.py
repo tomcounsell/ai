@@ -38,6 +38,16 @@ _MIGRATION_SCRIPT = "scripts/migrate_reflections_callables.py"
 # Repo-relative path to the acceptance probe that Step 4.65 gates on.
 _PROBE_SCRIPT = "scripts/verify_registry_without_shim.py"
 
+# Wall-clock ceiling for both helper subprocesses. Take with a grain of salt:
+# provisional and tunable. Both do the same shape of work — spawn the repo venv
+# python and import every `callable:` in the registry — and both run inside
+# `/update`, which has no interactive waiter. Sized well above the observed
+# cost (a handful of imports) so an ordinarily slow cold start is not read as a
+# fault, and well below anything an operator would call a hang. Reaching it is
+# itself a fail-closed verdict: the probe not finishing proves nothing about the
+# registry, so `run_registry_probe` reports the timeout as `success=False`.
+_HELPER_TIMEOUT_SECONDS = 120
+
 # Repo-relative sentinel the probe outcome is recorded to. `run.py` is a
 # Python process and `scripts/remote-update.sh` is a shell one; the shell
 # restarts the worker AFTER `run.py` has exited (see Step 4.65's comment), so
@@ -120,11 +130,13 @@ def run_reflections_callables_migration(
             cwd=str(project_dir),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_HELPER_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
         return ReflectionsCallablesResult(
-            success=False, action="error", error="migration timed out after 120s"
+            success=False,
+            action="error",
+            error=f"migration timed out after {_HELPER_TIMEOUT_SECONDS}s",
         )
     except Exception as e:  # pragma: no cover - defensive
         return ReflectionsCallablesResult(
@@ -174,10 +186,16 @@ class RegistryProbeResult:
             registry copy imported with ``agent.sustainability`` banned.
         detail: The probe's own summary line on success, or its stderr /
             an invocation error on failure. Rendered verbatim by ``run.py``.
+        sentinel_skipped: ``True`` when the caller asked for no sentinel I/O at
+            all (``record_sentinel=False``, which ``run.py`` passes under
+            ``--verify``). Read this BEFORE ``sentinel_recorded``: when it is
+            set, the sentinel was deliberately left exactly as it was and
+            ``sentinel_recorded`` is meaningless rather than bad news.
         sentinel_recorded: ``True`` iff the on-disk sentinel now matches
             ``success``. False means the shell half of ``/update`` will read a
             verdict this one does not agree with; see
             :func:`_write_probe_sentinel` for why only one direction is safe.
+            Always ``False`` when ``sentinel_skipped`` is set.
         nothing_probed: ``True`` when the probe found no registry copy at all
             (its exit code 2). ``success`` is ``True`` in that case — there is
             no callable that could have failed — but it is a *vacuous* pass and
@@ -190,6 +208,7 @@ class RegistryProbeResult:
     detail: str
     sentinel_recorded: bool = True
     nothing_probed: bool = False
+    sentinel_skipped: bool = False
 
 
 # Mirrors ``scripts/verify_registry_without_shim.py::EXIT_NO_REGISTRY``. Pinned
@@ -234,7 +253,7 @@ def _write_probe_sentinel(project_dir: Path, failed: bool) -> bool:
     return path.exists() is failed
 
 
-def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
+def run_registry_probe(project_dir: Path, *, record_sentinel: bool = True) -> RegistryProbeResult:
     """Run the registry acceptance probe and report a structured result.
 
     This is the POSITIVE check Step 4.65 gates on: "every registry callable
@@ -249,13 +268,25 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
     Args:
         project_dir: Repo root; supplies both the script and the ``.venv``
             python, exactly as :func:`run_reflections_callables_migration` does.
+        record_sentinel: When ``False``, run the probe but touch
+            ``data/registry-probe-failed`` in neither direction, and report
+            ``sentinel_skipped=True``. ``run.py`` passes ``False`` under
+            ``--verify`` (``UpdateConfig.read_only``, #3026): the sentinel is
+            machine-global state, and --verify promises to leave none behind.
+            The *clear* is the sharper reason. --verify runs outside
+            ``remote-update.sh``'s lockfile, so a passing --verify launched from
+            a scratch worktree between that script's ``run.py --cron`` and its
+            kickstart would unlink a failing verdict the cron run had just
+            stamped, and absence is the shell's green light. Suppression removes
+            that fail-open outright; the shell's mtime freshness bound only ever
+            covered the opposite (over-blocking) direction.
 
-    Side effect: writes/clears the ``data/registry-probe-failed`` sentinel so
-    the shell half of the update (``scripts/remote-update.sh``, which restarts
-    the worker after ``run.py`` exits) can consult the same verdict. Whether
-    that landed is reported as ``sentinel_recorded``; a failing probe whose
-    sentinel did not land is a false green for the shell and the caller must
-    escalate it.
+    Side effect (unless ``record_sentinel=False``): writes/clears the
+    ``data/registry-probe-failed`` sentinel so the shell half of the update
+    (``scripts/remote-update.sh``, which restarts the worker after ``run.py``
+    exits) can consult the same verdict. Whether that landed is reported as
+    ``sentinel_recorded``; a failing probe whose sentinel did not land is a
+    false green for the shell and the caller must escalate it.
 
     Never raises. An invocation failure (missing script, timeout) is reported
     as ``success=False`` — fail-closed, because the probe not running proves
@@ -267,7 +298,9 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
         helper_repo_root = Path(__file__).resolve().parent.parent.parent
         script = helper_repo_root / _PROBE_SCRIPT
         if not script.exists():
-            return _probe_failure(project_dir, f"probe script missing: {script}")
+            return _probe_failure(
+                project_dir, f"probe script missing: {script}", record_sentinel=record_sentinel
+            )
 
     python_bin = project_dir / ".venv" / "bin" / "python"
     if python_bin.exists():
@@ -298,13 +331,21 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
             cwd=str(project_dir),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_HELPER_TIMEOUT_SECONDS,
             env=probe_env,
         )
     except subprocess.TimeoutExpired:
-        return _probe_failure(project_dir, "registry probe timed out after 120s")
+        return _probe_failure(
+            project_dir,
+            f"registry probe timed out after {_HELPER_TIMEOUT_SECONDS}s",
+            record_sentinel=record_sentinel,
+        )
     except Exception as e:  # pragma: no cover - defensive
-        return _probe_failure(project_dir, f"failed to invoke registry probe: {e}")
+        return _probe_failure(
+            project_dir,
+            f"failed to invoke registry probe: {e}",
+            record_sentinel=record_sentinel,
+        )
 
     if proc.returncode == _PROBE_EXIT_NO_REGISTRY:
         # Vacuous pass: no registry copy exists, so no callable could have
@@ -313,29 +354,48 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
         # a run that probed nothing must not render as a clean green. The
         # probe's own explanation is on stderr, which the success path below
         # does not read; take it from there deliberately.
-        recorded = _write_probe_sentinel(project_dir, failed=False)
+        recorded = record_sentinel and _write_probe_sentinel(project_dir, failed=False)
         warning = (proc.stderr or proc.stdout or "").strip().splitlines()
         return RegistryProbeResult(
             success=True,
             detail=warning[-1].strip() if warning else "no reflections registry found",
             sentinel_recorded=recorded,
             nothing_probed=True,
+            sentinel_skipped=not record_sentinel,
         )
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
-        return _probe_failure(project_dir, err[-500:] or f"exit code {proc.returncode}")
+        return _probe_failure(
+            project_dir,
+            err[-500:] or f"exit code {proc.returncode}",
+            record_sentinel=record_sentinel,
+        )
 
-    recorded = _write_probe_sentinel(project_dir, failed=False)
+    recorded = record_sentinel and _write_probe_sentinel(project_dir, failed=False)
     summary = (proc.stdout or "").strip().splitlines()
     return RegistryProbeResult(
         success=True,
         detail=summary[-1].strip() if summary else "registry callables resolved",
         sentinel_recorded=recorded,
+        sentinel_skipped=not record_sentinel,
     )
 
 
-def _probe_failure(project_dir: Path, detail: str) -> RegistryProbeResult:
-    """Stamp the sentinel and return the failing result — one place, one order."""
-    recorded = _write_probe_sentinel(project_dir, failed=True)
-    return RegistryProbeResult(success=False, detail=detail, sentinel_recorded=recorded)
+def _probe_failure(
+    project_dir: Path, detail: str, *, record_sentinel: bool = True
+) -> RegistryProbeResult:
+    """Stamp the sentinel and return the failing result — one place, one order.
+
+    ``record_sentinel=False`` skips the stamp entirely. That is safe only
+    because the caller that passes it (``run.py`` under ``--verify``) escalates
+    a failing probe to ``result.errors`` unconditionally instead of relying on
+    the sentinel to carry the verdict anywhere.
+    """
+    recorded = record_sentinel and _write_probe_sentinel(project_dir, failed=True)
+    return RegistryProbeResult(
+        success=False,
+        detail=detail,
+        sentinel_recorded=recorded,
+        sentinel_skipped=not record_sentinel,
+    )

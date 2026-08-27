@@ -238,6 +238,66 @@ def test_writable_failure_sentinel_reports_recorded(tmp_path, monkeypatch):
     assert (fake_repo / PROBE_SENTINEL).exists()
 
 
+def test_read_only_probe_does_not_stamp_a_failing_sentinel(tmp_path, monkeypatch):
+    """`--verify` promises no changes (#3026), and the sentinel is a change.
+
+    Red/green pair with `test_writable_failure_sentinel_reports_recorded`
+    directly above: identical broken registry, identical writable `data/`, and
+    the only difference is `record_sentinel`. That one asserts the file appears;
+    this one asserts it does not.
+    """
+    broken = _write_flow_style_registry(
+        tmp_path / "reflections.yaml", "agent.sustainability.session_count_throttle"
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(broken))
+    monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    result = run_registry_probe(fake_repo, record_sentinel=False)
+
+    # The verdict is still produced — only its side effect is suppressed.
+    assert result.success is False
+    assert "agent.sustainability" in result.detail
+    assert result.sentinel_skipped is True
+    assert result.sentinel_recorded is False
+    assert not (fake_repo / PROBE_SENTINEL).exists()
+
+
+def test_read_only_probe_does_not_clear_a_concurrent_failing_sentinel(tmp_path, monkeypatch):
+    """The fail-open this suppression exists to close.
+
+    `remote-update.sh` holds a lockfile that `run.py --verify` does not honor,
+    and its green light is the sentinel's ABSENCE. So a passing --verify fired
+    from a scratch worktree in the window between that script's `run.py --cron`
+    and its `launchctl kickstart` would, with the sentinel write left enabled,
+    unlink a failing verdict the cron run had just stamped and hand the shell a
+    green light onto an unresolvable registry. The shell's mtime freshness bound
+    is no defense: it only discards sentinels that are too OLD.
+
+    Red/green pair with `test_probe_success_clears_a_stale_sentinel` above:
+    same clean registry, same pre-planted sentinel. There the clear is the
+    desired behavior and the file must vanish; here it must survive.
+    """
+    clean = _write_registry(
+        tmp_path / "reflections.yaml", ["reflections.agents.circuit_health_gate.run"]
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(clean))
+    monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "data").mkdir(parents=True)
+    live_verdict = fake_repo / PROBE_SENTINEL
+    live_verdict.write_text("stamped by a concurrent failing cron run\n")
+
+    result = run_registry_probe(fake_repo, record_sentinel=False)
+
+    assert result.success is True, result.detail
+    assert result.sentinel_skipped is True
+    assert live_verdict.exists(), "a --verify pass must not clear another run's verdict"
+    assert live_verdict.read_text().startswith("stamped by a concurrent")
+
+
 def _stub_probe(project_dir: Path, exit_code: int, *, stdout: str = "", stderr: str = "") -> Path:
     """Plant a probe script in `project_dir` that exits with a chosen code.
 
