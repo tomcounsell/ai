@@ -2478,32 +2478,40 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log(f"  Settings: {settings_migration.get('reason')}", v)
 
-        # Sync Claude OAuth credentials
-        log("Syncing Claude OAuth credentials...", v)
-        oauth_sync = verify.sync_claude_oauth(project_dir)
-        if oauth_sync.get("synced"):
-            if oauth_sync.get("refreshed_from_live"):
-                log("  OAuth: refreshed source from live token", v)
-            else:
-                log(f"  OAuth: {oauth_sync.get('reason')}", v)
-            # Resolved — clear stored state (and emit one resolved note) so a
-            # future regression warns again instead of staying silent.
-            if warn_state.should_emit("oauth-sync", "", project_dir):
-                log("  OAuth sync: resolved", v, always=True)
-                result.warn_keys_emitted.add("oauth-sync")
+        # Sync Claude OAuth credentials.
+        # Writes a credential file outside this checkout — off under --verify (#3026).
+        if config.read_only:
+            log(
+                "  OAuth: skipped credential sync — --verify makes no changes (#3026)",
+                v,
+                always=True,
+            )
         else:
-            # Human-gated (#2893): the source credential at
-            # ~/Desktop/Valor/claude_oauth_config.json is per-machine and only a
-            # human can provision it — structurally the same shape as
-            # google-token. One emission per state transition; the reason string
-            # is the signature, so a different failure mode re-warns. The
-            # verbose log stays outside the gate: it is diagnostic detail, not
-            # summary output, so it cannot respam the cron channel.
-            log(f"  OAuth: {oauth_sync.get('reason')}", v)
-            signature = f"unresolved:{oauth_sync.get('reason')}"
-            if warn_state.should_emit("oauth-sync", signature, project_dir):
-                _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
-                result.warn_keys_emitted.add("oauth-sync")
+            log("Syncing Claude OAuth credentials...", v)
+            oauth_sync = verify.sync_claude_oauth(project_dir)
+            if oauth_sync.get("synced"):
+                if oauth_sync.get("refreshed_from_live"):
+                    log("  OAuth: refreshed source from live token", v)
+                else:
+                    log(f"  OAuth: {oauth_sync.get('reason')}", v)
+                # Resolved — clear stored state (and emit one resolved note) so a
+                # future regression warns again instead of staying silent.
+                if warn_state.should_emit("oauth-sync", "", project_dir):
+                    log("  OAuth sync: resolved", v, always=True)
+                    result.warn_keys_emitted.add("oauth-sync")
+            else:
+                # Human-gated (#2893): the source credential at
+                # ~/Desktop/Valor/claude_oauth_config.json is per-machine and only a
+                # human can provision it — structurally the same shape as
+                # google-token. One emission per state transition; the reason string
+                # is the signature, so a different failure mode re-warns. The
+                # verbose log stays outside the gate: it is diagnostic detail, not
+                # summary output, so it cannot respam the cron channel.
+                log(f"  OAuth: {oauth_sync.get('reason')}", v)
+                signature = f"unresolved:{oauth_sync.get('reason')}"
+                if warn_state.should_emit("oauth-sync", signature, project_dir):
+                    _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
+                    result.warn_keys_emitted.add("oauth-sync")
 
         # Report SDK auth
         auth = result.verification.sdk_auth
