@@ -1822,6 +1822,51 @@ class TestPrStateAndLedgerLessResolution:
         )
         assert not isinstance(decision, Terminal)
 
+    def test_recorded_merged_pr_yields_to_a_live_open_pr(self):
+        """PR #3034 review reproducer: the RECORDED `session_pr` path must obey
+        the same open-before-merged ordering as the ledger-less rung.
+
+        A recorded `session.pr_number` can go stale merged history when an
+        issue reopens with a new PR: `session.pr_number=2884` (merged) while
+        the issue also has a live open PR #3000. Before the fix, `_compute_meta`
+        took the recorded PR unconditionally with no liveness check, so
+        `pr_state` read "MERGED" and `guard_terminal_lane` declared a live
+        pre-merge lane finished — exactly the plan's Risk 1 ("the terminal
+        guard swallows a live pre-merge lane").
+        """
+        import tools.sdlc_stage_query as q
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed"})
+        mock_session.pr_number = 2884
+        mock_session.slug = None
+
+        def _lookup(issue_number, repo=None, slug=None, state=None):
+            return 3000 if state == "open" else None
+
+        def _fetch(pr_number, repo=None):
+            if pr_number == 3000:
+                return ("UNKNOWN", None, "OPEN")
+            return ("UNKNOWN", None, "MERGED")
+
+        with (
+            patch.object(q, "_find_session_by_id", return_value=mock_session),
+            patch.object(q, "_lookup_pr", side_effect=_lookup),
+            patch.object(q, "_fetch_pr_merge_state", side_effect=_fetch),
+            patch.object(q, "_find_plan_path", return_value=None),
+        ):
+            result = q.query_enriched(session_id="sid")
+
+        assert result["_meta"]["pr_number"] == 3000
+        assert result["_meta"]["pr_state"] == "OPEN"
+
+        from agent.sdlc_router import Terminal, decide_next_dispatch
+
+        # MERGE unsettled (absent from stage_states) — only the recorded
+        # merged pr_number could manufacture terminality here.
+        decision = decide_next_dispatch({}, result["_meta"], {})
+        assert not isinstance(decision, Terminal)
+
     def test_fresh_issue_costs_one_lookup_round_not_one_per_poll(self):
         """The negative result is cached too — that is what protects the poll path.
 
@@ -1858,3 +1903,48 @@ class TestPrStateAndLedgerLessResolution:
             result = q.query_enriched(issue_number=4242)
         assert result["_meta"]["pr_number"] is None
         assert result["_meta"]["pr_state"] is None
+
+    def test_evict_expired_ledgerless_entries_drops_stale_entries_only(self):
+        """`_evict_expired_ledgerless_entries` bounds the cache to one TTL window.
+
+        The TTL was previously enforced on READ only (a stale hit is
+        recomputed), so an entry that is never looked up again sat in the dict
+        forever — in the long-lived bridge/worker the cache grows monotonically
+        with every distinct issue number ever polled. This asserts the WRITE-path
+        eviction: an entry older than the TTL is dropped, a fresh one is kept.
+        """
+        import tools.sdlc_stage_query as q
+
+        q._ledgerless_pr_cache.clear()
+        ttl = q._LEDGERLESS_PR_TTL_SECONDS
+        now = 10_000.0
+
+        # Stale: recorded well before (now - ttl). Fresh: recorded just now.
+        q._ledgerless_pr_cache[1] = (now - ttl - 1.0, 111, "MERGED")
+        q._ledgerless_pr_cache[2] = (now - 1.0, 222, "OPEN")
+
+        q._evict_expired_ledgerless_entries(now)
+
+        assert 1 not in q._ledgerless_pr_cache, "expired entry must be evicted"
+        assert 2 in q._ledgerless_pr_cache, "unexpired entry must survive"
+        assert q._ledgerless_pr_cache[2] == (now - 1.0, 222, "OPEN")
+
+    def test_evict_expired_ledgerless_entries_bounds_cache_to_one_ttl_window(self):
+        """Repeated writes across many TTL windows never grow the cache
+        unboundedly — only entries within the most recent window remain."""
+        import tools.sdlc_stage_query as q
+
+        q._ledgerless_pr_cache.clear()
+        ttl = q._LEDGERLESS_PR_TTL_SECONDS
+
+        # Simulate polling 50 distinct issues, each one TTL window apart, so
+        # every prior entry is expired by the time the next one is written.
+        for i in range(50):
+            now = i * (ttl + 1.0)
+            q._evict_expired_ledgerless_entries(now)
+            q._ledgerless_pr_cache[i] = (now, i, "OPEN")
+
+        assert len(q._ledgerless_pr_cache) == 1, (
+            "cache must self-bound to issues polled within one TTL window, "
+            f"found {len(q._ledgerless_pr_cache)} entries"
+        )

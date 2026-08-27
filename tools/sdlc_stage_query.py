@@ -646,6 +646,25 @@ def _compute_meta(
     # Fetch live PR merge state and CI status for G6 guard
     pr_merge_state, ci_all_passing, pr_state = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
 
+    # Open-before-merged ordering for the RECORDED path (#2894 tech debt).
+    # `session_pr` is a single-writer FIELD (comment above), but the write is
+    # not re-armed when an issue reopens with a fresh PR: the field can still
+    # point at a PR that has since merged while a NEW open PR for the same
+    # issue is live. Left unchecked, `pr_state` reads "MERGED" for a lane that
+    # is still mid-flight, and `agent.sdlc_router.guard_terminal_lane` declares
+    # it finished (plan's Risk 1 — "the terminal guard swallows a live
+    # pre-merge lane"). Mirrors `_ledger_less_merged_pr`'s ordering below: an
+    # OPEN PR must always win over a historical MERGED one for the same issue.
+    # Scoped to fire ONLY when the recorded PR resolves MERGED, so the common
+    # case (recorded PR is itself the live one) pays no extra `gh` call.
+    if isinstance(session_pr, int) and session_pr > 0 and (pr_state or "").upper() == "MERGED":
+        live_open_pr = _lookup_pr(issue_number, slug=slug, repo=resolved_repo, state="open")
+        if live_open_pr and live_open_pr != pr_number:
+            pr_number = live_open_pr
+            pr_merge_state, ci_all_passing, pr_state = _fetch_pr_merge_state(
+                pr_number, repo=resolved_repo
+            )
+
     # Compute dispatch-history derived fields.
     # D5: pass the LIVE stage snapshot so the count resets when state has
     # moved past the last recorded dispatch (G4 self-clears on a real
