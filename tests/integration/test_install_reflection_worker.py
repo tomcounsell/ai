@@ -97,7 +97,15 @@ def _gate_fragment(installer_src: str) -> str:
 
 
 def _run_gate(installer_src: str, tmp_path: Path, probe_exit: int) -> tuple[int, str]:
-    """Run the gate against a stub interpreter that exits with `probe_exit`."""
+    """Run the gate against a stub interpreter that exits with `probe_exit`.
+
+    The generated script sets `-euo pipefail` because the installer does. The
+    whole reason to execute the fragment instead of asserting substrings over it
+    is fidelity to the shipped context, and the shell mode is part of that
+    context: under a default shell, a future edit inside the markers that trips
+    `errexit` or `nounset` would abort the real install while these tests stayed
+    green. Matches `_run_latch` in `tests/unit/test_update_reflections_callables.py`.
+    """
     import subprocess
 
     project = tmp_path / "project"
@@ -110,7 +118,10 @@ def _run_gate(installer_src: str, tmp_path: Path, probe_exit: int) -> tuple[int,
 
     script = tmp_path / "gate.sh"
     script.write_text(
-        f'PROJECT_DIR="{project}"\n{_gate_fragment(installer_src)}\necho REACHED_END\n'
+        "set -euo pipefail\n"
+        f'PROJECT_DIR="{project}"\n'
+        f"{_gate_fragment(installer_src)}\n"
+        "echo REACHED_END\n"
     )
     proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
     return proc.returncode, proc.stdout

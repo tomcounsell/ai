@@ -311,6 +311,28 @@ class TestMainRestoresProcessGlobals:
         self._assert_restored(probe, probe.main)
         capsys.readouterr()
 
+    def test_the_sys_path_entry_is_removed_when_main_added_it(
+        self, probe, monkeypatch, tmp_path, capsys
+    ):
+        """Force `repo_root_added` true, which it never is under pytest.
+
+        The other cases in this class assert on `sys.path`, but that half is
+        trivially satisfied there: pytest already has the repo root on the path,
+        so `main()` never inserts it and never takes the removal branch.
+        Stripping the entry first is what makes the branch execute — without
+        this case, replacing the removal with `pass` leaves the class green.
+        """
+        monkeypatch.setattr(
+            sys, "path", [p for p in sys.path if p != str(probe._REPO_ROOT)], raising=False
+        )
+        monkeypatch.setattr(
+            probe, "_registry_copies", lambda owning_root: [tmp_path / "absent.yaml"]
+        )
+
+        self._assert_restored(probe, probe.main)
+        assert str(probe._REPO_ROOT) not in sys.path
+        capsys.readouterr()
+
     def test_globals_restored_on_a_failure(self, probe, monkeypatch, tmp_path, capsys):
         """The path that matters most: a raising probe must still disarm the ban."""
         registry = _write(
