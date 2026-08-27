@@ -88,17 +88,30 @@ def normalize_verdict(text: str | None) -> str:
 # Default maximum same-skill dispatches allowed before G4 trips. A value of 3
 # means the router may dispatch the same sub-skill up to three times in a row
 # without the pipeline state changing; the fourth would trip G4.
-# Kill switch for the terminal-lane guard (#2894, #2817). The guard preempts the
-# entire dispatch table, so a false positive halts a live lane silently. Provisional
-# and tunable: set SDLC_TERMINAL_GUARD=false to fall back to the pre-#2894 routing
-# on one machine without a revert or a fleet restart.
-TERMINAL_GUARD_ENABLED = os.environ.get("SDLC_TERMINAL_GUARD", "true").strip().lower() not in (
-    "false",
-    "0",
-    "no",
-)
-
 MAX_SAME_STAGE_DISPATCHES = 3
+
+
+def _terminal_guard_enabled() -> bool:
+    """Kill switch for the terminal-lane guard (#2894, #2817), read live.
+
+    The guard preempts the entire dispatch table, so a false positive halts a
+    live lane silently. Provisional and tunable: set ``SDLC_TERMINAL_GUARD=false``
+    to fall back to the pre-#2894 routing.
+
+    Read INSIDE :func:`guard_terminal_lane` rather than cached at import time —
+    ``agent/sdlc_router.py`` is imported once by the long-lived bridge/worker
+    (``agent/session_runner/runner.py``), so an import-time constant would make
+    the override per-process rather than live, defeating the point of a kill
+    switch with this guard's blast radius: a same-process flip (a test, an
+    operator script, a hot env change) takes effect on the very next call, no
+    service restart required.
+    """
+    return os.environ.get("SDLC_TERMINAL_GUARD", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+    )
+
 
 # Maximum number of router turns that G7 will wait for a /do-plan dispatch
 # after the plan_revising lock is set. After this many turns with no /do-plan
@@ -845,10 +858,11 @@ def guard_terminal_lane(stage_states: dict, meta: dict, context: dict) -> Termin
     terminal condition would have to be written four times today and rewritten
     for every row added later.
 
-    Set ``TERMINAL_GUARD_ENABLED=false`` (env ``SDLC_TERMINAL_GUARD``) to
-    disable, restoring the previous routing without a revert or a fleet restart.
+    Set ``SDLC_TERMINAL_GUARD=false`` to disable, restoring the previous
+    routing without a revert or a fleet restart — see ``_terminal_guard_enabled``
+    for why this is read live rather than cached at import time.
     """
-    if not TERMINAL_GUARD_ENABLED:
+    if not _terminal_guard_enabled():
         return None
     evidence = _terminal_evidence(stage_states, meta)
     if evidence is None:

@@ -229,10 +229,11 @@ table below exists so you can interpret a `blocked` decision or a forced dispatc
 returns one. The router's implementation, its ordering rationale, and the guard-by-guard nuances
 are declared in the repo context probe.
 
-Guards are evaluated in the **pinned `GUARDS` list order** `[G1, G2, G3, G4, G9, G8, G7, G5, G6]` — the first to return a non-`None` decision wins. Guard IDs are historical (assigned in introduction order), not evaluation order; the table below is listed in evaluation order:
+Guards are evaluated in the **pinned `GUARDS` list order** `[T, G1, G2, G3, G4, G9, G8, G7, G5, G6]` — the first to return a non-`None` decision wins. Guard IDs are historical (assigned in introduction order), not evaluation order; the table below is listed in evaluation order. `T` (the terminal-lane guard, #2894/#2817) runs ahead of every numbered guard — a lane that has already shipped has no correct dispatch, so no other guard's verdict is worth computing.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
+| T: Terminal lane | `stage_states["MERGE"]` settled (`completed`/`skipped`) OR `pr_state == "MERGED"` | `Terminal` decision — a clean "nothing to dispatch" exit, distinct from `blocked`. Preempts every guard and the dispatch table. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | G1: Critique loop | Latest critique verdict contains `NEEDS REVISION` or `MAJOR REWORK` AND `last_dispatched_skill == /do-plan-critique` | `/do-plan` |
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` (2) AND CRITIQUE is not completed | Escalate: `blocked` with reason `critique cycle cap reached` |
 | G3: PR lock | `pr_number` is set AND (`last_dispatched_skill` OR proposed dispatch) is `/do-plan` or `/do-plan-critique` | `/do-merge` (if REVIEW and DOCS complete), `/do-patch` (if review requested changes), else `/do-pr-review` |

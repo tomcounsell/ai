@@ -91,7 +91,8 @@ Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in cano
 | `latest_review_verdict` | `str \| null` | Normalized review verdict, e.g. `"APPROVED"` |
 | `revision_applied` | `bool` | Whether `revision_applied` frontmatter flag is set on the plan |
 | `pr_number` | `int \| null` | PR number for this issue, if any -- see PR-number resolution below |
-| `pr_merge_state` | `str \| null` | `mergeStateStatus` from `gh pr view` (e.g. `"CLEAN"`) |
+| `pr_state` | `str \| null` | GitHub's `state` field (`"OPEN"`/`"CLOSED"`/`"MERGED"`) from `gh pr view`, resolved even for a ledger-less lane; consulted by the `T` terminal guard (see [SDLC Terminal Lane State](sdlc-terminal-lane-state.md)) |
+| `pr_merge_state` | `str \| null` | `mergeStateStatus` from `gh pr view` (e.g. `"CLEAN"`); reports `"UNKNOWN"` for merged, not-yet-computed, and unresolvable PRs alike, so it is never used to decide terminality |
 | `ci_all_passing` | `bool \| null` | `True` when all CI status checks are `SUCCESS` |
 | `same_stage_dispatch_count` | `int` | Consecutive dispatches to the same stage without state change |
 | `last_dispatched_skill` | `str \| null` | The most recently dispatched skill name |

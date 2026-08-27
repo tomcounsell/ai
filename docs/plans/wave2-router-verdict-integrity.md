@@ -803,24 +803,24 @@ end-to-end and must be extended for the terminal decision and the widened verdic
       — the new status quo: which verdicts **record** a head SHA and which **assert** a
       trailer are now different sets; and the staleness default now fails closed with an
       explicit opt-out.
-- [ ] Create `docs/features/sdlc-terminal-lane-state.md` — what makes a lane terminal, why
+- [x] Create `docs/features/sdlc-terminal-lane-state.md` — what makes a lane terminal, why
       the terminal guard preempts the dispatch table rather than living in a row, and the
       three meanings of `pr_merge_state == "UNKNOWN"`.
-- [ ] Update [`docs/features/pipeline-state-machine.md`](../features/pipeline-state-machine.md)
+- [x] Update [`docs/features/pipeline-state-machine.md`](../features/pipeline-state-machine.md)
       — WS-7's refusal of mid-pipeline entry, and the closed plan-archival escape hatch.
-- [ ] Update [`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md)
+- [x] Update [`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md)
       — `skip_stage`'s preconditions after the archival hole is closed.
 - [ ] Update `docs/sdlc/do-plan-critique.md` — GC scope, the per-run stale-list path, and the
       `independent:` roster field.
 - [ ] Update `.claude/skills-global/do-plan-critique/SKILL.md` — the `independent:` field and
       its announcement in the verdict block. **Verify the hardlink inode after editing.**
-- [ ] Update `.claude/skills-global/do-sdlc/SKILL.md` and `.claude/skills/sdlc/SKILL.md` —
+- [x] Update `.claude/skills-global/do-sdlc/SKILL.md` and `.claude/skills/sdlc/SKILL.md` —
       the terminal decision shape and its clean-exit handling.
 - [ ] Update `docs/sdlc/do-patch.md` and the two `do-pr-review` sub-skills — explicit issue
       resolution replacing the ambient env var (WS-4).
 - [ ] Update [`docs/bug-backlog-waves.md`](../bug-backlog-waves.md) — correct the "all nine
       touch `agent/sdlc_router.py`" claim, which is false, and record what shipped.
-- [ ] Add entries to [`docs/features/README.md`](../features/README.md) for the new feature doc.
+- [x] Add entries to [`docs/features/README.md`](../features/README.md) for the new feature doc.
 - [ ] Delete `docs/plans/next-skill-terminal-verdict-and-pr-resolution.md` (superseded; its
       siblings #2825/#2824 are closed and #2817 is absorbed here).
 - [ ] Inline: docstrings for the terminal guard, the staleness opt-out contract, and the

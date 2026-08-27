@@ -837,10 +837,38 @@ _LEDGERLESS_PR_TTL_SECONDS = float(os.environ.get("SDLC_LEDGERLESS_PR_TTL", "300
 _ledgerless_pr_cache: dict[int, tuple[float, int | None, str | None]] = {}
 
 
+def _evict_expired_ledgerless_entries(now: float) -> None:
+    """Drop every ``_ledgerless_pr_cache`` entry older than the TTL.
+
+    The TTL was previously enforced on READ only (a stale hit is recomputed),
+    so an expired entry that is never looked up again sat in the dict forever
+    — in the long-lived bridge/worker the cache grows monotonically with every
+    distinct issue number the router has ever polled. Called on every write
+    path so the dict self-bounds to "issues polled within one TTL window"
+    rather than "issues ever polled", in the spirit of ``MAX_DISPATCH_HISTORY``
+    elsewhere in this codebase.
+    """
+    expired = [
+        k for k, v in _ledgerless_pr_cache.items() if (now - v[0]) >= _LEDGERLESS_PR_TTL_SECONDS
+    ]
+    for k in expired:
+        del _ledgerless_pr_cache[k]
+
+
 def _ledger_less_merged_pr(issue_number: int) -> tuple[int | None, str | None]:
-    """Resolve a merged PR for an issue whose ledger is gone. Cached, fail-open.
+    """Resolve a PR for an issue whose ledger is gone. Cached, fail-open.
 
     Returns ``(pr_number, pr_state)`` or ``(None, None)``.
+
+    **Open-before-merged ordering (#2894 tech debt).** Mirrors `_compute_meta`'s
+    two-pass ordering above: try `state="open"` first, and only fall back to
+    `state="merged"` when the open pass finds nothing. An OPEN PR is the lane's
+    live artifact and must always win over a historical one — without this
+    ordering, an issue with a merged PR AND a live open PR whose ledger was
+    evicted (the #2853/#2812 shape this rung exists to handle) would resolve to
+    the historical merged PR, read `pr_state == "MERGED"`, and
+    `agent.sdlc_router.guard_terminal_lane` would declare the lane finished
+    while its open PR is still in flight (the plan's Risk 1).
 
     **Caching the negative is the whole point.** The caller sits on a path the
     router polls constantly, and it cannot tell a shipped-but-evicted lane from
@@ -853,6 +881,7 @@ def _ledger_less_merged_pr(issue_number: int) -> tuple[int | None, str | None]:
     terminal verdict.
     """
     now = time.monotonic()
+    _evict_expired_ledgerless_entries(now)
     hit = _ledgerless_pr_cache.get(issue_number)
     if hit is not None and (now - hit[0]) < _LEDGERLESS_PR_TTL_SECONDS:
         return hit[1], hit[2]
@@ -869,7 +898,9 @@ def _ledger_less_merged_pr(issue_number: int) -> tuple[int | None, str | None]:
     pr_number: int | None = None
     pr_state: str | None = None
     try:
-        pr_number = _lookup_pr(issue_number, repo=resolved_repo, state="merged")
+        pr_number = _lookup_pr(issue_number, repo=resolved_repo, state="open")
+        if pr_number is None:
+            pr_number = _lookup_pr(issue_number, repo=resolved_repo, state="merged")
         if pr_number:
             _, _, pr_state = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
     except Exception as e:  # noqa: BLE001 — fail-open; never manufacture terminality

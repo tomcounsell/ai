@@ -216,12 +216,19 @@ class TestTerminalKillSwitch:
     """Risk 1 mitigation: the guard is switchable without a revert."""
 
     def test_disabling_the_guard_restores_prior_routing(self, monkeypatch):
-        import agent.sdlc_router as router
-
-        monkeypatch.setattr(router, "TERMINAL_GUARD_ENABLED", False)
+        monkeypatch.setenv("SDLC_TERMINAL_GUARD", "false")
         d = decide_next_dispatch(_states(MERGE="completed"), _meta(), _ctx())
         assert not isinstance(d, Terminal)
         assert isinstance(d, Dispatch) and d.skill == SKILL_DO_MERGE
+
+    def test_guard_reads_the_switch_live_no_import_time_caching(self, monkeypatch):
+        """The switch must take effect within one process — no restart needed."""
+        d_before = decide_next_dispatch(_states(MERGE="completed"), _meta(), _ctx())
+        assert isinstance(d_before, Terminal)
+
+        monkeypatch.setenv("SDLC_TERMINAL_GUARD", "false")
+        d_after = decide_next_dispatch(_states(MERGE="completed"), _meta(), _ctx())
+        assert not isinstance(d_after, Terminal)
 
 
 class TestTerminalIsObservable:

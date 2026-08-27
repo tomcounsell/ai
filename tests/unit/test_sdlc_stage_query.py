@@ -1763,21 +1763,72 @@ class TestPrStateAndLedgerLessResolution:
         """#2853: ledger emptied post-merge, so the router saw no pr_number."""
         import tools.sdlc_stage_query as q
 
+        def _lookup(issue_number, repo=None, slug=None, state=None):
+            return 2884 if state == "merged" else None
+
         q._ledgerless_pr_cache.clear()
         with (
             patch.object(q, "_find_session_by_id", return_value=None),
             patch.object(q, "_resolve_issue_record", return_value=None),
-            patch.object(q, "_lookup_pr", return_value=2884) as lookup,
+            patch.object(q, "_lookup_pr", side_effect=_lookup) as lookup,
             patch.object(q, "_fetch_pr_merge_state", return_value=("UNKNOWN", None, "MERGED")),
         ):
             result = q.query_enriched(issue_number=2853)
         assert result["stages"] == {}
         assert result["_meta"]["pr_number"] == 2884
         assert result["_meta"]["pr_state"] == "MERGED"
-        assert lookup.call_args.kwargs.get("state") == "merged"
+        # Two-pass: open tried first (and misses) before the merged fallback.
+        assert [c.kwargs.get("state") for c in lookup.call_args_list] == ["open", "merged"]
 
-    def test_fresh_issue_costs_one_lookup_not_one_per_poll(self):
-        """The negative result is cached too — that is what protects the poll path."""
+    def test_ledger_less_lane_prefers_a_live_open_pr_over_a_merged_one(self):
+        """An open PR must always win — a stale merged PR must never go terminal.
+
+        The #2853/#2812 shape this rung exists to handle can also have BOTH a
+        merged PR (an earlier round shipped) and a live open PR (a later round
+        in flight) once the ledger is evicted. Resolving to the merged one would
+        read pr_state == MERGED and `guard_terminal_lane` would wrongly declare
+        the lane finished while the open PR is still being worked (plan Risk 1).
+        """
+        import tools.sdlc_stage_query as q
+
+        def _lookup(issue_number, repo=None, slug=None, state=None):
+            return {"open": 3000, "merged": 2884}.get(state)
+
+        def _fetch(pr_number, repo=None):
+            if pr_number == 3000:
+                return ("UNKNOWN", None, "OPEN")
+            return ("UNKNOWN", None, "MERGED")
+
+        q._ledgerless_pr_cache.clear()
+        with (
+            patch.object(q, "_find_session_by_id", return_value=None),
+            patch.object(q, "_resolve_issue_record", return_value=None),
+            patch.object(q, "_lookup_pr", side_effect=_lookup),
+            patch.object(q, "_fetch_pr_merge_state", side_effect=_fetch),
+        ):
+            result = q.query_enriched(issue_number=2853)
+        assert result["_meta"]["pr_number"] == 3000
+        assert result["_meta"]["pr_state"] == "OPEN"
+
+        from agent.sdlc_router import Terminal, decide_next_dispatch
+
+        decision = decide_next_dispatch(
+            {},
+            {
+                "pr_number": result["_meta"]["pr_number"],
+                "pr_state": result["_meta"]["pr_state"],
+            },
+            {},
+        )
+        assert not isinstance(decision, Terminal)
+
+    def test_fresh_issue_costs_one_lookup_round_not_one_per_poll(self):
+        """The negative result is cached too — that is what protects the poll path.
+
+        One "round" is the two-pass open-then-merged probe (#2894 tech debt), so
+        a genuine cache miss costs 2 `_lookup_pr` calls, not 1 — but that cost is
+        paid ONCE across all 5 polls, not once per poll (which would be 10).
+        """
         import tools.sdlc_stage_query as q
 
         q._ledgerless_pr_cache.clear()
@@ -1789,8 +1840,9 @@ class TestPrStateAndLedgerLessResolution:
             for _ in range(5):
                 result = q.query_enriched(issue_number=99999)
         assert result["_meta"]["pr_number"] is None
-        assert lookup.call_count == 1, (
-            f"fresh issue polled 5x should cost 1 lookup, cost {lookup.call_count}"
+        assert lookup.call_count == 2, (
+            f"fresh issue polled 5x should cost one open+merged round (2 calls), "
+            f"cost {lookup.call_count}"
         )
 
     def test_lookup_failure_is_fail_open(self):

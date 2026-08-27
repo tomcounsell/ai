@@ -37,15 +37,21 @@ state" without parsing the reason string.
 Consumers matching on specific guards must compare against the codes they care
 about, never merely test `guard_id is not None`.
 
-## The Nine Guards
+## The Nine Guards, Plus the Terminal Guard
 
 Guards run **before** the dispatch table. The first tripped guard wins.
 **Pinned evaluation order** (`GUARDS` in `agent/sdlc_router.py`, list-literal
 order is binding):
 
 ```
-G1 → G2 → G3 → G4 → G9 → G8 → G7 → G5 → G6
+T → G1 → G2 → G3 → G4 → G9 → G8 → G7 → G5 → G6
 ```
+
+`T` (the terminal-lane guard, #2894/#2817) runs ahead of all nine numbered
+guards: a finished lane has no correct dispatch and no guard verdict worth
+computing, so it preempts the entire table rather than being one more row in
+it. See [SDLC Terminal Lane State](sdlc-terminal-lane-state.md) for what makes
+a lane terminal and why it sits first.
 
 The table below is numbered `G1`-`G9` for readability, not evaluation order —
 the row order in the table does **not** match the pinned order above (G7 sits
@@ -55,6 +61,7 @@ match the same state.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
+| **T: Terminal lane** | `stage_states["MERGE"]` is settled (`completed`/`skipped`) OR `pr_state == "MERGED"` | `Terminal` — a clean "nothing to dispatch, nothing is wrong" exit, distinct from `blocked`. Preempts every other guard and the dispatch table. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | **G1: Critique loop** | Latest critique verdict is `NEEDS REVISION` or `MAJOR REWORK` AND last dispatched skill was `/do-plan-critique` | `/do-plan`. **Steps aside if a PR is already open** (`meta["pr_number"]` set), deferring to G3 instead (#1932) — see below. |
 | **G2: Critique cycle cap** | `critique_cycle_count >= 2` AND CRITIQUE is still failing | `blocked` — escalate with reason `critique cycle cap reached` |
 | **G3: PR lock** | Open PR exists for the issue AND proposed dispatch is `/do-plan` or `/do-plan-critique` | Redirect to `/do-pr-review` / `/do-patch` / `/do-merge` based on `stage_states` |
@@ -439,6 +446,7 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
     "latest_review_head_sha": null,
     "revision_applied": false,
     "pr_number": null,
+    "pr_state": null,
     "pr_merge_state": null,
     "ci_all_passing": null,
     "same_stage_dispatch_count": 2,
@@ -457,6 +465,15 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
 - `ci_all_passing` — `True` when all `statusCheckRollup` conclusions are
   `"SUCCESS"` (empty rollup also returns `True` — a repo with no required
   checks has no failing checks). `null` on `gh` failure. Used by G6.
+
+**New field added by issue #2894:**
+
+- `pr_state` — GitHub's `state` field (`"OPEN"`/`"CLOSED"`/`"MERGED"`),
+  distinct from `pr_merge_state`'s `mergeStateStatus`. `mergeStateStatus`
+  reports `"UNKNOWN"` for merged, not-yet-computed, and genuinely-unresolvable
+  PRs alike, so only `pr_state` can answer "did this merge?". Consulted by the
+  `T` terminal guard (`agent.sdlc_router.guard_terminal_lane`) — see
+  [SDLC Terminal Lane State](sdlc-terminal-lane-state.md).
 
 Both fields default to `null` when the `gh` CLI fails (network error, unknown
 PR, timeout). G6 will not fire if either field is `null`, safely falling back

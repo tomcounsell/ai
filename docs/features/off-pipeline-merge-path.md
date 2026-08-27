@@ -124,6 +124,16 @@ caller's good intentions. Five properties hold together:
 2. **A derived precondition, not a claim.** The tool refuses with
    `PLAN_EXISTS_NOT_SKIPPABLE` when `find_plan_path(issue_number)` resolves a
    plan document. You cannot skip the CRITIQUE of an issue that has a plan.
+2b. **The archived-plan rung (issue #2851).** `find_plan_path` searches
+   `docs/plans/` only, so a shipped lane's plan — moved to
+   `docs/archive/plans-completed/` once it merges — was invisible to rung 2,
+   silently making that lane's CRITIQUE retroactively skippable. That was a
+   hole straight through this same precondition: archiving a plan is a filing
+   action, not evidence CRITIQUE never applied. The precondition also
+   consults `tools.lane_identity.find_archived_plan_path`; finding one refuses
+   the skip with the same `PLAN_EXISTS_NOT_SKIPPABLE` reason. An errored
+   archived-plan lookup refuses the skip too, same as rung 2 — "cannot
+   confirm no plan ever existed" is never read as "confirmed absent".
 3. **No retroactive skipping.** `STAGE_RAN_NOT_SKIPPABLE` refuses when the stage
    carries a recorded verdict, carries a recorded `_sdlc_dispatches` entry for
    its skill, or holds any status other than `pending`/`ready`. A CRITIQUE that
