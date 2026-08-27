@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -92,7 +92,7 @@ Three parallel code-read spikes ran at plan time (Explore agents; full reports i
 
 1. **Entry point**: human message → bridge → `AgentSession` (full text durably in `initial_telegram_message.message_text`; pre-run steers merged in by `session_pickup`).
 2. **Runner**: `session_executor` composes turn input → `SessionRunner.run` → `RoleDriver.run_turn(message)` → `claude -p` subprocess. The PM's terminal `StructuredOutput` call is validated against `PM_TURN_JSON_SCHEMA` — **phase 1 adds `ask_coverage` here** (per-clause `{item, disposition, evidence}`).
-3. **Routing**: `_route_turn` → `adapter.on_user_payload(payload, file_paths)` → `_deliver_sync` → `loop.create_task(send_cb(...))`. **Phase 1 composes the disposition footer here** (runner layer, where the validated schema object lives) for clauses not `delivered`, appending to the payload before handoff.
+3. **Routing**: `_route_turn` → `adapter.on_user_payload(payload, file_paths)` → `_deliver_sync` → `loop.create_task(send_cb(...))`. **Phase 1 adds the coverage bounce here** (runner layer, where the validated schema object lives): a turn whose `ask_coverage` carries non-`delivered` clauses is not dispatched; instead a coverage advisory (enumerating each such clause and its disposition) is pushed as self-draft steering, and the PM's revised message — which must state those dispositions in prose — is what ships. One bounce per turn, bounded like the existing self-draft flow.
 4. **Delivery**: `output_handler.send` → `draft_message(text, session, medium)` → `_evaluate_drafter_promise` (single chokepoint, both return paths). **Phase 3 makes the main path await the LLM layer**; short path (<200 chars, non-SDLC, no artifacts/`?`/fence) keeps the regex heuristic. BLOCK → `promise_override_active(session)` (open inbound expectation on the bound Job) → override or self-draft steering.
 5. **Output**: Telegram/email outbox; audit row to `logs/classification_audit.jsonl` (now with `elapsed_ms`); phase-4 measurement samples these rows plus the schema objects.
 
@@ -129,7 +129,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/promise-gate-recorded-
 
 ### Key Elements
 
-- **`ask_coverage` schema field (R4)** — per-clause self-attested dispositions with mandatory evidence on `delivered`; the runner renders non-delivered clauses as a deterministic footer on the outgoing message, making every clause's status user-visible without semantic matching.
+- **`ask_coverage` schema field (R4)** — per-clause self-attested dispositions with mandatory evidence on `delivered`; a turn with non-delivered clauses takes one advisory bounce (self-draft steering enumerating them), so the PM's own revised prose carries every clause's status to the user. Owner ruling 2026-08-27: bounce chosen over a deterministic runner-appended footer.
 - **PM prompt rewrite (R1/R4)** — phrasebook deleted; present-fact reporting norm retained; new rules: "a dispatch you can execute, you execute" and "a commitment you keep is a commitment you record (`expectation-add`)".
 - **LLM on the drafter main path (R2)** — `_evaluate_drafter_promise` awaits the gate's LLM judgment on the composed path; short path stays regex-only. Combined with the shipped `promise_recorded_override`, this **is** R1's over-claim behavior: forward-looking + recorded expectation passes; forward-looking + nothing recorded blocks, however phrased.
 - **Latency instrumentation** — `elapsed_ms` on every audit row (greenfield; nothing measures the budget today) plus a unit test pinning the short path to zero LLM calls.
@@ -137,14 +137,14 @@ Run via `python scripts/check_prerequisites.py docs/plans/promise-gate-recorded-
 
 ### Flow
 
-Human ask → PM turn → StructuredOutput `{route, message, ask_coverage[]}` → runner validates (delivered ⇒ evidence) → footer appended for non-delivered clauses → `output_handler.send` → `draft_message` → `_evaluate_drafter_promise` (main path: LLM verdict; block ⇒ open-inbound-expectation check ⇒ override or self-draft steering with revise-or-record advisory) → delivery + audit row with `elapsed_ms`.
+Human ask → PM turn → StructuredOutput `{route, message, ask_coverage[]}` → runner validates (delivered ⇒ evidence) → non-delivered clauses ⇒ one coverage bounce (advisory steering → PM revises) → `output_handler.send` → `draft_message` → `_evaluate_drafter_promise` (main path: LLM verdict; block ⇒ open-inbound-expectation check ⇒ override or self-draft steering with revise-or-record advisory) → delivery + audit row with `elapsed_ms`.
 
 ### Technical Approach
 
-- **Schema (Task 1).** `ask_coverage`: optional array of `{item: string, disposition: enum(delivered|blocked|declined|not_started), evidence: string}`; validation in `validate_structured_route` rejects `delivered` with empty/whitespace `evidence` (treat as invalid structured output → existing fallback path, observable via `SCHEMA_ROUTING_FALLBACK_EVENT`). `route:"continue"` accepts `[]`/absent. **Two-phase rollout:** phase A optional-but-prompted (this plan); phase B (tighten to required) only after `SCHEMA_ROUTING_FALLBACK_METRIC` confirms flat against its existing 5%/1-hour alert (`monitoring/schema_routing_alert.py:34-35`) over the named window (Open Question 2). No JSON Schema `if/then` — the enforcement lives in Python validation, avoiding the unverified CLI draft-coverage bet.
-- **Footer (Task 1).** Deterministic, composed at the runner layer from the validated schema object: one line per non-`delivered` clause (`— {item}: {disposition}`), appended to the payload before `on_user_payload`. No semantic matching against the prose (that arms race is exactly what R1 kills); the prompt tells the PM the footer owns non-delivered clauses, so prose duplication is a style miss, not a correctness bug. Footer text must itself clear the heuristic (precedent: `test_deferred_self_draft_completed.py::test_substitute_message_passes_the_heuristic`).
+- **Schema (Task 1).** `ask_coverage`: optional array of `{item: string, disposition: enum(delivered|blocked|declined|not_started), evidence: string}`; validation in `validate_structured_route` rejects `delivered` with empty/whitespace `evidence` (treat as invalid structured output → existing fallback path, observable via `SCHEMA_ROUTING_FALLBACK_EVENT`). `route:"continue"` accepts `[]`/absent. **Two-phase rollout:** phase A optional-but-prompted (this plan); phase B (tighten to required) only after `SCHEMA_ROUTING_FALLBACK_METRIC` confirms flat against its existing 5%/1-hour alert (`monitoring/schema_routing_alert.py:34-35`) over the #3035 window (not before 2026-09-10). No JSON Schema `if/then` — the enforcement lives in Python validation, avoiding the unverified CLI draft-coverage bet.
+- **Coverage bounce (Task 1).** Owner ruling 2026-08-27: advisory bounce, not a runner-appended footer. When the validated payload's `ask_coverage` contains non-`delivered` clauses, the runner withholds dispatch and pushes self-draft steering carrying a coverage advisory — the same channel and posture as the promise advisory (revise, don't mechanically rewrite). The advisory enumerates each non-delivered clause and its disposition and instructs the PM to state them in prose; the revised turn ships. **Exactly one coverage bounce per turn** (the revision is delivered even if still imperfect — no semantic verification of the revision, which would be the arms race R1 kills), and the existing `self_draft_attempts` bound (`test_output_handler_drafter.py::test_self_draft_attempts_bound_terminates_loop`) is the global backstop. Advisory text must itself clear the heuristic (precedent: `test_deferred_self_draft_completed.py::test_substitute_message_passes_the_heuristic`).
 - **Prompt (Task 3).** Delete `prime-pm-role.md:51-67` (measured-verdicts table + "two ways to stay on the allowed side"). Retain, reworded without gate framing: present-fact norm, turn-boundary/bounded-dispatch guidance, client-room threshold. Add: dispatch-you-can-execute rule; record-don't-phrase rule; `ask_coverage` authoring guidance (decompose the ask, dispositions honest, evidence = artifact reference). `_prime-rails.md:57` unchanged (its rule is now enforced by schema, but the prose stays as the cross-repo rail).
-- **Drafter LLM (Task 5).** New public `async def evaluate_promise_async(text, *, transport, session_id, classifier_verdict)` in `bridge/promise_gate.py` extracted from the existing internals (the sync `evaluate_promise` becomes a `_run_async_safely` wrapper over it — behavior-identical for CLI callers). `_evaluate_drafter_promise` becomes async, gains `use_llm: bool`; `draft_message:1116` (short path) passes `use_llm=False`, `:1167` (main path) `use_llm=True`. LLM failure/timeout falls to the heuristic exactly as the sync path does (fail-closed on judgment, fail-open on infrastructure — posture unchanged). Override ordering unchanged: any BLOCK (LLM or heuristic) → `promise_override_active` → allow as `promise_recorded_override`. Constraints: timeout via `AsyncAnthropic(timeout=RTR_SDK_TIMEOUT)` constructor (#1055), `semaphore_slot()` wrap, `_evaluate_drafter_promise` remains the single chokepoint (#2421). Audit: main-path LLM verdicts write `source="promise_gate_drafter_llm"` (additive value; existing vocabulary untouched — Open Question 3 offers the alternative). Ride-along fix: remove dead `_PromiseTimeoutError`, map `APITimeoutError` → `source="promise_gate_timeout"` properly, split the or-assertion at `test_promise_gate.py:533`.
+- **Drafter LLM (Task 5).** New public `async def evaluate_promise_async(text, *, transport, session_id, classifier_verdict)` in `bridge/promise_gate.py` extracted from the existing internals (the sync `evaluate_promise` becomes a `_run_async_safely` wrapper over it — behavior-identical for CLI callers). `_evaluate_drafter_promise` becomes async, gains `use_llm: bool`; `draft_message:1116` (short path) passes `use_llm=False`, `:1167` (main path) `use_llm=True`. LLM failure/timeout falls to the heuristic exactly as the sync path does (fail-closed on judgment, fail-open on infrastructure — posture unchanged). Override ordering unchanged: any BLOCK (LLM or heuristic) → `promise_override_active` → allow as `promise_recorded_override`. Constraints: timeout via `AsyncAnthropic(timeout=RTR_SDK_TIMEOUT)` constructor (#1055), `semaphore_slot()` wrap, `_evaluate_drafter_promise` remains the single chokepoint (#2421). Audit: main-path LLM verdicts write `source="promise_gate_drafter_llm"` (additive value; existing vocabulary untouched — confirmed by owner 2026-08-27). Ride-along fix: remove dead `_PromiseTimeoutError`, map `APITimeoutError` → `source="promise_gate_timeout"` properly, split the or-assertion at `test_promise_gate.py:533`.
 - **Instrumentation (Task 5).** `perf_counter` elapsed around both gate entry points, written as `elapsed_ms` in the audit row (single-writer file, additive field; readers must already tolerate the 40 legacy no-`kind` rows). p50/p99 reported offline from the JSONL — no new metric pipeline.
 - **Docs (Task 7).** `docs/features/promise-gate.md` rewritten to the obligation-keyed contract as current state (no "formerly"); `docs/features/message-drafter.md` drafter-path section updated; `#3016` test rewritten to assert `action` + non-empty `reason` only (never `class_` labels), PR carries `Closes #3016`.
 - **Phase-4 measurement (Task 7).** A small `tools/`-side report (invoked manually, not a service): sample audit rows + session transcripts over the soak window, tabulate `ask_coverage` dispositions vs delivered text, flag contradictions (a `delivered` clause whose evidence artifact doesn't exist; a footer clause the PM also claimed in prose as done). Output is the recorded entry-criterion artifact for the phase-4 decision.
@@ -154,7 +154,7 @@ Human ask → PM turn → StructuredOutput `{route, message, ask_coverage[]}` �
 ### Exception Handling Coverage
 - [ ] `_write_promise_audit` swallow (`promise_gate.py:534`) — existing `test_promise_gate_audit.py::TestWritePromiseAuditFailureSwallowing` covers it; extend for the new `elapsed_ms` field (failure still silent).
 - [ ] New async LLM call in `_evaluate_drafter_promise`: test that SDK exception AND timeout each fall through to the heuristic verdict with the correct audit `source` (closing the misrecorded-timeout bug).
-- [ ] Footer composition failure (malformed `ask_coverage` surviving validation): must degrade to no-footer delivery, never block the send — test asserts message still delivered and a `logger.warning` fires.
+- [ ] Coverage-bounce failure (steering push raises, or malformed `ask_coverage` survives validation): must degrade to plain delivery of the original message, never a dropped send — test asserts message still delivered and a `logger.warning` fires.
 
 ### Empty/Invalid Input Handling
 - [ ] `ask_coverage: []`, absent, `None`, and clause with whitespace `item` — validation behavior pinned for each (empty list valid; whitespace item dropped with warning).
@@ -163,7 +163,7 @@ Human ask → PM turn → StructuredOutput `{route, message, ask_coverage[]}` �
 
 ### Error State Rendering
 - [ ] Self-draft steering advisory on an LLM-layer block renders the revise-or-record instruction (extend `test_promise_advisory.py::TestDrafterCarriesAdvisory` to the LLM-verdict case).
-- [ ] Footer renders dispositions verbatim and clears the heuristic itself.
+- [ ] Coverage advisory renders each non-delivered clause and its disposition verbatim and clears the heuristic itself.
 
 ## Test Impact
 
@@ -179,14 +179,14 @@ From spike-1's inventory. Dispositions: UPDATE / DELETE / REPLACE.
 - [ ] `tests/unit/test_promise_advisory.py::TestPromiseOverride` (3 tests) — **UPDATE**: exercise the override against LLM-layer BLOCK verdicts too (currently heuristic-only, the sole override coverage).
 - [ ] `tests/unit/test_promise_gate_audit.py::TestDrafterPathAudit` — **UPDATE**: main-path rows carry `source="promise_gate_drafter_llm"` and `elapsed_ms`; short-path rows unchanged.
 - [ ] `tests/unit/session_runner/test_router_classification.py::TestBlockedReasonSchemaField` — **UPDATE**: extend the schema structural assertions to `ask_coverage` (optional in phase A, shape pinned).
-- [ ] `tests/unit/session_runner/test_schema_routing.py` — **UPDATE**: new cases for `ask_coverage` validation (valid, delivered-without-evidence → fallback, `[]` on continue) and the footer reaching `send_cb` payloads.
+- [ ] `tests/unit/session_runner/test_schema_routing.py` — **UPDATE**: new cases for `ask_coverage` validation (valid, delivered-without-evidence → fallback, `[]` on continue) and the coverage bounce: non-delivered clauses ⇒ no `send_cb` dispatch + advisory steering pushed; revised turn ⇒ dispatch proceeds; second bounce for the same turn never fires.
 - [ ] `tests/unit/output_handler/test_output_handler_drafter.py` — **UPDATE**: async `_evaluate_drafter_promise` in the mocked paths; no behavioral change to steering/bounce tests.
 - [ ] `tests/unit/valor_telegram/conftest.py::_bypass_promise_gate` — **UPDATE** only if the patched symbol moves; the sync `cli_check_or_exit` surface is unchanged, so likely no-op — verify.
 - [ ] Unaffected (verified by inventory, listed to bound the sweep): `test_drafter_validators.py`, `test_message_drafter_linkify.py`, `test_open_question_gate.py`, `test_checkin_primitive.py`, `test_deferred_self_draft_completed.py`, `test_promise_gate_session_events.py`, `test_resume_reverification*.py` (rails file untouched), `test_schema_routing_alert.py`, `test_harness_argv_golden.py`.
 
 ## Rabbit Holes
 
-- **Semantic matching of footer clauses against prose.** Detecting "the PM already said this in prose" to suppress a duplicate footer line is keyword matching against LLM output — the exact losing arms race R1 ends. Footer is unconditional for non-delivered clauses; move on.
+- **Semantically verifying the bounce revision.** Checking whether the PM's revised prose "really" states each disposition is keyword matching against LLM output — the exact losing arms race R1 ends. One bounce, deliver the revision, let the phase-4 measurement judge quality in aggregate; move on.
 - **Promoting `RTR_SDK_TIMEOUT` into `TimeoutSettings`.** Tempting config hygiene; the do-not-redefine comment and the promote-vs-name-locally criterion make it a standalone decision. Import it as the gate already does.
 - **Broadening `_FORWARD_DEFERRAL_PATTERNS`.** Explicitly dropped in the issue. The heuristic stays a narrow fail-closed backstop; the LLM's presence on the main path removes the temptation's justification.
 - **Building `evaluate_delivery` "while we're in there."** Phase 4 has an entry criterion for a reason; the measurement may show phases 1–3 suffice. Resist.
@@ -224,17 +224,16 @@ From spike-1's inventory. Dispositions: UPDATE / DELETE / REPLACE.
 **State prerequisite:** In phases 1–3 the gate reads only `session_id`, Job binding, and `extra_context` — none mutated per-turn; the footer is composed *before* task creation from the validated payload, so no shared-state read at delivery time. Phase 4's session-stamped ask WOULD be exposed to overwrite by turn N+1.
 **Mitigation:** Phases 1–3: none needed (documented invariant — new gate inputs must be bound into the coroutine's arguments at creation, not read from `session` at execution). Phase 4 (when/if built): pass the ask as a bound argument through the payload path or copy-on-create, never a live `session` attribute read; this constraint is recorded here so the phase-4 design inherits it.
 
-### Race 2: Steering preempt vs footer composition
-**Location:** `agent/session_runner/runner.py:1223-1240` (`_preempt_watcher`) vs `_route_turn`.
-**Trigger:** A steer arriving mid-turn can preempt routing; a preempted turn's payload (with `ask_coverage`) may never be delivered.
-**Data prerequisite:** Footer must derive only from the payload actually being delivered.
-**State prerequisite:** Footer composition lives inside the same code path that hands the payload to `on_user_payload` — an undelivered payload composes no footer.
-**Mitigation:** Structural (composition co-located with delivery handoff); no cross-task shared state.
+### Race 2: Coverage bounce vs steering preempt and the promise-gate bounce
+**Location:** `agent/session_runner/runner.py:1223-1240` (`_preempt_watcher`), `_route_turn`, and the self-draft steering channel shared with the drafter's promise bounce.
+**Trigger:** (a) A steer arriving mid-turn preempts routing — a preempted turn's `ask_coverage` must not leave a pending coverage advisory behind. (b) A single turn could qualify for BOTH a coverage bounce (runner layer) and a promise-gate self-draft (drafter layer), risking ping-pong revisions.
+**Data prerequisite:** The advisory must derive only from the payload actually being routed; the once-per-turn bounce flag must be turn-scoped, not session-global.
+**State prerequisite:** Coverage bounce fires before dispatch (runner layer); promise bounce fires at delivery (drafter layer) — the coverage-revised message still passes through the promise gate, so ordering is coverage-then-promise, never interleaved.
+**Mitigation:** Advisory composition co-located with the routing handoff (a preempted payload composes nothing); one coverage bounce per turn enforced by a turn-scoped flag; the shared `self_draft_attempts` bound terminates any residual loop. Test: a turn that triggers both bounces converges within the existing attempts bound.
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] **Phase 4: two-axis `evaluate_delivery` + gate-side under-delivery check.** Its entry criterion is the post-soak measurement report (Task 7 deliverable) reviewed by the owner — a human-gated event that cannot occur inside this lane's build window. The measurement tooling, the recorded criterion, and the session-stamping design constraints (spike-2, Race 1) all ship now so the phase-4 lane starts unblocked. If the measurement is clean, #3027 closes with the report as the recorded reason, per the issue's conditional AC.
-- [ORDERED] **Phase B schema tightening (`ask_coverage` → required).** One-line change gated on the fallback metric staying flat through the soak window — same human-gated review as above.
+- [SEPARATE-SLUG #3035] **Phase 4 (two-axis `evaluate_delivery`) and phase-B schema tightening (`ask_coverage` → required).** Both decisions are gated on the post-soak measurement and filed as investigation issue #3035, which its title defers to no earlier than 2026-09-10 (owner ruling 2026-08-27: recent update churn means no reliable stability for a sooner soak). The measurement tooling, the recorded entry criterion, and the phase-4 design constraints (spike-2 ask anchor, Race 1 bind-at-creation rule) all ship in THIS plan so #3035 starts unblocked.
 - [SEPARATE-SLUG #3016] The nightly-regression issue itself is *resolved* by this plan's test rewrite (implementation PR carries `Closes #3016`); listed here only to record that no further work on it exists outside this plan.
 
 Anti-criteria for the code-level No-Gos are in `## Verification` (no `evaluate_delivery` symbol ships; `ask_coverage` not in `required` in phase A).
@@ -262,7 +261,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 ## Success Criteria
 
 - [ ] `PM_TURN_JSON_SCHEMA` carries `ask_coverage`; `delivered` with empty `evidence` is rejected into the fallback path; `route:"continue"` accepts `[]`.
-- [ ] A two-clause ask answered on one clause produces a user-visible disposition for the other — asserted on delivered message text (footer), not only the schema object.
+- [ ] A two-clause ask answered on one clause triggers exactly one coverage bounce whose advisory names the dropped clause and its disposition; the revised turn is what ships (asserted end-to-end with a scripted driver whose revision states the disposition, proving the pipeline carries it to delivered text).
 - [ ] Incident A text ("Say the word and I'll…") blocks on the drafter main path; identical text with an open inbound expectation on the bound Job passes as `promise_recorded_override` — the R1 discriminator asserted directly.
 - [ ] Short path makes zero LLM calls (test-enforced); `elapsed_ms` lands on every audit row; measured p50/p99 reported in the PR against the <500ms/<3s budget.
 - [ ] Phrasebook deleted; replacement teaches no phrasing workaround and retains the present-fact norm (both prompt-content-tested).
@@ -295,8 +294,8 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - **Parallel**: true
 - Add optional `ask_coverage` to `PM_TURN_JSON_SCHEMA` (`agent/session_runner/router.py:61`) with the `{item, disposition, evidence}` shape; extend the comment block.
 - Extend `validate_structured_route`: `delivered` requires non-empty `evidence` (violation ⇒ invalid structured output ⇒ existing regex fallback); whitespace `item` dropped with warning; `[]`/absent valid.
-- Compose the deterministic footer for non-`delivered` clauses in `_route_turn`/`on_user_payload` handoff, bound into the payload before `loop.create_task` (Race 1/2 constraints).
-- New tests per Test Impact rows for these two files, including a metric-emission-site assertion (`agent/session_runner/runner.py:1373`) and footer-clears-heuristic.
+- Implement the coverage bounce at the `_route_turn`/`on_user_payload` handoff: non-`delivered` clauses ⇒ withhold dispatch, push the coverage advisory as self-draft steering (turn-scoped once-only flag; shared `self_draft_attempts` backstop) — Race 1/2 constraints.
+- New tests per Test Impact rows for these two files, including a metric-emission-site assertion (`agent/session_runner/runner.py:1373`), advisory-clears-heuristic, and the dual-bounce convergence case.
 
 ### 2. Validate schema coverage
 - **Task ID**: validate-schema-coverage
@@ -304,7 +303,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - **Assigned To**: component-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the two test files; verify footer appears in delivered payload in the schema-routing tests; verify fallback behavior on evidence-less `delivered`.
+- Run the two test files; verify the coverage bounce withholds dispatch and pushes the advisory, the revised turn dispatches, and no second bounce fires; verify fallback behavior on evidence-less `delivered`.
 
 ### 3. PM prompt rewrite
 - **Task ID**: build-prompt-rewrite
@@ -403,9 +402,11 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 
 ---
 
-## Open Questions
+## Owner Rulings (2026-08-27)
 
-1. **Footer vs. advisory-bounce for user-visible dispositions.** This plan chooses a deterministic footer (one line per non-delivered clause, appended at the runner layer) over bouncing the PM into self-draft revision when clauses are missing from prose. Footer cannot loop and needs no semantic matching, at the cost of occasional prose duplication. Confirm, or prefer the bounce (which reuses the existing self-draft machinery but adds a revision round-trip per under-covered message)?
-2. **Soak window length** for both ORDERED follow-ups (phase-B required-tightening and the phase-4 decision). Proposal: 7 days of normal traffic, using the existing 5%/1h fallback alert plus the Task-7 measurement report.
-3. **Audit source naming.** Plan adds `promise_gate_drafter_llm` for main-path LLM verdicts (additive value, distinguishes layers in the JSONL). Alternative: keep `promise_gate_drafter` for both layers and discriminate via `reason`. Additive value preferred — confirm?
-4. **Scope of the main-path LLM call.** `draft_message` serves all outbound (PM, teammate, email bridge, stop hook). The plan applies the LLM gate to the main path for **all** callers (honesty is transport-level, and the short path shields brief replies). Alternative: PM sessions only, keyed off session role. Confirm all-callers?
+Open questions were resolved by the owner at plan time; recorded here as the authority for the choices above.
+
+1. **Advisory bounce over deterministic footer** for user-visible clause dispositions — the PM's revised prose carries them, one bounce per turn, no semantic verification of the revision.
+2. **No timed soak window.** Recent update churn precludes a reliable soak; both post-merge decisions (phase-B required-tightening, phase-4 build) live in investigation issue #3035, deferred to no earlier than 2026-09-10.
+3. **`promise_gate_drafter_llm`** as the additive audit source for main-path LLM verdicts.
+4. **All `draft_message` callers** get the main-path LLM gate — honesty is transport-level; the short path shields brief replies.
