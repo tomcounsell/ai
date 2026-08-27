@@ -962,187 +962,208 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     for label in obsolete_removed:
         log(f"Removed obsolete launchd job {label} (feature deleted from codebase)", v, always=True)
 
-    # Step 1.6: Verify .env symlink
-    log("Verifying .env symlink...", v)
-    result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
-    env_r = result.env_sync_result
-    if env_r.created:
-        log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
-    if env_r.error:
-        log(f"WARN: Env symlink: {env_r.error}", v)
-        _append_warning(result, f"Env symlink: {env_r.error}")
-
-    # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
-    # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
-    log("Verifying config/projects.json...", v)
-    projects_r = env_sync.sync_projects_json(project_dir)
-    if projects_r.created:
-        log("config/projects.json copied from vault (was symlink or stale)", v, always=True)
-    elif projects_r.ok:
-        log("config/projects.json OK (real file copy)", v)
-    if projects_r.error:
-        log(f"WARN: projects.json: {projects_r.error}", v, always=True)
-        _append_warning(result, f"projects.json: {projects_r.error}")
-
-    # Step 1.655: Ensure the crash-recovery reflection is registered in the
-    # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
-    # (critique NIT) so the appended entry propagates into the per-machine
-    # config/reflections.yaml on this same cycle. Guarded on vault presence +
-    # 'valor' ownership; idempotent no-op once the entry exists.
-    log("Ensuring crash-recovery reflection is registered...", v)
-    result.reflection_register_result = reflection_register.register_crash_recovery(project_dir)
-    rr = result.reflection_register_result
-    if rr.action == "registered":
-        log("crash-recovery reflection registered in vault reflections.yaml", v, always=True)
-    elif rr.action == "noop":
-        log("crash-recovery reflection already registered", v)
-    elif rr.action == "skipped":
-        log(f"crash-recovery registration skipped: {rr.detail}", v)
-    if not rr.success:
-        log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
-        _append_warning(result, f"crash-recovery registration: {rr.detail}")
-
-    # Step 1.656: Remove reflections whose callables no longer ship in the
-    # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
-    # scheduling an entry that can no longer import (#2376). Same ordering
-    # rationale as Step 1.655: runs BEFORE Step 1.66's vault→config copy so
-    # the removal propagates on this same cycle.
-    for removed_name in reflection_register.REMOVED_REFLECTIONS:
-        log(f"Ensuring {removed_name} reflection is removed...", v)
-        rm = reflection_register.remove_reflection(project_dir, name=removed_name)
-        result.reflection_removal_results.append(rm)
-        if rm.action == "removed":
-            log(f"{removed_name} reflection removed from vault reflections.yaml", v, always=True)
-        elif rm.action == "noop":
-            log(f"{removed_name} reflection already absent", v)
-        elif rm.action == "skipped":
-            log(f"{removed_name} removal skipped: {rm.detail}", v)
-        if not rm.success:
-            log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
-            _append_warning(result, f"{removed_name} removal: {rm.detail}")
-
-    # Step 1.657: Ensure the memory-distill-backfill reflection is registered
-    # (#2202) via the same generalized register path. Same ordering rationale
-    # as Steps 1.655/1.656: runs BEFORE Step 1.66's vault→config copy so the
-    # entry propagates into the per-machine config/reflections.yaml on this
-    # same cycle.
-    log("Ensuring memory-distill-backfill reflection is registered...", v)
-    result.memory_distill_backfill_register_result = (
-        reflection_register.register_memory_distill_backfill(project_dir)
-    )
-    mdr = result.memory_distill_backfill_register_result
-    if mdr.action == "registered":
+    # Steps 1.6-1.68 mutate machine-global state outside this checkout: the
+    # .env symlink, config/projects.json, three reflection registrations into
+    # the shared iCloud vault, the vault->config reflections copy, ~/.zshenv,
+    # and gh CLI auth. All are off under --verify (#3026).
+    #
+    # The reflection registrations are the sharpest case. Since #2855 the
+    # write-side resolver targets the vault unconditionally, so leaving these
+    # ungated would make --verify write ~/Desktop/Valor/reflections.yaml --
+    # a shared, iCloud-synced file -- where it previously only dirtied a
+    # repo-local copy. The read_only flag has to lead the fix, not trail it.
+    if config.read_only:
         log(
-            "memory-distill-backfill reflection registered in vault reflections.yaml",
+            "Skipping machine-global sync steps 1.6-1.68 "
+            "(.env, projects.json, reflection registration, zshenv, gh auth) "
+            "— --verify makes no changes (#3026)",
             v,
             always=True,
         )
-    elif mdr.action == "noop":
-        log("memory-distill-backfill reflection already registered", v)
-    elif mdr.action == "skipped":
-        log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
-    if not mdr.success:
-        log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
-        _append_warning(result, f"memory-distill-backfill registration: {mdr.detail}")
+    else:
+        # Step 1.6: Verify .env symlink
+        log("Verifying .env symlink...", v)
+        result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
+        env_r = result.env_sync_result
+        if env_r.created:
+            log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
+        if env_r.error:
+            log(f"WARN: Env symlink: {env_r.error}", v)
+            _append_warning(result, f"Env symlink: {env_r.error}")
 
-    # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
-    # (#2717) via the same generalized register path. Same ordering
-    # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
-    # vault→config copy so the entry propagates into the per-machine
-    # config/reflections.yaml on this same cycle.
-    log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
-    result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
-        project_dir
-    )
-    upr = result.sdlc_upvote_pickup_register_result
-    if upr.action == "registered":
-        log(
-            "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
-            v,
-            always=True,
+        # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
+        # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
+        log("Verifying config/projects.json...", v)
+        projects_r = env_sync.sync_projects_json(project_dir)
+        if projects_r.created:
+            log("config/projects.json copied from vault (was symlink or stale)", v, always=True)
+        elif projects_r.ok:
+            log("config/projects.json OK (real file copy)", v)
+        if projects_r.error:
+            log(f"WARN: projects.json: {projects_r.error}", v, always=True)
+            _append_warning(result, f"projects.json: {projects_r.error}")
+
+        # Step 1.655: Ensure the crash-recovery reflection is registered in the
+        # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
+        # (critique NIT) so the appended entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle. Guarded on vault presence +
+        # 'valor' ownership; idempotent no-op once the entry exists.
+        log("Ensuring crash-recovery reflection is registered...", v)
+        result.reflection_register_result = reflection_register.register_crash_recovery(project_dir)
+        rr = result.reflection_register_result
+        if rr.action == "registered":
+            log("crash-recovery reflection registered in vault reflections.yaml", v, always=True)
+        elif rr.action == "noop":
+            log("crash-recovery reflection already registered", v)
+        elif rr.action == "skipped":
+            log(f"crash-recovery registration skipped: {rr.detail}", v)
+        if not rr.success:
+            log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
+            _append_warning(result, f"crash-recovery registration: {rr.detail}")
+
+        # Step 1.656: Remove reflections whose callables no longer ship in the
+        # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
+        # scheduling an entry that can no longer import (#2376). Same ordering
+        # rationale as Step 1.655: runs BEFORE Step 1.66's vault→config copy so
+        # the removal propagates on this same cycle.
+        for removed_name in reflection_register.REMOVED_REFLECTIONS:
+            log(f"Ensuring {removed_name} reflection is removed...", v)
+            rm = reflection_register.remove_reflection(project_dir, name=removed_name)
+            result.reflection_removal_results.append(rm)
+            if rm.action == "removed":
+                log(
+                    f"{removed_name} reflection removed from vault reflections.yaml", v, always=True
+                )
+            elif rm.action == "noop":
+                log(f"{removed_name} reflection already absent", v)
+            elif rm.action == "skipped":
+                log(f"{removed_name} removal skipped: {rm.detail}", v)
+            if not rm.success:
+                log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
+                _append_warning(result, f"{removed_name} removal: {rm.detail}")
+
+        # Step 1.657: Ensure the memory-distill-backfill reflection is registered
+        # (#2202) via the same generalized register path. Same ordering rationale
+        # as Steps 1.655/1.656: runs BEFORE Step 1.66's vault→config copy so the
+        # entry propagates into the per-machine config/reflections.yaml on this
+        # same cycle.
+        log("Ensuring memory-distill-backfill reflection is registered...", v)
+        result.memory_distill_backfill_register_result = (
+            reflection_register.register_memory_distill_backfill(project_dir)
         )
-    elif upr.action == "noop":
-        log("sdlc-upvote-pickup reflection already registered", v)
-    elif upr.action == "skipped":
-        log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
-    if not upr.success:
-        log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
-        _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
+        mdr = result.memory_distill_backfill_register_result
+        if mdr.action == "registered":
+            log(
+                "memory-distill-backfill reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif mdr.action == "noop":
+            log("memory-distill-backfill reflection already registered", v)
+        elif mdr.action == "skipped":
+            log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
+        if not mdr.success:
+            log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
+            _append_warning(result, f"memory-distill-backfill registration: {mdr.detail}")
 
-    # Step 1.659: Repoint reflection callables onto the modules that own them.
-    # Two migration families share one table: the `agent.sustainability.*` shim
-    # -> `reflections.agents.*` (#2875), and the `agent.agent_session_queue.*`
-    # re-export hub -> `agent.session_health` / `agent.session_revival` (#2876).
-    # Keep these strings family-agnostic: naming one family makes the log false
-    # on a machine where the other fires, and an operator verifying #2876's
-    # propagation gate reads exactly this output.
-    # config/reflections.yaml is gitignored, so this registry edit can only
-    # reach machines as tracked code that rewrites the file. Runs BEFORE Step
-    # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
-    # so a vault rewrite propagates on this same cycle; the migration also
-    # rewrites the config copy directly, because Step 1.66 skips the copy when
-    # the config copy is not older than the vault. Idempotent no-op once done.
-    log("Ensuring reflection callables name their owning modules...", v)
-    result.reflections_callables_result = reflections_callables.run_reflections_callables_migration(
-        project_dir
-    )
-    rcr = result.reflections_callables_result
-    if rcr.action == "rewrote":
-        log(
-            f"reflection callables repointed onto their owning modules "
-            f"({rcr.rewrites_count} line(s) across {len(rcr.targets or [])} file(s))",
-            v,
-            always=True,
+        # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
+        # (#2717) via the same generalized register path. Same ordering
+        # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
+        # vault→config copy so the entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle.
+        log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
+        result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
+            project_dir
         )
-    elif rcr.action == "noop":
-        log("reflection callables already name their owning modules", v)
-    if not rcr.success:
-        log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
-        _append_warning(result, f"reflection callable migration: {rcr.error}")
+        upr = result.sdlc_upvote_pickup_register_result
+        if upr.action == "registered":
+            log(
+                "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif upr.action == "noop":
+            log("sdlc-upvote-pickup reflection already registered", v)
+        elif upr.action == "skipped":
+            log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
+        if not upr.success:
+            log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
+            _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
 
-    # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
-    # symlink — the launchd worker's reflection scheduler reads it, and a
-    # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
-    log("Verifying config/reflections.yaml...", v)
-    result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
-    refl_r = result.reflections_sync_result
-    if refl_r.created:
-        log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
-    elif refl_r.ok:
-        log("config/reflections.yaml OK (real file copy)", v)
-    elif refl_r.skipped:
-        log("config/reflections.yaml: vault not found, using in-repo fallback", v)
-    if refl_r.error:
-        log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
-        _append_warning(result, f"reflections.yaml: {refl_r.error}")
+        # Step 1.659: Repoint reflection callables onto the modules that own them.
+        # Two migration families share one table: the `agent.sustainability.*` shim
+        # -> `reflections.agents.*` (#2875), and the `agent.agent_session_queue.*`
+        # re-export hub -> `agent.session_health` / `agent.session_revival` (#2876).
+        # Keep these strings family-agnostic: naming one family makes the log false
+        # on a machine where the other fires, and an operator verifying #2876's
+        # propagation gate reads exactly this output.
+        # config/reflections.yaml is gitignored, so this registry edit can only
+        # reach machines as tracked code that rewrites the file. Runs BEFORE Step
+        # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
+        # so a vault rewrite propagates on this same cycle; the migration also
+        # rewrites the config copy directly, because Step 1.66 skips the copy when
+        # the config copy is not older than the vault. Idempotent no-op once done.
+        log("Ensuring reflection callables name their owning modules...", v)
+        result.reflections_callables_result = (
+            reflections_callables.run_reflections_callables_migration(project_dir)
+        )
+        rcr = result.reflections_callables_result
+        if rcr.action == "rewrote":
+            log(
+                f"reflection callables repointed onto their owning modules "
+                f"({rcr.rewrites_count} line(s) across {len(rcr.targets or [])} file(s))",
+                v,
+                always=True,
+            )
+        elif rcr.action == "noop":
+            log("reflection callables already name their owning modules", v)
+        if not rcr.success:
+            log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
+            _append_warning(result, f"reflection callable migration: {rcr.error}")
 
-    # Step 1.67: Bootstrap cross-machine zshenv loader.
-    # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
-    # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
-    # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
-    log("Verifying ~/.zshenv → vault loader...", v)
-    result.zshenv_sync_result = zshenv_sync.sync_zshenv()
-    zr = result.zshenv_sync_result
-    if zr.vault_seeded:
-        log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
-    if zr.guard_added:
-        log("Added Valor source guard to ~/.zshenv", v, always=True)
-    if zr.error:
-        log(f"WARN: zshenv sync: {zr.error}", v, always=True)
-        _append_warning(result, f"zshenv sync: {zr.error}")
+        # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
+        # symlink — the launchd worker's reflection scheduler reads it, and a
+        # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
+        log("Verifying config/reflections.yaml...", v)
+        result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
+        refl_r = result.reflections_sync_result
+        if refl_r.created:
+            log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
+        elif refl_r.ok:
+            log("config/reflections.yaml OK (real file copy)", v)
+        elif refl_r.skipped:
+            log("config/reflections.yaml: vault not found, using in-repo fallback", v)
+        if refl_r.error:
+            log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
+            _append_warning(result, f"reflections.yaml: {refl_r.error}")
 
-    # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
-    # Ensures all machines use the correct primary GitHub token consistently.
-    # Idempotent — safe to run on every update tick.
-    log("Configuring gh CLI auth...", v)
-    gh_auth_result = gh_auth.configure_gh_auth(project_dir)
-    if gh_auth_result.action == "configured":
-        log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
-    elif gh_auth_result.action == "skipped":
-        log(f"gh auth: skipped — {gh_auth_result.detail}", v)
-    elif not gh_auth_result.success:
-        log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
-        _append_warning(result, f"gh auth: {gh_auth_result.error}")
+        # Step 1.67: Bootstrap cross-machine zshenv loader.
+        # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
+        # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
+        # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
+        log("Verifying ~/.zshenv → vault loader...", v)
+        result.zshenv_sync_result = zshenv_sync.sync_zshenv()
+        zr = result.zshenv_sync_result
+        if zr.vault_seeded:
+            log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
+        if zr.guard_added:
+            log("Added Valor source guard to ~/.zshenv", v, always=True)
+        if zr.error:
+            log(f"WARN: zshenv sync: {zr.error}", v, always=True)
+            _append_warning(result, f"zshenv sync: {zr.error}")
+
+        # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
+        # Ensures all machines use the correct primary GitHub token consistently.
+        # Idempotent — safe to run on every update tick.
+        log("Configuring gh CLI auth...", v)
+        gh_auth_result = gh_auth.configure_gh_auth(project_dir)
+        if gh_auth_result.action == "configured":
+            log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
+        elif gh_auth_result.action == "skipped":
+            log(f"gh auth: skipped — {gh_auth_result.detail}", v)
+        elif not gh_auth_result.success:
+            log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
+            _append_warning(result, f"gh auth: {gh_auth_result.error}")
 
     # Step 1.69: Check Google Workspace CLI (`gws`) auth state.
     # Detection only — the OAuth consent flow is human-gated and browser-based,
