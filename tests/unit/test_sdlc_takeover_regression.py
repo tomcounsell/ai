@@ -173,7 +173,7 @@ class TestTakeoverRegression:
         # for target_repo, so no env/gh resolution is needed here. Stub only
         # the gh-network boundary (_fetch_pr_merge_state) so this test never
         # shells out.
-        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)):
             enriched = query_enriched(issue_number=_ISSUE)
 
         assert enriched["stages"]["BUILD"] == "completed"

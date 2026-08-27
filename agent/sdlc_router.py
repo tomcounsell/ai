@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -88,6 +89,29 @@ def normalize_verdict(text: str | None) -> str:
 # means the router may dispatch the same sub-skill up to three times in a row
 # without the pipeline state changing; the fourth would trip G4.
 MAX_SAME_STAGE_DISPATCHES = 3
+
+
+def _terminal_guard_enabled() -> bool:
+    """Kill switch for the terminal-lane guard (#2894, #2817), read live.
+
+    The guard preempts the entire dispatch table, so a false positive halts a
+    live lane silently. Provisional and tunable: set ``SDLC_TERMINAL_GUARD=false``
+    to fall back to the pre-#2894 routing.
+
+    Read INSIDE :func:`guard_terminal_lane` rather than cached at import time —
+    ``agent/sdlc_router.py`` is imported once by the long-lived bridge/worker
+    (``agent/session_runner/runner.py``), so an import-time constant would make
+    the override per-process rather than live, defeating the point of a kill
+    switch with this guard's blast radius: a same-process flip (a test, an
+    operator script, a hot env change) takes effect on the very next call, no
+    service restart required.
+    """
+    return os.environ.get("SDLC_TERMINAL_GUARD", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+    )
+
 
 # Maximum number of router turns that G7 will wait for a /do-plan dispatch
 # after the plan_revising lock is set. After this many turns with no /do-plan
@@ -150,6 +174,30 @@ class Dispatch:
 
     skill: str
     reason: str
+    row_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Terminal:
+    """The pipeline is finished. Nothing to dispatch, and nothing is wrong.
+
+    Distinct from ``Blocked`` on purpose (#2817). A ``Blocked`` says the router
+    could not decide and a human should look; a ``Terminal`` says there is
+    correctly nothing left to do. Collapsing the two taught every consumer to
+    treat a shipped lane as an error — ``Blocked(NO_RULE)`` on a MERGE-completed
+    pipeline is exactly that confusion.
+
+    ``evidence`` names WHICH branch of the terminal predicate fired, so a false
+    positive is greppable in the logs rather than silent. The guard preempts the
+    entire dispatch table, so a wrong Terminal halts a live lane and is otherwise
+    indistinguishable from a legitimately finished one:
+
+      - ``"merge_marker"`` — ``stage_states["MERGE"]`` is settled.
+      - ``"merged_pr"``    — the tracking PR reports ``state == "MERGED"``.
+    """
+
+    reason: str
+    evidence: str
     row_id: str | None = None
 
 
@@ -771,6 +819,72 @@ def guard_g7_plan_revising(
     return None
 
 
+def _terminal_evidence(stage_states: dict, meta: dict) -> str | None:
+    """Return which branch proves this lane is finished, or ``None``.
+
+    **Positive evidence only.** Absence of signal is never terminal — an empty
+    ledger, a missing ``pr_number``, or an unresolvable merge state all mean "we
+    do not know", and treating not-knowing as finished would silently halt live
+    lanes. That is the same fail-closed discipline the staleness gate uses.
+
+    Two branches, in order of trust:
+
+    1. ``MERGE`` settled — the pipeline recorded its own completion.
+    2. ``pr_state == "MERGED"`` — GitHub says the tracking PR merged. This is the
+       branch that survives a lost ledger (#2853 merged, then its ledger emptied,
+       and the router began dispatching ``/do-plan`` on shipped work).
+
+    ``pr_merge_state`` is deliberately NOT consulted. It carries GitHub's
+    ``mergeStateStatus``, which reports ``UNKNOWN`` for merged, not-yet-computed,
+    AND genuinely-unresolvable PRs alike (#2894). Only ``pr_state`` separates
+    merged-and-done from the other two.
+    """
+    if stage_states.get("MERGE") in SETTLED_STATUSES:
+        return "merge_marker"
+    if (meta.get("pr_state") or "").upper() == "MERGED":
+        return "merged_pr"
+    return None
+
+
+def guard_terminal_lane(stage_states: dict, meta: dict, context: dict) -> Terminal | None:
+    """T: the lane is finished — preempt the entire dispatch table (#2894, #2817).
+
+    Evaluated FIRST, ahead of every other guard, because a finished lane has no
+    correct dispatch and no guard verdict worth computing. Recon on 2026-08-26
+    measured four different rows each claiming a shipped lane — row 10
+    (``/do-merge``, the originally filed #2894), row 8f (``/do-pr-review`` on the
+    merged #2734 and #2741), row 5 (``/do-build``), and row 1 (``/do-plan`` once
+    #2853's ledger emptied). Terminality therefore belongs in a guard: a per-row
+    terminal condition would have to be written four times today and rewritten
+    for every row added later.
+
+    Set ``SDLC_TERMINAL_GUARD=false`` to disable, restoring the previous
+    routing without a revert or a fleet restart — see ``_terminal_guard_enabled``
+    for why this is read live rather than cached at import time.
+    """
+    if not _terminal_guard_enabled():
+        return None
+    evidence = _terminal_evidence(stage_states, meta)
+    if evidence is None:
+        return None
+    pr_number = meta.get("pr_number")
+    pr_clause = f"PR #{pr_number}" if pr_number else "no PR on record"
+    reason = (
+        f"Pipeline complete — nothing to dispatch "
+        f"(evidence: {evidence}; {pr_clause}). "
+        f"This is a successful terminal state, not a routing failure."
+    )
+    # INFO, not debug: a false positive silently halts a live lane, so every
+    # terminal decision must be greppable after the fact (Risk 1).
+    logger.info(
+        "[sdlc_router] terminal lane: evidence=%s pr_number=%s merge_stage=%s",
+        evidence,
+        pr_number,
+        stage_states.get("MERGE"),
+    )
+    return Terminal(reason=reason, evidence=evidence, row_id="T")
+
+
 def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
     """G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to /do-merge.
 
@@ -919,7 +1033,10 @@ def guard_g9_blocked_on_conflict(
     )
 
 
-GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
+GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | Terminal | None]] = [
+    # T runs first by design: a finished lane has no correct dispatch, so no
+    # other guard's verdict is worth computing (#2894, #2817).
+    guard_terminal_lane,
     guard_g1_critique_loop,
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
@@ -934,7 +1051,7 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
 
 def evaluate_guards(
     stage_states: dict, meta: dict, context: dict | None = None
-) -> Dispatch | Blocked | None:
+) -> Dispatch | Blocked | Terminal | None:
     """Walk the guard list, return the first tripped decision, or ``None``."""
     ctx = context or {}
     for guard in GUARDS:
@@ -2001,11 +2118,12 @@ def decide_next_dispatch(
     stage_states: dict,
     meta: dict | None = None,
     context: dict | None = None,
-) -> Dispatch | Blocked:
+) -> Dispatch | Blocked | Terminal:
     """Decide which sub-skill the SDLC router should dispatch next.
 
     Algorithm:
-      1. Evaluate guards G1–G9. If any guard trips, return its decision.
+      1. Evaluate the terminal guard, then G1–G9. If any trips, return its
+         decision. A ``Terminal`` here means the lane is finished (#2894, #2817).
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
          rule whose ``state_predicate`` returns True as the primary dispatch.
       3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.

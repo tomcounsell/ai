@@ -259,15 +259,22 @@ class TestNoRuleBlockIsDistinguishable:
     without parsing the reason string."""
 
     def _unowned_state(self) -> tuple[dict, dict]:
-        # PR present, REVIEW completed with an APPROVED verdict, DOCS completed,
-        # MERGE completed — every PR-stage row has already been satisfied.
+        # A genuine hole in the dispatch table: REVIEW is *pending* while an
+        # APPROVED verdict is already recorded. Row 8e needs REVIEW completed,
+        # row 10 needs it settled, and row 7 needs no verdict — so nothing owns
+        # it. Found by enumerating the row predicates, not guessed.
+        #
+        # This deliberately no longer sets MERGE: "completed" (#2894/#2817).
+        # That shape is now a Terminal, not a NO_RULE — a finished pipeline is
+        # a success state, not a hole in the table. Using it here would assert
+        # the exact confusion the terminal guard exists to remove.
         states = {
             "PLAN": "completed",
             "CRITIQUE": "completed",
             "BUILD": "completed",
-            "REVIEW": "completed",
+            "REVIEW": "pending",
             "DOCS": "completed",
-            "MERGE": "completed",
+            "MERGE": "pending",
             "_verdicts": {"REVIEW": {"verdict": "APPROVED", "recorded_at": _VERDICT_AT}},
         }
         meta = {

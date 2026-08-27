@@ -113,6 +113,54 @@ Promotes the ISSUE-rooted success spine behind `stage` to `completed`, using `_r
 - **Single save**: all promotions from one call are persisted with one `_save()`, not one write per stage.
 - **Distinct metric**: each promoted stage emits `sdlc.stage_backfilled` (not `sdlc.stage_started`), so synthetic promotions are observable and distinguishable from real stage-start events.
 
+### Mid-Pipeline Entry Detection (issue #2851)
+
+A lane whose first `sdlc-tool` dispatch is at a non-ISSUE stage skipped its
+predecessors, and completing REVIEW then dies in `_backfill_predecessors` on
+the verdict invariant (#2415) — correctly, since there is genuinely no
+verdict to promote. That refusal used to be undiagnosable:
+`STATE_MACHINE_REJECTED` gave an operator no way to tell a mid-pipeline entry
+apart from an ordinary invariant violation.
+
+`tools/sdlc_stage_marker.py::_mid_pipeline_entry_diagnostic` closes that gap.
+It is observability only — it makes nothing newly skippable and nothing newly
+completable — and fires only on **positive evidence** the lane did work at a
+non-ISSUE stage, never on an empty stages map (which is indistinguishable from
+a genuinely fresh lane, since `tools/sdlc_next_skill.py`'s durable-signal
+recovery already runs before `decide_next_dispatch` and an empty map there
+just means that recovery failed). Two admissible signals, both naming what is
+missing so the state is repairable rather than merely refused:
+
+1. a stage with a recorded verdict but no marker — a verdict is only ever
+   produced by a stage that ran, so the marker was lost or never written;
+2. a plan document (live OR archived) with no PLAN marker — the plan is proof
+   PLAN was owed.
+
+The diagnostic runs inside the `STATE_MACHINE_REJECTED` error path and must
+never raise into it: every lookup is best-effort and a failure contributes no
+signal rather than refusing (the fail-closed posture belongs to
+`_skip_precondition_error` below, which grants a capability; this grants
+none).
+
+### The Closed Plan-Archival Escape Hatch (issue #2851)
+
+`_skip_precondition_error`'s plan-existence check originally consulted only
+`find_plan_path`, which searches `docs/plans/` — the live directory. A shipped
+lane's plan moves to `docs/archive/plans-completed/` once it merges, so once
+archived, `find_plan_path` returns `None` and the precondition read as "no
+plan ever existed", making that lane's CRITIQUE retroactively skippable. That
+was a hole straight through the verdict invariant the precondition exists to
+defend: archiving a plan is a filing action, not evidence the stage never
+applied.
+
+The precondition now also consults `tools.lane_identity.find_archived_plan_path`
+(rung 1b, alongside the live-plan rung 1). Finding an archived plan refuses the
+skip with the same `PLAN_EXISTS_NOT_SKIPPABLE` reason as a live one: the stage
+applied and actually ran, and archiving does not change that question. Like
+every other probe in this function, an errored archived-plan lookup refuses
+the skip rather than assuming no plan ever existed — "cannot confirm" must
+never read as "confirmed absent".
+
 ### Marker vs. Router Semantics
 
 The marker tool (`tools/sdlc_stage_marker.py`) and the router (`.claude/skills-global/do-sdlc/SKILL.md`) both operate on the same `PipelineStateMachine`, but with different intent:

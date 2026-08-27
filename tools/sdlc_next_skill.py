@@ -24,7 +24,7 @@ Environment:
     Setting ``SDLC_ROUTER_SOURCE`` has no effect.
 
 Exit codes:
-    0 — decision produced (``dispatch`` or ``blocked``)
+    0 — decision produced (``dispatch``, ``terminal``, or ``blocked``)
     1 — session lookup or dispatch calculation failed fatally
     2 — wrapper-level usage / configuration error
 
@@ -39,6 +39,14 @@ Output (JSON, stdout)::
         "recorded_reason": "NOT_PERSISTED_CALL_DISPATCH_RECORD"
     }
 
+    # When the lane is finished (#2894, #2817) — a SUCCESS, exit 0:
+    {
+        "decision": "terminal",
+        "reason": "Pipeline complete — nothing to dispatch (...)",
+        "evidence": "merge_marker",
+        "row_id": "T"
+    }
+
     # When the router blocks:
     {
         "blocked": true,
@@ -47,8 +55,10 @@ Output (JSON, stdout)::
         "guard_id": "G4"
     }
 
-Every response carries ``decision``: ``"dispatch"``, ``"blocked"``, or
-``"error"``.
+Every response carries ``decision``: ``"dispatch"``, ``"terminal"``,
+``"blocked"``, or ``"error"``. ``terminal`` is NOT a flavour of ``blocked``:
+a shipped pipeline is a correct, successful end state, and reporting it as an
+escalation is the confusion #2817 exists to end.
 
 **This tool persists nothing.** It is a pure decision call plus a read-only
 issue-lock peek — that holds with or without ``--run-id``, which only states
@@ -586,6 +596,10 @@ def decide(
         ``recorded`` is always ``False`` -- this function never writes to the
         ledger, so it never claims to (#2897); the caller records the
         dispatch with ``sdlc-tool dispatch record``.
+        On ``Terminal``: ``{"decision": "terminal", "reason": "...",
+        "evidence": "merge_marker" | "merged_pr", "row_id": "T"}`` -- the lane
+        is finished. No ``blocked`` key and no ``recorded`` claim: there is
+        nothing to escalate and nothing to record.
         On ``Blocked``: ``{"blocked": True, "decision": "blocked",
         "reason": "...", "guard_id": "..."}``
         On issue-lock contention: ``{"blocked": True, "reason": "ISSUE_LOCKED",
@@ -599,6 +613,7 @@ def decide(
         from agent.sdlc_router import (
             Blocked,
             Dispatch,
+            Terminal,
             decide_next_dispatch,
         )
 
@@ -734,6 +749,19 @@ def decide(
                 "recorded": False,
                 "recorded_reason": NOT_RECORDED_REASON,
             }
+        elif isinstance(result, Terminal):
+            # A finished lane is a SUCCESS, not an escalation (#2894, #2817).
+            # Deliberately NOT folded into the blocked shape and carrying no
+            # ``blocked`` key: a shipped pipeline reporting
+            # ``{"blocked": true, "guard_id": "NO_RULE"}`` is exactly the
+            # confusion this shape exists to end. No ``recorded`` claim either
+            # -- there is no dispatch to record.
+            return {
+                "decision": "terminal",
+                "reason": result.reason,
+                "evidence": result.evidence,
+                "row_id": result.row_id,
+            }
         elif isinstance(result, Blocked):
             return {
                 "blocked": True,
@@ -826,7 +854,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(json.dumps(result))
 
-    # Exit 1 on error, 0 on dispatch or block (both are valid outcomes)
+    # Exit 1 on error only. dispatch, terminal, and blocked are all valid
+    # outcomes -- a terminal (finished) pipeline is a success, not a failure.
     if result.get("decision") == "error":
         return 1
     return 0

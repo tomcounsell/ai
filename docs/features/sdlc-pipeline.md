@@ -10,16 +10,22 @@ ISSUE → PLAN → CRITIQUE → BUILD → TEST → PATCH → REVIEW → DOCS →
 
 Each stage is tracked as a JSON dict with stage-status keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", ...}`). Since issue #2012 the durable primary store is the issue-keyed `PipelineLedger` (`(target_repo, issue_number)`), with the PM session's `AgentSession.stage_states` retained as a fallback for callers with no live per-issue lease — see [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md). The SDLC router reads this state (via `sdlc-tool stage-query`) and dispatches one sub-skill per invocation.
 
-## Legal Dispatch Guards (G1–G9)
+## Legal Dispatch Guards (T, G1–G9)
 
 Guards are evaluated **in `GUARDS` list order** before the dispatch table; the
 first guard to return a non-`None` decision wins and overrides the table. The
-pinned order is `[G1, G2, G3, G4, G9, G8, G7, G5, G6]` — guard IDs are historical
-(assigned in the order each guard was introduced), not the evaluation order.
-The table below is listed in evaluation order:
+pinned order is `[T, G1, G2, G3, G4, G9, G8, G7, G5, G6]` — guard IDs are
+historical (assigned in the order each guard was introduced), not the
+evaluation order. The table below is listed in evaluation order.
+
+`T` runs ahead of every numbered guard: a lane whose MERGE stage is settled or
+whose tracking PR has merged has no correct dispatch, so no other guard's
+verdict is worth computing. See
+[SDLC Terminal Lane State](sdlc-terminal-lane-state.md).
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
+| T: Terminal lane | `stage_states["MERGE"]` settled OR `pr_state == "MERGED"` | `Terminal` — clean exit, preempts everything below. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | G1: Critique loop | Verdict NEEDS REVISION or MAJOR REWORK AND last dispatch was critique | `/do-plan` |
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` AND CRITIQUE not completed | `blocked` |
 | G3: PR lock | PR open AND last/proposed dispatch is plan-stage skill | Redirect to appropriate PR-stage skill |
@@ -303,7 +309,8 @@ The enriched stage query output (`sdlc-tool stage-query`) includes a `_meta` dic
 | `revision_applied` | bool | Plan frontmatter | Whether `revision_applied: true` is in the plan doc (sticky) |
 | `revision_applied_at` | str\|None | Plan frontmatter | ISO-8601 UTC timestamp written alongside `revision_applied: true`; event-scoped convergence latch for `_critique_verdict_is_stale()` (#1760) |
 | `pr_number` | int\|None | Session attr or `gh pr list` | Open PR number for this issue |
-| `pr_merge_state` | str\|None | GitHub API | `mergeStateStatus` from `gh pr view` |
+| `pr_state` | str\|None | GitHub API (`gh pr view`'s `state`) | `"OPEN"`/`"CLOSED"`/`"MERGED"`. Resolved even for a ledger-less lane via `_ledger_less_merged_pr` (open-before-merged, #2894). Consulted by the `T` terminal guard — see [SDLC Terminal Lane State](sdlc-terminal-lane-state.md) |
+| `pr_merge_state` | str\|None | GitHub API | `mergeStateStatus` from `gh pr view`. Reports `"UNKNOWN"` for merged, not-yet-computed, and genuinely-unresolvable PRs alike — never consulted for terminality, only `pr_state` is |
 | `ci_all_passing` | bool\|None | GitHub API | Whether all status checks pass |
 | `same_stage_dispatch_count` | int | `_sdlc_dispatches` | Consecutive same-skill same-state dispatches |
 | `last_dispatched_skill` | str\|None | `_sdlc_dispatches` | Most recent skill dispatched |

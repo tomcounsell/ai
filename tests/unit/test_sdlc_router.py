@@ -1144,6 +1144,9 @@ class TestGuardsListOrder:
     def test_guards_pinned_order(self):
         names = [g.__name__ for g in GUARDS]
         assert names == [
+            # T (#2894, #2817) runs first: a finished lane has no correct
+            # dispatch, so no other guard's verdict is worth computing.
+            "guard_terminal_lane",
             "guard_g1_critique_loop",
             "guard_g2_critique_cycle_cap",
             "guard_g3_pr_lock",
