@@ -286,7 +286,8 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_docs_auditor_substrate.py` | 130 | Documentation reference validation |
+| unit | `test_docs_auditor_substrate.py` | 196 | Documentation reference validation |
+| unit | `test_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
 | unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
 | unit | `test_validate_no_gos_justification.py` | 77 | No-Gos section justification validation |
 | unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |

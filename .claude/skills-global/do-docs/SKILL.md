@@ -217,8 +217,13 @@ If the repo-context file declares an auto-fix substrate, run it against the chan
 **before** doing manual edits. Such a substrate typically handles mechanical fixes —
 renamed markdown links, renamed paths/symbols, index entries pointing at deleted files, and
 stale-term renames — so Step 3 only handles cases requiring human judgment. Follow the
-context file's invocation and output-handling instructions exactly, and do not re-commit
-changes the substrate commits itself.
+context file's invocation and output-handling instructions exactly.
+
+The substrate applies its fixes to the working tree and does **not** commit them — you own
+the commit, and the diff it produced has to pass your review in Step 4 before it becomes a
+permanent record. Record the set of files it reports touching (the `files_touched` key of its
+output, if it reports one) and carry that list into Step 4, where it joins the Step 2 task
+list as an expected file.
 
 If no substrate is declared (the generic case), skip this step — all edits are made manually in Step 3.
 
@@ -249,7 +254,10 @@ After all edits are complete:
    ```bash
    git diff --name-only
    ```
-   Every file in this list should appear in the Step 2 task list. If there are unexpected files, revert them.
+   Every file in this list should appear in the expected set: the Step 2 task list **plus**
+   the `files_touched` the Step 2d substrate reported. If there are unexpected files, revert
+   them. Substrate-touched files are expected, but they are not exempt from review — read
+   their diffs in the next sub-step like any other, and revert any change you cannot justify.
 
 2. **Review each diff is minimal and correct:**
    ```bash
@@ -291,6 +299,12 @@ After all edits are complete:
    git add -A && git commit -m "Docs: cascade updates for <brief change description>"
    ```
    Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed." Push if the workflow expects it (`git push`).
+
+   <!-- NOTE (#2739 review): this `git add -A` stages the whole tree, mirroring
+   the whole-tree stage this issue removed from `reflections/docs_auditor.py`
+   itself. Left as-is here because this cascade runs inside a worktree-isolated
+   lane behind the plan's Step 4 review gate, unlike the rotation path's shared
+   main checkout — revisit if `/do-docs` ever runs outside a dedicated worktree. -->
 
    **Push-ancestry guard (this repo — #2026).** Before any `git push` to `main`
    from a cascade, run the push-ancestry guard so a worktree HEAD left detached at
