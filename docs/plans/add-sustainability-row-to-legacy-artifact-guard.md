@@ -426,11 +426,17 @@ table row across builders would cost more coordination than it saves. A
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Guard passes | `scripts/pytest-clean.sh tests/unit/test_no_legacy_artifacts.py -q -p no:xdist` | exit code 0 |
-| Symbol-referencing tests pass | `scripts/pytest-clean.sh tests/unit/test_no_legacy_artifacts.py tests/unit/test_sustainability_namespace.py tests/unit/test_migrate_reflections_callables.py tests/unit/test_update_reflections_callables.py tests/unit/test_verify_registry_without_shim.py tests/unit/test_reflection_scheduler.py -q -p no:xdist` | exit code 0 |
+| Guard passes | `scripts/pytest-clean.sh tests/unit/test_no_legacy_artifacts.py -q -n0` | exit code 0 |
+| Symbol-referencing tests pass | `scripts/pytest-clean.sh tests/unit/test_no_legacy_artifacts.py tests/unit/test_sustainability_namespace.py tests/unit/test_migrate_reflections_callables.py tests/unit/test_update_reflections_callables.py tests/unit/test_verify_registry_without_shim.py tests/unit/test_reflection_scheduler.py -q -n0` | exit code 0 |
 | No exemption is positional | `grep -nE '^\s*"[^"]+:[0-9]+"' tests/unit/test_no_legacy_artifacts.py` | exit code 1 |
 | Lint clean | `python -m ruff check tests/unit/test_no_legacy_artifacts.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tests/unit/test_no_legacy_artifacts.py` | exit code 0 |
+
+Serial execution is requested with `-n0`, never `-p no:xdist`. Unregistering the
+plugin leaves `pyproject.toml`'s `addopts` feeding it `-n auto --dist=loadfile`
+anyway, so pytest exits on an argument-parsing error before it collects
+anything — a red that looks like a guard failure and is not one. `-n0` keeps the
+plugin registered and simply runs one worker.
 
 Two rows a first draft of this plan carried are deliberately absent. A
 `git ls-files` invocation asserting the shim file is still absent would exit 0
