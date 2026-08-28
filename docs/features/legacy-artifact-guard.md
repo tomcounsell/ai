@@ -83,12 +83,32 @@ row is in place; nothing about it is still pending.
 
 Its exemption set is the largest in the table, and honesty about what that means
 matters more than the row looking strong. The rename left behind a migration
-script, an update-time probe, a standalone verifier, and their tests. Every one
-of them must keep recognizing the pre-rename import path — that path is the
-*source* side of the rename mapping, and stripping it out would disarm a
-self-heal that exists to repair registry copies still in the field. So they are
-exempted by path rather than edited, and the set's length is the migration's
-shape rather than accumulated laxity.
+script, an update-time probe, a standalone verifier, and their tests. They are
+**not** all exempt for the same reason, and the row groups them accordingly —
+one blanket rationale would read well and be false for most of the set:
+
+1. **The pre-rename path is data the code acts on.** The migration script's
+   rename mapping is keyed by it — that path is the *source* side of the table —
+   and the standalone verifier names it as the import it blocks. Rewrite either
+   and the self-heal that repairs registry copies still in the field stops
+   working. These cannot be paraphrased away at any price.
+2. **The path is fixture input or an assertion.** The tests covering the two
+   above pass it to the code under test, and the runtime absence guard passes it
+   to the import machinery to prove the module no longer resolves. Also
+   unavoidable, but note the second of those is an absence guard, not a
+   self-heal; it is exempt because it must *name* the module to assert it is
+   gone.
+3. **The path appears only in comment or docstring prose.** In the update-time
+   probe, the update script, and one scheduler-test docstring, nothing executes
+   it and stripping it would disarm nothing. These are exempt only so the guard
+   does not force explanatory prose to be mangled.
+
+That third group is worth flagging rather than burying: the update script is
+permanent production code, unlike the transitional migration machinery around
+it, so it will still be carrying a standing exemption long after groups 1 and 2
+have been deleted. Those three entries are the ones that could later be retired
+by paraphrasing the prose instead of exempting the file — the one direction in
+which an exemption set here can honestly shrink.
 
 What that costs is specific and confined to one of the three checks:
 

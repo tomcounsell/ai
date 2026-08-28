@@ -47,10 +47,11 @@ The last module row arrived after the rest, via #3008. Its shim was still on the
 default branch when this guard shipped, so a row naming it then would have
 turned that branch red for reasons the guard's own lane did not own. The
 deletion has since landed. That row's exemption set is by far the longest here,
-and deliberately so: the rename it belonged to left behind a migration script,
-an update-time probe, a standalone verifier, and their tests, every one of which
-has to keep recognizing the pre-rename import path in order to repair registry
-copies still in the field.
+because the rename it belonged to left a migration script, an update-time probe,
+a standalone verifier, and their tests behind. Its entries are grouped by *why*
+each one is exempt rather than listed flat: only some of them act on the
+pre-rename path, and claiming otherwise across the whole set would be false for
+most of it.
 """
 
 from __future__ import annotations
@@ -101,32 +102,41 @@ BANNED_MODULES: tuple[BannedModule, ...] = (
         allowed=frozenset({GUARD_FILE}),
     ),
     # Deleted by #2875, the last step of moving the self-healing reflections out
-    # from under agent/ and into their own package. The rename left a migration
-    # script, an update-time probe, a standalone verifier, and their tests
-    # behind, and all of them must keep recognizing the pre-rename import path
-    # to repair registry copies still in the field. Stripping the old path out
-    # of those files would disarm the self-heal, so they are exempted by path
-    # rather than edited. That makes this the longest exemption set in the
-    # table; the length is the migration's shape, not accumulated laxity.
+    # from under agent/ and into their own package. This row's exemption set is
+    # the longest in the table, and its entries are grouped below because they
+    # are not all exempt for the same reason. Any single blanket rationale would
+    # be false for most of them, and a false comment is worse than none.
     #
-    # reflections/redis_access.py is deliberately absent below. Its docstring
-    # names the deleted module's *file* path only, never the import path this
-    # row matches, so it is not an offender and needs no exception.
+    # reflections/redis_access.py is deliberately absent. Its docstring names
+    # the deleted module's *file* path only, never the import path this row
+    # matches, so it is not an offender and needs no exception.
     BannedModule(
         dotted_path="agent.sustainability",
         file_path="agent/sustainability.py",
         allowed=frozenset(
             {
                 GUARD_FILE,
+                # (1) The pre-rename path is data these act on: one is keyed by
+                # it as the source side of the rename mapping, the other names
+                # it as the import it blocks. Rewrite either and the self-heal
+                # that repairs registry copies still in the field stops working.
                 "scripts/migrate_reflections_callables.py",
-                "scripts/update/reflections_callables.py",
-                "scripts/update/run.py",
                 "scripts/verify_registry_without_shim.py",
+                # (2) Fixture input and assertions exercising the two above,
+                # plus the runtime guard that asserts the module no longer
+                # resolves. Each passes the pre-rename path to code under test.
                 "tests/unit/test_migrate_reflections_callables.py",
-                "tests/unit/test_reflection_scheduler.py",
                 "tests/unit/test_sustainability_namespace.py",
                 "tests/unit/test_update_reflections_callables.py",
                 "tests/unit/test_verify_registry_without_shim.py",
+                # (3) Comment and docstring prose only — nothing in these three
+                # executes the pre-rename path, so stripping it would disarm
+                # nothing. They are exempt so the guard does not force
+                # explanatory prose to be mangled, and they are the entries that
+                # could later be retired by paraphrasing instead of exempting.
+                "scripts/update/reflections_callables.py",
+                "scripts/update/run.py",
+                "tests/unit/test_reflection_scheduler.py",
             }
         ),
     ),
