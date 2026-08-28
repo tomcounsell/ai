@@ -457,7 +457,37 @@ Each perturbation is reverted and the suite re-confirmed green before the next.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. -->
+War room 2026-08-28, LITE depth (triage: single test-file table row plus prose
+sync; no doctrine path, `appetite: Small`). Roster 1/1 — Consolidated Critic,
+grounded. Verdict: **READY TO BUILD (no concerns)** — 0 blockers, 0 concerns,
+2 nits.
+
+Every factual claim the plan makes was re-verified against `origin/main` before
+the critic was dispatched, and all of them hold:
+
+- The shim file is absent from the default branch (`git cat-file -e` on that
+  path against `origin/main` exits non-zero). The deferral's gating condition is
+  discharged.
+- `git grep -l -F <dotted-path> origin/main -- '*.py'` returns exactly the set
+  the Technical Approach table enumerates — no more, no fewer, same paths.
+- `reflections/redis_access.py` carries the slash spelling in a docstring and
+  never the dotted spelling. Its deliberate exclusion from the exemption set is
+  correct, and adding it would grant an exception nothing needs.
+- `GUARD_FILE` is defined in the guard and is already forced onto every existing
+  row's exemption set, so the row's self-reference entry matches the table's
+  established shape.
+- The deferral paragraph naming this issue exists in both prose surfaces the
+  plan commits to correcting, and the feature index row still frames the guard
+  as covering only the first cleanup batch.
+- Every file path the plan names exists; every prior-art reference resolves.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| NIT | Consolidated Critic | The Documentation section commits to correcting the feature index row so it no longer implies the guard covers only the first cleanup batch, but no Success Criterion asserts that correction landed. The one Success Criterion touching the index row bans derived values there, which is a different property. Task 3's stated goal is therefore outside the reviewer's checklist. | pending | Cosmetic only — the guard's behavior and tests are unaffected either way. If addressed, add a Success Criterion of the form "the feature index row no longer frames the guard as single-batch coverage", distinct from the existing derived-value ban. |
+| NIT | Structural check | Tasks 2, 3, and 4 carry no `Validates:` field; only task 1 does. Task 2 *is* the red-demonstration evidence task and task 4 is the review gate, so the omission is defensible, but a reader scanning for per-task validation finds three blanks. | pending | The Verification table already covers every command that would appear in those fields, and the red-state table is explicitly marked a non-check table `/do-build` does not execute. If addressed, point task 2 at the red-state table and task 3 at the paraphrase/derived-value greps rather than inventing new commands. |
+
+Both nits are documentation-level and neither blocks the build. No revision
+pass is required.
 
 ---
 
