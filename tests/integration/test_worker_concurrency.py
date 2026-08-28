@@ -285,6 +285,8 @@ class TestPerChatSerialization:
 
         original_semaphore = _ss._slot_registry
         try:
+            # Headroom, not an assertion: this test's subject is per-chat serialization,
+            # so the ceiling is deliberately set above what the test can reach.
             _ss._slot_registry = SlotLeaseRegistry(3)  # Global ceiling
 
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
@@ -300,11 +302,13 @@ class TestPerChatSerialization:
                 f"Expected 3 sessions to execute, got {len(execution_order)}: {execution_order}"
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             task = _active_workers.pop(chat_id, None)
             if task:
                 task.cancel()
             _starting_workers.discard(chat_id)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_global_ceiling_across_multiple_chat_ids(self):
@@ -359,12 +363,14 @@ class TestPerChatSerialization:
                 "hold time."
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for cid in chat_ids:
                 task = _active_workers.pop(cid, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(cid)
+            _ss._slot_registry = original_semaphore
 
 
 class TestPMProjectKeySerialization:
@@ -399,6 +405,8 @@ class TestPMProjectKeySerialization:
 
         original_semaphore = _ss._slot_registry
         try:
+            # Headroom, not an assertion: this test's subject is project-keyed serialization,
+            # so the ceiling is deliberately set above what the test can reach.
             _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Both PM sessions should route to the same project-keyed worker
@@ -410,11 +418,13 @@ class TestPMProjectKeySerialization:
                 "Project-keyed serialization is broken."
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             task = _active_workers.pop(project_key, None)
             if task:
                 task.cancel()
             _starting_workers.discard(project_key)
+            _ss._slot_registry = original_semaphore
 
 
 class TestDevWorktreeParallelism:
@@ -453,6 +463,8 @@ class TestDevWorktreeParallelism:
 
         original_semaphore = _ss._slot_registry
         try:
+            # Headroom, not an assertion: this test's subject is worktree parallelism,
+            # so the ceiling is deliberately set above what the test can reach.
             _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker.
@@ -469,12 +481,14 @@ class TestDevWorktreeParallelism:
                 "Slugged dev sessions should run in parallel."
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(sl)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_two_slugged_dev_sessions_same_chat_id_execute_concurrently(self):
@@ -513,6 +527,8 @@ class TestDevWorktreeParallelism:
 
         original_semaphore = _ss._slot_registry
         try:
+            # Headroom, not an assertion: this test's subject is slug-keyed parallelism,
+            # so the ceiling is deliberately set above what the test can reach.
             _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker,
@@ -528,12 +544,14 @@ class TestDevWorktreeParallelism:
                 "via slug-keyed workers (issue #1085)."
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(sl)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_slug_keyed_pop_finds_session_by_slug(self):

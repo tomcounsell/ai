@@ -120,40 +120,94 @@ def _hub_reexports() -> set[str]:
     return imported - referenced
 
 
-def _scope_bindings(node: ast.AST) -> dict[str, str]:
-    """``{bound_name: dotted_module}`` for imports directly in this scope."""
-    bindings: dict[str, str] = {}
+def _own_scope_nodes(node: ast.AST):
+    """Descendants belonging to ``node``'s own scope, not descending into nested ones.
+
+    Both the binding pass and the reference pass go through this one helper, which
+    is what makes the walk order-independent. Reaching for ``ast.walk`` here instead
+    descends into a ``FunctionDef`` nested under an ``if`` / ``with`` / ``try``, so
+    that function's bindings leak outward and its references get evaluated against
+    the enclosing scope's aliases — a verdict that then flips with source ordering,
+    in both the false-negative and false-positive directions.
+    """
     for child in ast.iter_child_nodes(node):
         if isinstance(child, _SCOPE_NODES):
             continue  # a nested scope owns its own bindings
-        for sub in ast.walk(child):
-            if isinstance(sub, ast.Import):
-                for alias in sub.names:
-                    bindings[alias.asname or alias.name.split(".")[0]] = alias.name
-            elif isinstance(sub, ast.ImportFrom) and sub.module:
-                for alias in sub.names:
-                    bindings[alias.asname or alias.name] = f"{sub.module}.{alias.name}"
+        yield child
+        yield from _own_scope_nodes(child)
+
+
+def _nested_scopes(node: ast.AST):
+    """Scope nodes directly owned by ``node``, at any statement depth beneath it."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_NODES):
+            yield child
+        else:
+            yield from _nested_scopes(child)
+
+
+def _scope_bindings(node: ast.AST) -> dict[str, str]:
+    """``{bound_name: dotted_path}`` for imports in this scope.
+
+    ``import a.b.c`` binds only ``a``, so the name maps to ``a`` — not to ``a.b.c``,
+    which is a different module and would make the fully-dotted access form resolve
+    against the wrong entry.
+    """
+    bindings: dict[str, str] = {}
+    for sub in _own_scope_nodes(node):
+        if isinstance(sub, ast.Import):
+            for alias in sub.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    bindings[top] = top
+        elif isinstance(sub, ast.ImportFrom) and sub.module:
+            for alias in sub.names:
+                bindings[alias.asname or alias.name] = f"{sub.module}.{alias.name}"
     return bindings
 
 
+def _resolve_dotted(node: ast.AST, env: dict[str, str]) -> str | None:
+    """Resolve an expression to the dotted path it names, or ``None``.
+
+    Handles every binding form that can reach the hub: ``import ... as asq`` then
+    ``asq.X``; ``from agent import agent_session_queue as q`` then ``q.X``; and the
+    bare ``import agent.agent_session_queue`` then fully-dotted
+    ``agent.agent_session_queue.X``, which parses as an Attribute *of an Attribute*
+    and is invisible to a matcher keyed on ``Name`` alone.
+    """
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    base = env.get(current.id)
+    if base is None:
+        return None
+    parts.reverse()
+    return ".".join([base, *parts])
+
+
 def _alias_hits(node: ast.AST, inherited: dict[str, str], reexports: set[str]) -> list[tuple]:
-    """Walk scopes innermost-first so a rebound alias shadows the outer binding."""
+    """Collect hits in this scope, then recurse into nested scopes with its env.
+
+    Bindings for the whole scope are gathered before any reference is evaluated, so
+    a hit does not depend on whether the import happens to sit above or below it.
+    """
     env = {**inherited, **_scope_bindings(node)}
     hits: list[tuple] = []
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, _SCOPE_NODES):
-            hits.extend(_alias_hits(child, env, reexports))
-            continue
-        for sub in ast.walk(child):
-            if isinstance(sub, _SCOPE_NODES):
-                hits.extend(_alias_hits(sub, env, reexports))
-            elif (
-                isinstance(sub, ast.Attribute)
-                and isinstance(sub.value, ast.Name)
-                and env.get(sub.value.id) == HUB_MODULE
-                and sub.attr in reexports
-            ):
-                hits.append((sub.lineno, sub.value.id, sub.attr, type(sub.ctx).__name__))
+    for sub in _own_scope_nodes(node):
+        if (
+            isinstance(sub, ast.Attribute)
+            and sub.attr in reexports
+            and _resolve_dotted(sub.value, env) == HUB_MODULE
+        ):
+            hits.append((sub.lineno, ast.unparse(sub.value), sub.attr, type(sub.ctx).__name__))
+    for scope in _nested_scopes(node):
+        hits.extend(_alias_hits(scope, env, reexports))
     return hits
 
 
@@ -173,6 +227,80 @@ def find_hub_alias_reexport_references() -> dict[str, list[tuple]]:
         if hits:
             found[rel] = hits
     return found
+
+
+def _analyze(source: str, reexports: set[str]) -> list[tuple]:
+    """Run the analyzer over a source string. Used to test the guard's own machinery."""
+    return sorted(set(_alias_hits(ast.parse(source), {}, reexports)))
+
+
+# The analyzer is the artifact phase 5 leans on, so it carries its own tests. Both
+# cases below are regressions: PR #3048's round-2 review reproduced each as a real
+# defect in the first version of this file.
+
+_REORDER_HIT = """
+import agent.agent_session_queue as q
+q._slot_registry = None
+"""
+
+_REORDER_SHADOW = """
+if True:
+    def inner():
+        from agent import session_state as q
+
+        return q._slot_registry
+"""
+
+
+def test_scope_walk_does_not_depend_on_source_ordering():
+    """A nested scope's alias must not leak out, in either order.
+
+    The first version walked non-scope children with ``ast.walk``, which descends
+    into a function nested under an ``if``. That made the verdict depend on which
+    block came first: hub-import-first hid a real hit, ``if``-first reported a
+    perfectly safe ``agent.session_state`` line as a violation.
+    """
+    reexports = {"_slot_registry"}
+
+    hit_first = _analyze(_REORDER_HIT + _REORDER_SHADOW, reexports)
+    shadow_first = _analyze(_REORDER_SHADOW + _REORDER_HIT, reexports)
+
+    assert [(a, s, c) for _, a, s, c in hit_first] == [("q", "_slot_registry", "Store")]
+    assert [(a, s, c) for _, a, s, c in shadow_first] == [("q", "_slot_registry", "Store")]
+
+    # The shadowed inner read of agent.session_state is safe and must never appear,
+    # and the real hub write must never disappear — whichever block is written first.
+    assert len(hit_first) == len(shadow_first) == 1
+
+
+def test_bare_dotted_import_form_is_detected():
+    """``import agent.agent_session_queue`` + fully-dotted access is Attribute-of-Attribute.
+
+    A matcher keyed on ``Attribute.value`` being a ``Name`` never sees this form.
+    """
+    source = """
+import agent.agent_session_queue
+
+agent.agent_session_queue._slot_registry = None
+print(agent.agent_session_queue.steer_session)
+"""
+    hits = _analyze(source, {"_slot_registry", "steer_session"})
+    assert [(a, s) for _, a, s, _ in hits] == [
+        ("agent.agent_session_queue", "_slot_registry"),
+        ("agent.agent_session_queue", "steer_session"),
+    ]
+
+
+def test_working_imports_are_not_flagged():
+    """Reaching a module the hub genuinely uses is safe and must stay silent."""
+    source = """
+import agent.agent_session_queue as asq
+
+asq._session_state._slot_registry = None
+print(asq.AgentSession)
+"""
+    # `_session_state` and `AgentSession` are hub-used, so they are not re-exports.
+    assert _analyze(source, {"_slot_registry", "steer_session"}) == []
 
 
 def test_hub_reexport_set_is_derivable_and_non_empty():

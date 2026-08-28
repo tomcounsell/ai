@@ -119,10 +119,14 @@ class TestEnqueueNudgeTerminalGuard:
 
         session = _mock_agent_session(status=terminal_status)
 
-        # If the guard works, it returns early without querying Redis or calling
-        # transition_status. We patch AgentSession.query to detect any leak.
+        # If the guard works, _enqueue_nudge returns before reaching the recreate
+        # path. Assert on async_create, as the fallback-path sibling does: with the
+        # query returning empty, a session that got past the guard would fall
+        # through to recreating the record, so this call is the observable
+        # consequence of the guard failing.
         with patch("agent.session_executor.AgentSession") as mock_as:
             mock_as.query.filter.return_value = []
+            mock_as.async_create = MagicMock()
             await _enqueue_nudge(
                 session=session,
                 branch_name="session/test",
@@ -131,8 +135,7 @@ class TestEnqueueNudgeTerminalGuard:
                 output_msg="agent output",
                 nudge_feedback="continue",
             )
-            # Should NOT have queried Redis (guard returns before that)
-            mock_as.query.filter.assert_not_called()
+            mock_as.async_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_nudge_fallback_path_skips_terminal(self):
