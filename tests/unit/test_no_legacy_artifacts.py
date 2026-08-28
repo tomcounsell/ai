@@ -1,12 +1,14 @@
 """Guard: deleted shim modules and removed symbols stay gone.
 
-The #2872 / #2873 / #2874 cleanup batch deleted two compatibility shim modules
-and removed a set of deprecated attributes from ``AgentSession`` and
-``SessionType``. Two sibling tests already assert those names are absent from
-the *live object graph* (``test_agent_session_legacy_surface.py`` and
-``test_enums.py``). Neither notices a deleted module *file* reappearing, and
-neither notices a brand-new module defining one of the removed names itself.
-This guard closes that gap at the source-text and file-index level.
+The #2872 / #2873 / #2874 cleanup batch deleted compatibility shim modules and
+removed a set of deprecated attributes from ``AgentSession`` and
+``SessionType``; the related #2875 rename deleted one more shim, whose row
+arrived later for the reason recorded at the end of this docstring. Two sibling
+tests already assert those names are absent from the *live object graph*
+(``test_agent_session_legacy_surface.py`` and ``test_enums.py``). Neither
+notices a deleted module *file* reappearing, and neither notices a brand-new
+module defining one of the removed names itself. This guard closes that gap at
+the source-text and file-index level.
 
 Two hard constraints, both learned the expensive way. Do not relax either
 without reading the issue named next to it.
@@ -41,10 +43,14 @@ already-listed name, so a fixed-string search for them has an unbounded
 false-positive surface. They stay covered by the runtime attribute assertions
 in ``test_agent_session_legacy_surface.py``, which is the right layer for them.
 
-One further artifact from the same cleanup batch is deferred to **#3008**: its
-removal had not landed on the default branch when this guard shipped, so adding
-its row now would turn the branch red for reasons this lane does not own. #3008
-names the exact row and its legitimate retainers.
+The last module row arrived after the rest, via #3008. Its shim was still on the
+default branch when this guard shipped, so a row naming it then would have
+turned that branch red for reasons the guard's own lane did not own. The
+deletion has since landed. That row's exemption set is long, because the rename
+it belonged to left a migration script, an update-time probe, a standalone
+verifier, and their tests behind. Its entries are grouped by *why* each one is
+exempt rather than listed flat: only some of them act on the pre-rename path,
+and claiming otherwise across the whole set would be false for most of it.
 """
 
 from __future__ import annotations
@@ -80,19 +86,65 @@ class BannedSymbol(NamedTuple):
 
 
 BANNED_MODULES: tuple[BannedModule, ...] = (
-    # Only the bridge-side copy was deleted. There is a live, separate module of
-    # the same base name under agent/ that several production modules import, so
-    # the banned pattern is the fully-qualified dotted path and never the bare
-    # module name.
+    # Deleted by #2872. Only the bridge-side copy went: there is a live, separate
+    # module of the same base name under agent/ that several production modules
+    # import, so the banned pattern is the fully-qualified dotted path and never
+    # the bare module name.
     BannedModule(
         dotted_path="bridge.session_logs",
         file_path="bridge/session_logs.py",
         allowed=frozenset({GUARD_FILE}),
     ),
+    # Deleted by #2872, alongside the row above.
     BannedModule(
         dotted_path="models.reflections",
         file_path="models/reflections.py",
         allowed=frozenset({GUARD_FILE}),
+    ),
+    # Deleted by #2875, the last step of moving the self-healing reflections out
+    # from under agent/ and into their own package. This row's exemption set is
+    # long, and its entries are grouped below because they are not all exempt
+    # for the same reason. Any single blanket rationale would be false for most
+    # of them, and a false comment is worse than none.
+    #
+    # reflections/redis_access.py is deliberately absent. Its docstring names
+    # the deleted module's *file* path only, never the import path this row
+    # matches, so it is not an offender and needs no exception.
+    #
+    # Nothing yet asserts these entries are still live, so a retainer that is
+    # later deleted leaves a dead path here that silently exempts whatever file
+    # next occupies it. That gap is row-agnostic and tracked in #3052; it bites
+    # this row hardest, because group 3 is expected to shrink.
+    BannedModule(
+        dotted_path="agent.sustainability",
+        file_path="agent/sustainability.py",
+        allowed=frozenset(
+            {
+                GUARD_FILE,
+                # (1) The pre-rename path is data these act on: one is keyed by
+                # it as the source side of the rename mapping, the other names
+                # it as the import it blocks. Rewrite either and the self-heal
+                # that repairs registry copies still in the field stops working.
+                "scripts/migrate_reflections_callables.py",
+                "scripts/verify_registry_without_shim.py",
+                # (2) Fixture input and assertions: each passes the pre-rename
+                # path to code under test -- registry fixtures that still carry
+                # it, assertions that it was rewritten away -- and one passes it
+                # to the import machinery to prove the module no longer resolves.
+                "tests/unit/test_migrate_reflections_callables.py",
+                "tests/unit/test_sustainability_namespace.py",
+                "tests/unit/test_update_reflections_callables.py",
+                "tests/unit/test_verify_registry_without_shim.py",
+                # (3) Comment and docstring prose only — nothing in these three
+                # executes the pre-rename path, so stripping it would disarm
+                # nothing. They are exempt so the guard does not force
+                # explanatory prose to be mangled, and they are the entries that
+                # could later be retired by paraphrasing instead of exempting.
+                "scripts/update/reflections_callables.py",
+                "scripts/update/run.py",
+                "tests/unit/test_reflection_scheduler.py",
+            }
+        ),
     ),
 )
 
@@ -202,8 +254,9 @@ def test_deleted_module_file_absent(row: BannedModule):
     if _is_tracked(row.file_path):
         raise AssertionError(
             f"Deleted module file {row.file_path!r} is tracked again.\n"
-            f"It was removed by the #2872 / #2873 / #2874 cleanup batch and "
-            f"must stay removed.\n"
+            f"It was deleted by a deliberate cleanup and must stay removed; "
+            f"this guard's rows and docstring in {GUARD_FILE} record which "
+            f"cleanup retired which module.\n"
             f"Remedy: delete the file. If it is genuinely a new module that "
             f"happens to share the path, this guard's row in {GUARD_FILE} "
             f"must be revisited deliberately, in the same pull request."
