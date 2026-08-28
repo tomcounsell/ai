@@ -1259,7 +1259,7 @@ class TestExistenceInvariant:
 
 
 # ---------------------------------------------------------------------------
-# TestWithheldBlocksAutoMerge — the rotation path's only review gate
+# TestWithheldBlocksStaleClose — the rotation path's only review gate
 # ---------------------------------------------------------------------------
 
 
@@ -1267,12 +1267,9 @@ class TestWithheldBlocksStaleClose:
     """A run that withheld a fix still requires a human merge, and the sweeper
     must not close or delete the branch of a PR carrying the withheld marker.
 
-    Previously "TestWithheldBlocksAutoMerge" / auto-merge eligibility — Q2
-    deleted `_pr_is_auto_merge_eligible` outright, so this class's valid
-    subject is what survives: the withheld marker still reaches the PR body,
-    Telegram, and Redis liveness, and the sweeper's stale-close exemption
-    (covered in the real-git test file) is what replaces the old auto-merge
-    disqualification.
+    The withheld marker reaches the PR body, Telegram, and Redis liveness, and
+    the sweeper exempts a withheld-marker PR from stale-close (covered in the
+    real-git test file).
     """
 
     def test_pr_body_carries_marker_when_fixes_withheld(self, repo):
@@ -2051,8 +2048,8 @@ class TestDeletedTargetFiltering:
 
     def test_q7b_control_live_table_row_still_reported(self, repo: Path):
         content = (
-            '| `SessionType.GRANITE` | `"granite"` | Direct invocations of the standalone '
-            "`valor-granite-loop` CLI (`tools/granite_thing_xyz/cli.py`) |\n"
+            '| `SessionType.LEGACY_XYZ` | `"legacy_xyz"` | Direct invocations of the standalone '
+            "`valor-legacy-xyz-loop` CLI (`tools/granite_thing_xyz/cli.py`) |\n"
         )
         findings = _mk_finding(content, repo)
         assert len(findings) == 1
