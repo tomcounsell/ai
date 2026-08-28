@@ -907,7 +907,7 @@ class TestDualIdLookupAcrossSubcommands:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                    "agent.session_executor": MagicMock(steer_session=mock_steer),
                 },
             ),
         ):
@@ -931,7 +931,7 @@ class TestDualIdLookupAcrossSubcommands:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                    "agent.session_executor": MagicMock(steer_session=mock_steer),
                 },
             ),
         ):

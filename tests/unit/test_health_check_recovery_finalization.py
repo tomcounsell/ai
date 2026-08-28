@@ -905,7 +905,7 @@ class TestRecoveryAttempts:
         health-check kills — Risk 3 in plan)."""
         import inspect
 
-        from agent import agent_session_queue as q
+        from agent import session_health as q
 
         src = inspect.getsource(q._recover_interrupted_agent_sessions_startup)
         assert "recovery_attempts" not in src, (
@@ -947,7 +947,7 @@ class TestDisableProgressKill:
         """The env var must be read in the health-check recovery branch."""
         import inspect
 
-        from agent import agent_session_queue as q
+        from agent import session_health as q
 
         src = inspect.getsource(q._agent_session_health_check)
         assert "DISABLE_PROGRESS_KILL" in src, "kill-switch env var not wired"
