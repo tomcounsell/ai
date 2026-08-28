@@ -158,7 +158,7 @@ class TestEnqueueContinuationSessionLookupLogging:
         from unittest.mock import AsyncMock as _AsyncMock
 
         with (
-            caplog.at_level(logging.ERROR, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.ERROR, logger="agent.session_executor"),
             patch(
                 "agent.agent_session_queue.enqueue_agent_session",
                 new_callable=_AsyncMock,
@@ -265,7 +265,7 @@ class TestCheckRevivalBranchLogging:
         with (
             patch("agent.session_revival._load_cooldowns", return_value={}),
             patch("subprocess.run", side_effect=Exception("git not found")),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.WARNING, logger="agent.session_revival"),
         ):
             result = check_revival(
                 project_key="test-revival-project",

@@ -121,7 +121,7 @@ class TestEnqueueNudgeTerminalGuard:
 
         # If the guard works, it returns early without querying Redis or calling
         # transition_status. We patch AgentSession.query to detect any leak.
-        with patch("agent.agent_session_queue.AgentSession") as mock_as:
+        with patch("agent.session_executor.AgentSession") as mock_as:
             mock_as.query.filter.return_value = []
             await _enqueue_nudge(
                 session=session,
@@ -143,7 +143,7 @@ class TestEnqueueNudgeTerminalGuard:
         session = _mock_agent_session(status="completed")
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
+            patch("agent.session_executor.AgentSession") as mock_as,
             patch("agent.session_executor._diagnose_missing_session", return_value="diag"),
             patch(
                 "agent.agent_session_queue.continuation_agent_session_fields",

@@ -51,7 +51,14 @@ class TestOutputRouterExports:
 
 
 class TestBackwardCompatExports:
-    """Verify symbols are still importable from agent.agent_session_queue for backward compat."""
+    """Verify symbols are still importable from agent.agent_session_queue for backward compat.
+
+    Deliberately retained through phase 4 of issue #2876 as the one exception to
+    that phase's repoint-everything-off-the-hub rule: it is the tripwire that
+    fails loudly when the re-exports go away, rather than letting them go
+    quietly. Phase 5 deletes those re-exports and must delete this class in the
+    same diff — the proposition asserted here is exactly the one phase 5 inverts.
+    """
 
     def test_max_nudge_count_from_queue(self):
         from agent.agent_session_queue import MAX_NUDGE_COUNT

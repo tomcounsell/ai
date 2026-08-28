@@ -69,7 +69,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     """Startup recovery must skip sessions whose hash status is terminal."""
 
     @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
-    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.session_health.AgentSession")
     def test_terminal_session_not_recovered(self, mock_cls, terminal_status):
         """Sessions with any terminal hash status should not be recovered."""
         from agent.session_health import _recover_interrupted_agent_sessions_startup
@@ -131,7 +131,7 @@ class TestHealthCheckSkipsTerminalSessions:
     @pytest.mark.asyncio
     @patch("agent.agent_session_queue._active_workers", {})
     @patch("agent.agent_session_queue._active_events", {})
-    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.session_health.AgentSession")
     async def test_terminal_session_not_recovered_by_health_check(self, mock_cls, terminal_status):
         """Health check should skip a terminal session found in running index."""
         from agent.session_health import _agent_session_health_check
