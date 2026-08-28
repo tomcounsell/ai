@@ -240,7 +240,7 @@ plan honors it rather than restating it as new.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_no_legacy_artifacts.py` — UPDATE: add one `BANNED_MODULES`
+- [x] `tests/unit/test_no_legacy_artifacts.py` — UPDATE: add one `BANNED_MODULES`
       row and rewrite the module docstring's deferral paragraph. The three module
       checks are parametrized over the table, so they gain a case each with no
       change to their bodies.
@@ -326,42 +326,48 @@ no MCP surface, and no bridge import. The guard is reached only by pytest at the
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/legacy-artifact-guard.md`: replace the deferral
+- [x] Update `docs/features/legacy-artifact-guard.md`: replace the deferral
       paragraph with a description of the new row, name the deleting issue,
       and state plainly that this row's exemption set is the table's largest and
       what that does and does not weaken.
-- [ ] Update the `docs/features/README.md` index row so it no longer implies the
+      Shipped with one deliberate deviation: the doc says the exemption set is
+      "long", not "the table's largest". A superlative is a value nothing updates
+      when the tree moves, which the same document's "What it pins" section bans
+      from every prose surface describing this guard. The doc's shipped rule
+      outranks this line; the "what it does and does not weaken" half landed as
+      written.
+- [x] Update the `docs/features/README.md` index row so it no longer implies the
       guard covers only the first cleanup batch's issues.
 
 ### External Documentation Site
 - [x] Not applicable — this repo has no external documentation site build.
 
 ### Inline Documentation
-- [ ] Rewrite the deferral paragraph in the guard's module docstring. It names
+- [x] Rewrite the deferral paragraph in the guard's module docstring. It names
       #3008 as pending; that is now false and a false comment is worse than none.
-- [ ] Add a short comment on the new row explaining why its exemption set is long
+- [x] Add a short comment on the new row explaining why its exemption set is long
       — a migration whose machinery must keep recognizing the old path — so the
       next reader does not mistake it for accumulated laxity. Paraphrase only.
 
 ## Success Criteria
 
-- [ ] `BANNED_MODULES` carries a row for the retired sustainability shim.
-- [ ] The row's `file_path` is the mechanical translation of its `dotted_path`,
+- [x] `BANNED_MODULES` carries a row for the retired sustainability shim.
+- [x] The row's `file_path` is the mechanical translation of its `dotted_path`,
       as asserted by the existing path/import-agreement check.
-- [ ] Every legitimate retainer is exempted by repo-relative file path. No entry
+- [x] Every legitimate retainer is exempted by repo-relative file path. No entry
       is a line number or a range (#2805).
-- [ ] `reflections/redis_access.py` is **not** in the exemption set.
-- [ ] Each of the row's three checks is independently demonstrated red, each
+- [x] `reflections/redis_access.py` is **not** in the exemption set.
+- [x] Each of the row's three checks is independently demonstrated red, each
       reporting a single failure against a green remainder.
-- [ ] Neither prose surface nor the guard's docstring still describes the
+- [x] Neither prose surface nor the guard's docstring still describes the
       deferral as pending.
-- [ ] No comment, docstring, or documentation prose added by this change quotes
+- [x] No comment, docstring, or documentation prose added by this change quotes
       a banned string; the table row is the only place any of them appears.
-- [ ] No count, size, line total, or SHA appears in the feature doc, the index
+- [x] No count, size, line total, or SHA appears in the feature doc, the index
       row, or the pull-request body.
-- [ ] `tests/unit/test_no_legacy_artifacts.py` passes.
-- [ ] Every test file that references a symbol this diff touches passes.
-- [ ] Lint and format clean.
+- [x] `tests/unit/test_no_legacy_artifacts.py` passes.
+- [x] Every test file that references a symbol this diff touches passes.
+- [x] Lint and format clean.
 
 ## Team Orchestration
 
