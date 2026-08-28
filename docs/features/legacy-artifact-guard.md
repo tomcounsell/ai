@@ -2,8 +2,9 @@
 
 `tests/unit/test_no_legacy_artifacts.py` pins deleted modules and removed
 symbols as *absent*. It is a ratchet: once the cleanup batch behind
-#2872 / #2873 / #2874 removed a shim module or a deprecated attribute, this
-guard makes bringing it back a test failure rather than a silent regression.
+#2872 / #2873 / #2874 removed a shim module or a deprecated attribute — or the
+sibling #2875 rename retired one more shim — this guard makes bringing it back a
+test failure rather than a silent regression.
 
 ## Why it exists alongside the runtime guards
 
@@ -38,7 +39,8 @@ result — `len(BANNED_MODULES)` explains itself and cannot drift, while `2`
 silently stops being true.
 
 **`BANNED_MODULES`.** The bridge-side session-log shim and the reflections model
-shim, both deleted by #2872. Each row carries the module's import path, its file
+shim, both deleted by #2872, and the sustainability-namespace shim under
+`agent/`, deleted by #2875. Each row carries the module's import path, its file
 path, and its own exemption set. Each row drives three independent checks:
 
 1. **File absence.** The path is not present in `git ls-files`. This catches a
@@ -71,10 +73,42 @@ three stay covered by the runtime attribute assertions, which have no
 false-positive surface at all. Grep is the right tool only for names
 distinctive enough to survive it.
 
-One artifact from the same batch is deferred to **#3008**: its removal had not
-landed on `main` when this guard shipped, so its row would have turned the
-default branch red for reasons this lane did not own. #3008 names the exact row
-and its legitimate retainers.
+## The sustainability-shim row and what its exemption set costs
+
+The row for the shim retired by #2875 arrived after the others, via #3008. That
+deletion had not landed on `main` when the guard first shipped, so a row naming
+it then would have failed the file-absence check on the default branch for
+reasons the guard's own lane did not own. The deletion has since landed and the
+row is in place; nothing about it is still pending.
+
+Its exemption set is the largest in the table, and honesty about what that means
+matters more than the row looking strong. The rename left behind a migration
+script, an update-time probe, a standalone verifier, and their tests. Every one
+of them must keep recognizing the pre-rename import path — that path is the
+*source* side of the rename mapping, and stripping it out would disarm a
+self-heal that exists to repair registry copies still in the field. So they are
+exempted by path rather than edited, and the set's length is the migration's
+shape rather than accumulated laxity.
+
+What that costs is specific and confined to one of the three checks:
+
+- **Import absence is weakened for this row.** The files most likely to name the
+  old path already may. The check still catches a fresh reference from anywhere
+  else — `agent/`, `worker/`, `bridge/`, `reflections/`, `models/`, `tools/` —
+  which is the reintroduction shape that actually matters.
+- **The other two checks are untouched.** File absence consults no exemption set
+  at all; it queries the git index directly. Path/import agreement compares two
+  fields of the row against each other. Neither weakens by one byte as the
+  exemption set grows, so the row earns its place on those two alone.
+
+Do not read uniform strength across rows: a row's import-absence coverage is
+exactly the complement of its exemption set.
+
+One file is a deliberate near-miss. `reflections/redis_access.py` names the
+retired shim's *file* path in a docstring but never its dotted import path.
+The import-absence check matches the dotted spelling only, so that file is not
+an offender and is **not** exempted. Adding it would grant a permanent exception
+that nothing needs — and one nobody could later distinguish from a real one.
 
 ## Two hard constraints
 
