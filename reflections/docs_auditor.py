@@ -2406,7 +2406,7 @@ def run_docs_auditor() -> dict:
                 term = re.sub(
                     r"\\(.)",
                     r"\1",
-                    w["old"].removeprefix(r"\b").removesuffix(r"\b"),
+                    w.get("old", "").removeprefix(r"\b").removesuffix(r"\b"),
                 )
                 _file_issue_if_new(
                     {
@@ -2448,6 +2448,11 @@ def run_docs_auditor() -> dict:
         # never "a guard declined". That routes to status="error": no success
         # Telegram, no rotation-hash stamp (the doc was written but not audited to
         # completion, so re-picking it next run is correct), and no liveness "ok".
+        # NOTE (#3050): `_restore_checkout` only runs inside this call's own
+        # `finally`. An exception raised between the substrate write above and
+        # this call leaves the shared checkout dirty with no restore; the next
+        # rotation's dirty-tree guard then skips silently. Left as-is pending a
+        # decision on widening the try/finally — see #3050.
         pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, files_touched, withheld=withheld)
 
         if pr_url is None:
@@ -2729,6 +2734,10 @@ def run_docs_branch_sweeper() -> dict:
                 # it is made. Filing on sight would title a minutes-old PR as
                 # stale, and the dedup key is once-ever, so the wrong wording
                 # would be the permanent record.
+                # NOTE (#3049): the exemption never expires and the escalation
+                # above fires once-ever, so there is no re-nag and no ceiling on
+                # simultaneously-open withheld PRs. Left as-is pending an owner
+                # ruling on aging-out — see #3049.
                 if WITHHELD_PR_MARKER in (pr.get("body") or ""):
                     if age_days >= STALE_PR_AGE_DAYS:
                         _file_issue_if_new(

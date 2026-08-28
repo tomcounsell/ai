@@ -300,6 +300,12 @@ After all edits are complete:
    ```
    Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed." Push if the workflow expects it (`git push`).
 
+   <!-- NOTE (#2739 review): this `git add -A` stages the whole tree, mirroring
+   the whole-tree stage this issue removed from `reflections/docs_auditor.py`
+   itself. Left as-is here because this cascade runs inside a worktree-isolated
+   lane behind the plan's Step 4 review gate, unlike the rotation path's shared
+   main checkout — revisit if `/do-docs` ever runs outside a dedicated worktree. -->
+
    **Push-ancestry guard (this repo — #2026).** Before any `git push` to `main`
    from a cascade, run the push-ancestry guard so a worktree HEAD left detached at
    a PR branch head cannot register the open PR's ancestry as its merge:

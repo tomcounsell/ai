@@ -1501,9 +1501,10 @@ class TestWithheldRateNonRegression:
     """Widening ``_PATH_REF_RE`` adds no withholds on the real corpus (#2759 AC4).
 
     This is the mechanical proof behind the plan's ruling that #2759 does **not**
-    block on #2729 (withheld PRs are auto-merge-ineligible forever and stale-close
-    at day 14). Two measurement paths report a reassuring zero regardless of the
-    change's real effect and are therefore not used:
+    block on #2729 (a withheld-fix PR carries ``WITHHELD_PR_MARKER`` and is
+    exempt from the sweeper's stale-close; there is no auto-merge concept).
+    Two measurement paths report a reassuring zero regardless of the change's
+    real effect and are therefore not used:
 
     1. ``_detect_stale_term_fixes`` alone never reaches ``_absent_new_path_refs``;
        ``fixes_withheld`` is populated only by ``_apply_fixes_to_file``.
