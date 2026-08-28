@@ -3,11 +3,7 @@
 from .agent_session_queue import (
     PRIORITY_RANK,
     AgentSession,
-    check_revival,
-    cleanup_stale_branches,
     enqueue_agent_session,
-    queue_revival_agent_session,
-    record_revival_cooldown,
     register_callbacks,
 )
 from .branch_manager import (
@@ -32,6 +28,12 @@ from .sdk_client import (
     build_harness_turn_input,
     get_response_via_harness,
     verify_harness_health,
+)
+from .session_revival import (
+    check_revival,
+    cleanup_stale_branches,
+    queue_revival_agent_session,
+    record_revival_cooldown,
 )
 from .steering import (
     clear_steering_queue,

@@ -1278,7 +1278,7 @@ def cmd_steer(args: argparse.Namespace) -> int:
     """
     _load_env()
     try:
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         session = _find_session(args.id)
         if session is None:

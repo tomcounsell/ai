@@ -459,7 +459,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         # Transition parent to waiting_for_children if not already
         if parent_session and parent_session.status != "waiting_for_children":
             try:
-                from agent.agent_session_queue import _transition_parent
+                from agent.session_completion import _transition_parent
 
                 _transition_parent(parent_session, "waiting_for_children")
                 logger.info(f"Parent {parent_id} transitioned to waiting_for_children")

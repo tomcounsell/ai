@@ -646,17 +646,27 @@ line) to the two-tier no-progress detector.
 
 ## Import Boundary
 
-The bridge imports from `agent.agent_session_queue` are allowlisted to these functions only:
+The bridge's imports from the session-lifecycle modules are pinned to exactly this
+inventory, keyed by the module that actually owns each symbol:
+
+`agent.agent_session_queue`
 - `enqueue_agent_session` — enqueue new sessions
-- `maybe_send_revival_prompt` — send a revival prompt to a dormant session
-- `queue_revival_agent_session` — enqueue a revival session from a reply
-- `cleanup_stale_branches` — clean up stale git branches on startup
 - `register_callbacks` — register output delivery callbacks
 - `clear_restart_flag` — clear stale update restart flag
 
+`agent.session_revival`
+- `maybe_send_revival_prompt` — send a revival prompt to a dormant session
+- `queue_revival_agent_session` — enqueue a revival session from a reply
+- `cleanup_stale_branches` — clean up stale git branches on startup
+
 Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, `_cleanup_orphaned_claude_processes`, `_reap_orphan_session_processes`, or `register_worker_pid` imported in `bridge/telegram_bridge.py`, that is a regression.
 
-This boundary is enforced by a contract test that uses an allowlist to catch any unauthorized additions.
+This boundary is enforced by `tests/unit/test_worker_entry.py::TestWorkerImport::test_bridge_has_no_execution_function_imports`,
+which asserts **set equality per module** rather than a one-way allowlist difference. Equality
+is what makes the guard bidirectional: an import added outside the inventory fails, and so does
+an inventoried import that disappears. The one-way form went silently quiet when a symbol moved
+to its real owner, because the difference against a shrinking set is empty and the relocated
+import landed in a module the check never inspected.
 
 ## Operator CLI
 

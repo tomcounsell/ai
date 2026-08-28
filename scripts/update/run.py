@@ -429,7 +429,7 @@ def _cleanup_stale_sessions(
     # Attempt to import the live-worker registry; fails gracefully if the queue
     # module is not initialized in this process (standalone subprocess invocation).
     try:
-        from agent.agent_session_queue import _active_workers as active_workers_registry
+        from agent.session_state import _active_workers as active_workers_registry
     except Exception:
         import logging
 
@@ -2495,7 +2495,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Then stale running/pending sessions are killed. Terminal sessions are
     # preserved for reflections to analyze.
     try:
-        from agent.agent_session_queue import cleanup_corrupted_agent_sessions
+        from agent.session_health import cleanup_corrupted_agent_sessions
 
         # Returns dict {"corrupted": int, "orphans": int} as of issue #1271.
         cleanup_result = cleanup_corrupted_agent_sessions()
