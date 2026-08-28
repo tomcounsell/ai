@@ -46,12 +46,11 @@ in ``test_agent_session_legacy_surface.py``, which is the right layer for them.
 The last module row arrived after the rest, via #3008. Its shim was still on the
 default branch when this guard shipped, so a row naming it then would have
 turned that branch red for reasons the guard's own lane did not own. The
-deletion has since landed. That row's exemption set is by far the longest here,
-because the rename it belonged to left a migration script, an update-time probe,
-a standalone verifier, and their tests behind. Its entries are grouped by *why*
-each one is exempt rather than listed flat: only some of them act on the
-pre-rename path, and claiming otherwise across the whole set would be false for
-most of it.
+deletion has since landed. That row's exemption set is long, because the rename
+it belonged to left a migration script, an update-time probe, a standalone
+verifier, and their tests behind. Its entries are grouped by *why* each one is
+exempt rather than listed flat: only some of them act on the pre-rename path,
+and claiming otherwise across the whole set would be false for most of it.
 """
 
 from __future__ import annotations
@@ -87,15 +86,16 @@ class BannedSymbol(NamedTuple):
 
 
 BANNED_MODULES: tuple[BannedModule, ...] = (
-    # Only the bridge-side copy was deleted. There is a live, separate module of
-    # the same base name under agent/ that several production modules import, so
-    # the banned pattern is the fully-qualified dotted path and never the bare
-    # module name.
+    # Deleted by #2872. Only the bridge-side copy went: there is a live, separate
+    # module of the same base name under agent/ that several production modules
+    # import, so the banned pattern is the fully-qualified dotted path and never
+    # the bare module name.
     BannedModule(
         dotted_path="bridge.session_logs",
         file_path="bridge/session_logs.py",
         allowed=frozenset({GUARD_FILE}),
     ),
+    # Deleted by #2872, alongside the row above.
     BannedModule(
         dotted_path="models.reflections",
         file_path="models/reflections.py",
@@ -103,13 +103,18 @@ BANNED_MODULES: tuple[BannedModule, ...] = (
     ),
     # Deleted by #2875, the last step of moving the self-healing reflections out
     # from under agent/ and into their own package. This row's exemption set is
-    # the longest in the table, and its entries are grouped below because they
-    # are not all exempt for the same reason. Any single blanket rationale would
-    # be false for most of them, and a false comment is worse than none.
+    # long, and its entries are grouped below because they are not all exempt
+    # for the same reason. Any single blanket rationale would be false for most
+    # of them, and a false comment is worse than none.
     #
     # reflections/redis_access.py is deliberately absent. Its docstring names
     # the deleted module's *file* path only, never the import path this row
     # matches, so it is not an offender and needs no exception.
+    #
+    # Nothing yet asserts these entries are still live, so a retainer that is
+    # later deleted leaves a dead path here that silently exempts whatever file
+    # next occupies it. That gap is row-agnostic and tracked in #3052; it bites
+    # this row hardest, because group 3 is expected to shrink.
     BannedModule(
         dotted_path="agent.sustainability",
         file_path="agent/sustainability.py",
@@ -122,9 +127,10 @@ BANNED_MODULES: tuple[BannedModule, ...] = (
                 # that repairs registry copies still in the field stops working.
                 "scripts/migrate_reflections_callables.py",
                 "scripts/verify_registry_without_shim.py",
-                # (2) Fixture input and assertions exercising the two above,
-                # plus the runtime guard that asserts the module no longer
-                # resolves. Each passes the pre-rename path to code under test.
+                # (2) Fixture input and assertions: each passes the pre-rename
+                # path to code under test -- registry fixtures that still carry
+                # it, assertions that it was rewritten away -- and one passes it
+                # to the import machinery to prove the module no longer resolves.
                 "tests/unit/test_migrate_reflections_callables.py",
                 "tests/unit/test_sustainability_namespace.py",
                 "tests/unit/test_update_reflections_callables.py",

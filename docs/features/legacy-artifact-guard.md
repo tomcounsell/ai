@@ -81,23 +81,23 @@ it then would have failed the file-absence check on the default branch for
 reasons the guard's own lane did not own. The deletion has since landed and the
 row is in place; nothing about it is still pending.
 
-Its exemption set is the largest in the table, and honesty about what that means
-matters more than the row looking strong. The rename left behind a migration
-script, an update-time probe, a standalone verifier, and their tests. They are
-**not** all exempt for the same reason, and the row groups them accordingly —
-one blanket rationale would read well and be false for most of the set:
+Its exemption set is long, and honesty about what that means matters more than
+the row looking strong. The rename left behind a migration script, an
+update-time probe, a standalone verifier, and their tests. They are **not** all
+exempt for the same reason, and the row groups them accordingly — one blanket
+rationale would read well and be false for most of the set:
 
 1. **The pre-rename path is data the code acts on.** The migration script's
    rename mapping is keyed by it — that path is the *source* side of the table —
    and the standalone verifier names it as the import it blocks. Rewrite either
    and the self-heal that repairs registry copies still in the field stops
    working. These cannot be paraphrased away at any price.
-2. **The path is fixture input or an assertion.** The tests covering the two
-   above pass it to the code under test, and the runtime absence guard passes it
-   to the import machinery to prove the module no longer resolves. Also
-   unavoidable, but note the second of those is an absence guard, not a
-   self-heal; it is exempt because it must *name* the module to assert it is
-   gone.
+2. **The path is fixture input or an assertion.** Each of these passes the
+   pre-rename path to code under test — registry fixtures that still carry it,
+   and assertions that it was rewritten away — and one of them passes it to the
+   import machinery to prove the module no longer resolves. Also unavoidable,
+   but note that last one is an absence guard, not a self-heal; it is exempt
+   because it must *name* the module to assert the module is gone.
 3. **The path appears only in comment or docstring prose.** In the update-time
    probe, the update script, and one scheduler-test docstring, nothing executes
    it and stripping it would disarm nothing. These are exempt only so the guard
@@ -113,9 +113,11 @@ which an exemption set here can honestly shrink.
 What that costs is specific and confined to one of the three checks:
 
 - **Import absence is weakened for this row.** The files most likely to name the
-  old path already may. The check still catches a fresh reference from anywhere
-  else — `agent/`, `worker/`, `bridge/`, `reflections/`, `models/`, `tools/` —
-  which is the reintroduction shape that actually matters.
+  old path are already permitted to. The check still catches a fresh reference
+  from any other tracked Python file — exemptions are keyed per file, so no
+  directory is exempt wholesale, and a *new* file under `scripts/` or `tests/`
+  is caught exactly like one under `agent/` or `bridge/`. That is the
+  reintroduction shape that actually matters.
 - **The other two checks are untouched.** File absence consults no exemption set
   at all; it queries the git index directly. Path/import agreement compares two
   fields of the row against each other. Neither weakens by one byte as the
