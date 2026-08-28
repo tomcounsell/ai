@@ -56,7 +56,7 @@ class TestPopLockContention:
         This simulates the TOCTOU race scenario: a second worker calling
         _pop_agent_session for the same chat_id while the first is mid-transition.
         """
-        from agent.agent_session_queue import _acquire_pop_lock, _release_pop_lock
+        from agent.session_pickup import _acquire_pop_lock, _release_pop_lock
 
         chat_id = "test-contention-chat"
         _create_test_session(chat_id=chat_id, session_id="session-contention-1")
@@ -78,7 +78,7 @@ class TestPopLockContention:
     @pytest.mark.asyncio
     async def test_pop_succeeds_after_lock_released(self):
         """_pop_agent_session succeeds once the lock is released."""
-        from agent.agent_session_queue import _acquire_pop_lock, _release_pop_lock
+        from agent.session_pickup import _acquire_pop_lock, _release_pop_lock
 
         chat_id = "test-contention-after-release"
         _create_test_session(chat_id=chat_id, session_id="session-after-release-1")

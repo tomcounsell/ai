@@ -370,7 +370,7 @@ class TestBugACancelledErrorContract:
         """
         from datetime import timedelta
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         session_id = "bug-a-cancelled-recovery-001"
         old_started = datetime.now(tz=UTC) - timedelta(seconds=600)

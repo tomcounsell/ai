@@ -240,7 +240,7 @@ class TestHasProgressChildActivity:
         entry = self._make_entry()
         entry.get_children = lambda: [self._make_child(status="running")]
 
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
@@ -249,7 +249,7 @@ class TestHasProgressChildActivity:
         entry = self._make_entry()
         entry.get_children = lambda: [self._make_child(status="pending")]
 
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
@@ -262,7 +262,7 @@ class TestHasProgressChildActivity:
             self._make_child(status="killed"),
         ]
 
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is False
 
@@ -271,7 +271,7 @@ class TestHasProgressChildActivity:
         entry = self._make_entry()
         entry.get_children = lambda: []
 
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is False
 
@@ -321,7 +321,7 @@ class TestHasProgressDualHeartbeat:
     def test_queue_heartbeat_within_window_returns_true(self):
         """last_heartbeat_at fresh + no per-turn output → True (startup-window sub-check B)."""
         entry = self._make_entry(last_heartbeat_at=_ago(30))
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
@@ -332,7 +332,7 @@ class TestHasProgressDualHeartbeat:
         the buggy behavior (#1226 fix: last_sdk_heartbeat_at removed from Tier 1).
         """
         entry = self._make_entry(last_sdk_heartbeat_at=_ago(30))
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is False
 
@@ -342,7 +342,7 @@ class TestHasProgressDualHeartbeat:
             last_tool_use_at=_ago(30),
             last_sdk_heartbeat_at=_ago(300),  # stale watchdog tick: irrelevant
         )
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
@@ -352,21 +352,21 @@ class TestHasProgressDualHeartbeat:
             last_heartbeat_at=_ago(300),
             last_sdk_heartbeat_at=_ago(300),
         )
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is False
 
     def test_queue_heartbeat_at_boundary_returns_true(self):
         """last_heartbeat_at at age=89s (just inside 90s window) + sdk_ever_output=False → True."""
         entry = self._make_entry(last_heartbeat_at=_ago(89))
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
     def test_per_turn_fields_none_turn_count_set_returns_true(self):
         """turn_count=5 + fresh heartbeat → True (own-progress, heartbeat-gated by #1614)."""
         entry = self._make_entry(turn_count=5, last_heartbeat_at=_ago(30))
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         assert _has_progress(entry) is True
 
@@ -421,7 +421,7 @@ class TestStdoutStaleRetired:
         NOT a resurrection of the deleted #1046 stdout-freshness kill path
         (that path compared stdout freshness directly; this is the OR-input
         broadening of a different, presence-based signal)."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(last_stdout_at=_ago(700))
         assert _has_progress(entry) is False
@@ -430,7 +430,7 @@ class TestStdoutStaleRetired:
         """Fresh heartbeats + stale stdout + a FRESH tool/turn signal → progress
         (the deleted #1046 stdout-freshness kill path must NOT fire; sub-check
         A's tool/turn freshness is authoritative and finds real evidence)."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(last_stdout_at=_ago(700), last_tool_use_at=_ago(30))
         assert _has_progress(entry) is True
@@ -439,7 +439,7 @@ class TestStdoutStaleRetired:
         """No stdout, no tool/turn, but a fresh heartbeat and a young session →
         sdk_ever_output stays False, so sub-check B's heartbeat fallback still
         applies unchanged for sessions that have never streamed anything."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(30))
         assert _has_progress(entry) is True
@@ -456,7 +456,7 @@ class TestStdoutStaleRetired:
         #1172) — the structural guards on the deleted constants live in
         ``tests/unit/test_session_health_inference_removed.py``.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
         assert _has_progress(entry) is False
@@ -468,7 +468,7 @@ class TestStdoutStaleRetired:
         ``STARTUP_GRACE_SECONDS`` (300s) window so the no-output budget gate
         added in #1356 does not fire — fresh heartbeat alone passes.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(120))
         assert _has_progress(entry) is True
@@ -527,14 +527,14 @@ class TestSubCheckBNoOutputBudget:
 
     def test_legacy_started_at_and_created_at_none_preserves_fast_path(self):
         """Both started_at and created_at None (truly legacy) → fast-path."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=None, created_at=None)
         assert _has_progress(entry) is True
 
     def test_running_30s_in_startup_grace_returns_true(self):
         """running_seconds=30 (well inside STARTUP_GRACE_SECONDS=300) → True."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(30))
         assert _has_progress(entry) is True
@@ -548,7 +548,7 @@ class TestSubCheckBNoOutputBudget:
         bound the session is inside the widened cold-start window and stays
         alive (see ``test_running_299s_in_startup_grace_returns_true``).
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(1300))
         assert _has_progress(entry) is False
@@ -561,7 +561,7 @@ class TestSubCheckBNoOutputBudget:
         heartbeat signals progress. This is the inversion of the pre-widening
         behavior, where the 150s D0 gate denied the fast-path at 299s.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(299))
         assert _has_progress(entry) is True
@@ -573,7 +573,7 @@ class TestSubCheckBNoOutputBudget:
         grace-to-budget band for sessions with zero SDK output: past 150s the
         fresh heartbeat no longer signals progress.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(600))
         assert _has_progress(entry) is False
@@ -581,7 +581,7 @@ class TestSubCheckBNoOutputBudget:
     def test_running_1500s_late_in_band_returns_false_d0_gate(self):
         """running_seconds=1500s (old #1356 late-band leg) → False since #1724
         (commit 2efb58ce, D0 never-started gate)."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(1500))
         assert _has_progress(entry) is False
@@ -595,14 +595,14 @@ class TestSubCheckBNoOutputBudget:
         the fresh-heartbeat fast-path long before 1801s, so the False result
         is unchanged — it is now reached via the gate, not the removed band.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(1801))
         assert _has_progress(entry) is False
 
     def test_running_4h_no_output_returns_false(self):
         """The 11h-wedge pattern: 4h running, no SDK output ever → False."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
@@ -616,7 +616,7 @@ class TestSubCheckBNoOutputBudget:
         the verdict. With ``last_tool_use_at`` stale (older than 30 min),
         sub-check A returns no-progress and ``_has_progress`` returns False.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(
             started_at=_ago(4 * 3600),
@@ -626,7 +626,7 @@ class TestSubCheckBNoOutputBudget:
 
     def test_negative_running_seconds_clock_skew_preserves_fast_path(self):
         """started_at in the future (clock skew) → treated as in startup grace, True."""
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         # _ago(-30) → started_at is 30s in the future. Negative running_seconds
         # is < STARTUP_GRACE_SECONDS by construction, so the fast-path holds.
@@ -637,7 +637,7 @@ class TestSubCheckBNoOutputBudget:
         """started_at as naive datetime → coerced to UTC, gate evaluated normally."""
         from datetime import UTC, datetime, timedelta
 
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         # Naive (no tzinfo) datetime 4h in the past. Mirrors the coercion
         # pattern used for last_heartbeat_at in the source.
@@ -652,7 +652,7 @@ class TestSubCheckBNoOutputBudget:
         ``started_ref = started_at or created_at`` fallback ensures sub-check B
         does not silently re-enter the legacy fast-path on those records.
         """
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _has_progress
 
         entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
@@ -702,8 +702,11 @@ class TestSubCheckBNoOutputBudget:
         until ``MAX_NO_OUTPUT_REPRIEVES`` (20) is reached, at which point
         ``_tier2_reprieve_signal`` returns None (recovery proceeds).
         """
-        from agent.agent_session_queue import _has_progress, _tier2_reprieve_signal
-        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+        from agent.session_health import (
+            MAX_NO_OUTPUT_REPRIEVES,
+            _has_progress,
+            _tier2_reprieve_signal,
+        )
 
         entry = self._make_entry(started_at=_ago(4 * 3600))
         # Tier 1 declines.
@@ -732,7 +735,7 @@ class TestTier2ReprieveGates:
         return SimpleNamespace(**defaults)
 
     def _make_handle(self):
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         # Use a done task so we can construct SessionHandle without running one.
         # Durability plan #2494: SessionHandle no longer carries a pid; the
@@ -753,7 +756,7 @@ class TestTier2ReprieveGates:
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
         _fence_reads_as_ours(monkeypatch)
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         handle = self._make_handle()
         assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) == "alive"
@@ -771,7 +774,7 @@ class TestTier2ReprieveGates:
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
         _fence_reads_as_ours(monkeypatch)
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         handle = self._make_handle()
         assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) == "children"
@@ -791,7 +794,7 @@ class TestTier2ReprieveGates:
         # Fence matches, so the None below is the zombie gate's answer and not
         # the fence withdrawing the pid out from under it.
         _fence_reads_as_ours(monkeypatch)
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         handle = self._make_handle()
         assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) is None
@@ -807,14 +810,14 @@ class TestTier2ReprieveGates:
         # Fence matches, so the None below is ``NoSuchProcess`` reaching the
         # Tier-2 gates rather than the fence short-circuiting ahead of them.
         _fence_reads_as_ours(monkeypatch)
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         handle = self._make_handle()
         assert _tier2_reprieve_signal(handle, self._make_entry(pid=999999)) is None
 
     def test_no_reprieve_on_recent_stdout(self):
         """The "stdout" gate was retired by #1172 — recent stdout no longer reprieves."""
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         handle = self._make_handle()
         entry = self._make_entry(last_stdout_at=_ago(30))
@@ -822,13 +825,13 @@ class TestTier2ReprieveGates:
 
     def test_no_reprieve_on_handle_none(self):
         """handle=None and no other evidence → None."""
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         assert _tier2_reprieve_signal(None, self._make_entry()) is None
 
     def test_no_reprieve_on_stdout_when_handle_none(self):
         """handle=None and no compaction → None even if stdout is fresh (#1172)."""
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         entry = self._make_entry(last_stdout_at=_ago(30))
         assert _tier2_reprieve_signal(None, entry) is None
@@ -841,7 +844,8 @@ class TestRecoveryCancellation:
         """SessionHandle round-trips through _active_sessions."""
         import asyncio
 
-        from agent.agent_session_queue import SessionHandle, _active_sessions
+        from agent.agent_session_queue import _active_sessions
+        from agent.session_state import SessionHandle
 
         async def _test():
             t = asyncio.current_task()
@@ -857,7 +861,7 @@ class TestRecoveryCancellation:
 
     def test_recovery_handles_missing_registry_entry(self):
         """handle=None → _tier2_reprieve_signal still works gracefully."""
-        from agent.agent_session_queue import _tier2_reprieve_signal
+        from agent.session_health import _tier2_reprieve_signal
 
         # No handle, no fresh signals → None
         entry = SimpleNamespace(last_stdout_at=None)
@@ -867,7 +871,7 @@ class TestRecoveryCancellation:
         """A done task with done()==True → no crash during cancel wait."""
         import asyncio
 
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         async def _test():
             async def _trivial():
@@ -997,7 +1001,7 @@ class TestSessionHandleTaskInvariant:
 
     def test_session_handle_task_defaults_to_none(self):
         """SessionHandle() constructed without args has task=None."""
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         handle = SessionHandle()
         assert handle.task is None
@@ -1009,7 +1013,7 @@ class TestSessionHandleTaskInvariant:
         is nothing session-scoped to cancel; a bare `.cancel()` call on
         None would crash the health check.
         """
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         handle = SessionHandle(task=None)
         # Mirror the health-check guard (agent_session_queue.py ~L1900).
@@ -1028,7 +1032,7 @@ class TestSessionHandleTaskInvariant:
         """
         import asyncio
 
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         async def _test():
             # Two distinct long-running "session" tasks (simulating two
@@ -1391,7 +1395,7 @@ class TestTier2ReprieveEscalation:
         return SimpleNamespace(**defaults)
 
     def _make_handle(self):
-        from agent.agent_session_queue import SessionHandle
+        from agent.session_state import SessionHandle
 
         # Durability plan #2494: pid now lives on the AgentSession fence.
         fake_task = MagicMock()

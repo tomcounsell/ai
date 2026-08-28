@@ -22,10 +22,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from agent.agent_session_queue import (
-    _active_workers,
-    _agent_session_health_check,
-)
+from agent.agent_session_queue import _active_workers
+from agent.session_health import _agent_session_health_check
 from models.agent_session import AgentSession
 
 

@@ -165,7 +165,7 @@ class TestFinalizeParent:
 
     def test_transition_parent_completed(self):
         """_transition_parent transitions parent to completed via lifecycle module."""
-        from agent.agent_session_queue import _transition_parent
+        from agent.session_completion import _transition_parent
 
         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
 
@@ -178,7 +178,7 @@ class TestFinalizeParent:
 
     def test_transition_parent_failed(self):
         """_transition_parent transitions parent to failed via lifecycle module."""
-        from agent.agent_session_queue import _transition_parent
+        from agent.session_completion import _transition_parent
 
         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
 
@@ -190,7 +190,7 @@ class TestFinalizeParent:
 
     def test_transition_parent_waiting_no_completed_at(self):
         """_transition_parent does not set completed_at for non-terminal status."""
-        from agent.agent_session_queue import _transition_parent
+        from agent.session_completion import _transition_parent
 
         parent = self._make_session(agent_session_id="p1", status="running")
         parent.completed_at = None

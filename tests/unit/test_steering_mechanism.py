@@ -89,14 +89,14 @@ class TestSteerSessionGuards:
     """Unit tests for steer_session() edge cases (no Redis required)."""
 
     def test_empty_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "")
         assert result["success"] is False
         assert "Empty message" in result["error"]
 
     def test_whitespace_only_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "   ")
         assert result["success"] is False
@@ -104,7 +104,7 @@ class TestSteerSessionGuards:
 
     def test_nonexistent_session_returns_error(self):
         """steer_session on a non-existent session returns an error dict."""
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("definitely-does-not-exist-xyz-123", "hello")
         assert result["success"] is False
@@ -136,14 +136,14 @@ class TestSteerSessionLedgerGuard:
         session.delete()
 
     def test_ledger_session_rejected(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session(ledger_session.session_id, "hello ledger")
         assert result["success"] is False
         assert "ledger" in result["error"].lower()
 
     def test_ledger_rejection_pushes_nothing(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
         from agent.steering import has_steering_messages
 
         steer_session(ledger_session.session_id, "hello ledger")

@@ -72,7 +72,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     @patch("agent.agent_session_queue.AgentSession")
     def test_terminal_session_not_recovered(self, mock_cls, terminal_status):
         """Sessions with any terminal hash status should not be recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         zombie = _make_session(
             status=terminal_status,
@@ -87,7 +87,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     @patch("agent.session_health.AgentSession")
     def test_legitimate_running_session_still_recovered(self, mock_cls, mock_update):
         """A truly running session (non-terminal) should still be recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         legit = _make_session(status="running", session_id="tg_proj_chat_legit")
         mock_cls.query.filter.return_value = [legit]
@@ -100,7 +100,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     @patch("agent.session_health.AgentSession")
     def test_mixed_terminal_and_running_only_recovers_running(self, mock_cls, mock_update):
         """When both zombie and legitimate sessions exist, only the running one is recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         zombie = _make_session(
             agent_session_id="zombie-1",
@@ -134,7 +134,7 @@ class TestHealthCheckSkipsTerminalSessions:
     @patch("agent.agent_session_queue.AgentSession")
     async def test_terminal_session_not_recovered_by_health_check(self, mock_cls, terminal_status):
         """Health check should skip a terminal session found in running index."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         zombie = _make_session(
             status=terminal_status,

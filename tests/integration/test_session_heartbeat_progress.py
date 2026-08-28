@@ -23,10 +23,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from agent.agent_session_queue import (
+from agent.agent_session_queue import _active_sessions
+from agent.session_health import (
     HEARTBEAT_FRESHNESS_WINDOW,
     MAX_RECOVERY_ATTEMPTS,
-    _active_sessions,
     _has_progress,
     _tier2_reprieve_signal,
 )
