@@ -1666,7 +1666,7 @@ class TestSteerChildDelivery:
 
         # Patch at the source module — _steer_child imports steer_session lazily
         with patch(
-            "agent.agent_session_queue.steer_session",
+            "agent.session_executor.steer_session",
             return_value={
                 "success": False,
                 "session_id": child.session_id,

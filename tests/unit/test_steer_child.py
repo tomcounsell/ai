@@ -37,7 +37,7 @@ def mock_child():
 # Patch targets: imports happen inside functions, so patch the source modules
 _AGENT_SESSION = "models.agent_session.AgentSession"
 _PUSH_STEERING = "agent.steering.push_steering_message"
-_STEER_SESSION = "agent.agent_session_queue.steer_session"
+_STEER_SESSION = "agent.session_executor.steer_session"
 
 
 class TestSteerChild:

@@ -180,59 +180,97 @@ class TestImportDecoupling:
                 pytest.fail(f"Module-level bridge import found: {stripped}")
 
     def test_bridge_has_no_execution_function_imports(self):
-        """bridge/telegram_bridge.py may only import allowlisted functions from agent_session_queue.
+        """The bridge's session-lifecycle imports are pinned to an exact per-module inventory.
 
-        The allowlist represents the public API the bridge is permitted to use.
-        Any import not on this list is a boundary violation — update the allowlist
-        (and the docs/features/bridge-worker-architecture.md boundary section) if
-        a new function is intentionally added.
+        This is an **inventory**, not a one-way allowlist. The assertion is set
+        equality per module, so it fires in both directions:
+
+        - an import *added* outside the inventory is a boundary violation;
+        - an import *removed* fails until the inventory is updated, which is
+          what keeps the guard honest when symbols migrate between modules.
+
+        The earlier form of this test computed ``imported_names - allowed`` against
+        a single hardcoded set scoped to ``agent.agent_session_queue`` alone. That
+        shape had two blind spots that this de-hubbing work walks straight into
+        (issue #2876): moving a symbol to its real owner shrank the observed set,
+        left the difference empty, and the guard went quiet while coverage dropped
+        — and the relocated import landed in a module the regex never looked at.
+
+        Keying by module fixes the second blind spot; set equality fixes the first.
+
+        When a bridge import legitimately changes, update ``bridge_imports`` below
+        and the boundary section of docs/features/bridge-worker-architecture.md.
         """
-        import re
+        import ast
+        from collections import defaultdict
 
-        # Hardcoded allowlist — only these functions may be imported from agent_session_queue
-        allowed_imports = {
-            "enqueue_agent_session",
-            "maybe_send_revival_prompt",
-            "queue_revival_agent_session",
-            "cleanup_stale_branches",
-            "register_callbacks",
-            "clear_restart_flag",
+        # Modules whose symbols make up the session-lifecycle surface. The hub
+        # re-exported from all of these, so a symbol repointed off the hub lands
+        # in one of them; any that the bridge imports from must be inventoried
+        # here or the guard fails closed.
+        watched_modules = {
+            "agent.agent_session_queue",
+            "agent.output_router",
+            "agent.session_completion",
+            "agent.session_executor",
+            "agent.session_health",
+            "agent.session_pickup",
+            "agent.session_revival",
+            "agent.session_state",
         }
+
+        # The exact inventory, keyed by module path. A watched module absent from
+        # this mapping must contribute zero imports.
+        bridge_imports: dict[str, set[str]] = {
+            "agent.agent_session_queue": {
+                "clear_restart_flag",
+                "enqueue_agent_session",
+                "register_callbacks",
+            },
+            "agent.session_revival": {
+                "cleanup_stale_branches",
+                "maybe_send_revival_prompt",
+                "queue_revival_agent_session",
+            },
+        }
+
+        assert bridge_imports.keys() <= watched_modules, (
+            "bridge_imports names a module outside watched_modules: "
+            f"{sorted(bridge_imports.keys() - watched_modules)}"
+        )
 
         source = (Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py").read_text()
 
-        # Collect all names imported from agent.agent_session_queue
-        # Handles both single-line and multi-line imports:
-        #   from agent.agent_session_queue import foo
-        #   from agent.agent_session_queue import (foo, bar, ...)
-        imported_names: set[str] = set()
-        # Find each import block starting with "from agent.agent_session_queue import"
-        pattern = re.compile(
-            r"from agent\.agent_session_queue import\s+"
-            r"(?:\(([^)]+)\)|([^\n#(]+))",
-            re.MULTILINE,
-        )
-        for match in pattern.finditer(source):
-            block = match.group(1) or match.group(2)
-            # Each import item may look like "foo" or "foo as bar"
-            # Split on commas and whitespace, then take only the original name
-            for item in re.split(r",", block):
-                item = item.strip()
-                if not item:
-                    continue
-                # "name as alias" or just "name" (possibly with trailing whitespace/newline)
-                parts = re.split(r"\s+as\s+", item)
-                name = parts[0].strip()
-                if name:
-                    imported_names.add(name)
+        # AST-based collection covers module-level and function-local imports, and
+        # resolves `from X import a as b` to the original name `a` natively — the
+        # alias case the previous regex had to split on `\s+as\s+` by hand.
+        observed: dict[str, set[str]] = defaultdict(set)
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom) and node.module in watched_modules:
+                observed[node.module].update(alias.name for alias in node.names)
 
-        unauthorized = imported_names - allowed_imports
-        if unauthorized:
+        failures: list[str] = []
+        for module in sorted(watched_modules):
+            expected = bridge_imports.get(module, set())
+            actual = observed.get(module, set())
+            if actual == expected:
+                continue
+            unauthorized = sorted(actual - expected)
+            missing = sorted(expected - actual)
+            detail = []
+            if unauthorized:
+                detail.append(f"imports not in the inventory: {unauthorized}")
+            if missing:
+                detail.append(f"inventoried but no longer imported: {missing}")
+            failures.append(f"{module}: " + "; ".join(detail))
+
+        if failures:
             pytest.fail(
-                f"bridge/telegram_bridge.py imports unauthorized functions from "
-                f"agent.agent_session_queue: {sorted(unauthorized)}. "
-                f"Either remove these imports or add them to the allowlist in this test "
-                f"and update docs/features/bridge-worker-architecture.md."
+                "bridge/telegram_bridge.py's session-lifecycle imports do not match the "
+                "pinned inventory in this test:\n  "
+                + "\n  ".join(failures)
+                + "\nUpdate bridge_imports here and the boundary section of "
+                "docs/features/bridge-worker-architecture.md."
             )
 
     def test_reaction_constants_importable_from_agent(self):

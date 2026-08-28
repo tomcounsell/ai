@@ -329,7 +329,8 @@ async def _pop_agent_session(
                 # for worktree-stage PMs). Wrapped in try/except so a worker-start failure
                 # never blocks the pop loop.
                 try:
-                    from agent.agent_session_queue import _active_events, _ensure_worker
+                    from agent.agent_session_queue import _ensure_worker
+                    from agent.session_state import _active_events
 
                     for s in need_slug_worker:
                         slug_wk = s.worker_key  # slug at worktree stage

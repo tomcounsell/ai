@@ -252,7 +252,7 @@ def _green_heartbeat_write() -> None:
     filesystem error must not be confused with a frozen event loop. Refreshes
     the Redis worker PID as a side effect (issue #1271).
     """
-    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+    from agent.session_health import _write_worker_heartbeat  # noqa: PLC0415
 
     try:
         _write_worker_heartbeat()
@@ -534,22 +534,24 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     8. Waits for shutdown signal
     """
     from agent.agent_session_queue import (
-        _active_workers,
-        _agent_session_health_loop,
-        _cleanup_orphaned_claude_processes,
         _ensure_worker,
-        _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
+        register_callbacks,
+        request_shutdown,
+    )
+    from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
+    from agent.session_health import (
+        _agent_session_health_loop,
+        _agent_session_tool_timeout_loop,
+        _cleanup_orphaned_claude_processes,
+        _recover_interrupted_agent_sessions_startup,
         _sweep_dead_worker_sessions,
         _sweep_stranded_waiting_for_children_parents,
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
-        register_callbacks,
         register_worker_pid,
-        request_shutdown,
     )
-    from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
-    from agent.session_health import _agent_session_tool_timeout_loop
+    from agent.session_state import _active_workers
 
     # Initialize the global concurrency slot registry BEFORE any worker loops
     # are created. Clamp to minimum 1 to prevent deadlock if

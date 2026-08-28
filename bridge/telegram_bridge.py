@@ -1830,7 +1830,7 @@ async def main():
         # === Session queue with per-session branching ===
         import re as _re
 
-        from agent.agent_session_queue import (
+        from agent.session_revival import (
             maybe_send_revival_prompt,
             queue_revival_agent_session,
         )
@@ -3067,8 +3067,8 @@ async def main():
             )
 
     # Register session queue callbacks for each project
-    from agent.agent_session_queue import cleanup_stale_branches
     from agent.agent_session_queue import register_callbacks as register_queue_callbacks
+    from agent.session_revival import cleanup_stale_branches
 
     for _pkey, _pconfig in CONFIG.get("projects", {}).items():
         _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
