@@ -301,6 +301,51 @@ def finalize_session(
             f"Use transition_status() for non-terminal transitions."
         )
 
+    # 0. Deferred self-draft chokepoint flush (telegram) — UNCONDITIONAL.
+    #
+    # A reply deferred for self-draft that is never redrafted must be delivered
+    # on EVERY call to finalize_session() that carries a terminal status,
+    # regardless of whether that call goes on to complete a transition. This
+    # runs first, before the telemetry tap, the idempotency early-return, the
+    # reject_from_terminal guard, and the CAS re-read, so no gate below can
+    # skip it. Reachability no longer depends on transition semantics (#3053 —
+    # third recurrence after #1794 and #2197 of a skipped flush losing a
+    # user's reply with no log line explaining why).
+    #
+    # This placement deliberately REVERSES the prior invariant (#1794,
+    # originally documented here) that the flush ran only on a legitimate
+    # first-time terminal transition. Under that invariant, an already-terminal
+    # session with a still-pending deferral had no path left to ever deliver
+    # it — the flush was gated behind exactly the checks that could abort
+    # before reaching it. The old concern (flushing on a rejected
+    # terminal->terminal re-transition) is not a hazard: a session that is
+    # already terminal and still carries a pending deferral is precisely the
+    # state where nobody else will ever deliver the text, so flushing here is
+    # the desired outcome. Safe unconditionally because the flush is:
+    #   - fresh-reading: re-reads get_authoritative_session() internally, so
+    #     it is unaffected by the caller's possibly-stale session/extra_context
+    #   - self-gating: no-ops unless deferred_self_draft_pending is truthy
+    #   - self-deduping: per-run SETNX lock
+    #     (self_draft_completed_flush_sent:{session_id}:{run_id})
+    #   - self-clearing: pops deferred_self_draft_pending/_text from the
+    #     authoritative record after a successful outbox write, so a delivered
+    #     row cannot be re-delivered by a later call or by the backstop sweep
+    #   - never-raising: any internal failure is caught and logged, never
+    #     propagated
+    #
+    # Synchronous by necessity: the completed path has no running event loop,
+    # so the async _deliver_deferred_self_draft_fallback cannot be awaited
+    # here. Exception-isolated at this call site too: a flush failure (even an
+    # import error) must NEVER prevent the status write below — losing a
+    # reply is bad, but failing to finalize the session is worse. Lazy import
+    # avoids an import cycle (session_lifecycle is imported very early).
+    try:
+        from agent.session_health import flush_deferred_self_draft_sync
+
+        flush_deferred_self_draft_sync(session, status)
+    except Exception as e:
+        logger.warning(f"[lifecycle] Deferred self-draft flush failed (non-fatal): {e}")
+
     # Additive telemetry tap — no behavior change
     if emit_telemetry:
         try:
@@ -344,12 +389,38 @@ def finalize_session(
     except Exception:
         pass
 
-    # Idempotency: if already in this terminal state, skip side effects
+    # Idempotency: if already in this terminal state, skip side effects.
+    # Promoted to INFO when the AUTHORITATIVE record still carries a pending
+    # self-draft deferral — that state costs a user their reply, so it is not
+    # routine double-finalize traffic. Read from a fresh
+    # get_authoritative_session(), never from the caller's `session` parameter:
+    # the parameter is a snapshot that can pre-date the defer-time persist
+    # (agent/output_handler.py:862-872), and the flag is cleared only on the
+    # authoritative record (by the redraft-success path and, as of this
+    # change, by flush_deferred_self_draft_sync itself) — never on the
+    # caller's copy. Reading the parameter would fire INFO on every ordinary
+    # double-finalize that followed any deferral. This re-read is best-effort:
+    # any failure falls back to DEBUG and never blocks the return.
     current_status = getattr(session, "status", None)
     if current_status == status:
-        logger.debug(
+        _pending_on_reread = False
+        try:
+            _idem_sid = getattr(session, "session_id", None)
+            if _idem_sid:
+                _fresh_for_idem = get_authoritative_session(_idem_sid)
+                if _fresh_for_idem is not None:
+                    _pending_on_reread = bool(
+                        (getattr(_fresh_for_idem, "extra_context", None) or {}).get(
+                            "deferred_self_draft_pending"
+                        )
+                    )
+        except Exception:
+            _pending_on_reread = False
+        _idem_log = logger.info if _pending_on_reread else logger.debug
+        _idem_log(
             f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
             f"already in terminal state {status!r}, skipping finalize"
+            + (" (deferred_self_draft_pending still set)" if _pending_on_reread else "")
         )
         return
 
@@ -395,38 +466,13 @@ def finalize_session(
         except Exception as e:
             logger.debug(f"[lifecycle-cas] CAS re-read failed (non-fatal, proceeding): {e}")
 
-    # 0. Deferred self-draft chokepoint flush (telegram).
-    # A reply deferred for self-draft that is never redrafted must be delivered on
-    # EVERY terminal path. This is the single chokepoint that all terminal writes
-    # funnel through, so wiring the flush here covers completed, failed, abandoned,
-    # and any future terminal status by construction — replacing the fragile
-    # per-branch wiring in session_health.py.
-    #
-    # Placement invariant: this runs ONLY on a legitimate first-time terminal
-    # transition. It sits AFTER the idempotency early-return (already-terminal
-    # sessions returned above) AND AFTER the reject_from_terminal guard (illegal
-    # terminal->terminal re-transitions raised above), so a rejected re-transition
-    # never triggers a flush. The flush reads the FRESH authoritative session
-    # internally, so it is unaffected by the caller's possibly-stale extra_context.
-    #
-    # Synchronous by necessity: the completed path has no running event loop, so
-    # the async _deliver_deferred_self_draft_fallback cannot be awaited here.
-    # Exception-isolated: a flush failure (even an import error) must NEVER prevent
-    # the status write below — losing a reply is bad, but failing to finalize the
-    # session is worse. Lazy import avoids an import cycle (session_lifecycle is
-    # imported very early).
-    try:
-        from agent.session_health import flush_deferred_self_draft_sync
-
-        flush_deferred_self_draft_sync(session, status)
-    except Exception as e:
-        logger.warning(f"[lifecycle] Deferred self-draft flush failed (non-fatal): {e}")
-
-    # 1. Lifecycle transition log
+    # 1. Lifecycle transition log. Promoted to WARNING: a lifecycle log that
+    # cannot be written is a real observability outage on the terminal path
+    # (#3053), not a routine condition worth hiding at DEBUG.
     try:
         session.log_lifecycle_transition(status, reason)
     except Exception as e:
-        logger.debug(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
+        logger.warning(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
 
     # 2. Auto-tag session
     if not skip_auto_tag:

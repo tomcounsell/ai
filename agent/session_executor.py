@@ -1158,9 +1158,30 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     "[executor-guard] finalize_session(failed) raised: %s",
                     finalize_err,
                 )
+                # Belt-and-braces (#3053): finalize_session() itself raised, so its
+                # unconditional step-0 flush never ran for this transition. This is
+                # NOT "the one place the chokepoint is provably not going to run" —
+                # deliberate redundancy over a path the hoist and the backstop sweep
+                # already cover; the flush's own SETNX dedup makes the extra call
+                # harmless even when redundant.
                 try:
+                    from agent.session_health import (  # noqa: PLC0415
+                        flush_deferred_self_draft_sync,
+                    )
+
+                    flush_deferred_self_draft_sync(session, "failed")
+                except Exception as flush_err:
+                    logger.warning(
+                        "[executor-guard] last-resort deferred self-draft flush "
+                        "failed (non-fatal): %s",
+                        flush_err,
+                    )
+                try:
+                    import time as _time  # noqa: PLC0415
+
                     session.status = "failed"
-                    session.save(update_fields=["status", "updated_at"])
+                    session.completed_at = _time.time()
+                    session.save(update_fields=["status", "completed_at", "updated_at"])
                 except Exception as last_resort_err:
                     logger.debug(
                         "[executor-guard] last-resort status save failed (non-fatal): %s",
@@ -1208,13 +1229,34 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     "[executor-guard] finalize_session(failed) raised: %s",
                     finalize_err,
                 )
+                # Belt-and-braces (#3053): finalize_session() itself raised, so its
+                # unconditional step-0 flush never ran for this transition. This is
+                # NOT "the one place the chokepoint is provably not going to run" —
+                # deliberate redundancy over a path the hoist and the backstop sweep
+                # already cover; the flush's own SETNX dedup makes the extra call
+                # harmless even when redundant.
+                try:
+                    from agent.session_health import (  # noqa: PLC0415
+                        flush_deferred_self_draft_sync,
+                    )
+
+                    flush_deferred_self_draft_sync(session, "failed")
+                except Exception as flush_err:
+                    logger.warning(
+                        "[executor-guard] last-resort deferred self-draft flush "
+                        "failed (non-fatal): %s",
+                        flush_err,
+                    )
                 # Last-resort: mark status directly so the worker doesn't loop on
                 # this entry. ``reason`` is not a stored field on AgentSession —
                 # the structured ``[executor-guard]`` log above is the canonical
                 # reason record (visible to reflections / dashboards via log).
                 try:
+                    import time as _time  # noqa: PLC0415
+
                     session.status = "failed"
-                    session.save(update_fields=["status", "updated_at"])
+                    session.completed_at = _time.time()
+                    session.save(update_fields=["status", "completed_at", "updated_at"])
                 except Exception as last_resort_err:
                     logger.debug(
                         "[executor-guard] last-resort status save failed (non-fatal): %s",
@@ -2039,9 +2081,30 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     session.agent_session_id,
                     exc,
                 )
+                # Belt-and-braces (#3053): finalize_session() itself raised, so its
+                # unconditional step-0 flush never ran for this transition. This is
+                # NOT "the one place the chokepoint is provably not going to run" —
+                # deliberate redundancy over a path the hoist and the backstop sweep
+                # already cover; the flush's own SETNX dedup makes the extra call
+                # harmless even when redundant.
                 try:
+                    from agent.session_health import (  # noqa: PLC0415
+                        flush_deferred_self_draft_sync,
+                    )
+
+                    flush_deferred_self_draft_sync(session, "failed")
+                except Exception as flush_err:  # noqa: BLE001
+                    logger.warning(
+                        "[executor-guard] last-resort deferred self-draft flush "
+                        "failed (non-fatal): %s",
+                        flush_err,
+                    )
+                try:
+                    import time as _time  # noqa: PLC0415
+
                     session.status = "failed"
-                    session.save(update_fields=["status", "updated_at"])
+                    session.completed_at = _time.time()
+                    session.save(update_fields=["status", "completed_at", "updated_at"])
                 except Exception as last_resort_err:  # noqa: BLE001
                     logger.warning(
                         "[executor-guard] last-resort status save failed for "
@@ -2471,11 +2534,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.session_id,
                         _guard_status,
                     )
-            except StatusConflictError:
+            except StatusConflictError as _guard_conflict:
                 # CAS conflict = another actor (complete_transcript, a concurrent
                 # finalize, the health-checker) already finalized this session.
-                # Treat as success -- do not re-raise, do not log as error.
-                pass
+                # Treat as success -- do not re-raise. "Expected, do not treat
+                # as an error" is a reason to log at INFO, not a reason to log
+                # nothing (#3053 — this silent exit was one of the two ways a
+                # deferred self-draft flush could be skipped with no trace).
+                logger.info(
+                    "[executor] Completion-exit guard: %s already finalized (%s)",
+                    session.session_id,
+                    _guard_conflict,
+                )
             except Exception as _guard_err:
                 logger.warning(
                     "[executor] Completion-exit finalize guard failed for %s: %s",

@@ -2651,6 +2651,12 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         extra_ctx = getattr(source, "extra_context", None) or {}
 
         if not extra_ctx.get("deferred_self_draft_pending"):
+            # Not silent (#3053): makes "flush ran, nothing pending" distinguishable
+            # from "flush never ran" in the logs.
+            logger.debug(
+                "[session-health] flush_deferred_self_draft_sync: nothing pending for %s",
+                session_id,
+            )
             return
 
         # Transport / status gate — evaluated BEFORE the dedup SETNX so the key
@@ -2660,6 +2666,15 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             # Email: only proceed on the completed path.  The async fallback
             # helper (_deliver_deferred_self_draft_fallback) owns failed/abandoned.
             if status != "completed":
+                # Not silent (#3053): names the transport/status combination that
+                # deliberately defers to the async fallback helper.
+                logger.debug(
+                    "[session-health] flush_deferred_self_draft_sync: transport=%s "
+                    "status=%s not eligible for %s, deferring to async fallback",
+                    transport,
+                    status,
+                    session_id,
+                )
                 return
         # telegram / None transport: proceed unconditionally (async helper
         # early-returns for telegram, so no double-send risk).
@@ -2826,6 +2841,31 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             len(attached),
         )
 
+        # Post-delivery flag clear (#3053 correction — the flush is NOT
+        # self-clearing via #2489; that clear covers only the redraft-success
+        # path in TelegramRelayOutputHandler.send(), never this flush). Without
+        # this, a delivered row stays visible to the backstop sweep's predicate
+        # forever inside its lookback window, re-firing the sweep's WARNING and
+        # counter every tick, and can be re-delivered outright once the row
+        # outlives the SETNX dedup TTL. Re-read-then-RMW on the authoritative
+        # record, mirroring agent/output_handler.py:807-824. Its own try/except:
+        # a failed clear must not turn a delivered message into a flush failure
+        # — the SETNX key remains the backstop for the remainder of its TTL.
+        try:
+            _clear_target = get_authoritative_session(session_id) or source
+            _clear_ctx = dict(getattr(_clear_target, "extra_context", None) or {})
+            _clear_ctx.pop("deferred_self_draft_pending", None)
+            _clear_ctx.pop("deferred_self_draft_text", None)
+            _clear_target.extra_context = _clear_ctx
+            _clear_target.save(update_fields=["extra_context"])
+        except Exception as _clear_err:
+            logger.warning(
+                "[session-health] failed to clear deferred_self_draft_pending for "
+                "%s after successful flush (non-fatal, SETNX dedup still applies): %s",
+                session_id,
+                _clear_err,
+            )
+
         # Best-effort telemetry counter.
         try:
             _R.incr(f"{project_key}:session-health:deferred_self_draft_completed_flush")
@@ -2985,6 +3025,167 @@ async def _deliver_deferred_self_draft_fallback(
             "[session-health] _deliver_deferred_self_draft_fallback failed for %s: %s",
             getattr(entry, "session_id", "?"),
             _err,
+        )
+
+
+# Backstop sweep (#3053): lookback window for the periodic re-scan of
+# terminal sessions still carrying a stranded `deferred_self_draft_pending`
+# flag. PROVISIONAL/TUNABLE -- grain of salt: sized to the SETNX dedup TTL
+# (`HOUR_DEDUP_LOCK_TTL_SECONDS`) per the PM ruling on Open Question 2 in
+# docs/plans/sdlc-3053.md. The post-delivery flag clear added by this plan
+# (not the window) is what bounds re-delivery, so this no longer has to be a
+# short multiple of the health-check interval. Env-overridable for ops tuning
+# without a redeploy.
+DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS = int(
+    os.environ.get(
+        "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS",
+        str(HOUR_DEDUP_LOCK_TTL_SECONDS),
+    )
+)
+
+# Delivery-posture statuses for the backstop sweep (#3053): "the machine
+# dropped it" vs "a person called it off". `completed`, `failed`, and
+# `abandoned` are cases where the session ran out of road without delivering
+# -- the user asked something and silence is a failure they cannot detect or
+# recover from, so these are swept generously. `killed` and `cancelled` carry
+# an explicit human/supervisory "stop this"; honouring that intent matters
+# more than draining a held reply, so they are deliberately excluded. If a
+# new terminal status is added later, classify it by whether an actor chose
+# to stop the session, not by appending it here without re-reading this
+# rationale.
+DEFERRED_FLUSH_BACKSTOP_STATUSES = frozenset({"completed", "failed", "abandoned"})
+
+# Per-tick cap on rows acted on by the backstop sweep, so a pathological
+# backlog cannot stall the health loop. PROVISIONAL/TUNABLE.
+DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK = int(
+    os.environ.get("DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK", "25")
+)
+
+
+def _sweep_stranded_deferred_self_drafts() -> None:
+    """Periodic backstop: deliver or report any terminal session still holding
+    a stranded ``deferred_self_draft_pending`` flag.
+
+    Independent of the ``finalize_session`` call graph (#3053) -- this is the
+    mechanism that closes any path that cannot route through the hoisted
+    chokepoint flush, including the three last-resort ``"failed"`` bypass
+    writes in ``agent/session_executor.py`` (which now also call the flush
+    directly as belt-and-braces redundancy; this sweep is the independent
+    third layer).
+
+    Scan predicate: ORM-only (``AgentSession.query.filter(status=...)`` --
+    never a raw Redis scan, per repo convention) over
+    ``DEFERRED_FLUSH_BACKSTOP_STATUSES`` (the delivery-posture principle:
+    sessions the machine dropped, not sessions a human stopped), keeping only
+    rows whose ``extra_context.get("deferred_self_draft_pending")`` is truthy
+    AND whose ``completed_at`` is within ``DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS``.
+
+    A row with ``completed_at=None`` (legacy data predating this plan's
+    ``completed_at`` backfill at the three bypass sites, or any other writer
+    that skipped it) is ACTED ON exactly once -- the same repo precedent as
+    ``_response_delivered_after_start`` above ("legacy: no anchor at all,
+    preserve original always-fire behavior"). Skipping is the failure mode
+    this sweep exists to prevent. After a hit, the flush's own post-delivery
+    flag clear removes the row from this predicate on the very next tick, so
+    an anchorless row is neither permanently skipped nor permanently
+    resurrected.
+
+    A sweep hit means the chokepoint (the hoisted flush inside
+    ``finalize_session``) was bypassed for this session -- a defect signal,
+    not routine housekeeping -- so every hit logs at WARNING and increments
+    ``{project_key}:session-health:deferred_flush_backstop_hits``.
+
+    Delegates delivery to ``flush_deferred_self_draft_sync`` -- no second
+    delivery implementation. That function's own SETNX dedup makes a
+    concurrent chokepoint-flush-plus-sweep-flush on the same session safe.
+
+    Bounded work: caps rows acted on per tick
+    (``DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK``) and logs when the cap is
+    hit. One failing row is exception-isolated and never aborts the sweep.
+    Never raises.
+    """
+    try:
+        now = time.time()
+        acted = 0
+        capped = False
+        for status in DEFERRED_FLUSH_BACKSTOP_STATUSES:
+            if acted >= DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK:
+                capped = True
+                break
+            try:
+                candidates = _filter_hydrated_sessions(AgentSession.query.filter(status=status))
+            except Exception as _query_err:
+                logger.warning(
+                    "[session-health] backstop sweep query failed for status=%s: %s",
+                    status,
+                    _query_err,
+                )
+                continue
+
+            for entry in candidates:
+                if acted >= DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK:
+                    capped = True
+                    break
+                try:
+                    extra_ctx = getattr(entry, "extra_context", None)
+                    if not isinstance(extra_ctx, dict):
+                        continue
+                    if not extra_ctx.get("deferred_self_draft_pending"):
+                        continue
+
+                    completed_at = getattr(entry, "completed_at", None)
+                    if completed_at is not None:
+                        try:
+                            age = now - float(completed_at)
+                        except (TypeError, ValueError):
+                            age = None
+                        if age is not None and age > DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS:
+                            logger.debug(
+                                "[session-health] backstop sweep: %s outside lookback "
+                                "window (age=%.0fs), skipping",
+                                getattr(entry, "session_id", "?"),
+                                age,
+                            )
+                            continue
+                    # completed_at is None: anchorless row -- act on it once
+                    # (legacy precedent, see docstring).
+
+                    session_id = getattr(entry, "session_id", "?")
+                    project_key = getattr(entry, "project_key", None) or "unknown"
+                    logger.warning(
+                        "[session-health] backstop sweep hit for %s (status=%s, reason=%s)",
+                        session_id,
+                        status,
+                        "backstop sweep",
+                    )
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _R_SWEEP
+
+                        _R_SWEEP.incr(f"{project_key}:session-health:deferred_flush_backstop_hits")
+                    except Exception:  # noqa: S110 -- optional telemetry counter
+                        pass
+
+                    flush_deferred_self_draft_sync(entry, status)
+                    acted += 1
+                except Exception as _row_err:
+                    logger.warning(
+                        "[session-health] backstop sweep failed for row %s: %s",
+                        getattr(entry, "session_id", "?"),
+                        _row_err,
+                    )
+                    continue
+
+        if capped:
+            logger.warning(
+                "[session-health] backstop sweep hit its per-tick cap (%d rows); "
+                "remaining stranded rows will be picked up on a subsequent tick",
+                DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK,
+            )
+    except Exception as _sweep_err:
+        logger.error(
+            "[session-health] _sweep_stranded_deferred_self_drafts failed: %s",
+            _sweep_err,
+            exc_info=True,
         )
 
 
@@ -5247,6 +5448,12 @@ async def _agent_session_health_loop() -> None:
             # is too slow. The fast reaper is itself fail-silent (never
             # raises); the outer try/except here is a second safety layer.
             _fast_reap_stale_print_oneshots()
+            # #3053 backstop: re-scan recently-terminal sessions for a
+            # deferred self-draft that never made it through the
+            # finalize_session chokepoint. Independent of the call graph
+            # above -- catches the three last-resort bypass writes and any
+            # future bypass. Synchronous and self-contained (never raises).
+            _sweep_stranded_deferred_self_drafts()
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
