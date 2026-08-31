@@ -30,9 +30,20 @@ import pytest
 from agent.session_stall_classifier import (
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    NEVER_STARTED_GRACE_SECS,
     classify_session_stall,
 )
 from agent.session_telemetry import read_session_timeline
+
+# How old a session must be for the never-started probe to fire. DERIVED from
+# the classifier's own constants rather than hardcoded: these tests used to pin
+# 700s, which stopped exceeding the grace window when it widened to 1200s
+# (#1227). Every never-started assertion then classified "healthy", the
+# enforcement tests' kill mock was never called, and six tests failed for a
+# reason unrelated to what they test (#3006). Deriving it means a future
+# retune of the window moves these fixtures with it.
+_PAST_NEVER_STARTED_GRACE_SECS = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS + 100
 
 pytestmark = pytest.mark.integration
 
@@ -71,8 +82,8 @@ def _fake_session(
         agent_session_id=session_id,
         status=status,
         started_at=started_at,
-        # Default: created 700 seconds ago so never-started grace is exceeded.
-        created_at=created_at if created_at is not None else (now - 700),
+        # Default: old enough that the never-started grace window is exceeded.
+        created_at=created_at if created_at is not None else (now - _PAST_NEVER_STARTED_GRACE_SECS),
     )
 
 
@@ -267,7 +278,9 @@ class TestStallAdvisoryE2E:
         trace_file(session_id, [])
 
         now = time.time()
-        fake_sess = _fake_session(session_id, status="running", created_at=now - 700)
+        fake_sess = _fake_session(
+            session_id, status="running", created_at=now - _PAST_NEVER_STARTED_GRACE_SECS
+        )
 
         # Patch only AgentSession.query + TERMINAL_STATUSES to avoid Redis.
         mock_as_module = MagicMock()
@@ -299,7 +312,9 @@ class TestStallAdvisoryE2E:
         trace_file(session_id, [])  # no events → stalled/never_started
 
         now = time.time()
-        fake_sess = _fake_session(session_id, status="running", created_at=now - 700)
+        fake_sess = _fake_session(
+            session_id, status="running", created_at=now - _PAST_NEVER_STARTED_GRACE_SECS
+        )
 
         mock_as_module = MagicMock()
         mock_as_module.AgentSession.query.filter.return_value = [fake_sess]
@@ -430,8 +445,10 @@ def _patch_models(fake_sessions: list, *, kill_side_effect=None):
 class TestStallAdvisoryActionMode:
     def _stalled_session(self, sid: str) -> SimpleNamespace:
         """A session that classifies stalled/never_started (running, no events,
-        created 700s ago) with a settable status (kill simulation flips it)."""
-        return _fake_session(sid, status="running", created_at=time.time() - 700)
+        created past the never-started grace) with a settable status (kill simulation flips it)."""
+        return _fake_session(
+            sid, status="running", created_at=time.time() - _PAST_NEVER_STARTED_GRACE_SECS
+        )
 
     def _run(self, fake_sessions, recovery_redis, *, kill_mock, subprocess_mock):
         """Invoke run_stall_advisory with all action-mode collaborators patched."""
