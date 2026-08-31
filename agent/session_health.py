@@ -2851,6 +2851,14 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         # record, mirroring agent/output_handler.py:807-824. Its own try/except:
         # a failed clear must not turn a delivered message into a flush failure
         # — the SETNX key remains the backstop for the remainder of its TTL.
+        #
+        # ALSO mutate the caller's in-memory `session` object (not just the
+        # freshly-fetched authoritative record): `finalize_session` performs a
+        # full (non-partial) `session.save()` on its own `session` parameter
+        # immediately after this flush returns, and a full save writes back
+        # whatever `session.extra_context` still holds in memory. Without this
+        # second mutation, that full save silently resurrects the just-cleared
+        # flag on the very save that finalizes the transition.
         try:
             _clear_target = get_authoritative_session(session_id) or source
             _clear_ctx = dict(getattr(_clear_target, "extra_context", None) or {})
@@ -2858,6 +2866,16 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             _clear_ctx.pop("deferred_self_draft_text", None)
             _clear_target.extra_context = _clear_ctx
             _clear_target.save(update_fields=["extra_context"])
+            if session is not None and session is not _clear_target:
+                _caller_ctx = dict(getattr(session, "extra_context", None) or {})
+                _had_caller_flags = (
+                    "deferred_self_draft_pending" in _caller_ctx
+                    or "deferred_self_draft_text" in _caller_ctx
+                )
+                if _had_caller_flags:
+                    _caller_ctx.pop("deferred_self_draft_pending", None)
+                    _caller_ctx.pop("deferred_self_draft_text", None)
+                    session.extra_context = _caller_ctx
         except Exception as _clear_err:
             logger.warning(
                 "[session-health] failed to clear deferred_self_draft_pending for "
