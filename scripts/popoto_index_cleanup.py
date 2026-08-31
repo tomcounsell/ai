@@ -251,10 +251,10 @@ def _get_keyspace_size(model_class) -> int:
         return 0
 
 
-def _run_rebuild_with_timeout(model_class):
-    """Run ``model_class.rebuild_indexes()`` in a daemon thread with a wall-clock budget.
+def _run_with_timeout(fn):
+    """Run ``fn()`` in a daemon thread with a wall-clock budget.
 
-    Returns ``(rebuilt_count, timed_out, error)``. On timeout, ``rebuilt_count``
+    Returns ``(result, timed_out, error)``. On timeout, ``result``
     is ``None``, ``timed_out`` is ``True``, and the thread is abandoned
     (never joined again) — it keeps running in the background but, being a
     daemon thread, can never block interpreter shutdown.
@@ -272,7 +272,7 @@ def _run_rebuild_with_timeout(model_class):
 
     def _target():
         try:
-            outcome["count"] = model_class.rebuild_indexes()
+            outcome["result"] = fn()
         except Exception as e:  # noqa: BLE001 - surfaced to caller via outcome
             outcome["error"] = e
 
@@ -284,7 +284,15 @@ def _run_rebuild_with_timeout(model_class):
         return None, True, None
     if "error" in outcome:
         return None, False, outcome["error"]
-    return outcome.get("count"), False, None
+    return outcome.get("result"), False, None
+
+
+def _run_rebuild_with_timeout(model_class):
+    """Run ``model_class.rebuild_indexes()`` under the shared wall-clock budget.
+
+    Returns ``(rebuilt_count, timed_out, error)``.
+    """
+    return _run_with_timeout(model_class.rebuild_indexes)
 
 
 def _run_guarded_repairs() -> dict:
@@ -312,6 +320,15 @@ def _run_guarded_repairs() -> dict:
     pass here; the models log a WARNING in that case, which is where the
     distinction lives.
 
+    Each repair runs under the same wall-clock budget as the generic sweep
+    (``_run_with_timeout``). ``run_cleanup`` sits on the worker startup critical
+    path, and ``Job.repair_indexes()`` closes with a full hydration of the Job
+    population — which has no upper bound, since rest-by-age caps only the
+    *active* set and nothing retires an at-rest Job. Unbounded, one slow repair
+    delays worker start by an amount that scales with that population; bounded,
+    it degrades to a logged timeout and the sweep continues (issue #2699, same
+    failure shape as the #2207 wedge).
+
     Failures are contained per model, mirroring the generic sweep.
     """
     results: dict = {}
@@ -329,25 +346,44 @@ def _run_guarded_repairs() -> dict:
     guarded_repairs = {"Room": _room_repair, "Job": _job_repair}
 
     for model_name, repair_fn in guarded_repairs.items():
+        outcome, timed_out, error = _run_with_timeout(repair_fn)
+
+        if timed_out:
+            results[model_name] = {"status": "timeout"}
+            logger.warning(
+                f"[popoto-cleanup] {model_name}: guarded repair timed out after "
+                f"{_REBUILD_TIMEOUT_SECONDS}s — abandoning repair thread (daemon, "
+                f"never joined further) and continuing sweep"
+            )
+            continue
+
+        if error is not None:
+            results[model_name] = {"status": "error", "error": str(error)}
+            logger.error(f"[popoto-cleanup] Guarded repair failed for {model_name}: {error}")
+            continue
+
         try:
-            stale, rebuilt = repair_fn()
-            results[model_name] = {
-                "status": "ok",
-                "quarantined": stale,
-                "records_rebuilt": rebuilt,
-            }
-            if stale:
-                logger.warning(
-                    f"[popoto-cleanup] {model_name}: guarded repair quarantined "
-                    f"{stale} identity-less hash(es), {rebuilt} records reindexed"
-                )
-            else:
-                logger.debug(
-                    f"[popoto-cleanup] {model_name}: guarded repair clean ({rebuilt} records)"
-                )
-        except Exception as e:
+            stale, rebuilt = outcome
+        except (TypeError, ValueError) as e:
             results[model_name] = {"status": "error", "error": str(e)}
-            logger.error(f"[popoto-cleanup] Guarded repair failed for {model_name}: {e}")
+            logger.error(
+                f"[popoto-cleanup] Guarded repair for {model_name} returned an "
+                f"unexpected shape {outcome!r}: {e}"
+            )
+            continue
+
+        results[model_name] = {
+            "status": "ok",
+            "quarantined": stale,
+            "records_rebuilt": rebuilt,
+        }
+        if stale:
+            logger.warning(
+                f"[popoto-cleanup] {model_name}: guarded repair quarantined "
+                f"{stale} identity-less hash(es), {rebuilt} records reindexed"
+            )
+        else:
+            logger.debug(f"[popoto-cleanup] {model_name}: guarded repair clean ({rebuilt} records)")
     return results
 
 
