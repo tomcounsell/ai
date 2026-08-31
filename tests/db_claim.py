@@ -103,6 +103,28 @@ _CLAIMED_SCRATCH_DB: int | None = None
 _CLAIM_FAILURE: str | None = None
 
 
+def redis_test_host() -> str:
+    """Host of the Redis server the test suite talks to.
+
+    Part of the single definition of "which Redis server are tests on"
+    (:func:`redis_test_host` / :func:`redis_test_port`). Every test-suite client
+    — popoto's, the raw ``redis.Redis`` in ``conftest``'s ``redis_test_db``
+    fixture, and any subprocess via :func:`subprocess_env` — must resolve its
+    server through these two functions, so the server the claim registry is
+    keyed to and the server actually connected to cannot diverge (#2799).
+
+    ``or`` rather than a ``.get`` default: an env var set to the empty string
+    returns ``""``, which is not the same as unset and must still fall through
+    to the default (#2957).
+    """
+    return os.environ.get("REDIS_HOST") or "127.0.0.1"
+
+
+def redis_test_port() -> str:
+    """Port of the Redis server the test suite talks to. See :func:`redis_test_host`."""
+    return os.environ.get("REDIS_PORT") or "6379"
+
+
 def _test_db_claim_dir() -> str:
     """Machine-global registry dir for per-db claim locks.
 
@@ -117,7 +139,7 @@ def _test_db_claim_dir() -> str:
     would let those two compute DIFFERENT registry dirs and never coordinate —
     the exact footgun the machine-global full-suite lock (#2064) calls out.
     """
-    port = os.environ.get("REDIS_PORT", "6379")
+    port = redis_test_port()
     d = os.path.join("/tmp", f"valor-pytest-db-claims-{port}")  # noqa: S108 - see docstring
     os.makedirs(d, exist_ok=True)
     return d
@@ -309,10 +331,13 @@ def release_test_db_claim() -> None:
 atexit.register(release_test_db_claim)
 
 
-def redis_test_url(host: str = "127.0.0.1") -> str:
-    """``redis://host:port/N`` for THIS process's claimed test db."""
-    port = os.environ.get("REDIS_PORT", "6379")
-    return f"redis://{host}:{port}/{claim_test_db()}"
+def redis_test_url(host: str | None = None) -> str:
+    """``redis://host:port/N`` for THIS process's claimed test db.
+
+    Host and port come from :func:`redis_test_host` / :func:`redis_test_port`
+    so this URL always names the same server the claim registry is keyed to.
+    """
+    return f"redis://{host or redis_test_host()}:{redis_test_port()}/{claim_test_db()}"
 
 
 def subprocess_env(*, project_root: str | None = None, **extra) -> dict[str, str]:

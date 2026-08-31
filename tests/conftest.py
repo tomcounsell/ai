@@ -884,6 +884,33 @@ def no_calendar_subprocess_in_tests():
         _executor._calendar_heartbeat = original
 
 
+def _assert_client_matches_claim_registry(client, expected_host: str, expected_port: int) -> None:
+    """Fail loudly if the client is not on the server the claim registry keys.
+
+    The claim registry that guarantees db uniqueness is machine-global and keyed
+    by port (``/tmp/valor-pytest-db-claims-{port}``). If a client ever ends up on
+    a DIFFERENT server than the registry names, the flock that is supposed to
+    make this process's db exclusive is protecting a database on a server nobody
+    is writing to, and the writes land somewhere unprotected — which is #2799
+    exactly, and where the "private redis" runs were flushing production db N.
+
+    Host/port now flow from one resolver, so divergence is prevented by
+    construction; this assertion exists so that if a future edit reintroduces a
+    bare client, the suite says so on the first test instead of silently
+    operating on the wrong server.
+    """
+    kwargs = client.connection_pool.connection_kwargs
+    actual_host, actual_port = kwargs.get("host"), kwargs.get("port")
+    if (actual_host, actual_port) != (expected_host, expected_port):
+        raise RuntimeError(
+            "Test Redis client is not on the server the db-claim registry is keyed to: "
+            f"client={actual_host}:{actual_port} registry={expected_host}:{expected_port}. "
+            "The flock guaranteeing this process's db is exclusive protects the registry's "
+            "server, so writes to any other server are unprotected (#2799). Resolve the "
+            "client through tests.db_claim.redis_test_host()/redis_test_port()."
+        )
+
+
 @pytest.fixture(autouse=True)
 def redis_test_db(request):
     """Switch popoto to a dedicated test Redis client for ALL tests.
@@ -921,8 +948,19 @@ def redis_test_db(request):
     original_sync = rdb.POPOTO_REDIS_DB
     original_async = getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)
 
-    # Create a NEW Redis client pointed at the test db (not SELECT on the pool)
-    test_client = redis.Redis(db=test_db)
+    # Create a NEW Redis client pointed at the test db (not SELECT on the pool).
+    #
+    # Host and port come from db_claim, never from redis-py's localhost:6379
+    # defaults (#2799). Building this client bare meant an agent who started a
+    # private ``redis-server --port 641x`` for isolation got the OPPOSITE of
+    # isolation: the tests still hit production 6379 while REDIS_PORT re-keyed
+    # the claim registry to the private port, opting the run OUT of the
+    # machine-global pool that stops two runs claiming the same db. A private
+    # port made collisions MORE likely, and it flushed production db N.
+    test_host = db_claim.redis_test_host()
+    test_port = int(db_claim.redis_test_port())
+    test_client = redis.Redis(host=test_host, port=test_port, db=test_db)
+    _assert_client_matches_claim_registry(test_client, test_host, test_port)
     rdb.POPOTO_REDIS_DB = test_client
     test_client.flushdb()
 
@@ -937,8 +975,9 @@ def redis_test_db(request):
         _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
         _mod.POPOTO_REDIS_DB = test_client
 
-    # Reset async Redis connection to point at the same test db.
-    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
+    # Reset async Redis connection to point at the same test db — same host and
+    # port as the sync client above, or async reads diverge from sync ones.
+    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(host=test_host, port=test_port, db=test_db)
 
     yield
 
