@@ -24,10 +24,15 @@ would pass a string check. Deriving the property from the AST catches the shape
 regardless of how it is spelled — and it also means this guard cannot be
 satisfied by deleting a comment.
 
-Ruff's own F401 is not a substitute either. It is configured per-file and can be
-disabled, and it treats a `__all__` entry or a `TYPE_CHECKING` block as a use;
-this guard deliberately does not, because a hub re-export is exactly what those
-constructs would legitimize.
+Ruff's own F401 is not a substitute either: it is configured per-file and can be
+disabled, and it counts an `__all__` entry as a use. This guard does not — an
+`__all__` string is not a `Name` load, so re-exporting via `__all__` is still
+caught. Verified, along with the two limits below.
+
+**A name used only in an annotation or under `TYPE_CHECKING` is not flagged.**
+That is deliberate rather than a gap. Such an import does not exist at runtime,
+so no caller can reach a symbol through it — there is nothing to re-export. The
+rule this guard enforces is about runtime reachability.
 
 Scope is one file, read directly. This guard does not walk the tree or shell out
 to git: the property it enforces belongs to `agent/agent_session_queue.py`
@@ -155,3 +160,41 @@ def test_guard_detects_a_reintroduced_reexport():
     assert unused == {"_agent_session_health_check"}, (
         "the guard failed to flag an unused sibling import, or flagged a used one"
     )
+
+
+def _flagged(source: str) -> set[str]:
+    tree = ast.parse(source)
+    imports = _sibling_imports(tree)
+    referenced = _referenced_names(tree)
+    return {name for name in imports if name not in referenced}
+
+
+def test_all_entry_does_not_count_as_a_use():
+    """Re-exporting through `__all__` is still a re-export, and still caught.
+
+    An `__all__` entry is a string literal, not a `Name` load. Ruff's F401 honours
+    it; this guard does not, which is the whole reason it is not just F401.
+    """
+    assert _flagged("from agent.session_health import X\n__all__ = ['X']\n") == {"X"}
+
+
+def test_typing_only_reference_is_not_flagged():
+    """A name reachable only at type-check time is not a runtime re-export.
+
+    Nothing can read such a symbol off this module at runtime, so there is
+    nothing for a caller to route through. Asserted rather than assumed, because
+    the docstring makes this claim and an untested claim drifts.
+    """
+    source = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from agent.session_health import X\n"
+        "v: X = None\n"
+    )
+    assert _flagged(source) == set()
+
+
+def test_aliased_import_is_tracked_by_its_bound_name():
+    """`import ... as` must be judged on the name it binds, not the name it names."""
+    assert _flagged("from agent.session_health import X as Y\n") == {"Y"}
+    assert _flagged("from agent.session_health import X as Y\nY()\n") == set()
