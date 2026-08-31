@@ -1,5 +1,10 @@
 # Enterprise Valor — alternative architecture choices
 
+> **Read [`enterprise-valor-core.md`](enterprise-valor-core.md) first.** That note settles
+> the nouns and the subsystems. This one is the technology appendix — it is deliberately
+> more detail than the direction-orienting phase needs, and choosing from it before the
+> core is agreed is premature.
+
 Companion note to the *Enterprise Valor: Policy-Governed Autonomous Software Delivery*
 proposal. The proposal argues *what* to build. This note argues *what to build it out
 of*, on the premise that Enterprise Valor is a **new repository inspired by this one**,
