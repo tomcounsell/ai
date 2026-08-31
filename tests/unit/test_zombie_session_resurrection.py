@@ -129,8 +129,13 @@ class TestHealthCheckSkipsTerminalSessions:
 
     @pytest.mark.parametrize("terminal_status", ["killed", "completed", "abandoned"])
     @pytest.mark.asyncio
-    @patch("agent.agent_session_queue._active_workers", {})
-    @patch("agent.agent_session_queue._active_events", {})
+    # Patch the bindings `agent.session_health` itself captured (#3055). It does
+    # `from agent.session_state import _active_events, _active_workers` at module
+    # scope, so rebinding the name on any OTHER module — including the old
+    # agent_session_queue re-export hub these patches used to name — leaves the
+    # health check reading the real registry and the isolation is silent fiction.
+    @patch("agent.session_health._active_workers", {})
+    @patch("agent.session_health._active_events", {})
     @patch("agent.session_health.AgentSession")
     async def test_terminal_session_not_recovered_by_health_check(self, mock_cls, terminal_status):
         """Health check should skip a terminal session found in running index."""

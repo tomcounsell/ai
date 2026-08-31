@@ -434,7 +434,7 @@ def _cleanup_stale_sessions(
         import logging
 
         logging.getLogger(__name__).warning(
-            "[update] Could not import _active_workers from agent_session_queue — "
+            "[update] Could not import _active_workers from agent.session_state — "
             "falling back to recency-threshold-only cleanup"
         )
         active_workers_registry = {}
