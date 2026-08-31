@@ -1916,7 +1916,7 @@ class TestPrStateAndLedgerLessResolution:
         import tools.sdlc_stage_query as q
 
         q._ledgerless_pr_cache.clear()
-        ttl = q._LEDGERLESS_PR_TTL_SECONDS
+        ttl = q._ledgerless_pr_ttl_seconds()
         now = 10_000.0
 
         # Stale: recorded well before (now - ttl). Fresh: recorded just now.
@@ -1935,7 +1935,7 @@ class TestPrStateAndLedgerLessResolution:
         import tools.sdlc_stage_query as q
 
         q._ledgerless_pr_cache.clear()
-        ttl = q._LEDGERLESS_PR_TTL_SECONDS
+        ttl = q._ledgerless_pr_ttl_seconds()
 
         # Simulate polling 50 distinct issues, each one TTL window apart, so
         # every prior entry is expired by the time the next one is written.

@@ -852,8 +852,20 @@ def query_stage_states(
 
 # TTL cache for the ledger-less merged-PR probe. Provisional and tunable:
 # override with SDLC_LEDGERLESS_PR_TTL (seconds).
-_LEDGERLESS_PR_TTL_SECONDS = float(os.environ.get("SDLC_LEDGERLESS_PR_TTL", "300"))
+_LEDGERLESS_PR_TTL_DEFAULT = 300.0
 _ledgerless_pr_cache: dict[int, tuple[float, int | None, str | None]] = {}
+
+
+def _ledgerless_pr_ttl_seconds() -> float:
+    """Resolve the ledger-less probe TTL at call time, never at import time.
+
+    Read lazily rather than frozen into a module-scope constant: this module is
+    imported into long-lived bridge/worker processes and into per-plugin
+    contexts that set their own environment after import, so an import-time
+    capture would pin every one of them to whatever the ambient value happened
+    to be when the first importer ran (#2866).
+    """
+    return float(os.environ.get("SDLC_LEDGERLESS_PR_TTL", _LEDGERLESS_PR_TTL_DEFAULT))
 
 
 def _evict_expired_ledgerless_entries(now: float) -> None:
@@ -867,9 +879,8 @@ def _evict_expired_ledgerless_entries(now: float) -> None:
     rather than "issues ever polled", in the spirit of ``MAX_DISPATCH_HISTORY``
     elsewhere in this codebase.
     """
-    expired = [
-        k for k, v in _ledgerless_pr_cache.items() if (now - v[0]) >= _LEDGERLESS_PR_TTL_SECONDS
-    ]
+    ttl = _ledgerless_pr_ttl_seconds()
+    expired = [k for k, v in _ledgerless_pr_cache.items() if (now - v[0]) >= ttl]
     for k in expired:
         del _ledgerless_pr_cache[k]
 
@@ -902,7 +913,7 @@ def _ledger_less_merged_pr(issue_number: int) -> tuple[int | None, str | None]:
     now = time.monotonic()
     _evict_expired_ledgerless_entries(now)
     hit = _ledgerless_pr_cache.get(issue_number)
-    if hit is not None and (now - hit[0]) < _LEDGERLESS_PR_TTL_SECONDS:
+    if hit is not None and (now - hit[0]) < _ledgerless_pr_ttl_seconds():
         return hit[1], hit[2]
 
     # Repo resolution is best-effort and must not abort the lookup: `_lookup_pr`

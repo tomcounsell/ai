@@ -122,11 +122,17 @@ def _line_text(content: str, offset: int) -> str:
     return content[line_start:line_end]
 
 
-def find_violations(content: str, filename: str) -> list[str]:
+def find_violations(content: str, filename: str, added_lines: set[int] | None = None) -> list[str]:
     """Return actionable violation messages for offending bare-literal
     timeouts in `content`. Returns an empty list if there are none (this
     includes files with no timeout literals at all, and files where the only
     `timeout=` usages are settings/constant references).
+
+    When `added_lines` is given, only literals on those line numbers are
+    reported. The guard exists to stop *new* bare timeouts; scanning the whole
+    staged file instead froze every file that already contained one, so an
+    unrelated edit to such a file could not be committed at all (#2779). Pass
+    None (the CLI path) to lint a file in full.
     """
     violations: list[str] = []
     for start, end in _find_call_windows(content):
@@ -137,6 +143,8 @@ def find_violations(content: str, filename: str) -> list[str]:
             if ALLOW_MARKER in line_text:
                 continue
             line_no = _line_number(content, abs_offset)
+            if added_lines is not None and line_no not in added_lines:
+                continue
             violations.append(
                 f"{filename}:{line_no}: inline timeout literal `timeout={tm.group(1)}` "
                 f"in a subprocess/HTTP-client call — {line_text.strip()}\n"
@@ -182,6 +190,43 @@ def _staged_content(path: str) -> str | None:
     return result.stdout
 
 
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _staged_added_lines(path: str) -> set[int]:
+    """Line numbers `path` ADDS in the index, as they fall in the staged file.
+
+    Returns an empty set when the diff cannot be read, which makes the guard
+    fail *open* for that file: an unreadable diff must not manufacture a block
+    on lines the author never wrote.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "-U0", "--", path],
+            capture_output=True,
+            text=True,
+            timeout=10,  # timeout-guard: allow
+        )
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return set()
+    if result.returncode != 0:
+        return set()
+
+    added: set[int] = set()
+    cursor = 0
+    for line in result.stdout.split("\n"):
+        header = _HUNK_HEADER_RE.match(line)
+        if header:
+            cursor = int(header.group(1))
+            continue
+        if line.startswith("+++"):
+            continue
+        if line.startswith("+"):
+            added.add(cursor)
+            cursor += 1
+    return added
+
+
 def read_stdin() -> dict:
     try:
         raw = sys.stdin.read()
@@ -212,7 +257,7 @@ def find_violation_for_command(command: str) -> str | None:
         content = _staged_content(f)
         if content is None:
             continue
-        all_violations.extend(find_violations(content, f))
+        all_violations.extend(find_violations(content, f, _staged_added_lines(f)))
 
     if all_violations:
         return (
