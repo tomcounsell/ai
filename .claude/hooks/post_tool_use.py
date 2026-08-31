@@ -567,11 +567,31 @@ def main():
 
     append_to_log(session_dir, "tool_use.jsonl", entry)
 
-    # Memory recall -- query subconscious memory and inject thoughts
+    # Memory recall -- query subconscious memory and inject thoughts.
+    #
+    # The payload MUST be nested under ``hookSpecificOutput``. A bare
+    # top-level ``{"additionalContext": ...}`` is not a recognized shape on
+    # any hook event: the harness parses the JSON, finds no key it acts on,
+    # and discards it silently -- exit 0, no warning, nothing injected.
+    #
+    # Verified end to end on this harness with a scratch PostToolUse hook and
+    # a nonce the model was asked to echo:
+    #   {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+    #                           "additionalContext": "<nonce>"}}  -> delivered
+    #   {"additionalContext": "<nonce>"}                          -> discarded
+    #
+    # Matches the shape used for PostToolUse in agent/health_check.py and the
+    # SDK's PostToolUseHookSpecificOutput TypedDict.
     additional_context = _run_memory_recall(hook_input)
     if additional_context:
-        # Output hook response with additionalContext for thought injection
-        response = json.dumps({"additionalContext": additional_context})
+        response = json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": additional_context,
+                }
+            }
+        )
         print(response)
 
 

@@ -213,3 +213,50 @@ def test_fast_path_state_matches_real_recall():
     finally:
         for sid in (a, b):
             shutil.rmtree(REPO_ROOT / "data" / "sessions" / sid, ignore_errors=True)
+
+
+def test_recall_output_is_wrapped_in_hook_specific_output(capsys, monkeypatch, clean_session):
+    """Injected thoughts must be nested under ``hookSpecificOutput``.
+
+    A bare top-level ``{"additionalContext": ...}`` is not a recognized shape
+    on any hook event. The harness parses it, matches no key it acts on, and
+    discards it silently -- exit 0, no warning, nothing injected. That is what
+    this hook emitted before #3063, so every stub the sliding-window recall
+    produced was dropped while ``recall()`` still recorded it in the sidecar's
+    ``injected[]`` and called ``confirm_access()`` on it.
+
+    Verified end to end against the harness with a nonce the model was asked
+    to echo: the wrapped shape is delivered, the bare shape is not.
+    """
+    sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
+    import post_tool_use as p
+
+    monkeypatch.setattr(
+        p, "_run_memory_recall", lambda _i: '<thought id="abc">[memory] x</thought>'
+    )
+    monkeypatch.setattr(
+        p,
+        "read_hook_input",
+        lambda: {
+            "session_id": clean_session,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/x.txt"},
+            "tool_output": "hello",
+            "cwd": str(REPO_ROOT),
+        },
+    )
+    for name in (
+        "check_file_reminders",
+        "update_sdlc_state_for_file_write",
+        "update_sdlc_state_for_bash",
+        "_update_agent_session",
+    ):
+        monkeypatch.setattr(p, name, lambda *_a, **_k: None)
+
+    p.main()
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert "additionalContext" not in payload, "bare top-level shape is silently discarded"
+    hso = payload["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert hso["additionalContext"].startswith("<thought")
