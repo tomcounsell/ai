@@ -88,6 +88,33 @@ with no findings.
 then `rm -rf .venv && uv sync --all-extras` per checkout. Doctor names every
 env still on the old version.
 
+#### A pin bump strands the old interpreter's bytecode (#2883)
+
+Replacing the venv does **not** clean the source tree. Bytecode caches are
+namespaced per interpreter (`module.cpython-314.pyc`), so a pin bump *orphans*
+the previous interpreter's caches rather than replacing them. CPython never
+stats, validates, or deletes a cache whose magic tag is not its own, which makes
+an orphaned `.pyc` immortal — nothing invalidates it and no import heals it.
+
+That is not merely untidy. These files are real Python to any tool that reads
+the filesystem rather than tracked content: a stale pre-fix `.pyc` under
+`tools/__pycache__` already failed a clean source tree once (#2807/#2809).
+`PYTHONDONTWRITEBYTECODE=1` in `scripts/pytest-clean.sh` prevents new ones but
+cannot remove those on disk, and does not apply to a bare `python -m tools.x`.
+`tools/disk_reclaim.py` cannot find them either — it is size-ranked and these
+are kilobytes.
+
+`python -m tools.doctor` reports them (`stale_bytecode`), broken down by
+interpreter tag, with the sweep command. It is reported rather than swept
+automatically because deletion is the operator's call; the check skips `.venv/`
+and `.worktrees/`, which are replaced wholesale and already covered by
+`worktree_interpreters`.
+
+```bash
+find . -name '*.pyc' -not -path './.venv/*' -not -path './.worktrees/*' \
+  | grep -v cpython-<pin> | xargs rm -f
+```
+
 ### Enforcement on the ambient paths
 
 Pinning is not enough on its own, because a venv built before the pin landed
@@ -99,6 +126,10 @@ than as a downstream symptom:
   `.worktrees/*/.venv`, and every `.claude/worktrees/*/.venv` (harness-created
   agent worktrees, which nothing provisions and where the bare `uv sync` this
   issue is about is exactly what gets typed).
+- `python -m tools.doctor` (`stale_bytecode`) reports source-tree `.pyc` caches
+  orphaned by a pin bump — the dimension the interpreter check does not cover,
+  since a wrong *venv* and stranded *bytecode* are different failures. See
+  [A pin bump strands the old interpreter's bytecode](#a-pin-bump-strands-the-old-interpreters-bytecode-2883).
 - `scripts/pytest-clean.sh` **aborts** before running anything in two cases. If
   the venv is off the pin: a suite that runs to green on the wrong interpreter
   produces a verdict that looks authoritative and is worthless. And if the

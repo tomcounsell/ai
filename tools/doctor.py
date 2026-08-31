@@ -823,6 +823,106 @@ def _check_worktree_interpreters() -> CheckResult:
         )
 
 
+def _interpreter_tag_for_pin(pin: str) -> str:
+    """``"3.14"`` -> ``"cpython-314"``, the tag CPython stamps into cache names."""
+    major, _, minor = pin.partition(".")
+    return f"cpython-{major}{minor}"
+
+
+def _scan_off_pin_bytecode(root: Path, pin: str) -> list[Path]:
+    """Return `.pyc` files under `root` whose interpreter tag is not the pin's.
+
+    Skips `.venv/` and `.worktrees/`: those are whole environments with their own
+    lifecycle (`rm -rf .venv && uv sync` replaces one wholesale, and
+    `_check_worktree_interpreters` already reports drift there). This check is
+    about the SOURCE tree's caches, which nothing owns.
+    """
+    want = _interpreter_tag_for_pin(pin)
+    skip_dirs = {".venv", ".worktrees", ".git"}
+    stale: list[Path] = []
+    for path in root.rglob("*.pyc"):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        # Cache names are `module.cpython-314.pyc`; a name with no tag at all is
+        # not attributable to an interpreter, so it is left alone.
+        if "cpython-" in path.name and want not in path.name:
+            stale.append(path)
+    return stale
+
+
+def _check_stale_bytecode() -> CheckResult:
+    """Report source-tree `.pyc` caches left behind by a previous interpreter.
+
+    Issue #2883. Bytecode caches are namespaced per interpreter
+    (`module.cpython-314.pyc`), so bumping `.python-version` ORPHANS the previous
+    interpreter's caches rather than replacing them. CPython never stats,
+    validates, or deletes a cache whose magic tag is not its own, which makes an
+    orphaned `.pyc` immortal: nothing invalidates it, nothing sweeps it, and
+    nothing warns that a pin bump created it.
+
+    Why it is not merely untidy: these files are real Python source-of-record to
+    any tool that reads the filesystem rather than tracked content. A stale
+    pre-fix `.pyc` under `tools/__pycache__` already failed a clean source tree
+    once (#2807/#2809). `PYTHONDONTWRITEBYTECODE=1` in `scripts/pytest-clean.sh`
+    prevents new ones; it cannot remove those already on disk, and does not apply
+    to a bare `python -m tools.x`.
+
+    Reported rather than swept: deletion is the operator's call, and the fix
+    line below is a single safe command. `tools/disk_reclaim.py` cannot find
+    these — it is size-ranked and these are kilobytes.
+    """
+    try:
+        from agent.worktree_manager import repo_interpreter_pin
+
+        pin = repo_interpreter_pin(PROJECT_DIR)
+        if not pin:
+            return CheckResult(
+                name="stale_bytecode",
+                category="Environment",
+                passed=True,
+                message="no interpreter pin found; skipping bytecode scan",
+            )
+
+        stale = _scan_off_pin_bytecode(PROJECT_DIR, pin)
+        if not stale:
+            return CheckResult(
+                name="stale_bytecode",
+                category="Environment",
+                passed=True,
+                message=f"no off-pin bytecode in the source tree (pin {pin})",
+            )
+
+        tags: dict[str, int] = {}
+        for path in stale:
+            for part in path.name.split("."):
+                if part.startswith("cpython-"):
+                    tags[part] = tags.get(part, 0) + 1
+        breakdown = ", ".join(f"{tag}: {count}" for tag, count in sorted(tags.items()))
+
+        return CheckResult(
+            name="stale_bytecode",
+            category="Environment",
+            passed=False,
+            message=(
+                f"{len(stale)} off-pin .pyc file(s) in the source tree "
+                f"(pin {pin} wants {_interpreter_tag_for_pin(pin)}; found {breakdown}) — "
+                "orphaned by a pin bump; CPython will never read or remove them"
+            ),
+            fix=(
+                "find . -name '*.pyc' -not -path './.venv/*' -not -path './.worktrees/*' "
+                f"| grep -v {_interpreter_tag_for_pin(pin)} | xargs rm -f"
+            ),
+        )
+    except Exception as e:
+        return CheckResult(
+            name="stale_bytecode",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate tools/doctor.py::_check_stale_bytecode",
+        )
+
+
 def _check_system_tools() -> list[CheckResult]:
     """Check system-level tools via verify.py."""
     results = []
@@ -2117,6 +2217,7 @@ def get_checks(
         _check_git_hooks_installed,
         _check_popoto_floor,
         _check_worktree_interpreters,
+        _check_stale_bytecode,
         _check_system_tools,
         _check_python_deps,
         # Services
