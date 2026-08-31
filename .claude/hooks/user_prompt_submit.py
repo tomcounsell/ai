@@ -16,9 +16,12 @@ That position is load-bearing and must not be "corrected" to the system
 prompt or any other pre-history location. Prompt caches are keyed on an
 exact token prefix, so appending at the tail costs only the injected
 tokens, while writing above the history invalidates everything behind it
--- the whole context, on every turn that recall changes. This hook is the
-only memory path that reaches the model; see
-``post_tool_use._run_memory_recall`` for why PostToolUse is not.
+-- the whole context, on every turn that recall changes.
+
+This is the turn-granularity half of recall; ``post_tool_use.py`` carries
+the tool-granularity half. Both inject via the same
+``hookSpecificOutput.additionalContext`` channel, and both land at the
+tail, so both are append-only against the cache.
 
 All operations fail silently -- memory errors never block prompt submission.
 """

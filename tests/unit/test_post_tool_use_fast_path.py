@@ -181,21 +181,8 @@ def test_counter_only_call_bumps_sidecar_counter(clean_session):
 
 
 def test_fast_path_state_matches_real_recall():
-    """The hook helper tracks the same window as ``recall()`` but never injects.
-
-    ``count`` and ``buffer`` stay in lockstep with ``memory_bridge.recall()``
-    -- that is the sidecar contract ``prefetch()`` load-modify-saves around.
-
-    ``injected`` deliberately does NOT: PostToolUse has no channel to deliver
-    a thought stub, so the hook path must never mark a memory as injected.
-    Doing so suppressed it from ``prefetch()`` (which excludes anything in
-    ``injected[]``) and fed the outcome loop an access the model never saw.
-
-    This assertion is one-sided on purpose. It reads as vacuous whenever the
-    fixture's synthetic tool names miss the bloom filter and ``recall()``
-    injects nothing either -- which is the common case here. It is still the
-    assertion that catches a regression on a populated store.
-    """
+    """Driving N calls through the hook helper yields the same sidecar state
+    as driving them through ``memory_bridge.recall()`` directly."""
     sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
     sys.path.insert(0, str(REPO_ROOT))
     import post_tool_use as p
@@ -222,8 +209,54 @@ def test_fast_path_state_matches_real_recall():
         state_b = json.loads(_sidecar(b).read_text())
         assert state_a["count"] == state_b["count"]
         assert state_a["buffer"] == state_b["buffer"]
-        # The hook path never records injections, whatever recall() did.
-        assert not state_b.get("injected")
+        assert state_a.get("injected") == state_b.get("injected")
     finally:
         for sid in (a, b):
             shutil.rmtree(REPO_ROOT / "data" / "sessions" / sid, ignore_errors=True)
+
+
+def test_recall_output_is_wrapped_in_hook_specific_output(capsys, monkeypatch, clean_session):
+    """Injected thoughts must be nested under ``hookSpecificOutput``.
+
+    A bare top-level ``{"additionalContext": ...}`` is not a recognized shape
+    on any hook event. The harness parses it, matches no key it acts on, and
+    discards it silently -- exit 0, no warning, nothing injected. That is what
+    this hook emitted before #3063, so every stub the sliding-window recall
+    produced was dropped while ``recall()`` still recorded it in the sidecar's
+    ``injected[]`` and called ``confirm_access()`` on it.
+
+    Verified end to end against the harness with a nonce the model was asked
+    to echo: the wrapped shape is delivered, the bare shape is not.
+    """
+    sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
+    import post_tool_use as p
+
+    monkeypatch.setattr(
+        p, "_run_memory_recall", lambda _i: '<thought id="abc">[memory] x</thought>'
+    )
+    monkeypatch.setattr(
+        p,
+        "read_hook_input",
+        lambda: {
+            "session_id": clean_session,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/x.txt"},
+            "tool_output": "hello",
+            "cwd": str(REPO_ROOT),
+        },
+    )
+    for name in (
+        "check_file_reminders",
+        "update_sdlc_state_for_file_write",
+        "update_sdlc_state_for_bash",
+        "_update_agent_session",
+    ):
+        monkeypatch.setattr(p, name, lambda *_a, **_k: None)
+
+    p.main()
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert "additionalContext" not in payload, "bare top-level shape is silently discarded"
+    hso = payload["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert hso["additionalContext"].startswith("<thought")
