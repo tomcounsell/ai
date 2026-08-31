@@ -2592,7 +2592,7 @@ def _gate_terminal_promise(message: str, *, transport: str, session_id: str | No
         return message
 
 
-def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
+def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> bool:
     """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
 
     This is the synchronous flush invoked from the ``finalize_session``
@@ -2638,11 +2638,20 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             ``"failed"``, ``"abandoned"``).  Forwarded from
             ``finalize_session`` so the email gate can restrict delivery to
             the ``completed`` path only.
+
+    Returns:
+        ``True`` only when this call actually delivered the deferred reply
+        (wrote it to an outbox queue). ``False`` on every early-return path —
+        nothing pending, transport/status gate declined, SETNX dedup already
+        held, or an internal failure caught by the outer handler. Callers
+        that only need "did this call cause a delivery" (e.g. the backstop
+        sweep's WARNING/counter gating) should treat any non-``True`` result
+        as "not delivered this call."
     """
     try:
         session_id = getattr(session, "session_id", None)
         if not session_id:
-            return
+            return False
 
         # Authoritative read: the defer-time persist may post-date the caller's
         # in-memory copy, so read extra_context from a fresh re-read.
@@ -2657,7 +2666,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                 "[session-health] flush_deferred_self_draft_sync: nothing pending for %s",
                 session_id,
             )
-            return
+            return False
 
         # Transport / status gate — evaluated BEFORE the dedup SETNX so the key
         # is not burned on ineligible paths (e.g. email + failed).
@@ -2675,7 +2684,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                     status,
                     session_id,
                 )
-                return
+                return False
         # telegram / None transport: proceed unconditionally (async helper
         # early-returns for telegram, so no double-send risk).
 
@@ -2693,7 +2702,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                 "[session-health] self-draft completed flush already sent for %s — skipping",
                 session_id,
             )
-            return
+            return False
 
         project_key = getattr(source, "project_key", None) or "unknown"
 
@@ -2840,6 +2849,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             transport or "telegram",
             len(attached),
         )
+        delivered = True
 
         # Post-delivery flag clear (#3053 correction — the flush is NOT
         # self-clearing via #2489; that clear covers only the redraft-success
@@ -2890,12 +2900,15 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         except Exception:  # noqa: S110 -- optional telemetry counter
             pass
 
+        return delivered
+
     except Exception as _err:
         logger.warning(
             "[session-health] flush_deferred_self_draft_sync failed for %s: %s",
             getattr(session, "session_id", "?"),
             _err,
         )
+        return False
 
 
 async def _deliver_deferred_self_draft_fallback(
@@ -3110,8 +3123,14 @@ def _sweep_stranded_deferred_self_drafts() -> None:
 
     A sweep hit means the chokepoint (the hoisted flush inside
     ``finalize_session``) was bypassed for this session -- a defect signal,
-    not routine housekeeping -- so every hit logs at WARNING and increments
-    ``{project_key}:session-health:deferred_flush_backstop_hits``.
+    not routine housekeeping -- so a hit logs at WARNING and increments
+    ``{project_key}:session-health:deferred_flush_backstop_hits`` ONLY when
+    ``flush_deferred_self_draft_sync`` reports it actually delivered (return
+    value ``True``). A row the flush declines (e.g. transport=email with
+    status=failed/abandoned -- the sync flush always defers those to the
+    async fallback, which a terminal row can never reach) is logged at DEBUG
+    instead and does not increment the counter, so a row nothing ever
+    delivers cannot make the counter climb forever.
 
     Delegates delivery to ``flush_deferred_self_draft_sync`` -- no second
     delivery implementation. That function's own SETNX dedup makes a
@@ -3167,20 +3186,42 @@ def _sweep_stranded_deferred_self_drafts() -> None:
 
                     session_id = getattr(entry, "session_id", "?")
                     project_key = getattr(entry, "project_key", None) or "unknown"
-                    logger.warning(
-                        "[session-health] backstop sweep hit for %s (status=%s, reason=%s)",
-                        session_id,
-                        status,
-                        "backstop sweep",
-                    )
-                    try:
-                        from popoto.redis_db import POPOTO_REDIS_DB as _R_SWEEP
 
-                        _R_SWEEP.incr(f"{project_key}:session-health:deferred_flush_backstop_hits")
-                    except Exception:  # noqa: S110 -- optional telemetry counter
-                        pass
+                    delivered = flush_deferred_self_draft_sync(entry, status)
 
-                    flush_deferred_self_draft_sync(entry, status)
+                    if delivered:
+                        # A defect signal: the chokepoint flush inside
+                        # finalize_session was bypassed for this session.
+                        logger.warning(
+                            "[session-health] backstop sweep hit for %s (status=%s, reason=%s)",
+                            session_id,
+                            status,
+                            "backstop sweep",
+                        )
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _R_SWEEP
+
+                            _R_SWEEP.incr(
+                                f"{project_key}:session-health:deferred_flush_backstop_hits"
+                            )
+                        except Exception:  # noqa: S110 -- optional telemetry counter
+                            pass
+                    else:
+                        # Not a defect signal: the flush declined (gated
+                        # transport/status combo, dedup already held, nothing
+                        # pending, or an internal failure). Logging at DEBUG
+                        # keeps the row traceable without inflating the
+                        # backstop-hits counter on rows nothing ever delivers
+                        # (e.g. transport=email + status=failed/abandoned,
+                        # which the sync flush always declines and the async
+                        # fallback never reaches from a terminal row).
+                        logger.debug(
+                            "[session-health] backstop sweep: %s not delivered this tick "
+                            "(status=%s), skipping WARNING/counter",
+                            session_id,
+                            status,
+                        )
+
                     acted += 1
                 except Exception as _row_err:
                     logger.warning(

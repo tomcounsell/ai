@@ -317,6 +317,49 @@ def test_one_failing_row_does_not_abort_the_sweep(cleanup, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Declined delivery: a row the flush refuses (email + failed/abandoned) must
+# not inflate the backstop-hits counter, even across repeated ticks (#3053
+# review finding: WARNING/counter must fire only on an actual delivery).
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_does_not_count_declined_email_failed_row(cleanup):
+    sid = f"{SID_PREFIX}declined-email-failed"
+    cleanup.append(sid)
+    session = _make_terminal_session(
+        sid, status="failed", completed_at=time.time(), transport="email"
+    )
+    project_key = session.project_key
+    counter_key = f"{project_key}:session-health:deferred_flush_backstop_hits"
+    _redis().delete(counter_key)
+
+    # Tick 1: the sync flush declines (email + failed is the async fallback's
+    # territory, which a terminal row can never reach), so nothing is
+    # delivered and the counter must not move.
+    _sweep_stranded_deferred_self_drafts()
+
+    assert _outbox_count(sid) == 0, "email+failed must never be delivered by the sync flush"
+    assert int(_redis().get(counter_key) or 0) == 0, (
+        "a declined row must not increment deferred_flush_backstop_hits"
+    )
+
+    # The flag must still be pending (nothing cleared it) so the row remains
+    # traceable to the next tick rather than silently vanishing.
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.extra_context.get("deferred_self_draft_pending"), (
+        "a declined row's pending flag must survive the tick untouched"
+    )
+
+    # Tick 2: repeat to prove the counter does not accumulate across ticks.
+    _sweep_stranded_deferred_self_drafts()
+
+    assert _outbox_count(sid) == 0
+    assert int(_redis().get(counter_key) or 0) == 0, (
+        "repeated ticks on a declined row must not accumulate backstop hits"
+    )
+
+
+# ---------------------------------------------------------------------------
 # No cross-session double-scan: a session already delivered via chokepoint
 # and NOT still pending is left alone by the sweep.
 # ---------------------------------------------------------------------------

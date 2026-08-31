@@ -157,14 +157,27 @@ for the chokepoint itself.
   SETNX dedup TTL). A row is kept only if `completed_at` falls within the window. A row with
   `completed_at=None` (legacy data, or a writer that predates the Task 1 backfill) is **acted on
   exactly once** — the same precedent as `_response_delivered_after_start`'s anchorless-row
-  handling ("legacy: no anchor at all, preserve original always-fire behavior"). The flush's own
-  post-delivery flag clear, not the window, is what prevents an anchorless row from re-firing on
-  the next tick.
+  handling ("legacy: no anchor at all, preserve original always-fire behavior"). For a row the
+  flush actually **delivers**, its own post-delivery flag clear (not the window) is what prevents
+  an anchorless row from re-firing on the next tick; for a row the flush **declines** (see below),
+  the flag is left untouched and the row is simply re-evaluated, silently, on every subsequent
+  tick until something else clears it or delivers it.
 - **Action**: delegates to `flush_deferred_self_draft_sync(entry, entry.status)` — no second
   delivery implementation, so the same SETNX dedup that makes a concurrent chokepoint-flush and
-  sweep-flush safe on the same session applies here too. On a hit, logs at **WARNING** (a sweep hit
-  means the chokepoint was bypassed for this session — a defect signal, not routine housekeeping)
-  and increments `{project_key}:session-health:deferred_flush_backstop_hits`.
+  sweep-flush safe on the same session applies here too. The flush reports back whether it
+  actually delivered (`True`) or declined (`False` — nothing pending, the transport/status gate
+  refused, the SETNX dedup was already held, or an internal failure). **Only a `True` result**
+  logs at **WARNING** (a genuine sweep hit means the chokepoint was bypassed for this session — a
+  defect signal, not routine housekeeping) and increments
+  `{project_key}:session-health:deferred_flush_backstop_hits`. A declined result logs at
+  **DEBUG** instead and does **not** touch the counter — this matters concretely for
+  `transport="email"` combined with a terminal `status` of `"failed"`/`"abandoned"`: the sync
+  flush always defers that combination to the async fallback helper, which itself is only ever
+  reachable from a `status="running"` recovery path and therefore can never pick up an
+  already-terminal row. Without the delivered/declined split, that combination would re-log the
+  same WARNING and re-increment the same counter on every tick — forever, for an anchorless row —
+  making the counter useless as a defect signal. The row still counts toward `acted` for the
+  per-tick cap either way, since it was processed this tick regardless of outcome.
 - **Bounded work**: `DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` caps rows acted on per tick (a
   WARNING logs when the cap is hit); one failing row is exception-isolated and never aborts the
   sweep or the health loop.
