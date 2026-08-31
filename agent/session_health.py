@@ -3150,6 +3150,19 @@ def _sweep_stranded_deferred_self_drafts() -> None:
                 capped = True
                 break
             try:
+                # NOTE: this scans every AgentSession row for this terminal
+                # status with no completed_at bound pushed into the query --
+                # ``completed_at`` is a plain ``DatetimeField`` (see
+                # models/agent_session.py), not a Popoto ``SortedFieldMixin``
+                # field, so Popoto has no cheap range-filter path
+                # (``completed_at__gte=...``) that pushes down to Redis; a
+                # range filter there would silently fail to narrow the scan
+                # rather than raise. Full per-status scan is acceptable here:
+                # it's bounded by DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK
+                # and runs on a multi-minute health-loop tick at current
+                # session volume. Narrowing this properly would mean
+                # promoting completed_at to a sorted-field index -- a
+                # schema/index migration, out of scope for this patch.
                 candidates = _filter_hydrated_sessions(AgentSession.query.filter(status=status))
             except Exception as _query_err:
                 logger.warning(

@@ -1624,22 +1624,38 @@ _TERMINAL_STATUS_ASSIGNMENT_RE = re.compile(
     r'\.status\s*=\s*["\'](completed|failed|killed|abandoned|cancelled)["\']'
 )
 
-# The three known last-resort bypass sites (Technical Approach step 4) --
-# each now calls flush_deferred_self_draft_sync() first as belt-and-braces
-# redundancy over a path the finalize_session hoist and the backstop sweep
-# already cover. A new bypass anywhere else must fail this test.
+# A non-literal terminal-status assignment (``session.status = status``,
+# where ``status`` is a function parameter) -- the shape used by the shared
+# ``_last_resort_flush_and_fail`` helper below, which the literal-string
+# regex above cannot see.
+_TERMINAL_STATUS_PARAM_ASSIGNMENT_RE = re.compile(r"\.status\s*=\s*status\b")
+
+# The three known last-resort bypass sites (Technical Approach step 4) were
+# originally three inline copy-pasted blocks, each with its own literal
+# ``session.status = "failed"`` assignment. A PR-review tech-debt pass
+# (#3053 round 2) consolidated them into a single shared helper,
+# ``_last_resort_flush_and_fail(session, status)`` (agent/session_executor.py),
+# which does the flush_deferred_self_draft_sync() call and the fallback
+# status write exactly once, parameterized on ``status``. The three call
+# sites now read ``_last_resort_flush_and_fail(session, "failed")`` instead
+# of duplicating the assignment. A new bypass anywhere else -- including a
+# brand-new file, or a second literal assignment alongside the helper --
+# must still fail this test.
 _KNOWN_BYPASS_FILE = "agent/session_executor.py"
-_KNOWN_BYPASS_COUNT = 3
+_KNOWN_BYPASS_CALL_COUNT = 3
+_KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT = 1
 
 
 def test_no_new_terminal_writer_bypasses_outside_lifecycle():
     """Any direct ``<obj>.status = "<terminal>"`` assignment in tracked,
-    non-test production source must be one of the three known
-    ``agent/session_executor.py`` last-resort sites. A new bypass anywhere
-    else — including a brand-new file — fails this test, forcing the author
-    to either route through ``finalize_session`` or explicitly extend this
-    guard (and add the matching flush call) instead of silently reintroducing
-    an unguarded terminal-status write.
+    non-test production source must be the single shared
+    ``_last_resort_flush_and_fail`` helper in
+    ``agent/session_executor.py``, called from exactly the three known
+    last-resort sites. A new bypass anywhere else — including a brand-new
+    file, or a fresh inline literal assignment — fails this test, forcing
+    the author to either route through ``finalize_session`` or explicitly
+    extend this guard (and add the matching flush call) instead of silently
+    reintroducing an unguarded terminal-status write.
     """
     repo_root = Path(__file__).resolve().parents[2]
     offenders: dict[str, int] = {}
@@ -1668,10 +1684,29 @@ def test_no_new_terminal_writer_bypasses_outside_lifecycle():
         if count:
             offenders[rel_str] = offenders.get(rel_str, 0) + count
 
-    assert offenders == {_KNOWN_BYPASS_FILE: _KNOWN_BYPASS_COUNT}, (
-        f"Unexpected terminal-status bypass writer(s) outside "
+    assert offenders == {}, (
+        f"Unexpected literal terminal-status bypass writer(s) outside "
         f"models/session_lifecycle.py: {offenders}. Route through "
         f"finalize_session(), or if this is a deliberate new last-resort "
         f"bypass, add a flush_deferred_self_draft_sync() call before it and "
         f"update this guard's expected count."
+    )
+
+    executor_path = repo_root / _KNOWN_BYPASS_FILE
+    executor_text = executor_path.read_text(encoding="utf-8")
+
+    helper_assignment_count = len(_TERMINAL_STATUS_PARAM_ASSIGNMENT_RE.findall(executor_text))
+    assert helper_assignment_count == _KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT, (
+        f"Expected exactly {_KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT} "
+        f"parameterized terminal-status assignment (the shared "
+        f"_last_resort_flush_and_fail helper) in {_KNOWN_BYPASS_FILE}, "
+        f"found {helper_assignment_count}."
+    )
+
+    call_count = executor_text.count('_last_resort_flush_and_fail(session, "failed")')
+    assert call_count == _KNOWN_BYPASS_CALL_COUNT, (
+        f"Expected exactly {_KNOWN_BYPASS_CALL_COUNT} calls to "
+        f'_last_resort_flush_and_fail(session, "failed") in '
+        f"{_KNOWN_BYPASS_FILE}, found {call_count}. A new last-resort bypass "
+        f"site must route through the shared helper too."
     )

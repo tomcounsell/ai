@@ -1047,6 +1047,45 @@ async def _reenqueue_leftover_steering(
         )
 
 
+def _last_resort_flush_and_fail(session: AgentSession, status: str) -> None:
+    """Belt-and-braces (#3053): finalize_session() itself raised, so its
+    unconditional step-0 flush never ran for this transition. This is
+    NOT "the one place the chokepoint is provably not going to run" —
+    deliberate redundancy over a path the hoist and the backstop sweep
+    already cover; the flush's own SETNX dedup makes the extra call
+    harmless even when redundant.
+
+    Directly invokes ``flush_deferred_self_draft_sync`` and then falls back
+    to a raw ``session.status`` write, since ``finalize_session`` (which
+    would normally do both) is the thing that just failed. Both steps are
+    best-effort: a failure here is logged as a visible defect signal but
+    never re-raised, since this is already the last-resort path.
+    """
+    try:
+        from agent.session_health import (  # noqa: PLC0415
+            flush_deferred_self_draft_sync,
+        )
+
+        flush_deferred_self_draft_sync(session, status)
+    except Exception as flush_err:
+        logger.warning(
+            "[executor-guard] last-resort deferred self-draft flush failed (non-fatal): %s",
+            flush_err,
+        )
+    try:
+        import time as _time  # noqa: PLC0415
+
+        session.status = status
+        session.completed_at = _time.time()
+        session.save(update_fields=["status", "completed_at", "updated_at"])
+    except Exception as last_resort_err:
+        logger.warning(
+            "[executor-guard] last-resort status save failed (non-fatal): %s",
+            last_resort_err,
+            exc_info=True,
+        )
+
+
 async def _execute_agent_session(session: AgentSession) -> None:
     """
     Execute a single agent session:
@@ -1158,35 +1197,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     "[executor-guard] finalize_session(failed) raised: %s",
                     finalize_err,
                 )
-                # Belt-and-braces (#3053): finalize_session() itself raised, so its
-                # unconditional step-0 flush never ran for this transition. This is
-                # NOT "the one place the chokepoint is provably not going to run" —
-                # deliberate redundancy over a path the hoist and the backstop sweep
-                # already cover; the flush's own SETNX dedup makes the extra call
-                # harmless even when redundant.
-                try:
-                    from agent.session_health import (  # noqa: PLC0415
-                        flush_deferred_self_draft_sync,
-                    )
-
-                    flush_deferred_self_draft_sync(session, "failed")
-                except Exception as flush_err:
-                    logger.warning(
-                        "[executor-guard] last-resort deferred self-draft flush "
-                        "failed (non-fatal): %s",
-                        flush_err,
-                    )
-                try:
-                    import time as _time  # noqa: PLC0415
-
-                    session.status = "failed"
-                    session.completed_at = _time.time()
-                    session.save(update_fields=["status", "completed_at", "updated_at"])
-                except Exception as last_resort_err:
-                    logger.debug(
-                        "[executor-guard] last-resort status save failed (non-fatal): %s",
-                        last_resort_err,
-                    )
+                _last_resort_flush_and_fail(session, "failed")
             return
 
         if session.working_dir is None or session.session_id is None:
@@ -1229,39 +1240,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     "[executor-guard] finalize_session(failed) raised: %s",
                     finalize_err,
                 )
-                # Belt-and-braces (#3053): finalize_session() itself raised, so its
-                # unconditional step-0 flush never ran for this transition. This is
-                # NOT "the one place the chokepoint is provably not going to run" —
-                # deliberate redundancy over a path the hoist and the backstop sweep
-                # already cover; the flush's own SETNX dedup makes the extra call
-                # harmless even when redundant.
-                try:
-                    from agent.session_health import (  # noqa: PLC0415
-                        flush_deferred_self_draft_sync,
-                    )
-
-                    flush_deferred_self_draft_sync(session, "failed")
-                except Exception as flush_err:
-                    logger.warning(
-                        "[executor-guard] last-resort deferred self-draft flush "
-                        "failed (non-fatal): %s",
-                        flush_err,
-                    )
                 # Last-resort: mark status directly so the worker doesn't loop on
                 # this entry. ``reason`` is not a stored field on AgentSession —
                 # the structured ``[executor-guard]`` log above is the canonical
                 # reason record (visible to reflections / dashboards via log).
-                try:
-                    import time as _time  # noqa: PLC0415
-
-                    session.status = "failed"
-                    session.completed_at = _time.time()
-                    session.save(update_fields=["status", "completed_at", "updated_at"])
-                except Exception as last_resort_err:
-                    logger.debug(
-                        "[executor-guard] last-resort status save failed (non-fatal): %s",
-                        last_resort_err,
-                    )
+                _last_resort_flush_and_fail(session, "failed")
             return
 
         working_dir = Path(session.working_dir)
@@ -2081,38 +2064,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     session.agent_session_id,
                     exc,
                 )
-                # Belt-and-braces (#3053): finalize_session() itself raised, so its
-                # unconditional step-0 flush never ran for this transition. This is
-                # NOT "the one place the chokepoint is provably not going to run" —
-                # deliberate redundancy over a path the hoist and the backstop sweep
-                # already cover; the flush's own SETNX dedup makes the extra call
-                # harmless even when redundant.
-                try:
-                    from agent.session_health import (  # noqa: PLC0415
-                        flush_deferred_self_draft_sync,
-                    )
-
-                    flush_deferred_self_draft_sync(session, "failed")
-                except Exception as flush_err:  # noqa: BLE001
-                    logger.warning(
-                        "[executor-guard] last-resort deferred self-draft flush "
-                        "failed (non-fatal): %s",
-                        flush_err,
-                    )
-                try:
-                    import time as _time  # noqa: PLC0415
-
-                    session.status = "failed"
-                    session.completed_at = _time.time()
-                    session.save(update_fields=["status", "completed_at", "updated_at"])
-                except Exception as last_resort_err:  # noqa: BLE001
-                    logger.warning(
-                        "[executor-guard] last-resort status save failed for "
-                        "session %s (non-fatal): %s",
-                        session.agent_session_id,
-                        last_resort_err,
-                        exc_info=True,
-                    )
+                _last_resort_flush_and_fail(session, "failed")
             return
 
         # All session types route through the headless session runner (plan
