@@ -136,12 +136,12 @@
 <section>
   <p class="sec-label">2 · Recall</p>
   <h2>The bloom filter and the <code>&lt;thought&gt;</code> stub</h2>
-  <p>Recall happens inside the PostToolUse hook while the agent works, on a sliding window across tool calls, affordable because most checks cost nothing:</p>
+  <p>Recall runs in the UserPromptSubmit hook, once per turn, before any tool fires — so the agent already carries relevant memory when it starts thinking. It is affordable because most checks cost nothing:</p>
   <div class="diagram-wrap">
-  <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: tool activity is checked against a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
+  <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: each user prompt is checked against a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
     <rect class="dg-box" x="20" y="76" width="160" height="60"/>
-    <text class="dg-title" x="100" y="101" text-anchor="middle">Tool call</text>
-    <text class="dg-sub" x="100" y="119" text-anchor="middle">every one</text>
+    <text class="dg-title" x="100" y="101" text-anchor="middle">User prompt</text>
+    <text class="dg-sub" x="100" y="119" text-anchor="middle">every turn</text>
 
     <rect class="dg-box store" x="256" y="76" width="190" height="60"/>
     <text class="dg-title" x="351" y="101" text-anchor="middle">Bloom filter</text>
@@ -172,6 +172,13 @@
     <div class="tag">Concept · Bloom filter</div>
     <p>A bloom filter is a probabilistic set-membership structure: it answers "have I seen this?" with no false negatives and tunable false positives, in constant space. Here it gates memory recall cheaply, so the hook injects small stubs and the agent pulls full bodies only when needed.</p>
   </aside>
+  <p>Both halves of that design are also what keeps recall cheap against the model provider's <strong>prompt cache</strong>, which is the larger cost by far.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Prompt caching</div>
+    <p>Providers cache the model's context by exact token <em>prefix</em>: a turn is billed at a fraction of the input price for every token it shares with the previous request, up to the first byte that differs. So the cost of writing into the context is not the size of what you wrote — it is the size of everything that comes <em>after</em> it. Editing one line near the top of a 100,000-token context re-bills almost all of it.</p>
+  </aside>
+  <p>Recall therefore obeys two rules. It <strong>only ever appends</strong>, landing in the user turn after all sealed history, so an injection costs the stub's own tokens and nothing more. And it <strong>never rewrites</strong> — no memory block is edited or withdrawn once sent, because removing a block behind the cursor invalidates every token behind it and costs more than leaving it in place.</p>
+  <p>The stub is what makes the append affordable in aggregate. Injected blocks accumulate for the life of a session, so the per-turn size is paid on every later turn too; a twenty-token stub compounds where a full memory body would not. Memories already surfaced this session are suppressed rather than re-injected, which is also append-only — declining to add costs nothing, while pruning would cost the prefix.</p>
 </section>
 
 <section>
@@ -201,6 +208,7 @@
   <p>The second store is ordinary files: the repository's <code>CLAUDE.md</code> operating instructions, a per-project <code>MEMORY.md</code> index with one Markdown file per durable fact, the <code>docs/</code> tree, and a curated knowledge vault of business context and decisions. This is the memory humans write, and the memory humans can <em>read</em>, diff, and version. Every change has a git history; every fact has an author.</p>
   <p>The two stores stay separate because they answer different questions on different clocks. Object memory answers "what have I learned that's relevant to this exact moment?", at tool-call granularity, thousands of times a day, ranked and decaying. Filesystem memory answers "how does this project work and what are the standing rules?", read once at session start, changed a few times a week, reviewed like code.</p>
   <p>Merging them would break both: files are too slow and too flat to consult on every tool call, and a Redis store is illegible to the humans who need to audit what the system believes.</p>
+  <p>Reading the files once, at session start, is also what makes them free. They are loaded into the context ahead of the conversation, so a file edited mid-session changes bytes that the running session has already stopped looking at — the agent can write to its own notes without re-billing the context it is sitting on. The price is honest and paid knowingly: a fact written at turn five does not appear in the files the model is reading until the next session starts. Keeping <em>this</em> session current is the object store's job, which is exactly why the two clocks are different.</p>
 </section>
 
 <div class="page-next">

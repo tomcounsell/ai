@@ -51,13 +51,15 @@ QUALITY_COMMANDS = ("pytest", "ruff", "ruff-format")
 # common paths early-exit (or bump the recall counter) WITHOUT importing the
 # popoto-heavy module; the genuinely heavy branches still import lazily.
 #
-# ``_RECALL_WINDOW_SIZE`` / ``_RECALL_BUFFER_SIZE`` MUST stay in sync with
-# ``hook_utils.memory_bridge.WINDOW_SIZE`` / ``BUFFER_SIZE`` — they are
-# duplicated here only so the counter-only fast path can mirror recall()'s
-# non-query branch byte-for-byte. recall() remains the source of truth; the
-# WINDOW_SIZE-th call delegates to it for the real BM25/bloom work.
+# ``_RECALL_BUFFER_SIZE`` MUST stay in sync with
+# ``hook_utils.memory_bridge.BUFFER_SIZE`` — it is duplicated here only so the
+# counter-only path can mirror recall()'s non-query branch byte-for-byte.
+#
+# This hook no longer delegates to recall() on the WINDOW_SIZE-th call, because
+# PostToolUse has no injection channel to deliver its output — see
+# _run_memory_recall(). The window constant is therefore gone from this file;
+# memory_bridge.WINDOW_SIZE remains the source of truth for recall() itself.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_RECALL_WINDOW_SIZE = 3
 _RECALL_BUFFER_SIZE = 9
 
 
@@ -361,41 +363,62 @@ def check_file_reminders(hook_input: dict) -> None:
             print(reminder)
 
 
-def _run_memory_recall(hook_input: dict) -> str | None:
-    """Run memory recall and return additionalContext string or None.
+def _run_memory_recall(hook_input: dict) -> None:
+    """Advance the recall sliding window. Never injects, by design.
 
-    Queries subconscious memory based on accumulated tool calls.
+    PostToolUse has no context-injection channel. The harness contract
+    supports ``hookSpecificOutput.additionalContext`` on UserPromptSubmit,
+    UserPromptExpansion, and SessionStart only; PostToolUse output carries
+    ``systemMessage`` but not ``additionalContext``, and a bare top-level
+    ``{"additionalContext": ...}`` (what this hook used to print) is not a
+    supported shape on any event.
+
+    Measured before this change, over 8 recent sessions: every delivered
+    ``<thought>`` stub arrived in a ``hook_additional_context`` attachment
+    parented to a *user* record -- i.e. from ``prefetch()`` on
+    UserPromptSubmit. Not one arrived after a ``tool_result``, which is
+    where a PostToolUse injection would land. Session
+    ``eefc78b8`` recorded **181** entries in its sidecar ``injected[]``
+    while delivering **3** stubs to the model.
+
+    That gap was not merely wasted work. ``recall()`` extends the sidecar's
+    ``injected[]`` and calls ``record.confirm_access()`` on every record it
+    formats, so each undelivered batch:
+
+    * suppressed those memories from ``prefetch()``, the path that does
+      reach the model -- ``prefetch()`` excludes anything already in
+      ``injected[]``; and
+    * fed the outcome / confidence loop an access the model never saw,
+      biasing ``dismissal_count`` and importance decay against memories
+      that were never actually shown.
+
+    So this function now does the window bookkeeping and nothing else. The
+    ``recall()`` implementation in ``memory_bridge`` is left intact and
+    tested so it can be re-homed to a channel that can inject; until then,
+    ``prefetch()`` on UserPromptSubmit is the recall path.
+
     Fails silently -- memory errors never block tool execution.
     """
     try:
         session_id = hook_input.get("session_id", "unknown")
         tool_name = hook_input.get("tool_name", "")
         tool_input = hook_input.get("tool_input", {})
-        cwd = hook_input.get("cwd", "")
 
-        # Cheap fast path: only every WINDOW_SIZE-th tool call actually queries
-        # memory. The other (WINDOW_SIZE - 1) calls just bump the sliding-window
-        # counter and append to the buffer. Mirror recall()'s non-query branch
-        # inline here so those calls avoid importing the popoto-heavy
-        # memory_bridge module. The WINDOW_SIZE-th call (and any read failure)
-        # falls through to the real recall(), which re-reads the sidecar and
-        # performs the increment + BM25/bloom query itself (no double-count,
-        # since this branch does not write on delegation).
+        # Window bookkeeping only. Every call bumps the counter and appends
+        # to the buffer; none delegates to recall(). Previously the
+        # WINDOW_SIZE-th call fell through to recall(), whose output this
+        # event cannot deliver -- see the docstring. Keeping the counter and
+        # buffer preserves the sidecar shape that prefetch() load-modify-saves
+        # around, and costs no import of the popoto-heavy memory_bridge.
         state = _load_memory_buffer(session_id)
-        next_count = state.get("count", 0) + 1
-        if next_count % _RECALL_WINDOW_SIZE != 0:
-            state["count"] = next_count
-            buffer = state.get("buffer", [])
-            buffer.append({"tool_name": tool_name, "tool_input": tool_input})
-            if len(buffer) > _RECALL_BUFFER_SIZE:
-                buffer = buffer[-_RECALL_BUFFER_SIZE:]
-            state["buffer"] = buffer
-            _save_memory_buffer(session_id, state)
-            return None
-
-        from hook_utils.memory_bridge import recall
-
-        return recall(session_id, tool_name, tool_input, cwd=cwd)
+        state["count"] = state.get("count", 0) + 1
+        buffer = state.get("buffer", [])
+        buffer.append({"tool_name": tool_name, "tool_input": tool_input})
+        if len(buffer) > _RECALL_BUFFER_SIZE:
+            buffer = buffer[-_RECALL_BUFFER_SIZE:]
+        state["buffer"] = buffer
+        _save_memory_buffer(session_id, state)
+        return None
     except Exception:
         return None
 
@@ -567,12 +590,9 @@ def main():
 
     append_to_log(session_dir, "tool_use.jsonl", entry)
 
-    # Memory recall -- query subconscious memory and inject thoughts
-    additional_context = _run_memory_recall(hook_input)
-    if additional_context:
-        # Output hook response with additionalContext for thought injection
-        response = json.dumps({"additionalContext": additional_context})
-        print(response)
+    # Memory recall -- advance the sliding window only. See
+    # _run_memory_recall() for why this event cannot inject.
+    _run_memory_recall(hook_input)
 
 
 if __name__ == "__main__":
