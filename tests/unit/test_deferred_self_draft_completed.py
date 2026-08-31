@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,7 +51,7 @@ import pytest
 from agent.output_handler import DRAFTER_FALLBACK_SENDER
 from agent.session_executor import _reenqueue_leftover_steering
 from models.agent_session import AgentSession
-from models.session_lifecycle import finalize_session
+from models.session_lifecycle import StatusConflictError, finalize_session
 
 # A substantive (non-narration, no file-path / URL / code-fence) reply body.
 # is_narration_only() must return False for this so it is delivered VERBATIM.
@@ -598,16 +599,24 @@ def test_empty_deferred_text_delivers_canned_notice(cleanup, empty_text):
 # ---------------------------------------------------------------------------
 
 
-def test_no_deferral_writes_zero_outbox(cleanup):
+def test_no_deferral_writes_zero_outbox(cleanup, caplog):
     """A normal ``completed`` session with no deferred_self_draft_pending produces
-    zero flush-originated outbox writes."""
+    zero flush-originated outbox writes, and the flush's "nothing pending"
+    early-return is no longer silent (#3053) — it logs at DEBUG, distinguishing
+    "ran, found nothing" from "never ran"."""
     sid = f"{SID_PREFIX}no-deferral"
     cleanup.append(sid)
     session = _make_session(sid, pending=False)
 
-    finalize_session(session, "completed", reason="normal completion")
+    with caplog.at_level("DEBUG", logger="agent.session_health"):
+        finalize_session(session, "completed", reason="normal completion")
 
     assert _outbox_count(sid) == 0
+    assert any(
+        "nothing pending" in rec.message
+        for rec in caplog.records
+        if rec.name == "agent.session_health"
+    ), "flush_deferred_self_draft_sync must log a DEBUG line on its nothing-pending early-return"
 
 
 # ---------------------------------------------------------------------------
@@ -1097,9 +1106,19 @@ def test_helper_exception_degrades_to_unconverted_delivery(cleanup, monkeypatch,
 
 
 def test_re_finalize_already_completed_does_not_reflush(cleanup):
-    """Finalizing an already-``completed`` session a second time short-circuits at
-    the idempotency return and does NOT re-flush — exactly one write total from the
-    first genuine finalize."""
+    """Finalizing an already-``completed`` session a second time: exactly one
+    outbox write total across both calls.
+
+    Under the #3053 hoist, the flush is now the FIRST thing every
+    ``finalize_session`` call does — including this second, already-terminal
+    call — so the flush IS entered on the re-finalize. What prevents a second
+    delivery is that the first flush already popped
+    ``deferred_self_draft_pending`` from the authoritative record (the
+    post-delivery clear), so the second flush's own "nothing pending"
+    early-return no-ops it before the SETNX dedup is even consulted. The
+    invariant that actually matters — and the one this test pins — is
+    "exactly one outbox write", not "the flush was never entered".
+    """
     sid = f"{SID_PREFIX}re-finalize-idempotent"
     cleanup.append(sid)
     session = _make_session(sid, text=ORIGINAL_REPLY)
@@ -1108,7 +1127,8 @@ def test_re_finalize_already_completed_does_not_reflush(cleanup):
     assert _outbox_count(sid) == 1
 
     # Re-read the now-terminal session and finalize again to 'completed'. The
-    # idempotency early-return (current_status == status) fires before the flush.
+    # flush runs again (hoisted, unconditional) but no-ops on the cleared flag;
+    # the idempotency early-return (current_status == status) still fires below it.
     fresh = list(AgentSession.query.filter(session_id=sid))[0]
     assert fresh.status == "completed"
     finalize_session(fresh, "completed", reason="second re-finalize")
@@ -1227,3 +1247,466 @@ class TestTerminalFlushPromiseGate:
         mock_notice.assert_awaited_once()
         args, _kwargs = mock_notice.call_args
         assert args[1] == TERMINAL_PROMISE_FALLBACK_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# 9. Reachability (#3053 AC1): real defer through output_handler.send(),
+#    real completion through complete_transcript.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reachability_real_defer_through_output_handler_to_completion(cleanup):
+    """AC1: a validator-flagged final reply, deferred through the REAL
+    ``TelegramRelayOutputHandler.send()`` path (not a hand-built session
+    record), reaches the outbox when the session completes via the real
+    ``complete_transcript`` -> ``finalize_session`` chokepoint.
+    """
+    from bridge.message_drafter import MessageDraft
+
+    sid = f"{SID_PREFIX}reachability-e2e"
+    cleanup.append(sid)
+    session = _make_session(sid, pending=False, status="running")
+
+    flagged_draft = MessageDraft(text=ORIGINAL_REPLY, needs_self_draft=True)
+
+    with (
+        patch(
+            "bridge.message_drafter.draft_message",
+            new_callable=AsyncMock,
+            return_value=flagged_draft,
+        ),
+        patch(
+            "agent.output_handler.TelegramRelayOutputHandler._inject_self_draft_steering",
+            return_value=True,
+        ),
+    ):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        handler = TelegramRelayOutputHandler()
+        outcome = await handler.send("12345", ORIGINAL_REPLY, 263, session=session)
+
+    from agent.output_handler import DeliveryOutcome
+
+    assert outcome == DeliveryOutcome.deferred_self_draft
+    # No outbox write yet — production code persisted the deferral onto the
+    # authoritative record, not this in-memory `session` object.
+    assert _outbox_count(sid) == 0
+    fresh_before = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh_before.extra_context.get("deferred_self_draft_pending") is True
+    assert fresh_before.extra_context.get("deferred_self_draft_text") == ORIGINAL_REPLY
+
+    # Turn ends with no redraft: real completion entry point.
+    from bridge.session_transcript import complete_transcript
+
+    complete_transcript(sid, status="completed")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1, "the deferred reply must reach the outbox on completion"
+    assert payloads[0]["text"] == ORIGINAL_REPLY
+    fresh_after = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh_after.status == "completed"
+    assert not fresh_after.extra_context.get("deferred_self_draft_pending")
+
+
+# ---------------------------------------------------------------------------
+# 10. Parametrized exit-invariant: the flush is entered on every
+#     finalize_session exit (#3053 AC2).
+# ---------------------------------------------------------------------------
+
+
+def test_flush_entered_on_fresh_terminal_transition(cleanup, monkeypatch):
+    sid = f"{SID_PREFIX}invariant-fresh"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    calls = []
+    import agent.session_health as session_health
+
+    original = session_health.flush_deferred_self_draft_sync
+
+    def _spy(sess, status=None):
+        calls.append(status)
+        return original(sess, status)
+
+    monkeypatch.setattr(session_health, "flush_deferred_self_draft_sync", _spy)
+
+    finalize_session(session, "completed", reason="fresh")
+
+    assert calls == ["completed"], "flush must be entered exactly once on a fresh transition"
+
+
+def test_flush_entered_on_idempotent_re_finalize(cleanup, monkeypatch):
+    sid = f"{SID_PREFIX}invariant-idempotent"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    import agent.session_health as session_health
+
+    original = session_health.flush_deferred_self_draft_sync
+    calls = []
+
+    def _spy(sess, status=None):
+        calls.append(status)
+        return original(sess, status)
+
+    monkeypatch.setattr(session_health, "flush_deferred_self_draft_sync", _spy)
+
+    finalize_session(session, "completed", reason="first")
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    finalize_session(fresh, "completed", reason="second (idempotent)")
+
+    assert calls == ["completed", "completed"], (
+        "flush must be entered on BOTH the fresh transition and the idempotent "
+        "re-finalize — it is the flush's own gating/dedup, not finalize_session's "
+        "idempotency check, that prevents a second delivery"
+    )
+    assert _outbox_count(sid) == 1
+
+
+def test_flush_entered_on_reject_from_terminal_conflict(cleanup, monkeypatch):
+    """A rejected terminal->terminal re-transition still flushes before raising
+    ``StatusConflictError`` — the accepted cost of the hoist (PM ruling, Open
+    Question 1)."""
+    sid = f"{SID_PREFIX}invariant-reject"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY, status="running")
+
+    import agent.session_health as session_health
+
+    original = session_health.flush_deferred_self_draft_sync
+    calls = []
+
+    def _spy(sess, status=None):
+        calls.append(status)
+        return original(sess, status)
+
+    monkeypatch.setattr(session_health, "flush_deferred_self_draft_sync", _spy)
+
+    # First finalize to "failed" (a different terminal status than the next call).
+    finalize_session(session, "failed", reason="first terminal")
+    assert calls == ["failed"]
+    assert _outbox_count(sid) == 1
+
+    # Attempting to re-classify failed -> killed hits reject_from_terminal
+    # (the session is already terminal), but the flush -- which sits ABOVE
+    # that guard -- must have been entered first.
+    with pytest.raises(StatusConflictError):
+        finalize_session(session, "killed", reason="illegal re-transition")
+
+    assert calls == ["failed", "killed"], "flush must run even on a rejected re-transition"
+
+
+def test_flush_entered_on_cas_conflict(cleanup, monkeypatch):
+    """A CAS conflict (concurrent writer changed the on-disk status) still
+    flushes before raising."""
+    sid = f"{SID_PREFIX}invariant-cas"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY, status="running")
+
+    import agent.session_health as session_health
+
+    original = session_health.flush_deferred_self_draft_sync
+    calls = []
+
+    def _spy(sess, status=None):
+        calls.append(status)
+        return original(sess, status)
+
+    monkeypatch.setattr(session_health, "flush_deferred_self_draft_sync", _spy)
+
+    # Concurrent writer changes the on-disk status out from under `session`'s
+    # in-memory snapshot (still "running").
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    fresh.status = "abandoned"
+    fresh.save(update_fields=["status", "updated_at"])
+
+    with pytest.raises(StatusConflictError):
+        finalize_session(session, "completed", reason="stale snapshot")
+
+    assert calls == ["completed"], "flush must run even on a CAS conflict"
+
+
+# ---------------------------------------------------------------------------
+# 11. Post-delivery flag clear (#3053 correction to the "self-clearing" claim)
+# ---------------------------------------------------------------------------
+
+
+def test_flush_clears_pending_flag_after_successful_delivery(cleanup):
+    sid = f"{SID_PREFIX}clear-on-success"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    finalize_session(session, "completed", reason="clear test")
+
+    assert _outbox_count(sid) == 1
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert not fresh.extra_context.get("deferred_self_draft_pending"), (
+        "the flush must clear deferred_self_draft_pending after a successful delivery"
+    )
+    assert not fresh.extra_context.get("deferred_self_draft_text"), (
+        "the flush must clear deferred_self_draft_text after a successful delivery"
+    )
+
+
+def test_flush_failing_clear_does_not_lose_the_delivery(cleanup, monkeypatch, caplog):
+    """If the post-delivery clear itself raises, the delivery already happened
+    and must NOT be undone or reported as a failure — WARNING logged, no raise."""
+    sid = f"{SID_PREFIX}clear-failure"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    import models.agent_session as agent_session_mod
+
+    original_save = agent_session_mod.AgentSession.save
+    call_count = {"n": 0}
+
+    def _boom_on_second_save(self, *args, **kwargs):
+        call_count["n"] += 1
+        if kwargs.get("update_fields") == ["extra_context"]:
+            raise RuntimeError("simulated clear-save failure")
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(agent_session_mod.AgentSession, "save", _boom_on_second_save)
+
+    with caplog.at_level("WARNING", logger="agent.session_health"):
+        finalize_session(session, "completed", reason="clear-failure test")
+
+    assert _outbox_count(sid) == 1, "delivery must have happened despite the clear failure"
+    assert any(
+        "failed to clear" in rec.message.lower()
+        for rec in caplog.records
+        if rec.name == "agent.session_health"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Idempotency log: DEBUG on the ordinary case, INFO when the AUTHORITATIVE
+#     record still carries a pending deferral (#3053 AC3)
+# ---------------------------------------------------------------------------
+
+
+def test_double_finalize_stale_object_logs_debug_not_info(cleanup, caplog):
+    """A double-``finalize_session("completed")`` on the SAME stale session
+    object (the shape of ``test_exactly_once_when_finalize_completed_called_twice``)
+    logs the idempotency early-return at DEBUG, not INFO — pinning that the
+    INFO promotion reads the AUTHORITATIVE record (where the flag was already
+    cleared by the first flush), never the caller's stale parameter."""
+    sid = f"{SID_PREFIX}idempotent-debug"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    finalize_session(session, "completed", reason="first")
+
+    with caplog.at_level("DEBUG", logger="models.session_lifecycle"):
+        finalize_session(session, "completed", reason="second (stale object)")
+
+    idem_records = [
+        rec
+        for rec in caplog.records
+        if rec.name == "models.session_lifecycle" and "already in terminal state" in rec.message
+    ]
+    assert len(idem_records) == 1
+    assert idem_records[0].levelname == "DEBUG"
+
+
+def test_idempotency_promotes_to_info_when_pending_still_set(cleanup, caplog, monkeypatch):
+    """If the authoritative record still carries a pending deferral at the
+    time of a double-finalize (flush failed or was bypassed), the idempotency
+    early-return logs at INFO."""
+    sid = f"{SID_PREFIX}idempotent-info"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    # Simulate the flush having failed to deliver/clear: patch it to a no-op
+    # so the pending flag survives the first finalize.
+    import agent.session_health as session_health
+
+    monkeypatch.setattr(session_health, "flush_deferred_self_draft_sync", lambda *a, **k: None)
+
+    finalize_session(session, "completed", reason="first (flush no-op)")
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.extra_context.get("deferred_self_draft_pending") is True
+
+    with caplog.at_level("INFO", logger="models.session_lifecycle"):
+        finalize_session(fresh, "completed", reason="second re-finalize")
+
+    idem_records = [
+        rec
+        for rec in caplog.records
+        if rec.name == "models.session_lifecycle" and "already in terminal state" in rec.message
+    ]
+    assert len(idem_records) == 1
+    assert idem_records[0].levelname == "INFO"
+    assert "deferred_self_draft_pending" in idem_records[0].message
+
+
+# ---------------------------------------------------------------------------
+# 13. LIFECYCLE-log swallow promoted to WARNING (#3053 AC3)
+# ---------------------------------------------------------------------------
+
+
+def test_lifecycle_log_failure_logs_warning_and_does_not_block_status_write(
+    cleanup, monkeypatch, caplog
+):
+    sid = f"{SID_PREFIX}lifecycle-log-fail"
+    cleanup.append(sid)
+    session = _make_session(sid, pending=False)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated lifecycle log failure")
+
+    monkeypatch.setattr(session, "log_lifecycle_transition", _boom)
+
+    with caplog.at_level("WARNING", logger="models.session_lifecycle"):
+        finalize_session(session, "completed", reason="lifecycle log failure")
+
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.status == "completed", "a raising LIFECYCLE log must not block the status write"
+    assert any(
+        "lifecycle log failed" in rec.message.lower()
+        for rec in caplog.records
+        if rec.name == "models.session_lifecycle"
+    )
+    assert any(
+        rec.levelname == "WARNING" for rec in caplog.records if "Lifecycle log" in rec.message
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. waiting_for_children -> _finalize_parent_sync re-enters the hoisted flush
+# ---------------------------------------------------------------------------
+
+
+def test_waiting_for_children_parent_flushed_via_finalize_parent_sync(cleanup):
+    from models.session_lifecycle import _finalize_parent_sync
+
+    parent_sid = f"{SID_PREFIX}parent-wfc"
+    child_sid = f"{SID_PREFIX}child-wfc"
+    cleanup.append(parent_sid)
+    cleanup.append(child_sid)
+
+    parent = _make_session(
+        parent_sid, pending=True, text=ORIGINAL_REPLY, status="waiting_for_children"
+    )
+    child = AgentSession(
+        session_id=child_sid,
+        project_key="test-dsd",
+        status="completed",
+        parent_agent_session_id=parent.id,
+    )
+    child.save()
+
+    _finalize_parent_sync(
+        parent.id,
+        completing_child_id=child.agent_session_id,
+        completing_child_status="completed",
+    )
+
+    payloads = _outbox_payloads(parent_sid)
+    assert len(payloads) == 1, (
+        "a waiting_for_children parent must be flushed once all children finalize"
+    )
+    assert payloads[0]["text"] == ORIGINAL_REPLY
+
+    try:
+        child.delete()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 15. Static terminal-writer guard (#3053 AC2): pins the set of code paths
+#     that assign a terminal status outside models/session_lifecycle.py.
+# ---------------------------------------------------------------------------
+
+_TERMINAL_STATUS_ASSIGNMENT_RE = re.compile(
+    r'\.status\s*=\s*["\'](completed|failed|killed|abandoned|cancelled)["\']'
+)
+
+# A non-literal terminal-status assignment (``session.status = status``,
+# where ``status`` is a function parameter) -- the shape used by the shared
+# ``_last_resort_flush_and_fail`` helper below, which the literal-string
+# regex above cannot see.
+_TERMINAL_STATUS_PARAM_ASSIGNMENT_RE = re.compile(r"\.status\s*=\s*status\b")
+
+# The three known last-resort bypass sites (Technical Approach step 4) were
+# originally three inline copy-pasted blocks, each with its own literal
+# ``session.status = "failed"`` assignment. A PR-review tech-debt pass
+# (#3053 round 2) consolidated them into a single shared helper,
+# ``_last_resort_flush_and_fail(session, status)`` (agent/session_executor.py),
+# which does the flush_deferred_self_draft_sync() call and the fallback
+# status write exactly once, parameterized on ``status``. The three call
+# sites now read ``_last_resort_flush_and_fail(session, "failed")`` instead
+# of duplicating the assignment. A new bypass anywhere else -- including a
+# brand-new file, or a second literal assignment alongside the helper --
+# must still fail this test.
+_KNOWN_BYPASS_FILE = "agent/session_executor.py"
+_KNOWN_BYPASS_CALL_COUNT = 3
+_KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT = 1
+
+
+def test_no_new_terminal_writer_bypasses_outside_lifecycle():
+    """Any direct ``<obj>.status = "<terminal>"`` assignment in tracked,
+    non-test production source must be the single shared
+    ``_last_resort_flush_and_fail`` helper in
+    ``agent/session_executor.py``, called from exactly the three known
+    last-resort sites. A new bypass anywhere else — including a brand-new
+    file, or a fresh inline literal assignment — fails this test, forcing
+    the author to either route through ``finalize_session`` or explicitly
+    extend this guard (and add the matching flush call) instead of silently
+    reintroducing an unguarded terminal-status write.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    offenders: dict[str, int] = {}
+
+    for py_file in repo_root.rglob("*.py"):
+        rel = py_file.relative_to(repo_root)
+        rel_str = str(rel)
+        if rel_str.startswith(
+            (
+                "tests/",
+                ".venv/",
+                ".worktrees/",
+                ".claude/",
+                "docs/",
+            )
+        ):
+            continue
+        if rel_str == "models/session_lifecycle.py":
+            # The lifecycle module IS the authority for terminal writes.
+            continue
+        try:
+            text = py_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        count = len(_TERMINAL_STATUS_ASSIGNMENT_RE.findall(text))
+        if count:
+            offenders[rel_str] = offenders.get(rel_str, 0) + count
+
+    assert offenders == {}, (
+        f"Unexpected literal terminal-status bypass writer(s) outside "
+        f"models/session_lifecycle.py: {offenders}. Route through "
+        f"finalize_session(), or if this is a deliberate new last-resort "
+        f"bypass, add a flush_deferred_self_draft_sync() call before it and "
+        f"update this guard's expected count."
+    )
+
+    executor_path = repo_root / _KNOWN_BYPASS_FILE
+    executor_text = executor_path.read_text(encoding="utf-8")
+
+    helper_assignment_count = len(_TERMINAL_STATUS_PARAM_ASSIGNMENT_RE.findall(executor_text))
+    assert helper_assignment_count == _KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT, (
+        f"Expected exactly {_KNOWN_BYPASS_HELPER_ASSIGNMENT_COUNT} "
+        f"parameterized terminal-status assignment (the shared "
+        f"_last_resort_flush_and_fail helper) in {_KNOWN_BYPASS_FILE}, "
+        f"found {helper_assignment_count}."
+    )
+
+    call_count = executor_text.count('_last_resort_flush_and_fail(session, "failed")')
+    assert call_count == _KNOWN_BYPASS_CALL_COUNT, (
+        f"Expected exactly {_KNOWN_BYPASS_CALL_COUNT} calls to "
+        f'_last_resort_flush_and_fail(session, "failed") in '
+        f"{_KNOWN_BYPASS_FILE}, found {call_count}. A new last-resort bypass "
+        f"site must route through the shared helper too."
+    )
