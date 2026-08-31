@@ -710,12 +710,20 @@ session someone stopped does not. Rows are kept only if `deferred_self_draft_pen
 and `completed_at` falls within `DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS` (a named,
 env-overridable, provisional constant defaulting to the SETNX dedup TTL); a row with
 `completed_at=None` (legacy data, or any writer that skipped the backfill) is acted on exactly
-once, matching the existing `_response_delivered_after_start` precedent for anchorless rows. Every
-hit delegates to `flush_deferred_self_draft_sync` (no second delivery implementation), logs at
-WARNING (a sweep hit means the chokepoint was bypassed — a defect signal, not routine
-housekeeping), and increments `{project_key}:session-health:deferred_flush_backstop_hits`. Bounded
-to `DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` rows per tick; one failing row never aborts the
-sweep or the loop.
+once **when the flush actually delivers it**, matching the existing
+`_response_delivered_after_start` precedent for anchorless rows — it is the flush's own
+post-delivery flag clear, not the lookback window, that stops a delivered anchorless row from
+re-firing on the next tick. Every matching row delegates to `flush_deferred_self_draft_sync` (no
+second delivery implementation), which reports back whether it actually delivered (`True`) or
+declined (`False` — nothing pending, the transport/status gate refused, the SETNX dedup was
+already held, or an internal failure). **Only a `True` result** logs at **WARNING** (a genuine
+sweep hit means the chokepoint was bypassed for this session — a defect signal, not routine
+housekeeping) and increments `{project_key}:session-health:deferred_flush_backstop_hits`; a
+declined result logs at **DEBUG** instead and does **not** touch the counter — and for an
+anchorless row, a declined result leaves the flag untouched, so that row is silently re-evaluated
+on every subsequent tick until something else clears it or delivers it. Bounded to
+`DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` rows per tick; one failing row never aborts the sweep
+or the loop.
 
 **Pre-existing gap this plan did not introduce:** a PM/parent session's terminal transition after
 a worker-shutdown `asyncio.CancelledError` in `_deliver_pipeline_completion`
