@@ -161,17 +161,32 @@ def _make_session(current_stage: str | None = None, **kwargs):
             "session_type": SessionType.ENG,
         }
         defaults.update(kwargs)
+        session = AgentSession(**defaults)
         if current_stage is not None:
             # Build a stage_states dict with the given stage as 'in_progress'.
-            # AgentSession.current_stage reads the first SDLC_STAGES entry with status
-            # 'in_progress'. We need to pass this via stage_states at construction time.
+            # AgentSession.current_stage reads the first SDLC_STAGES entry with
+            # status 'in_progress'.
+            #
+            # Assigned AFTER construction, through the setter. `stage_states` is
+            # no longer a Popoto field — it is a property backed by
+            # `session_events`, so passing it as a constructor kwarg is silently
+            # dropped and `current_stage` stays None. That is what made every
+            # slugged-Eng worker_key assertion fail: `worker_key` fell through
+            # the worktree-stage branch to `project_key`, so the tests read
+            # "test-project" where they expected the slug. The property was
+            # correct throughout; the fixture was writing to a field that had
+            # stopped existing.
             from models.agent_session import SDLC_STAGES
 
             stages_dict = {}
             for stage in SDLC_STAGES:
                 stages_dict[stage] = "in_progress" if stage == current_stage else "pending"
-            defaults["stage_states"] = json.dumps(stages_dict)
-        return AgentSession(**defaults)
+            session.stage_states = json.dumps(stages_dict)
+            assert session.current_stage == current_stage, (
+                f"fixture failed to set current_stage={current_stage!r} "
+                f"(got {session.current_stage!r}) — the stage_states write path changed again"
+            )
+        return session
     finally:
         AgentSession.save = original_save
 
