@@ -50,48 +50,6 @@ class TestOutputRouterExports:
         assert state.auto_continue_count == 0
 
 
-class TestBackwardCompatExports:
-    """Verify symbols are still importable from agent.agent_session_queue for backward compat.
-
-    Deliberately retained through phase 4 of issue #2876 as the one exception to
-    that phase's repoint-everything-off-the-hub rule: it is the tripwire that
-    fails loudly when the re-exports go away, rather than letting them go
-    quietly. Phase 5 deletes those re-exports and must delete this class in the
-    same diff — the proposition asserted here is exactly the one phase 5 inverts.
-    """
-
-    def test_max_nudge_count_from_queue(self):
-        from agent.agent_session_queue import MAX_NUDGE_COUNT
-
-        assert isinstance(MAX_NUDGE_COUNT, int)
-
-    def test_nudge_message_from_queue(self):
-        from agent.agent_session_queue import NUDGE_MESSAGE
-
-        assert isinstance(NUDGE_MESSAGE, str)
-
-    def test_determine_delivery_action_from_queue(self):
-        from agent.agent_session_queue import determine_delivery_action
-
-        assert callable(determine_delivery_action)
-
-    def test_send_to_chat_result_from_queue(self):
-        from agent.agent_session_queue import SendToChatResult
-
-        state = SendToChatResult()
-        assert state.completion_sent is False
-
-    def test_steer_session_from_queue(self):
-        from agent.agent_session_queue import steer_session
-
-        assert callable(steer_session)
-
-    def test_re_enqueue_session_from_queue(self):
-        from agent.agent_session_queue import re_enqueue_session
-
-        assert callable(re_enqueue_session)
-
-
 class TestSteerSessionGuards:
     """Unit tests for steer_session() edge cases (no Redis required)."""
 

@@ -126,7 +126,7 @@ When a stuck session is found:
 The health check loop starts automatically with the **worker process** (`python -m worker`), alongside the session notify listener and session watchdog. Both the health loop and notify listener run as background asyncio tasks in the worker:
 
 - **Session notify listener** (`_session_notify_listener()` in `agent/agent_session_queue.py`): Subscribes to the `valor:sessions:new` Redis pub/sub channel. Extracts `worker_key` from the payload and calls `_ensure_worker(worker_key, is_project_keyed)` immediately — ~1s pickup latency. This is the fast path for normal operation. Uses a **dedicated** `redis.Redis` connection with `socket_timeout=None` so `pubsub.listen()` blocks indefinitely between messages, instead of inheriting the global `POPOTO_REDIS_DB` pool's `socket_timeout=settings.timeouts.redis_socket_s` (default 5s, `.env`-overridable via `TIMEOUTS__REDIS_SOCKET_S` — see [Config Timeout Catalog](config-timeout-catalog.md)) (which would cause a reconnect cycle and a guaranteed message-loss window). After `subscribe()`, the listener verifies `PUBSUB NUMSUB >= 1` on its own connection (up to 3 retries, ~300 ms total). If NUMSUB remains 0, a WARNING is logged and the function returns early so the outer loop re-subscribes after its 5 s backoff. Post-subscribe drift (NUMSUB→0 after a previously-good subscribe) is left to this health monitor's 300 s backstop.
-- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/session_health.py`, re-exported from `agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net. The task is named `session-health-monitor` and registers a `done_callback` (`_health_task_done`) that logs ERROR if the loop exits unexpectedly with an exception (cancellation during shutdown is ignored). This mirrors the `_notify_task_done` pattern on `notify_task` and prevents silent loss of health monitoring.
+- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/session_health.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net. The task is named `session-health-monitor` and registers a `done_callback` (`_health_task_done`) that logs ERROR if the loop exits unexpectedly with an exception (cancellation during shutdown is ignored). This mirrors the `_notify_task_done` pattern on `notify_task` and prevents silent loss of health monitoring.
 - **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level (separate from queue-level monitoring)
 
 ### Single-owner actuation
@@ -227,7 +227,7 @@ Total: 3 sessions (1 pending, 2 running)
 
 ## Configuration
 
-Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py`):
+Constants in `agent/session_health.py`:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
@@ -258,4 +258,4 @@ Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py
 - [agent-session-fenced-execution-record.md](agent-session-fenced-execution-record.md) -- The `(exec_pid, pid_create_time)` fence every kill/reprieve/ownership site here consults, and the canonical legacy-row rule
 - [agent-session-liveness-authorship.md](agent-session-liveness-authorship.md) -- Who is authorized to write `updated_at`/`last_heartbeat_at`/the fence; the `/update` reaper's full liveness ladder; the `Meta.ttl` keepalive
 - `agent/session_health.py` -- Health monitor and startup recovery implementation
-- `agent/agent_session_queue.py` -- Queue entry points (re-exports from session_health and other modules)
+- `agent/agent_session_queue.py` -- Queue entry points

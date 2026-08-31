@@ -603,7 +603,7 @@ In `agent/sdk_client.py`, `session_type` is resolved from Redis **before** `buil
 
 ## Per-session registry (`_active_sessions`)
 
-`agent/session_state.py` (re-exported from `agent_session_queue.py`) maintains `_active_sessions: dict[str, SessionHandle]`,
+`agent/session_state.py` maintains `_active_sessions: dict[str, SessionHandle]`,
 a per-session registry keyed by `agent_session_id`. Each `SessionHandle` holds:
 
 * `task` — the `asyncio.Task` currently running `_execute_agent_session`. The

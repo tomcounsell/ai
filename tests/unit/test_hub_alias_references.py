@@ -1,30 +1,33 @@
 """Guard: nothing reaches a re-exported symbol through an `agent_session_queue` module alias.
 
-Issue #2876 is removing `agent/agent_session_queue.py`'s role as a re-export hub.
-Phases 3 and 4 repointed callers at the modules that actually own each symbol, but
-the sweep that drove those phases matched only ``from agent.agent_session_queue
-import X``. Attribute access through a module alias — ``_queue.X``, where ``_queue``
-is the hub module object — is a second reference class, and it was missed. PR #3048's
-review found 17 such sites.
+Issue #2876 removed `agent/agent_session_queue.py`'s role as a re-export hub. Phases
+3 and 4 repointed callers at the modules that own each symbol, but the sweep that
+drove those phases matched only ``from agent.agent_session_queue import X``.
+Attribute access through a module alias — ``_queue.X``, where ``_queue`` is the hub
+module object — is a second reference class, and it was missed. PR #3048's review
+found 17 such sites.
 
-Those sites fail in two distinct ways, which is why this guard is worth its weight:
+Those sites failed in two distinct ways, which is why this guard was worth its weight:
 
-1. **They break at phase 5.** The hub's re-exports are deleted there, so
-   ``_queue.<re-export>`` becomes ``AttributeError``.
-2. **Writes through them are already vacuous.** ``from X import y`` binds a *copy*
+1. **They break when the re-exports go.** ``_queue.<re-export>`` becomes
+   ``AttributeError`` once the name is gone, which phase 5 did.
+2. **Writes through them were already vacuous.** ``from X import y`` binds a *copy*
    of ``y`` onto the importing module at import time. Assigning ``_queue.y = z``
    rebinds that copy; the module that owns ``y``, and every reader that resolves it
    from the owner, never sees the change. Fifteen of the seventeen sites were of
    this shape, and the concurrency ceiling those tests existed to verify was never
    actually installed.
 
+**Status after phase 5.** The hub carries no re-exports, so the hazard set is empty
+and the live-site check below skips rather than passing vacuously. The analyzer is
+kept and covered on its own: it re-arms automatically if a re-export is ever
+reintroduced. `test_no_reexport_hub.py` is what stops that from happening quietly.
+
 The hazard set is derived from the hub's own AST rather than pinned as a name list.
 A name is a *pure re-export* when the hub imports it and never references it in its
 own body — the plan's Finding 1 definition. Names the hub actually uses are working
-imports: they survive phase 5, and an alias reaching them resolves the same object
-the hub does. Deriving rather than pinning is what keeps this guard honest as the
-hub changes, and it still fires if a re-export is reintroduced and reached this way
-later.
+imports, and an alias reaching them resolves the same object the hub does. Deriving
+rather than pinning is what keeps this guard honest as the hub changes.
 
 Two constraints inherited from `docs/features/legacy-artifact-guard.md`:
 
@@ -73,7 +76,7 @@ def _tracked_python_files() -> list[str]:
     return files
 
 
-def _hub_reexports() -> set[str]:
+def _hub_reexports(source: str | None = None) -> set[str]:
     """Names the hub imports and never references in its own body.
 
     This is the plan's Finding 1 definition of a *pure re-export*, and the
@@ -91,8 +94,15 @@ def _hub_reexports() -> set[str]:
     to route around.
 
     Derived, not pinned: no name list to fall out of date as the hub changes.
+
+    ``source`` overrides what is analyzed, so the derivation can be exercised
+    against a synthetic module. That seam exists because #2876 emptied the real
+    hub: without it, the only way to check that this function still works would
+    be to assert on a set that is now permanently empty.
     """
-    tree = ast.parse((_repo_root() / HUB_PATH).read_text(encoding="utf-8"))
+    tree = ast.parse(
+        source if source is not None else (_repo_root() / HUB_PATH).read_text(encoding="utf-8")
+    )
 
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -303,27 +313,56 @@ print(asq.AgentSession)
     assert _analyze(source, {"_slot_registry", "steer_session"}) == []
 
 
-def test_hub_reexport_set_is_derivable_and_non_empty():
-    """The hazard set must actually resolve, or the main check passes vacuously.
+def test_hub_carries_no_reexports():
+    """#2876's end state: the hazard set derived from the real hub is empty.
 
-    Until phase 5 lands, the hub still carries re-exports, so this is non-empty.
-    Phase 5 empties it by deleting them — at which point this assertion is the one
-    that must be updated, deliberately, in the same diff that does the deleting.
+    This assertion is the inverse of the one that stood here through phase 4,
+    flipped in the same diff that deleted the 40 re-exports. The invariant it
+    now states is owned by ``test_no_reexport_hub.py``, which explains *why*
+    and fails with the offending line; this is the cheap corroboration that the
+    alias guard below has nothing left to hunt.
     """
-    reexports = _hub_reexports()
-    assert reexports, (
-        "No pure re-exports derived from the hub. Either phase 5 has landed (in "
-        "which case update this test alongside it) or the AST derivation is broken."
+    assert _hub_reexports() == set()
+
+
+def test_hub_reexport_derivation_still_works():
+    """The derivation must stay correct even though the real hub is now empty.
+
+    Without this, ``_hub_reexports()`` returning an empty set because its AST
+    walk broke would be indistinguishable from returning empty because #2876
+    succeeded — and every check keyed on that set would pass vacuously forever.
+    """
+    reexports = _hub_reexports(
+        "import agent.session_state as _session_state\n"
+        "from agent.session_health import _agent_session_health_check\n"
+        "from models.agent_session import AgentSession\n"
+        "def _push_agent_session():\n"
+        "    _session_state.touch()\n"
+        "    return AgentSession\n"
     )
-    # A symbol the hub defines itself is not a re-export.
+    # Imported, never referenced in the body: a pure re-export.
+    assert "_agent_session_health_check" in reexports
+    # Defined here, so never an import at all.
     assert "_push_agent_session" not in reexports
-    # Nor is one the hub imports and actually uses — see _hub_reexports' docstring.
+    # Imported and actually used — see _hub_reexports' docstring.
     assert "AgentSession" not in reexports
     assert "_session_state" not in reexports
 
 
 def test_no_module_alias_reaches_a_hub_reexport():
-    """No tracked Python may reach a hub re-export through a module alias."""
+    """No tracked Python may reach a hub re-export through a module alias.
+
+    Dormant since #2876: with no re-exports left, the hazard set is empty and
+    this can find nothing. It is kept rather than deleted because it re-arms
+    automatically if a re-export is ever reintroduced, and the analyzer it
+    drives is covered on its own above. The skip is explicit so an empty result
+    is never mistaken for coverage that ran.
+    """
+    if not _hub_reexports():
+        pytest.skip(
+            "hub carries no re-exports (#2876) — nothing for the alias guard to "
+            "match; test_no_reexport_hub.py enforces that end state"
+        )
     found = find_hub_alias_reexport_references()
     if found:
         detail = "\n".join(
