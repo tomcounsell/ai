@@ -590,13 +590,22 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    "(the referenced file is no longer available)" notice if scrubbing empties the text with
    nothing attached. See [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)
    for the full mechanism.
-   - Runs **after** the idempotency early-return (already-terminal sessions exit before reaching it).
-   - Runs **after** the `reject_from_terminal` guard (illegal re-transitions raise before reaching it).
+   - **Runs UNCONDITIONALLY, first, on every `finalize_session` invocation carrying a terminal
+     status (issue #3053)** — immediately after terminal-status validation, above the telemetry
+     tap, the idempotency early-return, the `reject_from_terminal` guard, and the CAS re-read. See
+     *Unconditional Terminal Delivery Flush* below for the full rationale — this superseded the
+     original placement (which ran the flush only on a first-time, uncontested transition) after a
+     third recurrence of a silently-skipped flush losing a user's reply.
    - Runs **before** `session.save()`, inside the CAS region.
    - **Exception-isolated**: a flush failure never blocks the status write.
    - Reads the deferral flag from a **fresh authoritative session** via
      `get_authoritative_session(session_id)` — not the caller's possibly-stale object.
    - Deduplicates on its **own** SETNX key `self_draft_completed_flush_sent:{session_id}` (1 h TTL).
+   - **Self-clearing (issue #3053)**: on a successful delivery, pops `deferred_self_draft_pending`
+     and `deferred_self_draft_text` from the authoritative record's `extra_context` (and from the
+     caller's in-memory `session` object, so `finalize_session`'s own subsequent full `save()` does
+     not resurrect the just-cleared flag). A failed clear logs WARNING and never blocks the
+     delivery — the SETNX key remains the backstop for the remainder of its TTL.
    - **Transport/status gate** (evaluated before the dedup SETNX):
      - **telegram** (or `None`): proceeds for **all** terminal statuses (`completed`, `failed`,
        `abandoned`), writing directly to `telegram:outbox:{session_id}` via `rpush`.
@@ -638,6 +647,84 @@ non-deferred send) now also clears both `deferred_self_draft_pending` and
 (`get_authoritative_session` re-read, then merge so a concurrent `extra_context` write is not
 clobbered). The clear is gated on a cheap local check of the flag first, so the common case (no
 prior deferral) skips the extra authoritative re-read entirely.
+
+### Unconditional Terminal Delivery Flush (issue #3053)
+
+**The recurring failure:** a validator-flagged final reply that is never redrafted was lost with
+no log line explaining why — the third recurrence of this failure class after #1794 and #2197.
+Root cause: every prior fix moved the chokepoint flush closer to the terminal write, but its
+execution stayed **conditional** on `finalize_session` completing a first-time, uncontested,
+non-idempotent terminal transition. Three gates sat in front of it — the idempotency
+early-return, the `reject_from_terminal` guard, and the CAS re-read — and every abort path through
+those gates logged at DEBUG or was a bare `pass`, so a skipped flush left no trace.
+
+**The fix — hoist above every gate.** The flush now runs **first**, immediately after
+terminal-status validation, before the telemetry tap and all three gates above. This deliberately
+**reverses** the placement invariant documented in earlier revisions of this section (that the
+flush ran only on a legitimate first-time transition, specifically to avoid flushing on a rejected
+terminal→terminal re-transition). That old concern is no longer a hazard: a session that is
+already terminal and still carries a pending deferral is exactly the state where nobody else will
+ever deliver the text, so flushing there is the desired outcome, not a bug. The hoist is safe
+unconditionally because the flush is fresh-reading, self-gating (no-ops when nothing is pending),
+self-deduping (per-run SETNX), and — as of this change — self-clearing (see above). Do not
+reintroduce a gate in front of the flush; that is the exact shape of the original defect.
+
+**Closed silent exits:**
+
+- `agent/session_health.py` (`flush_deferred_self_draft_sync`'s own early-returns) — the
+  "nothing pending" return and the email/status-gate return both now log at DEBUG, making "the
+  flush ran and found nothing" distinguishable from "the flush never ran".
+- `models/session_lifecycle.py`'s idempotency early-return — promoted to INFO when a **fresh**
+  `get_authoritative_session()` read shows the record still carries a pending deferral (the state
+  that costs a user their reply); stays DEBUG otherwise. Reads the authoritative record, never the
+  caller's `session` parameter, so an ordinary stale-object double-finalize (the ORDINARY case
+  after this hoist, since the flush itself is what clears the flag) still logs at DEBUG.
+- `models/session_lifecycle.py`'s step-1 LIFECYCLE-log swallow — promoted from DEBUG to WARNING; a
+  lifecycle log that cannot be written is a real observability outage on the terminal path, not a
+  routine condition.
+- `agent/session_executor.py`'s unconditional completion-exit finalize guard (#2007) — the bare
+  `pass` on its own `StatusConflictError` catch (meaning "another actor already finalized this
+  session, treat as success") now logs at INFO naming the session and the conflict. "Expected, do
+  not treat as an error" is a reason to log at INFO, not a reason to log nothing.
+
+**Belt-and-braces at the three last-resort bypass writes.** `agent/session_executor.py` has three
+sites that assign `session.status = "failed"` directly, bypassing `finalize_session` entirely,
+reached only inside an `except Exception` around a `finalize_session(session, "failed", ...)` call
+that itself raised. Each site now also calls `flush_deferred_self_draft_sync(session, "failed")`
+before the direct write, and adds `"completed_at"` to its `update_fields` (`session.completed_at =
+time.time()`) so the backstop sweep below has an anchor for these rows. **This is deliberate
+belt-and-braces redundancy over a path the hoist and the backstop sweep already cover — it is NOT
+"the one place the chokepoint is provably not going to run"** (an earlier, incorrect framing): the
+hoisted flush is the first action `finalize_session` takes, so on the path into these `except`
+blocks it has already run — successfully — before `finalize_session` itself raised. The flush's
+own SETNX dedup makes the extra call harmless even when redundant.
+
+**Terminal backstop sweep.** `agent/session_health._sweep_stranded_deferred_self_drafts`, called
+from `_agent_session_health_loop` alongside the existing per-tick checks, independently re-scans
+recently-terminal sessions for a stranded `deferred_self_draft_pending=True` flag — closing any
+path that cannot route through `finalize_session` at all (including the three bypass writes
+above, and any future bypass). Scans `AgentSession.query.filter(status=...)` (ORM-only, never a
+raw Redis scan) over `completed`, `failed`, and `abandoned` — **never** `killed` or `cancelled`,
+per the delivery-posture principle: a session that ended on its own still owes its reply; a
+session someone stopped does not. Rows are kept only if `deferred_self_draft_pending` is truthy
+and `completed_at` falls within `DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS` (a named,
+env-overridable, provisional constant defaulting to the SETNX dedup TTL); a row with
+`completed_at=None` (legacy data, or any writer that skipped the backfill) is acted on exactly
+once, matching the existing `_response_delivered_after_start` precedent for anchorless rows. Every
+hit delegates to `flush_deferred_self_draft_sync` (no second delivery implementation), logs at
+WARNING (a sweep hit means the chokepoint was bypassed — a defect signal, not routine
+housekeeping), and increments `{project_key}:session-health:deferred_flush_backstop_hits`. Bounded
+to `DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` rows per tick; one failing row never aborts the
+sweep or the loop.
+
+**Pre-existing gap this plan did not introduce:** a PM/parent session's terminal transition after
+a worker-shutdown `asyncio.CancelledError` in `_deliver_pipeline_completion`
+(`agent/session_completion.py`) explicitly skips `finalize_session` for the parent ("the shutdown
+path owns that transition"), and nothing else in the shutdown sequence invokes it either — the
+parent is left `waiting_for_children` until the next `_agent_session_hierarchy_health_check` tick
+picks it up via `_transition_parent` → `finalize_session`. Reachability holds but is delayed to
+that pre-existing periodic check rather than the hoisted step-0 path on the first attempt after a
+restart.
 
 ## Design Constraints
 

@@ -137,6 +137,42 @@ Every detection branch keys off the **process-local** `_active_workers` / `_acti
 
 The worker's in-process `_agent_session_health_loop` (~300s tick, described throughout this document) is the **sole** backstop for recovering stuck running sessions and picking up orphaned pending ones — see [Reflections § Registered Reflections](reflections.md#registered-reflections) for the current registry. Regression coverage for the `VALOR_REFLECTION_WORKER` guard: `tests/unit/test_session_liveness_single_owner.py`.
 
+### Deferred self-draft backstop sweep (issue #3053)
+
+`_sweep_stranded_deferred_self_drafts()` runs on every `_agent_session_health_loop` tick, alongside
+`_agent_session_health_check`, `_agent_session_hierarchy_health_check`, and
+`_dependency_health_check`. It is the third, independent layer that closes any path bypassing the
+`finalize_session` chokepoint flush (`flush_deferred_self_draft_sync`) — see [Session Lifecycle
+§Unconditional Terminal Delivery Flush](session-lifecycle.md#unconditional-terminal-delivery-flush-issue-3053)
+for the chokepoint itself.
+
+- **Scan predicate**: `AgentSession.query.filter(status=<s>)` (ORM-only — never a raw Redis scan)
+  over `DEFERRED_FLUSH_BACKSTOP_STATUSES = {"completed", "failed", "abandoned"}`. **Never**
+  `killed` or `cancelled` — the delivery-posture principle: a session that ended on its own (ran
+  out of road without delivering) still owes its reply; a session a human or supervisor explicitly
+  stopped does not, and delivering after a deliberate kill would read as the system ignoring the
+  operator. Keeps only rows whose `extra_context.get("deferred_self_draft_pending")` is truthy.
+- **Lookback window**: `DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS` — a named, env-overridable,
+  **provisional/tunable** constant, defaulting to `HOUR_DEDUP_LOCK_TTL_SECONDS` (the flush's own
+  SETNX dedup TTL). A row is kept only if `completed_at` falls within the window. A row with
+  `completed_at=None` (legacy data, or a writer that predates the Task 1 backfill) is **acted on
+  exactly once** — the same precedent as `_response_delivered_after_start`'s anchorless-row
+  handling ("legacy: no anchor at all, preserve original always-fire behavior"). The flush's own
+  post-delivery flag clear, not the window, is what prevents an anchorless row from re-firing on
+  the next tick.
+- **Action**: delegates to `flush_deferred_self_draft_sync(entry, entry.status)` — no second
+  delivery implementation, so the same SETNX dedup that makes a concurrent chokepoint-flush and
+  sweep-flush safe on the same session applies here too. On a hit, logs at **WARNING** (a sweep hit
+  means the chokepoint was bypassed for this session — a defect signal, not routine housekeeping)
+  and increments `{project_key}:session-health:deferred_flush_backstop_hits`.
+- **Bounded work**: `DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` caps rows acted on per tick (a
+  WARNING logs when the cap is hit); one failing row is exception-isolated and never aborts the
+  sweep or the health loop.
+- **Backstops**: the three last-resort `"failed"` bypass writes in `agent/session_executor.py`
+  (`:1182`, `:1257`, `:2105`) that assign `session.status` directly, skipping `finalize_session`
+  entirely — this sweep is what re-delivers a stranded reply on those rows if the sites' own
+  belt-and-braces flush call also failed.
+
 ### Done Callback — `_health_task_done`
 
 `health_task` is registered with a `_health_task_done` done_callback (mirroring the identical pattern on `notify_task`):
