@@ -11,7 +11,7 @@ a terminal-status guard, the zombie gets re-promoted to pending.
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -138,7 +138,15 @@ class TestHealthCheckSkipsTerminalSessions:
     @patch("agent.session_health._active_events", {})
     @patch("agent.session_health.AgentSession")
     async def test_terminal_session_not_recovered_by_health_check(self, mock_cls, terminal_status):
-        """Health check should skip a terminal session found in running index."""
+        """Health check should skip a terminal session found in running index.
+
+        Asserts on the recovery action, not merely that the call returns. This
+        test used to have no assertion at all: it awaited the health check and
+        passed if nothing raised, so it held for ANY status — including
+        ``running`` — and could not detect a zombie actually being recovered
+        (#3054). ``test_running_session_is_a_positive_control`` below is what
+        proves the assertion can fail.
+        """
         from agent.session_health import _agent_session_health_check
 
         zombie = _make_session(
@@ -153,8 +161,52 @@ class TestHealthCheckSkipsTerminalSessions:
 
         mock_cls.query.filter.side_effect = mock_filter
 
-        # Should complete without attempting recovery on the zombie
-        await _agent_session_health_check()
+        with patch(
+            "agent.session_health._apply_recovery_transition", new_callable=AsyncMock
+        ) as mock_recover:
+            await _agent_session_health_check()
+
+        assert mock_cls.query.filter.called, (
+            "the patched AgentSession was never consulted — the patch does not "
+            "reach the code under test and every assertion here is vacuous"
+        )
+        assert not mock_recover.called, (
+            f"terminal session ({terminal_status}) was put through recovery: "
+            f"{mock_recover.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    @patch("agent.session_health._active_workers", {})
+    @patch("agent.session_health._active_events", {})
+    @patch("agent.session_health.AgentSession")
+    async def test_running_session_is_a_positive_control(self, mock_cls):
+        """A stale NON-terminal session must reach recovery.
+
+        Without this, the terminal cases above could pass because recovery never
+        fires for any input — which is precisely how the hollow version survived.
+        """
+        from agent.session_health import _agent_session_health_check
+
+        live = _make_session(status="running", session_id="tg_proj_chat_running")
+        live.started_at = None  # legacy row: worker dead + no started_at -> recover
+
+        def mock_filter(**kwargs):
+            if kwargs.get("status") == "running":
+                return [live]
+            return []
+
+        mock_cls.query.filter.side_effect = mock_filter
+
+        with patch(
+            "agent.session_health._apply_recovery_transition", new_callable=AsyncMock
+        ) as mock_recover:
+            mock_recover.return_value = True
+            await _agent_session_health_check()
+
+        assert mock_recover.called, (
+            "a stale running session did not reach _apply_recovery_transition — "
+            "the terminal-skip assertions above would then be vacuous"
+        )
 
 
 # ---------------------------------------------------------------------------
