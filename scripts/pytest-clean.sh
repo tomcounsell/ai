@@ -121,6 +121,30 @@ reap_workers
 # subprocess (and its xdist workers) via export.
 export PYTHONDONTWRITEBYTECODE=1
 
+# Abort when a linked git worktree has no .venv of its own (#3033). Without one,
+# imports resolve through the PRIMARY checkout's editable path entry: the branch's
+# tests silently exercise main's code, always find a real module, and never raise.
+# The run reports green on code it never loaded — biased toward green, which hides
+# exactly the regressions it exists to catch. Observed in PR #3028, where it
+# produced a confidently false "1545 unit tests pass" and the one genuinely
+# failing test surfaced only when a reviewer forced PYTHONPATH.
+#
+# A linked worktree has `.git` as a FILE (a gitdir pointer); the primary checkout
+# has it as a directory. That distinction is what scopes this to worktrees, so a
+# primary checkout with no .venv still falls through to the PATH pytest below.
+if [ -f "$REPO_ROOT/.git" ] && [ ! -d "$REPO_ROOT/.venv" ]; then
+    echo "pytest-clean: refusing to run — worktree has no .venv of its own." >&2
+    echo "  worktree: $REPO_ROOT" >&2
+    echo "  missing:  $REPO_ROOT/.venv" >&2
+    echo "" >&2
+    echo "  Without it, imports resolve from the PRIMARY checkout via its editable" >&2
+    echo "  path entry, so this branch's tests would exercise main's code and a" >&2
+    echo "  branch-local regression would read green (#3033)." >&2
+    echo "" >&2
+    echo "  Remedy:   cd $REPO_ROOT && uv sync" >&2
+    exit 1
+fi
+
 # Resolve the interpreter that owns this repo's dependencies. A bare `pytest`
 # resolves from PATH, which on a machine with a user-site pytest picks an
 # interpreter that never had `pip install -e .` run against it — so

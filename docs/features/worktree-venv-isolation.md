@@ -99,9 +99,11 @@ than as a downstream symptom:
   `.worktrees/*/.venv`, and every `.claude/worktrees/*/.venv` (harness-created
   agent worktrees, which nothing provisions and where the bare `uv sync` this
   issue is about is exactly what gets typed).
-- `scripts/pytest-clean.sh` **aborts** before running anything if the venv is
-  off the pin. A suite that runs to green on the wrong interpreter produces a
-  verdict that looks authoritative and is worthless.
+- `scripts/pytest-clean.sh` **aborts** before running anything in two cases. If
+  the venv is off the pin: a suite that runs to green on the wrong interpreter
+  produces a verdict that looks authoritative and is worthless. And if the
+  caller is a **linked worktree with no `.venv` at all** (#3033) — see
+  [The absent-venv case](#the-absent-venv-case-3033) below.
 - `.githooks/pre-commit` blocks with an explicit "broken environment, NOT a
   lint failure" message when `ruff` is missing from the resolved interpreter,
   and warns (without blocking) on an off-pin venv.
@@ -115,9 +117,38 @@ Provisioning failures (uv missing, sync error, timeout, marker write failure)
 log a WARNING tagged `[worktree-venv-provision-failed]` — greppable by
 `checking-system-logs` and log-scanning reflections — with the worktree path
 and a stderr tail, then return `False`. Worktree creation never fails on a
-provisioning error: the lane still works against the shared env, and the
-#2050 guard keeps blocking `uv sync` there because no worktree-local `.venv`
-exists.
+provisioning error, and the #2050 guard keeps blocking `uv sync` there because
+no worktree-local `.venv` exists.
+
+What such a lane must NOT do is run its test suite. Fail-open provisioning is
+why a venv-less worktree can exist at all; it is not a licence to test in one.
+The guard below is what makes the fail-open safe.
+
+### The absent-venv case (#3033)
+
+A linked worktree with **no `.venv`** does not fail to import — it resolves
+imports through the primary checkout's editable path entry. The branch's tests
+then exercise `main`'s code, always find a real module, and never raise. The run
+reports green on code it never loaded.
+
+That direction matters: the failure is biased toward green, so it hides exactly
+the regressions the run exists to catch. In PR #3028 it produced a confidently
+false "1545 unit tests pass" in the PR body, and the one genuinely failing test
+surfaced only because a reviewer forced `PYTHONPATH`.
+
+The off-pin check does not cover this. Off-pin means a *wrong* venv; absent
+means *no* venv, which degrades silently rather than mismatching.
+
+`scripts/pytest-clean.sh` therefore refuses to run from a linked worktree with
+no `.venv`, naming the worktree, the missing path, and the remedy (`uv sync` in
+the worktree). It keys on `.git` being a **file** — a linked worktree's gitdir
+pointer — so a primary checkout is unaffected.
+
+Verified live (2026-08-31): in a real venv-less worktree,
+`import tools.sdlc_stage_query` resolved to the primary checkout and the
+pre-guard script reported "8 passed". `tests/unit/test_worktree_venv_absent_guard.py`
+pins that the guard fires, names all three facts, and does not over-reach onto
+worktrees that have a venv or onto the primary checkout.
 
 ### Guard relaxation (#2050 coordination)
 
