@@ -20,15 +20,14 @@ import pytest
 
 import agent.agent_session_queue as asq
 from agent.agent_session_queue import (
-    _acquire_pop_lock,
     _complete_agent_session,
     _copyable_agent_session_fields,
     _pop_agent_session,
     _push_agent_session,
-    _release_pop_lock,
     _worker_loop,
     clone_agent_session_fields,
 )
+from agent.session_pickup import _acquire_pop_lock, _release_pop_lock
 from models.agent_session import AgentSession
 from models.session_lifecycle import StatusConflictError
 
@@ -179,11 +178,11 @@ class TestPopLock:
         Failing open preserves backward compatibility: workers continue to
         function without the lock rather than deadlocking when Redis is down.
         """
-        with patch("agent.agent_session_queue._acquire_pop_lock") as mock_acquire:
-            # Simulate the fail-open path by returning True even on error
-            mock_acquire.return_value = True
-            result = mock_acquire("test-chat-id")
-            assert result is True
+        # Make the Redis SETNX raise, then call the real function. Patching
+        # _acquire_pop_lock itself and asserting on the mock's return value
+        # would exercise unittest.mock rather than the fail-open branch.
+        with patch("popoto.redis_db.POPOTO_REDIS_DB.set", side_effect=Exception("redis down")):
+            assert _acquire_pop_lock("test-chat-id") is True
 
     def test_pop_lock_key_is_chat_id_scoped(self):
         """Pop lock key format must be worker:pop_lock:{chat_id}."""
@@ -472,7 +471,7 @@ class TestHealthCheckDeliveryGuard:
             mock_transition = MagicMock()
             lifecycle_mod.transition_status = mock_transition
             try:
-                from agent.agent_session_queue import _agent_session_health_check
+                from agent.session_health import _agent_session_health_check
 
                 await _agent_session_health_check()
             finally:
@@ -518,7 +517,7 @@ class TestHealthCheckDeliveryGuard:
             lifecycle_mod.finalize_session = mock_finalize
             lifecycle_mod.transition_status = mock_transition
             try:
-                from agent.agent_session_queue import _agent_session_health_check
+                from agent.session_health import _agent_session_health_check
 
                 await _agent_session_health_check()
             finally:
@@ -735,7 +734,7 @@ class TestHealthCheckNoProgressRecovery:
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 
@@ -763,7 +762,7 @@ class TestHealthCheckNoProgressRecovery:
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 
@@ -824,7 +823,7 @@ class TestHealthCheckNoProgressRecovery:
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 
@@ -851,7 +850,7 @@ class TestHealthCheckNoProgressRecovery:
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 
@@ -887,7 +886,7 @@ class TestHealthCheckNoProgressRecovery:
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 
@@ -984,7 +983,7 @@ class TestHealthCheckNoProgressRecovery:
             _ctx(),
         ):
             mock_cls.query.filter.return_value = [session]
-            from agent.agent_session_queue import _agent_session_health_check
+            from agent.session_health import _agent_session_health_check
 
             await _agent_session_health_check()
 

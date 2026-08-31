@@ -20,10 +20,10 @@ from agent.agent_session_queue import (
     _ensure_worker,
     _pop_agent_session,
     _pop_agent_session_with_fallback,
-    _recover_interrupted_agent_sessions_startup,
     _starting_workers,
     clone_agent_session_fields,
 )
+from agent.session_health import _recover_interrupted_agent_sessions_startup
 from models.agent_session import AgentSession
 
 

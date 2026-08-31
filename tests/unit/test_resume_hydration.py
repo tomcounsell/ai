@@ -92,7 +92,7 @@ class TestMaybeInjectResumeHydration:
 
     def _run(self, session, worker_key="test-worker"):
         """Run the async helper synchronously."""
-        from agent.agent_session_queue import _maybe_inject_resume_hydration
+        from agent.session_pickup import _maybe_inject_resume_hydration
 
         asyncio.run(_maybe_inject_resume_hydration(session, worker_key))
 

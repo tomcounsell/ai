@@ -179,7 +179,7 @@ class TestEnqueueContinuationAsyncWrapping:
 
     def test_continuation_filter_uses_to_thread(self, mock_agent_session):
         """The session lookup in _enqueue_nudge should use to_thread."""
-        from agent.agent_session_queue import _enqueue_nudge
+        from agent.session_executor import _enqueue_nudge
 
         # Create a mock agent session
         mock_rj = MagicMock()

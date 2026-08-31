@@ -140,6 +140,8 @@ Check counts with: `pytest -m <marker> --collect-only -q`
 
 When a test patches a symbol, patch the **canonical module that owns the symbol**, not the shim that re-exports it. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd because the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`). The shim keeps re-exports for type checkers and editor navigation, but patch targets must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
 
+Attribute access through a module alias — `_queue.<X>`, where `_queue` is the hub module object — is the same mistake in a second syntax, and a write through it (`_queue.X = fake`) rebinds only the hub's copy, so the owning module never sees it. `tests/unit/test_hub_alias_references.py` guards both forms. It derives the hazard set from the hub's own AST (a name the hub imports and never references in its own body) rather than pinning a list, so it stays honest as the hub changes.
+
 ## Test-Reliability Layers
 
 - **PR-branch flaky filter** (`/do-test`, PR #484, issue #476) — when a test fails on the PR branch, pytest retries the failure once; tests that pass on retry are dropped from the failure report. This layer addresses flakiness *on the PR branch*.
@@ -300,6 +302,7 @@ tests/
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
+| unit | `test_hub_alias_references.py` | 5 | Module-alias reference guard (#2876): no tracked Python reaches an `agent.agent_session_queue` pure re-export through a module alias. Hazard set derived from the hub's AST, not pinned; discovery via `git ls-files`, no exemption set |
 | unit | `test_stale_reference_sweep.py` | 3 | Stale-prose sweep (#2853, #2839): the unregistered reflection name, the two deleted granite package paths, and a scoped cadence-wording anti-criterion. Enumerates via `git ls-files` (untracked scratch Markdown is not repo content) and assembles every compared token by concatenation so the file cannot trip its own sweeps |
 | unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |
 

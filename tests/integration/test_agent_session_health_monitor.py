@@ -249,7 +249,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_recovers_job_with_dead_worker(self):
         """A running session whose worker task is done should be recovered."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         # Create a running session that has been running long enough
         _create_test_session(
@@ -277,7 +277,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_recovers_job_with_no_worker(self):
         """A running session with no entry in _active_workers should be recovered."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         _create_test_session(
             status="running",
@@ -300,7 +300,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_skips_job_with_alive_worker_under_timeout(self):
         """A running session with an alive worker under timeout should NOT be recovered."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         _create_test_session(
             status="running",
@@ -327,7 +327,7 @@ class TestJobHealthCheck:
     async def test_long_running_session_with_fresh_heartbeat_survives(self):
         """Issue #1172: a session with a fresh heartbeat is NOT killed regardless
         of wall-clock duration. The previous wall-clock cap is gone."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         # Simulate a 4-hour-old session — far beyond any prior wall-clock cap.
         s = _create_test_session(
@@ -357,7 +357,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_skips_recently_started_job_with_dead_worker(self):
         """Sessions running < AGENT_SESSION_HEALTH_MIN_RUNNING not recovered (race guard)."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         _create_test_session(
             status="running",
@@ -381,7 +381,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_handles_job_without_started_at(self):
         """Jobs without started_at (legacy) should still be checked for dead workers."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         # A running session with no started_at (legacy session that predates this field)
         _create_test_session(
@@ -406,7 +406,7 @@ class TestJobHealthCheck:
     @pytest.mark.asyncio
     async def test_no_running_jobs_is_noop(self):
         """When no running sessions exist, health check should do nothing."""
-        from agent.agent_session_queue import _agent_session_health_check
+        from agent.session_health import _agent_session_health_check
 
         # Create only a pending session
         _create_test_session(status="pending")
@@ -439,9 +439,9 @@ class TestJobHealthCheck:
         """
         import logging
 
-        from agent.agent_session_queue import (
+        from agent.agent_session_queue import _active_workers
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
-            _active_workers,
             _agent_session_health_check,
         )
 
@@ -525,7 +525,7 @@ class TestJobHealthCheck:
         _delivery_belongs_to_current_run instead of before it, this test
         would fail with the session incorrectly finalized to "completed".
         """
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
             _agent_session_health_check,
         )
@@ -568,7 +568,7 @@ class TestJobHealthCheck:
         aged past the orphan threshold with a 'local'-prefixed worker_key (so
         it WOULD hit the orphaned-local-pending abandon branch), must NOT be
         abandoned by the health check's PENDING loop."""
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
             _agent_session_health_check,
         )
@@ -603,7 +603,7 @@ class TestJobHealthConstants:
 
     def test_constants_exist(self):
         """Health check constants that survived the #1172 simplification."""
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_CHECK_INTERVAL,
             AGENT_SESSION_HEALTH_MIN_RUNNING,
         )

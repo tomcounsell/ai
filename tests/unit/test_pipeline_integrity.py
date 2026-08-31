@@ -189,7 +189,7 @@ class TestEnqueueContinuationFallback:
 
     def test_diagnose_missing_session_returns_dict(self):
         """Verify _diagnose_missing_session returns diagnostic info."""
-        from agent.agent_session_queue import _diagnose_missing_session
+        from agent.session_completion import _diagnose_missing_session
 
         result = _diagnose_missing_session("nonexistent-session-id-12345")
         assert isinstance(result, dict)

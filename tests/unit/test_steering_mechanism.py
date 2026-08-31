@@ -51,7 +51,14 @@ class TestOutputRouterExports:
 
 
 class TestBackwardCompatExports:
-    """Verify symbols are still importable from agent.agent_session_queue for backward compat."""
+    """Verify symbols are still importable from agent.agent_session_queue for backward compat.
+
+    Deliberately retained through phase 4 of issue #2876 as the one exception to
+    that phase's repoint-everything-off-the-hub rule: it is the tripwire that
+    fails loudly when the re-exports go away, rather than letting them go
+    quietly. Phase 5 deletes those re-exports and must delete this class in the
+    same diff — the proposition asserted here is exactly the one phase 5 inverts.
+    """
 
     def test_max_nudge_count_from_queue(self):
         from agent.agent_session_queue import MAX_NUDGE_COUNT
@@ -89,14 +96,14 @@ class TestSteerSessionGuards:
     """Unit tests for steer_session() edge cases (no Redis required)."""
 
     def test_empty_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "")
         assert result["success"] is False
         assert "Empty message" in result["error"]
 
     def test_whitespace_only_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "   ")
         assert result["success"] is False
@@ -104,7 +111,7 @@ class TestSteerSessionGuards:
 
     def test_nonexistent_session_returns_error(self):
         """steer_session on a non-existent session returns an error dict."""
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("definitely-does-not-exist-xyz-123", "hello")
         assert result["success"] is False
@@ -136,14 +143,14 @@ class TestSteerSessionLedgerGuard:
         session.delete()
 
     def test_ledger_session_rejected(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session(ledger_session.session_id, "hello ledger")
         assert result["success"] is False
         assert "ledger" in result["error"].lower()
 
     def test_ledger_rejection_pushes_nothing(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
         from agent.steering import has_steering_messages
 
         steer_session(ledger_session.session_id, "hello ledger")
