@@ -16,6 +16,12 @@ Architecture:
 - Worker loop: one asyncio.Task per project, processes sessions sequentially
 - Revival detection: lightweight git state check, no SDK agent call
 - Output: OutputHandler protocol (Telegram callbacks or file logging)
+
+This module imports only what it uses. It is not a re-export hub: a symbol that
+lives in agent/session_health.py, agent/session_revival.py, agent/session_state.py
+or any other sibling is imported from that module, never through this one. Issue
+#2876 removed the 40 re-exports that used to sit at the top of this file, and
+tests/unit/test_no_reexport_hub.py fails if any come back.
 """
 
 import asyncio
@@ -30,112 +36,44 @@ from pathlib import Path
 
 from popoto.exceptions import ModelException
 
-# Shared mutable session-tracking state — re-exported here for backward compatibility.
-import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
+# Shared mutable session-tracking state. Imported as a module, not as names, so
+# the mutation sites below write through to the owning module rather than to a
+# local copy of each binding.
+import agent.session_state as _session_state
 from agent.output_handler import OutputHandler
-
-# Output routing — decision logic lives in output_router; re-exported here
-# for backward compatibility with callers that import from agent_session_queue.
-from agent.output_router import (
-    MAX_NUDGE_COUNT,  # noqa: F401
-    NUDGE_MESSAGE,  # noqa: F401
-    SendToChatResult,  # noqa: F401
-    determine_delivery_action,  # noqa: F401
-)
 
 # Off-loop Redis bulkhead seam for the drain-loop idle-check (issue #1826).
 from agent.redis_offload import offload_redis
-
-# Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
-from agent.session_completion import (  # noqa: F401
-    _complete_agent_session,
-    _diagnose_missing_session,
-    _transition_parent,
-)
-
-# Session executor (CLI harness, nudge/re-enqueue, steer) — re-exported for backward compatibility.
-from agent.session_executor import (  # noqa: F401
-    _HARNESS_EXHAUSTION_MSG,
-    _HARNESS_NOT_FOUND_PREFIX,
-    _enqueue_nudge,
-    _execute_agent_session,
-    _handle_harness_not_found,
-    re_enqueue_session,
-    steer_session,
-)
-
-# Health monitoring — re-exported here for backward compatibility.
-from agent.session_health import (  # noqa: F401
-    AGENT_SESSION_HEALTH_CHECK_INTERVAL,
-    AGENT_SESSION_HEALTH_MIN_RUNNING,
-    HEARTBEAT_FRESHNESS_WINDOW,
-    MAX_RECOVERY_ATTEMPTS,
+from agent.session_completion import _complete_agent_session
+from agent.session_executor import _execute_agent_session
+from agent.session_health import (
     TASK_CANCEL_TIMEOUT,
-    _agent_session_health_check,
-    _agent_session_health_loop,
-    _agent_session_hierarchy_health_check,
     _apply_recovery_transition,
-    _cleanup_orphaned_claude_processes,
-    _has_progress,
     _is_ledger,
-    _recover_interrupted_agent_sessions_startup,
     _should_kill_no_progress,
-    _sweep_dead_worker_sessions,
-    _sweep_stranded_waiting_for_children_parents,
-    _tier2_reprieve_signal,
     _ts,
-    _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
-    register_worker_pid,
 )
 from agent.session_logs import save_session_snapshot
-
-# Session pickup (pop locking, startup steering drain, dependency checks) — re-exported here.
-from agent.session_pickup import (  # noqa: F401
-    _acquire_pop_lock,
-    _maybe_inject_resume_hydration,
-    _pop_agent_session,
-    _pop_agent_session_with_fallback,
-    _release_pop_lock,
-)
-
-# Revival detection — re-exported here for backward compatibility.
-from agent.session_revival import (  # noqa: F401
-    _load_cooldowns,
-    _session_branch_name,
-    check_revival,
-    cleanup_stale_branches,
-    # Resolved at runtime by the reflection scheduler through this hub path:
-    # config/reflections.yaml's `stale-branch-cleanup` entry declares
-    # `callable: "agent.agent_session_queue.cleanup_stale_branches_all_projects"`,
-    # which reflection_scheduler._resolve_callable getattrs off this module.
-    # Untracked config, so no repo-wide source sweep can see the reference.
-    # Deleting this needs the yaml migrated to agent.session_revival first.
-    cleanup_stale_branches_all_projects,
-    maybe_send_revival_prompt,
-    queue_revival_agent_session,
-    record_revival_cooldown,
-)
+from agent.session_pickup import _pop_agent_session, _pop_agent_session_with_fallback
+from agent.session_revival import _session_branch_name
 from agent.session_runner.liveness import (
     clear_hang_state,
     derive_sdk_ever_output,
     subprocess_hang_verdict,
     tool_activity_ts,
 )
-from agent.session_state import (  # noqa: F401
+from agent.session_state import (
     ReactionCallback,
     ResponseCallback,
     SendCallback,
-    SessionHandle,
     _active_events,
     _active_sessions,
     _active_workers,
     _reaction_callbacks,
     _response_callbacks,
     _send_callbacks,
-    _shutdown_requested,
-    _slot_registry,
     _starting_workers,
 )
 from config.enums import ClassificationType, SessionType
@@ -695,8 +633,7 @@ def restore_branch_state(session: AgentSession) -> bool:
         return False
 
 
-# Session pickup functions extracted to agent/session_pickup.py.
-# All symbols re-exported at the top of this module for backward compatibility.
+# Session pickup functions live in agent/session_pickup.py.
 
 
 async def _pending_depth(chat_id: str) -> int:
@@ -1383,7 +1320,7 @@ def register_callbacks(
                    callbacks are stored under a (project_key, transport) composite key,
                    allowing multiple transports to coexist for the same project.
                    When None (default), callbacks are stored under the plain project_key
-                   string key for backward compatibility.
+                   string key, which is what callers predating transports expect.
         handler: An OutputHandler instance. If provided, its send() and react()
                  methods are wrapped as send_callback and reaction_callback.
     """
@@ -3040,8 +2977,7 @@ async def _worker_loop(
         _active_events.pop(worker_key, None)
 
 
-# Revival detection functions extracted to agent/session_revival.py.
-# All symbols re-exported at the top of this module for backward compatibility.
+# Revival detection functions live in agent/session_revival.py.
 
 
 # === CLI Entry Point ===

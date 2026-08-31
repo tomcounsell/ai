@@ -16,7 +16,7 @@ The session system has 10 mechanisms that can revive, recover, or re-enqueue ses
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
+| Location | `agent/session_health.py` |
 | Trigger | Worker process startup (`worker/__main__.py`, Step 3b — after Step 3a dead-worker sweep) |
 | What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process, with live or absent PID); for local CLI sessions, re-queues eng sessions but abandons teammate sessions (and any pre-cutover granite records that still hydrate) |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
@@ -28,7 +28,7 @@ The session system has 10 mechanisms that can revive, recover, or re-enqueue ses
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
+| Location | `agent/session_health.py` |
 | Trigger | Periodic timer (every 5 min, `AGENT_SESSION_HEALTH_CHECK_INTERVAL`) |
 | What it does | Recovers stuck `running` sessions on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
 | Progress signal | `_has_progress(entry)` uses a **two-tier** detector (issue #1036, narrowed by #1226 / #1724 / #1614 / #1905 / #1935). Tier 1 sub-check A: `last_tool_use_at` or `last_turn_at` fresher than `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s) counts as progress (#1226). Tier 1 sub-check B: when `sdk_ever_output=False`, `last_heartbeat_at` fresh within `HEARTBEAT_FRESHNESS_WINDOW` (90s) counts as progress, but only while the D0 never-started gate (`running_seconds <= NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS` = 150s, issue #1724, clock-consistent with sub-check B's own `running_seconds` as of #1905) has not fired; the gate is the authoritative never-started bound, superseding the #1356 grace-to-budget band and its `tier1_falloff` budget-exceeded telemetry counter (pruned in #1905 as unreachable). `sdk_ever_output` is `agent.session_runner.liveness.derive_sdk_ever_output(entry)` — as of #1935 an OR of THREE fields (`last_tool_use_at`, `last_turn_at`, and `last_stdout_at`, the last written by `SessionRunner._stamp_stdout_liveness` on the headless stream's `init`/stdout events), not just the first two, closing a toolless-but-streaming false-positive wedge. The own-progress signals (`turn_count > 0`, `log_path`, `claude_session_uuid`) are evaluated only when `sdk_ever_output=False` AND the heartbeat is fresh within `NO_OUTPUT_BUDGET_SECONDS` (#1614 — sticky fields no longer count when the heartbeat is stale). The #963 child-activity check is unconditional. Tier 2 (`no_progress` only): `_tier2_reprieve_signal()` checks `compacting` / `children` / `alive`; any one passing gate reprieves the kill for this cycle (the previous `stdout` gate was retired by #1172; this is unrelated to `last_stdout_at`, which feeds `sdk_ever_output`, not a Tier-2 reprieve gate). See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design. `derive_sdk_ever_output` was already this row's own shared leaf pre-#2004; issue #2004 Task 2 additionally unified the **other two** hand-forked "has this session progressed" predicates (`session_stall_classifier._has_demonstrable_progress`, `crash_signature._has_demonstrable_progress`) behind a second, narrower leaf in the same module — `has_demonstrable_activity(entry, *, freshness_window=None)`, reading only `{turn_count, last_tool_use_at}`. This row's own leaf and call sites are unchanged; see [Stall Advisory Classifier](stall-advisory-classifier.md#live-never-started-detection) and [Crash-Signature Auto-Resume](crash-signature-auto-resume.md#progress-fields-ground-truth) for the two consolidated callers. |
@@ -59,7 +59,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
+| Location | `agent/session_health.py` |
 | Trigger | Periodic timer |
 | What it does | Fixes orphaned children (parent deleted) and stuck parents (all children terminal) |
 | Terminal safety | **Safe** -- orphan fix preserves original status via `clone_agent_session_fields`; stuck parent fix only finalizes (terminal transition), never revives |
@@ -69,7 +69,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/session_executor.py` (re-exported from `agent/agent_session_queue.py`) |
+| Location | `agent/session_executor.py` |
 | Trigger | Agent output during execution (auto-continue) |
 | What it does | Re-enqueues session with nudge message for continued execution |
 | Terminal safety | **Guarded** -- three-layer defense |
@@ -121,7 +121,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/session_executor.py` (re-exported from `agent/agent_session_queue.py`) |
+| Location | `agent/session_executor.py` |
 | Trigger | `get_response_via_harness()` returns a string starting with `"Error: CLI harness not found"` (i.e., `FileNotFoundError` on `claude` binary) |
 | What it does | Silently re-queues the session up to 3 times using `transition_status()` in-place. After 3 failures, delivers one persona-aligned message instead of a raw Python exception string. |
 | Terminal safety | **Guarded** -- `transition_status()` default `reject_from_terminal=True` prevents re-queuing a terminal session. B1 guard returns raw early when `agent_session is None`. |

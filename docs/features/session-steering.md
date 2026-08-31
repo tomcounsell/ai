@@ -246,16 +246,9 @@ In `cmd_create`, all three fields are always non-null. In `cmd_status`, `worker_
 
 Agent callers should branch on `worker_state` rather than parsing the stderr warning text.
 
-## Backward Compatibility
+## Where These Symbols Live
 
-All symbols that previously lived only in `agent/agent_session_queue.py` are re-exported from there for backward compatibility:
-
-- `MAX_NUDGE_COUNT`
-- `NUDGE_MESSAGE`
-- `SendToChatResult`
-- `determine_delivery_action`
-
-Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
+`MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` and `determine_delivery_action` are defined in `agent/output_router.py` and imported from there. They were reachable through `agent.agent_session_queue` for a period after the split; issue #2876 removed that path, so `agent.output_router` is the only one.
 
 ## Drafter Self-Draft Steering (née "Summarizer Fallback")
 

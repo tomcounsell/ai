@@ -444,7 +444,11 @@ def _resolve_callable(dotted_path: str) -> Any:
     """Resolve a dotted Python path to a callable.
 
     Args:
-        dotted_path: e.g. "agent.agent_session_queue._agent_session_health_check"
+        dotted_path: e.g. "agent.session_health._agent_session_health_check".
+            Name the module that defines the callable. A path through a module
+            that merely imports it resolves only for as long as that import
+            survives, and a resolution failure here is swallowed per-tick by
+            run_reflection's broad except — a dead job with a green worker.
 
     Returns:
         The callable object.

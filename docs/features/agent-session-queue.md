@@ -30,8 +30,10 @@ worker/__main__.py
             └── session_completion.py   (finalization + continuation-PM; imports session_state)
 ```
 
-All six modules re-export their public symbols from `agent_session_queue.py` — callers
-(bridge, tools, tests) import from `agent.agent_session_queue`.
+Each module owns its symbols and callers import from it directly. `agent_session_queue.py`
+is not a path to them: it imports only what its own queue logic uses, and
+`tests/unit/test_no_reexport_hub.py` fails if an unused sibling import reappears there
+(issue #2876).
 
 ### Import Rules
 

@@ -138,7 +138,9 @@ Check counts with: `pytest -m <marker> --collect-only -q`
 
 ## Patch-Target Convention
 
-When a test patches a symbol, patch the **canonical module that owns the symbol**, not the shim that re-exports it. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd because the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`). The shim keeps re-exports for type checkers and editor navigation, but patch targets must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
+When a test patches a symbol, patch the **canonical module that owns the symbol**. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd: the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`), so patching the queue module's copy could not reach the copy the code under test reads. A patch target must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
+
+The queue module no longer offers a second path to those symbols at all — issue #2876 deleted its 40 re-exports, and `tests/unit/test_no_reexport_hub.py` fails if any return. So a patch aimed at `agent.agent_session_queue.<X>` for a symbol owned elsewhere now raises `AttributeError` instead of passing vacuously, which is the louder and better failure.
 
 Attribute access through a module alias — `_queue.<X>`, where `_queue` is the hub module object — is the same mistake in a second syntax, and a write through it (`_queue.X = fake`) rebinds only the hub's copy, so the owning module never sees it. `tests/unit/test_hub_alias_references.py` guards both forms. It derives the hazard set from the hub's own AST (a name the hub imports and never references in its own body) rather than pinning a list, so it stays honest as the hub changes.
 
@@ -302,6 +304,7 @@ tests/
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
+| unit | `test_no_reexport_hub.py` | 6 | Re-export-hub guard (#2876): `agent/agent_session_queue.py` imports no sibling symbol it does not use. Derived from that one file's AST — no F401-string check, so a re-export without a suppression is still caught. Carries its own demonstrated-red case, and asserts its two stated limits (`__all__` is not a use; a `TYPE_CHECKING`-only name is) |
 | unit | `test_hub_alias_references.py` | 5 | Module-alias reference guard (#2876): no tracked Python reaches an `agent.agent_session_queue` pure re-export through a module alias. Hazard set derived from the hub's AST, not pinned; discovery via `git ls-files`, no exemption set |
 | unit | `test_stale_reference_sweep.py` | 3 | Stale-prose sweep (#2853, #2839): the unregistered reflection name, the two deleted granite package paths, and a scoped cadence-wording anti-criterion. Enumerates via `git ls-files` (untracked scratch Markdown is not repo content) and assembles every compared token by concatenation so the file cannot trip its own sweeps |
 | unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |

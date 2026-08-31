@@ -328,7 +328,7 @@ For Eng sessions:
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `config/enums.py` | `SessionType`, `PersonaType`, `AccessLevel` enums |
 | `agent/agent_definitions.py` | Agent registry (builder, validator, code-reviewer); `validate_agent_files()` verifies expected `.claude/agents/*.md` files are present AND parse cleanly at process startup |
-| `agent/agent_session_queue.py` | Queue dispatch surface -- entry points (`enqueue_agent_session`, `register_callbacks`, worker loops); re-exports symbols from split modules |
+| `agent/agent_session_queue.py` | Queue dispatch surface -- entry points (`enqueue_agent_session`, `register_callbacks`, worker loops) |
 | `agent/session_completion.py` | Post-execution lifecycle: finalization |
 | `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |
 | `agent/session_health.py` | Health monitor, startup recovery, orphan cleanup |
