@@ -3151,13 +3151,10 @@ def _sweep_stranded_deferred_self_drafts() -> None:
                     if not extra_ctx.get("deferred_self_draft_pending"):
                         continue
 
-                    completed_at = getattr(entry, "completed_at", None)
-                    if completed_at is not None:
-                        try:
-                            age = now - float(completed_at)
-                        except (TypeError, ValueError):
-                            age = None
-                        if age is not None and age > DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS:
+                    completed_at_ts = _ts(getattr(entry, "completed_at", None))
+                    if completed_at_ts is not None:
+                        age = now - completed_at_ts
+                        if age > DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS:
                             logger.debug(
                                 "[session-health] backstop sweep: %s outside lookback "
                                 "window (age=%.0fs), skipping",

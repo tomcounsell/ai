@@ -260,6 +260,38 @@ class TestDefectBCompletionExitGuard:
             "StatusConflictError must be swallowed as success, not logged as a failure"
         )
 
+    async def test_guard_status_conflict_error_logs_info_not_silently(self, redis_test_db, caplog):
+        """#3053: the guard's StatusConflictError handler used to be a bare
+        ``pass`` — one of the two silent exits that could skip the deferred
+        self-draft flush with no trace. It must now log at INFO naming the
+        session and the conflict ("expected, do not treat as an error" is a
+        reason to log at INFO, not a reason to log nothing)."""
+        sid = _sid("defect-b-info-log")
+        session = _make_teammate_session(sid, project_key="dbinfolog")
+
+        def _noop_complete_transcript(*_a, **_k):
+            return None
+
+        def _raising_finalize(*_a, **_k):
+            raise StatusConflictError(sid, "running", "completed", reason="raced by another actor")
+
+        with (
+            _patch_runner(),
+            patch("bridge.session_transcript.complete_transcript", _noop_complete_transcript),
+            patch("models.session_lifecycle.finalize_session", _raising_finalize),
+            caplog.at_level(logging.INFO),
+        ):
+            await _execute_agent_session(session)
+
+        info_logs = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and "already finalized" in r.getMessage()
+            and sid in r.getMessage()
+        ]
+        assert info_logs, "the StatusConflictError guard exit must log at INFO, not silently"
+
 
 # ---------------------------------------------------------------------------
 # Defect A — enqueue-time reconciliation (child-guarded delete)

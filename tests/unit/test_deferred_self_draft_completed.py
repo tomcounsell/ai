@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1612,3 +1613,65 @@ def test_waiting_for_children_parent_flushed_via_finalize_parent_sync(cleanup):
         child.delete()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 15. Static terminal-writer guard (#3053 AC2): pins the set of code paths
+#     that assign a terminal status outside models/session_lifecycle.py.
+# ---------------------------------------------------------------------------
+
+_TERMINAL_STATUS_ASSIGNMENT_RE = re.compile(
+    r'\.status\s*=\s*["\'](completed|failed|killed|abandoned|cancelled)["\']'
+)
+
+# The three known last-resort bypass sites (Technical Approach step 4) --
+# each now calls flush_deferred_self_draft_sync() first as belt-and-braces
+# redundancy over a path the finalize_session hoist and the backstop sweep
+# already cover. A new bypass anywhere else must fail this test.
+_KNOWN_BYPASS_FILE = "agent/session_executor.py"
+_KNOWN_BYPASS_COUNT = 3
+
+
+def test_no_new_terminal_writer_bypasses_outside_lifecycle():
+    """Any direct ``<obj>.status = "<terminal>"`` assignment in tracked,
+    non-test production source must be one of the three known
+    ``agent/session_executor.py`` last-resort sites. A new bypass anywhere
+    else — including a brand-new file — fails this test, forcing the author
+    to either route through ``finalize_session`` or explicitly extend this
+    guard (and add the matching flush call) instead of silently reintroducing
+    an unguarded terminal-status write.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    offenders: dict[str, int] = {}
+
+    for py_file in repo_root.rglob("*.py"):
+        rel = py_file.relative_to(repo_root)
+        rel_str = str(rel)
+        if rel_str.startswith(
+            (
+                "tests/",
+                ".venv/",
+                ".worktrees/",
+                ".claude/",
+                "docs/",
+            )
+        ):
+            continue
+        if rel_str == "models/session_lifecycle.py":
+            # The lifecycle module IS the authority for terminal writes.
+            continue
+        try:
+            text = py_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        count = len(_TERMINAL_STATUS_ASSIGNMENT_RE.findall(text))
+        if count:
+            offenders[rel_str] = offenders.get(rel_str, 0) + count
+
+    assert offenders == {_KNOWN_BYPASS_FILE: _KNOWN_BYPASS_COUNT}, (
+        f"Unexpected terminal-status bypass writer(s) outside "
+        f"models/session_lifecycle.py: {offenders}. Route through "
+        f"finalize_session(), or if this is a deliberate new last-resort "
+        f"bypass, add a flush_deferred_self_draft_sync() call before it and "
+        f"update this guard's expected count."
+    )
