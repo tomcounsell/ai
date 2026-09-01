@@ -737,8 +737,13 @@ classified — this table *is* the #2809 enumeration deliverable):
 | B14 | `test_harness_model_coverage.py:60` | explicit `if not agent_dir.is_dir(): return []` vacuous path | **ADD FLOOR** — convert to raise |
 | B1-B6, B9, B10, B15-B20 | 14 further walks | already carry non-vacuity floors | **DOCUMENT AS SAFE** |
 
-The B-series are `rglob("*.py")` walks. They are **not** `.pyc`-vulnerable
-(`*.py` does not match `*.pyc`); their only defect is the missing floor. That
+The B-series are pure-Python directory walks — `rglob`/`glob` over `*.py` at
+B7, B8, B12, B13 and B14, and **markdown** globs at B11
+(`_iter_include_paths()` walks `REPO_ROOT.glob(...)` over patterns such as
+`.claude/skills-global/**/sub-skills/**/*.md`, so a builder sizing its floor
+should not go looking for Python files that are not there). None is
+`.pyc`-vulnerable (`*.py` does not match `*.pyc`, and `*.md` matches neither);
+their only defect is the missing floor. That
 distinction is deliberate — this plan does not rewrite them to use `git grep`,
 which would be churn for no correctness gain.
 
@@ -1341,20 +1346,45 @@ the same moment:
 - **Task ID**: build-floors
 - **Depends On**: none
 - **Validates**: `tests/unit/test_template_filter_registry.py`, `tests/unit/test_sdlc_lease_helper_binding.py`, `tests/unit/test_sdlc_tool_wrapper.py`, `tests/integration/test_dm_recovery.py`, `tests/unit/test_no_positional_query_get.py`, `tests/unit/test_harness_model_coverage.py`
-- **Informed By**: spike-4 (these are `rglob("*.py")` walks — not `.pyc`-vulnerable; the only defect is the missing floor)
+- **Informed By**: spike-4 (these are pure-Python directory walks — not `.pyc`-vulnerable; the only defect is the missing floor)
 - **Assigned To**: walk-hardener
 - **Agent Type**: builder
 - **Parallel**: true
 - Add a scanned-count floor to each, modelled on `tests/unit/test_update_pull_fetch_head_race.py`.
-- Set each floor at roughly 60-70% of the current count, not `current - 1`, so ordinary churn never trips it.
-- Put the rationale in the assertion message, not only in a comment.
+- **Every floor is pinned here, not left to the builder** — the same rule task 2
+  applies to the four conversions, and for the same reason: an unpinned floor
+  invites the `current - 1` value Risk 1 forbids, and the Success Criterion
+  "each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count" is
+  otherwise satisfiable by any number. Six of the ten touched files live in this
+  task, so leaving them unmeasured would ship 60% of the surface unconstrained.
+
+  Counts are measured at `88f572d3a` **by running each module's own walk**, not
+  by `git ls-files`: B7 and B13 walk untracked files too, and B11 scans `.md`,
+  so an index count would be the wrong number for three of the six.
+
+  | Site | Walk | Files | `min_files` | Share |
+  |---|---|---|---|---|
+  | B7 | `TESTS_DIR.rglob("*.py")` | 827 | **500** | 60.5% |
+  | B8 | `_SEARCH_ROOTS` (`agent`, `bridge`, `models`, `tools`, `worker`) | 343 | **220** | 64.1% |
+  | B11 | `_iter_include_paths()` (markdown globs) | 48 | **30** | 62.5% |
+  | B12 | `bridge_dir.glob("*.py")` (non-recursive) | 42 | **28** | 66.7% |
+  | B13 | `_iter_python_files()` over 8 `SCAN_DIRS` | 1272 | **780** | 61.3% |
+  | B14 | `_agent_py_files()` | 86 | **55** | 64.0% |
+
+  **B7's 500 deliberately equals the meta-guard's `min_files=500`.** Both scan
+  `tests/` with `rglob("*.py")`, so a divergent pair is a maintenance trap: the
+  next author to move one would have no way to tell whether the other was meant
+  to follow.
+- Put the measured count and its commit in the assertion message, not only in a
+  comment — the same form task 2 mandates, e.g.
+  `f"scanned {len(files)} files, floor {min_files} (827 at 88f572d3a; lower this only if the corpus really shrank)"`.
 - In `test_harness_model_coverage.py` (B14), replace `if not agent_dir.is_dir(): return []` with a raise — that early return is an explicit vacuous-green path.
 - In `test_no_positional_query_get.py` (B13), apply the **same** treatment: replace `if not root.exists(): continue` at `:67` with accumulate-then-assert over all eight `SCAN_DIRS`:
   ```python
   missing = [t for t in SCAN_DIRS if not (REPO_ROOT / t).is_dir()]
   assert not missing, f"SCAN_DIRS roots absent from the checkout: {missing} — the sweep would silently skip them"
   ```
-  Keep the total floor **as well**. A total floor cannot see a lost root: `worker/` is 3 of 1231 tracked `.py` (0.24%) and `ui/` is 10 (0.8%), both an order of magnitude inside any percentage band.
+  Keep the total floor **as well**. A total floor cannot see a lost root: `worker/` is 3 of 1272 tracked `.py` (0.24%) and `ui/` is 10 (0.79%), both an order of magnitude inside any percentage band.
 - Do **not** convert these to `git grep`. `*.py` cannot match `*.pyc`; conversion is churn.
 
 ### 4. Add the recurrence meta-guard
@@ -1366,14 +1396,18 @@ the same moment:
 - **Parallel**: false
 - Add a test asserting no test under `tests/` invokes a bare recursive `grep` over a directory (argv[0] `grep` with `-r`/`-rn`).
 - **The discriminator is pinned, and it is structural, not textual.** A naive
-  text matcher ("the file mentions `grep` and mentions `-r`") flags **7** files
-  under `tests/` at `cefc07e7e`, of which exactly **2** are real offenders. The
-  five innocents are hook-validator fixtures
+  text matcher ("the file mentions `grep` and mentions `-r`") flags a moving set
+  of files under `tests/` — 7 at `cefc07e7e`, 8 at `dbb8baaf5`, 10 under the
+  round-3 critique's looser regex — of which exactly **2** are real offenders.
+  **Do not pin the candidate count**; it is a moving target and any figure
+  written here goes stale. The known-innocent kinds are hook-validator fixtures
   (`test_validate_no_redis_flush.py`, `test_validate_no_raw_redis_delete.py`),
   payload strings (`test_tool_call_delivery.py`, `test_verification_parser.py`),
   and — most awkwardly — `tests/unit/test_plan_migration_invariant.py`, which is
   A6, dispositioned `DOCUMENT AS SAFE` and cited throughout this plan as the
-  reference pattern; its `grep -r` occurrence is the explanatory comment #2093
+  reference pattern (`tests/unit/test_sdlc_takeover_regression.py` is a further
+  docstring-only candidate that has come and gone between rounds — which is the
+  point); its `grep -r` occurrence is the explanatory comment #2093
   added. Demanding an opt-out stamp on the plan's own exemplar is absurd, and the
   builder's alternative — loosening the matcher until the false positives vanish —
   is the exact weakening this task already forbids for the self-hit.
@@ -1391,12 +1425,14 @@ the same moment:
 
   Both are converted by task 2, so **the expected flagged set after this lane is
   empty**. State that in the test's own message.
-- **Record the five known-innocent files in a comment in the test**, with one
-  line each saying why they are not offenders, so the next author can tell a real
-  regression from a re-litigated false positive. Run the matcher against all
-  seven textual candidates *before* wiring it into the assertion and confirm it
-  returns only A1 and A2 — a matcher validated against only the two offenders
-  proves nothing about the five it must not flag.
+- **Record every textual candidate the AST matcher does not flag in a comment in
+  the test**, with one line each saying why it is not an offender, so the next
+  author can tell a real regression from a re-litigated false positive. Enumerate
+  the candidates at build time rather than copying this plan's list — the set has
+  changed in every round. Run the matcher against **every textual candidate the
+  sweep returns** *before* wiring it into the assertion and confirm it returns
+  only A1 and A2: a matcher validated against only the two offenders proves
+  nothing about the ones it must not flag.
 - The explicit opt-out comment survives for a genuine future survivor
   **elsewhere** in the suite, but stamping one on any of these five means the
   matcher is wrong and must be fixed instead. It is never the instrument for the
@@ -1412,7 +1448,7 @@ the same moment:
   that is the positive control's job, and V-21 is what tells the two apart.
 - **Ship a planted-offender positive control in the same file:** write a temp file under `tmp_path` containing `subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at `tmp_path`, and assert it is flagged. Without it, a correct self-exemption and a matcher that flags nothing are indistinguishable.
 - **Take root and floor as independent parameters** so the floor and the positive control do not collide: `def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]`, raising `AssertionError` when `len(scanned) < min_files`. The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control calls `_scan_for_bare_grep(tmp_path, min_files=1)`. A floor baked into the scanner would be tripped by the control's one-file root *before* the offender assertion ran, so the control would pass for the wrong reason and V-21 would be uninformative.
-- `min_files=500` because `tests/` holds 784 tracked `.py` at `7ba89ca5c` (63.8%, inside Risk 1's 60-70% band). Not 600, which is 76.5% and outside it.
+- `min_files=500` because `tests/` holds 827 tracked `.py` at `88f572d3a` (60.5%, inside Risk 1's 60-70% band). Not 600, which is 72.6% and sits at the top of it while the corpus keeps growing (784 → 827 in a week). This must stay equal to B7's floor — both walk `tests/` with `rglob("*.py")`.
 - Never let the control pass `min_files=0` — a scanner returning `[]` unconditionally would satisfy both callers and both would stay green.
 - Name the control test so `-k "positive_control"` selects it (V-21).
 
@@ -1525,8 +1561,23 @@ below.
 
 ## Verification
 
-Rows are numbered for the traceability table above. Every row is runnable as
-written from the repo root unless a row states otherwise.
+Rows are numbered for the traceability table above.
+
+**Where each row runs is part of the row, not a matter of taste.** Every row runs
+from the repo root **except**:
+
+| Rows | Run from | Why |
+|---|---|---|
+| V-17, V-18, V-18b | **the lane worktree** (`.worktrees/{slug}/`) | They mutate the working tree. No live process on this machine resolves a path inside the lane worktree, and both affected guards derive their root from `__file__` (`_find_repo_root()` at B13, the module-level `REPO_ROOT` at A1), so the guard follows the node into the worktree by construction. |
+| V-1, V-2, V-16 | **the primary checkout** `~/src/ai` | The stale off-pin `.pyc` that AC1 depends on exists only there. |
+| V-19 | its own throwaway worktree | It creates and removes one. |
+| all others | repo root, either checkout | They read only. |
+
+The earlier drafts said both "every row is runnable from the repo root" and "run
+the mutation rows from the lane's own worktree", which let a builder satisfy the
+letter of the plan while running a destructive rename in the shared primary
+checkout. The table above is the decision; the prose note under the verification
+table no longer carries it alone.
 
 Five conventions make that promise hold. Each is stated so a reader can *check*
 the table against it rather than take it on faith, because two rounds running
@@ -1615,32 +1666,41 @@ the table has shipped rows that could never have run.
 | V-29 | **No helper unit test mutates the primary checkout.** Run the helper's own module and confirm the tree is untouched afterwards | `git status --porcelain > /tmp/zz_before.txt; ./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0; rc=$?; git status --porcelain > /tmp/zz_after.txt; diff /tmp/zz_before.txt /tmp/zz_after.txt; d=$?; test $rc -eq 0 -a $d -eq 0` | exit code 0, and `diff` reports nothing. A non-empty diff means a scratch-repo case leaked into `~/src/ai` |
 
 > **On the mutation rows (V-17, V-18, V-18b).** These deliberately break the tree,
-> observe a FAIL, and revert. Run them one at a time from the lane's own worktree,
-> confirm `git status` is clean afterwards, and never run them concurrently with
-> another lane's suite on this machine or leave a mutation in place across an
-> await. V-17, V-18 and V-18b are the **only** places in this lane where the
-> working tree is mutated; helper unit tests use a `git init` scratch repo in
-> `tmp_path` instead (see task 1 and V-29).
+> observe a FAIL, and revert. **Run them one at a time from the lane worktree**
+> (`.worktrees/{slug}/`) — never from the primary checkout — confirm `git status`
+> is clean afterwards, and never leave a mutation in place across an await. V-17,
+> V-18 and V-18b are the **only** places in this lane where the working tree is
+> mutated; helper unit tests use a `git init` scratch repo in `tmp_path` instead
+> (see task 1 and V-29).
 >
-> **No mutation row may rename a path a launchd service resolves.** This is the
-> reason V-18 uses `ui/` and not `worker/`. Verified at critique time on this
-> machine: `com.valor.worker` is loaded and running (pid 72972) with
-> `ProgramArguments` `/Users/tomcounsell/src/ai/.venv/bin/python -m worker` and
-> `WorkingDirectory` `/Users/tomcounsell/src/ai`, under launchd `KeepAlive`. For
-> the duration of a `git mv worker worker_zz` any lazy import in the running
-> process, any `KeepAlive` respawn, and any `worker-restart` resolve `-m worker`
-> against a directory that does not exist. `ui/` demonstrates exactly the same
-> property — it is a `SCAN_DIRS` root at **10** tracked `.py`, 0.79% of the
-> 1272-file corpus, an order of magnitude inside any percentage floor, so the
-> total floor stays green while the per-root assertion fires — and no plist under
-> `~/Library/LaunchAgents/com.valor.*` targets it (checked: the six loaded jobs
-> run `-m worker`, `-m reflections`, `scripts/log_rotate.py`,
-> `scripts/sdlc_reflection.py`, `scripts/remote-update.sh`, and
-> `monitoring/worker_watchdog.py`). Task 5's B13 mutation bullet carries the same
-> substitution. If a future author has a reason to rename `worker/` anyway, the
-> row must wrap it in `./scripts/valor-service.sh worker-disable` / `worker-enable`
-> with the re-enable in a `trap`, so an interrupted row cannot leave the service
-> down — but the simpler answer is to pick a root nothing runs.
+> **The invariant is "no process on this machine resolves the path", not "no
+> launchd plist names it".** The narrower, plist-shaped version of this rule is
+> what produced the round-3 `worker/` → `ui/` substitution and it was wrong:
+> `ui/` carries no plist, but it is served right now by a long-lived
+> `python -m ui.app` started by `scripts/valor-service.sh` and restarted by
+> `scripts/update/service.py`, whose `Jinja2Templates(directory=...)` and
+> `StaticFiles(directory=...)` read from disk **per request**. A
+> `git mv ui ui_zz` in the primary checkout therefore breaks every dashboard
+> render for the row's duration, and a `com.valor.update` run landing inside that
+> window leaves the dashboard down after the revert with no `KeepAlive` to
+> recover it. `worker/` is worse still (`com.valor.worker`, `KeepAlive`), and
+> `agent/`, `models/`, `tools/` and `bridge/` are all imported by the running
+> worker, reflection worker and watchdog — so **no `SCAN_DIRS` root is safe to
+> rename in the primary checkout**. The answer is not a better root; it is a
+> different checkout.
+>
+> Running from the lane worktree removes the whole class: nothing on this machine
+> resolves `.worktrees/{slug}/ui`, and both affected guards resolve their root
+> from `__file__`, so the node under test sees the worktree's `REPO_ROOT` and the
+> mutation is invisible to every other lane. B13's mutation still uses **`ui/`**
+> rather than `worker/` — 10 tracked `.py`, 0.79% of the 1272-file corpus, an
+> order of magnitude inside any percentage floor, so the total floor stays green
+> while the per-root assertion fires — but that is now a choice about corpus
+> share, not a safety argument.
+>
+> Before running any mutation row, confirm the invariant directly rather than by
+> reading plists: `ps -o command= -p $(pgrep -f "$HOME/src/ai/.venv/bin/python")`
+> must list nothing rooted in the lane worktree.
 >
 > **`git mv` versus plain `mv` is load-bearing.** V-18 uses `git mv` so the revert
 > is exact and the index stays consistent. V-18b uses a plain `mv` precisely
