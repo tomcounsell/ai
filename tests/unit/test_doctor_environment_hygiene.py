@@ -1,14 +1,22 @@
-"""doctor must report source-tree bytecode orphaned by an interpreter pin bump (#2883).
+"""doctor's environment-hygiene checks: stale artifacts that fail silently.
 
-Bytecode caches are namespaced per interpreter (`module.cpython-314.pyc`), so
-bumping `.python-version` orphans the previous interpreter's caches rather than
-replacing them. CPython never stats, validates, or deletes a cache whose magic
-tag is not its own, so nothing invalidates them, nothing swept them, and nothing
-warned that a pin bump created them.
+Two checks, one shape — machine state that no longer matches the repo's pins, and
+that degrades quietly rather than erroring.
 
-They are not merely untidy: a stale pre-fix `.pyc` under `tools/__pycache__`
-already failed a clean source tree once (#2807/#2809), because a guard read the
-filesystem rather than tracked content.
+`stale_bytecode` (#2883): bytecode caches are namespaced per interpreter
+(`module.cpython-314.pyc`), so bumping `.python-version` orphans the previous
+interpreter's caches rather than replacing them. CPython never stats, validates,
+or deletes a cache whose magic tag is not its own, so nothing invalidated them,
+nothing swept them, and nothing warned a pin bump created them. Not merely
+untidy: a stale pre-fix `.pyc` under `tools/__pycache__` already failed a clean
+source tree once (#2807/#2809), because a guard read the filesystem rather than
+tracked content.
+
+`shadowed_toolchain` (#2780): a stale user-site `uv` ahead of the real one on
+PATH does not fail loudly — it succeeds and rewrites `uv.lock` in its own older
+format, so the damage lands in a tracked file and reads as an ordinary diff.
+`_check_console_scripts_resolve` cannot cover it, because `uv` is not one of this
+repo's `[project.scripts]`.
 """
 
 from __future__ import annotations
@@ -121,3 +129,78 @@ class TestRegisteredWithDoctor:
         assert "_check_stale_bytecode," in source, (
             "check must be registered in doctor's check list, not merely defined"
         )
+
+
+class TestShadowedToolchain:
+    """A stale user-site `uv` must be reported (#2780).
+
+    `_check_console_scripts_resolve` covers this repo's own `[project.scripts]`,
+    which cannot include `uv` — and `uv` is the one that matters most, because an
+    old `uv` does not fail loudly. It succeeds and rewrites `uv.lock` in its own
+    older format, so the damage lands in a tracked file and reads as an ordinary
+    diff.
+
+    Measured live on 2026-08-31: `~/Library/Python/3.12/bin/uv` was v0.6.10
+    (built 2025-03-25) and won PATH resolution over Homebrew's v0.11.3.
+    """
+
+    def _shimmed(self, tmp_path, monkeypatch, tool="uv"):
+        shim_dir = tmp_path / "Library" / "Python" / "3.12" / "bin"
+        shim_dir.mkdir(parents=True)
+        shim = shim_dir / tool
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+        monkeypatch.setattr("tools.doctor.Path.home", staticmethod(lambda: tmp_path))
+        return shim
+
+    def test_fires_when_a_tool_resolves_into_user_site(self, tmp_path, monkeypatch):
+        from tools.doctor import _check_shadowed_toolchain
+
+        shim = self._shimmed(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "shutil.which", lambda t: str(shim) if t == "uv" else "/opt/homebrew/bin/uvx"
+        )
+
+        result = _check_shadowed_toolchain()
+        assert result.passed is False
+        assert "uv" in result.message
+        assert str(shim) in result.message
+        assert result.fix
+
+    def test_message_explains_why_an_old_uv_is_dangerous(self, tmp_path, monkeypatch):
+        """An operator who thinks this is cosmetic will not act on it."""
+        from tools.doctor import _check_shadowed_toolchain
+
+        shim = self._shimmed(tmp_path, monkeypatch)
+        monkeypatch.setattr("shutil.which", lambda t: str(shim) if t == "uv" else None)
+
+        assert "uv.lock" in _check_shadowed_toolchain().message
+
+    def test_passes_when_tools_resolve_outside_user_site(self, tmp_path, monkeypatch):
+        from tools.doctor import _check_shadowed_toolchain
+
+        self._shimmed(tmp_path, monkeypatch)
+        monkeypatch.setattr("shutil.which", lambda _t: "/opt/homebrew/bin/uv")
+
+        assert _check_shadowed_toolchain().passed is True
+
+    def test_absent_tool_is_not_reported_as_shadowed(self, tmp_path, monkeypatch):
+        from tools.doctor import _check_shadowed_toolchain
+
+        self._shimmed(tmp_path, monkeypatch)
+        monkeypatch.setattr("shutil.which", lambda _t: None)
+
+        assert _check_shadowed_toolchain().passed is True
+
+    def test_no_user_site_dir_passes(self, tmp_path, monkeypatch):
+        from tools.doctor import _check_shadowed_toolchain
+
+        monkeypatch.setattr("tools.doctor.Path.home", staticmethod(lambda: tmp_path))
+        assert _check_shadowed_toolchain().passed is True
+
+    def test_check_is_registered_with_doctor(self):
+        import inspect
+
+        import tools.doctor as doctor
+
+        assert "_check_shadowed_toolchain," in inspect.getsource(doctor)

@@ -823,6 +823,88 @@ def _check_worktree_interpreters() -> CheckResult:
         )
 
 
+# Toolchain binaries that are NOT console scripts of this repo, so
+# `_check_console_scripts_resolve` never looks at them, but whose version
+# materially changes repo artifacts. `uv` is the motivating case: a stale
+# user-site `uv` ahead of the real one silently rewrites `uv.lock` in its own
+# older format on every `uv sync` (#2780).
+_SHADOW_SENSITIVE_TOOLS: tuple[str, ...] = ("uv", "uvx")
+
+# User-site bin directories that accumulate stale shims. Installing with
+# `pip install --user` writes here, and nothing ever prunes it, so a binary
+# dropped in 2025 still shadows a 2026 one if this sits earlier on PATH.
+_USER_SITE_BIN_GLOB = "Library/Python/*/bin"
+
+
+def _check_shadowed_toolchain() -> CheckResult:
+    """Report toolchain binaries resolving to a stale user-site shim (#2780).
+
+    `_check_console_scripts_resolve` covers this repo's own `[project.scripts]`.
+    It cannot cover `uv`, which is not one of them — and `uv` is the one that
+    matters most, because an old `uv` does not fail loudly. It succeeds, and
+    rewrites `uv.lock` in its own older format, so the damage lands in a tracked
+    file and looks like an ordinary diff.
+
+    Measured on this machine 2026-08-31: `~/Library/Python/3.12/bin/uv` was
+    v0.6.10 (built 2025-03-25) and won PATH resolution over Homebrew's v0.11.3.
+    """
+    try:
+        import shutil
+
+        home = Path.home()
+        user_site_bins = {p.resolve() for p in home.glob(_USER_SITE_BIN_GLOB) if p.is_dir()}
+        if not user_site_bins:
+            return CheckResult(
+                name="shadowed_toolchain",
+                category="Environment",
+                passed=True,
+                message="no user-site bin directories on this machine",
+            )
+
+        shadowed: list[str] = []
+        for tool in _SHADOW_SENSITIVE_TOOLS:
+            found = shutil.which(tool)
+            if not found:
+                continue
+            if Path(found).resolve().parent in user_site_bins:
+                shadowed.append(f"{tool} -> {found}")
+
+        if shadowed:
+            return CheckResult(
+                name="shadowed_toolchain",
+                category="Environment",
+                passed=False,
+                message=(
+                    f"{len(shadowed)} toolchain binary/ies resolve to a stale user-site "
+                    f"shim: {', '.join(shadowed)} — an old `uv` does not fail, it rewrites "
+                    "uv.lock in its own older format"
+                ),
+                fix=(
+                    "Rename the shim aside (reversible), e.g. "
+                    "mv ~/Library/Python/*/bin/uv{,.disabled} — then confirm with "
+                    "`which uv && uv --version`"
+                ),
+            )
+
+        return CheckResult(
+            name="shadowed_toolchain",
+            category="Environment",
+            passed=True,
+            message=(
+                f"{len(_SHADOW_SENSITIVE_TOOLS)} shadow-sensitive tool(s) resolve "
+                "outside user-site shims"
+            ),
+        )
+    except Exception as e:
+        return CheckResult(
+            name="shadowed_toolchain",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate tools/doctor.py::_check_shadowed_toolchain",
+        )
+
+
 def _interpreter_tag_for_pin(pin: str) -> str:
     """``"3.14"`` -> ``"cpython-314"``, the tag CPython stamps into cache names."""
     major, _, minor = pin.partition(".")
@@ -2218,6 +2300,7 @@ def get_checks(
         _check_popoto_floor,
         _check_worktree_interpreters,
         _check_stale_bytecode,
+        _check_shadowed_toolchain,
         _check_system_tools,
         _check_python_deps,
         # Services

@@ -3067,12 +3067,22 @@ async def _deliver_deferred_self_draft_fallback(
 # (not the window) is what bounds re-delivery, so this no longer has to be a
 # short multiple of the health-check interval. Env-overridable for ops tuning
 # without a redeploy.
-DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS = int(
-    os.environ.get(
-        "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS",
-        str(HOUR_DEDUP_LOCK_TTL_SECONDS),
+def deferred_flush_backstop_lookback_seconds() -> int:
+    """Resolve the backstop lookback window at call time, never at import time.
+
+    Read lazily so the "env-overridable for ops tuning without a redeploy"
+    intent above is actually true: a module-scope capture freezes the value at
+    whatever the first importer saw, so a live worker would keep the old window
+    until the process restarted — which is the redeploy the comment promises to
+    avoid (#2866).
+    """
+    return int(
+        os.environ.get(
+            "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS",
+            str(HOUR_DEDUP_LOCK_TTL_SECONDS),
+        )
     )
-)
+
 
 # Delivery-posture statuses for the backstop sweep (#3053): "the machine
 # dropped it" vs "a person called it off". `completed`, `failed`, and
@@ -3088,9 +3098,17 @@ DEFERRED_FLUSH_BACKSTOP_STATUSES = frozenset({"completed", "failed", "abandoned"
 
 # Per-tick cap on rows acted on by the backstop sweep, so a pathological
 # backlog cannot stall the health loop. PROVISIONAL/TUNABLE.
-DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK = int(
-    os.environ.get("DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK", "25")
-)
+DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK_DEFAULT = 25
+
+
+def deferred_flush_backstop_max_rows_per_tick() -> int:
+    """Resolve the per-tick cap at call time. See the lookback accessor above."""
+    return int(
+        os.environ.get(
+            "DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK",
+            str(DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK_DEFAULT),
+        )
+    )
 
 
 def _sweep_stranded_deferred_self_drafts() -> None:
@@ -3143,10 +3161,15 @@ def _sweep_stranded_deferred_self_drafts() -> None:
     """
     try:
         now = time.time()
+        # Resolved once per tick, not per row: a value that shifted mid-sweep
+        # would make the cap and the window mean different things to different
+        # rows of the same pass.
+        max_rows = deferred_flush_backstop_max_rows_per_tick()
+        lookback = deferred_flush_backstop_lookback_seconds()
         acted = 0
         capped = False
         for status in DEFERRED_FLUSH_BACKSTOP_STATUSES:
-            if acted >= DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK:
+            if acted >= max_rows:
                 capped = True
                 break
             try:
@@ -3179,7 +3202,7 @@ def _sweep_stranded_deferred_self_drafts() -> None:
                 continue
 
             for entry in candidates:
-                if acted >= DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK:
+                if acted >= max_rows:
                     capped = True
                     break
                 try:
@@ -3192,7 +3215,7 @@ def _sweep_stranded_deferred_self_drafts() -> None:
                     completed_at_ts = _ts(getattr(entry, "completed_at", None))
                     if completed_at_ts is not None:
                         age = now - completed_at_ts
-                        if age > DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS:
+                        if age > lookback:
                             logger.debug(
                                 "[session-health] backstop sweep: %s outside lookback "
                                 "window (age=%.0fs), skipping",
@@ -3254,7 +3277,7 @@ def _sweep_stranded_deferred_self_drafts() -> None:
             logger.warning(
                 "[session-health] backstop sweep hit its per-tick cap (%d rows); "
                 "remaining stranded rows will be picked up on a subsequent tick",
-                DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK,
+                max_rows,
             )
     except Exception as _sweep_err:
         logger.error(

@@ -120,6 +120,39 @@ duplicates. The two checks can both fire on the same drifted venv -- when
 they do, they prescribe the identical `rm -rf .venv && uv sync --all-extras`
 remedy, so one action clears both findings.
 
+## Environment Hygiene: stale artifacts that fail silently
+
+Two checks cover machine state that no longer matches the repo's pins and
+degrades *quietly* rather than erroring. Both live in `tools/doctor.py` and are
+tested by `tests/unit/test_doctor_environment_hygiene.py`.
+
+### `shadowed_toolchain` (#2780)
+
+`_check_console_scripts_resolve` above covers this repo's `[project.scripts]`.
+It cannot cover `uv`, which is not one of them — and `uv` is the case that
+matters most. A stale shim on PATH does not die with `ModuleNotFoundError` the
+way a shadowed console script does. **It succeeds**, and rewrites `uv.lock` in
+its own older format, so the damage lands in a tracked file and reads as an
+ordinary diff.
+
+Measured on this machine 2026-08-31: `~/Library/Python/3.12/bin/uv` was v0.6.10
+(built 2025-03-25) and won PATH resolution over Homebrew's v0.11.3, with `uvx`
+shadowed the same way. Both were renamed aside (`uv.disabled-…`) rather than
+deleted, so the change is reversible.
+
+The check reports any binary in `_SHADOW_SENSITIVE_TOOLS` resolving into a
+`~/Library/Python/*/bin` directory. Remedy is a rename, not a delete:
+
+```bash
+mv ~/Library/Python/*/bin/uv{,.disabled}   # then: which uv && uv --version
+```
+
+### `stale_bytecode` (#2883)
+
+Reports source-tree `.pyc` caches orphaned by an interpreter pin bump. See
+[worktree-venv-isolation.md](worktree-venv-isolation.md#a-pin-bump-strands-the-old-interpreters-bytecode-2883)
+for the mechanism and the sweep command.
+
 ## Flags
 
 | Flag | Behavior |

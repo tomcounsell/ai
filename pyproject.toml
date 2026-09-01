@@ -11,7 +11,7 @@ dependencies = [
     # unconditionally, so every call dies at argument binding (see #2960).
     "anthropic==0.125.0",
     "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
-    "claude-agent-sdk==0.2.148", # CRITICAL — pin exact, upgrade via /update only
+    "claude-agent-sdk==0.2.149", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",

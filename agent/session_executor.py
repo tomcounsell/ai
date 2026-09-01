@@ -1069,7 +1069,9 @@ def _last_resort_flush_and_fail(session: AgentSession, status: str) -> None:
         flush_deferred_self_draft_sync(session, status)
     except Exception as flush_err:
         logger.warning(
-            "[executor-guard] last-resort deferred self-draft flush failed (non-fatal): %s",
+            "[executor-guard] last-resort deferred self-draft flush failed for session %s "
+            "(non-fatal): %s",
+            session.agent_session_id,
             flush_err,
         )
     try:
@@ -1079,8 +1081,12 @@ def _last_resort_flush_and_fail(session: AgentSession, status: str) -> None:
         session.completed_at = _time.time()
         session.save(update_fields=["status", "completed_at", "updated_at"])
     except Exception as last_resort_err:
+        # The session id is what makes this line actionable: it is the last
+        # signal emitted for a session whose finalize already blew up, so a
+        # warning without it names a failure nobody can trace to a row.
         logger.warning(
-            "[executor-guard] last-resort status save failed (non-fatal): %s",
+            "[executor-guard] last-resort status save failed for session %s (non-fatal): %s",
+            session.agent_session_id,
             last_resort_err,
             exc_info=True,
         )

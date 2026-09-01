@@ -181,7 +181,7 @@ def test_sweep_never_delivers_killed_or_cancelled(cleanup, status):
 
 
 def test_sweep_skips_row_outside_lookback_window(cleanup, monkeypatch):
-    monkeypatch.setattr(session_health, "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS", 100)
+    monkeypatch.setattr(session_health, "deferred_flush_backstop_lookback_seconds", lambda: 100)
     sid = f"{SID_PREFIX}outside-window"
     cleanup.append(sid)
     _make_terminal_session(sid, status="completed", completed_at=time.time() - 1000)
@@ -192,7 +192,7 @@ def test_sweep_skips_row_outside_lookback_window(cleanup, monkeypatch):
 
 
 def test_sweep_delivers_row_inside_lookback_window(cleanup, monkeypatch):
-    monkeypatch.setattr(session_health, "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS", 3600)
+    monkeypatch.setattr(session_health, "deferred_flush_backstop_lookback_seconds", lambda: 3600)
     sid = f"{SID_PREFIX}inside-window"
     cleanup.append(sid)
     _make_terminal_session(sid, status="completed", completed_at=time.time() - 100)
@@ -210,7 +210,7 @@ def test_sweep_delivers_row_inside_lookback_window(cleanup, monkeypatch):
 
 
 def test_sweep_acts_on_anchorless_row_exactly_once(cleanup, monkeypatch):
-    monkeypatch.setattr(session_health, "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS", 3600)
+    monkeypatch.setattr(session_health, "deferred_flush_backstop_lookback_seconds", lambda: 3600)
     sid = f"{SID_PREFIX}anchorless"
     cleanup.append(sid)
     # completed_at intentionally omitted -> None (legacy row / pre-Task-1 writer).
@@ -265,7 +265,7 @@ def test_chokepoint_and_sweep_flush_same_session_exactly_once(cleanup):
 
 
 def test_sweep_caps_rows_per_tick(cleanup, monkeypatch, caplog):
-    monkeypatch.setattr(session_health, "DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK", 2)
+    monkeypatch.setattr(session_health, "deferred_flush_backstop_max_rows_per_tick", lambda: 2)
     sids = [f"{SID_PREFIX}cap-{i}" for i in range(4)]
     for sid in sids:
         cleanup.append(sid)
@@ -283,7 +283,7 @@ def test_sweep_caps_rows_per_tick(cleanup, monkeypatch, caplog):
     )
 
     # The remaining rows are still pending and will be picked up on a later tick.
-    monkeypatch.setattr(session_health, "DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK", 10)
+    monkeypatch.setattr(session_health, "deferred_flush_backstop_max_rows_per_tick", lambda: 10)
     _sweep_stranded_deferred_self_drafts()
     delivered_total = sum(_outbox_count(sid) for sid in sids)
     assert delivered_total == 4, "a later tick must pick up rows the cap deferred"
