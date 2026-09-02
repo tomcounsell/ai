@@ -45,7 +45,7 @@ def tmp_telemetry(tmp_path, monkeypatch):
         if fh:
             try:
                 fh.close()
-            except Exception:
+            except Exception:  # swallow-ok: fixture teardown, handle may already be closed
                 pass
     telemetry_mod._locks.clear()
     telemetry_mod._last_event_monotonic.clear()

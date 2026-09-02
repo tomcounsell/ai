@@ -479,7 +479,7 @@ def denial_stream(tmp_path, monkeypatch, request):
     if fh:
         try:
             fh.close()
-        except Exception:
+        except Exception:  # swallow-ok: fixture teardown, handle may already be closed
             pass
     telemetry_mod._locks.pop(session_id, None)
     telemetry_mod._last_event_monotonic.pop(session_id, None)

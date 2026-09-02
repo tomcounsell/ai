@@ -55,7 +55,7 @@ def _reset_telemetry_state():
         if fh:
             try:
                 fh.close()
-            except Exception:
+            except Exception:  # swallow-ok: fixture teardown, handle may already be closed
                 pass
     telemetry_mod._locks.clear()
     telemetry_mod._last_event_monotonic.clear()
