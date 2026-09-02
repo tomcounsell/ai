@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -428,22 +429,78 @@ def check_dep_files_changed(changed_files: list[str]) -> bool:
 # PyPI version checking and auto-bump
 # ---------------------------------------------------------------------------
 
-# `anthropic` is deliberately NOT here. It is one member of a coupled set
-# (anthropic + pydantic-ai-slim + openai) that must move together or not at all:
-# anthropic 1.0.0 dropped temperature/top_p/top_k from the Messages API, which
-# pydantic-ai passes through, so a partial bump kills every LLM call at argument
-# binding with no network I/O. Auto-bumping one member on a schedule while the
-# others stay pinned GUARANTEES that drift — it broke the whole LLM layer twice
-# on 2026-08-24 alone.
+
+@dataclass(frozen=True)
+class CoupledSet:
+    """Packages that move together or not at all.
+
+    A set is the atomic unit of every stage of an auto-bump: resolve,
+    rewrite, sync, gate, and rollback. Record-an-error-and-continue over
+    individual packages is precisely how one member stayed behind while the
+    others moved and killed the whole LLM layer twice on 2026-08-24.
+
+    ``gates`` defaults to ``("import", "pytest")`` so a newly declared set
+    never silently inherits the billed ``llm`` phase; a set that needs a
+    real API call must ask for it by name.
+
+    ``import_names`` are the set's *own* importable module names — the
+    ``import`` phase imports these, so the gate always probes what the set
+    actually moved rather than a hardcoded package list.
+
+    ``hold`` parks a set in the declaration without executing it: the bump
+    is skipped and the reason is recorded, which is how a member can be
+    described here (and gated by ``/update``'s verify leg) while a human
+    still owns the decision to move it.
+    """
+
+    members: Sequence[str]
+    import_names: tuple[str, ...]
+    reason: str
+    gates: tuple[str, ...] = ("import", "pytest")
+    hold: str | None = None
+
+
+AUTO_BUMP_SETS: list[CoupledSet] = [
+    CoupledSet(
+        members=["anthropic", "pydantic-ai-slim"],
+        import_names=("anthropic", "pydantic_ai"),
+        gates=("llm", "import", "pytest"),
+        reason=(
+            "anthropic 1.0.0 removed temperature/top_p/top_k from the Messages "
+            "API and pydantic_ai/models/anthropic.py forwards all three "
+            "unconditionally, so a partial bump kills every non-harness LLM "
+            "call at argument binding — before any network I/O. An import "
+            "check cannot see it (`import anthropic` succeeds fine on a "
+            "version whose call signature we cannot satisfy), which is why "
+            "this set carries the `llm` phase."
+        ),
+        hold="#3001 Step 2",
+    ),
+    CoupledSet(
+        members=["claude-agent-sdk"],
+        import_names=("claude_agent_sdk",),
+        reason=(
+            "The headless session runner's transport. It moves alone — no "
+            "other pinned package's API is coupled to it — so an import "
+            "check plus the fast unit-test file is the whole gate."
+        ),
+    ),
+]
+
+# `openai` is in NO coupled set, and this assertion is the enforcement.
 #
-# The smoke gate below cannot currently catch it either: it is an import check,
-# and `import anthropic` succeeds fine on a version whose call signature we
-# cannot satisfy.
-#
-# This exclusion is a STOPGAP holding the line until #3001 lands coupled-set
-# bumping plus a gate that makes a real call through agent/llm/wrapper.py.
-# Re-add `anthropic` only together with that work.
-AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]
+# spike-5 established there is no packaging coupling: `pydantic-ai-slim`'s
+# locked dependencies contain no `openai` (it appears only under the
+# `[openai]` extra, which this repo does not install). The ImportError that
+# looked like coupling was self-inflicted — a module-scope
+# `from pydantic_ai.models.openai import OpenAIChatModel` in
+# `agent/llm/wrapper.py` — and it is fixed at the import, not by widening a
+# set. Its declaration is also a floor (`openai>=1.0.0`), not an exact pin,
+# so an auto-bump could not rewrite it without inventing a pin nobody chose.
+assert "openai" not in {member for s in AUTO_BUMP_SETS for member in s.members}, (
+    "`openai` must not be a coupled-set member (spike-5): it has no packaging "
+    "coupling to the anthropic stack and is declared as a floor, not a pin."
+)
 
 
 @dataclass
@@ -467,6 +524,15 @@ class AutoBumpResult:
     smoke_passed: bool = False
     smoke_output: str = ""
     rolled_back: bool = False
+    # The gate phase (or "sync") that failed and triggered the rollback, so
+    # "the LLM pair is incompatible" reads differently from "an unrelated
+    # unit test is flaky" in the /update warning.
+    failed_phase: str | None = None
+    # A rollback whose own re-sync failed. The environment is NOT back to
+    # its pre-bump state, so `run.py` must not commit anything this run —
+    # a later successful bump would otherwise push a poisoned lockfile
+    # fleet-wide.
+    restore_failed: bool = False
 
     @property
     def any_bumped(self) -> bool:
@@ -551,143 +617,252 @@ def bump_pin_in_pyproject(project_dir: Path, package: str, new_version: str) -> 
     return True
 
 
-def run_smoke_test(project_dir: Path) -> tuple[bool, str]:
-    """Run a minimal smoke test to verify deps still work.
+# ---------------------------------------------------------------------------
+# Gate phases
+# ---------------------------------------------------------------------------
 
-    Imports critical packages and runs a fast subset of tests.
-    Returns (passed, output).
+# The one fast test file every set runs as its `pytest` phase.
+GATE_PYTEST_TARGET = "tests/unit/test_docs_auditor_substrate.py"
+
+# Per-phase subprocess bounds. `llm` is the only phase that makes a network
+# call, so it gets the widest window; `import` is a bare import and `pytest`
+# is a single fast file.
+_GATE_TIMEOUTS = {"llm": 120, "import": 30, "pytest": 60}
+
+
+def llm_gate_argv(venv_python: Path) -> list[str]:
+    """The argv of the `llm` gate phase — the ONE construction of it.
+
+    Both the phase runner below and the manual two-leg rollback verification
+    call this helper, so a hand-run invocation can never drift from the
+    production one while still appearing to prove the gate works.
+
+    `venv_python` must be the TARGET venv's interpreter
+    (`{project_dir}/.venv/bin/python`), never the update process's own: that
+    interpreter imported its modules before the sync and would report on a
+    stack that no longer exists on disk.
     """
+    return [str(venv_python), "-m", "agent.llm.compat", "--json", "--allow-network"]
+
+
+def _gate_argv(project_dir: Path, phase: str, coupled_set: CoupledSet) -> list[str]:
+    """Argv for one gate phase of one set."""
+    python_path = project_dir / ".venv" / "bin" / "python"
+
+    if phase == "llm":
+        return llm_gate_argv(python_path)
+    if phase == "import":
+        # Set-derived, never a hardcoded package list: the gate probes what
+        # this set actually moved.
+        program = "; ".join(f"import {name}" for name in coupled_set.import_names)
+        return [str(python_path), "-c", program]
+    if phase == "pytest":
+        return [str(python_path), "-m", "pytest", GATE_PYTEST_TARGET, "-x", "-q"]
+    raise ValueError(f"unknown gate phase {phase!r}")
+
+
+def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, str | None, str]:
+    """Run every gate phase `coupled_set` declares, in order.
+
+    Returns ``(passed, failed_phase, output)``. Stops at the first failing
+    phase and names it, so the rollback warning can distinguish an
+    incompatible LLM pair from a flaky unrelated unit test.
+
+    Fail-closed throughout: a phase that cannot be run at all (no venv,
+    timeout, OSError) is a failed phase, never a skipped one.
+    """
+    if not coupled_set.gates:
+        return True, None, "no gate phases declared"
+
     python_path = project_dir / ".venv" / "bin" / "python"
     if not python_path.exists():
-        return False, "No Python venv found"
+        return False, coupled_set.gates[0], "No Python venv found at .venv/bin/python"
 
-    # Phase 1: import check
-    import_check = (
-        "import anthropic; import claude_agent_sdk; print(f'anthropic={anthropic.__version__}')"
+    passed_phases: list[str] = []
+    for phase in coupled_set.gates:
+        try:
+            proc = run_cmd(
+                _gate_argv(project_dir, phase, coupled_set),
+                cwd=project_dir,
+                check=False,
+                timeout=_GATE_TIMEOUTS.get(phase, 60),
+            )
+        except subprocess.TimeoutExpired:
+            return False, phase, f"{phase} gate timed out"
+        except OSError as exc:
+            return False, phase, f"{phase} gate could not run: {exc}"
+
+        if proc.returncode != 0:
+            detail = (proc.stdout + proc.stderr).strip()
+            return False, phase, f"{phase} gate failed:\n{detail}"
+        passed_phases.append(phase)
+
+    return True, None, f"gates passed: {', '.join(passed_phases)}"
+
+
+# ---------------------------------------------------------------------------
+# Auto-bump
+# ---------------------------------------------------------------------------
+
+
+def _safe_pinned(project_dir: Path, package: str) -> str | None:
+    """`get_pinned_version` for logging contexts where a refusal is not fatal."""
+    try:
+        return get_pinned_version(project_dir, package)
+    except PinDeclarationError:
+        return None
+
+
+def _record_set(
+    result: AutoBumpResult,
+    coupled_set: CoupledSet,
+    current: dict[str, str | None],
+    latest: dict[str, str | None],
+    *,
+    bumped: set[str] | None = None,
+    error: str | None = None,
+) -> None:
+    """Append one `BumpResult` per member, so `run.py`'s per-package log stays legible."""
+    for member in coupled_set.members:
+        result.bumps.append(
+            BumpResult(
+                package=member,
+                old_version=current.get(member),
+                new_version=latest.get(member),
+                bumped=bool(bumped and member in bumped),
+                error=error,
+            )
+        )
+
+
+def _restore_set(project_dir: Path, snapshot: str, result: AutoBumpResult, resync: bool) -> None:
+    """Put this set's pins back, and record it loudly if that fails.
+
+    The snapshot is PER-SET, taken immediately before the set's own rewrite.
+    A whole-file snapshot taken once before the loop would revert every
+    other set's good bump on one bad set (spike-4).
+    """
+    (project_dir / "pyproject.toml").write_text(snapshot)
+    if not resync:
+        return
+
+    restore_sync = sync_dependencies(project_dir, frozen=False)
+    if restore_sync.success:
+        return
+
+    # The environment is NOT back to its pre-bump state. Say so — a
+    # swallowed restore failure is how a poisoned lockfile ships fleet-wide.
+    result.restore_failed = True
+    try:
+        run_cmd(["git", "checkout", "--", "uv.lock"], cwd=project_dir, check=False, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
+def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBumpResult) -> None:
+    """Resolve, rewrite, sync, and gate one coupled set — all or nothing."""
+    pyproject = project_dir / "pyproject.toml"
+    current: dict[str, str | None] = {}
+    latest: dict[str, str | None] = {}
+
+    if coupled_set.hold:
+        for member in coupled_set.members:
+            current[member] = _safe_pinned(project_dir, member)
+        _record_set(result, coupled_set, current, latest, error=f"held: {coupled_set.hold}")
+        return
+
+    # Resolve EVERY member before touching the file. One unresolvable
+    # member skips the whole set — a half-resolved set is a half-bump.
+    blocker: str | None = None
+    for member in coupled_set.members:
+        try:
+            current[member] = get_pinned_version(project_dir, member)
+        except PinDeclarationError as exc:
+            current[member] = None
+            blocker = blocker or str(exc)
+            continue
+        latest[member] = get_pypi_latest(member)
+        if blocker is None and (current[member] is None or latest[member] is None):
+            blocker = f"could not determine current or latest version for {member!r}"
+
+    if blocker:
+        _record_set(result, coupled_set, current, latest, error=f"set skipped: {blocker}")
+        return
+
+    changed = {m: latest[m] for m in coupled_set.members if current[m] != latest[m]}
+    if not changed:
+        # Nothing moved — no rewrite and, critically, no sync. A quiet cycle
+        # must not re-resolve the lockfile.
+        _record_set(result, coupled_set, current, latest)
+        return
+
+    snapshot = pyproject.read_text() if pyproject.exists() else ""
+
+    try:
+        for member, new_version in changed.items():
+            bump_pin_in_pyproject(project_dir, member, new_version)
+    except PinDeclarationError as exc:
+        # No sync has happened yet, so restoring the file is the whole undo.
+        _restore_set(project_dir, snapshot, result, resync=False)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=f"set abandoned: could not rewrite pyproject.toml: {exc}",
+        )
+        return
+
+    # `frozen=False` because we just edited pyproject.toml and need uv to
+    # re-resolve and rewrite uv.lock.
+    sync_result = sync_dependencies(project_dir, frozen=False)
+    result.synced = result.synced or sync_result.success
+    if not sync_result.success:
+        result.sync_error = sync_result.error
+        result.rolled_back = True
+        result.failed_phase = result.failed_phase or "sync"
+        _restore_set(project_dir, snapshot, result, resync=True)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=f"set rolled back: sync failed: {sync_result.error}",
+        )
+        return
+
+    passed, failed_phase, output = run_gate_phases(project_dir, coupled_set)
+    result.smoke_output = (
+        f"{result.smoke_output}\n{output}".strip() if result.smoke_output else output
     )
-    try:
-        result = run_cmd(
-            [str(python_path), "-c", import_check],
-            cwd=project_dir,
-            check=False,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return False, f"Import check failed: {result.stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "Import check timed out"
 
-    # Phase 2: run one fast test file
-    try:
-        result = run_cmd(
-            [
-                str(python_path),
-                "-m",
-                "pytest",
-                "tests/unit/test_docs_auditor_substrate.py",
-                "-x",
-                "-q",
-            ],
-            cwd=project_dir,
-            check=False,
-            timeout=60,
+    if not passed:
+        result.rolled_back = True
+        result.failed_phase = result.failed_phase or failed_phase
+        _restore_set(project_dir, snapshot, result, resync=True)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=f"set rolled back: {failed_phase} gate failed",
         )
-        output = result.stdout + result.stderr
-        if result.returncode != 0:
-            return False, f"Smoke test failed:\n{output}"
-        return True, output.strip()
-    except subprocess.TimeoutExpired:
-        return False, "Smoke test timed out (60s)"
+        return
+
+    result.smoke_passed = True
+    _record_set(result, coupled_set, current, latest, bumped=set(changed))
 
 
 def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
-    """Check PyPI for newer versions of critical deps, bump pins, sync, and test.
+    """Bump every coupled set that has moved on PyPI, one set at a time.
 
-    If the smoke test fails after bumping, rolls back pyproject.toml.
+    Each set is resolved, rewritten, synced, and gated as a unit; a failure
+    at any stage restores that set's own snapshot and moves to the next set.
+    A member is reported `bumped=True` only once its whole set has survived
+    every gate, so `run.py`'s commit list never names a pin that was rolled
+    back underneath it.
     """
     result = AutoBumpResult()
-    pyproject = project_dir / "pyproject.toml"
-
-    # Save original content for rollback
-    original_content = pyproject.read_text() if pyproject.exists() else ""
-
-    for package in AUTO_BUMP_PACKAGES:
-        current = get_pinned_version(project_dir, package)
-        latest = get_pypi_latest(package)
-
-        if not latest or not current:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                    error="Could not determine current or latest version",
-                )
-            )
-            continue
-
-        if current == latest:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                )
-            )
-            continue
-
-        # The writer refuses loudly rather than no-opping. Carry its reason
-        # verbatim into the result so a refusal is legible in the /update log
-        # instead of reading as a generic write failure.
-        try:
-            bump_pin_in_pyproject(project_dir, package, latest)
-        except PinDeclarationError as exc:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                    error=f"Failed to update pyproject.toml: {exc}",
-                )
-            )
-            continue
-
-        result.bumps.append(
-            BumpResult(
-                package=package,
-                old_version=current,
-                new_version=latest,
-                bumped=True,
-            )
-        )
-
-    if not result.any_bumped:
-        return result
-
-    # Sync dependencies with new pins. `frozen=False` because we just edited
-    # pyproject.toml and need uv to re-resolve and rewrite uv.lock.
-    sync_result = sync_dependencies(project_dir, frozen=False)
-    result.synced = sync_result.success
-    if not sync_result.success:
-        result.sync_error = sync_result.error
-        # Roll back
-        pyproject.write_text(original_content)
-        sync_dependencies(project_dir, frozen=False)  # restore old deps
-        result.rolled_back = True
-        return result
-
-    # Run smoke test
-    passed, output = run_smoke_test(project_dir)
-    result.smoke_passed = passed
-    result.smoke_output = output
-
-    if not passed:
-        # Roll back
-        pyproject.write_text(original_content)
-        sync_dependencies(project_dir, frozen=False)
-        result.rolled_back = True
-
+    for coupled_set in AUTO_BUMP_SETS:
+        _bump_coupled_set(project_dir, coupled_set, result)
     return result
