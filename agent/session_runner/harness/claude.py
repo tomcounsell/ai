@@ -371,6 +371,35 @@ async def get_response_via_harness(
         harness_cmd.extend(["--model", model])
         logger.info(f"[harness] Using --model {model} for session_id={session_id}")
 
+    # Persona toolbelt composition (plan #3081, Lane A — dark behind
+    # TOOLBELTS_ENFORCE). When the flag is off the resolver is never called
+    # and this invocation stays byte-identical to ambient behavior; the
+    # Race 3 enforce-state stamp still runs every role turn so the fleet's
+    # activation window is observable before, during, and after the flip.
+    # Belt flags must live inside harness_cmd so they precede the positional
+    # message (and any --resume <uuid>) in the final argv assembly below; a
+    # BeltResolutionError propagates and refuses the turn BEFORE any
+    # subprocess spawn (the runner's terminal exception classification
+    # surfaces the reason on the session output path).
+    if role:
+        from agent.session_runner.belt_resolver import (  # noqa: PLC0415
+            check_and_stamp_belt_state,
+            resolve_belt,
+        )
+        from config.settings import settings as _settings  # noqa: PLC0415
+
+        belt_enforced = bool(_settings.toolbelts_enforce)
+        belt_version: int | None = None
+        if belt_enforced:
+            resolved_belt = resolve_belt(role)
+            harness_cmd.extend(resolved_belt.flags)
+            belt_version = resolved_belt.belt_version
+            logger.info(
+                f"[harness] Belt v{belt_version} enforced for role={role} "
+                f"session_id={session_id}"
+            )
+        check_and_stamp_belt_state(session_id, enforce=belt_enforced, belt_version=belt_version)
+
     # Plan #1842 (headless leg): inject the #1688 --settings hook set so the
     # single-shot `claude -p` writes turn-end (Stop) / needs-human / compaction
     # edges to the per-session NDJSON edge file, letting the HeadlessRoleDriver
