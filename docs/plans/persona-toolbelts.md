@@ -72,7 +72,7 @@ Verified locally instead of web search — the load-bearing external dependency 
 ## Data Flow
 
 1. **Entry point**: worker picks up an AgentSession turn; `role_driver.py` selects the persona (`pm` / `dev` / `teammate`).
-2. **Belt resolver (new)**: loads `config/toolbelts/{persona}.toml`, validates the pin, and compiles it to CLI flags (`--tools`, `--allowedTools`, `--mcp-config` + `--strict-mcp-config`). Unresolvable belt → refuse to start the turn with a structured error.
+2. **Belt resolver (new)**: if `TOOLBELTS_ENFORCE` is on, loads `config/toolbelts/{persona}.toml`, validates the pin, and compiles it to CLI flags (`--tools`, `--allowedTools`, `--mcp-config` + `--strict-mcp-config`). Unresolvable belt → refuse to start the turn with a structured error. Flag off → current ambient behavior, byte-identical invocation.
 3. **Harness**: `harness/claude.py` appends the compiled flags to `_HARNESS_COMMANDS` and launches `claude -p`.
 4. **Telemetry (Phase 0)**: the stream-json parser attributes tokens per tool call and stamps counts/cost onto the session telemetry stream and stage transitions.
 5. **Escalation (Phase 1)**: when the agent reports a missing capability, one tagged line is appended to the session's open-question channel output; non-blocking.
@@ -93,10 +93,10 @@ Verified locally instead of web search — the load-bearing external dependency 
 **Team:** Solo dev, PM check-ins at phase boundaries
 
 **Interactions:**
-- PM check-ins: 2-3 (Phase 0 baseline review ranks Phase 2; Phase 1 checkpoint decides whether to continue)
-- Review rounds: 2+ (each phase lands as its own PR through the SDLC pipeline)
+- PM check-ins: 2-3 (baseline review ranks Lane B's wrapper order; the activation flip is a deliberate checkpoint)
+- Review rounds: 2+ (two lanes instead of four phases roughly halves trips through the review pipeline; Lane B still lands as one PR per wrapper)
 
-Phases land independently. Phase 1 is the stopping point that still leaves the project net-positive.
+Lanes land independently. Lane A + activation is the stopping point that still leaves the project net-positive.
 
 ## Prerequisites
 
@@ -110,11 +110,10 @@ Phases land independently. Phase 1 is the stopping point that still leaves the p
 ### Key Elements
 
 - **Belt manifest** (`config/toolbelts/{persona}.toml`): version-pinned declaration of built-in tools, MCP servers, and CLI entry points a persona may use. Committed, reviewed, client-shareable.
-- **Belt resolver** (`agent/session_runner/belt_resolver.py`): pure function persona → compiled CLI flags; fails closed on unknown persona, missing manifest, or version mismatch.
-- **Context-cost instrumentation** (Phase 0): per-tool call counts and token attribution stamped onto session telemetry and stage transitions, plus a baseline report per merged PR.
+- **Belt resolver** (`agent/session_runner/belt_resolver.py`): pure function persona → compiled CLI flags; fails closed on unknown persona, missing manifest, or version mismatch. Ships **dark** behind an activation flag so the baseline window closes before enforcement changes anything.
+- **Context-cost instrumentation**: per-tool call counts and token attribution stamped onto session telemetry and stage transitions, plus a baseline report per merged PR.
 - **Missing-capability escalation**: one tagged, non-blocking line riding the existing open-question channel.
-- **AXI conformance linter + wrappers** (Phase 2): thin CLIs over `gh`/`git`/`pytest` for the top tools by measured cost.
-- **Allowlist retirement** (Phase 3): remove redundant PreToolUse role-scoping one at a time, guard tests kept; Teammate docs writes move into a path-scoped `valor-docs-write` belt tool.
+- **AXI wrappers with interleaved retirement**: thin CLIs over `gh`/`git`/`pytest` for the top tools by measured cost; each wrapper PR retires the PreToolUse hook it makes redundant in the same PR, guard test rewritten to assert belt-absence and mutation-checked. The AXI conformance linter lands with the first wrapper. `valor-docs-write` (path allowlist compiled in) is the first wrapper regardless of ranking — it is justified by the role-boundary goal, not context savings — and Teammate's general Write/Edit leaves the belt when it ships.
 
 ### Flow
 
@@ -122,10 +121,11 @@ Worker picks turn → resolver loads persona belt → belt compiles to CLI flags
 
 ### Technical Approach
 
-- **Phase 0 — Instrument.** Extend the stream-json parse path in the runner to attribute tokens per tool call; stamp aggregates onto `session_telemetry` events and stage transitions. Add `tools.belt_baseline` report: tool-definition + tool-output tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts. Nothing else ships until this reports.
-- **Phase 1 — Declare and enforce.** Manifest format TOML, one file per persona, `belt_version` pin. Resolver composes `--tools` for built-ins, `--strict-mcp-config` + generated per-persona MCP config for MCP, `--allowedTools`/`--disallowedTools` where a tool stays visible but scoped. Dev keeps open Bash by decision — belts are ergonomics and reproducibility, not a trust boundary, and every doc says so plainly. Reproducibility test: resolve each belt in two synthetic environments (different env vars, different fake host inventory) and assert byte-identical flag output. Escalation: the role priming skills gain one line of instruction; the runner tags and forwards it on the open-question channel.
-- **Phase 2 — Wrap.** Ranked strictly by Phase 0 numbers. Expected set: `sdlc-tool` family reads (`stage-query` returning PR number + merge state + CI + verdict in one call), PR/issue read-write, test execution with baseline-delta classification, worktree/branch state. Each wrapper is a thin `[project.scripts]` entry over `gh`/`git`/`pytest`. AXI linter (`tools/axi_lint.py`) checks: compact list output with `--full` hatch, definitive empty states, structured exit codes, idempotent mutations, next-step suggestion.
-- **Phase 3 — Retire.** For each PreToolUse role-scoping block the belts made redundant: remove the hook branch, keep its guard test asserting the tool is absent from the belt instead. Teammate general Write/Edit leaves the belt; `valor-docs-write` (path allowlist compiled in) replaces it.
+The PRD's four phases compact into **two build lanes plus one activation event**. The PRD phase numbering maps as: Lane A = PRD Phases 0+1, Activation = the Phase 0→1 boundary, Lane B = PRD Phases 2+3. The compaction is safe because Phase 1 never truly depended on Phase 0's data (belts are seeded by *enumerating* the current surface, not by measuring usage), and retirement was always coupled to wrapping (a hook can only go once its replacement exists).
+
+- **Lane A — Instrument + declare (dark).** Two disjoint workstreams in one lane. (1) Instrumentation: extend the stream-json parse path in the runner to attribute tokens per tool call; stamp aggregates onto `session_telemetry` events and stage transitions; add a `tools.belt_baseline` report (tool-definition + tool-output tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts). (2) Belts: manifest format TOML, one file per persona, `belt_version` pin, seeded by enumeration of today's surface (faithful snapshot, zero behavior change). Resolver composes `--tools` for built-ins, `--strict-mcp-config` + generated per-persona MCP config for MCP, `--allowedTools`/`--disallowedTools` where a tool stays visible but scoped — all **behind an activation flag** (`TOOLBELTS_ENFORCE` via `config/settings.py`), default off. Dev keeps open Bash by decision — belts are ergonomics and reproducibility, not a trust boundary, and every doc says so plainly. Reproducibility test: resolve each belt in two synthetic environments (different env vars, different fake host inventory) and assert byte-identical flag output. Escalation: the role priming skills gain one line of instruction; the runner tags and forwards it on the open-question channel.
+- **Activation — its own observable event.** After the baseline window (2-4 weeks of merged PRs) closes and the baseline report is published, flip `TOOLBELTS_ENFORCE` on in a dedicated commit. Baseline measurement MUST precede activation or the −40% target becomes unfalsifiable — the flag exists precisely to let both halves of Lane A merge early without contaminating the measurement. Keeping the flip isolated also makes it the obvious suspect if a live session stalls on a too-tight belt.
+- **Lane B — Wrap + retire, interleaved.** Wrapper order ranked strictly by the baseline numbers (expected but provisional: `sdlc-tool` family reads such as `stage-query` returning PR number + merge state + CI + verdict in one call, PR/issue read-write, test execution with baseline-delta classification, worktree/branch state). Exception: `valor-docs-write` goes first regardless of ranking, since it is justified by the role-boundary goal. Each wrapper is a thin `[project.scripts]` entry over `gh`/`git`/`pytest`, and **each wrapper PR retires the PreToolUse hook it makes redundant in the same PR**: hook branch removed, guard test rewritten to assert belt-absence, mutation-checked in that PR (prove the test fails when the belt re-adds the tool). The wrapper and its guard land atomically, so there is no window where both old hook and new wrapper half-apply, and retirement — the phase the PRD flagged as most likely to be skipped — structurally cannot be skipped. AXI linter (`tools/axi_lint.py`) lands with the first wrapper and checks: compact list output with `--full` hatch, definitive empty states, structured exit codes, idempotent mutations, next-step suggestion.
 
 ## Failure Path Test Strategy
 
@@ -143,11 +143,11 @@ Worker picks turn → resolver loads persona belt → belt compiles to CLI flags
 
 ## Test Impact
 
-- [ ] `tests/unit/test_teammate_write_restriction.py` — UPDATE (Phase 3): assertions move from "hook denies Write outside docs/" to "Teammate belt omits Write/Edit; `valor-docs-write` refuses paths off the allowlist". Guard intent is preserved.
-- [ ] `tests/unit/test_tool_budget.py` — UPDATE (Phase 0): extended for context-cost attribution fields alongside call counts.
-- [ ] `tests/unit/test_session_telemetry.py` — UPDATE (Phase 0): new event fields for per-tool cost.
-- [ ] `tests/unit/test_harness_stale_uuid_result_preservation.py` — UPDATE (Phase 1): harness invocation construction gains belt flags; fixtures that assert the exact `_HARNESS_COMMANDS` shape need the composed form.
-- [ ] `tests/unit/test_sdk_permissions.py` — UPDATE (Phase 3): permission expectations shift from hook-denial to tool-absence for role scoping.
+- [ ] `tests/unit/test_teammate_write_restriction.py` — UPDATE (Lane B, first wrapper PR): assertions move from "hook denies Write outside docs/" to "Teammate belt omits Write/Edit; `valor-docs-write` refuses paths off the allowlist". Guard intent is preserved.
+- [ ] `tests/unit/test_tool_budget.py` — UPDATE (Lane A): extended for context-cost attribution fields alongside call counts.
+- [ ] `tests/unit/test_session_telemetry.py` — UPDATE (Lane A): new event fields for per-tool cost.
+- [ ] `tests/unit/test_harness_stale_uuid_result_preservation.py` — UPDATE (Lane A): harness invocation construction gains flag-gated belt composition; fixtures that assert the exact `_HARNESS_COMMANDS` shape need the flag-off (identical) and flag-on (composed) forms.
+- [ ] `tests/unit/test_sdk_permissions.py` — UPDATE (Lane B): permission expectations shift from hook-denial to tool-absence for role scoping, per retired hook.
 
 ## Rabbit Holes
 
@@ -161,15 +161,19 @@ Worker picks turn → resolver loads persona belt → belt compiles to CLI flags
 
 ### Risk 1: Belt too tight breaks live sessions
 **Impact:** A persona hits a missing tool mid-pipeline and stalls real work.
-**Mitigation:** Phase 1 belts start as a faithful snapshot of today's observed usage (from Phase 0 data), shrinking later; the escalation line makes gaps visible within a turn; sustained escalation volume is the "cut too tight" signal per the PRD.
+**Mitigation:** Belts are seeded by enumerating today's full surface (faithful snapshot, zero behavior change at activation), shrinking later; belts ship dark and activate in a dedicated commit so a stall points straight at the flip; the escalation line makes gaps visible within a turn; sustained escalation volume is the "cut too tight" signal per the PRD.
 
 ### Risk 2: CLI flag semantics drift across Claude CLI versions
 **Impact:** An upgrade changes `--tools`/`--strict-mcp-config` behavior and belts silently widen.
 **Mitigation:** The reproducibility test pins expected flag output; a doctor check asserts the installed CLI version supports the flags (Prerequisites row); belts record the CLI version they were validated against.
 
-### Risk 3: Phase 0 numbers contradict the expected Phase 2 set
+### Risk 3: Baseline numbers contradict the expected Lane B set
 **Impact:** Effort planned for `sdlc-tool` wrapping turns out to be misdirected.
-**Mitigation:** By design — Phase 2 ordering is data-bound, and the plan's task list marks the expected set as provisional.
+**Mitigation:** By design — Lane B ordering is data-bound (only `valor-docs-write` is exempt, being role-boundary-justified), and the plan's task list marks the expected set as provisional.
+
+### Risk 5: Baseline contamination from early activation
+**Impact:** Belts activate before the measurement window closes; the −40%/−25% targets lose their pre-change baseline and become unfalsifiable.
+**Mitigation:** The resolver ships dark behind `TOOLBELTS_ENFORCE`; task 4's gate requires the published baseline report before the flip, and the flip is a dedicated commit that cannot ride in on a feature PR.
 
 ### Risk 4: Retirement removes a guard the belt does not actually cover
 **Impact:** A capability the hook blocked becomes reachable.
@@ -179,7 +183,7 @@ Worker picks turn → resolver loads persona belt → belt compiles to CLI flags
 
 ### Race 1: Belt manifest edited while turns are in flight
 **Location:** `agent/session_runner/belt_resolver.py` (new), worker turn loop
-**Trigger:** `/update` pulls a new belt version while a session is mid-turn.
+**Trigger:** `/update` pulls a new belt version (or the `TOOLBELTS_ENFORCE` flip) while a session is mid-turn.
 **Data prerequisite:** The belt is resolved once at turn start and the resolved flags are immutable for the turn.
 **State prerequisite:** Turn boundaries are the only belt-switch points (matches the steering-drain pattern).
 **Mitigation:** Resolver reads the manifest into memory per turn; no mid-turn re-reads. The session records the belt version it ran under.
@@ -198,6 +202,7 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 - `config/toolbelts/*.toml` ships with the repo; `/update` propagates it via normal git sync — no new update step.
 - The `/update` doctor gains one check: installed Claude CLI supports the belt flags (`claude --help` grep). Add to `scripts/update/verify.py`.
 - No migrations: belts are new files; existing sessions without a recorded belt version are treated as pre-belt legacy reads.
+- `TOOLBELTS_ENFORCE` lives in `config/settings.py` with a committed default (env-overridable per the existing settings pattern), so the activation flip propagates to every machine through normal git sync + `/update` — the fleet activates together, and a per-machine env override exists only as a break-glass rollback.
 
 ## Agent Integration
 
@@ -215,13 +220,14 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 
 ## Success Criteria
 
-- [ ] Phase 0 baseline report exists: tool-surface tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts.
-- [ ] One manifest per persona in `config/toolbelts/`, version-pinned; resolver refuses unresolvable belts.
+- [ ] Baseline report exists: tool-surface tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts — published before activation.
+- [ ] One manifest per persona in `config/toolbelts/`, version-pinned; resolver refuses unresolvable belts; flag off leaves the harness invocation byte-identical.
 - [ ] Reproducibility test fails when the same persona+version resolves different surfaces in two environments.
+- [ ] Activation is a dedicated commit flipping `TOOLBELTS_ENFORCE`, nothing else in the diff.
 - [ ] Escalation line lands on the open-question channel, tagged, non-blocking.
 - [ ] AXI linter fails a tool missing empty-state handling, structured exit codes, or `--full`.
-- [ ] Top Phase-0-ranked tools wrapped, each its own PR.
-- [ ] Redundant role-scoping allowlists removed one at a time with guard tests retained; Teammate docs writes survive via `valor-docs-write`.
+- [ ] Top baseline-ranked tools wrapped, each its own PR, each retiring its redundant hook in the same PR with a mutation-checked guard test.
+- [ ] Teammate docs writes survive via `valor-docs-write` while general Write/Edit leaves its belt.
 - [ ] Post-rollout measurement against baseline reported (targets −40% context / −25% turns; first-pass review rate not regressed).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -230,16 +236,15 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 
 ### Team Members
 
-- **Builder (instrumentation)** — Name: `telemetry-builder` — Role: Phase 0 token attribution + baseline report — Agent Type: builder — Resume: true
-- **Builder (resolver)** — Name: `belt-builder` — Role: Phase 1 manifests, resolver, harness wiring — Agent Type: builder — Resume: true
-- **Builder (wrappers)** — Name: `axi-builder` — Role: Phase 2 wrappers + linter — Agent Type: builder — Resume: true
-- **Builder (retirement)** — Name: `retire-builder` — Role: Phase 3 hook removals + `valor-docs-write` — Agent Type: builder — Resume: true
-- **Validator (all phases)** — Name: `belt-validator` — Role: verify each phase's criteria, run drift/absence tests — Agent Type: validator — Resume: true
+- **Builder (instrumentation)** — Name: `telemetry-builder` — Role: Lane A token attribution + baseline report — Agent Type: builder — Resume: true
+- **Builder (belts)** — Name: `belt-builder` — Role: Lane A manifests, dark resolver, harness wiring; owns the activation flip — Agent Type: builder — Resume: true
+- **Builder (wrappers + retirement)** — Name: `axi-builder` — Role: Lane B wrappers + linter, retiring each redundant hook in the same PR — Agent Type: builder — Resume: true
+- **Validator (all lanes)** — Name: `belt-validator` — Role: verify each lane's criteria, run drift/absence tests, baseline stability — Agent Type: validator — Resume: true
 - **Documentarian** — Name: `belt-documentarian` — Role: feature docs + index + cross-doc updates — Agent Type: documentarian — Resume: true
 
 ## Step by Step Tasks
 
-### 1. Phase 0: per-tool context-cost attribution
+### 1. Lane A: per-tool context-cost attribution
 - **Task ID**: build-instrumentation
 - **Depends On**: none
 - **Validates**: tests/unit/test_session_telemetry.py, tests/unit/test_tool_budget.py
@@ -251,64 +256,60 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 - Stamp per-tool counts and cost onto session telemetry events and stage transitions
 - Add `tools.belt_baseline` report (tokens per merged PR, turns per merged PR, denial counts)
 
-### 2. Validate Phase 0
-- **Task ID**: validate-instrumentation
-- **Depends On**: build-instrumentation
-- **Assigned To**: belt-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run the baseline report over recent merged PRs; confirm numbers are non-empty and stable across two runs
-
-### 3. Phase 1: manifests + resolver + drift test
-- **Task ID**: build-resolver
-- **Depends On**: build-instrumentation
+### 2. Lane A: manifests + dark resolver + drift test + escalation
+- **Task ID**: build-belts-dark
+- **Depends On**: none
 - **Validates**: tests/unit/test_belt_resolver.py (create), tests/unit/test_harness_stale_uuid_result_preservation.py
 - **Informed By**: spike-1 (CLI flags confirmed on 2.1.236; `--tools` is true absence)
 - **Assigned To**: belt-builder
 - **Agent Type**: builder
-- **Parallel**: false
-- Create `config/toolbelts/{pm,dev,teammate}.toml` seeded from observed usage (Phase 0 data)
-- Implement `belt_resolver.py` (pure, fail-closed) and wire into `harness/claude.py` flag composition
+- **Parallel**: true
+- Create `config/toolbelts/{pm,dev,teammate}.toml` seeded by enumerating today's surface (faithful snapshot)
+- Implement `belt_resolver.py` (pure, fail-closed) behind `TOOLBELTS_ENFORCE` (default off) and wire into `harness/claude.py` flag composition; flag off → byte-identical invocation
 - Reproducibility test: identical resolution across two synthetic environments
 - Escalation line: role-skill instruction + runner tagging onto the open-question channel
 
-### 4. Validate Phase 1
-- **Task ID**: validate-resolver
-- **Depends On**: build-resolver
+### 3. Validate Lane A + publish baseline
+- **Task ID**: validate-lane-a
+- **Depends On**: build-instrumentation, build-belts-dark
 - **Assigned To**: belt-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Launch a headless turn per persona; assert belt tools callable, off-belt tools absent, unresolvable belt refuses loudly
+- Run the baseline report over recent merged PRs; confirm numbers are non-empty and stable across two runs
+- With flag off: assert the harness invocation is byte-identical to pre-belt behavior
+- With flag on (test harness only): launch a headless turn per persona; assert belt tools callable, off-belt tools absent, unresolvable belt refuses loudly
 
-### 5. Phase 2: AXI linter + ranked wrappers
-- **Task ID**: build-wrappers
-- **Depends On**: validate-resolver
-- **Validates**: tests/unit/test_axi_lint.py (create), per-wrapper tests (create)
-- **Informed By**: Phase 0 ranking (expected set is provisional: sdlc-tool reads, PR/issue, test execution, worktree state)
+### 4. Activation flip (dedicated event)
+- **Task ID**: activate-belts
+- **Depends On**: validate-lane-a
+- **Assigned To**: belt-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Gate: baseline report published over the agreed measurement window (2-4 weeks of merged PRs) — do NOT flip early; the −40% target is unfalsifiable without a pre-activation baseline
+- Flip `TOOLBELTS_ENFORCE` on in a dedicated commit, nothing else in the diff
+- Watch the first live turns per persona; a stall here indicts the flip, not a feature PR
+
+### 5. Lane B: wrappers with interleaved retirement
+- **Task ID**: build-wrappers-retire
+- **Depends On**: activate-belts
+- **Validates**: tests/unit/test_axi_lint.py (create), per-wrapper tests (create), tests/unit/test_teammate_write_restriction.py, tests/unit/test_sdk_permissions.py
+- **Informed By**: baseline ranking (expected set is provisional: sdlc-tool reads, PR/issue, test execution, worktree state)
 - **Assigned To**: axi-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement `tools/axi_lint.py`; wrap top-ranked tools as thin `[project.scripts]` entries, one PR each
+- First wrapper regardless of ranking: `valor-docs-write` with the compiled path allowlist; same PR removes Teammate Write/Edit from the belt and rewrites its guard test to assert belt-absence
+- Land `tools/axi_lint.py` with that first wrapper
+- Then one PR per baseline-ranked wrapper; each PR retires the hook it makes redundant, guard test rewritten and mutation-checked in the same PR
 
-### 6. Phase 3: retire redundant allowlists
-- **Task ID**: build-retirement
-- **Depends On**: build-wrappers
-- **Validates**: tests/unit/test_teammate_write_restriction.py, tests/unit/test_sdk_permissions.py
-- **Assigned To**: retire-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Ship `valor-docs-write` with the compiled path allowlist; remove Teammate Write/Edit from the belt
-- Remove redundant hook branches one at a time; rewrite each guard test to assert belt absence; mutation-check each guard
-
-### 7. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-retirement
+- **Depends On**: build-wrappers-retire
 - **Assigned To**: belt-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
 - All items in ## Documentation
 
-### 8. Final validation + re-measurement
+### 7. Final validation + re-measurement
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: belt-validator
@@ -328,7 +329,7 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 | CLI supports belt flags | `claude --help 2>&1 \| grep -c -- "--strict-mcp-config"` | output > 0 |
 | No new bypass of belt in harness | `grep -c "bypassPermissions" agent/session_runner/harness/claude.py` | output > 0 |
 
-(The last row is a placeholder until Phase 1 decides the permission-mode interaction — see Open Questions. The drift test itself runs inside the test suite row.)
+(The last row is a placeholder until Open Question 2 decides the permission-mode interaction. The drift test itself runs inside the test suite row.)
 
 ## Critique Results
 
@@ -342,4 +343,5 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 
 1. **Belt versioning scheme**: do belts version with the repo (implicit via git, simplest) or carry an independent `belt_version` integer bumped on every edit (better for the client-facing artifact and session audit stamps)? Plan currently assumes an explicit pin; confirm or simplify.
 2. **Permission-mode interaction**: with belts composed via `--tools`/`--strict-mcp-config`, does the headless runner keep `--permission-mode bypassPermissions` (absence does the scoping; prompts stay impossible) or move to a stricter mode for Teammate? Plan assumes keep, since headless turns cannot answer prompts.
-3. **Phase 1 belt seeding**: seed the first manifests from Phase 0 observed usage (faithful, zero breakage, shrink later) or hand-author them tight from the PRD's belt-shape table (immediate wins, higher stall risk)? Plan assumes observed-usage seeding per Risk 1.
+
+(Resolved 2026-09-02: belt seeding is by enumeration of the current surface, not observed usage — decided with the two-lane compaction; see Technical Approach.)
