@@ -1491,3 +1491,147 @@ class TestFatalPathIntegration:
         mock_send.assert_called_once()
         assert "timed out" in mock_send.call_args.args[0]
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing
+
+
+class TestSendTelegramReturncode:
+    """A failed or rejected send must be distinguishable from a delivered one.
+
+    Before this check the success line was unconditional, so an unpaged night
+    read exactly like a paged one in the log (issue #2334, step 1).
+    """
+
+    def _send(self, tmp_path: Path, returncode: int, stderr: str = "chat not found"):
+        nrt.LOG_FILE = tmp_path / "test.log"
+        bin_path = tmp_path / "valor-telegram"
+        bin_path.write_text("#!/bin/sh\n")
+        nrt.TELEGRAM_BIN = bin_path
+        completed = subprocess.CompletedProcess(["x"], returncode, "", stderr)
+        with patch("subprocess.run", return_value=completed):
+            nrt.send_telegram("regression alert", dry_run=False)
+        return nrt.LOG_FILE.read_text()
+
+    def test_telegram_returncode_nonzero_warns_and_claims_no_success(self, tmp_path: Path) -> None:
+        log_text = self._send(tmp_path, returncode=3)
+        assert "WARNING: telegram send failed rc=3" in log_text
+        assert "chat not found" in log_text
+        assert "Telegram sent" not in log_text
+
+    def test_telegram_returncode_zero_logs_success(self, tmp_path: Path) -> None:
+        log_text = self._send(tmp_path, returncode=0, stderr="")
+        assert "Telegram sent: regression alert" in log_text
+        assert "WARNING: telegram send failed" not in log_text
+
+
+class TestSpawnPytestCwdSeam:
+    """The `cwd` parameter exists for the classifier; both existing callers are
+    byte-identical in behavior and still spawn at PROJECT_DIR (issue #2334)."""
+
+    def test_spawn_pytest_cwd_defaults_to_project_dir(self) -> None:
+        proc = _fake_popen(returncode=0)
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            nrt._spawn_pytest(["echo", "hi"], timeout=10)
+        assert mock_popen.call_args.kwargs["cwd"] == nrt.PROJECT_DIR
+
+    def test_spawn_pytest_cwd_is_forwarded_when_given(self, tmp_path: Path) -> None:
+        proc = _fake_popen(returncode=0)
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            nrt._spawn_pytest(["echo", "hi"], timeout=10, cwd=tmp_path)
+        assert mock_popen.call_args.kwargs["cwd"] == tmp_path
+
+    def test_spawn_pytest_cwd_unchanged_for_run_tests(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        report_path = tmp_path / "report.json"
+        nrt.PYTEST_JSON_TMP = str(report_path)
+        proc = _fake_popen(returncode=0)
+
+        def _popen(argv, **kwargs):
+            report_path.write_text(json.dumps({"summary": {"total": 3, "passed": 3}, "tests": []}))
+            return proc
+
+        with patch("subprocess.Popen", side_effect=_popen) as mock_popen:
+            nrt.run_tests()
+        assert mock_popen.call_args.kwargs["cwd"] == nrt.PROJECT_DIR
+
+    def test_spawn_pytest_cwd_unchanged_for_reconfirm_serial(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        report_path = tmp_path / "serial.json"
+        nrt.PYTEST_SERIAL_JSON_TMP = str(report_path)
+        proc = _fake_popen(returncode=0)
+
+        def _popen(argv, **kwargs):
+            report_path.write_text(
+                json.dumps({"tests": [{"nodeid": "a::t1", "outcome": "failed"}]})
+            )
+            return proc
+
+        with patch("subprocess.Popen", side_effect=_popen) as mock_popen:
+            nrt.reconfirm_serial(["a::t1"])
+        assert mock_popen.call_args.kwargs["cwd"] == nrt.PROJECT_DIR
+
+
+class TestPersistedStateKeyInvariance:
+    """The shadow tier persists NO new key in data/nightly_tests_last_run.json.
+
+    `classify_attempts` was dropped as structurally unreachable at this scope;
+    this test is what keeps it (or any sibling map) from creeping back in.
+    """
+
+    def _run(self, tmp_path: Path, mode: str) -> dict:
+        run_dir = tmp_path / mode
+        run_dir.mkdir()
+        confirmed = ["tests/unit/test_a.py::test_one"]
+        nrt.LOG_FILE = run_dir / "nightly.log"
+        nrt.LOCK_FILE = run_dir / "nightly.lock"
+        nrt.LAST_RUN_FILE = run_dir / "last_run.json"
+        serial_report = run_dir / "serial.json"
+        serial_report.write_text(json.dumps({"tests": []}))
+        nrt.PYTEST_SERIAL_JSON_TMP = str(serial_report)
+        nrt.LAST_RUN_FILE.write_text(
+            json.dumps(
+                {
+                    "collection": nrt.COLLECTION_PATHS,
+                    "failing_tests": [],
+                    "dispatched_nodes": [],
+                    "head_commit": "baselinesha",
+                }
+            )
+        )
+        run_result = {
+            "passed": 10,
+            "failed": 1,
+            "error": 0,
+            "skipped": 0,
+            "total": 11,
+            "failing_parallel": list(confirmed),
+            "run_at": "2026-09-02T00:00:00+00:00",
+        }
+        classification = {
+            "newly_broken": list(confirmed),
+            "pre_existing": [],
+            "inconclusive": [],
+        }
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py"]),
+            patch.object(nrt, "NIGHTLY_FIX_MODE", mode),
+            patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
+            patch.object(nrt, "load_env_or_die", return_value=(42, None)),
+            patch.object(
+                nrt, "run_tests", return_value=({"summary": {"total": 11}}, run_result, 0)
+            ),
+            patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
+            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
+            patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
+            patch.object(nrt, "run_ttft_gate", return_value=None),
+            patch.object(nrt, "_get_head_commit", return_value="headsha"),
+            patch.object(nrt, "classify_against_baseline", return_value=classification),
+            patch.object(nrt, "send_telegram"),
+        ):
+            assert nrt.main() == 0
+        return json.loads(nrt.LAST_RUN_FILE.read_text())
+
+    def test_state_key_invariance_between_shadow_and_off(self, tmp_path: Path) -> None:
+        off_state = self._run(tmp_path, "off")
+        shadow_state = self._run(tmp_path, "shadow")
+        assert set(shadow_state) == set(off_state)
+        assert "classify_attempts" not in shadow_state
+        assert "fix_sessions" not in shadow_state
