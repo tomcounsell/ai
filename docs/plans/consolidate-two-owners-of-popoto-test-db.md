@@ -218,7 +218,7 @@ The coding is roughly a 30-line net deletion in one fixture plus three test-file
 | popoto installed with its bundled pytest plugin | `.venv/bin/python -c "import popoto.pytest_plugin as p; assert hasattr(p, '_swap_db')"` | The plan makes the plugin the db-number authority; a popoto without `_swap_db` invalidates spikes 2-4 |
 | popoto exposes the sync connection cap constant | `.venv/bin/python -c "import popoto.redis_db as r; assert isinstance(r._SYNC_MAX_CONNECTIONS, int)"` | conftest reads the cap from here rather than hardcoding 128 |
 | Free slot in the machine-global db-claim pool | `.venv/bin/python -c "import sys; sys.path.insert(0,'.'); from tests.db_claim import claim_test_db; print(claim_test_db())"` | A pool-exhausted machine cannot run the suite at all |
-| Venv on the committed interpreter pin | `python -m tools.doctor` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+| Venv on the committed interpreter pin | `.venv/bin/python -c "import pathlib,sys; pin=pathlib.Path('.python-version').read_text().strip(); assert '.'.join(map(str,sys.version_info[:2])).startswith(pin.rsplit('.',1)[0]), (pin, sys.version)"` | `scripts/pytest-clean.sh` aborts on an off-pin venv. Scoped deliberately: `python -m tools.doctor` also reports unrelated machine state (e.g. Redis index drift) and would fail this gate for reasons that have nothing to do with this plan |
 
 ## Solution
 
@@ -351,15 +351,31 @@ Replace object assignment with pool mutation. The shape:
 
 ## No-Gos (Out of Scope)
 
-TBD
+- `[SEPARATE-SLUG #2770]` Moving host/port resolution into popoto's own `_swap_db` (or otherwise changing `~/src/popoto`). Spike-3 established this is neither necessary nor sufficient here, and #2770 already owns the upstream plugin-hardening surface. **Anti-criterion:** the Verification table asserts conftest never delegates server resolution by grepping that `_swap_db` is not called from `tests/`.
+- `[SEPARATE-SLUG #3003]` Sweeping the repo for hand-built raw Redis clients that bypass the ORM. The two bare `redis.Redis(db=...)` clients inside `TestPopotoSplitBrainRoundTrip` *are* fixed here because that test is being edited anyway; the other ~20 production call sites belong to #3003.
+- `[SEPARATE-SLUG #2535]` The broader "concurrent test runs corrupt each other" cluster (suite lock skipping targeted runs, the 99% wedge, the shared editable install). Adjacent to Race 2 but a different mechanism and a different fix.
+- `[ORDERED]` Deleting popoto's bundled plugin dependency entirely and having conftest own both facts. That would only be safe after #2770 lands upstream and the pinned popoto version is bumped here — a sequenced, human-gated release event in another repo. Until then the split is the correct design, not a compromise.
+- `[SEPARATE-SLUG #2628]` Any repair of `main`'s pre-existing red unit tests surfaced by this plan's full-suite runs. Risk 4 requires classifying them against a baseline; classified-as-pre-existing failures get reported, not fixed in this diff.
+
+Everything else the issue asks for is in scope: the audit is complete (spikes 1-4), the redundant repatch loop and eager async bind are deleted here, and the "document why the split is required" branch is answered in the Technical Approach and carried into `docs/features/test-db-ownership.md`.
 
 ## Update System
 
-TBD
+No update system changes required. This work is confined to `tests/`, two `docs/features/` pages, and no runtime code — `scripts/update/run.py` and the `/update` skill neither read nor propagate any of it. Specifically:
+
+- No new dependency, so no `pyproject.toml` / `uv.lock` change and no `uv sync` implication.
+- No new `.env` key, so no `.env.example` declaration and no `check_env_completeness` impact.
+- No Popoto **model** change (this touches the Redis *client*, not any model schema), so `scripts/update/migrations.py` gets no new entry and `data/migrations_completed.json` is untouched.
+- No bridge, worker, or agent code changes, so no `./scripts/valor-service.sh restart` is needed after merge. `/update` should still be run after the PR merges per repo convention, but purely to move the git ref.
 
 ## Agent Integration
 
-TBD
+No agent integration required. Nothing here is reachable by, or visible to, the agent at runtime:
+
+- No new CLI entry point in `pyproject.toml [project.scripts]`.
+- No new MCP tool in `mcp_servers/` or `.mcp.json`.
+- `bridge/telegram_bridge.py` imports nothing from `tests/`, and `tests/conftest.py` is loaded only by pytest's own collection machinery.
+- The one indirect agent-facing effect is positive and needs no wiring: restoring popoto's `BlockingConnectionPool` cap during tests means agent-code paths exercised under test (`Model.async_save` bursts via `asyncio.gather`) run against the same connection ceiling production uses, so a `MaxConnectionsError` that production would hit is now reproducible in the suite instead of being masked by an unbounded test pool.
 
 ## Documentation
 
@@ -375,15 +391,162 @@ TBD
 
 ## Success Criteria
 
-TBD
+- [ ] `tests/conftest.py` contains exactly zero assignments to `rdb.POPOTO_REDIS_DB` and zero assignments to `rdb._POPOTO_ASYNC_REDIS_DB`. The client object popoto built at import time is the one the whole session uses.
+- [ ] `_popoto_modules_with_redis_db`, `_POPOTO_MODULE_CACHE`, and `_POPOTO_MODULE_CACHE_LEN` do not appear anywhere in the repo.
+- [ ] `redis_test_db` keeps its name, `autouse=True`, and function scope; the ~197 requesting call sites are unmodified.
+- [ ] `tests/unit/test_popoto_client_identity.py` exists and passes, asserting: (a) `rdb.POPOTO_REDIS_DB` is the same object across tests in a process, (b) every `popoto.*` module in `sys.modules` holding a `POPOTO_REDIS_DB` symbol holds *that* object, (c) the live pool is a `redis.BlockingConnectionPool` whose `max_connections` equals `rdb._SYNC_MAX_CONNECTIONS`.
+- [ ] Assertion (c) is demonstrated RED on `main` before the change lands, and the RED output is pasted into the PR description as the paper trail.
+- [ ] Spike-1's probe is re-run and now prints `ASYNC_IS_NONE: True` inside a test body (it prints `False` on main), proving the async global is back under the plugin's lazy in-loop control.
+- [ ] `tests/unit/test_test_redis_server_resolution.py::test_async_client_matches_the_sync_client` awaits `get_async_redis_db()` and **fails** on divergence — it can no longer `pytest.skip` its way to green.
+- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPopotoSplitBrainRoundTrip` still reproduces the #2037 split-brain in Step 1 and still goes green in Step 3, with the fix step expressed as a restore to the canonical object.
+- [ ] `docs/features/test-isolation-hardening.md` no longer describes the deleted cache as load-bearing, and `docs/features/test-db-ownership.md` states the conftest-owns-server / plugin-owns-db-number split with the #2799 reason.
+- [ ] `tests/db_claim.py`'s module docstring (line 4) and `redis_test_host` docstring (line 111) no longer describe conftest as building a replacement client.
+- [ ] Full `tests/unit/` and `tests/integration/` runs are green, or every failure is classified against a pre-change `main` baseline by `baseline-verifier` and shown to be pre-existing.
+- [ ] The suite passes both under xdist and under `-n0 -p no:randomly` (ordering must not be load-bearing in a new way).
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+- [ ] No xfail markers added or left behind — this change introduces none and converts none (no xfails exist for this defect; it was found by audit, not by a failing test).
 
 ## Team Orchestration
 
-TBD
+The lead agent orchestrates and never builds directly. This is a Small-appetite change with a
+whole-suite blast radius, so the team is deliberately thin — one builder holding the whole
+context beats parallel builders coordinating on one fixture — with an independent validator and
+a baseline classifier.
+
+### Team Members
+
+- **Builder (conftest consolidation)**
+  - Name: `conftest-builder`
+  - Role: Owns every edit to `tests/conftest.py` and the three affected test files, in the task order below. Sole writer to `tests/conftest.py`.
+  - Agent Type: `builder`
+  - Domain: Redis/Popoto data + async/concurrency (paste the matching `DOMAIN_FRAMING.md` rules into the assignment)
+  - Resume: true
+
+- **Validator (invariant + anti-criteria)**
+  - Name: `identity-validator`
+  - Role: Read-only. Confirms the one-object invariant holds, runs every Verification row including the anti-criteria greps, and confirms the RED-state paper trail exists.
+  - Agent Type: `validator`
+  - Resume: true
+
+- **Baseline classifier**
+  - Name: `suite-baseline`
+  - Role: Captures the pre-change `tests/unit/` + `tests/integration/` baseline on `main` and classifies every post-change failure as regression vs pre-existing. Never edits code.
+  - Agent Type: `baseline-verifier`
+  - Resume: true
+
+- **Documentarian**
+  - Name: `db-ownership-docs`
+  - Role: The two `docs/features/` updates and the `tests/db_claim.py` docstring corrections.
+  - Agent Type: `documentarian`
+  - Resume: true
 
 ## Step by Step Tasks
 
-TBD
+### 1. Capture the pre-change baseline
+- **Task ID**: baseline-main
+- **Depends On**: none
+- **Validates**: n/a (produces the artifact everything else is judged against)
+- **Assigned To**: `suite-baseline`
+- **Agent Type**: baseline-verifier
+- **Parallel**: true
+- Run `./scripts/pytest-clean.sh tests/unit/ -q` and `./scripts/pytest-clean.sh tests/integration/ -q` on unmodified `main` and record the full failure set (node ids, not counts).
+- Persist it to the lane's scratchpad so later classification is a diff, not a memory.
+- Do not attempt to fix anything. Red tests on main are #2628's territory (see No-Gos).
+
+### 2. Prove the invariant is currently violated (RED state)
+- **Task ID**: build-identity-test
+- **Depends On**: none
+- **Validates**: `tests/unit/test_popoto_client_identity.py` (create)
+- **Informed By**: spike-2 (the plugin's `_swap_db` strips the `BlockingConnectionPool` and its cap; `max_connections` is not in `connection_kwargs`)
+- **Assigned To**: `conftest-builder`
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tests/unit/test_popoto_client_identity.py` with the three assertions from Test Impact: object stability across tests, all-`popoto.*`-bindings-agree, pool is `BlockingConnectionPool` with `max_connections == rdb._SYNC_MAX_CONNECTIONS`.
+- Read the cap as `getattr(rdb, "_SYNC_MAX_CONNECTIONS", 128)` with a comment naming #2770 as the upstream coordination point — never hardcode `128` in the fixture (there is an anti-criterion for that).
+- Run it on unmodified `main`. The pool-class assertion must FAIL. Capture that output verbatim for the PR description.
+- Also re-run spike-1's probe on `main` and capture `ASYNC_IS_NONE: False`.
+
+### 3. Rewrite `redis_test_db` to mutate in place
+- **Task ID**: build-inplace-swap
+- **Depends On**: build-identity-test
+- **Validates**: `tests/unit/test_popoto_client_identity.py`, `tests/unit/test_redis_flush_guard.py`, `tests/unit/test_db_derivation_guard.py`
+- **Informed By**: spike-3 (conftest must keep owning host/port or #2799 regresses), spike-4 (`_popoto_flush_db` only re-swaps on db drift, so the two compose), Research findings 1-3
+- **Assigned To**: `conftest-builder`
+- **Agent Type**: builder
+- **Domain**: Redis/Popoto data
+- **Parallel**: false
+- Implement the fixture body per Technical Approach step 1: idempotence guard with type-normalized host/port comparison, `BlockingConnectionPool` reconstruction carrying `password`/`username` forward, in-place `client.connection_pool` assignment, `old_pool.disconnect()` with the "synchronous setup phase, no in-flight commands" comment, `_assert_client_matches_claim_registry` against the canonical client, flush, yield, flush, restore pool, disconnect the pool we made.
+- Do NOT call `client.close()` (the client does not own its pool, and the object is shared).
+- Delete the `import redis.asyncio as aioredis` line.
+- Rewrite the docstring per Technical Approach step 3 — the current "CRITICAL: We replace the POPOTO_REDIS_DB object" paragraph is now false and must not survive in any form.
+- Confirm `tests/unit/test_popoto_client_identity.py` now passes, and spike-1's probe now prints `ASYNC_IS_NONE: True`.
+
+### 4. Delete the now-dead repatch machinery
+- **Task ID**: build-delete-cache
+- **Depends On**: build-inplace-swap
+- **Validates**: `tests/unit/test_conftest_isolation_guards.py`
+- **Assigned To**: `conftest-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Delete `_popoto_modules_with_redis_db`, `_POPOTO_MODULE_CACHE`, `_POPOTO_MODULE_CACHE_LEN`, and the explanatory comment block above them (conftest:659-710).
+- Delete `TestPopotoModuleCacheInvalidation` (the class and its `_snapshot_and_restore_cache_globals` fixture) from `tests/unit/test_conftest_isolation_guards.py`.
+- Rewrite `TestPopotoSplitBrainRoundTrip::test_create_then_filter_split_brain_and_fix`: keep Step 1's reproduction verbatim; replace Step 2's helper-driven repair with `query_module.POPOTO_REDIS_DB = rdb.POPOTO_REDIS_DB`; replace both bare `redis.Redis(db=...)` clients with `db_claim`-resolved host/port.
+- No compatibility shim, no deprecation alias, no commented-out original. Delete means delete.
+
+### 5. Fix the async-mirror test
+- **Task ID**: build-async-test
+- **Depends On**: build-inplace-swap
+- **Validates**: `tests/unit/test_test_redis_server_resolution.py`
+- **Informed By**: spike-1 (the eager bind was what made this test observable at all)
+- **Assigned To**: `conftest-builder`
+- **Agent Type**: builder
+- **Domain**: async/concurrency
+- **Parallel**: false
+- Rewrite `test_async_client_matches_the_sync_client` as an async test that `await`s `rdb.get_async_redis_db()` inside the test's own event loop and asserts host/port/db match the sync client's `connection_kwargs`.
+- Remove the `pytest.skip("popoto exposes no async client in this version")` branch entirely — divergence must fail, not skip.
+- Extend `tests/unit/test_conftest_isolation_guards.py:1271-1299` with a case asserting `_POPOTO_ASYNC_REDIS_DB` is still `None` immediately after `redis_test_db` setup (the fence against re-introducing an eager bind).
+
+### 6. Validate the invariant and the anti-criteria
+- **Task ID**: validate-invariant
+- **Depends On**: build-delete-cache, build-async-test
+- **Assigned To**: `identity-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row in the Verification table, including all four anti-criteria greps.
+- Run `tests/unit/test_popoto_client_identity.py` at the END of a full `tests/unit/` run (not standalone) so the maximum number of popoto submodules are imported when the all-bindings-agree assertion fires — this is the Risk 1 mitigation and a standalone run does not exercise it.
+- Confirm the RED-state output from task 2 is present in the PR description.
+- Report pass/fail per row; do not fix anything.
+
+### 7. Classify the full-suite result
+- **Task ID**: classify-failures
+- **Depends On**: validate-invariant
+- **Assigned To**: `suite-baseline`
+- **Agent Type**: baseline-verifier
+- **Parallel**: false
+- Diff the post-change `tests/unit/` and `tests/integration/` failure sets against the task-1 baseline.
+- Every new failure is a regression until proven otherwise by a run on `main`. Return the classification, not a verdict on whether to ship.
+- Async failures specifically: per Risk 2, a genuine async failure is a find. Route it back to `conftest-builder` to fix the test — never to restore the eager bind.
+
+### 8. Documentation
+- **Task ID**: document-ownership-split
+- **Depends On**: validate-invariant
+- **Assigned To**: `db-ownership-docs`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Apply every item in the Documentation section: `docs/features/test-isolation-hardening.md` (lines 9-11, 60, 64), `docs/features/test-db-ownership.md` (lines 113, 119), `tests/db_claim.py` (lines 4, 111).
+- No new `docs/features/` file and no README index row — this is a change to two documented features, not a new one.
+- The docs must describe only the new status quo. No "previously we..." narration.
+
+### 9. Final validation
+- **Task ID**: validate-all
+- **Depends On**: classify-failures, document-ownership-split
+- **Assigned To**: `identity-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Re-run the full Verification table plus `python -m ruff check .` and `python -m ruff format --check .`.
+- Walk every Success Criteria checkbox and mark it met or unmet with evidence.
+- Confirm no doc still references the deleted helper: `grep -rn '_popoto_modules_with_redis_db' docs/ tests/` must be empty.
 
 ## Verification
 
@@ -399,6 +562,9 @@ TBD
 | ANTI: conftest never writes the async global | `grep -cE 'rdb\._POPOTO_ASYNC_REDIS_DB\s*=' tests/conftest.py` | match count == 0 |
 | ANTI: the submodule repatch helper is gone repo-wide | `grep -rc '_popoto_modules_with_redis_db' tests/` | match count == 0 |
 | ANTI: no test skips on a `None` async client | `grep -rn 'popoto exposes no async client' tests/` | exit code 1 |
+| ANTI (No-Go #2770): tests never call popoto's `_swap_db` | `grep -rc '_swap_db' tests/` | match count == 0 |
+| ANTI (No-Go #3003): no bare `redis.Redis(db=...)` in the edited guard file | `grep -cE 'redis\.Redis\(db=' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
+| ANTI: the connection cap is read from popoto, not hardcoded | `grep -cE 'max_connections\s*=\s*[0-9]' tests/conftest.py` | match count == 0 |
 | Live client identity holds (one object, all bindings) | `./scripts/pytest-clean.sh tests/unit/test_popoto_client_identity.py -q -p no:randomly -n0` | exit code 0 |
 | Live pool keeps popoto's connection cap | `./scripts/pytest-clean.sh tests/unit/test_popoto_client_identity.py::test_pool_is_blocking_with_popoto_cap -q -n0` | exit code 0 |
 | db-derivation recurrence guard (#2655) still clean | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -q -n0` | exit code 0 |
@@ -411,4 +577,12 @@ TBD
 
 ## Open Questions
 
-TBD
+The four spikes resolved every technically-verifiable assumption. What remains is judgement, not investigation.
+
+1. **Is restoring popoto's `BlockingConnectionPool` cap in scope, or should it be split out?** It is not what #2771 asked for — the issue is about ownership, and the cap is an incidental finding. The plan folds it in because it is *free* under in-place mutation (you have to construct the pool anyway, and constructing the wrong kind is a deliberate act) and because it makes the identity test falsifiable on main today, which is the strongest available proof the change did something. The counter-argument: it changes test-suite connection behaviour for every test, which is a second variable in a diff whose whole risk profile is "autouse fixture, whole-suite blast radius". Split it into its own issue if you want a single-variable diff.
+
+2. **Should the async-mirror test become a fail, or is a skip acceptable?** The plan makes it fail on divergence. That is strictly better as a test, but it converts a test that has been silently skipping (or silently passing on a wrong-loop client) into one that can block a PR. If `tests/integration/`'s async popoto usage turns out to have latent divergence, this test becomes the thing that surfaces it — good, but it may cost a round of unrelated-looking fixes. Confirm the appetite covers that.
+
+3. **How much of a full-suite run is the acceptance bar?** The plan requires green (or baseline-classified) `tests/unit/` **and** `tests/integration/`, which is roughly 20 minutes plus integration time, run at least twice (baseline and post-change) and again under `-n0`. On a machine running several agents' suites concurrently that is a real resource commitment. If the bar should be `tests/unit/` only, say so — but note that async popoto usage concentrates in `tests/integration/`, which is exactly where Risk 2 lives.
+
+4. **Anything the recon and spikes missed?** The one thing this plan cannot prove from the outside is that no popoto submodule captures `POPOTO_REDIS_DB` in some way other than a module-level `from ..redis_db import` — a class attribute set at import time, a default argument, a closure. The identity test enumerates module-level symbols only, which is the same surface the deleted repatch loop covered, so the change is no worse than the status quo. But "no worse than the status quo" is not "proven", and the status quo has been the source of #2037 and #2061.
