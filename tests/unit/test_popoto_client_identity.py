@@ -17,36 +17,45 @@ test. They are the fence around that design:
   know about popoto's cap (popoto's own ``_swap_db`` is exactly such a thing);
 * pool-object stability catches a function-scoped restore/rebuild cycle, which
   would leave the three assertions above green while reintroducing the hazard.
+
+The two stability assertions compare against a session-scoped baseline rather
+than against state left behind by a sibling test, so they are armed in every
+xdist worker and under any ``-k`` selection.
 """
 
 import sys
 
 import popoto.redis_db as rdb
+import pytest
 import redis
 
-# Cross-test observations. Recorded by the baseline test and read by the
-# stability tests. A stability test whose baseline did not run in this process
-# (an xdist worker that got only one of the pair, or a ``-k`` selection) has
-# nothing to compare against and says so rather than failing spuriously.
-_OBSERVED: dict[str, int] = {}
 
+@pytest.fixture(scope="session")
+def installed_identity(_popoto_pool_install):
+    """The canonical client and pool object ids, captured once per session.
 
-def test_pool_identity_baseline_is_recorded():
-    """Record the canonical client and pool object ids for the stability tests."""
+    Session scope is what makes the two stability assertions below un-vacuous.
+    An earlier shape recorded the baseline in a *test* and compared in a later
+    one, which silently no-opped whenever the pair was split — standalone, under
+    a ``-k`` selection, or under xdist, where the module's tests are distributed
+    across workers and a worker can receive the comparison without the baseline.
+    A session fixture runs once in every worker that collects any test here, so
+    the baseline always exists wherever the comparison runs.
+
+    It depends on ``_popoto_pool_install`` so the capture happens after conftest
+    has installed the session pool, never against the plugin's import-time one.
+    """
     client = rdb.POPOTO_REDIS_DB
-    _OBSERVED["client_id"] = id(client)
-    _OBSERVED["pool_id"] = id(client.connection_pool)
+    return {"client_id": id(client), "pool_id": id(client.connection_pool)}
 
 
-def test_pool_identity_is_stable_across_tests():
+def test_pool_identity_is_stable_across_tests(installed_identity):
     """(d) The connection pool object survives from one test to the next.
 
     A function-scoped restore/rebuild cycle in ``redis_test_db`` breaks only this
     assertion, which is why it exists separately from the client-identity one.
     """
-    if "pool_id" not in _OBSERVED:
-        return  # baseline did not run in this process; nothing to compare
-    assert id(rdb.POPOTO_REDIS_DB.connection_pool) == _OBSERVED["pool_id"], (
+    assert id(rdb.POPOTO_REDIS_DB.connection_pool) == installed_identity["pool_id"], (
         "popoto's connection pool was replaced between two tests in the same "
         "session. The pool is installed once per session by conftest's "
         "_popoto_pool_install; a per-test restore or rebuild reintroduces the "
@@ -54,11 +63,9 @@ def test_pool_identity_is_stable_across_tests():
     )
 
 
-def test_client_object_identity_is_stable_across_tests():
+def test_client_object_identity_is_stable_across_tests(installed_identity):
     """(a) ``rdb.POPOTO_REDIS_DB`` is the same object across tests in a process."""
-    if "client_id" not in _OBSERVED:
-        return  # baseline did not run in this process; nothing to compare
-    assert id(rdb.POPOTO_REDIS_DB) == _OBSERVED["client_id"], (
+    assert id(rdb.POPOTO_REDIS_DB) == installed_identity["client_id"], (
         "rdb.POPOTO_REDIS_DB was rebound to a different object between two tests. "
         "conftest must mutate the canonical client's pool in place, never replace "
         "the object — replacement strands every popoto submodule's import-time "

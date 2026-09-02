@@ -954,7 +954,7 @@ def _popoto_pool_install(_popoto_test_db):
 
 
 @pytest.fixture(autouse=True)
-def redis_test_db(request, _popoto_pool_install):
+def redis_test_db(_popoto_pool_install):
     """Per-test Redis hygiene on popoto's canonical client (#2771).
 
     autouse=True ensures this runs for every test, even those that don't

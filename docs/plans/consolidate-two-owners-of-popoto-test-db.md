@@ -629,7 +629,7 @@ when the command prints nothing.
 | ANTI: the submodule repatch helper is gone from the test tree | `grep -rn '_popoto_modules_with_redis_db' tests/` | no output |
 | ANTI: no live code or live feature doc names the deleted helper | `grep -rn '_popoto_modules_with_redis_db' docs/features/ tests/ --include='*.py' --include='*.md' \| grep -v 'docs/archive/'` | no output |
 | ANTI: no test skips on a `None` async client | `grep -rn 'popoto exposes no async client' tests/` | no output |
-| ANTI (No-Go #2770): tests never call popoto's `_swap_db` | `grep -rn '_swap_db' tests/` | no output |
+| ANTI (No-Go #2770): tests never call popoto's `_swap_db` | `grep -rnE '_swap_db\s*\(' tests/` | no output — the call form only; bare-name mentions in docstrings/comments are mandated by Technical Approach step 3 and are fine |
 | ANTI (No-Go #3003): no bare `redis.Redis(db=...)` in the edited guard file | `grep -nE 'redis\.Redis\(db=' tests/unit/test_conftest_isolation_guards.py` | no output |
 | ANTI: the connection cap is read from popoto, not hardcoded | `grep -nE 'max_connections\s*=\s*[0-9]' tests/conftest.py` | no output |
 | ANTI: the pool is never restored at function scope | `grep -nE 'connection_pool\s*=\s*old_pool' tests/conftest.py \| grep -v 'session-finalizer-only'` | no output |
