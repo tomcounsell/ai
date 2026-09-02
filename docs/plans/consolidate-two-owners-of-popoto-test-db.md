@@ -243,21 +243,60 @@ Not a user-facing flow. The mechanism flow, as a sequence within one pytest proc
 
 ### Technical Approach
 
-**1. Rewrite `redis_test_db`'s body (`tests/conftest.py:914-990`).**
+**1. Split pool ownership from per-test hygiene: install the pool once per session, flush per test.**
 
-Replace object assignment with pool mutation. The shape:
+The pool swap is a *session*-lifetime concern and must not live in a function-scoped
+setup/teardown pair. Critique round 1 established why (BLOCKER, Critique Results row 1): if
+the function teardown restores `client.connection_pool = old_pool`, then `old_pool` at the
+first swap is the plugin's plain `ConnectionPool` (spike-2 — `_swap_db` strips the
+`BlockingConnectionPool` class), so the idempotence guard can never observe "already a
+`BlockingConnectionPool` on the target `(host, port, db)`". Every test would rebuild, which
+contradicts the steady-state no-op this design depends on. Worse, restoring between tests
+parks the canonical client on the plugin's import-time-`REDIS_URL` pool, and the plugin's
+`_popoto_flush_db` runs *first* next test and `flushdb()`s whatever host that pool carries.
+Spike-4 cleared db-number drift only, never host drift — today's full-object replacement has
+no restore-then-reapply cycle, so this hazard would be introduced by the change rather than
+inherited.
 
-- Resolve `test_db = claim_test_db()`, `test_host = db_claim.redis_test_host()`, `test_port = int(db_claim.redis_test_port())` — unchanged from today.
+**1a. New session-scoped fixture `_popoto_pool_install` (`tests/conftest.py`).** Autouse at
+session scope, ordered after the plugin's `_popoto_test_db` (depend on it explicitly so the
+db number is already applied). It performs the swap exactly once and unwinds exactly once:
+
+- Resolve `test_db = claim_test_db()`, `test_host = db_claim.redis_test_host()`, `test_port = int(db_claim.redis_test_port())`.
 - Take `client = rdb.POPOTO_REDIS_DB` (the canonical object; never rebind this name onto the module).
-- **Idempotence guard:** if `client.connection_pool.connection_kwargs` already reports the target `(host, port, db)` *and* the pool is already a `BlockingConnectionPool`, skip the swap entirely. On the steady-state path (every test after the first) this makes the fixture a no-op beyond the flush, avoiding a per-test pool teardown/rebuild that today's code pays unconditionally.
-- Otherwise build `new_pool = redis.BlockingConnectionPool(host=test_host, port=test_port, db=test_db, socket_timeout=5, socket_connect_timeout=5, max_connections=rdb._SYNC_MAX_CONNECTIONS)`, save `old_pool = client.connection_pool`, assign `client.connection_pool = new_pool`, then `old_pool.disconnect()`.
+- **Idempotence guard:** if `client.connection_pool` is already a `BlockingConnectionPool`
+  whose `connection_kwargs` report the target `(host, port, db)`, do nothing. Normalize types
+  on both sides before comparing — a pool built from a URL may carry `port` as `int` while
+  `db_claim.redis_test_port()` returns `str`. Under session scoping this guard is genuinely
+  reachable: it is what makes a second install attempt (from any future caller) a no-op
+  rather than a rebuild.
+- Otherwise build `new_pool = redis.BlockingConnectionPool(host=test_host, port=test_port, db=test_db, socket_timeout=5, socket_connect_timeout=5, max_connections=rdb._SYNC_MAX_CONNECTIONS)`, save `old_pool = client.connection_pool`, assign `client.connection_pool = new_pool`, then `old_pool.disconnect()`, and record that an install happened on a session-level installed-flag.
   - Carry forward `password` / `username` from the old `connection_kwargs` if present, mirroring what `_swap_db` preserves — an authenticated `REDIS_URL` must keep working.
-  - The immediate `disconnect()` is safe *only* because this runs in pytest's synchronous setup phase with no in-flight commands (see Research finding 1 and Race 1). Say so in a comment.
-- Call `_assert_client_matches_claim_registry(client, test_host, test_port)` against the canonical client — the #2799 guard is preserved verbatim, just pointed at the object instead of a replacement.
+  - The immediate `disconnect()` is safe *only* because this runs in pytest's synchronous
+    setup phase with no in-flight commands (see Research finding 1 and Race 1). Say so in a
+    comment.
+- `yield`.
+- Session finalizer, and **only** here: if the installed-flag is set, restore
+  `client.connection_pool = old_pool` and `new_pool.disconnect()`. Do **not** call
+  `client.close()` — the client does not own its pool (Research finding 2) and the object is
+  shared.
+
+**1b. Rewrite `redis_test_db`'s body (`tests/conftest.py:914-990`) as per-test hygiene only.**
+It keeps its exact name, `autouse=True`, and function scope — the contract ~197 call sites
+depend on. It now depends on `_popoto_pool_install` and does no pool work at all:
+
+- Take `client = rdb.POPOTO_REDIS_DB`.
+- Call `_assert_client_matches_claim_registry(client, test_host, test_port)` against the
+  canonical client — the #2799 guard is preserved verbatim, just pointed at the object
+  instead of a replacement. It stays per-test: it is the check that catches drift introduced
+  *during* a test.
 - `client.flushdb()`.
 - `yield`.
-- Teardown: `client.flushdb()`; if a swap happened, restore `client.connection_pool = old_pool` and `new_pool.disconnect()`. Do **not** call `client.close()` — the client does not own its pool (Research finding 2) and the object is shared.
+- Teardown: `client.flushdb()`. **No pool restore, no `disconnect()`, no object rebinding.**
 - Delete the `import redis.asyncio as aioredis` line; nothing in the fixture needs it.
+
+The steady state is therefore exactly what this plan claims: one pool install for the whole
+session, and per test nothing but two flushes and one registry assertion.
 
 **2. Delete `_popoto_modules_with_redis_db` and its cache (`tests/conftest.py:659-710`), including the comment block at 659-666.** Its only consumer is the loop deleted in step 1. Leave no compatibility shim.
 
