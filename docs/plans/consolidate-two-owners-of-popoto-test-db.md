@@ -362,7 +362,7 @@ session, and per test nothing but two flushes and one registry assertion.
 
 ### Risk 3: The idempotence guard misjudges "already correct" and the swap never happens
 **Impact:** Silent worst case — the fixture becomes a no-op, the suite runs on whatever server popoto imported from the ambient `REDIS_URL`, and if that is production db 0 the flush guard is the only thing standing between the suite and real data.
-**Mitigation:** `_assert_client_matches_claim_registry` runs **after** the guard on every test, unconditionally, so a wrong "already correct" verdict fails on the first test rather than being silently tolerated. Type-normalize host/port before comparing (str vs int `port` is the realistic way this misjudges). The four-layer flush hardening from #2680 remains a backstop, not the primary defence.
+**Mitigation:** `_assert_client_matches_claim_registry` stays in the function-scoped `redis_test_db` and runs on **every** test, unconditionally and independently of the session-scoped guard, so a wrong "already correct" verdict at install fails on the very first test rather than being silently tolerated. Type-normalize host/port before comparing (str vs int `port` is the realistic way this misjudges). Under session scoping the guard is consulted once per session rather than once per test, which shrinks this risk surface to a single evaluation. The four-layer flush hardening from #2680 remains a backstop, not the primary defence.
 
 ### Risk 4: A pre-existing red suite masks a regression introduced here
 **Impact:** `main`'s unit suite has a history of a rotating failure set (#2628) and there is an open `fix-red-main-unit-tests` plan. Attributing a real regression to "pre-existing" is the exact mistake this repo has been burned by.
@@ -375,11 +375,13 @@ session, and per test nothing but two flushes and one registry assertion.
 ## Race Conditions
 
 ### Race 1: Pool swap versus in-flight commands on the old pool
-**Location:** `tests/conftest.py`, the new `redis_test_db` body (currently ~948-990) — the `client.connection_pool = new_pool; old_pool.disconnect()` pair.
-**Trigger:** `disconnect()` tears down every connection hosted by the old pool. Any caller holding a checked-out connection from it gets a broken socket mid-command (Research finding 1, redis-py #932).
+**Location:** `tests/conftest.py`, the new session-scoped `_popoto_pool_install` fixture — the `client.connection_pool = new_pool; old_pool.disconnect()` pair at install, and the mirrored restore/`disconnect()` in its session finalizer.
+**Trigger:** `disconnect()` tears down every connection hosted by the pool being dropped. Any caller holding a checked-out connection from it gets a broken socket mid-command (Research finding 1, redis-py #932).
 **Data prerequisite:** none.
-**State prerequisite:** no thread or coroutine may hold a checked-out connection from `old_pool` at the moment of disconnect.
-**Mitigation:** The swap runs in pytest's synchronous fixture-setup phase: the previous test's teardown has completed and the current test body has not started, so no test code holds a connection. popoto's `async_save`/`async_delete` funnel into the sync pool via a thread pool, but only from inside a running test. The plan states this precondition in a code comment and forbids moving the swap into a test body, an async context, or a session-scoped fixture that could overlap a running test. The same reasoning already licenses popoto's `_swap_db`, which does the identical thing.
+**State prerequisite:** no thread or coroutine may hold a checked-out connection from the pool being disconnected at the moment of disconnect.
+**Mitigation:** Both ends run in pytest's synchronous fixture phases with no test body executing. The install runs during session-scoped setup, before the first test body starts; the restore runs in the session finalizer, after the last test's teardown has completed. popoto's `async_save`/`async_delete` funnel into the sync pool via a thread pool, but only from inside a running test. The plan states this precondition in a code comment and forbids moving either operation into a test body or an async context. The same reasoning already licenses popoto's `_swap_db`, which does the identical thing.
+
+Session scoping is what makes this argument hold for the whole run rather than only the first test. A function-scoped restore would put the client back on the plugin's import-time pool between every pair of tests, and the plugin's `_popoto_flush_db` — which runs first in the next test's setup — would then `flushdb()` whatever host that pool carries. Spike-4 cleared db-number drift, not host drift, so that would be a new hazard rather than an inherited one. It is the reason pool ownership is session-scoped (Critique Results row 1).
 
 ### Race 2: Concurrent pytest processes and the db-claim pool
 **Location:** `tests/db_claim.py` claim registry; `tests/conftest.py::pytest_configure`.
