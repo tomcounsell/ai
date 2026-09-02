@@ -1825,6 +1825,10 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   `_build_completed_resume_text` preamble.** Every other check in this plan is a unit test with a
   stubbed handler or a grep; this is the only assertion that the nine subsystems are actually wired
   together, and it is scheduled after Task 10 because that is the first point where it can pass.
+  **This criterion is a hard shipping gate (owner ruling, 2026-09-02): neither FAIL nor UNRESOLVED
+  may be merged past.** Both halves must be observed live — the outbound poll rendering in Telegram
+  and the inbound vote arriving and reaching the session. Its deploy precondition (the live bridge
+  and relay must be running this lane's code) is stated in Task 10a.
 - [ ] **The Race-6 correlation key has exactly one producer.** `poll_id_hint` is minted in
   `build_telegram_poll_outbox_payload` and nowhere else, carried on the outbox payload, and read by
   `_send_queued_poll` as both the `register_pending_poll` key and `send_poll(correlation_id=...)`.
@@ -2014,6 +2018,12 @@ could be skipped entirely and the graph would still run to completion, with the 
 Task 15's prose. The edge does not weaken the pause property: `gate-poll-e2e` is inside the inbound
 set, and Task 15's *satisfied-by-pause* rule means a paused or UNRESOLVED gate lets Task 15 run and
 report the E2E row UNRESOLVED. Only a Task 10a **FAIL** stops the pipeline, which is the intent.
+
+**Owner ruling 2026-09-02 — Task 10a is a hard shipping gate.** The *satisfied-by-pause* rule above
+governs the **build** only: an UNRESOLVED `gate-poll-e2e` still lets Tasks 13a/13b/14/15 run so the
+work is finished and reviewable. It does **not** govern the **merge**. Task 10a must be PASS before
+this lane merges; FAIL and UNRESOLVED both hold the PR at REVIEW. Read every "UNRESOLVED does not
+block" statement in this plan as scoped to build progression, never to shipping.
 
 That property is why Task 13 is split. Before cycle 6 the single `build-tests` depended on
 `build-vote-observation` and Tasks 14 and 15 chained behind it, so an UNRESOLVED gate blocked tests,
@@ -2711,7 +2721,7 @@ The translator imports `resolve_answer_target` / `resume_completed_session` from
   TTL with no match is dropped with a warning.
 - Every interval, TTL, and warn-age is a named env-overridable constant with a grain-of-salt comment.
 
-### 10a. GATE — end to end through the shipped chain (bounded; UNRESOLVED permitted)
+### 10a. GATE — end to end through the shipped chain (HARD SHIPPING GATE — owner ruling 2026-09-02)
 - **Task ID**: gate-poll-e2e
 - **Depends On**: build-vote-observation
 - **Validates**: manual probe; output pasted verbatim into the PR description
@@ -2773,9 +2783,31 @@ The translator imports `resolve_answer_target` / `resume_completed_session` from
   wiring break the rest of the plan cannot detect: everything else is a unit test with a stubbed
   handler or a grep, so a broken CLI→relay→observer→steering seam ships green across nine
   subsystems without this task.
-- **On timeout → UNRESOLVED**, recorded on #2701 exactly as Task 2's timeout is. Unlike a FAIL,
-  UNRESOLVED does not block Tasks 13a/13b/14/15; it is reported in the PR description as an
-  unexercised end-to-end path so the reviewer decides, rather than the build deciding silently.
+- **On timeout → UNRESOLVED**, recorded on #2701 exactly as Task 2's timeout is. UNRESOLVED does not
+  block Tasks 13a/13b/14/15 — those still run and report the E2E rows UNRESOLVED rather than green.
+  **It does block MERGE.** See the hard-shipping-gate rule below.
+- **HARD SHIPPING GATE (owner ruling, Valor, 2026-09-02).** *Supersedes the earlier "UNRESOLVED
+  permitted" framing of this task, which allowed the feature to merge with its only end-to-end
+  assertion unexercised.* This feature may not merge unless a real vote round trip has been
+  observed live: an outbound poll rendered in Telegram **and** the resulting inbound vote received,
+  translated, and routed back into the asking session. A FAIL blocks merge. An UNRESOLVED (no tap
+  in the window) **also** blocks merge — it does not stop the build, but the PR sits at REVIEW until
+  the tap happens and PASS is recorded. There is no reviewer discretion to merge past this row and
+  no "ship the outbound half now, verify inbound later" split. The two live failures of 2026-09-02
+  (`Relay: unknown message type 'poll', discarding` from a relay that had never seen this code, and
+  an operator tap that produced no inbound trace at all) are exactly what this gate exists to catch,
+  and both would have shipped green under the previous wording.
+- **Deploy precondition — the gate is meaningless without it.** Task 10a runs against the *live*
+  bridge and relay, which execute from the main checkout at `/Users/valorengels/src/ai`, **not**
+  from this lane's worktree. The lane's code must therefore be running in those processes before
+  the probe poll is sent, or the outbound payload is discarded by a relay whose
+  `KNOWN_MESSAGE_TYPES` has no `poll` and the inbound half has no `events.Raw` handler and no
+  reconciliation loop to observe a tap. Confirm all three before originating the poll: (1) the
+  running bridge is executing this lane's code; (2) `logs/bridge.log` shows `Poll reconciliation
+  loop started` after the restart; (3) `telegram:poll:reconcile:heartbeat` is present and fresh.
+  Restart via `./scripts/valor-service.sh restart` only — and because that restart cycles the
+  bridge, watchdog, and worker for **every** session on the machine, coordinate it with the
+  operator rather than taking it unilaterally.
 - Runs against the live bridge — that is the point — so it opens no second Telethon client and the
   `receive_updates=False` / temp-session-copy constraints that bind Tasks 1 and 2 do not apply here.
   Delete the probe poll and its question message when done.
