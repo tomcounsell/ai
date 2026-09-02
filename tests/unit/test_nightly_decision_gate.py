@@ -337,6 +337,7 @@ def _run_main(
     mode: str,
     prev_extra: dict | None = None,
     classification: dict[str, list[str]] | None = None,
+    classify_side_effect: Exception | None = None,
 ):
     """Drive main() with everything below the alert branch stubbed out.
 
@@ -376,7 +377,12 @@ def _run_main(
         patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
         patch.object(nrt, "run_ttft_gate", return_value=None),
         patch.object(nrt, "_get_head_commit", return_value="headsha"),
-        patch.object(nrt, "classify_against_baseline", return_value=classification) as classify,
+        patch.object(
+            nrt,
+            "classify_against_baseline",
+            return_value=classification,
+            side_effect=classify_side_effect,
+        ) as classify,
         patch.object(nrt, "send_telegram") as mock_send,
     ):
         rc = nrt.main()
@@ -429,6 +435,25 @@ class TestModeGating:
         mock_send.assert_called_once()
         mock_send.classify.assert_not_called()
         assert "shadow-verdict" not in log_text
+
+    def test_mode_gating_shadow_tier_exception_never_suppresses_the_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Blocker fix (#3082 review): the shadow tier sits BEFORE send_telegram
+        on the failing-night path, so a classifier crash must be swallowed
+        (non-fatal, like the TTFT gate) with the page fired and the alert text
+        unchanged."""
+        _rc, _s, send_off, _l = _run_main(tmp_path / "off", confirmed=self.NODES, mode="off")
+        rc, _state, mock_send, log_text = _run_main(
+            tmp_path / "boom",
+            confirmed=self.NODES,
+            mode="shadow",
+            classify_side_effect=RuntimeError("baseline worktree exploded"),
+        )
+        assert rc == 0
+        mock_send.assert_called_once()
+        assert mock_send.call_args.args[0] == send_off.call_args.args[0]
+        assert "nightly-fix shadow tier error (non-fatal): baseline worktree exploded" in log_text
 
     def test_mode_gating_shadow_escalate_still_pages(self, tmp_path: Path) -> None:
         """An escalate verdict changes nothing outbound in this tier."""
