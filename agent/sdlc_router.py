@@ -409,15 +409,37 @@ def guard_g2_critique_cycle_cap(
 ) -> Dispatch | Blocked | None:
     """G2: escalate when the critique cycle ceiling is reached.
 
-    If ``critique_cycle_count >= MAX_CRITIQUE_CYCLES`` and CRITIQUE is still
-    failing (not completed), the router blocks and surfaces to the human.
+    Two trip conditions, either suffices once ``cycles >= MAX_CRITIQUE_CYCLES``:
+
+    - CRITIQUE is not ``completed`` (the original shape), or
+    - the latest critique verdict still demands revision (#2885 via #3065).
+      The skill-driven loop marks CRITIQUE ``completed`` every round while
+      recording ``NEEDS REVISION`` / ``MAJOR REWORK``, so the marker-status
+      check alone made this guard inert against the exact loop it bounds —
+      lanes ran 9+ rounds on 2026-09-02 with the cap never firing.
+
+    ``cycles`` is the max of ``critique_cycle_count`` (the fail_stage-driven
+    legacy counter) and ``revision_round_count`` (the durable counter
+    ``record_verdict`` now increments on every revision-demanding verdict).
+    max() rather than sum: if both paths ever counted the same round, summing
+    would double-charge it.
+
+    This guard MUST evaluate before G1 in ``GUARDS``: G1 dispatches
+    ``/do-plan`` on every NEEDS REVISION verdict, so with G1 first the router
+    never reaches this cap. Below the cap G2 returns None, so the ordering is
+    behavior-identical until the bound is spent.
     """
-    cycles = meta.get("critique_cycle_count", 0)
+    cycles = max(
+        int(meta.get("critique_cycle_count", 0) or 0),
+        int(meta.get("revision_round_count", 0) or 0),
+    )
     if cycles < MAX_CRITIQUE_CYCLES:
         return None
 
     critique_status = stage_states.get("CRITIQUE")
-    if critique_status == STATUS_COMPLETED:
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
+    still_revising = CRITIQUE_NEEDS_REVISION in verdict or CRITIQUE_MAJOR_REWORK in verdict
+    if critique_status == STATUS_COMPLETED and not still_revising:
         return None
 
     return Blocked(
@@ -1037,8 +1059,12 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | Terminal | None]]
     # T runs first by design: a finished lane has no correct dispatch, so no
     # other guard's verdict is worth computing (#2894, #2817).
     guard_terminal_lane,
-    guard_g1_critique_loop,
+    # G2 before G1 (#2885 via #3065): G1 dispatches /do-plan on every
+    # revision-demanding verdict, so it would shadow the cycle cap forever.
+    # G2 is None below the cap, so this order changes nothing until the
+    # bound is spent.
     guard_g2_critique_cycle_cap,
+    guard_g1_critique_loop,
     guard_g3_pr_lock,
     guard_g4_oscillation,
     guard_g9_blocked_on_conflict,

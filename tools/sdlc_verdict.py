@@ -509,6 +509,24 @@ def record_verdict(
             except (TypeError, ValueError):
                 current = 0
             states["_concern_round_count"] = current + 1
+
+        # #2885 (folded into #3065): count revision-demanding CRITIQUE rounds.
+        # Same durable design as `_concern_round_count` above, for the same
+        # reasons: `_revision_round_count` is absent from `_OWNED_METADATA_KEYS`
+        # (agent/pipeline_state.py), so `PipelineStateMachine._save()` merges it
+        # back from the live store instead of clobbering it with the in-memory 0.
+        # `_critique_cycle_count` cannot serve this loop: it IS an owned key, and
+        # its only incrementer is `PipelineStateMachine.fail_stage`, which the
+        # skill-driven flow never calls — which is why G2's cap sat inert while
+        # lanes ran 9+ NEEDS REVISION rounds. G2 reads this via
+        # `_meta.revision_round_count` and escalates at MAX_CRITIQUE_CYCLES.
+        # Monotonic and deliberately dedupe-free, per the block above.
+        if stage == "CRITIQUE" and ("NEEDS REVISION" in verdict or "MAJOR REWORK" in verdict):
+            try:
+                current = int(states.get("_revision_round_count", 0) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            states["_revision_round_count"] = current + 1
         return states
 
     try:

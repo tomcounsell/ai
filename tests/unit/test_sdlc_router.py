@@ -30,6 +30,7 @@ from agent.sdlc_router import (
     compute_same_stage_count,
     decide_next_dispatch,
     evaluate_guards,
+    guard_g2_critique_cycle_cap,
     guard_g5_artifact_hash_cache,
     guard_g7_plan_revising,
     record_dispatch,
@@ -1147,8 +1148,12 @@ class TestGuardsListOrder:
             # T (#2894, #2817) runs first: a finished lane has no correct
             # dispatch, so no other guard's verdict is worth computing.
             "guard_terminal_lane",
-            "guard_g1_critique_loop",
+            # G2 before G1 (#2885 via #3065): G1 dispatches /do-plan on every
+            # revision-demanding verdict, so with G1 first the cycle cap can
+            # never fire. G2 is None below the cap, so precedence is unchanged
+            # until the bound is spent.
             "guard_g2_critique_cycle_cap",
+            "guard_g1_critique_loop",
             "guard_g3_pr_lock",
             "guard_g4_oscillation",
             "guard_g9_blocked_on_conflict",
@@ -1157,6 +1162,68 @@ class TestGuardsListOrder:
             "guard_g5_artifact_hash_cache",
             "guard_g6_terminal_merge_ready",
         ]
+
+
+class TestG2RevisionRoundCap:
+    """#2885 via #3065: G2 must bound the NEEDS REVISION <-> revise loop.
+
+    The skill-driven loop marks CRITIQUE ``completed`` every round while
+    recording NEEDS REVISION, and ``critique_cycle_count`` stays 0 (its only
+    incrementer is ``fail_stage``, which that flow never calls). G2 now also
+    reads ``revision_round_count`` and trips on a still-revising verdict even
+    with CRITIQUE completed.
+    """
+
+    def _states(self, critique="completed"):
+        return {"PLAN": "completed", "CRITIQUE": critique}
+
+    def test_trips_at_cap_despite_completed_marker(self):
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = guard_g2_critique_cycle_cap(self._states(), meta, {})
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G2"
+
+    def test_below_cap_stands_down(self):
+        meta = _base_meta(
+            revision_round_count=1,
+            latest_critique_verdict="NEEDS REVISION",
+        )
+        assert guard_g2_critique_cycle_cap(self._states(), meta, {}) is None
+
+    def test_accepted_verdict_stands_down_even_with_spent_count(self):
+        """A lane whose loop terminated (verdict accepted) must not re-block."""
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="READY TO BUILD",
+        )
+        assert guard_g2_critique_cycle_cap(self._states(), meta, {}) is None
+
+    def test_g2_precedes_g1_end_to_end(self):
+        """Through decide_next_dispatch: at the cap the router escalates
+        instead of letting G1 dispatch /do-plan for a tenth round."""
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G2"
+
+    def test_below_cap_g1_still_routes_to_plan(self):
+        meta = _base_meta(
+            revision_round_count=1,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "G1"
 
 
 # ---------------------------------------------------------------------------
