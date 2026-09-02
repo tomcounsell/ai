@@ -1160,6 +1160,23 @@ class TestSessionClaimHook:
         except StopIteration:
             pass
 
+    def test_async_global_is_still_none_after_redis_test_db_setup(self):
+        """The fence against re-introducing an eager async bind in conftest.
+
+        ``redis_test_db`` has already completed its setup by the time this body
+        runs (it is autouse and function-scoped), so this observes exactly the
+        state a test sees. It must still be ``None``: conftest used to assign
+        ``aioredis.Redis(...)`` here, and because conftest sets up AFTER the
+        plugin's ``_popoto_reset_async``, that synchronously-built,
+        wrong-event-loop client was the one every test actually got. Leaving the
+        global ``None`` hands it back to ``get_async_redis_db()``, which builds
+        it lazily inside the test's own loop (#2771).
+        """
+        assert getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None) is None, (
+            "something bound popoto's async client outside a running test loop; "
+            "conftest must never assign _POPOTO_ASYNC_REDIS_DB (#2771)"
+        )
+
     def test_every_live_popoto_client_sits_on_a_claimed_db(self):
         """The plugin-agnostic half: whatever clients ``popoto.redis_db`` holds,
         each points at a db this process owns.
