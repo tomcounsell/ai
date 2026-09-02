@@ -209,7 +209,7 @@ The fact travelling through this system is **"which Redis server and db does pop
 
 **Size:** Small
 
-**Team:** Solo dev, code reviewer
+**Team:** Five roles, as enumerated in Team Orchestration — a lane lead plus `conftest-builder`, `identity-validator`, `suite-baseline`, and `db-ownership-docs`. The edit is small; the roster is sized to the blast radius (an autouse fixture over the whole suite) and to the two full-suite runs the verification loop requires, not to the line count.
 
 **Interactions:**
 - PM check-ins: 0 (scope is fully pinned by the issue's recon and the four spikes above)
@@ -607,6 +607,11 @@ a baseline classifier.
 
 ## Verification
 
+Every `ANTI:` row states its expectation as **"no output"** rather than a match count. This is
+deliberate: recursive and `-c` forms of `grep` print one `path:count` line per scanned file
+(including zero-count files), so a validator cannot read PASS/FAIL off a count. A row passes
+when the command prints nothing.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Targeted tests pass | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py tests/unit/test_test_redis_server_resolution.py tests/unit/test_popoto_client_identity.py tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
@@ -615,13 +620,15 @@ a baseline classifier.
 | Serial run also passes (no xdist masking) | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n0 -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| ANTI: conftest never reassigns the popoto sync global | `grep -cE '^\s*rdb\.POPOTO_REDIS_DB\s*=' tests/conftest.py` | match count == 0 |
-| ANTI: conftest never writes the async global | `grep -cE 'rdb\._POPOTO_ASYNC_REDIS_DB\s*=' tests/conftest.py` | match count == 0 |
-| ANTI: the submodule repatch helper is gone repo-wide | `grep -rc '_popoto_modules_with_redis_db' tests/` | match count == 0 |
-| ANTI: no test skips on a `None` async client | `grep -rn 'popoto exposes no async client' tests/` | exit code 1 |
-| ANTI (No-Go #2770): tests never call popoto's `_swap_db` | `grep -rc '_swap_db' tests/` | match count == 0 |
-| ANTI (No-Go #3003): no bare `redis.Redis(db=...)` in the edited guard file | `grep -cE 'redis\.Redis\(db=' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
-| ANTI: the connection cap is read from popoto, not hardcoded | `grep -cE 'max_connections\s*=\s*[0-9]' tests/conftest.py` | match count == 0 |
+| ANTI: conftest never reassigns the popoto sync global | `grep -nE '^\s*rdb\.POPOTO_REDIS_DB\s*=' tests/conftest.py` | no output |
+| ANTI: conftest never writes the async global | `grep -nE 'rdb\._POPOTO_ASYNC_REDIS_DB\s*=' tests/conftest.py` | no output |
+| ANTI: the submodule repatch helper is gone from the test tree | `grep -rn '_popoto_modules_with_redis_db' tests/` | no output |
+| ANTI: no live code or live feature doc names the deleted helper | `grep -rn '_popoto_modules_with_redis_db' docs/features/ tests/ --include='*.py' --include='*.md' \| grep -v 'docs/archive/'` | no output |
+| ANTI: no test skips on a `None` async client | `grep -rn 'popoto exposes no async client' tests/` | no output |
+| ANTI (No-Go #2770): tests never call popoto's `_swap_db` | `grep -rn '_swap_db' tests/` | no output |
+| ANTI (No-Go #3003): no bare `redis.Redis(db=...)` in the edited guard file | `grep -nE 'redis\.Redis\(db=' tests/unit/test_conftest_isolation_guards.py` | no output |
+| ANTI: the connection cap is read from popoto, not hardcoded | `grep -nE 'max_connections\s*=\s*[0-9]' tests/conftest.py` | no output |
+| ANTI: the pool is never restored at function scope | `grep -nE 'connection_pool\s*=\s*old_pool' tests/conftest.py` | no output outside the session-scoped `_popoto_pool_install` finalizer |
 | Live client identity holds (one object, all bindings) | `./scripts/pytest-clean.sh tests/unit/test_popoto_client_identity.py -q -p no:randomly -n0` | exit code 0 |
 | Live pool keeps popoto's connection cap | `./scripts/pytest-clean.sh tests/unit/test_popoto_client_identity.py::test_pool_is_blocking_with_popoto_cap -q -n0` | exit code 0 |
 | Pool is installed once per session, not per test | `./scripts/pytest-clean.sh tests/unit/test_popoto_client_identity.py -k pool_identity -q -n0 -p no:randomly` | exit code 0 |
