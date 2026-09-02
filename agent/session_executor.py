@@ -1601,6 +1601,23 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 else None
             )
 
+            # Open-question pause (#2701). An sdlc eng session that has already
+            # put a question in front of a human must wait for the answer rather
+            # than be nudged onward to guess at it. The condition is the poll
+            # registry's existing unanswered row — no new state — and the read
+            # happens HERE so `determine_delivery_action` stays a pure function,
+            # matching the `last_compaction_ts` contract. Thread-offloaded: this
+            # is a Redis read on an async callback. Fail-quiet by construction —
+            # `session_has_open_poll` returns False rather than raising, so a
+            # Redis hiccup degrades to today's nudge behavior.
+            _has_open_question = False
+            if session.session_id:
+                from bridge.poll_registry import session_has_open_poll
+
+                _has_open_question = await asyncio.to_thread(
+                    session_has_open_poll, session.session_id
+                )
+
             # Delegate routing decision to output_router (call site preserved here)
             from agent.output_router import route_session_output
 
@@ -1615,9 +1632,25 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 classification_type=_classification,
                 is_teammate=_is_teammate,
                 last_compaction_ts=_last_compaction_ts,
+                has_open_question=_has_open_question,
             )
 
-            if action == "deliver_already_completed":
+            if action == "pause_open_question":
+                # The question is already on screen (as a poll, or as the text
+                # of this very turn). Deliver whatever the turn produced and
+                # then STOP — no `_enqueue_nudge`. The session resumes when the
+                # human answers, via the steering / completed-resume path.
+                logger.info(
+                    "[%s] Session %s has an outstanding question awaiting a human "
+                    "— delivering and pausing instead of nudging",
+                    session.project_key,
+                    session.session_id,
+                )
+                if msg and msg.strip():
+                    await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
+                chat_state.completion_sent = True
+
+            elif action == "deliver_already_completed":
                 logger.info(
                     f"[{session.project_key}] Session already completed — "
                     f"delivering without nudge ({len(msg)} chars)"
