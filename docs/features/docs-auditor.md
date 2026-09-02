@@ -46,8 +46,10 @@ and notifies that review is required. The notification destination is
 derived, not hardcoded: it goes to the `Eng:` group of the project whose
 `working_directory` (in `projects.json`) matches the audited repo root,
 addressed by numeric `chat_id` rather than group name. It falls back to the
-`Eng: Valor` literal only when the audited repo is this checkout and no
-project match is found; for any other unmatched or unregistered repo the
+`Eng: Valor` literal only when the audited repo is this checkout **and** no
+`Eng:` group could be resolved for it, whether because no project matched, the
+matched project's `Eng:` group is misconfigured, or the lookup itself raised;
+for any other repo whose `Eng:` group does not resolve, the
 Telegram notification is suppressed with a logged warning **and** a
 suppression notice spliced into the run's `summary` (placed before the PR
 URL so the 500-char truncation the reflection scheduler applies cannot drop
