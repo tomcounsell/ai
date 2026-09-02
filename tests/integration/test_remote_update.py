@@ -474,17 +474,17 @@ class TestGetPypiLatest:
 
 # Mirrors the real ``pyproject.toml`` shape the pin helpers must survive:
 # a floor declaration (``openai>=1.0.0``) whose package name also appears
-# inside another line's *comment*, an extras pin
-# (``pydantic-ai-slim[anthropic]``) that contains a second package's name,
-# and that extras line placed ABOVE the ``anthropic`` declaration so a
-# line-order-dependent reader resolves the wrong one.
+# inside the TRAILING COMMENT of a line that does carry ``==`` (the exact
+# defect-1 reproduction — a comment on its own line would not trip the old
+# substring scan), an extras pin (``pydantic-ai-slim[anthropic]``) that
+# contains a second package's name, and that extras line placed ABOVE the
+# ``anthropic`` declaration so a line-order-dependent reader resolves the
+# wrong one.
 REALISTIC_PYPROJECT = """[project]
 name = "ai"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    # CRITICAL — slim + anthropic extra only (avoids the openai/google/mcp
-    # extras pulled in by the pydantic-ai meta-package)
-    "pydantic-ai-slim[anthropic]==2.9.0",
+    "pydantic-ai-slim[anthropic]==2.9.0", # slim: avoids the openai/google/mcp extras
     "anthropic==0.125.0", # CRITICAL — pin exact
     "claude-agent-sdk==0.2.151", # CRITICAL — pin exact
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
@@ -538,7 +538,7 @@ class TestPinDeclarationDefects:
         # The extras marker and the neighbouring declarations are untouched.
         assert '"anthropic==0.125.0"' in content
         assert '"openai>=1.0.0"' in content
-        assert "avoids the openai/google/mcp" in content
+        assert "avoids the openai/google/mcp extras" in content
 
 
 class TestPinHelpersRefuseLoudly:
@@ -565,6 +565,25 @@ class TestPinHelpersRefuseLoudly:
     def test_reader_returns_none_when_package_absent(self, tmp_path: Path):
         (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
         assert get_pinned_version(tmp_path, "not-declared-anywhere") is None
+
+    def test_no_dependency_block_refuses_without_crashing(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "ai"\n')
+        assert get_pinned_version(tmp_path, "anthropic") is None
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "anthropic", "1.0.0")
+        # Refusal is a refusal: the file is byte-for-byte untouched.
+        assert (tmp_path / "pyproject.toml").read_text() == '[project]\nname = "ai"\n'
+
+    def test_writer_raises_when_pyproject_missing(self, tmp_path: Path):
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "anthropic", "1.0.0")
+
+    def test_real_pyproject_declarations_resolve(self):
+        """The live file is the shape that produced every spike-2 defect."""
+        assert get_pinned_version(PROJECT_DIR, "anthropic") == "0.125.0"
+        assert get_pinned_version(PROJECT_DIR, "pydantic-ai-slim") == "2.9.0"
+        # A floor is not a pin, and `openai` sits inside the slim line's comment.
+        assert get_pinned_version(PROJECT_DIR, "openai") is None
 
 
 class TestVerifyCriticalVersions:

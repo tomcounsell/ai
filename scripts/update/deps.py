@@ -12,7 +12,14 @@ from pathlib import Path
 
 
 class PinDeclarationError(RuntimeError):
-    """Temporary red-state shim."""
+    """A dependency declaration could not be resolved unambiguously.
+
+    Raised instead of silently returning a wrong-but-plausible answer or
+    silently no-opping. Both failure modes produced the 2026-08-24 half-bump
+    incident: a reader that scraped a version out of a comment, and a writer
+    whose regex could not match an extras pin and reported ``False`` into an
+    error list that ``auto_bump_deps`` recorded and then continued past.
+    """
 
 
 @dataclass
@@ -251,31 +258,137 @@ def get_installed_version(project_dir: Path, package: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Declaration-aware pin helpers
+# ---------------------------------------------------------------------------
+#
+# A `pyproject.toml` dependency line is NOT a substring haystack. The real file
+# carries all three shapes that broke the naive helpers (#3001 spike-2):
+#
+#     "pydantic-ai-slim[anthropic]==2.9.0", # ... avoids the openai/... extras
+#     "anthropic==0.125.0",
+#     "openai>=1.0.0", # Embedding API ...
+#
+#   1. `openai` occurs inside the FIRST line's trailing comment, so a substring
+#      scan for `openai` on a line containing `==` returns `2.9.0`. The real
+#      `openai` declaration is a floor with no `==` at all.
+#   2. `anthropic` also occurs in that first line, as an EXTRA. A line-ordered
+#      scan resolves the wrong declaration; today it happens to be right only
+#      because of where the lines sit.
+#   3. The writer's `"{package}==[^"]*"` cannot match an extras pin, so it
+#      no-ops and reports failure into a list `auto_bump_deps` records and then
+#      continues past — the half-bump this lane exists to prevent.
+#
+# So: strip comments, extract whole quoted requirement strings, parse each into
+# (normalized name, extras, specifier), and match on the NAME. Refuse loudly on
+# ambiguity. Deliberately regex-on-text rather than tomlkit/tomllib — the writer
+# must preserve the CRITICAL comments verbatim (see plan Rabbit Holes).
+
+# A PEP 508 requirement's leading name, optional extras, and the rest.
+_REQUIREMENT_RE = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?P<extras>\[[^\]]*\])?"
+    r"\s*(?P<spec>.*?)\s*$"
+)
+# An exact pin, and only an exact pin: `==1.2.3`. A compound specifier
+# (`==1.2.3,<2`) or an environment marker is not one, and must not be
+# mistaken for one by either helper.
+_EXACT_PIN_RE = re.compile(r"^==\s*(?P<version>[^,\s;]+)$")
+
+
+def _normalize_package(name: str) -> str:
+    """PEP 503 normalization so `Claude_Agent.SDK` matches `claude-agent-sdk`."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _strip_comment(line: str) -> str:
+    """Drop the trailing `#` comment, ignoring `#` inside a quoted string."""
+    in_string = False
+    for i, char in enumerate(line):
+        if char == '"':
+            in_string = not in_string
+        elif char == "#" and not in_string:
+            return line[:i]
+    return line
+
+
+@dataclass
+class _Declaration:
+    """One parsed dependency declaration and where its text lives."""
+
+    package: str  # normalized name
+    requirement: str  # the full quoted body, e.g. pydantic-ai-slim[anthropic]==2.9.0
+    extras: str  # "[anthropic]" or ""
+    specifier: str  # "==2.9.0", ">=1.0.0", ""
+    line_index: int
+
+    @property
+    def pinned_version(self) -> str | None:
+        """The exact-pinned version, or None for a floor/range/unconstrained."""
+        match = _EXACT_PIN_RE.match(self.specifier)
+        return match.group("version") if match else None
+
+
+def _find_declarations(content: str, package: str) -> list[_Declaration]:
+    """Every declaration of `package` in a pyproject.toml body, comment-blind."""
+    wanted = _normalize_package(package)
+    found: list[_Declaration] = []
+
+    for line_index, line in enumerate(content.split("\n")):
+        for requirement in re.findall(r'"([^"]*)"', _strip_comment(line)):
+            match = _REQUIREMENT_RE.match(requirement)
+            if not match or _normalize_package(match.group("name")) != wanted:
+                continue
+            found.append(
+                _Declaration(
+                    package=wanted,
+                    requirement=requirement,
+                    extras=match.group("extras") or "",
+                    specifier=match.group("spec"),
+                    line_index=line_index,
+                )
+            )
+
+    return found
+
+
+def _resolve_declaration(content: str, package: str, source: Path) -> _Declaration | None:
+    """The single declaration of `package`, or None if absent.
+
+    Raises `PinDeclarationError` when the file declares it more than once —
+    a rewrite would then have to guess which one the coupled set means.
+    """
+    declarations = _find_declarations(content, package)
+    if not declarations:
+        return None
+    if len(declarations) > 1:
+        raise PinDeclarationError(
+            f"{source}: {package!r} is declared {len(declarations)} times "
+            f"({[d.requirement for d in declarations]}); refusing to guess "
+            "which declaration to read or rewrite"
+        )
+    return declarations[0]
+
+
 def get_pinned_version(project_dir: Path, package: str) -> str | None:
-    """Get pinned version from pyproject.toml."""
+    """The exact-pinned version of `package` in pyproject.toml, if it has one.
+
+    Comment-blind and extras-tolerant: matches the declaration's own name,
+    never text inside a neighbouring line's comment or extras marker.
+
+    Returns None when the package is not declared at all, or is declared
+    without an exact `==` pin (a floor such as `openai>=1.0.0` is not a pin,
+    and reporting one would invent a version nobody wrote).
+
+    Raises `PinDeclarationError` on duplicate declarations.
+    """
     pyproject = project_dir / "pyproject.toml"
 
     if not pyproject.exists():
         return None
 
-    content = pyproject.read_text()
-
-    # Simple parser for == pins
-    # Format: "telethon==1.40.0",  # CRITICAL — comment
-    for line in content.split("\n"):
-        if package in line and "==" in line:
-            # Extract version from line
-            parts = line.split("==")
-            if len(parts) >= 2:
-                version_part = parts[1]
-                # Remove trailing comma, quotes, and comments
-                # First strip the quote and comma: 1.40.0",  # comment -> 1.40.0
-                if '"' in version_part:
-                    version_part = version_part.split('"')[0]
-                version = version_part.strip().rstrip(",")
-                return version
-
-    return None
+    declaration = _resolve_declaration(pyproject.read_text(), package, pyproject)
+    return declaration.pinned_version if declaration else None
 
 
 def verify_critical_versions(project_dir: Path) -> list[VersionInfo]:
@@ -393,25 +506,48 @@ def get_pypi_latest(package: str, timeout: int = 10) -> str | None:
 
 
 def bump_pin_in_pyproject(project_dir: Path, package: str, new_version: str) -> bool:
-    """Update the pinned version for a package in pyproject.toml.
+    """Rewrite `package`'s exact pin in pyproject.toml to `new_version`.
 
-    Matches lines like: "anthropic==0.62.0",  # CRITICAL — ...
-    Replaces only the version portion, preserving comments.
+    Extras-tolerant: `pydantic-ai-slim[anthropic]==2.9.0` is rewritten in
+    place with its extras marker and trailing comment intact. Only the
+    version portion of the one matched declaration changes.
+
+    Returns True on a successful rewrite. Never returns False — every refusal
+    raises `PinDeclarationError`, because a silent no-op reported as a
+    recorded-and-continued error is precisely how one member of a coupled set
+    stayed behind while the others moved.
+
+    Raises `PinDeclarationError` when pyproject.toml is missing, when the
+    package is not declared, when it is declared more than once, or when its
+    declaration is a floor/range rather than an exact pin (rewriting
+    `openai>=1.0.0` would invent a pin the maintainer never chose).
     """
     pyproject = project_dir / "pyproject.toml"
     if not pyproject.exists():
-        return False
+        raise PinDeclarationError(f"{pyproject}: no pyproject.toml to rewrite")
 
     content = pyproject.read_text()
-    # Match: "package==VERSION" — capture the full quoted string
-    pattern = re.compile(
-        rf'"{re.escape(package)}==[^"]*"',
-    )
-    new_content, count = pattern.subn(f'"{package}=={new_version}"', content)
-    if count == 0:
-        return False
+    declaration = _resolve_declaration(content, package, pyproject)
+    if declaration is None:
+        raise PinDeclarationError(f"{pyproject}: {package!r} has no dependency declaration to bump")
+    if declaration.pinned_version is None:
+        raise PinDeclarationError(
+            f"{pyproject}: {package!r} is declared as {declaration.requirement!r}, "
+            f"not an exact `==` pin; refusing to invent a pin at {new_version}"
+        )
 
-    pyproject.write_text(new_content)
+    lines = content.split("\n")
+    old_text = f'"{declaration.requirement}"'
+    new_text = f'"{package}{declaration.extras}=={new_version}"'
+    line = lines[declaration.line_index]
+    if line.count(old_text) != 1:
+        raise PinDeclarationError(
+            f"{pyproject}: {old_text} is not uniquely locatable on line "
+            f"{declaration.line_index + 1}; refusing an ambiguous rewrite"
+        )
+    lines[declaration.line_index] = line.replace(old_text, new_text)
+
+    pyproject.write_text("\n".join(lines))
     return True
 
 
@@ -502,25 +638,31 @@ def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
             )
             continue
 
-        if bump_pin_in_pyproject(project_dir, package, latest):
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=True,
-                )
-            )
-        else:
+        # The writer refuses loudly rather than no-opping. Carry its reason
+        # verbatim into the result so a refusal is legible in the /update log
+        # instead of reading as a generic write failure.
+        try:
+            bump_pin_in_pyproject(project_dir, package, latest)
+        except PinDeclarationError as exc:
             result.bumps.append(
                 BumpResult(
                     package=package,
                     old_version=current,
                     new_version=latest,
                     bumped=False,
-                    error="Failed to update pyproject.toml",
+                    error=f"Failed to update pyproject.toml: {exc}",
                 )
             )
+            continue
+
+        result.bumps.append(
+            BumpResult(
+                package=package,
+                old_version=current,
+                new_version=latest,
+                bumped=True,
+            )
+        )
 
     if not result.any_bumped:
         return result
