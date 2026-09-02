@@ -63,17 +63,29 @@ _CONSUMED_TYPES = ("tool_cost", "token_usage", "pre_tool_use_denial")
 #:
 #: Task 4 arms the escalation rollback gate against
 #: ``max(ESCALATION_CEILING_MULTIPLIER x belt-relevant denial baseline,
-#: ESCALATION_CEILING_FLOOR)``. Counting causes a belt does not control would
-#: inflate that ceiling and mask a belt that is genuinely cut too tight, so the
-#: denominator excludes them. ``sensitive_path`` and ``teammate_write`` are the
-#: two the plan names; ``tool_budget`` (a per-session spend cap) and
-#: ``foreground_guard`` (a subagent-backgrounding guard) are excluded on the
-#: same principle — both are orthogonal to which tools a belt offers.
+#: ESCALATION_CEILING_FLOOR)``. Counting a cause a belt does not control would
+#: inflate that ceiling and mask a belt that is genuinely cut too tight.
 #:
-#: ``teammate_write`` leaves this set in Lane B, once ``valor-docs-write``
-#: replaces the hook branch and the restriction becomes belt-expressible.
+#: The plan authorizes EXACTLY the two entries below and no more (Risk 1, task
+#: 4, Success Criteria). Every further exclusion subtracts signal the ceiling
+#: exists to watch, and enough of them drive ``denials_belt_relevant`` to a
+#: structural zero. ``tool_budget`` is the clearest example of what belongs IN
+#: the denominator: a narrower belt means fewer tool calls, hence fewer
+#: per-session spend-cap trips, so budget denials move with belt width and are
+#: exactly the signal being measured. Widening this set requires amending the
+#: plan first; ``tests/unit/test_belt_reports.py`` pins it.
 BELT_IRRELEVANT_CAUSES = frozenset(
-    {"sensitive_path", "teammate_write", "tool_budget", "foreground_guard"}
+    {
+        # Plan Risk 1: "the SENSITIVE_PATHS/SENSITIVE_FRAGMENTS block". A belt
+        # chooses which tools are offered; no belt makes .env writable, so a
+        # narrower belt cannot move this count.
+        "sensitive_path",
+        # Plan Risk 1: "and, pre-Lane-B, the teammate write-restriction block".
+        # TEMPORARY. Lane B's ``valor-docs-write`` wrapper retires that hook
+        # branch, at which point the restriction becomes belt-expressible and
+        # this entry must be deleted, leaving ``sensitive_path`` alone.
+        "teammate_write",
+    }
 )
 
 
@@ -267,8 +279,8 @@ def _render(summary: dict, telemetry_dir: Path, args: argparse.Namespace) -> str
     if not summary["denials"]:
         lines.append(
             "  none recorded — denial telemetry only counts instrumented causes "
-            "(tool_budget today), so zero here means no instrumented denials, "
-            "not necessarily no denials."
+            "(tool_budget, sensitive_path, teammate_write), so zero here means "
+            "no instrumented denials, not necessarily no denials."
         )
 
     if args.merged_pr_count:

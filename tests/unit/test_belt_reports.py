@@ -85,13 +85,32 @@ class TestBaselineEmptyStates:
         assert "not a zero baseline" in out
         # The distinguishing property: no measurement is presented as a number.
         assert "attributed tokens   0" not in out
+        # Nor is task 4's ceiling baseline — an unmeasured window must not
+        # publish "0 belt-relevant denials" as if that were a reading.
+        assert "belt-relevant" not in out
 
     def test_stream_with_only_unconsumed_events_is_still_unmeasured(self, tmp_path, capsys):
         telemetry = tmp_path / "session_telemetry"
         _write_stream(telemetry, "s1", [{"type": "turn_start"}, {"type": "idle_gap"}])
         code = belt_baseline.main(["--telemetry-dir", str(telemetry)])
+        out = capsys.readouterr().out
         assert code == belt_baseline.EXIT_NO_DATA
-        assert "NO MEASUREMENTS FOUND" in capsys.readouterr().out
+        assert "NO MEASUREMENTS FOUND" in out
+        assert "belt-relevant" not in out
+
+    def test_measured_window_with_no_denials_says_zero_is_not_a_reading(self, tmp_path, capsys):
+        """A window that HAS measurements but no denial events reports a
+        belt-relevant count of 0. That 0 is a real observation of the stream,
+        not a ceiling baseline, so the report caveats it in words rather than
+        letting task 4 read it as "no belt pressure"."""
+        telemetry = tmp_path / "session_telemetry"
+        _write_stream(telemetry, "s1", [_tool_cost({"Bash": _row(inp=10)})])
+
+        assert belt_baseline.main(["--telemetry-dir", str(telemetry)]) == belt_baseline.EXIT_OK
+        out = capsys.readouterr().out
+        assert "PreToolUse denials: 0" in out
+        assert "none recorded" in out
+        assert "not necessarily no denials" in out
 
 
 class TestBaselineAggregation:
@@ -170,6 +189,21 @@ class TestBeltRelevantDenialSplit:
     cannot affect. Counting them would inflate the ceiling and mask a belt cut
     too tight."""
 
+    def test_exclusion_set_is_exactly_the_two_the_plan_authorizes(self):
+        """PINNED. The plan (Risk 1, task 4, Success Criteria) authorizes two
+        exclusions and no more: the sensitive-path block and, pre-Lane-B, the
+        teammate write-restriction block.
+
+        Widening this set is how ``denials_belt_relevant`` silently becomes a
+        structural zero — every additional exclusion removes signal the
+        escalation ceiling exists to watch. ``tool_budget`` in particular IS
+        belt-affected: a narrower belt means fewer tool calls, hence fewer
+        budget trips. Any widening must amend the plan first, and will fail
+        here until it does."""
+        assert belt_baseline.BELT_IRRELEVANT_CAUSES == frozenset(
+            {"sensitive_path", "teammate_write"}
+        )
+
     def test_split_separates_affectable_from_unaffectable_causes(self, tmp_path):
         telemetry = tmp_path / "session_telemetry"
         _write_stream(
@@ -187,22 +221,31 @@ class TestBeltRelevantDenialSplit:
         )
         summary = belt_baseline.collect_baseline(telemetry)
         assert summary["denials_total"] == 7
-        # Only the two `missing_tool` denials are something a belt changes.
-        assert summary["denials_belt_relevant"] == 2
-        assert summary["denials_belt_irrelevant"] == 5
+        # tool_budget + foreground_guard + 2x missing_tool are all belt-affected.
+        assert summary["denials_belt_relevant"] == 4
+        assert summary["denials_belt_irrelevant"] == 3
         assert (
             summary["denials_belt_relevant"] + summary["denials_belt_irrelevant"]
             == summary["denials_total"]
         )
 
-    @pytest.mark.parametrize(
-        "cause", ["sensitive_path", "teammate_write", "tool_budget", "foreground_guard"]
-    )
+    @pytest.mark.parametrize("cause", ["sensitive_path", "teammate_write"])
     def test_each_named_exclusion_stays_out_of_the_denominator(self, cause, tmp_path):
         telemetry = tmp_path / "session_telemetry"
         _write_stream(telemetry, "s1", [{"type": "pre_tool_use_denial", "cause": cause}])
         summary = belt_baseline.collect_baseline(telemetry)
         assert summary["denials_belt_relevant"] == 0, f"{cause} must not inflate the ceiling"
+
+    @pytest.mark.parametrize("cause", ["tool_budget", "foreground_guard"])
+    def test_budget_and_guard_denials_stay_in_the_denominator(self, cause, tmp_path):
+        """A belt controls how many tools a session can reach, so it controls
+        how often the spend cap and the foreground guard trip. Excluding these
+        was the defect that made ``denials_belt_relevant`` structurally zero."""
+        telemetry = tmp_path / "session_telemetry"
+        _write_stream(telemetry, "s1", [{"type": "pre_tool_use_denial", "cause": cause}])
+        summary = belt_baseline.collect_baseline(telemetry)
+        assert summary["denials_belt_relevant"] == 1, f"{cause} is belt-affected"
+        assert summary["denials_belt_irrelevant"] == 0
 
     def test_unknown_cause_counts_as_belt_relevant(self, tmp_path):
         """Fail-loud on an unrecognised cause: under-counting the denominator
