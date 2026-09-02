@@ -5,9 +5,9 @@ appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2701
-last_comment_id: 5237014662
+last_comment_id: 5237664288
 revision_applied: true
-revision_applied_at: 2026-08-10T07:17:53Z
+revision_applied_at: 2026-09-02T00:00:00Z
 ---
 
 # Render /ask-me questions as native Telegram polls (group chats, eng sessions)
@@ -83,10 +83,57 @@ degrades to today's prose behavior at a single decision point.**
 
 ## Freshness Check
 
-**Verification baseline:** `95aba8187` — the single commit every `file:line` and symbol reference in
+**Verification baseline:** `5021a40aa` — the single commit every `file:line` and symbol reference in
 this document was last re-verified against. Where an older sha appears anywhere else in this plan's
 history, this line supersedes it.
 **Issue filed at:** 2026-08-10T04:47:24Z
+
+### Re-verification 2026-09-02 (revision cycle 5) — **Minor drift, one substantive change**
+
+Three weeks passed between cycle 4 and this pass. Fourteen commits on main touched files this plan
+references. Every symbol the plan names still exists and still means what the plan says it means;
+**every line offset has moved** (the reply-to ladder alone shifted ~+100 lines). The plan already
+carries the "locate by symbol, the offset is a hint" instruction under Technical Approach — that
+instruction is now doing real work and builders must obey it literally. Representative corrections,
+re-verified at `5021a40aa`: `_ack_steering_routed` `:904`→`:943`; `_build_completed_resume_text`
+→`:804`; `_completed_created_at` `:1898`→`:2017`; the steering ladder `:1799-1866`→`~:1899-1966`; the
+completed-dispatch block `:1951-2005`→`~:2051-2124`; `_steering_session_enqueued` `:2006`→`:2124`;
+`events.NewMessage` `:1165`→`:1261`; `events.MessageEdited` `:2523`→`:2681`; `replay_dead_letters`
+`:2842`→`:3019`; `_dead_letter_message` `:803`→`:946`; `process_outbox` `:850`→`:1018`;
+`_record_sent_message` `:655`→`:798`; `_bind_outbound_message_to_job` `:258`→`:389`;
+`_record_sent_reaction` `:182`→`:357`; the unknown-type dispatch guard `:911-915`→`:1054`;
+`set_reaction` `:320`→`:433`; `read_thread` `:371`→`:351`; `sweep_chat` `:560`→`:496`;
+`draft_message` `:1016`→`:1028`; `_validate_for_medium` `:561`→`:560`; `session_type` field
+`models/agent_session.py:156`→`:158`. Unchanged and re-confirmed: `KNOWN_MESSAGE_TYPES` at
+`telegram_relay.py:58`, `build_telegram_outbox_payload` at `output_handler.py:270`, the `send`
+capability at `:611` and `dropped_empty` at `:675`, `_is_group_chat` at `read_the_room.py:126`,
+`claim_message` at `dedup.py:171`, `_send_cb_accepts_file_paths` at `adapter.py:61`, `MessageDraft`
+at `message_drafter.py:193`, `_has_valor_reply_after`/`_render_transcript` in `agent_catchup.py`,
+and **zero `events.Raw` handlers repo-wide**.
+
+**The one substantive change — the steering overlap resolved against this plan, not for it.**
+`docs/plans/flip-steering-writers-to-room-key.md` was an *active* plan at cycle 4 and this document
+recorded it as a coordination note ("we add a new caller, so we inherit whatever it lands"). It
+**landed** (`ac190fb26`) and is now archived under `docs/archive/plans-completed/`. Inheriting it is
+no longer passive: `push_steering_message` gained a `room_id` parameter, the Room leg is live with
+**no feature flag**, and the writer *deliberately never looks a session up* — so **the caller must
+derive and pass `room_id` or the write silently falls back to the legacy key**. Every production
+caller in the reply-to ladder now passes `room_id=room_id_for_session(<the session it selected>)`
+(`telegram_bridge.py:1927`, `:1956`, `:1996`, `:2336`, `:2784`, `:2824`). A vote-originated steer
+that omits it would land on the legacy leg while every peer writes the Room leg — a real defect, and
+the reason this is called out rather than left to the builder. Corrected in **Technical Approach**
+and **Task 9b**, with a fifth item added to the extraction's behavior-preservation checklist.
+
+**Prior build work is gone; BUILD starts from zero.** Issue comment `5237664288` (the operator's
+2026-08-10 PAUSE) records branch `session/ask-me-telegram-polls` at tip `80dcae8e9` with six
+commits and a live worktree. **None of it survives**: no local branch, no remote ref, no worktree,
+and all six SHAs fail `git cat-file` — the objects were garbage-collected. There is nothing to
+rebase, audit, or recover. This is not a loss worth mourning: the operator's own note flags those
+commits as produced by a build agent running outside its supervisor's loop and "unaudited until it
+passes TEST and REVIEW". The one durable result is preserved as **spike-8** below.
+
+**Disposition: proceed.** Minor drift on offsets, one substantive correction applied, no change to
+scope, appetite, task topology, or the settled capability matrix.
 **Disposition (revision cycle 4):** **Major drift — resolved by re-scope.** The plan's core premise
 (polls into 1:1 DMs) was disproved by its own Task 1 gate and the issue was re-scoped by the owner
 (see **Scope** above and issue comments `5236653597` / `5237014662`). This revision replaces the
@@ -147,12 +194,10 @@ Every cited reference was still re-verified by hand:
 
 **Commits on main since issue was filed (touching referenced files):** none.
 
-**Active plans in `docs/plans/` overlapping this area:**
-`docs/plans/flip-steering-writers-to-room-key.md` touches `agent/steering.py` writers (the
-legacy `steering:{session_id}` key vs the Room key `steering:room:{room_id}`). This plan adds a
-**new caller** of `push_steering_message`, not a new key writer, so it inherits whatever that
-plan lands. Coordination note only, not a blocker: the vote translator must call
-`push_steering_message(...)` and never write a steering key directly.
+**Active plans in `docs/plans/` overlapping this area:** none as of `5021a40aa`. The one overlap
+this plan carried — `flip-steering-writers-to-room-key.md` — **shipped** (`ac190fb26`) and is
+archived. It is no longer a coordination note; it is a hard requirement on the vote translator. See
+the 2026-09-02 re-verification above, and Technical Approach / Task 9b for the corrected call shape.
 
 ## Prior Art
 
@@ -343,6 +388,22 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
   `session_type` into the outbox payload, which would let a queued payload outlive a session's real
   type.
 
+### spike-8: a vote IS readable back by the sending user account in a group (Gate 1 PASS, salvaged)
+- **Assumption**: "A user account can read back a vote cast on its own group poll" — i.e. Task 1.
+- **Method**: prototype, run 2026-08-10 by the build that was later paused and whose commits are
+  gone (commit `1b6c4c13a`, recorded in issue comment `5237664288`).
+- **Finding**: **PASS.** Vote readback by a user account in a group works. That was the last open
+  *design* risk after the DM rejection, and it is the finding that keeps this plan buildable.
+- **Confidence**: medium — **lower than every other spike here, deliberately.** The code that
+  produced it was written by an agent running outside its supervisor's loop, was never reviewed or
+  tested, and no longer exists to re-read. The claim is credible and consistent with Research
+  findings 4 and 5, but its provenance is not audit-grade.
+- **Impact on plan**: **Task 1 is NOT deleted.** It stays a hard gate. The probe is cheap, needs no
+  human, and re-establishes the result under supervision with output pasted into the PR — which is
+  exactly what an unaudited PASS cannot do. Treat spike-8 as a strong prior that Task 1 will pass,
+  never as a substitute for running it. Task 2 (the human-tap gate) was left **UNRESOLVED** by that
+  same build and remains genuinely open.
+
 ## Data Flow
 
 **Outbound (question → poll on screen):**
@@ -408,9 +469,11 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
    side-effect-free status ladder factored out of `bridge/telegram_bridge.py:1799-1866`, returning
    `LIVE` / `PENDING` / `LIVE_GUARD` / `COMPLETED` / `NONE`. Steer kinds →
    `push_steering_message`. `COMPLETED` → `resume_completed_session(...)`, the dispatch block
-   factored out of `:1951-2005`, called with the poll's own `msg_id` and no reply chain. `NONE` →
+   factored out of `~:2051-2124`, called with the poll's own `msg_id` and no reply chain. `NONE` →
    log and return. See the Technical Approach for the full signatures and the per-branch contract.
-6. **`agent/steering.py:85 push_steering_message(session_id, text, sender)`** — the sole inbox.
+6. **`agent/steering.py:176 push_steering_message(session_id, text, sender, room_id=...)`** — the
+   sole inbox. `room_id` is derived by the caller via `models.room.room_id_for_session`; omitting it
+   silently downgrades the write to the legacy key (see Technical Approach).
 7. **Worker turn boundary** — `runner.py:1290 _drain_steering_boundary()` merges the steer into
    the next `claude --resume` turn's user message.
 8. **Output** — the session resumes with the chosen option text in its input. If the choice was
@@ -633,7 +696,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
      telegram_message_id, chat_title=None, sender_id=None, project=None, project_key=None,
      working_dir=None, telegram_message_key=None, reply_chain_context=None,
      extra_context_overrides=None) -> None`** — the completed-session re-enqueue lifted from
-     `:1951-2005`: `_build_completed_resume_text(completed, text, reply_chain_context=...)` then
+     `~:2051-2124`: `_build_completed_resume_text(completed, text, reply_chain_context=...)` then
      `dispatch_telegram_session(...)`. Every `project`/`project_key`/`working_dir`/`session_type`
      argument left `None` falls back to the corresponding field on the `completed` **AgentSession
      record itself** (`project_key`, `working_dir`, `project_config`, `session_type` are all model
@@ -648,8 +711,19 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
 
 - **What a vote does on each branch, stated explicitly.** `translate_poll_vote` calls
   `resolve_answer_target(session_id)` and then:
-  - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text, sender_name)`
-    directly. It does **not** call `_ack_steering_routed`: there is no inbound message to react to,
+  - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text, sender_name,
+    room_id=room_id_for_session(target.session))`. **The `room_id` argument is mandatory, not
+    optional.** `agent/steering.py::push_steering_message` selects the Room key
+    (`steering:room:{room_id}`) only when the caller supplies `room_id`; with none it silently
+    writes the legacy `steering:{session_id}` key. The writer never looks the session up itself —
+    `session_id` is unindexed and a lookup there would cost ~2.4s on the inbound fast path — so
+    derivation is the caller's job, exactly as every reply-to-ladder caller now does
+    (`telegram_bridge.py:1927`, `:1956`, `:1996`). The translator already holds the session record
+    from `resolve_answer_target`, so `room_id_for_session(target.session)` is a pure attribute read
+    with no extra query. `AnswerTarget.session` is `None` only on the `NONE` kind, which never
+    steers; a session with no `project_key` yields `None` and correctly takes the legacy leg.
+    Omitting this puts the vote steer on a leg no one drains alongside its peers — a silent
+    regression, not a crash. It does **not** call `_ack_steering_routed`: there is no inbound message to react to,
     and closing the poll is already the visible acknowledgment. It also deliberately skips
     `_ack_steering_routed`'s abort-keyword detection — a poll option is never an abort keyword.
   - `COMPLETED` → `resume_completed_session(completed=target.session, text=steer_text,
@@ -930,6 +1004,16 @@ Additional coverage required by **revision cycle 2**, all in
 - `encode_option` / `decode_option` round-trip, including an option index recovered from a poll
   read back off the wire (`tests/unit/test_poll_payload.py`).
 
+Additional coverage required by **revision cycle 5** (the landed Room-key flip), in
+`tests/unit/test_poll_vote_translation.py`:
+
+- `translate_poll_vote` against a `LIVE` target calls `push_steering_message` with
+  `room_id == room_id_for_session(<that session>)` — asserted on the **keyword argument**, not just
+  on the steer text, since omitting it is a silent legacy-key downgrade rather than an error.
+  Repeated for `PENDING` and `LIVE_GUARD`.
+- A target session with no `project_key` yields `room_id=None` and the steer still lands (legacy
+  leg), rather than raising.
+
 Additional coverage required by **revision cycle 4** (the group-only + eng-only re-scope): every
 bullet under **Eligibility Gate**, **Vote Selection Under Multiple Voters**, and **Claim
 Durability** in the Failure Path Test Strategy above, in `tests/unit/test_poll_gating.py`,
@@ -1018,7 +1102,7 @@ looks broken and trust in it is gone after one occurrence.
 **Mitigation:** the vote translator branches on `resolve_answer_target(session_id)` rather than
 calling `push_steering_message` blindly, and the `COMPLETED` branch calls
 `resume_completed_session(...)` — the same dispatch block a typed reply uses, factored out of
-`bridge/telegram_bridge.py:1951-2005`. Explicitly covered by an integration test against a
+`bridge/telegram_bridge.py` ~`:2051-2124`. Explicitly covered by an integration test against a
 `completed` session.
 
 ### Risk 4: duplicate or repeated translation of one vote
@@ -1378,9 +1462,25 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
 
 ## Team Orchestration
 
-The lead agent orchestrates and never builds directly.
+> **This section is a suggested division of labour, NOT a precondition for building.** Two
+> independent builds of this plan hard-stopped here (issue comment `5237664288`): each read the
+> named team below as mandatory, found no subagent-dispatch tool available to it, and halted —
+> even though executing the tasks sequentially, itself, was available the whole time and is a
+> perfectly good way to ship this plan. That was a plan defect, not an agent misjudgment, and this
+> paragraph is the fix.
+>
+> **If you cannot spawn subagents, ignore the roster and work the Step by Step Tasks in dependency
+> order yourself.** The names below exist to describe which tasks group naturally and may run in
+> parallel; nothing in the Success Criteria or the Verification table checks who did the work. The
+> only genuinely ordering-sensitive facts live in each task's `Depends On`.
+>
+> A related dispatch note from the same postmortem: when BUILD *is* dispatched to a child agent,
+> dispatch it as agent type `builder`, not `general-purpose` — `builder` carries the full tool set.
 
-### Team Members
+The lead agent orchestrates and, when it has the tools to do so, delegates rather than building
+directly.
+
+### Team Members (suggested grouping)
 
 - **Probe runner (vote-readback gates)**
   - Name: `poll-probe`
@@ -1447,6 +1547,10 @@ longer stalls eleven tasks. Tasks 3-8 and 11-12 depend on neither gate.
 - **This is the only remaining gate-worthy unknown.** Reconciliation is the primary inbound
   mechanism and there is nothing behind it, so if a vote cannot be read back the inbound half is
   impossible.
+- **Expect a PASS, but run it anyway.** spike-8 records that the 2026-08-10 build already got a PASS
+  here. That build's code is gone and was never reviewed or tested, so its result is a strong prior,
+  not evidence. This gate is cheap, needs no human, and its whole value is producing a supervised
+  result pasted into the PR. Do not skip it on the strength of spike-8.
 - **Do NOT re-probe the send capability and do NOT send any poll into a 1:1 DM.** spike-6 settled
   both with verbatim MTProto results.
 - **Production-safety constraints on the probe (mandatory, and the reason the push question is not
@@ -1684,8 +1788,9 @@ ladder is an inline block in `handler(event)` and cannot be lifted at a `(sessio
 signature; every branch consumes `event`/`message`/`project`. Extract only the genuinely shared
 parts and leave caller-specific side effects in the caller:
 
-- `resolve_answer_target(session_id) -> AnswerTarget` — a state read over
-  `bridge/telegram_bridge.py:1799-1866`. `AnswerTarget` is
+- `resolve_answer_target(session_id) -> AnswerTarget` — a state read over the ladder at
+  `bridge/telegram_bridge.py` ~`:1899-1966` (**locate by symbol** — start at
+  `_steering_session_enqueued = False` and read to the completed branch). `AnswerTarget` is
   `(kind: AnswerTargetKind, session: AgentSession | None, matched_status: str | None,
   pending_age_s: float | None)`; `AnswerTargetKind` is `LIVE | PENDING | LIVE_GUARD | COMPLETED |
   NONE`. **This is a restructure, not a verbatim lift** — the source interleaves the ladder with
@@ -1694,17 +1799,25 @@ parts and leave caller-specific side effects in the caller:
   1. `matched_status` carried because the LIVE log embeds `matching_session.status` and the
      LIVE_GUARD log embeds `live_guard.status`.
   2. `pending_age_s` carried because the PENDING log embeds `age=%.1f` from
-     `_pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`).
+     `_pending_session_age_seconds(pending_session.created_at, time.time())` (helper at `:153`,
+     call site now `:1944`).
   3. `COMPLETED` returns the record chosen by the existing most-recent-`created_at` sort
-     (`_completed_created_at`, `:1898`), **not** `completed_sessions[0]` — the wrong record silently
+     (`_completed_created_at`, now `:2017`), **not** `completed_sessions[0]` — the wrong record silently
      degrades `_build_completed_resume_text`'s `context_summary`.
-  4. `_steering_session_enqueued = True` (`:2006`) stays caller-side; `resume_completed_session`
+  4. `_steering_session_enqueued = True` (now `:2124`) stays caller-side; `resume_completed_session`
      returns `None`.
-  The `LIVE_GUARD` kind is the existing belt-and-suspenders re-check at `:1856-1866`.
+  5. **`room_id` derivation stays with whoever calls `push_steering_message`.** The ladder now
+     derives `room_id=room_id_for_session(<the session that branch selected>)` at each of its three
+     steering branches (`:1927`, `:1956`, `:1996`), and the LIVE branch's `matching_session` is
+     chosen by a newest-first `created_at` sort *specifically so the Room is derived from the live
+     row*. `resolve_answer_target` must preserve that sort and return the session object itself —
+     returning only a `kind` would strand both callers with no way to derive the Room.
+  The `LIVE_GUARD` kind is the existing belt-and-suspenders re-check (locate by symbol; formerly
+  `:1856-1866`, now ~`:1956-1966`).
 - `resume_completed_session(*, completed, text, sender_name, telegram_chat_id,
   telegram_message_id, chat_title=None, sender_id=None, project=None, project_key=None,
   working_dir=None, telegram_message_key=None, reply_chain_context=None,
-  extra_context_overrides=None) -> None` — lifted from `:1951-2005`:
+  extra_context_overrides=None) -> None` — lifted from `~:2051-2124`:
   `_build_completed_resume_text(completed, text, reply_chain_context=...)` then
   `dispatch_telegram_session(...)`. Any of `project` / `project_key` / `working_dir` /
   `session_type` left `None` falls back to the corresponding field on the `completed` record.
@@ -1736,9 +1849,13 @@ regression net.
 - Build the steer text: `Poll answer to your question "<question>": <chosen option>`; for the escape
   hatch, instruct a narrowed plain-text followup the human answers by reply-to.
 - Branch on `resolve_answer_target(session_id)`, with a stated outcome for **every** kind:
-  - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text, sender_name)`.
-    No `_ack_steering_routed` (no inbound message to react to; closing the poll is the
-    acknowledgment) and deliberately no abort-keyword detection (a poll option is never an abort).
+  - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text, sender_name,
+    room_id=room_id_for_session(target.session))`. **`room_id` is mandatory** — without it the write
+    silently lands on the legacy `steering:{session_id}` key while every peer caller writes the Room
+    key (see Technical Approach). No `_ack_steering_routed` (no inbound message to react to; closing
+    the poll is the acknowledgment) and deliberately no abort-keyword detection (a poll option is
+    never an abort — and note `push_steering_message` force-routes any auto-detected abort to the
+    legacy key regardless of `room_id`, which is why a poll option must never trip `ABORT_KEYWORDS`).
   - `COMPLETED` → `resume_completed_session(completed=target.session, text=steer_text,
     sender_name=..., telegram_chat_id=<registry chat_id>,
     telegram_message_id=<the poll's own msg_id from the registry row>, reply_chain_context=None)`.
@@ -1752,7 +1869,7 @@ regression net.
   the field `iter_unanswered_polls()` and `poll_expired_unanswered` key on.
 - `is_duplicate_message` is **not** called on the vote path — idempotency is `claim_poll_answer`
   (`SET NX`) plus `claim_message` inside `dispatch_telegram_session`.
-- **Never write a steering key directly** — always via `agent/steering.py:85 push_steering_message`
+- **Never write a steering key directly** — always via `agent/steering.py:176 push_steering_message`
   (coordination note with `docs/plans/flip-steering-writers-to-room-key.md`).
 
 ### 10. Reconciliation loop (primary) + `events.Raw` fast path
