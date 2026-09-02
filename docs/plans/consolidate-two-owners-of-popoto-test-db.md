@@ -430,7 +430,9 @@ No agent integration required. Nothing here is reachable by, or visible to, the 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/test-isolation-hardening.md` — its opening section (lines 9-11) documents `_popoto_modules_with_redis_db()`'s two-signal cache as load-bearing ("Neither branch may be dropped"). That statement becomes false when the helper is deleted. Replace it with the new invariant: there is exactly one `POPOTO_REDIS_DB` object per process, conftest mutates its pool in place, and no submodule binding ever needs re-pointing. Line 60's "authoritative mechanism explanations" list and line 64's "Test B" description must lose their references to the deleted helper and its tests.
+- [ ] Update `docs/features/test-isolation-hardening.md` — its opening section (lines 9-11) documents `_popoto_modules_with_redis_db()`'s two-signal cache as load-bearing ("Neither branch may be dropped"). That statement becomes false when the helper is deleted. Replace it with the new invariant: there is exactly one `POPOTO_REDIS_DB` object per process, conftest mutates its pool in place once per session, and no submodule binding ever needs re-pointing. Line 60's "authoritative mechanism explanations" list and line 64's "Test B" description must lose their references to the deleted helper and its tests.
+- [ ] **Rename the section heading at `docs/features/test-isolation-hardening.md:7`.** It currently reads `## Popoto module re-pointing cache invalidation` — a title naming the exact mechanism this plan deletes. Retitle it (e.g. `## Popoto client identity`) or fold its content into the in-place-mutation invariant section. A body rewrite that leaves the old heading standing is the historical-artifact-in-docs that CLAUDE.md forbids, so the deliverable is checked against the heading, not only against the enumerated line ranges above.
+- [ ] Update `tests/README.md` — it references `_popoto_modules_with_redis_db` as a live mechanism. It is a live doc, not an archived record, so it must describe only the new status quo: one canonical client object, session-scoped in-place pool install, no submodule re-pointing.
 - [ ] Update `docs/features/test-db-ownership.md` — describe the split ownership explicitly: `tests/conftest.py` owns *server resolution* (host/port, via `tests/db_claim.py`), popoto's bundled plugin owns the *db number* (via the `POPOTO_TEST_DB` export). Lines 113 and 119 already state the `_POPOTO_ASYNC_REDIS_DB is None` truth; extend them to say the async client is now built lazily in-loop by `get_async_redis_db()` and that conftest never binds it.
 - [ ] No new `docs/features/` file and no `docs/features/README.md` index row — this is a consolidation inside two existing documented features, not a new capability.
 
@@ -442,14 +444,14 @@ No agent integration required. Nothing here is reachable by, or visible to, the 
 ## Success Criteria
 
 - [ ] `tests/conftest.py` contains exactly zero assignments to `rdb.POPOTO_REDIS_DB` and zero assignments to `rdb._POPOTO_ASYNC_REDIS_DB`. The client object popoto built at import time is the one the whole session uses.
-- [ ] `_popoto_modules_with_redis_db`, `_POPOTO_MODULE_CACHE`, and `_POPOTO_MODULE_CACHE_LEN` do not appear anywhere in the repo.
+- [ ] `_popoto_modules_with_redis_db`, `_POPOTO_MODULE_CACHE`, and `_POPOTO_MODULE_CACHE_LEN` do not appear in **live code or live feature docs**. Two records legitimately keep the name and must not be rewritten: `docs/archive/plans-completed/xdist-test-isolation-flakes.md` (a historical record) and this plan document (which necessarily names what it deletes).
 - [ ] `redis_test_db` keeps its name, `autouse=True`, and function scope; the ~197 requesting call sites are unmodified.
 - [ ] `tests/unit/test_popoto_client_identity.py` exists and passes, asserting: (a) `rdb.POPOTO_REDIS_DB` is the same object across tests in a process, (b) every `popoto.*` module in `sys.modules` holding a `POPOTO_REDIS_DB` symbol holds *that* object, (c) the live pool is a `redis.BlockingConnectionPool` whose `max_connections` equals `rdb._SYNC_MAX_CONNECTIONS`.
 - [ ] Assertion (c) is demonstrated RED on `main` before the change lands, and the RED output is pasted into the PR description as the paper trail.
 - [ ] Spike-1's probe is re-run and now prints `ASYNC_IS_NONE: True` inside a test body (it prints `False` on main), proving the async global is back under the plugin's lazy in-loop control.
 - [ ] `tests/unit/test_test_redis_server_resolution.py::test_async_client_matches_the_sync_client` awaits `get_async_redis_db()` and **fails** on divergence — it can no longer `pytest.skip` its way to green.
 - [ ] `tests/unit/test_conftest_isolation_guards.py::TestPopotoSplitBrainRoundTrip` still reproduces the #2037 split-brain in Step 1 and still goes green in Step 3, with the fix step expressed as a restore to the canonical object.
-- [ ] `docs/features/test-isolation-hardening.md` no longer describes the deleted cache as load-bearing, and `docs/features/test-db-ownership.md` states the conftest-owns-server / plugin-owns-db-number split with the #2799 reason.
+- [ ] `docs/features/test-isolation-hardening.md` no longer describes the deleted cache as load-bearing **and no longer carries a section heading named after it**, `docs/features/test-db-ownership.md` states the conftest-owns-server / plugin-owns-db-number split with the #2799 reason, and `tests/README.md` describes only the new status quo.
 - [ ] `tests/db_claim.py`'s module docstring (line 4) and `redis_test_host` docstring (line 111) no longer describe conftest as building a replacement client.
 - [ ] Full `tests/unit/` and `tests/integration/` runs are green, or every failure is classified against a pre-change `main` baseline by `baseline-verifier` and shown to be pre-existing.
 - [ ] The suite passes both under xdist and under `-n0 -p no:randomly` (ordering must not be load-bearing in a new way).
@@ -586,7 +588,8 @@ a baseline classifier.
 - **Assigned To**: `db-ownership-docs`
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Apply every item in the Documentation section: `docs/features/test-isolation-hardening.md` (lines 9-11, 60, 64), `docs/features/test-db-ownership.md` (lines 113, 119), `tests/db_claim.py` (lines 4, 111).
+- Apply every item in the Documentation section: `docs/features/test-isolation-hardening.md` (**the section heading at line 7**, plus lines 9-11, 60, 64), `docs/features/test-db-ownership.md` (lines 113, 119), `tests/README.md`, `tests/db_claim.py` (lines 4, 111).
+- The line numbers are a starting point, not the contract. Judge the result by whether any live doc still describes the deleted helper, the deleted cache, or object replacement — headings included.
 - No new `docs/features/` file and no README index row — this is a change to two documented features, not a new one.
 - The docs must describe only the new status quo. No "previously we..." narration.
 
@@ -598,7 +601,9 @@ a baseline classifier.
 - **Parallel**: false
 - Re-run the full Verification table plus `python -m ruff check .` and `python -m ruff format --check .`.
 - Walk every Success Criteria checkbox and mark it met or unmet with evidence.
-- Confirm no doc still references the deleted helper: `grep -rn '_popoto_modules_with_redis_db' docs/ tests/` must be empty.
+- Confirm no live code or live doc still references the deleted helper. The check must exclude the two records that legitimately keep the name (`docs/archive/`, and this plan document itself):
+  `grep -rn '_popoto_modules_with_redis_db' docs/features/ tests/ --include='*.py' --include='*.md' | grep -v 'docs/archive/'` — expected: no output.
+- A bare `grep -rn ... docs/ tests/` can never return empty and must not be used as the gate.
 
 ## Verification
 
