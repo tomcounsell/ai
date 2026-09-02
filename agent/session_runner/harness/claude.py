@@ -44,6 +44,7 @@ from agent.session_runner.harness.claude_diagnostics import (
     describe_harness_exit_for_sentry,
 )
 from agent.session_runner.hook_edge import HEADLESS_ENV_OVERRIDES
+from agent.tool_cost_attribution import ToolCostAttributor, merge_tool_cost_snapshots
 from config.enums import ClassificationType
 
 logger = logging.getLogger(__name__)
@@ -504,6 +505,17 @@ async def get_response_via_harness(
     )
     _tls_state = {"streak": 0, "last_class": None}
 
+    # Per-tool context-cost attribution (issue #3081, Lane A). One snapshot per
+    # subprocess invocation, merged across the up-to-three invocations below so
+    # the turn's aggregate covers primary + fallbacks — mirroring how
+    # total_num_turns / total_tool_call_count already accumulate. Rides a
+    # callback rather than the return tuple: the 9-tuple shape is asserted
+    # verbatim by four test modules and widening it would churn every fake.
+    _tool_cost_snapshots: list[dict] = []
+
+    def _collect_tool_cost(snapshot: dict) -> None:
+        _tool_cost_snapshots.append(snapshot)
+
     def _handle_early_exit_class(exit_class: HarnessExitClass | None) -> None:
         _tls_state["last_class"] = exit_class
         if _tls_streak_key is None or exit_class is None:
@@ -549,6 +561,7 @@ async def get_response_via_harness(
         on_init=on_init,
         on_exit_status=_capture_primary_exit,
         on_early_exit_class=_handle_early_exit_class,
+        on_tool_cost=_collect_tool_cost,
         ttft_metadata=_ttft_meta,
         true_session_id=session_id,
     )
@@ -596,6 +609,7 @@ async def get_response_via_harness(
                 on_init=on_init,
                 on_exit_status=on_exit_status,
                 on_early_exit_class=_handle_early_exit_class,
+                on_tool_cost=_collect_tool_cost,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -697,6 +711,7 @@ async def get_response_via_harness(
                 on_init=on_init,
                 on_exit_status=on_exit_status,
                 on_early_exit_class=_handle_early_exit_class,
+                on_tool_cost=_collect_tool_cost,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -755,11 +770,23 @@ async def get_response_via_harness(
             },
         )
 
+    # Per-tool context-cost attribution (issue #3081, Lane A). Emitted as its
+    # own `tool_cost` event rather than folded into `token_usage`: the
+    # breakdown exists whenever tools were called, including on turns where the
+    # `result` event carried no usage at all, so gating it on the usage branch
+    # above would silently drop samples. Fail-quiet end to end — the attributor
+    # swallows its own errors and record_telemetry_event never raises.
+    _turn_tool_cost = merge_tool_cost_snapshots(_tool_cost_snapshots)
+    if session_id and (_turn_tool_cost["per_tool"] or _turn_tool_cost["dropped_samples"]):
+        from agent.session_telemetry import record_telemetry_event
+
+        record_telemetry_event(session_id, {"type": "tool_cost", **_turn_tool_cost})
+
     # Issue #1245: persist turn_count + tool_call_count onto the AgentSession
     # via Popoto. Accumulating (`+=`) so primary + fallback subprocess
     # invocations sum across this single get_response_via_harness call.
     # Wrapped in try/except — Popoto failure must never crash the harness path.
-    if session_id and (total_num_turns or total_tool_call_count):
+    if session_id and (total_num_turns or total_tool_call_count or _turn_tool_cost["per_tool"]):
         try:
             from models.agent_session import AgentSession
 
@@ -770,14 +797,26 @@ async def get_response_via_harness(
             if sessions:
                 sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
                 session = sessions[0]
+                _fields = ["turn_count", "tool_call_count"]
                 if total_num_turns:
                     session.turn_count = (session.turn_count or 0) + total_num_turns
                 if total_tool_call_count:
                     session.tool_call_count = (session.tool_call_count or 0) + total_tool_call_count
+                # Issue #3081: cumulative per-tool cost, accumulated the same
+                # way as the counters above so a stage transition can stamp a
+                # session-level aggregate without replaying the telemetry file.
+                if _turn_tool_cost["per_tool"]:
+                    _prior = getattr(session, "tool_cost_json", None)
+                    session.tool_cost_json = json.dumps(
+                        merge_tool_cost_snapshots(
+                            [json.loads(_prior) if _prior else {}, _turn_tool_cost]
+                        )
+                    )
+                    _fields.append("tool_cost_json")
                 # update_fields=[...] to avoid clobbering concurrent writes to
                 # other fields like status/updated_at (matches accumulate_session_tokens
                 # convention).
-                session.save(update_fields=["turn_count", "tool_call_count"])
+                session.save(update_fields=_fields)
         except Exception as e:
             logger.warning(
                 "Failed to persist turn/tool counts for session %s: %s",
@@ -900,6 +939,7 @@ async def _run_harness_subprocess(
     on_init: Callable[[dict], None] | None = None,
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     on_early_exit_class: Callable[[HarnessExitClass | None], None] | None = None,
+    on_tool_cost: Callable[[dict], None] | None = None,
     ttft_metadata: dict | None = None,
     true_session_id: str | None = None,
 ) -> tuple[
@@ -971,6 +1011,13 @@ async def _run_harness_subprocess(
             exceptions are caught + logged.
         on_stdout_event(): fires on each non-empty stdout line from the SDK.
             Callback exceptions are caught + logged.
+        on_tool_cost(snapshot): fires ONCE, after the stream is drained, with
+            this subprocess's per-tool context-cost snapshot (issue #3081 —
+            ``agent/tool_cost_attribution.py`` documents what the numbers mean
+            and why they are approximate). Delivered by callback rather than
+            appended to the return tuple because the 9-tuple shape above is
+            asserted verbatim across four test modules. Skipped only when the
+            binary was never found. Callback exceptions are caught + logged.
 
     Optional TTFT measurement (issue #1227):
         ttft_metadata: dict with keys {session_id, session_type, prompt_chars,
@@ -1066,6 +1113,10 @@ async def _run_harness_subprocess(
     # classify_harness_early_exit — a nonzero exit with no init and no TLS/auth
     # stderr match classifies as STALE_UUID.
     init_seen: bool = False
+    # Per-tool context-cost attribution (issue #3081). Folds every parsed event
+    # into an approximate per-tool token ledger; self-contained and fail-quiet,
+    # so nothing in this loop can be broken by an attribution error.
+    tool_cost = ToolCostAttributor()
 
     # Generic-harness cancellation backstop (issue #1938): if the awaiting
     # coroutine is torn down (CancelledError) mid-stream or mid-communicate, the
@@ -1109,6 +1160,11 @@ async def _run_harness_subprocess(
                 continue
 
             event_type = data.get("type")
+
+            # Issue #3081: fold this event into the per-tool cost attribution
+            # BEFORE the type branching below, so the `result` event's `break`
+            # and the `assistant` branch's `continue` cannot skip it.
+            tool_cost.observe_event(data)
 
             # Capture-at-init (plan #1924, Race 5): the `system/init` event names
             # the NEW invocation's session_id before any work happens. Callers
@@ -1269,6 +1325,16 @@ async def _run_harness_subprocess(
             on_sdk_finished()
         except Exception as _cb_err:
             logger.warning("on_sdk_finished callback raised: %s", _cb_err)
+
+    # Hand the per-tool cost snapshot to the caller (issue #3081). Fires on
+    # every path that got past spawn, a non-zero exit included: a turn that
+    # burned context on tools before dying is exactly the sample the baseline
+    # wants.
+    if on_tool_cost is not None:
+        try:
+            on_tool_cost(tool_cost.snapshot())
+        except Exception as _cb_err:
+            logger.warning("on_tool_cost callback raised: %s", _cb_err)
 
     # Capture first 2000 chars of stderr for Mode 1 sentinel checks (issue #1099).
     # Bound the snippet at 2000 chars: ~4x the 500-char log-only window already
