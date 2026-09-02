@@ -89,6 +89,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -107,6 +108,22 @@ TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
 PYTEST_CLEAN_SH = PROJECT_DIR / "scripts" / "pytest-clean.sh"
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 PYTEST_SERIAL_JSON_TMP = "/tmp/nightly_pytest_serial_report.json"
+# The baseline classifier gets its OWN report path and must never write either
+# path above. main() re-reads PYTEST_SERIAL_JSON_TMP *after* the classifier runs
+# to build the human's alert text (summarize_failures); overwriting it with the
+# baseline commit's results would summarize the alert from a report in which
+# every newly-broken node passed.
+PYTEST_BASELINE_JSON_TMP = "/tmp/nightly_pytest_baseline_report.json"
+
+# The persistent, provisioned worktree the classifier re-runs failing node IDs
+# in, checked out detached at the prior run's HEAD SHA. It needs its own .venv:
+# scripts/pytest-clean.sh refuses a linked worktree without one (#3033) and
+# refuses an off-pin interpreter (#2617). It is protected from the worktree
+# sweeper by tools/disk_reclaim.py's PROTECTED_WORKTREE_SLUGS.
+BASELINE_WORKTREE = PROJECT_DIR / ".worktrees" / "nightly-baseline"
+# Records the uv.lock digest the worktree's .venv was last provisioned against,
+# so `uv sync` re-runs only when the lockfile actually moved.
+BASELINE_PROVISION_MARKER = ".nightly-baseline-provisioned"
 
 # The default collection — matches what a bare `scripts/pytest-clean.sh`
 # collects (pyproject.toml's `testpaths`). "The default collection is red" and
@@ -170,6 +187,21 @@ PYTEST_TIMEOUT_SECONDS = 5400
 # same rule as PYTEST_TIMEOUT_SECONDS above.
 PYTEST_RECONFIRM_TIMEOUT_SECONDS = 1800  # 30 minutes max
 
+# The baseline classifier re-runs only the newly-confirmed failing node IDs
+# (capped by NIGHTLY_FIX_MAX_FAILURES) serially in the baseline worktree, so it
+# is bounded by the same reasoning as PYTEST_RECONFIRM_TIMEOUT_SECONDS above.
+# Deliberately a plain module int rather than an env knob, matching both
+# neighbours' convention.
+PYTEST_BASELINE_TIMEOUT_SECONDS = 1800  # 30 minutes max
+
+# Provisioning the baseline worktree must never hang the nightly run: every
+# git/uv subprocess carries one of these explicit bounds, and a TimeoutExpired
+# is bucketed `inconclusive` exactly like a non-zero exit. Provisional/tunable —
+# a `git worktree add` is seconds on a warm checkout, and a cold `uv sync`
+# minutes.
+BASELINE_GIT_TIMEOUT_SECONDS = 300
+BASELINE_UV_SYNC_TIMEOUT_SECONDS = 900
+
 # If a serial re-confirmation would have to re-run more than this many nodes,
 # skip the serial pass entirely rather than spawn a subprocess that will
 # almost certainly exhaust its own timeout. Returns every input node as
@@ -183,6 +215,26 @@ MAX_RECONFIRM_NODES = 200
 # retried on a later run rather than lost — only the dispatched slice is
 # recorded in dispatched_nodes.
 MAX_DISPATCH_NODES = 10
+
+# Autonomous-fix gate mode (issue #2334). Two values ship:
+#   off     — skip classification, the gate, and the verdict log entirely;
+#             the detector behaves exactly as it did before this feature.
+#   shadow  — classify, gate, and LOG the verdict that would have been acted
+#             on, while paging a human exactly as today. Nothing is fixed.
+# Anything else is treated as `off` (fail toward today's behavior).
+# Provisional/tunable: `shadow` is the default because the whole point of this
+# tier is to accumulate verdict evidence; flip to `off` on a machine where the
+# extra bounded pytest run is unwelcome. Acting on the verdict is #3076.
+NIGHTLY_FIX_MODE = os.environ.get("NIGHTLY_FIX_MODE", "shadow")
+
+# Volume ceiling on the newly-confirmed set the gate will consider, checked
+# BEFORE any classification work so the cost is never paid first. Deliberately
+# NOT reconciled with MAX_DISPATCH_NODES above: that one truncates the
+# triage-filing set, never new_failures, and folding it in here would kill every
+# configured value above 10 and disqualify this feature's own motivating case
+# (#2399 had 11 newly-confirmed failures). Provisional/tunable via
+# NIGHTLY_FIX_MAX_FAILURES — 15 is a first guess, to be tuned from shadow data.
+NIGHTLY_FIX_MAX_FAILURES = int(os.environ.get("NIGHTLY_FIX_MAX_FAILURES", "15"))
 
 # TTFT regression gate (issue #1227).
 # Plan target: production 90s, nightly CI 120s (allowing slack for run-to-run noise).
@@ -609,6 +661,372 @@ def reconfirm_serial(node_ids: list[str]) -> tuple[list[str], list[str], bool]:
     confirmed = [n for n in ordered if n in serial_failing]
     artifacts = [n for n in ordered if n not in serial_failing]
     return confirmed, artifacts, True
+
+
+def _run_provision_step(argv: list[str], *, cwd: Path | str, timeout: int) -> bool:
+    """Run one bounded baseline-provisioning subprocess; return True on success.
+
+    Every provisioning step (``git worktree add``, ``git checkout --detach``,
+    ``uv sync``) goes through here so that all of them carry an explicit
+    ``timeout=``. A ``TimeoutExpired`` is reported as failure exactly like a
+    non-zero exit: an unbounded ``uv sync`` at 03:00 on a cold or
+    network-stalled cache otherwise has no bound and no route to a bucket.
+    """
+    try:
+        result = subprocess.run(  # timeout-guard: allow
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"WARNING: baseline provisioning step {argv!r} failed: {exc}")
+        return False
+    if result.returncode != 0:
+        log(
+            f"WARNING: baseline provisioning step {argv!r} exited "
+            f"{result.returncode}: {(result.stderr or '').strip()}"
+        )
+        return False
+    return True
+
+
+def provision_baseline_worktree(
+    baseline_sha: str,
+    *,
+    repo_root: Path = PROJECT_DIR,
+    worktree_path: Path = BASELINE_WORKTREE,
+) -> bool:
+    """Point the persistent baseline worktree at ``baseline_sha`` with a usable ``.venv``.
+
+    Creates the worktree with ``git worktree add --detach`` plus a full
+    ``uv sync`` when it is absent; otherwise re-points it with
+    ``git -C <path> checkout --detach`` and re-runs ``uv sync`` **only when
+    ``uv.lock`` changed** since the last provision (recorded in the
+    ``BASELINE_PROVISION_MARKER`` file inside the worktree). That is what keeps
+    the amortized cost near zero on the common night.
+
+    The ``.venv`` is mandatory, not an optimization: ``scripts/pytest-clean.sh``
+    refuses a linked worktree that has none (#3033) and refuses an off-pin
+    interpreter (#2617), and the committed ``.python-version`` is what makes a
+    bare ``uv sync`` land on the pinned interpreter.
+
+    Returns ``False`` on any failure. The caller buckets everything
+    ``inconclusive`` in that case and **never** falls back to ``PROJECT_DIR`` —
+    a fallback would import HEAD's source and classify every node
+    ``pre_existing``, which looks exactly like a working classifier.
+    """
+    if worktree_path.exists():
+        if not _run_provision_step(
+            ["git", "-C", str(worktree_path), "checkout", "--detach", baseline_sha],
+            cwd=repo_root,
+            timeout=BASELINE_GIT_TIMEOUT_SECONDS,
+        ):
+            return False
+    else:
+        if not _run_provision_step(
+            ["git", "worktree", "add", "--detach", str(worktree_path), baseline_sha],
+            cwd=repo_root,
+            timeout=BASELINE_GIT_TIMEOUT_SECONDS,
+        ):
+            return False
+
+    marker = worktree_path / BASELINE_PROVISION_MARKER
+    try:
+        lock_digest = hashlib.sha256((worktree_path / "uv.lock").read_bytes()).hexdigest()
+    except OSError as exc:
+        log(f"WARNING: baseline worktree uv.lock unreadable: {exc}")
+        return False
+
+    venv_ok = (worktree_path / ".venv" / "bin" / "pytest").exists()
+    try:
+        synced_digest = marker.read_text().strip()
+    except OSError:
+        synced_digest = ""
+
+    if venv_ok and synced_digest == lock_digest:
+        return True
+
+    log(f"Provisioning baseline worktree venv at {worktree_path} (uv sync) ...")
+    if not _run_provision_step(
+        ["uv", "sync"],
+        cwd=worktree_path,
+        timeout=BASELINE_UV_SYNC_TIMEOUT_SECONDS,
+    ):
+        return False
+
+    try:
+        marker.write_text(lock_digest + "\n")
+    except OSError as exc:
+        # Only costs an unnecessary re-sync next run; not a classification failure.
+        log(f"WARNING: could not write baseline provision marker: {exc}")
+    return True
+
+
+def empty_classification() -> dict[str, list[str]]:
+    """The three discrete buckets, all empty — the shape every caller sees."""
+    return {"newly_broken": [], "pre_existing": [], "inconclusive": []}
+
+
+def classify_against_baseline(
+    node_ids: list[str],
+    baseline_sha: str,
+    *,
+    repo_root: Path = PROJECT_DIR,
+    worktree_path: Path = BASELINE_WORKTREE,
+    wrapper: Path = PYTEST_CLEAN_SH,
+    report_path: str = PYTEST_BASELINE_JSON_TMP,
+) -> dict[str, list[str]]:
+    """Bucket each node ID by whether it was already failing at ``baseline_sha``.
+
+    Synchronous and in-process: it provisions the baseline worktree, re-runs
+    exactly ``node_ids`` there through ``scripts/pytest-clean.sh``, and reads
+    the JSON report. No subagent, no spawned session, no Task tool.
+
+    ``baseline_sha`` is **the prior run's HEAD SHA** (``prev["head_commit"]``),
+    never bare ``main`` and never described as "last-green": that key is
+    written on every non-fatal run and nothing in the detector records
+    greenness. The soundness argument is per-node and narrower — a
+    *newly-confirmed* failure was by definition absent from the prior run's
+    confirmed-failing set, so at that SHA the node was not failing. The SHA is
+    interpolated as a literal argument, so no shell parameter default can
+    silently resolve to ``main``.
+
+    Buckets:
+
+    - ``newly_broken`` — passed at ``baseline_sha`` and fails at HEAD.
+    - ``pre_existing`` — failed at ``baseline_sha`` too.
+    - ``inconclusive`` — **every** failure path: a missing SHA, worktree
+      provisioning failure, collection error, timeout, an unparseable or
+      missing report, a node absent from the report, or any raised exception.
+      It never guesses and never falls back to running at ``PROJECT_DIR``.
+
+    The four keyword-only parameters are the injection seam the non-stubbed
+    fixture test drives without monkeypatching module globals:
+
+    - ``repo_root`` — the checkout ``git worktree add`` runs from.
+    - ``worktree_path`` — the provisioned baseline worktree to run pytest in.
+    - ``wrapper`` — the ``pytest-clean.sh`` the run routes **through**; its
+      ``.venv``, interpreter-pin and rootdir guards are load-bearing here.
+    - ``report_path`` — the classifier's own JSON report target, defaulting to
+      ``PYTEST_BASELINE_JSON_TMP``. It must never be
+      ``PYTEST_SERIAL_JSON_TMP`` or ``PYTEST_JSON_TMP``.
+
+    Their production defaults keep ``main()``'s call site a two-argument call.
+    """
+    result = empty_classification()
+    ordered = sorted(set(node_ids))
+    if not ordered:
+        return result
+
+    if not baseline_sha:
+        log("WARNING: no baseline SHA — classifying every node inconclusive")
+        result["inconclusive"] = ordered
+        return result
+
+    if not provision_baseline_worktree(
+        baseline_sha, repo_root=repo_root, worktree_path=worktree_path
+    ):
+        log(
+            f"WARNING: baseline worktree provisioning failed at {baseline_sha} — "
+            "classifying every node inconclusive (no PROJECT_DIR fallback)"
+        )
+        result["inconclusive"] = ordered
+        return result
+
+    log(f"Classifying {len(ordered)} node ID(s) against baseline {baseline_sha} ...")
+    try:
+        Path(report_path).unlink(missing_ok=True)
+        argv = [
+            str(wrapper),
+            *ordered,
+            "-n0",
+            "--tb=no",
+            "-q",
+            "--json-report",
+            f"--json-report-file={report_path}",
+        ]
+        # Verbatim from run_tests() and reconfirm_serial(): the test-DB claim
+        # happens in tests/conftest.py::pytest_configure, before collection and
+        # therefore before any per-item timer is armed, so the interactive 30s
+        # default would abort the whole session under contention and bucket
+        # every node inconclusive.
+        env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
+        rc = _spawn_pytest(
+            argv, env=env, timeout=PYTEST_BASELINE_TIMEOUT_SECONDS, cwd=worktree_path
+        )
+        log(f"baseline classification exit code: {rc}")
+        report = json.loads(Path(report_path).read_text())
+    except Exception as exc:
+        log(f"WARNING: baseline classification run failed ({exc}) — every node inconclusive")
+        result["inconclusive"] = ordered
+        return result
+
+    outcomes = {t.get("nodeid"): t.get("outcome") for t in report.get("tests", [])}
+    for node in ordered:
+        outcome = outcomes.get(node)
+        if outcome == "passed":
+            result["newly_broken"].append(node)
+        elif outcome in ("failed", "error"):
+            result["pre_existing"].append(node)
+        else:
+            # Absent from the baseline report (never collected, filtered, or
+            # the run died early) is inconclusive — never assumed-passed.
+            result["inconclusive"].append(node)
+    return result
+
+
+@dataclass(frozen=True)
+class GateCaps:
+    """The volume ceilings the decision gate enforces."""
+
+    max_failures: int = NIGHTLY_FIX_MAX_FAILURES
+
+
+@dataclass(frozen=True)
+class RunFlags:
+    """The run-shape and data facts the decision gate refuses to act against."""
+
+    is_seed_run: bool = False
+    integrity_warnings: list[str] | None = None
+    dry_run: bool = False
+    baseline_sha: str = ""
+
+
+def classify_precondition_reason(
+    new_failures: list[str], caps: GateCaps, run_flags: RunFlags
+) -> str | None:
+    """Return the first failing classification precondition, or ``None``.
+
+    These are the last five of the seven ``CLASSIFY_PRECONDITIONS`` (the first
+    two — mode is not ``off`` and ``new_failures`` is non-empty — are the
+    caller's business). They are evaluated at the call site **before**
+    :func:`classify_against_baseline` runs, so a refused night does no git and
+    no pytest work, and they are the first five clauses of
+    :func:`gate_reason` in the same order, so the ``reason=`` token is
+    identical whichever side reports it.
+    """
+    if run_flags.is_seed_run:
+        return "seed_run"
+    if run_flags.integrity_warnings:
+        return "integrity_warnings"
+    if run_flags.dry_run:
+        return "dry_run"
+    if not run_flags.baseline_sha:
+        return "no_baseline_sha"
+    if len(new_failures) > caps.max_failures:
+        return "over_max_failures"
+    return None
+
+
+def gate_reason(
+    classification: dict[str, list[str]],
+    new_failures: list[str],
+    caps: GateCaps,
+    run_flags: RunFlags,
+) -> str:
+    """Return the first failing gate condition's token, or ``"none"``.
+
+    The clause order below IS the ``reason=`` token vocabulary, and it is
+    short-circuited in exactly this order: ``seed_run``,
+    ``integrity_warnings``, ``dry_run``, ``no_baseline_sha``,
+    ``over_max_failures``, ``pre_existing``, ``inconclusive``,
+    ``not_all_newly_broken``, and ``none`` when every clause holds.
+
+    There is deliberately **no ``MAX_DISPATCH_NODES`` clause**: that constant
+    truncates the triage-filing set, not ``new_failures``, so folding it in
+    would make ``NIGHTLY_FIX_MAX_FAILURES`` dead config and disqualify this
+    feature's own 11-failure motivating case.
+    """
+    precondition = classify_precondition_reason(new_failures, caps, run_flags)
+    if precondition is not None:
+        return precondition
+    if classification.get("pre_existing"):
+        return "pre_existing"
+    if classification.get("inconclusive"):
+        return "inconclusive"
+    if set(new_failures) != set(classification.get("newly_broken") or []):
+        return "not_all_newly_broken"
+    return "none"
+
+
+def decide_fix_or_escalate(
+    classification: dict[str, list[str]],
+    new_failures: list[str],
+    caps: GateCaps,
+    run_flags: RunFlags,
+) -> str:
+    """Return ``"autonomous-fix"`` iff every gate condition holds, else ``"escalate"``.
+
+    Pure: no I/O, no subprocess, no state. The conditions and their order are
+    documented on :func:`gate_reason`, which reports which one failed first; a
+    verdict of ``"escalate"`` always has a matching ``reason=`` token.
+
+    It consumes ``new_failures`` (``compute_new_failures``) — the population
+    this feature is about — never ``compute_dispatch_set``'s output, which
+    answers the different question of what has never been filed.
+
+    In this tier the verdict is computed and logged only. ``"autonomous-fix"``
+    means "the gate would have attempted a fix"; it triggers nothing (#3076).
+    """
+    return (
+        "autonomous-fix"
+        if gate_reason(classification, new_failures, caps, run_flags) == "none"
+        else "escalate"
+    )
+
+
+_FIX_MODE_WARNED = False
+
+
+def resolve_fix_mode(raw: str | None = None) -> str:
+    """Normalize ``NIGHTLY_FIX_MODE`` to ``"off"`` or ``"shadow"``.
+
+    An unrecognized value is treated as ``"off"`` — failing toward the
+    detector's pre-feature behavior — and warned about once per process.
+    """
+    global _FIX_MODE_WARNED
+    value = (raw if raw is not None else NIGHTLY_FIX_MODE).strip().lower()
+    if value in ("off", "shadow"):
+        return value
+    if not _FIX_MODE_WARNED:
+        _FIX_MODE_WARNED = True
+        log(f"WARNING: unrecognized NIGHTLY_FIX_MODE={value!r} — treating as 'off'")
+    return "off"
+
+
+def log_shadow_verdict(
+    new_failures: list[str],
+    caps: GateCaps,
+    run_flags: RunFlags,
+) -> None:
+    """Compute and log the shadow verdict for a non-``off`` run. Changes nothing else.
+
+    Emits the byte-stable verdict line on **every** call, including the nights
+    a precondition skipped classification (whose ``reason=`` names that
+    precondition), plus the sibling bucket line only when classification
+    actually ran — the verdict line alone answers "would the gate have fired?"
+    but not "would it have been right?".
+    """
+    skip_reason = classify_precondition_reason(new_failures, caps, run_flags)
+    if skip_reason is not None:
+        verdict, reason = "escalate", skip_reason
+    else:
+        classification = classify_against_baseline(new_failures, run_flags.baseline_sha)
+        verdict = decide_fix_or_escalate(classification, new_failures, caps, run_flags)
+        reason = gate_reason(classification, new_failures, caps, run_flags)
+        not_newly_broken = sorted(
+            set(classification["pre_existing"]) | set(classification["inconclusive"])
+        )
+        log(
+            "nightly-fix shadow-buckets: "
+            f"newly_broken={len(classification['newly_broken'])} "
+            f"pre_existing={len(classification['pre_existing'])} "
+            f"inconclusive={len(classification['inconclusive'])} "
+            f"not_newly_broken={','.join(not_newly_broken)}"
+        )
+    log(f"nightly-fix shadow-verdict: {verdict} reason={reason} nodes={len(new_failures)}")
 
 
 def send_telegram(msg: str, dry_run: bool = False) -> None:
@@ -1218,6 +1636,24 @@ def main() -> int:
         )
         send_telegram(msg, dry_run=args.dry_run)
     elif new_failures:
+        # Shadow tier (issue #2334): classify, gate, and log the verdict that
+        # would have been acted on. It runs BEFORE the alert is built because
+        # the alert re-reads PYTEST_SERIAL_JSON_TMP below and the classifier
+        # owns a separate report path. The page itself is untouched — it fires
+        # in both `off` and `shadow` with byte-identical text. Acting on the
+        # verdict is #3076.
+        if resolve_fix_mode() != "off":
+            log_shadow_verdict(
+                new_failures,
+                GateCaps(max_failures=NIGHTLY_FIX_MAX_FAILURES),
+                RunFlags(
+                    is_seed_run=is_seed_run,
+                    integrity_warnings=list(integrity_warnings),
+                    dry_run=args.dry_run,
+                    baseline_sha=prev.get("head_commit") or "",
+                ),
+            )
+
         try:
             serial_report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
         except (FileNotFoundError, json.JSONDecodeError):
