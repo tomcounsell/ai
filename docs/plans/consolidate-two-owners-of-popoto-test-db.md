@@ -186,13 +186,15 @@ The fact travelling through this system is **"which Redis server and db does pop
 1. **Import time** — unchanged.
 2. **`pytest_configure`** — unchanged. This remains the single authority for the **db number**, published to the plugin through `POPOTO_TEST_DB`.
 3. **Session fixture `_popoto_test_db` (plugin)** — unchanged. Owns applying the db number.
-4. **Session fixture `_popoto_client_ownership_check`** — unchanged.
-5. **Per test, plugin first** — unchanged.
-6. **Per test, conftest second** — `redis_test_db` resolves host/port from `db_claim` (the single authority for the **server**), and if the canonical client's current `connection_kwargs` already match `(host, port, db)` it does nothing at all. Otherwise it builds a `BlockingConnectionPool` with popoto's own cap and assigns it to `rdb.POPOTO_REDIS_DB.connection_pool` **in place**, keeping the object identity. `_assert_client_matches_claim_registry` then runs against the canonical client. `flushdb()` on the canonical client. **No submodule walk. No async assignment.**
-7. **Test body** — sync writes go through the one canonical object, whatever binding captured it. The first `await get_async_redis_db()` builds the async client lazily *inside the test's own loop*, mirroring the canonical sync client's kwargs.
-8. **Teardown** — `flushdb()`, restore the pool object conftest displaced (and disconnect the one it created). The plugin nulls the async global. Nothing else to restore, because nothing else was changed.
+4. **Session fixture `_popoto_pool_install` (conftest, new)** — runs after the plugin's session fixture. Resolves host/port from `db_claim` (the single authority for the **server**) and, **once for the whole session**, builds a `BlockingConnectionPool` with popoto's own cap and assigns it to `rdb.POPOTO_REDIS_DB.connection_pool` **in place**, keeping the object identity. If the pool is already a `BlockingConnectionPool` on the target `(host, port, db)` it does nothing.
+5. **Session fixture `_popoto_client_ownership_check`** — unchanged.
+6. **Per test, plugin first** — unchanged. It now always sees the installed `BlockingConnectionPool`, because nothing puts the client back on the import-time pool between tests.
+7. **Per test, conftest second** — `redis_test_db` runs `_assert_client_matches_claim_registry` against the canonical client and `flushdb()`s it. **No pool work. No submodule walk. No async assignment.**
+8. **Test body** — sync writes go through the one canonical object, whatever binding captured it. The first `await get_async_redis_db()` builds the async client lazily *inside the test's own loop*, mirroring the canonical sync client's kwargs.
+9. **Per-test teardown** — `flushdb()`. The plugin nulls the async global. Nothing to restore, because per-test setup changed nothing but the data.
+10. **Session teardown** — `_popoto_pool_install`'s finalizer restores the pool it displaced and disconnects the one it built. This is the *only* place the pool is ever unwound.
 
-**The invariant this establishes:** `rdb.POPOTO_REDIS_DB` is the same Python object for the entire process lifetime, and `id()` of every `popoto.*` submodule's `POPOTO_REDIS_DB` equals it. That single sentence replaces steps 6-8's four layers of machinery, and it is directly assertable (see Test Impact, new test file).
+**The invariant this establishes:** `rdb.POPOTO_REDIS_DB` is the same Python object for the entire process lifetime, its `connection_pool` is the same object for the entire session, and `id()` of every `popoto.*` submodule's `POPOTO_REDIS_DB` equals the client. That single sentence replaces the old steps 6-8's four layers of machinery, and it is directly assertable (see Test Impact, new test file).
 
 ## Architectural Impact
 
@@ -230,7 +232,7 @@ The coding is roughly a 30-line net deletion in one fixture plus three test-file
 ### Key Elements
 
 - **A declared ownership split, written down where the code lives.** `tests/db_claim.py` is the authority for *which db number* and *which server*. popoto's plugin is the authority for *applying the db number* to the client. `tests/conftest.py` is the authority for *applying the server*. `popoto.redis_db.get_async_redis_db()` is the authority for the async client, derived from the sync one. Four facts, four writers, no overlaps. The `redis_test_db` docstring states this split explicitly so the next person does not re-derive it.
-- **In-place pool mutation in `redis_test_db`.** conftest stops assigning a new object to `rdb.POPOTO_REDIS_DB` and instead swaps the `connection_pool` attribute on the existing object. Object identity is preserved, so every `from ..redis_db import POPOTO_REDIS_DB` binding in every popoto submodule follows for free.
+- **In-place pool mutation, installed once per session.** conftest stops assigning a new object to `rdb.POPOTO_REDIS_DB` and instead swaps the `connection_pool` attribute on the existing object, from a new session-scoped `_popoto_pool_install` fixture. Object identity is preserved, so every `from ..redis_db import POPOTO_REDIS_DB` binding in every popoto submodule follows for free. `redis_test_db` keeps only per-test hygiene (registry assertion plus the two flushes), so no test ever puts the client back on the plugin's import-time pool.
 - **Three deletions that become dead by construction.** The submodule repatch loop (conftest:967-976), the `_popoto_modules_with_redis_db` helper and its two-signal cache (conftest:659-710), and the eager `_POPOTO_ASYNC_REDIS_DB` assignment (conftest:980, with its save at 949 and restore at 988).
 - **Pool-class and cap restoration.** The reconstructed pool is a `redis.BlockingConnectionPool` with `max_connections=rdb._SYNC_MAX_CONNECTIONS`, restoring the protection popoto intended and that both current owners were stripping.
 - **An identity invariant with a test that can fail.** A new `tests/unit/test_popoto_client_identity.py` asserts the one-object property, the all-bindings-agree property, and the pool-class/cap property. Two of its three assertions are red on main today.
@@ -239,7 +241,7 @@ The coding is roughly a 30-line net deletion in one fixture plus three test-file
 
 Not a user-facing flow. The mechanism flow, as a sequence within one pytest process:
 
-**popoto import (pool built from ambient `REDIS_URL`)** → **`pytest_configure` claims db N, exports `POPOTO_TEST_DB=N`** → **plugin session fixture applies db N in place** → **conftest session ownership check asserts db N is claimed** → **per test: plugin nulls async global, flushes** → **per test: conftest applies claim-registry host/port in place (no-op if already correct), asserts registry match, flushes** → **test body: one canonical sync client; async client built lazily in-loop on first `await`** → **teardown: flush, restore displaced pool, plugin nulls async global**
+**popoto import (pool built from ambient `REDIS_URL`)** → **`pytest_configure` claims db N, exports `POPOTO_TEST_DB=N`** → **plugin session fixture applies db N in place** → **conftest session fixture `_popoto_pool_install` applies claim-registry host/port in place, once** → **conftest session ownership check asserts db N is claimed** → **per test: plugin nulls async global, flushes** → **per test: conftest asserts registry match, flushes** → **test body: one canonical sync client; async client built lazily in-loop on first `await`** → **per-test teardown: flush; plugin nulls async global** → **session teardown: restore the displaced pool, disconnect the installed one**
 
 ### Technical Approach
 
