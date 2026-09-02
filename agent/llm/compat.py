@@ -70,6 +70,35 @@ are ``scripts/update/verify.py`` and the auto-bump ``llm`` gate phase, and
 the gate deliberately runs the predicate against a stack it is *about to
 roll back* -- an impure CLI would fire a fatal Sentry capture and strand a
 red marker on every **successful** rollback.
+
+Degraded posture: start degraded, alert loudly
+----------------------------------------------
+An incompatible stack at bridge or worker startup **does not exit the
+process**. Telegram intake keeps running and AgentSessions keep enqueueing;
+only the non-harness LLM calls fail fast, with the typed
+``LLMStackIncompatible`` so every existing ``except LLMCallError`` fail-safe
+keeps working. Degraded-but-running is precisely the state that hid the
+2026-08-24 incident for six hours, so **the alert is the entire safety
+property**.
+
+:func:`_resolve_degraded_flag` is the flag: lazily self-resolving, memoizing
+both axes, and **the first transition to degraded emits the alert from
+inside the resolver**. Binding the alert to resolution rather than to
+startup means no entry path can reach the broken stack without alarming, and
+no ordering race between boot and first call exists -- the startup hooks in
+``bridge/telegram_bridge.py::main`` and ``worker/__main__.py`` do nothing but
+force resolution early.
+
+Because the thing being alarmed *is* the LLM stack, the alert must not route
+through it: no ``run_typed``, no message drafter, no persona pass, no
+dynamic body composition. The body is a **static string** plus the two
+resolved versions and the captured exception type and message. This is a
+deliberate, named exception to the standing "never let raw text speak"
+convention -- the drafter is unavailable by construction, and a silent alert
+is the failure being prevented. Three independent transports carry it:
+Sentry (``level="fatal"``, exempted from the bridge's hibernation drop),
+``logger.critical`` with :data:`SENTINEL`, and the per-process marker file
+the dashboard globs.
 """
 
 from __future__ import annotations
@@ -100,10 +129,20 @@ SENTINEL = "LLM_STACK_COMPAT"
 _MARKER_DIR = Path(__file__).resolve().parents[2] / "data"
 _MARKER_STEM = "llm-stack-degraded"
 
-# Memoized degraded verdict, owned by ``_resolve_degraded_flag()`` (task 4).
-# Declared here because the predicate's purity is asserted against it: a
-# ``check_llm_stack_compat`` call must leave this ``None``.
+# Memoized degraded verdict, owned by ``_resolve_degraded_flag()``.
+# ``None`` means "not yet resolved" -- the predicate's purity is asserted
+# against exactly that: a ``check_llm_stack_compat`` call must leave this
+# ``None``. The two axes are memoized beside it because they are consumed
+# separately: ``run_typed`` is gated on both, ``run_typed_local`` on
+# ``loader_ok`` alone.
 _DEGRADED: bool | None = None
+_LOADER_OK: bool = True
+_COMPATIBLE: bool = True
+
+# Static alert body. Everything variable about a degraded resolution is
+# appended as resolved versions + exception type/message; nothing here is
+# composed by an LLM, because the LLM stack is the thing that is broken.
+_ALERT_BODY = "LLM stack incompatible — non-harness LLM calls fail fast until this is fixed"
 
 # One-shot latch so an active ``LLM_STACK_MARKER_DIR`` announces itself
 # exactly once per process instead of once per marker touch.
@@ -407,6 +446,153 @@ def _check_network(
             exc_type=type(exc).__name__,
         )
     return None
+
+
+def _degraded_axis(result: CompatResult) -> str:
+    """Which axis failed, in one word, for the alert and the marker."""
+    if not result.loader_ok:
+        return "loader"
+    return "signature"
+
+
+def _alert_degraded(result: CompatResult, proc: str | None) -> None:
+    """Fire all three channels for a first transition to degraded.
+
+    Order is deliberate: the stdlib log first (it is the signal of record
+    and cannot fail), then Sentry, then the marker. Each later channel is
+    independently guarded, so a Sentry outage suppresses neither the
+    sentinel log nor the standing marker.
+    """
+    body = (
+        f"{SENTINEL} DEGRADED: {_ALERT_BODY} "
+        f"[axis={_degraded_axis(result)} "
+        f"anthropic={result.anthropic_version} "
+        f"pydantic-ai={result.pydantic_ai_version} "
+        f"exc_type={result.exc_type}] {result.reason}"
+    )
+
+    logger.critical(body)
+
+    try:
+        import sentry_sdk
+
+        sentry_sdk.capture_message(body, level="fatal")
+    except Exception:
+        # A Sentry capture failure must never crash the resolver or
+        # suppress the other two channels -- the critical log above is
+        # already the signal of record. Mirrors agent/index_drift.py.
+        logger.warning("%s Sentry capture_message failed", SENTINEL, exc_info=True)
+
+    _write_marker(result, proc)
+
+
+def _write_marker(result: CompatResult, proc: str | None) -> None:
+    """Write the standing dashboard marker -- only when ``proc`` is given.
+
+    Only a process that will still be around to *clear* its marker may
+    write one, so ``bridge`` and ``worker`` are the whole marker
+    population. A one-shot script, a cron helper, or a pytest process gets
+    the Sentry capture and the sentinel log and deposits nothing that would
+    strand the board red after the fix lands.
+    """
+    if not proc:
+        return
+
+    path = _marker_path(proc)
+    payload = {
+        "process": proc,
+        "axis": _degraded_axis(result),
+        "loader_ok": result.loader_ok,
+        "compatible": result.compatible,
+        "anthropic_version": result.anthropic_version,
+        "pydantic_ai_version": result.pydantic_ai_version,
+        "exc_type": result.exc_type,
+        "reason": result.reason,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        # The resolver's write failure logs; it never raises. Losing the
+        # dashboard channel must not take the process with it.
+        logger.warning("%s could not write degraded marker %s", SENTINEL, path, exc_info=True)
+
+
+def _clear_marker(proc: str | None) -> None:
+    """Clear **only this process's own** marker path.
+
+    Never a glob and never another process's file: the bridge's healthy
+    re-resolution after a pin fix must not paint the board green over a
+    worker that deferred its restart and is still raising.
+    """
+    if not proc:
+        return
+    try:
+        _marker_path(proc).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("%s could not clear degraded marker", SENTINEL, exc_info=True)
+
+
+def _resolve_degraded_flag(proc: str | None = None) -> bool:
+    """Is this process's LLM stack degraded? Lazily resolved, memoized.
+
+    The first read -- from a startup hook, or from a ``run_typed`` call in a
+    process that never ran one -- evaluates the predicate and, on a first
+    transition to degraded, emits the alert (see the module docstring).
+    Subsequent reads are memo hits and alert nothing.
+
+    ``proc`` names the marker file this process owns (``"bridge"`` /
+    ``"worker"``). Callers that pass nothing write no marker; they still get
+    Sentry and the sentinel log.
+
+    Break-glass: ``LLM_STACK_COMPAT_OVERRIDE=healthy`` short-circuits to
+    not-degraded, announced at ``logger.warning`` with :data:`SENTINEL`. The
+    read is inside the function body because a module-scope ``os.environ``
+    read is blocked by ``validate_no_module_scope_env.py``. The override
+    clears this process's marker on the way out: the short-circuit happens
+    *before* the predicate, so without the clear no future resolution could
+    ever reach the healthy branch and the board would stay red forever on a
+    machine the operator declared healthy. The override is deliberately not
+    honoured by :func:`check_llm_stack_compat`, by the ``--json`` CLI, or by
+    the auto-bump gate -- it must never let a bad pin ship.
+    """
+    global _DEGRADED, _LOADER_OK, _COMPATIBLE
+
+    if _DEGRADED is not None:
+        return _DEGRADED
+
+    if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy":
+        logger.warning("%s OVERRIDDEN: LLM_STACK_COMPAT_OVERRIDE=healthy", SENTINEL)
+        _LOADER_OK = True
+        _COMPATIBLE = True
+        _DEGRADED = False
+        _clear_marker(proc)
+        return False
+
+    result = check_llm_stack_compat()
+    _LOADER_OK = result.loader_ok
+    _COMPATIBLE = result.compatible
+    _DEGRADED = not (result.loader_ok and result.compatible)
+
+    if _DEGRADED:
+        _alert_degraded(result, proc)
+    else:
+        _clear_marker(proc)
+
+    return _DEGRADED
+
+
+def stack_axes() -> tuple[bool, bool]:
+    """``(loader_ok, compatible)`` for this process, forcing resolution.
+
+    The two axes stay separate all the way to the call sites:
+    ``run_typed`` is gated on both, ``run_typed_local`` on ``loader_ok``
+    alone, because the local granite-on-Ollama leg never touches
+    ``anthropic`` and an Anthropic *signature* break must not fall the two
+    hot-path classifiers back to their conservative defaults fleet-wide.
+    """
+    _resolve_degraded_flag()
+    return _LOADER_OK, _COMPATIBLE
 
 
 def main(argv: list[str] | None = None) -> int:

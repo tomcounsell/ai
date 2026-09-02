@@ -24,20 +24,25 @@ The shim is a directory placed first on ``PYTHONPATH`` holding an
 ``ImportError``. ``PYTHONPATH`` entries precede site-packages, so the child
 resolves the raising stubs rather than the installed distributions.
 
-The alert / typed-exception half of this contract (``run_typed`` raises
-``LLMStackIncompatible`` under a degraded stack and all three alert
-channels fire) lands with **task 4** and stays in process; it is
-deliberately absent here.
+The alert / typed-exception half of the contract stays **in process** and
+lives at the bottom of this file: with the loader raising, ``run_typed``
+raises ``LLMStackIncompatible`` and all three alert channels fire on the
+same resolution. The no-startup-hook path is asserted there too — a process
+that never ran a startup hook still alarms, because the alert is bound to
+flag resolution rather than to boot.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import sentry_sdk
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,3 +133,81 @@ def test_loader_still_raises_under_broken_stack(raising_stack_shim: Path) -> Non
     assert proc.returncode == 0, (
         f"loader did not surface the ImportError\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
+
+
+# --------------------------------------------------------------------------
+# The in-process half: the typed exception and the three alert channels
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def broken_loader(monkeypatch):
+    """Make ``_load_stack`` raise, as a missing/broken install would.
+
+    Drives the real predicate down its ``loader_ok=False`` path rather than
+    stubbing the verdict, so the resolver's own handling of an ImportError
+    is what is under test.
+    """
+    from agent import anthropic_client
+    from agent.llm import compat
+
+    def _boom():
+        raise ImportError("stubbed by test_llm_import_safety")
+
+    monkeypatch.setattr(anthropic_client, "_load_stack", _boom)
+    monkeypatch.setattr(compat, "_DEGRADED", None)
+    monkeypatch.setattr(compat, "_LOADER_OK", True)
+    monkeypatch.setattr(compat, "_COMPATIBLE", True)
+    monkeypatch.delenv("LLM_STACK_COMPAT_OVERRIDE", raising=False)
+    return compat
+
+
+@pytest.fixture
+def captures(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        sentry_sdk,
+        "capture_message",
+        lambda message, **kw: calls.append({"message": message, **kw}),
+    )
+    return calls
+
+
+async def test_run_typed_raises_typed_and_fires_all_channels(broken_loader, captures, caplog):
+    """The no-startup-hook path: the first call resolves, alerts, and raises.
+
+    A process that never ran a startup hook is exactly where the six-hour
+    silent outage lived. Because the alert is bound to flag resolution, the
+    first ``run_typed`` call is also the first alert.
+    """
+    from pydantic import BaseModel
+
+    from agent.llm import run_typed
+    from agent.llm.wrapper import LLMCallError, LLMStackIncompatible
+
+    class Out(BaseModel):
+        answer: str
+
+    compat = broken_loader
+    assert compat._DEGRADED is None, "no startup hook has run in this process"
+    caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
+
+    with pytest.raises(LLMStackIncompatible) as excinfo:
+        await run_typed("hello", Out)
+
+    # Subclassing is what keeps every existing fail-safe working unchanged.
+    assert isinstance(excinfo.value, LLMCallError)
+
+    assert any(
+        r.levelno == logging.CRITICAL and compat.SENTINEL in r.getMessage() for r in caplog.records
+    )
+    assert [c["level"] for c in captures] == ["fatal"]
+    assert compat.SENTINEL in captures[0]["message"]
+
+    marker = compat._marker_path("bridge")
+    assert not marker.exists(), "a no-proc caller must strand no marker"
+
+    # ...while a bridge-shaped resolution does write one.
+    compat._DEGRADED = None
+    compat._resolve_degraded_flag("bridge")
+    assert json.loads(marker.read_text())["axis"] == "loader"

@@ -56,6 +56,7 @@ import logging
 from pydantic import BaseModel
 
 from agent.anthropic_client import _load_stack, semaphore_slot
+from agent.llm.compat import stack_axes
 from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
@@ -85,6 +86,45 @@ class LLMCallError(Exception):
     own site-specific conservative default on this exception -- the
     wrapper deliberately does not pick one for them.
     """
+
+
+# N818 (Error suffix) is waived: the name is fixed by #3001's plan and its
+# verification greps, and it inherits the suffix-free house style of
+# LLMCallError, the class every call site already catches.
+class LLMStackIncompatible(LLMCallError):  # noqa: N818
+    """Raised when this process's LLM stack is degraded (#3001).
+
+    A subclass of :class:`LLMCallError` on purpose: every existing
+    ``except LLMCallError`` fail-safe keeps working unchanged, so a
+    degraded stack degrades each call site to its own conservative default
+    instead of surfacing a raw provider ``TypeError`` from deep inside
+    ``pydantic_ai``. The alert has already fired from
+    ``agent.llm.compat._resolve_degraded_flag`` by the time this is raised.
+    """
+
+
+def _guard_stack(caller: str, *, signature_axis: bool) -> None:
+    """Fail fast on a degraded stack, forcing flag resolution on first use.
+
+    Resolving here is what makes the alert unmissable in a process that
+    never ran a startup hook: the first call *is* the first read, and the
+    resolver alerts on the transition.
+
+    ``signature_axis`` is ``False`` for the local granite leg, which never
+    touches ``anthropic`` -- an Anthropic create-signature break must not
+    fall the two hot-path classifiers over.
+    """
+    loader_ok, compatible = stack_axes()
+    if not loader_ok:
+        raise LLMStackIncompatible(
+            f"{caller} refused: the LLM stack failed to import "
+            "(see the LLM_STACK_COMPAT critical log for the reason)"
+        )
+    if signature_axis and not compatible:
+        raise LLMStackIncompatible(
+            f"{caller} refused: the installed anthropic + pydantic-ai pair is "
+            "incompatible (see the LLM_STACK_COMPAT critical log for the reason)"
+        )
 
 
 async def run_typed(
@@ -129,6 +169,8 @@ async def run_typed(
     """
     if not prompt or not prompt.strip():
         raise ValueError("run_typed requires a non-empty, non-whitespace prompt")
+
+    _guard_stack("run_typed", signature_axis=True)
 
     stack = _load_stack()
 
@@ -206,6 +248,8 @@ async def run_typed_local(
     """
     if not prompt or not prompt.strip():
         raise ValueError("run_typed_local requires a non-empty, non-whitespace prompt")
+
+    _guard_stack("run_typed_local", signature_axis=False)
 
     if hard_timeout is None:
         hard_timeout = settings.timeouts.local_typed_hard_s

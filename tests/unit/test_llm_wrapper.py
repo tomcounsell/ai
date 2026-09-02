@@ -21,14 +21,18 @@ wrapper's contract without hitting the real Anthropic API:
   hang.
 
 Network isolation: every test monkeypatches ``anthropic.AsyncAnthropic``
-(a fake, non-network client) and ``agent.llm.wrapper.AnthropicModel``
-(PydanticAI's ``FunctionModel`` instead of a real HTTP-backed model), so
-no test makes a real Anthropic API call.
+(a fake, non-network client) and the memoized loader
+``agent.llm.wrapper._load_stack`` so its ``AnthropicModel`` is PydanticAI's
+``FunctionModel`` rather than a real HTTP-backed model. No test makes a
+real Anthropic API call. The loader replaced the old
+``wrapper_mod.AnthropicModel`` seam when the import-safety contract (#3001)
+moved every third-party symbol out of the wrapper's module scope.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 
 import anthropic
@@ -37,7 +41,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from agent.llm import LLMCallError, run_typed
+from agent.llm import LLMCallError, LLMStackIncompatible, run_typed
 from agent.llm import wrapper as wrapper_mod
 
 
@@ -119,7 +123,7 @@ def spy_semaphore_slot(monkeypatch):
 
 
 def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
-    """Monkeypatch ``wrapper_mod.AnthropicModel`` to build a ``FunctionModel``.
+    """Swap the loader's ``AnthropicModel`` for an in-process ``FunctionModel``.
 
     Preserves the wrapper's real ``AnthropicProvider(anthropic_client=...)``
     construction (the caller still builds and passes ``provider``); only the
@@ -127,6 +131,12 @@ def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
     double so no network call happens. When ``capture`` is provided, the
     ``provider`` instance PydanticAI would have used is stashed under
     ``capture["provider"]`` for post-call assertions.
+
+    The seam is ``wrapper_mod._load_stack`` (#3001): the third-party stack
+    is no longer imported at the wrapper's module scope, so
+    ``wrapper_mod.AnthropicModel`` no longer exists as an attribute to
+    patch. The loader is the *only* route from this module to a real model
+    class, which makes this seam strictly stronger than the old one.
     """
 
     def fake_anthropic_model(model_name, *, provider):
@@ -134,7 +144,9 @@ def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
             capture["provider"] = provider
         return FunctionModel(fn, model_name=model_name)
 
-    monkeypatch.setattr(wrapper_mod, "AnthropicModel", fake_anthropic_model)
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
 
 
 class TestStructuredOutputSuccess:
@@ -398,8 +410,33 @@ class TestDefaultModelFromConfig:
 
             return FunctionModel(fn, model_name=model_name)
 
-        monkeypatch.setattr(wrapper_mod, "AnthropicModel", fake_anthropic_model)
+        real = wrapper_mod._load_stack()
+        fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
+        monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
 
         await run_typed("classify: hello there", Classification)
 
         assert seen_model_name["value"] == MODEL_FAST
+
+
+class TestDegradedStack:
+    """A degraded LLM stack fails fast, typed, before any client work (#3001)."""
+
+    def test_typed_exception_preserves_existing_fail_safes(self):
+        # Subclassing is the whole compatibility story: every existing
+        # `except LLMCallError` site keeps its own conservative default.
+        assert issubclass(LLMStackIncompatible, LLMCallError)
+
+    async def test_run_typed_raises_llm_stack_incompatible(self, monkeypatch):
+        from agent.llm import compat
+
+        def never_call_this(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise AssertionError("a degraded stack must not reach the model call")
+
+        _install_function_model(monkeypatch, never_call_this)
+        monkeypatch.setattr(compat, "_DEGRADED", True)
+        monkeypatch.setattr(compat, "_LOADER_OK", True)
+        monkeypatch.setattr(compat, "_COMPATIBLE", False)
+
+        with pytest.raises(LLMStackIncompatible):
+            await run_typed("classify: hello there", Classification)

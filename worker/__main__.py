@@ -1192,6 +1192,15 @@ def main() -> None:
 
     configure_resilient_redis()
 
+    # LLM-stack compat (#3001): force the degraded flag to resolve now, so a
+    # broken anthropic + pydantic-ai pair alarms at boot instead of at the
+    # first non-harness call. Deliberately NOT fatal — the worker keeps
+    # executing sessions; only non-harness LLM calls fail fast with the typed
+    # LLMStackIncompatible, and each call site keeps its own fail-safe default.
+    from agent.llm.compat import _resolve_degraded_flag  # noqa: PLC0415
+
+    _resolve_degraded_flag("worker")
+
     # Validate agent definition files are usable on disk. Missing, malformed,
     # or unreadable files are not fatal — the SDK falls back gracefully — but
     # we surface warnings early so operators can fix them before users hit

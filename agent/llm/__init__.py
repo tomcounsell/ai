@@ -12,6 +12,7 @@ from .wrapper import (
     DEFAULT_HARD_TIMEOUT,
     DEFAULT_SDK_TIMEOUT,
     LLMCallError,
+    LLMStackIncompatible,
     run_typed,
     run_typed_local,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "run_typed",
     "run_typed_local",
     "LLMCallError",
+    "LLMStackIncompatible",
     "DEFAULT_SDK_TIMEOUT",
     "DEFAULT_HARD_TIMEOUT",
 ]
