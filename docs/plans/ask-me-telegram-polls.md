@@ -804,15 +804,25 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   recovery mechanisms are defeated: `iter_unanswered_polls()` skips a claimed row, so the
   reconciliation loop never retries; and Risk 7's `poll_expired_unanswered` signal — if defined as
   "no claim" — never fires. That is exactly the invisible permanently-blocked agent this feature
-  exists to prevent. Two changes, both required:
+  exists to prevent. Three changes, all required:
   1. Everything after `claim_poll_answer(poll_id)` runs inside `try/except Exception`, and the
      handler **deletes the claim key** before logging, so the next reconciliation tick retries.
-  2. Completion is recorded **separately from the claim**: write `steered_at` onto the
-     `telegram:poll:{poll_id}` row only after `push_steering_message` / `resume_completed_session`
-     returns. `iter_unanswered_polls()` treats "claim present, no `steered_at`, claim older than one
-     reconcile interval" as **still unanswered**, and `poll_expired_unanswered` keys on **missing
-     `steered_at`**, never on a missing claim — otherwise the operator signal is blind to precisely
-     this state.
+  2. Completion is recorded **separately from the claim**, and every marker is its own atomic key
+     rather than a field inside the row's JSON: `telegram:poll:steered_at:{poll_id}` is written
+     (`SET NX EX`) only after `push_steering_message` / `resume_completed_session` returns.
+     `iter_unanswered_polls()` treats "claim present, steered key absent, claim older than one
+     reconcile interval" as **still unanswered**, and `poll_expired_unanswered` keys on the
+     **absent steered key**, never on a missing claim — otherwise the operator signal is blind to
+     precisely this state.
+  3. **The re-yield and the claim must agree, or (1) and (2) are decorative.** Change (1) only helps
+     when the process survived to run its own `except`. On a bridge death after the claim, nothing
+     releases it — so `translate_poll_vote` must not `return` unconditionally on a lost claim. The
+     claim value is the ISO-8601 claim timestamp (not the constant `1`, which cannot express
+     staleness); on a lost claim the translator compares that timestamp's age to
+     `POLL_RECONCILE_SLOW_INTERVAL_S` and, when it is stale **and** the `dispatched` marker is
+     absent, takes the claim over with `SET ... XX` and proceeds. The `dispatched` guard is what
+     keeps the takeover from re-running a steer that already succeeded. Full step sequence in
+     Task 9b.
 
   `sender_name` for a vote is the `GetPollVotesRequest`-resolved voter when available, else the
   target session's `initial_telegram_message["sender_name"]`, else the literal `"Telegram poll"`.
@@ -1290,16 +1300,25 @@ after it — bridge death, a raising `EditMessageRequest`, a throwing steering w
 claim alive for its TTL. `iter_unanswered_polls()` skips claimed rows, so reconciliation never
 retries, and if `poll_expired_unanswered` keyed on the missing claim it would never fire either. The
 result is a silently, permanently blocked agent — the exact failure this feature exists to prevent.
-**Mitigation:** three changes, all mandatory (Technical Approach, Task 9): everything after the claim
-runs in `try/except Exception` with the handler **deleting the claim key** before logging;
-completion is recorded as a separate `steered_at` field written only after the steer returns, with
-`iter_unanswered_polls()` re-yielding "claim present, no `steered_at`, older than one reconcile
-interval" and `poll_expired_unanswered` keying on **missing `steered_at`**; and a `dispatched`
-marker written immediately after the steer/re-enqueue returns bounds the release, so a throw *after*
-a successful side effect does not release the claim and re-run the dispatch. **The release and the
-`dispatched` marker are a matched pair** — a blanket release re-opens the mirror-image failure
-(one vote, two enqueues) that this plan's own `COMPLETED` branch is most exposed to. Covered by the
-**Claim Durability** test block.
+**Mitigation:** four changes, all mandatory (Technical Approach, Tasks 6 and 9):
+1. Everything after the claim runs in `try/except Exception` with the handler **deleting the claim
+   key** before logging.
+2. Completion is recorded as a separate `telegram:poll:steered_at:{poll_id}` key written only after
+   the steer returns, with `iter_unanswered_polls()` re-yielding "claim present, steered key absent,
+   claim older than one reconcile interval" and `poll_expired_unanswered` keying on the **absent
+   steered key**.
+3. A `dispatched` marker key written immediately after the steer/re-enqueue returns bounds the
+   release, so a throw *after* a successful side effect does not release the claim and re-run the
+   dispatch. **The release and the `dispatched` marker are a matched pair** — a blanket release
+   re-opens the mirror-image failure (one vote, two enqueues) that this plan's own `COMPLETED`
+   branch, now known to be the *mainline* (Risk 3), is most exposed to.
+4. **A stale-claim takeover, without which items 1-3 do not cover the failure this risk names
+   first.** Item 1 runs only if the process survived; on a bridge death after the claim nothing
+   releases it, so the re-yielded row would meet a live claim and `translate_poll_vote` would bail
+   every tick until TTL. The claim's value is therefore the ISO-8601 claim timestamp, and a lost
+   claim that is older than `POLL_RECONCILE_SLOW_INTERVAL_S` **with no `dispatched` marker** is
+   taken over (`SET ... XX`) and the translation proceeds. Covered by the **Claim Durability** test
+   block.
 
 ## Race Conditions
 
@@ -1319,8 +1338,13 @@ consequence is bounded added latency, not loss.
 **Trigger:** An update arrives at the same instant a reconciliation tick reads the same entry.
 **Data prerequisite:** Exactly one steering message per poll.
 **State prerequisite:** The claim must be atomic across both async callers.
-**Mitigation:** `SET telegram:poll:answered:{poll_id} 1 NX EX <ttl>`; the loser returns immediately
-without steering or closing.
+**Mitigation:** `SET telegram:poll:answered:{poll_id} <iso claim ts> NX EX <ttl>`; the loser reads
+the claim's age and returns immediately without steering or closing **when the claim is younger
+than `POLL_RECONCILE_SLOW_INTERVAL_S`** — which is the concurrent-peer case this race is about. An
+*older* claim is not a peer, it is the Risk 9 orphan, and the loser takes it over instead (Task 9b).
+The two are only distinguishable because the claim's value is a timestamp rather than `1`.
+The markers the two callers write (`dispatched`, `steered_at`, the warn marker) are separate
+`SET NX` keys, not fields in one JSON row, so this race cannot produce a lost marker update either.
 
 ### Race 3: session transitions running → completed while the human is deciding
 **Note the direction of the odds.** This is not a narrow window: the transition happens at the end
@@ -2036,13 +2060,11 @@ why reversibility depends on it.
 - Provide the Race-6 provisional row `telegram:poll:pending:{poll_id_hint}`, written **before**
   `send_poll` and promoted to the real row (then deleted) once the server poll id is known. This
   write belongs **here and only here** — it is not duplicated in the relay task.
-- Provide `register_poll(...)`, `lookup_poll(poll_id)`, `claim_poll_answer(poll_id)` (`SET NX EX`),
-  `release_poll_claim(poll_id)`, `mark_poll_dispatched(poll_id)`, `mark_poll_steered(poll_id)`,
-  `register_pending_poll(...)`,
-  `iter_pending_polls()`, `promote_pending_poll(...)`, and `iter_unanswered_polls()`.
-- **`iter_unanswered_polls()` treats a row as unanswered when it has no `steered_at`** — including a
-  row whose claim exists but is older than one reconcile interval (Risk 9). It must not treat "claim
-  present" alone as answered.
+- **`iter_unanswered_polls()` treats a row as unanswered when
+  `telegram:poll:steered_at:{poll_id}` does not exist** — a single `EXISTS`, not a JSON field parse
+  — including a row whose claim exists but is older than one reconcile interval (Risk 9). It must
+  not treat "claim present" alone as answered. It re-yields such a row *and* Task 9b takes the
+  claim over; the two halves must agree or the recovery is inert.
 - **Both iterators are backed by index SETs, never by a keyspace scan (cycle 7).** Add
   `POLL_OPEN_INDEX = "telegram:poll:open"` and `POLL_PENDING_INDEX = "telegram:poll:pending:index"`
   as Redis SETs in this module. `register_poll(...)` `SADD`s the server poll id in the same call that
@@ -2240,16 +2262,35 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   filter `results.results` to `voters >= 1`; zero → return **without claiming**; exactly one → use
   it; more than one → log a warning naming the poll id and the tied options, then take the highest
   `voters`, breaking ties by **lowest decoded option index** (`decode_option`, Task 4).
-- `claim_poll_answer(poll_id)`; lost claim → return.
-- **Everything after the claim runs inside `try/except Exception`; the handler calls
-  `release_poll_claim(poll_id)` before logging** so the next reconciliation tick retries (Risk 9) —
-  **but only when the `dispatched` marker is absent** (next bullet).
+- **`claim_poll_answer(poll_id)`, and on a lost claim a `dispatched`-guarded stale-claim takeover —
+  not an unconditional `return` (cycle-8 blocker).** An unconditional return makes the whole Risk 9
+  recovery inert for the failure mode it names first: if the bridge dies after the claim, no
+  `except` handler ever runs to release it, `iter_unanswered_polls()` dutifully re-yields the row,
+  and this line bails on every tick until the claim TTL expires. The exact sequence on a lost claim:
+
+  1. `age = poll_claim_age_s(poll_id)`. `None` (the key vanished between the `SET NX` and the
+     `GET`) → retry `claim_poll_answer` once; still lost → return.
+  2. `age < POLL_RECONCILE_SLOW_INTERVAL_S` → **return.** This is the genuine Race 2 case: a
+     concurrent translator holds a live claim.
+  3. `poll_dispatched(poll_id)` is true → the side effect already happened; re-attempt
+     `mark_poll_steered(poll_id)` **only**, then return. Never re-steer, never re-dispatch. This is
+     the load-bearing half of the guard.
+  4. Otherwise (stale claim, nothing dispatched) → `takeover_poll_claim(poll_id)`; False (a peer
+     took over first) → return; True → **continue the translation** as if the claim had been won.
+
+  `POLL_RECONCILE_SLOW_INTERVAL_S` is the staleness threshold because it is the longest interval at
+  which a healthy translator could still be mid-flight.
+- **Everything after the claim (or the takeover) runs inside `try/except Exception`; the handler
+  calls `release_poll_claim(poll_id)` before logging** so the next reconciliation tick retries
+  (Risk 9) — **but only when the `dispatched` marker is absent** (next bullet).
 - **`dispatched` marker — the claim-release must not span the side effect.** The moment
   `push_steering_message` / `resume_completed_session` returns, and **before anything else that can
   throw**, call `mark_poll_dispatched(poll_id)` (Task 6). The `except Exception` handler then reads
   the row and calls `release_poll_claim(poll_id)` **only if `dispatched` is absent**. With
   `dispatched` present the retry path re-attempts `mark_poll_steered(poll_id)` **only** — never the
-  steer or the dispatch. Without this split, an exception thrown *after* a successful steer (e.g.
+  steer or the dispatch. Both markers are their own `SET NX` keys (Task 6), so
+  `mark_poll_dispatched` is a single atomic command that cannot lose a concurrent read-modify-write
+  against the loop's warn-marker write. Without this split, an exception thrown *after* a successful steer (e.g.
   from the `mark_poll_steered` write, which is deliberately last) releases the claim and the next
   reconcile tick re-runs the whole translation. The stated second guard cannot cover that window:
   `claim_message` inside `dispatch_telegram_session` uses `bridge/dedup.py:168 CLAIM_TTL_SECONDS`,
