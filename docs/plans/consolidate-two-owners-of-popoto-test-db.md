@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor Engels
 created: 2026-09-02
 tracking: https://github.com/tomcounsell/ai/issues/2771
-last_comment_id:
+last_comment_id: 5505101875
 ---
 
 # Consolidate the two owners of "which db popoto is on" in tests/conftest.py
@@ -82,6 +82,11 @@ verifies the recon's own pointers, not the stale ones in the issue's Background 
 (`overclaim-guard-greps-whole-worktree`, `fix-red-main-unit-tests`,
 `module-scope-env-reads-migration`) touch the test suite but not popoto client
 construction or `redis_test_db`.
+
+**Issue comments incorporated (through `last_comment_id: 5505101875`):**
+
+- **Comment 5281092164** (tomcounsell, 2026-08-13) — a blocking audit note: *"this issue's stated precondition is not yet true on `main`. Do not start it before PR #2683 merges, or it will consolidate onto an authority that does not exist."* At the time, `tests/conftest.py` had no `pytest_configure` and therefore never exported `POPOTO_TEST_DB`. **This precondition is now satisfied**: PR #2683 merged 2026-08-13 and `pytest_configure` is at `tests/conftest.py:308` with the export at `:323`, verified at the plan baseline. The comment also correctly separates #2770 (upstream popoto, the hardcoded db-15 default) from #2771 (this downstream cleanup); the No-Gos honour that split. The block is cleared and the work is startable.
+- **Comment 5505101875** (2026-09-02) — the `## Recon Summary`, mirrored into the issue body and absorbed throughout this plan.
 
 **Notes:** This is not a bug fix in the "reproduce the symptom" sense — nothing is
 currently failing. It is a correctness-and-consolidation chore whose *observable*
