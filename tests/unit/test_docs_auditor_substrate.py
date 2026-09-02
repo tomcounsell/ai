@@ -1384,6 +1384,7 @@ class TestWithheldBlocksStaleClose:
         # _push_branch_and_pr above is never reached on this path.
         assert result["status"] == "skipped"
         assert "1 fix(es) withheld" in notify.call_args.args[0]
+        assert notify.call_args.kwargs["repo_root"] == repo
         assert liveness.call_args.kwargs["fixes_withheld"] == 1
 
     def test_rotation_result_surfaces_withheld_count(self, repo, auth_ok, patch_redis):
@@ -1423,6 +1424,7 @@ class TestWithheldBlocksStaleClose:
         assert push.call_args.args[2] == audit_result["files_touched"]
         assert push.call_args.kwargs["withheld"] == audit_result["withheld"]
         assert "withheld" in notify.call_args.args[0]
+        assert notify.call_args.kwargs["repo_root"] == repo
         # One issue filed per withheld entry (Q5 / B4).
         assert file_issue.call_count == 2
 
@@ -1464,6 +1466,7 @@ class TestWithheldBlocksStaleClose:
         msg = notify.call_args.args[0]
         assert "2 fix(es) withheld" in msg
         assert "docs_features_foo_md" in msg  # the rotation slug
+        assert notify.call_args.kwargs["repo_root"] == repo
         assert liveness.call_args.kwargs["fixes_withheld"] == 2
         # One issue filed per withheld entry (Q5 / B4), even on the no-PR path.
         assert file_issue.call_count == 2
@@ -1482,9 +1485,252 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor._update_rotation_hash"),
             patch("reflections.docs_auditor._write_liveness"),
         ):
-            docs_auditor.run_docs_auditor()
+            result = docs_auditor.run_docs_auditor()
 
         assert notify.call_count == 0
+        assert result["status"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# TestTelegramChatRouting — #2754
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramChatRouting:
+    """``_send_telegram_notification`` resolves its destination from repo_root."""
+
+    VALOR_PROJECT = {
+        "slug": "valor",
+        "working_directory": str(docs_auditor.PROJECT_ROOT),
+        "telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}},
+    }
+
+    def test_production_valor_path_routes_by_id(self):
+        """Case 1: the production valor path sends to the numeric chat_id, not the name."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hello", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        argv = calls[0]
+        assert "-1003449100931" in argv
+        assert "Eng: Valor" not in argv
+
+    def test_foreign_registered_repo_routes_to_its_own_group(self, tmp_path):
+        """Case 2: a foreign registered repo with a configured Eng: group."""
+        foreign_project = {
+            "slug": "popoto",
+            "working_directory": str(tmp_path),
+            "telegram": {"groups": {"Eng: Popoto": {"chat_id": -5189826365}}},
+        }
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT, foreign_project],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is True
+        assert "-5189826365" in calls[0]
+
+    def test_project_root_with_empty_projects_falls_back_to_literal(self):
+        """Case 3: repo_root == PROJECT_ROOT with load_local_projects returning []."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch("reflections.docs_auditor.load_local_projects", return_value=[]),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        assert "Eng: Valor" in calls[0]
+
+    def test_foreign_unregistered_repo_suppresses_send(self, tmp_path, caplog):
+        """Case 4: a foreign, unregistered repo sends nothing and returns False."""
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch("reflections.docs_auditor.load_local_projects", return_value=[]),
+            caplog.at_level("WARNING"),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is False
+        run.assert_not_called()
+        assert str(tmp_path) in caplog.text
+
+    def test_registered_repo_with_malformed_group_suppresses_send(self, tmp_path):
+        """Case 5: a registered repo whose Eng: group is malformed (the royop shape)."""
+        malformed_project = {
+            "slug": "royop",
+            "working_directory": str(tmp_path),
+            "telegram": {"groups": {}},
+        }
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[malformed_project],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is False
+        run.assert_not_called()
+
+    def test_load_local_projects_raising_falls_back_for_project_root_only(self, tmp_path, caplog):
+        """Case 6: ``load_local_projects`` raising is swallowed; ``PROJECT_ROOT``
+        still falls back to the literal, a foreign path returns False."""
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            sent_root = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+            sent_foreign = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent_root is True
+        assert "Eng: Valor" in run.call_args_list[0].args[0]
+        assert sent_foreign is False
+        assert "boom" in caplog.text
+
+    def test_subprocess_filenotfounderror_still_returns_true(self):
+        """Case 7a: a resolved destination whose ``subprocess.run`` raises
+        ``FileNotFoundError`` still returns True — a send was attempted, not
+        suppressed."""
+        with (
+            patch(
+                "reflections.docs_auditor.subprocess.run",
+                side_effect=FileNotFoundError,
+            ),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+
+    def test_nonzero_exit_code_logs_warning_and_still_returns_true(self, caplog):
+        """Case 7b: a non-zero ``valor-telegram`` exit code on a resolved
+        destination logs a warning and still returns True."""
+        with (
+            patch(
+                "reflections.docs_auditor.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="boom"),
+            ),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        assert "valor-telegram exited 1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# TestTelegramSuppressionReachesSummary — #2754
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramSuppressionReachesSummary:
+    """A ``False`` return threads a suppression notice into the persisted summary."""
+
+    def test_zero_diff_suppression_reaches_summary(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok",
+            files_touched=[],
+            fixes_applied=0,
+            fixes_withheld=1,
+            withheld=[
+                {"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"}
+            ],
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "suppressed" in result["summary"]
+        assert any("suppressed" in f for f in result["findings"])
+
+    def test_step9_suppression_reaches_summary_before_pr_url(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok", files_touched=["docs/features/foo.md"], fixes_applied=1
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "suppressed" in result["summary"]
+        assert result["summary"].index("suppressed") < result["summary"].index("PR=")
+        assert any("suppressed" in f for f in result["findings"])
 
 
 # ---------------------------------------------------------------------------
