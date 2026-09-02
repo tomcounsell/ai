@@ -89,8 +89,18 @@ decision:
 RTR is a **group-chat** feature. A DM always deserves a reply — suppressing one
 to leave a silent reaction would read as the bot ignoring the person — so RTR
 **never** room-reads DMs. Group vs. DM is discriminated by the Telegram id sign
-(`_is_group_chat`: groups/supergroups/channels are negative, user DMs positive;
+(`is_group_chat`: groups/supergroups/channels are negative, user DMs positive;
 an unclassifiable id is treated as non-group and short-circuits to `send`).
+
+That predicate is now **public and shared**. It was renamed from the private
+`_is_group_chat` for [Telegram Poll Questions](telegram-poll-questions.md)
+(#2701), whose eligibility gate `bridge/poll_gating.py` needs the same
+group-vs-DM discrimination, and it **stays in this module** — a generic Telegram
+peer-type predicate does not belong in a feature module, and hosting it there
+would make read-the-room import from a poll module, the naming inversion that
+later invites a second, drifting copy. Poll gating imports it; RTR behavior is
+unchanged. There is no `_is_group_chat` back-compat alias: two live names is the
+drift the single definition exists to prevent.
 
 The master `READ_THE_ROOM_ENABLED` flag is **off by default**. The mechanism
 (staleness signal + no-anchor reaction target) ships group-scoped behind the

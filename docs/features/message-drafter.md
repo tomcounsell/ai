@@ -303,3 +303,39 @@ The first two queue a 👀 reaction on suppress (with an anchor) and emit `sessi
 - `tests/unit/test_tool_call_delivery.py` — stop-hook classification for send / react / silent / continue outcomes via `tool_use` pattern match on the CLI delivery tools, plus per-path contract tests asserting input → outbox payload with the real handler (issue #1370) — classification logic only, the gate itself is dead for session_runner/eng sessions (see Files above).
 - `tests/integration/test_message_drafter_integration.py` — pass-through validation: narration strip, composition, validator surface, self-draft steering path, plus (issue #1955) a regression case reproducing the weekly-review local-path incident text end-to-end.
 - `tests/integration/test_reply_delivery.py` — end-to-end reaction paths (PM self-message bypass, completion emoji, error emoji).
+
+## The `telegram_poll` medium — validate only, never compose
+
+Added for [Telegram Poll Questions](telegram-poll-questions.md) (#2701).
+
+A poll question is validated by the drafter but is **never composed** by it:
+
+```python
+def validate_poll_question(question: str) -> list[Violation]:
+    """Validate a poll question against the telegram_poll medium. No composition."""
+    return _validate_for_medium(question, "telegram_poll")
+```
+
+**Why a new public entry point rather than routing through `draft_message`.** `_validate_for_medium`
+is private and reachable only from inside `draft_message`, and `draft_message` runs
+`_compose_structured_draft` *before* it validates — so routing a poll question through the normal
+path would return it with the emoji prefix, stage line and link footer attached. A stage line inside
+a poll question is not a message with a header; it is a broken question. "Validate via the drafter"
+and "bypass composition" are only compatible through a dedicated seam. `TelegramRelayOutputHandler.send_poll`
+calls that seam directly.
+
+The private `_validate_for_medium(text, medium)` **signature is unchanged**, so nothing ripples to
+its existing call sites or to `tests/unit/test_medium_validators.py`.
+
+**What it checks, and what it deliberately does not.** Question text only: non-empty after strip, at
+most `POLL_QUESTION_MAX_CHARS` (300). It **cannot** check option count or option length —
+`_validate_for_medium` takes text and a medium, and physically never sees the options. Widening the
+signature to carry them would ripple through every consumer for no gain, so **option validation
+lives in `tools/ask_poll.py`** (2–10 options, each non-empty and ≤ 100 chars, de-duplicated,
+mandatory final option appended).
+
+**Relationship to the "drafter is the load-bearing comms layer" doctrine.** This is a deliberate,
+narrow departure from the composition half of it, not a bypass. A poll question is a structured
+artifact rendered by Telegram's own UI, so composition would corrupt it. The comms layer still owns
+the prose: the escape-hatch followup message goes through the full `draft_message` path like any
+other reply.

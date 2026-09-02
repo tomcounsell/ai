@@ -480,6 +480,52 @@ All validation failures exit with non-zero code and print an error to stderr.
 
 The non-abort path converges on `steer_session()` in `agent/session_executor.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
 
+## Steering producers
+
+Two things write to the steering inbox today. Both go through
+`agent/steering.py::push_steering_message` — **never a raw steering-key write**.
+
+| Producer | Trigger | Entry point |
+|---|---|---|
+| Reply-to handler | A human types a reply into a thread with a live session | `bridge/telegram_bridge.py` |
+| **Poll vote** | A human **taps** an option on an `/ask-me` poll | `bridge/poll_vote.py::translate_poll_vote` |
+
+A vote produces no Telegram message at all — only an `updateMessagePoll` broadcast — so the
+translator reconstructs the routing information from the poll registry. See
+[Telegram Poll Questions](telegram-poll-questions.md).
+
+`room_id` is **mandatory** for both. `push_steering_message` selects the Room key
+(`steering:room:{room_id}`) only when the caller supplies it, and deliberately never looks a session
+up itself: `session_id` is unindexed and a lookup on the inbound fast path would cost seconds. A
+caller that omits it silently writes the legacy `steering:{session_id}` key while every peer writes
+the Room leg — a regression that produces no error.
+
+## The shared `bridge/answer_routing.py` seam
+
+The reply-to handler and the vote translator answer the same question — *what state is the session
+in, and how do I reach it?* — so that ladder lives in one place:
+
+- **`resolve_answer_target(session_id) -> AnswerTarget`** — a pure state read returning
+  `LIVE | PENDING | LIVE_GUARD | COMPLETED | NONE`. It carries the **session object**, not just a
+  kind, because the caller must derive `room_id` from it.
+- **`resume_completed_session(...)`** — the completed-session re-enqueue
+  (`_build_completed_resume_text` → `dispatch_telegram_session`), with `project` / `project_key` /
+  `working_dir` / `session_type` each falling back to the field on the completed record, which is
+  why a caller holding no project dict can still use it.
+
+**Everything caller-specific stays in the caller**: `_ack_steering_routed`, the
+`is_duplicate_message` short-circuit, reply-chain hydration, and `react_if_worker_down` (which needs
+the inbound `message.id` — a vote has no equivalent). That split is what makes "behavior must not
+change" a checkable claim rather than a wish.
+
+The module is deliberately **poll-independent**: `translate_poll_vote` lives in
+`bridge/poll_vote.py` and imports from it, rather than living inside it. The extraction restructures
+the primary inbound path for every typed Telegram reply on every machine, so it landed as its own
+commit and reverting the poll feature does not revert it.
+
+**`COMPLETED` is the normal outcome for a poll answer**, not an edge case — `/ask-me` finalizes its
+session at turn end via the clean, wrap-up-eligible `pm_needs_human` exit, long before a human taps.
+
 ## No-Gos
 
 - `bridge/message_drafter.py` `nudge_feedback` is untouched — separate concept
