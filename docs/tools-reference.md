@@ -477,11 +477,16 @@ python -m tools.belt_baseline --full --json         # every tool, machine-readab
 ```
 
 Denials split **belt-relevant** vs **belt-irrelevant**. A belt cannot prevent a
-denial whose cause it does not control, so `BELT_IRRELEVANT_CAUSES`
-(`sensitive_path`, `teammate_write`, `tool_budget`, `foreground_guard`) stays out
-of the denominator; `denials_belt_relevant` is the field the escalation rollback
-gate consumes. An unrecognised cause counts as belt-relevant — under-counting
-makes the ceiling tighter, which is the safe direction to be wrong.
+denial whose cause it does not control, so `BELT_IRRELEVANT_CAUSES` keeps
+exactly two causes out of the denominator: `sensitive_path` (no belt makes
+`.env` writable) and `teammate_write` (hook-enforced until the
+`valor-docs-write` wrapper makes the restriction belt-expressible).
+`denials_belt_relevant` counts everything else, `tool_budget` included: a
+narrower belt means fewer tool calls, hence fewer spend-cap trips, so budget
+denials move with belt width and are exactly the signal being measured. It is
+the field the escalation rollback gate consumes. An unrecognised cause counts
+as belt-relevant, so a cause added later stays in the baseline until the plan
+is amended to exclude it.
 
 An empty or missing stream exits **3** and says the window was not measured. That
 is deliberate: a zero baseline would make the −40% context target trivially
