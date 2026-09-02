@@ -454,6 +454,38 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
   never as a substitute for running it. Task 2 (the human-tap gate) was left **UNRESOLVED** by that
   same build and remains genuinely open.
 
+### spike-9: `PollAnswer.option` accepts 8 bytes, not 100 (Task 1 gate, supervised, 2026-09-02)
+- **Assumption**: "`PollAnswer.option` is bounded at 100 bytes, so a 32-hex correlation id fits."
+- **Method**: prototype — live MTProto size sweep into the machine-owned eng group from a temp
+  session copy with `receive_updates=False`, every probe poll deleted immediately.
+- **Finding**: **Invalidated.** 1, 2, 4 and 8 bytes are accepted; 9 and 12 are rejected with
+  `A poll option used invalid data (the data may be too long) (caused by SendMediaRequest)`.
+  The ceiling is **8 bytes**. The TL schema declares `option:bytes` with no visible bound, so the
+  number is only knowable by probing — every reference this plan consulted said 100.
+- **Confidence**: high (reproducible, verbatim MTProto error at the boundary)
+- **Impact on plan**: the Race-6 option layout is re-cut from the `f"{index}:{hex32}"` text form
+  (34 bytes, unsendable) to packed binary — `bytes([index])` plus the first **7 bytes** of the
+  hint, 8 bytes exactly — with a new `correlation_matches(decoded_prefix, poll_id_hint)` owning the
+  prefix-vs-full-hint comparison in one place. `poll_id_hint` is otherwise unchanged: full
+  `uuid.uuid4().hex`, still the registry key, still one producer. No scope, appetite, capability
+  matrix, owner decision or task topology change.
+- **Why this is the gate's whole value.** The plan graded spike-8 medium-confidence and required
+  Task 1 to be re-run under supervision anyway. Had it been skipped on spike-8's strength, this
+  build would have wired nine subsystems onto an encoding that cannot be sent, and the failure
+  would have surfaced at the wire with no local signal.
+
+### spike-10: vote readback in a group, re-established under supervision (Task 1 PASS)
+- **Assumption**: "A user account can read back a vote cast on its own group poll" — Task 1.
+- **Method**: prototype, run 2026-09-02 under supervision with output pasted into the PR
+  description and recorded on #2701; supersedes the unaudited spike-8.
+- **Finding**: **PASS.** With the spike-9 encoding, `GetPollResultsRequest` returns
+  `PollResults(min=False, ..., total_voters=1)` and the chosen option is recoverable from
+  `PollAnswerVoters` with `chosen=True`; the embedded correlation prefix survives the server round
+  trip verbatim; the server-assigned `poll.id` differs from the supplied placeholder; and
+  `close_poll(closed=True)` succeeds.
+- **Confidence**: high — audit-grade, unlike spike-8.
+- **Impact on plan**: the inbound set (Tasks 9, 10, 10a, 13b) is unblocked. Risk 2 is retired.
+
 ## Data Flow
 
 **Outbound (question → poll on screen):**
@@ -1085,7 +1117,9 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
 - [ ] `_send_queued_poll` passes the payload's `poll_id_hint` to **both** `register_pending_poll` and
   `send_poll(correlation_id=...)` — asserted on the recorded call args, not by inspection.
 - [ ] `encode_option(index, poll_id_hint)` round-trips through `decode_option` and the encoded bytes
-  are `<= 100` bytes for a 32-char hex hint at every option index the CLI permits (2..10).
+  are **exactly 8 bytes** — Telegram's verified ceiling — at every option index the CLI permits
+  (2..10), and that `correlation_matches(decoded_prefix, poll_id_hint)` is True for the minting hint
+  and False for a different one.
 - [ ] A payload arriving at `_send_queued_poll` **without** `poll_id_hint` logs at error and delivers
   the plain-text fallback; it does not send a poll.
 - [ ] `send_poll(correlation_id=None)` emits `poll_sent_without_correlation_id` at warning.
@@ -1680,8 +1714,12 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   `pm_needs_human` exit — so a reader does not mistake `resume_completed_session` for an edge case.
 - [ ] The feature doc must document `poll_id_hint` as the Race-6 correlation key: minted once in
   `build_telegram_poll_outbox_payload`, carried on the outbox payload, embedded in the option bytes
-  by `send_poll`, and matched exactly by orphan adoption — with the 100-byte `PollAnswer.option`
-  ceiling stated as the reason the id is a 32-char hex and not a longer digest.
+  by `send_poll`, and matched by orphan adoption through `correlation_matches` — with the
+  **verified 8-byte `PollAnswer.option` ceiling** stated as the reason only a 7-byte prefix of the
+  hint travels on the wire, and the reason the layout is packed binary rather than text. The doc
+  must record that the ceiling was measured empirically during the Task 1 gate (8 accepted, 9
+  rejected at the wire with no local signal) because the TL schema's `option:bytes` states no
+  bound, so a future reader does not "restore" a longer id from the schema.
 - [ ] The feature doc must document `telegram:poll:reconcile:heartbeat` as the loop's external
   liveness signal, name the health surface that reads it, and state why `poll_expired_unanswered`
   cannot serve that role (it is emitted from inside the loop it would be reporting on).
@@ -2174,8 +2212,18 @@ why reversibility depends on it.
   dict unconditionally. It is the correlation key the entire Race-6 mitigation is built on: Task 7
   passes it to both `register_pending_poll(...)` (as the registry key) and
   `send_poll(..., correlation_id=poll_id_hint)` (which embeds it in the option bytes), and Task 10's
-  orphan adoption matches on it. **Size budget:** `f"{index}:{hex32}"` is at most 35 bytes, inside
-  Telegram's 100-byte `PollAnswer.option` ceiling. Do not substitute a longer id (a payload digest,
+  orphan adoption matches on it. **Size budget — the ceiling is 8 bytes, measured, not 100.**
+  `PollAnswer.option` accepts 8 bytes and rejects 9 at the wire with
+  `A poll option used invalid data (the data may be too long)` and no local signal; verified
+  empirically during the Task 1 gate on 2026-09-02, because the TL schema declares `option:bytes`
+  with no visible bound and every consulted reference said 100. The full 32-hex hint therefore
+  **cannot** travel in the option. `send_poll` embeds a packed-binary `bytes([index]) + first 7
+  bytes of the hint` (8 bytes exactly), and `correlation_matches()` owns the resulting
+  prefix-vs-full-hint comparison so no call site has to get the asymmetry right by hand. 56 bits
+  disambiguates a bounded window of recent outbound polls in one chat with room to spare, and the
+  adoption rule's "more than one candidate → adopt nothing, warn" bail already covers a collision.
+  `poll_id_hint` itself is unchanged: still a full `uuid.uuid4().hex`, still the registry key,
+  still minted by exactly one producer. Do not substitute a longer id (a payload digest,
   a composite `session_id:timestamp` string) — those can exceed the ceiling and the send fails at
   the wire with no local signal.
 - Add `TelegramRelayOutputHandler.send_poll(...)` as a sibling of `send`: validate via the
