@@ -181,7 +181,7 @@ class TestFailedRotationEscalates:
         monkeypatch.setattr(docs_auditor, "_git_diff_quiet", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg: None)
+        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
         result = docs_auditor.run_docs_auditor()
@@ -235,11 +235,12 @@ class TestWithheldTitleUnwrap:
         monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg: None)
+        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
-        docs_auditor.run_docs_auditor()
+        result = docs_auditor.run_docs_auditor()
 
+        assert result["status"] == "skipped"
         assert len(filed) == 1
         title = filed[0]["title"]
         assert "(real -> realistic)" in title
@@ -383,7 +384,7 @@ class TestFailedRestoreReporting:
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
         monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg: None)
+        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", lambda finding, root: True)
 
         result = docs_auditor.run_docs_auditor()
@@ -420,7 +421,7 @@ class TestGuardFiredNoWorkingTreeWrite:
         monkeypatch.setattr(docs_auditor, "_daily_pr_cap_reached", lambda root: True)
         monkeypatch.setattr(docs_auditor, "_has_open_pr_for_slug", lambda slug, root: False)
         monkeypatch.setattr(docs_auditor, "audit", fake_audit)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg: None)
+        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
 
         result = docs_auditor.run_docs_auditor()
 
@@ -513,12 +514,13 @@ class TestWithheldFilingCap:
         monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg: None)
+        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
         with caplog.at_level("WARNING", logger="reflections.docs_auditor"):
             result = docs_auditor.run_docs_auditor()
 
+        assert result["status"] == "skipped"
         assert len(filed) == docs_auditor.ISSUE_FILING_PER_RUN_CAP
         assert any(
             "cap" in r.message.lower() and "suppress" in r.message.lower() for r in caplog.records
