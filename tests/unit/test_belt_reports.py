@@ -392,6 +392,16 @@ class TestSkewEventTypeContract:
 
         assert _skew("h1")["type"] == BELT_ENFORCE_SKEW_EVENT
 
+    def test_resolver_emission_constant_equals_report_filter_constant(self):
+        """The resolver emits via belt_resolver.BELT_SKEW_EVENT_TYPE and the
+        report filters via session_telemetry.BELT_ENFORCE_SKEW_EVENT — two
+        names for one contract. If either side drifts, skew events silently
+        vanish from the report; this pins them equal."""
+        from agent.session_runner.belt_resolver import BELT_SKEW_EVENT_TYPE
+        from agent.session_telemetry import BELT_ENFORCE_SKEW_EVENT
+
+        assert BELT_SKEW_EVENT_TYPE == BELT_ENFORCE_SKEW_EVENT == "belt_enforce_skew"
+
     def test_last_ts_is_the_newest_event(self, tmp_path, capsys):
         telemetry = tmp_path / "session_telemetry"
         _write_stream(
