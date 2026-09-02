@@ -911,83 +911,143 @@ def _assert_client_matches_claim_registry(client, expected_host: str, expected_p
         )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _popoto_pool_install(_popoto_test_db):
+    """Point popoto's canonical client at the claim registry's server, once (#2771).
+
+    Ownership is split by fact, and this fixture owns exactly one of them:
+
+    * ``tests/db_claim.py`` owns the db NUMBER and the SERVER (host/port).
+    * popoto's bundled ``pytest11`` plugin owns APPLYING the db number — it reads
+      the ``POPOTO_TEST_DB`` that ``pytest_configure`` exports and calls its own
+      ``_swap_db``. Declaring ``_popoto_test_db`` as a dependency orders this
+      fixture after that swap by construction rather than by collection accident.
+    * this fixture owns APPLYING the server. It cannot be delegated to
+      ``_swap_db``: that helper preserves whatever host/port the pool already
+      carries, and that pool was built at popoto import time from the ambient
+      ``REDIS_URL``. Under ``REDIS_PORT=641x`` the claim registry is keyed to the
+      private port while the client sits on 6379 — the run opts OUT of the
+      machine-global pool and flushes production db N (#2799).
+
+    The swap is IN PLACE on the existing client object: only
+    ``client.connection_pool`` is reassigned, never ``rdb.POPOTO_REDIS_DB``.
+    Popoto submodules capture the symbol with ``from ..redis_db import
+    POPOTO_REDIS_DB`` at import time, so replacing the object strands every one
+    of those bindings on a stale client — the #2037 split-brain. Mutating the
+    object every binding already points at makes them all follow for free, and
+    is why no submodule re-pointing walk exists any more.
+
+    The pool is rebuilt rather than adjusted because ``max_connections`` is a
+    POOL constructor argument and is absent from ``connection_kwargs``: anything
+    that rebuilds from those kwargs — including popoto's own ``_swap_db``, which
+    runs before this fixture — silently downgrades a ``BlockingConnectionPool``
+    to a plain unbounded ``ConnectionPool``. Reconstructing popoto's own pool
+    type restores the connection ceiling the suite is supposed to run under.
+
+    SELECT is still not used: with a connection pool a recycled connection
+    defaults back to db 0, and the next ``flushdb()`` wipes production.
+    """
+    import popoto.redis_db as rdb
+    import redis
+
+    test_db = claim_test_db()
+    test_host = db_claim.redis_test_host()
+    test_port = int(db_claim.redis_test_port())
+
+    client = rdb.POPOTO_REDIS_DB
+    old_pool = client.connection_pool
+    old_kwargs = dict(old_pool.connection_kwargs)
+
+    # Idempotence guard. Host/port are type-normalized on both sides: a pool
+    # built from a URL carries ``port`` as int while ``redis_test_port()``
+    # returns a str, and comparing those raw would rebuild the pool on every
+    # call instead of recognising the steady state.
+    already_installed = (
+        isinstance(old_pool, redis.BlockingConnectionPool)
+        and str(old_kwargs.get("host")) == str(test_host)
+        and int(old_kwargs.get("port") or 0) == test_port
+        and int(old_kwargs.get("db") or 0) == test_db
+    )
+    if already_installed:
+        yield
+        return
+
+    new_pool_kwargs = {
+        "host": test_host,
+        "port": test_port,
+        "db": test_db,
+        "socket_timeout": 5,
+        "socket_connect_timeout": 5,
+        # Read from popoto rather than hardcoded: it honours
+        # POPOTO_SYNC_MAX_CONNECTIONS. #2770 is the upstream coordination point
+        # if this name ever moves.
+        "max_connections": getattr(rdb, "_SYNC_MAX_CONNECTIONS", 128),
+    }
+    # An authenticated REDIS_URL must keep working; mirror what _swap_db carries.
+    for auth_key in ("password", "username"):
+        if old_kwargs.get(auth_key) is not None:
+            new_pool_kwargs[auth_key] = old_kwargs[auth_key]
+
+    new_pool = redis.BlockingConnectionPool(**new_pool_kwargs)
+    client.connection_pool = new_pool
+    # Disconnecting immediately is safe ONLY because this runs in pytest's
+    # synchronous session-setup phase, with no test body executing and therefore
+    # no checked-out connection in flight. disconnect() tears down every
+    # connection the pool hosts, so a caller mid-command would get a broken
+    # socket. Never move this into a test body or an async context.
+    old_pool.disconnect()
+
+    yield
+
+    # Session finalizer, and the only place the pool this fixture installed is
+    # unwound. Runs after the last test's teardown, again with nothing in
+    # flight. Not client.close(): the client does not own its pool (it was built
+    # with redis.Redis(connection_pool=...)), and the object is shared.
+    client.connection_pool = old_pool  # session-finalizer-only
+    new_pool.disconnect()
+
+
 @pytest.fixture(autouse=True)
-def redis_test_db(request):
-    """Switch popoto to a dedicated test Redis client for ALL tests.
+def redis_test_db(request, _popoto_pool_install):
+    """Per-test Redis hygiene on popoto's canonical client (#2771).
 
     autouse=True ensures this runs for every test, even those that don't
     explicitly request the fixture. This prevents accidental writes to db=0
     if a test imports a popoto model without requesting isolation.
 
-    The db number is this PROCESS's flock claim (tests/db_claim.py), established
-    in ``pytest_configure`` before any fixture runs. It is never derived from the
-    xdist worker id: that is unique within one run but not across the several
-    pytest processes this machine runs at once, which is how one run's flushdb()
-    used to wipe another's data mid-test (#2060, #2628).
+    This fixture does NO pool work. Which server and which db the client is on
+    is settled once per session by ``_popoto_pool_install``; all that is left
+    per test is the flush pair and the registry assertion.
 
-    CRITICAL: We replace the POPOTO_REDIS_DB object with a new Redis client
-    pointed at the test db, rather than using SELECT on the production connection.
-    SELECT is unsafe with connection pools — if the pool recycles a connection,
-    the new connection defaults back to db=0 and flushdb() wipes production data.
+    The db number is this PROCESS's flock claim (tests/db_claim.py), exported as
+    ``POPOTO_TEST_DB`` in ``pytest_configure`` and applied by popoto's own
+    plugin. It is never derived from the xdist worker id: that is unique within
+    one run but not across the several pytest processes this machine runs at
+    once, which is how one run's flushdb() used to wipe another's data mid-test
+    (#2060, #2628).
 
-    Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
-    maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
+    The registry assertion stays function-scoped on purpose. It is the check
+    that catches drift introduced DURING a test — a test that rebinds the global
+    or swaps the pool fails on the very next test rather than silently flushing
+    an unprotected server (#2799).
+
+    ``rdb._POPOTO_ASYNC_REDIS_DB`` is deliberately untouched. The plugin nulls it
+    at setup and teardown of every test so that ``get_async_redis_db()`` builds
+    the async client lazily INSIDE the test's own event loop, mirroring the
+    canonical sync client's kwargs. Binding it here — synchronously, in fixture
+    setup — produces a client attached to the wrong loop, which is the one thing
+    the plugin's reset exists to prevent.
     """
     import popoto.redis_db as rdb
-    import redis
-    import redis.asyncio as aioredis
 
-    # Per-PROCESS unique test db (issue #2060). Replaces the old per-worker
-    # ``gw{N}->db{N+1}`` / master->db1 derivation, which collided across
-    # concurrent pytest processes and let one process's flushdb() wipe another's
-    # data mid-test. ``claim_test_db`` is memoized per process, so every test in
-    # this process uses the same claimed db.
-    test_db = claim_test_db()
-
-    # Save original connections
-    original_sync = rdb.POPOTO_REDIS_DB
-    original_async = getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)
-
-    # Create a NEW Redis client pointed at the test db (not SELECT on the pool).
-    #
-    # Host and port come from db_claim, never from redis-py's localhost:6379
-    # defaults (#2799). Building this client bare meant an agent who started a
-    # private ``redis-server --port 641x`` for isolation got the OPPOSITE of
-    # isolation: the tests still hit production 6379 while REDIS_PORT re-keyed
-    # the claim registry to the private port, opting the run OUT of the
-    # machine-global pool that stops two runs claiming the same db. A private
-    # port made collisions MORE likely, and it flushed production db N.
+    client = rdb.POPOTO_REDIS_DB
     test_host = db_claim.redis_test_host()
     test_port = int(db_claim.redis_test_port())
-    test_client = redis.Redis(host=test_host, port=test_port, db=test_db)
-    _assert_client_matches_claim_registry(test_client, test_host, test_port)
-    rdb.POPOTO_REDIS_DB = test_client
-    test_client.flushdb()
+    _assert_client_matches_claim_registry(client, test_host, test_port)
 
-    # Popoto submodules use `from ..redis_db import POPOTO_REDIS_DB`, which
-    # captures the binding at import time. Assigning rdb.POPOTO_REDIS_DB above
-    # does not update those local bindings, so we must patch every popoto
-    # module that has a local POPOTO_REDIS_DB symbol. Without this, sync
-    # reads/writes route to whichever db was active at import (often
-    # production), and async vs. sync reads diverge.
-    _patched_popoto_modules: list[tuple[object, object]] = []
-    for _mod in _popoto_modules_with_redis_db():
-        _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
-        _mod.POPOTO_REDIS_DB = test_client
-
-    # Reset async Redis connection to point at the same test db — same host and
-    # port as the sync client above, or async reads diverge from sync ones.
-    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(host=test_host, port=test_port, db=test_db)
-
+    client.flushdb()
     yield
-
-    # Flush test db and restore original production connections
-    test_client.flushdb()
-    test_client.close()
-    rdb.POPOTO_REDIS_DB = original_sync
-    rdb._POPOTO_ASYNC_REDIS_DB = original_async
-    for _mod, _orig in _patched_popoto_modules:
-        _mod.POPOTO_REDIS_DB = _orig
+    client.flushdb()
 
 
 # ---------------------------------------------------------------------------
