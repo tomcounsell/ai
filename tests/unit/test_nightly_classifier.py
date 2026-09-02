@@ -505,6 +505,120 @@ class TestProvisionFailures:
         spawn.assert_not_called()
 
 
+class TestProvisionHardening:
+    """The provisioning tech-debt fixes from the #3082 review."""
+
+    def test_provision_steps_own_a_process_group(self, tmp_path: Path) -> None:
+        """start_new_session=True on every step, so killpg can reach a
+        surviving uv build grandchild instead of hanging in communicate()."""
+        wt = _ready_worktree(tmp_path)
+        (wt / nrt.BASELINE_PROVISION_MARKER).write_text("stale-digest\n")
+        fake = _ProvisionFake()
+        with patch.object(nrt.subprocess, "Popen", fake):
+            assert nrt.provision_baseline_worktree(
+                "cafef00d", repo_root=tmp_path / "repo-root", worktree_path=wt
+            )
+        assert fake.calls, "at least one provisioning step must run"
+        assert all(k.get("start_new_session") is True for k in fake.kwargs)
+
+    def test_provision_prune_and_retry_recovers_a_desynced_admin_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A registered-but-missing lane fails `git worktree add` forever until
+        pruned; the classifier prunes and retries once, logging the recovery."""
+        wt = tmp_path / "absent-wt"
+        calls: list[list[str]] = []
+
+        def _fake(argv, **kwargs):
+            calls.append(list(argv))
+            token = _step_token(list(argv))
+            # First add fails (desynced admin entry); post-prune add succeeds.
+            first_add_failing = token == "worktree_add" and calls.count(list(argv)) == 1
+            return _FakeProc(list(argv), 1 if first_add_failing else 0, timeout=False)
+
+        with patch.object(nrt.subprocess, "Popen", _fake):
+            # The add "succeeds" without creating the directory, so the venv
+            # check below still returns False — the assertion here is about
+            # the recovery sequence, not end-to-end success.
+            nrt.provision_baseline_worktree(
+                "cafef00d", repo_root=tmp_path / "repo-root", worktree_path=wt
+            )
+        tokens = [_step_token(a) for a in calls]
+        assert tokens[:3] == ["worktree_add", "worktree_prune", "worktree_add"]
+        log_text = (tmp_path / "nightly.log").read_text()
+        assert "git worktree prune" in log_text
+
+    @pytest.mark.parametrize("bad_sha", ["-rf", "main", "HEAD~1", "", "cafe f00d"])
+    def test_provision_refuses_a_non_hex_baseline_sha(self, tmp_path: Path, bad_sha: str) -> None:
+        """last_run.json content never reaches git argv unvalidated. A `--`
+        separator is not usable for `checkout --detach`, so shape validation is
+        the guard."""
+        wt = _ready_worktree(tmp_path)
+        fake = _ProvisionFake()
+        with patch.object(nrt.subprocess, "Popen", fake):
+            assert not nrt.provision_baseline_worktree(
+                bad_sha, repo_root=tmp_path / "repo-root", worktree_path=wt
+            )
+        assert fake.calls == []
+
+
+class TestBaselineNodePrefilter:
+    """Newly-ADDED failing tests must not poison the whole batch."""
+
+    def _spawn_with_report(self, report: Path, payload: dict):
+        def _spawn(argv, timeout=None, env=None, cwd=None):
+            report.write_text(json.dumps(payload))
+            return 1
+
+        return _spawn
+
+    def test_prefilter_absent_node_is_inconclusive_alone(self, tmp_path: Path) -> None:
+        """A node whose test file does not exist at the baseline SHA buckets
+        inconclusive by itself; the present nodes still classify."""
+        wt = _ready_worktree(tmp_path)
+        report = tmp_path / "baseline.json"
+        payload = {"tests": [{"nodeid": "a::t1", "outcome": "passed"}]}
+        captured: dict = {}
+
+        def _spawn(argv, timeout=None, env=None, cwd=None):
+            captured["argv"] = list(argv)
+            report.write_text(json.dumps(payload))
+            return 1
+
+        with (
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
+            patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
+        ):
+            result = _classify(
+                tmp_path, wt, nodes=["a::t1", "tests/new_file.py::t9"], report_path=report
+            )
+        assert result["newly_broken"] == ["a::t1"]
+        assert result["inconclusive"] == ["tests/new_file.py::t9"]
+        assert "tests/new_file.py::t9" not in captured["argv"]
+
+    def test_prefilter_all_nodes_absent_skips_the_baseline_run(self, tmp_path: Path) -> None:
+        wt = _ready_worktree(tmp_path)
+        with (
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
+            patch.object(nrt, "_spawn_pytest") as spawn,
+        ):
+            result = _classify(tmp_path, wt, nodes=["tests/new_file.py::t9"])
+        assert result["inconclusive"] == ["tests/new_file.py::t9"]
+        spawn.assert_not_called()
+
+    def test_prefilter_logs_the_absent_nodes(self, tmp_path: Path) -> None:
+        wt = _ready_worktree(tmp_path)
+        with (
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
+            patch.object(nrt, "_spawn_pytest") as spawn,
+        ):
+            _classify(tmp_path, wt, nodes=["tests/new_file.py::t9"])
+        spawn.assert_not_called()
+        log_text = (tmp_path / "nightly.log").read_text()
+        assert "no test file at baseline" in log_text
+        assert "tests/new_file.py::t9" in log_text
+
+
 class TestNoProjectDirFallback:
     """A failed provision must never silently classify against HEAD's source."""
 
