@@ -1258,6 +1258,37 @@ async def main():
     # worker no longer needs a Telethon client reference. Module-level client
     # registration on bridge.enrichment is removed.
 
+    @client.on(events.Raw)
+    async def poll_update_handler(update):
+        """Fast path for poll votes (#2701). The repo's first events.Raw handler.
+
+        A tap produces NO Telegram message — only an `updateMessagePoll`
+        broadcast carrying aggregate counts. This handler is a LATENCY WIN over
+        the reconciliation loop, never the mechanism: `UpdateMessagePoll` has no
+        peer and no msg_id, so `translate_poll_vote` still has to go through the
+        registry, and it is idempotent so both callers can observe the same vote.
+
+        `poll_update_observed` is how the un-gated push question gets answered in
+        production rather than by opening a second updates-enabled client on the
+        bridge's auth key. **If that signal never appears, this handler is dead
+        weight and should be deleted in a follow-up — a scope reduction, not a
+        bug.**
+
+        Must never raise into Telethon's update loop.
+        """
+        try:
+            from telethon.tl.types import UpdateMessagePoll
+
+            if not isinstance(update, UpdateMessagePoll):
+                return
+            logger.info("poll_update_observed poll_id=%s", update.poll_id)
+
+            from bridge.poll_vote import translate_poll_vote
+
+            await translate_poll_vote(client, update.poll_id)
+        except Exception as e:
+            logger.warning(f"poll_update_handler failed (non-fatal): {e}")
+
     @client.on(events.NewMessage)
     async def handler(event):
         """Handle incoming messages."""
@@ -3347,6 +3378,20 @@ async def main():
         logger.info("PM Telegram relay started")
     except Exception as e:
         logger.error(f"Failed to start PM Telegram relay: {e}")
+
+    # Poll vote reconciliation (#2701). THE PRIMARY inbound mechanism for poll
+    # answers — the events.Raw handler above is only a latency win layered on
+    # it. UpdateMessagePoll carries no peer and no message id, so it cannot
+    # route a vote on its own; this loop reads the registry and confirms through
+    # GetPollResultsRequest, which also makes votes survive a bridge restart.
+    # The loop body lives in bridge/poll_reconcile.py; this only starts it.
+    try:
+        from bridge.poll_reconcile import poll_reconcile_loop
+
+        _background_tasks.append(asyncio.create_task(poll_reconcile_loop(client)))
+        logger.info("Poll reconciliation loop started")
+    except Exception as e:
+        logger.error(f"Failed to start poll reconciliation loop: {e}")
 
     # Heartbeat: log periodically so the external watchdog sees fresh logs
     # (watchdog kills the bridge if logs are stale for 5 minutes)
