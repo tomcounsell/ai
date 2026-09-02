@@ -1,493 +1,510 @@
 ---
 status: Ready
 type: feature
-appetite: Large
+appetite: Medium
 owner: Valor Engels
 created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/2334
 last_comment_id: 5086978978
 revision_applied: true
-revision_applied_at: 2026-09-02T18:32:41Z
+revision_applied_at: 2026-09-02T06:47:39Z
 ---
 
-# Nightly Regression: Attempt an Autonomous Fix Before Paging a Human
+# Nightly Regression: Classify Before Paging a Human (shadow tier)
 
 ## Problem
 
 The nightly regression detector (`scripts/nightly_regression_tests.py`) runs the
 unit suite each night. On a newly-confirmed serial failure it does two things in
-the same run: dispatches an **investigate-only** Eng session (`maybe_dispatch_triage_session`,
-mandate: "Do NOT attempt an auto-hotfix") **and** pages a human up front via
-`send_telegram(...)`. The human is the *first responder* — they wake up to a raw
-"tests are red" ping carrying the full cognitive load of "what broke and what do I
-do", even when the regression is a mechanical test carry-forward Valor could have
-patched before anyone woke up.
+the same run: dispatches an **investigate-only** Eng session (`maybe_dispatch_triage_session`
+L856; mandate `"...auto-hotfix — this is an investigation-and-file-an-issue task only"`
+L846) **and** pages a human up front (`send_telegram(msg, dry_run=args.dry_run)` L1220,
+on the `elif new_failures:` arm at L1207). The human is the *first responder* — they
+wake to a raw "tests are red" ping carrying the full cognitive load of "what broke and
+what do I do", even when the regression is a mechanical test carry-forward.
 
-The worked example that proves the point: **#2399 → PR #2402**. 11 newly-confirmed
-nightly failures, all of which turned out to be **test-stale** (source contracts
-moved in merged PRs, the tests weren't carried forward). A human triaged and fixed
-them by hand. An autonomous fixer should have handled the mechanical carry-forward
-and paged nobody.
+The worked example: **#2399 → PR #2402**. 11 newly-confirmed nightly failures, all
+**test-stale** (source contracts moved in merged PRs, the tests weren't carried forward).
+A human triaged and fixed them by hand.
 
-**Current behavior:** Detection → dispatch investigate-only session **and** page a
-human immediately.
+**Current behavior:** Detection → dispatch investigate-only session **and** page a human
+immediately. Every red suite pages, regardless of what kind of red it is.
 
-**Desired outcome:** Detection → silent log → Valor **classifies** each failure and
-attempts a *bounded, review-gated* autonomous fix **only** when every failure is
-test-stale with high confidence and within a hard blast-radius cap → on success a
-**low-urgency, non-paging notification** tells a human a fix PR is waiting for review
-(the happy path is not fully silent — a human must know a PR exists) → a human is
-**paged** (high-urgency, wakes someone) **only** as the *escalation of last resort*:
-when any failure is code-regressed, when classification is uncertain, when a cap is
-exceeded, or (fail-safe) when the fix session dies/hangs. The last-resort page carries
-the stuck point (what broke, what was tried, why blocked, the specific decision needed),
-not a raw test dump.
+**Desired end state:** Detection → classify each newly-confirmed failure as
+*newly-broken-since-last-green* vs *pre-existing* vs *inconclusive* → route the
+newly-broken-and-within-caps case to a bounded autonomous fix, and page a human only as
+the escalation of last resort.
 
-Two notification tiers, kept distinct throughout the plan: a **page** is the
-high-urgency escalation that wakes a human (reserved for genuine blockers); a
-**notify** is a low-urgency FYI ("a fix PR exists, review when convenient"). Only
-genuine blockers page.
+**What this plan ships (deliberate scope cut — round 7).** The classification stage and
+the decision gate, running in `shadow`: every non-`off` run computes and logs the verdict
+it *would* act on, while paging exactly as today. **It does not ship the autonomous fixer.**
+The dispatch, hand-back, watchdog, PR guards, enforcement preflight, and the low-urgency
+notify tier are deferred to **#3076**, because they depend on two seams that do not exist
+on this machine and cannot be conjured by this plan (see Scope Boundary below).
 
-**The one gate that matters:** an autonomous fixer must NEVER make a failing test pass
-by weakening or deleting its assertions. If the code genuinely regressed, editing the
-test to match is a catastrophic silent regression. Failing toward paging is always
-safe; a silent wrong fix is not.
+This is the smaller plan that is entirely real, chosen over the complete one that was
+partly fictional. The shadow verdict is the artifact that earns #3076: a month of logs
+answering "would the gate have fired, and would it have been right?" is the evidence the
+autonomous tier is currently missing.
+
+## Scope Boundary — why `active` mode is not in this plan
+
+Three consecutive critique rounds found the same failure class: a load-bearing mechanism
+asserted without a verified invocation seam (round 1's permission profile, round 5's
+`--silent` flag, round 6's `GH_TOKEN` export). Round 7 opened the source for every
+mechanism the autonomous tier depends on. Two of them have no seam:
+
+**1. There is no per-session environment seam, so the fixer's `gh` identity cannot be set.**
+The only structural never-merge guarantee requires the fixer session's `gh` to authenticate
+as a non-admin bot (`SDLC_AGENT_GH_TOKEN`), never the operator's admin credentials. Verified
+at `2d60de31d`:
+
+| Hop | Evidence | Verdict |
+|---|---|---|
+| Dispatch call site | `scripts/nightly_regression_tests.py` L909-927: `subprocess.run([sys.executable, "-m", "tools.valor_session", "create", ...], cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30)` — **no `env=` kwarg** | No seam |
+| The CLI itself | `valor-session create --help` lists `--role/--message/--chat-id/--telegram-message-id/--parent/--project-key/--slug/--model/--needs-real-chrome/--job-id/--expect-what/--json` — **no env or token flag**. It only *enqueues* an `AgentSession` | No seam, and adding `env=` above would configure the enqueuing CLI, not the session |
+| Who actually spawns `claude -p` | The **worker**, a separate launchd process | Different process entirely |
+| The worker's env overlay | `agent/session_runner/role_driver.py::subscription_auth_env` L76-100, called at L204 (`self.env = subscription_auth_env(env)`); merged into `proc_env` at `agent/session_runner/harness/claude.py` L431-433 | Process-global, derived from the worker's own `os.environ` — **not per-session** |
+| A place to persist a per-session override | `models/agent_session.py` field list — **no env/token/permission field** | No seam |
+
+`TurnRequest.env` (`agent/session_runner/harness/base.py` L52) is the one plumbing that
+*could* carry it, but nothing session-specific reaches it. Building this means a new
+per-session env override persisted on `AgentSession`, read by the worker, threaded through
+`TurnRequest.env` into the `claude -p` spawn, with its own tests. That is standalone work,
+filed as part of **#3076** — not a dispatch-site one-liner, and not something to assert in
+a Success Criterion before it exists.
+
+**2. Branch protection on `main` is absent.** `gh api repos/tomcounsell/ai/branches/main/protection`
+→ `404 Not Found` (re-verified 2026-09-02). Enabling review-required protection is a
+repo-governance action for the owner, and without it seam 1 buys nothing anyway.
+
+Because both legs of the never-merge guarantee are unavailable, an `active` mode built now
+would dispatch a `bypassPermissions` session with unrestricted bash and the operator's admin
+`gh` credentials into an unprotected `main`. The correct move is not to ship it behind a
+flag nobody can enable — that is unreachable code whose safety claims nothing tests. It is
+to cut it.
+
+**Consequently deferred to #3076** (design detail preserved there and in Critique Results
+below): the narrow-mandate draft-PR fixer dispatch, the `GH_TOKEN` export, the
+`AgentSession.nightly_fix_handback` field, `tools/nightly_fix_handback.py`, the
+escalation/fail-safe watchdog preamble, the fail-closed diff-path and merge/draft-state
+guards, the three-leg `active`-mode preflight, the per-node `fix_sessions` map, and the
+`valor-telegram send --silent` notify transport (deferred with the rest because without an
+`active` happy path it would be a flag with no consumer — a dead surface propagated to every
+machine).
 
 ## Freshness Check
 
-<!-- Round 2 re-verification, 2026-09-02. The original 2026-07-27 check against
-     66a433bd9 is superseded: nine commits reshaped the detector between then and
-     now. Only the current baseline is recorded, per the no-historical-artifacts
-     rule. -->
+**Baseline commit:** `2d60de31d` (`git rev-parse origin/main`, 2026-09-02, round-7 revision
+pass). Every file:line reference in this plan is resolved against that SHA and was re-read
+at revision time, not carried forward from an earlier round.
 
-**Baseline commit:** `0b6688433` (`git rev-parse origin/main`, 2026-09-02, round-5 revision pass)
-**Issue filed at:** 2026-07-24T06:45:58Z · **Plan first written:** 2026-07-27 (baseline `66a433bd9`)
-**Disposition:** Minor drift — **the premise is intact, the substrate moved substantially.**
+**Issue filed at:** 2026-07-24T06:45:58Z · **Plan first written:** 2026-07-27
+**Disposition:** Minor drift — **the premise is intact; the plan's scope changed for
+seam reasons, not drift reasons.**
 
-The defect this plan exists to fix is unchanged: `main()` still pages a human up front
-on the `elif new_failures:` branch (`send_telegram(msg, dry_run=args.dry_run)`, ~L1197-1207),
-and the dispatched session is still investigate-only (`"...auto-hotfix — this is an
-investigation-and-file-an-issue task only"`, L846 in `_build_triage_prompt`; the seed
-prompt repeats it at L1127). Nothing else has taken over the concern, and no merged PR
-fixes it. **Proceed.**
+The defect this plan exists to fix is unchanged: `main()` still pages up front on the
+`elif new_failures:` branch (L1207 → `send_telegram(msg, dry_run=args.dry_run)` L1220),
+and the dispatched session is still investigate-only (L846; the seed prompt repeats it at
+L1127). Nothing else has taken over the concern and no merged PR fixes it. **Proceed.**
 
-What *did* move is the machinery the plan's dedup and dispatch design was written
-against. `scripts/nightly_regression_tests.py` grew from ~700 to **1366 lines** across
-nine commits (`3264ce7ff`, `e48199979`, `c8d06886f`, `f57a10b4a`, `3578882c7`,
-`af8cd6aac`, `5a37cef05`, `1831b6883`, `b8e08ece4`). Every line reference below is
-re-resolved against `3b6eb651b`.
+**Re-verified at `2d60de31d` — claims this plan depends on:**
 
-**Re-verified — claims that still hold:**
-
-| Claim | Current location | Status |
+| Claim | Location | Status |
 |---|---|---|
-| Up-front unconditional page on newly-confirmed failures | `main()`, `elif new_failures:` → `send_telegram(...)` ~L1197-1207 | **Holds** — the defect |
-| Investigate-only mandate ("Do NOT attempt an auto-hotfix") | `_build_triage_prompt` L846; seed prompt L1127 | **Holds** |
-| `maybe_dispatch_triage_session()` is the dispatch seam | L856-988 (gained `prompt` / `slug_suffix` / `dry_run` kwargs) | **Holds**, signature widened |
+| Up-front unconditional page on newly-confirmed failures | `main()` `elif new_failures:` L1207; `send_telegram(...)` L1220 | **Holds** — the defect |
+| `send_telegram(msg, dry_run=False)` has no urgency parameter | L609 | **Holds** |
+| `send_telegram` never checks the subprocess `.returncode` and logs `"Telegram sent"` unconditionally | L626-635 (`subprocess.run(..., capture_output=True)` L626; `log(f"Telegram sent: {msg}")` L633) | **Holds** — a failed or rejected send is indistinguishable from a delivered one. Fixed by Step 1 |
+| `_spawn_pytest(argv, timeout, env=None)` hardcodes `cwd=PROJECT_DIR` | L283 (signature), L302 (`cwd=PROJECT_DIR` in the `Popen` call) | **Holds** — the classifier cannot reuse it unmodified (round-6 blocker 2) |
+| `scripts/pytest-clean.sh` derives its rootdir from the caller's cwd | L34-38: `REPO_ROOT="$(pwd)"` when cwd has a `[tool.pytest` section, else the script's own root | **Holds** — so a `cwd=<worktree>` spawn *does* target the worktree |
+| `pytest-clean.sh` aborts on a linked worktree with no `.venv` of its own (#3033) | L135-145 | **Holds** — a bare `git worktree add` produces exactly this, and aborts |
+| `pytest-clean.sh` aborts on an off-pin interpreter (#2617) | L169-175 (`scripts/check-interpreter-pin.sh`) | **Holds** — the provisioned venv must be on the `.python-version` pin |
+| `head_commit` is already persisted on every non-fatal path | `current["head_commit"] = _get_head_commit()` L1092; helper L1344 | **Holds** — consumed, never added |
+| `compute_new_failures` (L654) drives the alert; `compute_dispatch_set` (L728) answers "what has never been filed" — different sets since #2559 | L654 / L728 | **Holds** — the gate consumes `new_failures` |
+| `MAX_DISPATCH_NODES = 10` (L185) truncates `dispatch_nodes` at L1160-1166 and never touches `new_failures` | L185, L1160-1166 | **Holds** — not a fixer disqualifier; see Cap arithmetic |
+| Seed / re-baseline run flags | `is_reseed` L1026, `is_seed_run` L1027, `seeded_nodes()` L683 | **Holds** — hard gate disqualifier |
+| `validate_run_integrity()` → `integrity_warnings` | L401 (definition), L1047 (call) | **Holds** — hard gate disqualifier |
 | `reconfirm_serial()` serial gate → `confirmed_failing` | L532 | **Holds** |
-| `send_telegram(msg, dry_run=False)` has **no** urgency parameter | L609 | **Holds** — the `silent=` addition is still required and still non-vacuous |
-| `send_telegram` never checks the subprocess `.returncode` and logs `"Telegram sent"` unconditionally | L626-634 | **Holds — newly recorded (round 5).** A failed/rejected send is indistinguishable from a delivered one. Fixed as part of the notify tier (Technical Approach → Notify transport chain). |
-| `valor-telegram send` has **no** `--silent` flag, and `disable_notification` has **zero** hits anywhere in `tools/valor_telegram.py` or `bridge/` | `send_parser` L1367-1440; `cmd_send` L798; relay send call sites `bridge/telegram_relay.py` L468/L488/L746 + the text-only path | **Newly recorded (round 5)** — the notify tier needs a real three-hop transport change, not a wrapper kwarg. |
-| `baseline-verifier` is reachable **only** via the Claude Task tool | sole caller `.claude/skills-global/do-test/baseline-verification.md` L76-81 (`subagent_type: "baseline-verifier"`); zero `.py` callers repo-wide | **Newly recorded (round 5)** — a launchd Python script has no Task tool, so the subagent has no invocation seam here. Classification is re-designed as in-process Python (Technical Approach → Classifier). `.claude/agents/baseline-verifier.md` is now **untouched** by this plan. |
-| `main` branch protection is **ABSENT** | `gh api repos/tomcounsell/ai/branches/main/protection` → `404 Not Found` | **Holds, re-verified 2026-09-02** — the sole structural never-merge leg still does not exist |
-| `SDLC_AGENT_GH_TOKEN` is a declared, opt-in-per-machine bot identity | `.env.example`, `config/settings.py`, `docs/features/do-pr-review-bot-identity.md` | **Newly recorded (round 5)** — this is the non-admin second identity that makes branch protection satisfiable without breaking direct-to-`main` (Technical Approach → Enforcement design). |
-| #2405 (Cowork parity / intra-day watchdog follow-up) open | `gh issue view 2405` → OPEN | **Holds** |
-
-**Re-verified — claims that DRIFTED and forced design changes (all propagated below):**
-
-1. **`dispatched_hash` no longer exists.** #2559 / PR #2581 (`3264ce7ff`) replaced
-   sha256-of-the-failing-set dedup with **per-node** dedup. The live mechanism is now
-   `dispatched_nodes` (a node-ID set in `data/nightly_tests_last_run.json`) plus three
-   pure helpers: `prior_dispatched(prev)` (L669), `compute_dispatch_set(prev, confirmed_failing)`
-   (L728), `carry_dispatched_nodes(prev, confirmed_failing, just_dispatched)` (L754).
-   **Consequence:** the plan's `fix_attempts: {failing_set_hash: count}` and
-   `dispatched_sessions: {failing_set_hash: agent_session_id}` maps were keyed on a hash
-   that no longer has a producer. Both are **re-keyed per node ID** — see Technical
-   Approach → Dedup. The round-4 concerns those maps resolved (orphaned session pointer,
-   canonical attempt-count naming) survive intact under the new key; only the key changed.
-
-2. **`compute_new_failures` and `compute_dispatch_set` are now different sets, deliberately.**
-   `compute_new_failures` (L654) drives the *alert*; `compute_dispatch_set` (L728) asks the
-   different question of *what has never been filed*. The decision gate must be explicit
-   about which set it consumes — it consumes `new_failures` (that is the population this
-   feature promises to fix before paging), while attempt-count dedup rides on the per-node
-   `dispatched_nodes` model. Stated in Technical Approach.
-
-3. **`head_commit` is ALREADY persisted.** `current["head_commit"] = _get_head_commit()`
-   at L1092 (`_get_head_commit()` L1344). Step 1's first bullet is **already done on main**;
-   it degrades to a verify-and-consume step. The plan no longer claims to add it.
-
-4. **`current["dispatched_session_id"]` (scalar) already exists in state** (L1090, carried
-   from `prev`). The plan's round-4 replacement of a scalar session pointer with a keyed map
-   is therefore now a *change to live code*, not a greenfield choice. Named in Interface changes.
-
-5. **Three new mechanisms the plan must not break, none of which existed at plan time:**
-   - **Seed / re-baseline runs** (`is_first_run`, `is_reseed` L1026, `is_seed_run` L1027,
-     `seeded_nodes()` L683, `seed_size`, `min_expected_collected`). A seed run declares a
-     known-failing population rather than discovering a regression. **The autonomous fixer
-     must never dispatch on a seed run** — added as a hard gate condition.
-   - **`MAX_DISPATCH_NODES = 10`** (L185) truncation, which applies to `dispatch_nodes`
-     (the output of `compute_dispatch_set`, L1160-1166) — the *triage-filing* set — and
-     never to `new_failures` (`compute_new_failures`, L654), which is not truncated at all.
-     **Round-5 correction:** the round-4 rebase wrongly promoted this to a hard disqualifier
-     for the fixer, which made the plan's own motivating case (#2399, 11 failures) fail its
-     own gate and turned `NIGHTLY_FIX_MAX_FAILURES=15` into dead config. The disqualifier is
-     a category error and is **removed** — see Technical Approach → Cap arithmetic.
-   - **`validate_run_integrity()` → `integrity_warnings`** (L1047) and the `_fatal()`
-     never-write-state-on-an-untrusted-run invariant, plus the `DRY_RUN_SESSION_ID` truthy
-     sentinel so `--dry-run` exercises the success path without spawning a session.
-     **An integrity-warned run or a `--dry-run` must never dispatch a fixer** — added as
-     gate conditions.
+| Per-node dedup helpers this plan must not disturb | `prior_dispatched` L669, `compute_dispatch_set` L728, `carry_dispatched_nodes` L754 | **Holds** |
+| Scalar `current["dispatched_session_id"]` carried from `prev` | L1090 | **Holds** — untouched by this plan |
+| `main` branch protection is ABSENT | `gh api repos/tomcounsell/ai/branches/main/protection` → `404` | **Holds, re-verified 2026-09-02** |
+| `baseline-verifier` is reachable only via the Claude Task tool | sole caller `.claude/skills-global/do-test/baseline-verification.md` L76-81; zero `.py` callers repo-wide | **Holds** — classification is in-process Python; the subagent file stays untouched |
+| No per-session env seam anywhere in the dispatch → worker → `claude -p` chain | See the Scope Boundary table above | **Newly recorded (round 7)** — the reason `active` mode is cut |
+| `grep -E` treats `\|` as a **literal pipe**, not alternation | Demonstrated: a file containing both `gh pr ready` and `gh pr merge` returns `0` for `grep -Ec "gh pr ready\|gh pr merge"` and `2` for `grep -Ec "gh pr ready\|gh pr merge"` without the backslash | **Newly recorded (round 7)** — two Verification rows were passing vacuously |
 
 **Overlapping active plans:** `nightly-serial-reconfirm.md` (the #2180 serial gate — a
-dependency, not a conflict). The #2559/#2823 detector work that caused the drift above has
-already landed; no in-flight lane owns `scripts/nightly_regression_tests.py`.
+dependency, not a conflict). No in-flight lane owns `scripts/nightly_regression_tests.py`.
 
 ## Prior Art
 
-- **#2192 / PR #2195** — added `maybe_dispatch_triage_session` (investigate-and-file-an-issue) + the run lock + LLM summarizer. **Deliberately deferred auto-hotfix as a No-Go** (unreviewed merge to main was the concern). This plan does NOT reverse that No-Go — it introduces a *narrower, review-gated* bounded fix (propose-a-PR, never merge), which preserves the original concern (a human still reviews before anything lands on main).
-- **#2399 / PR #2402** — the worked example. 11 test-stale failures across 3 groups. Two groups were mechanical carry-forward; **Group 2 hid a genuine design fork** (self-heal intended vs. a safety hole) that required a human reading #2144's intent to resolve. **Lesson baked into scoping:** "classifies as test-stale" is *necessary but not sufficient* for autonomy — a test-stale carry-forward that turns on a contract-direction judgment must still escalate.
-- **#410** — Autoexperiment (autonomous prompt-optimization loop). Prior art for a bounded autonomous loop with caps; informs the guardrail-constant design (max attempts, dedupe).
-- **#2405** — follow-up filed by this plan for the Cowork-parity migration (open question 5). Still OPEN as of 2026-09-02.
-- **#2559 / PR #2581** — replaced set-hash triage dedup with per-node dedup (`dispatched_nodes`, `compute_dispatch_set`, `carry_dispatched_nodes`) to end the #2429/#2430/#2462 duplicate-issue churn. **Landed after this plan was first written and retired the `dispatched_hash` this plan originally extended** — the dedup design is re-keyed per node to match (Technical Approach → Dedup). Its lesson also applies directly here: a second, parallel keying scheme in the same state file is how the churn started.
-- **#2823 (collection-aware baseline, `e48199979`…`b8e08ece4`)** — added seed/re-baseline runs, the umbrella-issue seed path, `MAX_DISPATCH_NODES` truncation, and `validate_run_integrity`. These are the four run shapes on which an autonomous fixer must refuse to act; folded into the decision gate as hard disqualifiers.
+- **#2192 / PR #2195** — added `maybe_dispatch_triage_session` (investigate-and-file-an-issue) plus the run lock and LLM summarizer. **Deliberately deferred auto-hotfix as a No-Go.** This plan does not reverse that No-Go; it stops short of the fixer entirely.
+- **#2399 / PR #2402** — the worked example. 11 test-stale failures across 3 groups. Two groups were mechanical carry-forward; **Group 2 hid a genuine design fork** (self-heal intended vs. a safety hole) that required a human reading #2144's intent. **Lesson:** "classifies as newly-broken" is *necessary but not sufficient* for autonomy. That is precisely why the classifier alone is a coherent shippable unit and the fixer is not.
+- **#410** — Autoexperiment (autonomous prompt-optimization loop). Prior art for a bounded autonomous loop with caps; informs the guardrail-constant design.
+- **#2559 / PR #2581** — replaced set-hash triage dedup with per-node dedup (`dispatched_nodes`, `compute_dispatch_set`, `carry_dispatched_nodes`). Its lesson applies here: a second, parallel keying scheme in the same state file is how the #2429/#2430/#2462 churn started. This plan adds **one** per-node map and prunes it with the existing rule.
+- **#2823 (collection-aware baseline)** — added seed/re-baseline runs, `MAX_DISPATCH_NODES` truncation, and `validate_run_integrity`. These are the run shapes the gate must refuse to act on.
+- **#3033 / #2617** — the `pytest-clean.sh` worktree-`.venv` and interpreter-pin aborts. Not background: they are the two guards that decide whether the classifier works or ships inert.
+- **#3076** — the deferred `active`-mode stack (dispatch, hand-back, watchdog, guards, enforcement, notify transport), filed by this revision.
+- **#2405** — Cowork parity / intra-day watchdog follow-up, still OPEN. Out of scope.
 
 ## Data Flow
 
-1. **Entry point**: launchd fires `python scripts/nightly_regression_tests.py`. `load_env_or_die()`, run lock, `run_tests()`, `reconfirm_serial()` → `confirmed_failing` set, `new_failures` = newly-confirmed vs `prev["failing_tests"]`. (Unchanged.)
-2. **Classification** *(new)*: for the `new_failures` set, run the **in-process baseline classifier** — a plain Python function in the nightly script that checks out `prev["head_commit"]` (the last-known-good SHA) into a detached git worktree and re-runs exactly those node IDs there with pytest. Produces `{newly_broken, pre_existing, inconclusive}` buckets. It is **synchronous inside the same nightly invocation** — no subagent, no session, no Task tool (see Technical Approach → Classifier for why the `baseline-verifier` subagent cannot be used here).
-3. **Decision gate** *(new)*: eligible-for-autonomy iff every `new_failure` lands in the `newly_broken` (test-stale-candidate) bucket — none `pre_existing`, none `inconclusive` — AND count ≤ `NIGHTLY_FIX_MAX_FAILURES` AND per-node attempt counts are under cap. **Three hard run-shape disqualifiers, from mechanisms that landed after the plan was first written:** the run is a seed/re-baseline run (`is_seed_run`), the run carried `integrity_warnings`, or the run is `--dry-run`. Any of these → escalate path, never autonomy: a seed run is a *declaration* of known-failing state rather than a discovery, an integrity-warned run's `confirmed_failing` set is not trustworthy enough to edit tests against, and `--dry-run` must never spawn a session. (A fourth, `MAX_DISPATCH_NODES` truncation, was added in round 4 and **removed in round 5** — it truncates the triage-filing set, not `new_failures`; see Technical Approach → Cap arithmetic.) Otherwise → escalate path.
-4. **Autonomous fix path** *(new)*: dispatch a **narrowly-scoped** fixer session — NOT an auto-continuing full-SDLC eng session (an eng session drives itself to `/do-merge`). Its mandate is exactly: make test-file-only edits on a branch, run the targeted tests, open a **DRAFT** PR (`gh pr create --draft`), write the structured hand-back, and STOP. The mandate never names "run the SDLC pipeline" and never names `/do-merge`, and explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main`. The `--draft` flag is a deterrent/detective signal, NOT a structural in-session block — under hardcoded `bypassPermissions` the session's bash could still self-merge; the load-bearing structural never-merge guarantee is **server-side branch protection on `main`**, external to the session (see Technical Approach → Enforcement design). Bounded: test-file-only edits, cite the source-contract-moving commit. No up-front page.
-5. **Structured hand-back** *(new)*: the dispatched session persists its terminal hand-back **on its own `AgentSession` record via the Popoto ORM** (nullable `nightly_fix_handback` JSON field — not a separate file), so the watchdog (which already reads the session via the ORM) has a single, atomic source of truth: `{disposition, pr_url, what_broke, classification, tried, blocked_reason, decision_requested, written_at}`.
-6. **Test-file-only mechanical guard** *(new)*: before the watchdog honors a `fixed-silent` disposition, it fetches the PR's changed paths (`gh pr diff --name-only`) and **rejects the fix mechanically if any path is outside `tests/`** — a source-file edit voids `fixed-silent` and converts it to an escalation page. This does not rely on the session honoring the prompt.
-7. **Escalation / fail-safe watchdog** *(new)*: a **page** fires (a) immediately when the decision gate routes to escalate (any regression/inconclusive/cap-exceeded), with content from the classification; (b) when a prior dispatch's hand-back reports `blocked-escalate`; (c) when a `fixed-silent` PR fails the test-file-only mechanical guard; or (d) fail-safe — the session is terminal-failed/killed/abandoned, OR hung past `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` with no hand-back. Silence must never swallow a red suite.
-8. **Output**: on the happy path, a PR for human review **plus a low-urgency notify** (not a page); otherwise a last-resort **page** carrying the stuck point.
+1. **Entry point**: launchd fires `python scripts/nightly_regression_tests.py`. `load_env_or_die()`, run lock, `run_tests()`, `reconfirm_serial()` → `confirmed_failing`, `new_failures = compute_new_failures(prev, confirmed_failing)` (L654). **Unchanged.**
+2. **Classification** *(new)*: when `NIGHTLY_FIX_MODE != "off"` and `new_failures` is non-empty, run `classify_against_baseline(new_failures, prev["head_commit"])` — a synchronous in-process function that re-runs exactly those node IDs at the last-known-good SHA in a **provisioned baseline worktree** and buckets each node `{newly_broken, pre_existing, inconclusive}`. No subagent, no session, no Task tool.
+3. **Decision gate** *(new)*: `decide_fix_or_escalate(classification, new_failures, caps, run_flags)` — a pure function returning `"autonomous-fix" | "escalate"`.
+4. **Verdict log** *(new)*: the gate's result is logged under a stable greppable prefix with the first failing condition as a `reason=` token.
+5. **Alert** *(unchanged in this plan)*: the up-front page fires exactly as today. `off` skips steps 2-4 entirely; `shadow` runs them and still pages.
+
+There is no step 6. Acting on the verdict is #3076.
 
 ## Architectural Impact
 
-- **New dependencies**: none external. Reuses `git worktree` + pytest (already the detector's own machinery), `tools.valor_session create`, the existing local-JSON state file, and `send_telegram`.
-- **Interface changes**: **`.claude/agents/baseline-verifier.md` is NOT touched** — it has no Python invocation seam, so classification is an in-process function in `scripts/nightly_regression_tests.py` instead (round-5 blocker 2). `valor-telegram send` gains a `--silent` flag threaded through three hops (subparser → outbox payload → Telethon `silent=`), and `send_telegram` gains both a `silent: bool = False` parameter and a `.returncode` check it currently lacks. `AgentSession` gains a nullable `nightly_fix_handback` JSON field (the structured hand-back contract). `data/nightly_tests_last_run.json` **already carries `head_commit`** (landed on main, L1092 — consumed, not added) and gains two **per-node-keyed** maps: `fix_attempts: {node_id: count}` and `fix_sessions: {node_id: agent_session_id}`. Both are keyed by pytest node ID, matching the live per-node dedup model (`dispatched_nodes` / `compute_dispatch_set`) that #2559 put in place of the retired `dispatched_hash`; they are pruned together by exactly the rule `carry_dispatched_nodes` already uses — a node that stops appearing in `confirmed_failing` drops out of both. The keyed (rather than scalar) shape is what stops a second dispatch from orphaning the first fixer's session pointer (round-4 concern 1); note the *existing* scalar `current["dispatched_session_id"]` (L1090) stays as-is for the unchanged triage path — the fixer path uses `fix_sessions` and does not overload it.
-- **Coupling**: the nightly runner already reads Redis for the fixer's session status in the watchdog; persisting the hand-back on that same `AgentSession` record (rather than a parallel JSON file) keeps one source of truth and removes a file-write race. Local-JSON stays the store for detection/dedup state only. The fixer session runs a **narrowly-mandated** make-test-edits → run-tests → open-DRAFT-PR → hand-back → STOP flow (NOT a self-driving pipeline) — no new orchestration substrate and, critically, **no new permission subsystem**.
-- **Data ownership**: nightly detection/dedup state stays local JSON; the fixer session is a normal `AgentSession` owned by the worker, and its hand-back lives on that record via the Popoto ORM (`session.save()` — never raw-Redis writes).
-- **Reversibility**: high — gated behind `NIGHTLY_FIX_MODE` (`off` | `shadow` | `active`). `off` restores the exact current detect-and-page behavior; `shadow` (the first-deploy default) runs classification + the decision gate and logs the decision it *would* have made, but still pages as today and dispatches nothing.
+- **New dependencies**: none external. Reuses `git worktree`, `uv sync`, and pytest — machinery the detector and the repo already own.
+- **Interface changes**:
+  - `send_telegram` (L609) gains a `.returncode` check it currently lacks. No signature change.
+  - `_spawn_pytest` (L283) gains a `cwd: Path | str = PROJECT_DIR` parameter. Existing callers (`run_tests` L379, `reconfirm_serial` L587) pass nothing and stay byte-identical.
+  - `data/nightly_tests_last_run.json` gains **one** per-node map: `classify_attempts: {node_id: count}`, pruned by exactly the rule `carry_dispatched_nodes` already applies to `dispatched_nodes`. `head_commit` is already persisted (L1092) — consumed, not added. The scalar `dispatched_session_id` (L1090) is untouched.
+  - `.claude/agents/baseline-verifier.md` is **not touched** (no Python invocation seam).
+  - No `AgentSession` schema change, therefore **no Popoto migration** in this plan.
+- **Coupling**: the classifier is self-contained in the nightly script. It reads git and runs pytest — no Redis, no ORM, no session substrate, no new orchestration.
+- **Reversibility**: total. `NIGHTLY_FIX_MODE=off` skips classification and the gate entirely, leaving the detector byte-identical to today. The default `shadow` adds a bounded pytest run and a log line and changes no outbound behavior.
 
 ## Appetite
 
-**Size:** Large
+**Size:** Medium
 
-**Team:** Solo dev, PM, code reviewer
+**Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 2-3 (the classification-semantics adaptation and the escalation/fail-safe design are safety-critical and warrant alignment)
-- Review rounds: 2+ (this ships a system that edits tests autonomously — the test-stale gate and the never-weaken-assertions invariant must be reviewed hard)
+- PM check-ins: 1 (confirm the baseline-worktree provisioning cost is acceptable on the nightly critical path)
+- Review rounds: 1-2
 
-Safety-critical: a wrong autonomous fix is strictly worse than the current alert. The appetite is Large because of the review/alignment overhead the safety surface demands, not because the code volume is large.
+Reduced from Large in round 7. The Large appetite was carried by the autonomous fixer's
+safety-review surface; with that deferred to #3076, what remains is a bounded classifier
+and a pure function. The remaining review weight is on the classifier being *real* rather
+than inert.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Worker running (dispatched fixer sessions need an executor) | `./scripts/valor-service.sh worker-status` | The fixer is an `AgentSession` the worker executes |
-| `git worktree` usable against the last-green SHA | `git worktree list` | The in-process baseline classifier checks out `prev["head_commit"]` detached |
-| `valor-telegram` reachable | `test -x .venv/bin/valor-telegram` | Escalation alert channel |
-| Review-required branch protection on `main`, **admins NOT enforced** (**prerequisite for `active` mode only**) | `gh api repos/tomcounsell/ai/branches/main/protection` | Half of the structural never-merge backstop. **Verified ABSENT at plan time (404).** Requires `required_pull_request_reviews.required_approving_review_count >= 1` and, deliberately, `enforce_admins.enabled == false` (the GitHub default) so the operator's admin token keeps its direct-to-`main` push and `/do-merge` ability — see Technical Approach → Enforcement design for why round 4's `enforce_admins == true` requirement is reversed. |
-| `SDLC_AGENT_GH_TOKEN` set on this machine, resolving to a **non-admin** login (**prerequisite for `active` mode only**) | `GH_TOKEN=$SDLC_AGENT_GH_TOKEN gh api user -q .login`, then `gh api repos/tomcounsell/ai/collaborators/{login}/permission -q .permission` | The other half. The fixer's `gh` must run as this bot, not the operator: a non-admin author cannot bypass required review and cannot approve its own PR, which is what makes self-merge structurally impossible. Per CLAUDE.md this token is **opt-in per machine** — where it is absent or resolves to an admin, `active` mode is **not adoptable on that machine** and the preflight refuses to dispatch. |
+| `uv` available to the nightly process | `uv --version` | Provisions the baseline worktree's `.venv` |
+| `git worktree` usable | `git worktree list` | The classifier checks out `prev["head_commit"]` detached |
+| Committed interpreter pin present | `cat .python-version` | `pytest-clean.sh` L169-175 aborts on an off-pin venv; the provisioned venv must match |
+| `valor-telegram` reachable | `test -x .venv/bin/valor-telegram` | Existing alert channel (unchanged) |
 
-No new secrets. `SDLC_AGENT_GH_TOKEN` already exists as a declared, opt-in key; this plan adds a new consumer, not a new secret. (Branch protection is a GitHub repo setting, not a new service.)
+No new secrets. No branch-protection prerequisite — nothing in this plan dispatches a
+session or opens a PR.
 
 ## Solution
 
 ### Key Elements
 
-- **Mode-scoped detection page (round-5 blocker 3 — pinned)**: the up-front `send_telegram` on the `new_failures` branch is **retained verbatim for `off` and `shadow`** and suppressed **only in `active`** mode, where the escalation/notify tiers take over. Concretely `if NIGHTLY_FIX_MODE in ("off", "shadow"): send_telegram(msg, dry_run=args.dry_run)`. This is what makes `off` a true break-glass revert: flipping to `off` after an incident restores byte-identical detect-and-page behavior, never a silent red suite.
-- **Shadow-first rollout**: `NIGHTLY_FIX_MODE` ships defaulting to `shadow` — classify, run the decision gate, log the decision under a stable greppable prefix, but page-as-today and dispatch nothing. Flip to `active` only after real shadow logs confirm the gate's judgment. De-risks the blast radius of an autonomous test-editor.
-- **In-process test-stale-vs-code-regressed classifier**: a plain Python function in the nightly script that re-runs the failing node IDs at the last-known-good SHA in a detached worktree. It is the *necessary precondition* for autonomy; the dispatched session performs the final test-stale determination via git archaeology under a test-file-only constraint. **Not** the `baseline-verifier` subagent — that has no Python caller (round-5 blocker 2).
-- **Decision gate**: a pure function mapping the classification + caps to one of `autonomous-fix | escalate`.
-- **Narrowly-mandated fixer (not a pipeline)**: the fixer is dispatched as a narrowly-scoped session, NOT an auto-continuing full-SDLC eng session. Its mandate is exactly: make test-file-only edits on a branch, run the targeted tests, open a **DRAFT** PR, write the structured hand-back, STOP. The mandate never names "run the pipeline" and never names `/do-merge`.
-- **Review-required `main` + a non-admin fixer identity = the real structural never-merge guarantee (external to the session)**: the ONLY mechanism that mechanically prevents self-merge under hardcoded `bypassPermissions`. It has **two** legs that only work together — review-required branch protection on `main` (currently ABSENT, verified 404) AND the fixer's `gh` running under the non-admin `SDLC_AGENT_GH_TOKEN` bot rather than the operator's admin token. Both are hard, code-enforced prerequisites for `active` mode. The `gh pr create --draft` flag and the forbid-`gh pr ready`/`gh pr merge` mandate are **deterrents**, not structural blocks — an unrestricted in-session bash could flip a draft ready and merge. This replaces round 2's incorrect claim that the draft flag was itself load-bearing.
-- **Fail-closed test-file-only watchdog guard**: the watchdog runs `gh pr diff --name-only` **outside** the fixer session; on ANY error, non-zero exit, empty/unparseable output, any path outside `tests/`, OR a changed-file count exceeding `NIGHTLY_FIX_MAX_CHANGED_FILES` (round-4 concern 2 — the cap is wired here), it **VOIDS the PR (closes it) and PAGES a human**. Only a successful command whose every path is under `tests/` and whose changed-file count is within the cap downgrades to the low-urgency notify. It never fails open.
-- **Structured hand-back protocol**: persisted on the `AgentSession` record via the ORM (nullable `nightly_fix_handback` field), consumed by the escalation watchdog.
-- **Escalation + fail-safe watchdog**: pages on `blocked-escalate`, on the escalate decision, on a test-file-only guard failure/error, or when the session dies/hangs past a bounded timeout with no hand-back. On the happy path it emits a **low-urgency notify** (not a page).
-- **Guardrail constants**: five named, env-overridable caps read via **raw `os.environ.get` at nightly-script module scope** (max failures, max changed files, max attempts, hand-back timeout, and the `NIGHTLY_FIX_MODE` gate), each with a provisional/tunable comment. Deliberately NOT promoted to `config/settings.py` — see Technical Approach for the rationale.
+- **`send_telegram` returncode check**: strictly independent, strictly an improvement. Today a rejected or failed send logs `"Telegram sent"` (L633) and the run continues believing a human was paged. Ships first, on its own.
+- **`_spawn_pytest` gains `cwd`**: the one-line seam that lets a second caller target a different tree. Default `PROJECT_DIR` keeps both existing callers byte-identical.
+- **Provisioned baseline worktree**: a persistent worktree at `.worktrees/nightly-baseline/` with **its own `.venv`**, re-pointed to `prev["head_commit"]` each run. This is not a detail — it is the difference between a working classifier and an inert one (round-6 blocker 2). A bare `git worktree add` has no `.venv`, and `pytest-clean.sh` L135-145 refuses to run there; running at `PROJECT_DIR` instead would import HEAD's source and bucket every node `pre_existing`. Both failure modes are silent and safe-looking.
+- **In-process classifier**: `classify_against_baseline(node_ids, baseline_sha)`, synchronous, returning three discrete buckets. Every exception path lands in `inconclusive`, which the gate treats as escalate — a broken classifier fails toward paging.
+- **Pure decision gate**: `decide_fix_or_escalate(...)`, no I/O, exhaustively unit-testable.
+- **Non-stubbed classifier test**: a two-commit fixture repo where a node passes at the baseline SHA and fails at HEAD must classify `newly_broken`. Every other classifier test stubs the classifier and therefore cannot distinguish "working" from "inert but safe" — this one test is what makes the feature's core claim falsifiable.
+- **Greppable verdict log**: `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing condition} nodes={n}` on every non-`off` run. This is the plan's delivered artifact: the evidence #3076 is gated on.
+- **Guardrail constants**: three named, env-overridable knobs read via raw `os.environ.get` at module scope, each with a provisional/tunable comment. Deliberately not promoted to `config/settings.py` — see Technical Approach.
 
 ### Flow
 
-Nightly run detects newly-confirmed failures → classify in-process (re-run the failing nodes at the last-green SHA in a detached worktree) →
-**decision gate** (in `off` mode: skip classification entirely and page as today; in `shadow` mode: log the verdict below, then page-as-today and dispatch nothing; in `active` mode: suppress the up-front page and execute the verdict):
-- *all test-stale-candidate & within caps* → dispatch narrowly-mandated fixer session (silent) → session edits tests, opens a **DRAFT** PR, persists `fixed-silent` hand-back on its `AgentSession` record → watchdog runs the **fail-closed** test-file-only guard on the PR diff → **guard passes (command succeeded, every path under `tests/`, changed-file count `<= NIGHTLY_FIX_MAX_CHANGED_FILES`): low-urgency notify, draft PR waits for a human to mark ready + review; guard fails (error / non-zero / empty / non-`tests/` path / count over cap): void the PR + page**.
-- *any regression / inconclusive / cap exceeded* → page human now with the classification stuck-point.
-- *session self-determines a code regression or judgment call mid-fix* → persists `blocked-escalate` hand-back → watchdog pages with what-was-tried + decision-requested.
-- *session dies/hangs past timeout* → fail-safe watchdog pages ("autonomous fix died, suite still red").
+Nightly run detects newly-confirmed failures →
+- `NIGHTLY_FIX_MODE=off`: skip classification and the gate entirely; page as today. Byte-identical to current behavior.
+- `NIGHTLY_FIX_MODE=shadow` (the default): re-point and sync the baseline worktree → `classify_against_baseline(new_failures, prev["head_commit"])` → `decide_fix_or_escalate(...)` → log the verdict under the stable prefix → **page as today**. Nothing else changes.
+
+There is no third mode in this plan. `active` is #3076.
 
 ### Technical Approach
 
-**Classifier — in-process Python, NOT the `baseline-verifier` subagent (BLOCKER resolution, round 5).**
-Rounds 1-4 planned to reuse the `baseline-verifier` subagent with a `baseline_ref` parameter. **That is not buildable and is deleted from this plan.** Verified on `0b6688433`: `baseline-verifier` is a Claude *subagent*, dispatched only through the Task tool; its sole caller anywhere in the repo is `.claude/skills-global/do-test/baseline-verification.md` L76-81 (`subagent_type: "baseline-verifier"`), and no `.py` file invokes it. `scripts/nightly_regression_tests.py` is a plain launchd Python process with no Task tool — the classification stage that gates every other decision in this plan had **no invocation seam at all**. The two escape hatches both fail: routing through `tools.valor_session create` would make classification *asynchronous* (the runner cannot block on a session result inside one nightly invocation, turning Data Flow steps 2-4 into a two-night handshake), and the `${baseline_ref:-main}` shell default cannot be set by a Task dispatch, which passes prose — so it would always resolve to literal `main`, silently reinstating exactly the masking this plan exists to avoid.
+**Classifier — in-process Python, NOT the `baseline-verifier` subagent.**
+Verified at `2d60de31d`: `baseline-verifier` is a Claude *subagent* dispatched only through
+the Task tool; its sole caller repo-wide is `.claude/skills-global/do-test/baseline-verification.md`
+L76-81, and no `.py` file invokes it. `scripts/nightly_regression_tests.py` is a plain
+launchd Python process with no Task tool. The two escape hatches both fail: routing through
+`tools.valor_session create` would make classification *asynchronous* (a two-night handshake
+inside one nightly invocation), and the `${baseline_ref:-main}` shell default cannot be set
+by a Task dispatch, so it would always resolve to literal `main` — silently reinstating the
+exact masking this plan exists to avoid. `.claude/agents/baseline-verifier.md` is left
+untouched, so every `/do-test` caller is unaffected.
 
-**Resolution: build the classifier as a synchronous function in the nightly script.** The mechanic needs no LLM — it is "re-run these node IDs at a known commit and see whether they passed." `baseline-verifier.md` already documents that procedure (detached worktree + targeted pytest + junitxml); this ports it into Python next to the detector that already runs pytest. `.claude/agents/baseline-verifier.md` is left **untouched**, so every `/do-test` caller is unaffected and there is no shared-prompt coupling.
+The mechanic needs no LLM: it is "re-run these node IDs at a known commit and see whether
+they passed."
 
-- The baseline ref is the **last-known-good commit**, `prev["head_commit"]` — **NOT bare `main`**. Nightly runs on `main` HEAD and the failure IS on `main`, so diffing against `main` would mask a regression that already landed there. Since a *newly-confirmed* failure was by definition absent from the prior run's confirmed-failing set, the prior run's HEAD SHA is a commit where that test passed. (`head_commit` is already persisted on main at L1092 — consumed, not added.)
-- `classify_against_baseline(node_ids, baseline_sha) -> {newly_broken, pre_existing, inconclusive}`: `git worktree add <tmpdir> <baseline_sha> --detach`, run the node IDs there with the same pytest invocation the detector uses, parse the report, and always remove the worktree in a `finally`. The SHA is interpolated as a literal — there is no shell-parameter default to mis-resolve.
-- Interpretation:
-  - **PASSED at last-green, FAILS at HEAD** → `newly_broken`. A source-contract-moving commit *or* a code regression landed in `last_green..HEAD`. This is the set eligible for the *test-stale determination*.
-  - **FAILED at last-green too** → `pre_existing`; not caused by recent change; do not auto-touch → escalate/leave.
-  - **`inconclusive`** — worktree-add failure, missing baseline SHA, pytest collection error, timeout, or a node absent at baseline → escalate; never guess. Every exception path lands here, so a broken classifier fails toward paging.
-- Cost note: this adds one targeted pytest run (only the failing node IDs, not the suite) plus a worktree checkout to the nightly critical path. It runs only when `new_failures` is non-empty and only outside `off` mode.
+- **The baseline ref is `prev["head_commit"]` — NOT bare `main`.** Nightly runs on `main` HEAD and the failure IS on `main`, so diffing against `main` would mask a regression that already landed there. A *newly-confirmed* failure was by definition absent from the prior run's confirmed-failing set, so the prior run's HEAD SHA is a commit where that test passed. `head_commit` is already persisted at L1092 — consumed, not added. The SHA is interpolated as a literal; there is no shell parameter default to mis-resolve.
+- **Interpretation**:
+  - **PASSED at last-green, FAILS at HEAD** → `newly_broken`. Something in `last_green..HEAD` moved a contract or introduced a regression. This is the set that would be eligible for a fix attempt under #3076.
+  - **FAILED at last-green too** → `pre_existing`; not caused by recent change → escalate.
+  - **`inconclusive`** — worktree provisioning failure, missing baseline SHA, pytest collection error, timeout, a node absent at baseline, or any raised exception → escalate; never guess.
 
-**The final test-stale-vs-code-regressed determination is the dispatched session's job, not a mechanical verdict.** The classifier tells us "newly broken since last-green" — it does NOT by itself prove test-stale (a genuine bug also passes-then-fails). #2399 Group 2 proved a mechanical bucket is insufficient. Therefore the dispatched session:
-1. Reads `git log last_green..HEAD -- <source-of-failing-test>` to find the governing commit.
-2. Is **hard-constrained to edit only files under `tests/`** — if a correct fix would require touching source, that is a code regression → escalate, do not proceed.
-3. Must cite the specific contract-moving commit that legitimizes each test change (the evidence #2402 produced by hand).
-4. Escalates on ANY of: a suspected code regression, a contract-*direction* judgment call (Group-2 shape), inability to cite a legitimizing commit, or a cap exceeded.
-5. Executes a **narrow mandate, not a pipeline**: make the test-file-only edits on a branch, run the targeted tests, open a **DRAFT** PR, write the hand-back, STOP. The mandate **never names "run the SDLC pipeline" and never names `/do-merge`.** (Concretely: `/do-build`-style test edits → run the targeted tests to confirm they pass without a NEW regression → `gh pr create --draft`. It is dispatched as a narrowly-scoped session, not an auto-continuing eng session that would drive itself onward to Merge.)
+**Baseline worktree provisioning — the seam that decides whether the classifier is real
+(BLOCKER resolution, round 7).** Rounds 5-6 said "run the node IDs there with the same
+pytest invocation the detector uses" and stopped. That instruction is not executable.
+Verified:
 
-**Enforcement design — layered defense; the ONE structural guarantee lives OUTSIDE the session (BLOCKER resolution, round 3).**
-Round 1 proposed a "structural never-merge via a `nightly-fixer` permission profile." **That mechanism has no implementation seam and is deleted from this plan.** Verified in the codebase: `tools.valor_session create` exposes no permission/settings flag; `AgentSession` has no permission field; every `claude-cli` spawn is hardcoded to `--permission-mode bypassPermissions` (`agent/session_runner/harness/claude.py` L154-168); and `PermissionRequest` hooks do NOT fire under `claude -p` (`agent/session_runner/hook_edge.py` L188-190). A deny-list has nowhere to attach, and bypass mode would not evaluate deny rules anyway. `config/permission_profiles/nightly_fixer.json` was fiction.
+- `_spawn_pytest` (L283) is `_spawn_pytest(argv: list[str], timeout: int, env: dict | None = None) -> int` and bakes `cwd=PROJECT_DIR` into its `Popen` call at L302.
+- Its argv routes through `scripts/pytest-clean.sh`, which resolves `REPO_ROOT` from the **caller's cwd** (L34-38) — so a `cwd=<worktree>` spawn genuinely targets the worktree, which is what makes this approach viable at all.
+- But that same wrapper **refuses to run in a linked worktree with no `.venv` of its own** (L135-145, #3033) and **refuses an off-pin interpreter** (L169-175, #2617).
 
-**Honest statement of the in-session limitation (round 3, the surviving BLOCKER).** The fixer is a `--role eng` `AgentSession` spawned with hardcoded `--permission-mode bypassPermissions` = unrestricted bash. **Nothing in-session can mechanically stop it from running `gh pr ready <url>` then `gh pr merge <url>`.** Round 2 wrongly called `gh pr create --draft` "the load-bearing structural never-auto-merge guarantee" — a draft PR is only unmergeable until a `gh pr ready` that this same session's bash is free to issue. The draft flag is therefore a **deterrent and a detective signal, NOT a structural in-session block.** We do not claim in-session structural prevention, because under bypass mode none exists. This plan states that plainly and puts the real guarantee outside the session.
+So a bare `git worktree add` yields exactly the tree the wrapper rejects. The three
+outcomes rounds 5-6 left open were: run at `PROJECT_DIR` (imports HEAD's source → every
+node buckets `pre_existing` → gate escalates 100% of the time), run in a venv-less worktree
+(wrapper aborts → `inconclusive` → escalates 100% of the time), or provision the worktree
+(never mentioned). All three are indistinguishable from a working classifier under
+fully-stubbed tests.
 
-**The real structural guarantee is server-side and external to the session — and it has TWO legs, not one (BLOCKER resolution, round 5).** Round 3-4 named a single leg: review-required branch protection on `main` with `enforce_admins.enabled == true`. Round 5 established that this configuration is **not adoptable on this repo**, because it is repo-wide and its collateral was never examined: `enforce_admins` makes `git push origin main` fail for the `docs/plans/` commits CLAUDE.md mandates ("Plans and md docs commit directly on main") and that `.githooks/pre-push` assumes, and it makes `gh pr merge` fail with "reviews required" for every PR in the repo — including `/do-merge`'s. Worse, it does not even close the hole it was aimed at: the fixer's `gh` runs under the *operator's* token, so the operator is the PR author and cannot approve their own PR, leaving the fix PR permanently unmergeable while every other workflow breaks.
+**Resolution — three concrete changes:**
 
-**The reversal (named explicitly, per the round-4 finding it supersedes): the round-4 `enforce_admins == true` requirement is DROPPED and replaced by an identity requirement.** Round 4's finding was correct in substance — *the identity that would merge the fixer's PR must not be exempt from required review*. It chose to remove everyone's exemption; the cheaper and non-collateral fix is to make the fixer's identity a non-exempt one:
+1. **`_spawn_pytest` gains `cwd: Path | str = PROJECT_DIR`**, forwarded to `Popen`. `run_tests` (L379) and `reconfirm_serial` (L587) pass nothing and are byte-identical. This is the seam; it does not exist today.
+2. **A persistent, provisioned baseline worktree** at `.worktrees/nightly-baseline/`:
+   - If absent: `git worktree add --detach .worktrees/nightly-baseline <baseline_sha>`, then `uv sync` inside it to create a pin-matching `.venv`.
+   - If present: `git -C .worktrees/nightly-baseline checkout --detach <baseline_sha>`, and re-run `uv sync` **only when `uv.lock` differs** between the worktree's checked-out revision and the last provisioned one (recorded in a marker file inside the worktree). This is what keeps the amortized cost near zero on the common night.
+   - It is **persistent by design** — a fresh `uv sync` every night is the cost Risk 2b was written against. Add `.worktrees/` to the worktree-gc exclusion the repo already honors for named worktrees, or name it so `scripts/worktree-gc.sh` leaves it alone.
+   - Any failure in provisioning (worktree add, checkout, `uv sync` non-zero) → the whole classification is `inconclusive` → escalate. It never falls back to `PROJECT_DIR`; a silent fallback is exactly the inert-but-safe-looking failure this resolution exists to prevent.
+3. **The classifier's pytest invocation** mirrors `reconfirm_serial`'s serial form (L575-584): `[str(PYTEST_CLEAN_SH), *node_ids, "-n0", "--tb=no", "-q", "--json-report", f"--json-report-file=..."]`, spawned via `_spawn_pytest(argv, timeout=..., env=..., cwd=BASELINE_WORKTREE)`. It goes **through** `pytest-clean.sh`, not around it — the wrapper's guards are load-bearing here, and bypassing them is how #3033's false-green happens.
 
-| Leg | Mechanism | Why it is structural | Collateral |
-|---|---|---|---|
-| **A. Review-required protection on `main`** (`required_approving_review_count >= 1`), with `enforce_admins.enabled == false` (the GitHub default) | GitHub-enforced, cannot be overridden from in-session bash | A non-admin author's PR cannot be merged without an approval it cannot give itself | **None.** Admins stay exempt, so the operator keeps direct-to-`main` pushes for `docs/plans/` and keeps `/do-merge` working exactly as today |
-| **B. The fixer's `gh` runs under `SDLC_AGENT_GH_TOKEN`** — a **non-admin** bot login, exported into the fixer session's env, never the operator's admin token | The bot is not an admin, so leg A binds it; and GitHub forbids self-approval, so the bot cannot approve its own PR | This is what makes leg A bite on the fixer while sparing the operator | Per CLAUDE.md the token is **opt-in per machine**; where it is absent or resolves to an admin, `active` mode is simply not adoptable on that machine |
+The report is parsed the same way `reconfirm_serial` parses its own; a node absent from
+the baseline report is `inconclusive`, never assumed-passed.
 
-Both legs together are the single load-bearing never-merge mechanism. **Current state, verified 2026-09-02 via `gh api repos/tomcounsell/ai/branches/main/protection`: `404 Not Found` — leg A does not exist today.** Consequently the builder MUST, as an explicit task: (a) re-verify protection and document the finding in the feature doc; (b) treat **both legs as hard prerequisites for ever setting `NIGHTLY_FIX_MODE=active`**, enforced *in code* by the runtime preflight below, not in prose. Enabling leg A is a repo-governance action for the owner, not something this plan's build performs unilaterally; until it exists, `active` mode is unreachable by construction and the feature ships usefully in `shadow`.
+**Cost.** One targeted pytest run over only the failing node IDs (never the suite), plus a
+detached checkout and a conditional `uv sync`. It runs only when `new_failures` is non-empty
+and only outside `off` mode. It carries its own timeout; a timeout is `inconclusive`.
 
-The never-auto-merge posture is a layered defense whose ONLY structural leg lives outside the session:
-
-1. **Review-required protection on `main` + a non-admin fixer identity — STRUCTURAL, external, load-bearing.** The two-leg mechanism (table above) that actually prevents self-merge. Leg A currently ABSENT (404); leg B machine-dependent. Both gated in code as prerequisites for `active` mode (runtime preflight below).
-2. **Shadow-first default — blast-radius bound.** `NIGHTLY_FIX_MODE` defaults to `shadow`, which dispatches nothing; `active` is a deliberate, documented opt-in gated on #1.
-3. **Narrow mandate + anti-criteria deterrent — in-session, deterrent only.** The mandate explicitly FORBIDS `gh pr ready`, `gh pr merge`, and push-to-`main`; the PR is opened with `gh pr create --draft`. Anti-criteria assert the dispatch prompt and runner code never emit `gh pr ready`/`gh pr merge` and DO emit `--draft`. Because bash is unrestricted this reduces the chance a well-behaved session strays; it is NOT a structural block.
-4. **Extended fail-closed watchdog — merge/draft-state detective layer.** Beyond the diff-path guard, the watchdog runs `gh pr view <pr> --json isDraft,state,mergedAt`. If the PR is not draft, or is merged/closed unexpectedly, or the command errors/returns empty → **page** (and `gh pr close <pr>` if still open). **Honest scope: DETECTIVE — it fires on the next nightly preamble (~24h later), catches-and-pages, and does NOT stop a same-session merge. #1 is what prevents that.**
-
-The enforcement is this stack, with branch protection (#1) the only structural leg; everything in-session (#3) is deterrence and everything in the watchdog (#4) is next-night detection.
-
-**Runtime `active`-mode preflight (enforces the shadow→active flip, round-3 concern; re-scoped round 5).** Because "flip `NIGHTLY_FIX_MODE=active` only after the guarantee is in place" is unenforceable as prose, the runner enforces it. When `NIGHTLY_FIX_MODE == "active"`, before dispatching any fixer, **all three** conditions of one boolean short-circuit must hold:
-
-1. `gh api repos/{owner}/{repo}/branches/main/protection` → `data["required_pull_request_reviews"]["required_approving_review_count"] >= 1` (leg A). **Note the deliberate absence of an `enforce_admins` check** — requiring it would break direct-to-`main` pushes and `/do-merge` repo-wide (see the reversal above); admins staying exempt is the point.
-2. `SDLC_AGENT_GH_TOKEN` is non-empty **and** `GH_TOKEN=$SDLC_AGENT_GH_TOKEN gh api user -q .login` resolves to a login that is **not** the operator's (leg B, identity).
-3. `gh api repos/{owner}/{repo}/collaborators/{bot_login}/permission -q .permission` is **not** `"admin"` (leg B, non-exemption) — an admin bot would be review-exempt and the guarantee would be vacuous, which is round 4's finding preserved in its correct form.
-
-On any of {404, command error, missing/insufficient review requirement, absent token, token resolving to the operator, bot with admin permission}, the runner **refuses to dispatch, logs the specific failing condition, and falls back to the escalate-and-page path** (fail toward paging). `active` mode therefore cannot dispatch a fixer into an unprotected `main` or under a review-exempt identity. This makes the prerequisite a code gate, not a hope — and it makes the honest answer to "is `active` adoptable here?" a runtime fact rather than a claim: today it is **not** (leg A is 404), and on a machine without a non-admin `SDLC_AGENT_GH_TOKEN` it never will be.
-
-**The token must reach the fixer's environment, not just the preflight.** Passing the preflight is meaningless if the dispatched session's `gh` still picks up the operator's ambient credentials. The dispatch therefore exports `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` into the fixer session's environment, and an anti-criterion asserts the dispatch path sets it. A dispatch that cannot set it must not happen — same refuse-and-page arm as a failed preflight.
-
-**Decision gate** (`decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"`): pure, unit-testable, no I/O. Autonomy iff **all** of:
+**Decision gate** (`decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"`):
+pure, unit-testable, no I/O. Returns `autonomous-fix` iff **all** of:
 
 ```
 not run_flags.is_seed_run              # a re-baseline declares state, it does not discover a regression
-and not run_flags.integrity_warnings   # an untrusted confirmed set must not be edited against
-and not run_flags.dry_run              # --dry-run never spawns a fixer
+and not run_flags.integrity_warnings   # an untrusted confirmed set is not a basis for any verdict
+and not run_flags.dry_run              # --dry-run stays a pure preview
 and classification.pre_existing == []
 and classification.inconclusive == []
 and set(new_failures) == set(classification.newly_broken)
 and len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES
-and all(fix_attempts.get(n, 0) < NIGHTLY_FIX_MAX_ATTEMPTS for n in new_failures)
+and all(classify_attempts.get(n, 0) < NIGHTLY_FIX_MAX_ATTEMPTS for n in new_failures)
 ```
 
-The gate consumes **`new_failures`** (from `compute_new_failures`, L654) — that is the population this feature promises to fix before paging. It is deliberately *not* `compute_dispatch_set`'s output, which answers the different question of what has never been filed; the two sets diverged in #2559 and conflating them would let a standing, already-filed failure enter the autonomous-fix path. Attempt-count dedup nonetheless rides on the per-node model, hence the `all(...)` over node IDs rather than a single set-hash lookup. The classifier returns discrete buckets (no numeric score), so "high confidence" is bucket membership, not a threshold float. In `shadow` mode the verdict is computed and logged but not acted on.
+The gate consumes **`new_failures`** (from `compute_new_failures`, L654) — the population
+this feature is about. It is deliberately *not* `compute_dispatch_set`'s output (L728),
+which answers the different question of what has never been filed; the two sets diverged in
+#2559 and conflating them would let a standing, already-filed failure enter the eligible
+bucket. The classifier returns discrete buckets, so "high confidence" is bucket membership,
+not a threshold float.
 
-**Cap arithmetic — `MAX_DISPATCH_NODES` is NOT a fixer disqualifier (CONCERN resolution, round 5).** Round 4 added `not run_flags.dispatch_truncated` to the gate. That was a category error with a load-bearing consequence: `MAX_DISPATCH_NODES = 10` truncates `dispatch_nodes` — the output of `compute_dispatch_set` (L728), applied at L1160-1166 — which answers *"what has never been filed as a triage issue"*. It never touches `new_failures` (`compute_new_failures`, L654), which is not truncated anywhere. Carrying the triage cap into the fixer gate made the effective ceiling `min(NIGHTLY_FIX_MAX_FAILURES, 10)`, so every configured value 11..15 was dead, **and it disqualified this plan's own motivating case**: #2399 had 11 newly-confirmed failures, which under round 4's gate would have truncated → escalated → paged a human, the exact outcome the feature exists to avoid. The clause is **removed**. `NIGHTLY_FIX_MAX_FAILURES` (default 15) is the sole volume cap on the fixer path, it governs a set that is never truncated, and #2399's 11 failures pass it. The two caps now govern disjoint sets and never need numeric reconciliation.
+In this plan the verdict is **computed and logged only**. `autonomous-fix` means "the gate
+would have attempted a fix" — it triggers nothing.
 
-**Structured hand-back — persisted on the `AgentSession` record via the ORM (reconsidered per critique).** The fixer is *already* a normal `AgentSession` the worker owns, and the watchdog *already* reads that record via `AgentSession.query`. So rather than duplicate a parallel file-based store (with its own atomic-write dance and read/write race), the hand-back lives on the session itself: add a nullable `nightly_fix_handback` JSON field to `AgentSession`. The fixer writes it at terminal through a thin, documented helper CLI (`python -m tools.nightly_fix_handback write ...`) that loads the session by id and calls `session.save()` — **ORM only, never raw Redis**. Schema: `{disposition: "fixed-silent"|"blocked-escalate"|"still-working", pr_url, what_broke, classification, tried, blocked_reason, decision_requested, written_at}`. This is an additive nullable field: per `_heal_descriptor_pollution` (issues #1099/#1172) existing records read it as `None` with no backcompat code; it is still registered as a no-op idempotent entry in `scripts/update/migrations.py` per the repo's Popoto-schema-change convention.
+**Cap arithmetic — `MAX_DISPATCH_NODES` is NOT a disqualifier.** `MAX_DISPATCH_NODES = 10`
+(L185) truncates `dispatch_nodes` — the output of `compute_dispatch_set` (L728), applied at
+L1160-1166 — which answers *"what has never been filed as a triage issue"*. It never touches
+`new_failures` (L654), which is not truncated anywhere. Carrying the triage cap into this
+gate would make the effective ceiling `min(NIGHTLY_FIX_MAX_FAILURES, 10)`, killing every
+configured value 11..15, **and would disqualify this plan's own motivating case**: #2399 had
+11 newly-confirmed failures. The two caps govern disjoint sets and are never reconciled
+numerically. `NIGHTLY_FIX_MAX_FAILURES` (default 15) is the sole volume cap here.
 
-**Escalation watchdog + fail-safe.** At the start of each nightly run, before running tests, inspect each *prior* dispatch (if any) by iterating `fix_sessions` and loading each `agent_session_id` — read its session status **and its `nightly_fix_handback` field** via `AgentSession.query` (ORM — never raw Redis). The keyed `fix_sessions` map (round-4 concern 1) is what lets the watchdog resolve exactly which record belongs to each still-red node, even across multiple concurrent dispatches. Distinct session ids are de-duplicated before loading, since one fixer session covers several nodes.
-- **Record-absent (CONCERN resolution, round 5) — checked FIRST, before any status or `updated_at` inspection.** `AgentSession` carries `Meta.ttl` (`models/agent_session.py`, ~L650) and rows are additionally swept by `agent/session_health.py`, so a `fix_sessions[node]` pointer can outlive its record and resolve to nothing. The load is `AgentSession.query.filter(id=sid)`, which returns an **empty list**, not `None` — a truthiness check written for `None` would misread it, and every downstream page branch (terminal status, hand-back content, hang-past-timeout) would fall through, leaving the suite red with nobody paged. Guard: `sessions = AgentSession.query.filter(id=sid)`; `if not sessions: page("fixer session record missing — cannot verify outcome"); ` prune that node's `fix_attempts`/`fix_sessions` entries; `continue`. Ordering is load-bearing — placed after the status inspection, a missing record could be mistaken for a fresh non-terminal session. Pruning after paging is what stops the next run re-paging a dead pointer forever.
-- `blocked-escalate` → **page** with the hand-back's stuck-point content; prune those nodes' entries from `fix_attempts` and `fix_sessions`.
-- session terminal `failed`/`killed`/`abandoned` with no `fixed-silent` hand-back → fail-safe **page**.
-- session non-terminal but older than `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` → fail-safe **page** ("fix attempt hung, suite still red").
-- `fixed-silent` with a `pr_url` → run **two fail-closed mechanical guards**, both against the exact `pr_url` persisted in the hand-back (never a PR discovered by branch/search — see the new-vs-preexisting note below):
-  - **Diff-path guard**: `gh pr diff --name-only <pr_url>`. Downgrades to a low-urgency notify **only** when the command exits zero AND returns non-empty, parseable output AND every changed path is under `tests/` AND the changed-file **count is `<= NIGHTLY_FIX_MAX_CHANGED_FILES`** (round-4 concern 2 — this is where the previously-declared-but-unwired cap earns its keep: a test-file-only diff that nonetheless rewrites an implausibly large number of files is not a mechanical carry-forward and must escalate). On ANY of {non-zero exit, error/exception, empty or unparseable output, any path outside `tests/`, changed-file count `> NIGHTLY_FIX_MAX_CHANGED_FILES`} → treat the fix as void.
-  - **Merge/draft-state guard (round-3, detective)**: `gh pr view <pr_url> --json isDraft,state,mergedAt`. The fix stays eligible for notify **only** when the PR is still a draft AND `state == "OPEN"` AND `mergedAt` is null. On ANY of {`isDraft == false`, `state != "OPEN"`, `mergedAt` non-null, command error/empty} → treat the fix as void. This catches the honest-limitation case where an in-session bash issued `gh pr ready`/`gh pr merge` despite the mandate — it is **detective (next-night), not preventive**; branch protection (#1) is what actually prevents the merge.
-  - On ANY guard voiding the fix → **close the PR (`gh pr close <pr_url>`, if still open) and page** ("autonomous fix could not be verified test-file-only-and-still-draft — review required"). Neither guard ever fails open. Both run in the nightly runner's watchdog preamble and do not trust the session's self-report.
+**Attempt tracking — one per-node map, pruned by the existing rule.** Persist
+`classify_attempts: {node_id: count}` in `data/nightly_tests_last_run.json`, keyed by pytest
+node ID to match the live per-node dedup model (`dispatched_nodes` / `compute_dispatch_set` /
+`carry_dispatched_nodes`) that #2559 put in place of the retired `dispatched_hash`.
 
-**New-vs-preexisting-PR resolution (round-3 concern).** The watchdog identifies the fixer's PR by exactly one means: the `pr_url` written into the hand-back on the fixer's own `AgentSession` record. It never enumerates open PRs, never matches by head branch, and never inspects any PR the fixer did not create. A hand-back with a `fixed-silent` disposition but a null/absent/unparseable `pr_url` is treated as invalid → fail-safe **page** (a claimed silent fix with no PR to guard is a contradiction, never a notify). This removes the earlier ambiguity between "the fixer opened a new draft PR" and "the watchdog inspects a PR" — there is one PR, named by the hand-back, or there is a page.
+- A node entering the failing set starts at 0; a node absent from the map is unattempted.
+- `classify_attempts[node]` increments once per classification attempt, **before** the baseline run, so a crash mid-classification still counts and cannot loop forever.
+- **Going green prunes the node**, by exactly the keep-while-still-in-`confirmed_failing` rule `carry_dispatched_nodes` already applies. The map therefore holds only currently-red nodes, cannot grow unbounded, and a node that later re-regresses starts fresh.
+- At `NIGHTLY_FIX_MAX_ATTEMPTS` the gate returns `escalate` rather than re-classifying.
 
-**Verifiable low-urgency notify — the transport chain must be built, not assumed (BLOCKER resolution, round 5).** `send_telegram(msg, dry_run=...)` has no urgency parameter, so a bare-string "notify" would be functionally identical to a page. Rounds 2-4 planned to fix that by forwarding `silent=True` to `valor-telegram send --silent` — **but that flag does not exist.** Verified on `0b6688433`: `send_parser` (`tools/valor_telegram.py` L1367-1440) declares no `--silent`, and `disable_notification` has **zero** hits in `tools/valor_telegram.py` or anywhere under `bridge/`. Worse, the failure would have been invisible: `send_telegram` (`scripts/nightly_regression_tests.py` L626-634) calls `subprocess.run(..., capture_output=True)`, **never inspects `.returncode`**, and logs `"Telegram sent: {msg}"` unconditionally at L633. An unrecognized flag makes argparse exit 2, so the happy-path notify would be **silently dropped while the log claimed success** — and the `grep -c "send_telegram(.*silent=True"` anti-criterion would still have passed, vacuously.
+Only **one** map, not two: `fix_sessions` existed to let a watchdog resolve a dispatched
+session, and there is no dispatch in this plan. It moves to #3076 with the watchdog.
 
-The notify tier therefore requires four concrete changes, all in scope:
+**Discoverable shadow verdict.** Every non-`off` run logs, under a stable prefix:
 
-1. **`send_telegram` gains a `.returncode` check** (`scripts/nightly_regression_tests.py` L626-634). This is a prerequisite, not a nicety: it is the only thing that converts a broken alert transport from a silent no-op into a visible one. `proc = subprocess.run(...)`; on `proc.returncode != 0`, log `WARNING: telegram send failed rc=... stderr=...`. Ship this **first and independently** — it is a strict improvement to the existing detector regardless of the rest of the feature.
-2. **`--silent` on the `send` subparser** — `send_parser.add_argument("--silent", action="store_true", help="Send without a notification sound/badge (disable_notification).")` near L1373.
-3. **Carry the flag through the outbox payload** — `cmd_send` (L798) queues a JSON payload onto `telegram:outbox:{session_id}` that the relay consumes; add `"silent": bool(args.silent)` to that payload. This is the transport, and it is the hop rounds 2-4 missed entirely.
-4. **Forward it to Telethon in the relay** — `bridge/telegram_relay.py` reads the payload and calls `telegram_client.send_message(...)` on the text path (and the follow-up-text path at L746). Thread `silent=message.get("silent", False)` into those calls; Telethon's `silent=` kwarg is the `disable_notification` wire field. Default `False` keeps every existing sender byte-identical.
+```
+nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing gate condition} nodes={n}
+```
 
-Only then does `send_telegram(msg, silent=True)` mean anything. The happy-path notify uses it; every page keeps the default `silent=False`. The anti-criterion asserts the call signature **and** the transport hops (a `--silent` argument in `valor_telegram.py`, a `silent` key in the relay's send path), so it can no longer pass on a wrapper kwarg that dead-ends.
+One `reason` token names the *first* condition that failed the short-circuit, so a month of
+logs answers "why did the gate refuse?" without re-deriving it. This line is the plan's
+delivered artifact and the entry condition for #3076.
 
-**Worst-case fail-safe latency (critique correction).** The watchdog is a *preamble to the next nightly run*, so `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` does not bound *detection* latency — it only decides whether a still-running dispatch is judged "hung" when the preamble next fires. The true worst-case latency for surfacing a hung/dead fixer is therefore **~one nightly cadence (~24h)**, not the 6h timeout. This is **accepted for the first cut**: (a) `shadow` mode is the default, so no real dispatch happens until we opt in; (b) a hung fixer produces no merge (structurally impossible) and leaves the suite in exactly the red state a human would have seen under today's detect-and-page anyway — the feature cannot make latency *worse* than the status quo, only the happy path faster. If ~24h proves unacceptable after `active` rollout, a dedicated intra-day launchd watchdog is filed as follow-up **#2405**; it is deliberately out of scope here to avoid a second scheduled job before the core gate is proven.
-
-**Discoverable shadow verdict (NIT resolution, round 5).** The shadow→active flip is supposed to be earned by reading shadow logs, but nothing made the verdict findable. The gate logs its result under a stable, greppable prefix on every non-`off` run: `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing gate condition} nodes={n}` (in `active` mode the same line reads `nightly-fix active-verdict: ...`). One `reason` token names the *first* condition that failed the short-circuit, so a month of logs answers "why did the gate refuse?" without re-deriving it. A Verification row greps the prefix.
-
-**Dedup — per-node keying, matching the live model (rebased 2026-09-02).** The plan originally extended `dispatched_hash`, a sha256-of-the-sorted-failing-set key. **That mechanism no longer exists**: #2559 / PR #2581 replaced set-hash dedup with **per-node** dedup, and the live substrate is `dispatched_nodes` plus `prior_dispatched()` / `compute_dispatch_set()` / `carry_dispatched_nodes()`. Re-keying to match is not cosmetic — a set-hash key has no producer left, and inventing a second, parallel keying scheme in the same state file would reintroduce exactly the two-sources-of-truth shape #2559 removed.
-
-Persist two maps in `data/nightly_tests_last_run.json`, both keyed by **pytest node ID**:
-- `fix_attempts: {node_id: count}` — how many times an autonomous fix has been attempted for that node. **This is the ONE name and the ONE semantics for attempt tracking; there is no scalar `fix_attempt_count`** (round-4 concern 3, preserved).
-- `fix_sessions: {node_id: agent_session_id}` — which `AgentSession` each still-red node was handed to, so the watchdog can resolve exactly the right record. Keyed rather than scalar because a scalar pointer is orphaned the moment a second dispatch happens (round-4 concern 1, preserved). It is a *separate* key from the pre-existing scalar `dispatched_session_id` (L1090), which continues to serve the unchanged triage path untouched.
-
-Reset semantics, expressed in terms of the live helpers:
-- **A node entering the failing set starts at 0.** No hash to invalidate; a node absent from both maps is simply unattempted.
-- **`fix_attempts[node]` increments once per dispatch attempt**, at dispatch time before the session runs, so a crash mid-attempt still counts (fail toward escalate, never infinite-retry).
-- **Going green prunes the node from BOTH maps**, by the same rule `carry_dispatched_nodes` already applies to `dispatched_nodes`: keep a key only while its node is still in `confirmed_failing`. The maps therefore hold only currently-red nodes, cannot grow unbounded, and a node that later re-regresses starts fresh with no stale session pointer. Reusing the existing carry rule (rather than a bespoke one) keeps all three maps pruning in lockstep.
-- **Cap-exceeded escalates, does not silently drop.** When any node in `new_failures` has reached `NIGHTLY_FIX_MAX_ATTEMPTS`, the run escalates (pages) instead of re-dispatching.
-- **Disjoint from `MAX_DISPATCH_NODES`, not composed with it.** That cap (L185) truncates `dispatch_nodes` (triage filing volume); `NIGHTLY_FIX_MAX_FAILURES` caps `new_failures` (autonomy eligibility), a set that is never truncated. They govern different sets and are never reconciled numerically — see Cap arithmetic above for why round 4's truncation disqualifier was wrong and is removed.
-
-**In-process, not Cowork, for the first cut** (open question 5): reuse the existing `maybe_dispatch_triage_session` machinery (rename → `maybe_dispatch_fix_session` with the new mandate). Cowork parity is filed as follow-up **#2405**.
-
-**Guardrail constants — raw `os.environ.get` at module scope, NOT `config/settings.py` (critique decision).** All five knobs (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`, `NIGHTLY_FIX_MAX_CHANGED_FILES`, `NIGHTLY_FIX_MAX_ATTEMPTS`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS`) are declared as module-level constants in `scripts/nightly_regression_tests.py`, each read via `os.environ.get(...)` with an in-code default and a one-line provisional/tunable grain-of-salt comment. This is a deliberate, stated choice, not an oversight: `config/settings.py`'s `TimeoutSettings` is the home for cross-cutting timeout/retry/TTL values consumed across the bridge/worker/agent runtime (per `docs/features/config-timeout-catalog.md`'s promote-vs-name-locally criterion). These five are single-consumer knobs of one standalone launchd script (`nightly_regression_tests.py` imports nothing from the runtime config surface today), so naming them locally keeps them next to their only reader and avoids polluting the global settings namespace. If a second consumer ever appears, promote them then. The anti-criterion greps for `os.environ.get("NIGHTLY_FIX` to assert no bare magic numbers survive in the new paths.
+**Guardrail constants — raw `os.environ.get` at module scope, NOT `config/settings.py`.**
+Three knobs (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`, `NIGHTLY_FIX_MAX_ATTEMPTS`)
+as module-level constants in `scripts/nightly_regression_tests.py`, each read via
+`os.environ.get(...)` with an in-code default and a one-line provisional/tunable comment.
+Deliberate: `config/settings.py`'s `TimeoutSettings` is the home for cross-cutting
+timeout/retry/TTL values consumed across the bridge/worker/agent runtime (per
+`docs/features/config-timeout-catalog.md`'s promote-vs-name-locally criterion). These are
+single-consumer knobs of one standalone launchd script that imports nothing from the runtime
+config surface. If a second consumer appears, promote them then. The other two knobs from
+earlier rounds (`NIGHTLY_FIX_MAX_CHANGED_FILES`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS`) are
+**not declared here** — their only consumers were the deferred watchdog guards, and a
+declared constant with no reader is the dead config round 4 already caught once.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The existing `except Exception` swallow in `maybe_dispatch_*` (dispatch failure → "no dispatch") is preserved; add a test asserting a failed dispatch logs a warning AND leaves the `fix_attempts`/`fix_sessions` entries for those node IDs untouched so a retry is possible.
-- [ ] In-process classifier failure (worktree add fails, baseline SHA unknown to git, pytest collection error, timeout, any raised exception) → classified `inconclusive` → **must route to escalate**, not to autonomous-fix. Test the fail-toward-paging path explicitly, and assert the temporary worktree is removed on every path (the `finally` arm).
-- [ ] **Watchdog: `AgentSession` record absent** for a `fix_sessions[node]` pointer (TTL-expired or swept) — `AgentSession.query.filter(id=sid)` returns `[]` → fail-safe **page** ("record missing — cannot verify outcome") and the node is pruned from both maps. Assert the page fires (not a fall-through) and that a second run does not re-page the same dead pointer.
-- [ ] **`send_telegram` transport failure**: stub `subprocess.run` to return a non-zero `returncode` → a WARNING naming the return code is logged and the success line is NOT emitted. This is the regression test for the round-5 blocker (an unrecognized flag exiting 2 while the log claimed "Telegram sent").
-- [ ] `nightly_fix_handback` field absent/null/malformed on the session record when the watchdog reads it → treated as "no hand-back" → fail-safe page (never silently assume success). Test with a `None` field and a non-dict/invalid payload.
-- [ ] `fixed-silent` hand-back whose PR diff touches a non-`tests/` path → the mechanical guard voids the fix (closes the PR) → **page** (not a notify). Test by stubbing `gh pr diff --name-only` to return a `src/` path.
-- [ ] **Fail-closed diff-path guard**: stub `gh pr diff --name-only` to (a) exit non-zero, (b) raise/throw, (c) return empty/whitespace output, and (d) return an all-`tests/` diff whose file count `> NIGHTLY_FIX_MAX_CHANGED_FILES` (round-4 concern 2) — each case must void the fix → **page**, never a notify. Asserted alongside the non-`tests/` case above.
-- [ ] **Fail-closed merge/draft-state guard (round-3)**: stub `gh pr view --json isDraft,state,mergedAt` to return (a) `isDraft=false`, (b) `state="MERGED"`/non-null `mergedAt`, (c) `state="CLOSED"`, and (d) command error/empty — each must void the fix → close (if open) + **page**, never a notify. This is the detective backstop for a strayed in-session `gh pr ready`/`gh pr merge`.
-- [ ] **`fixed-silent` hand-back with null/absent/unparseable `pr_url`** → invalid → fail-safe page (a claimed silent fix with no PR to guard is never a notify). Test.
-- [ ] **Active-mode preflight (three legs, round-5 re-scope)**: with `NIGHTLY_FIX_MODE=active`, each of the following must refuse dispatch and route to escalate-and-page (`valor_session create` NOT called; `send_telegram` called), logging the specific failing condition — (a) protection API returns 404, (b) protection API errors, (c) body has no `required_pull_request_reviews` or `required_approving_review_count < 1`, (d) `SDLC_AGENT_GH_TOKEN` unset/empty, (e) the token resolves to the operator's own login, (f) the bot login's repo permission is `"admin"` (review-exempt → guarantee vacuous). Dispatch proceeds ONLY when review-count ≥ 1 AND a non-operator token AND a non-admin bot. **Also assert the negative:** the preflight does NOT require `enforce_admins` (a body with `enforce_admins.enabled == false` and review-count ≥ 1 still passes) — requiring it would break direct-to-`main` and `/do-merge` repo-wide.
-- [ ] **Fixer env carries the bot token**: assert the dispatch path exports `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` into the fixer session's environment; a dispatch that cannot set it takes the refuse-and-page arm. Without this the preflight is decorative — the session's `gh` would fall back to the operator's ambient credentials.
+- [ ] **Baseline worktree provisioning failures** — `git worktree add` non-zero, `git checkout --detach` non-zero (unknown SHA), `uv sync` non-zero — each → whole classification `inconclusive` → gate returns `escalate`. Assert explicitly that the classifier does **not** fall back to running at `PROJECT_DIR`.
+- [ ] **Classifier run failures** — pytest collection error, `TimeoutExpired`, unparseable/missing JSON report, any raised exception → `inconclusive` → `escalate`.
+- [ ] **Node absent from the baseline report** → that node is `inconclusive`, never assumed-passed.
+- [ ] **`send_telegram` transport failure**: stub `subprocess.run` to return a non-zero `returncode` → a WARNING naming the return code is logged and the `"Telegram sent"` success line is NOT emitted. Regression test for the L626-635 defect.
+- [ ] **`_spawn_pytest` back-compat**: `run_tests` and `reconfirm_serial` still spawn with `cwd=PROJECT_DIR` after the parameter is added (assert on the `Popen` kwargs via call capture).
 
 ### Empty/Invalid Input Handling
-- [ ] `new_failures == []` → no classification, no dispatch, no page (clean-run path unchanged). Test.
-- [ ] `prev["head_commit"]` absent (first run after deploy, or state migrated from an older schema without the field) → cannot establish a last-green baseline → escalate (do not attempt an unbaselined fix). Test.
-- [ ] Empty/whitespace `disposition` in a hand-back → treated as invalid → fail-safe page. Test.
+- [ ] `new_failures == []` → no classification, no gate, no verdict log, no behavior change. Test.
+- [ ] `prev["head_commit"]` absent (first run after deploy, or state from an older schema) → no baseline can be established → `escalate` without classifying, and the verdict log names that reason. Test.
+- [ ] `NIGHTLY_FIX_MODE` set to an unrecognized value → treated as `off` (fail toward today's behavior), logged once. Test.
 
-### Error State Rendering
-- [ ] Escalation Telegram content is asserted to contain the stuck-point fields (what broke, tried, decision requested) — not a raw node-ID dump — on the `blocked-escalate` path.
-- [ ] Fail-safe page fires (asserted via `send_telegram` call capture) when the session is terminal-failed with no hand-back.
-- [ ] `fixed-silent` + guard-pass emits a **low-urgency notify** via `send_telegram(msg, silent=True)` — a distinct call signature from the high-urgency page (`silent=False`), asserted via call capture on the `silent` kwarg (not a prose substring) — the happy path is not fully silent.
+### Non-Stubbed Classifier Validation (the falsifiability test)
+- [ ] **Two-commit fixture repo, no stubbing of `classify_against_baseline`.** Build a temporary git repo with a trivial test that passes at commit A and fails at commit B, provision it the same way the real classifier provisions its baseline worktree, and assert the node buckets `newly_broken` when classified at baseline A. **This is the one test that can distinguish a working classifier from an inert one** — every other classifier test stubs the classifier and would pass identically against a function that returns all-`pre_existing` or all-`inconclusive` (round-6 blocker 2).
+- [ ] Same fixture, node failing at **both** commits → `pre_existing`. Confirms the classifier is not simply echoing HEAD's result.
 
-### Run-Shape Disqualifiers (added in the 2026-09-02 freshness rebase)
-- [ ] **Seed / re-baseline run** (`is_seed_run` true — first run, or `prev["collection"] != COLLECTION_PATHS`): even in `active` mode with an all-test-stale classification, NO fixer is dispatched; the run takes its existing seed path. A baseline declares known-failing state; autonomously "fixing" an absorbed population would rewrite tests wholesale. Asserted: `valor_session create` not called on the fixer path.
-- [ ] **Integrity-warned run** (`validate_run_integrity` returned non-empty `integrity_warnings`, e.g. the shallow-shrink warning): no dispatch → escalate. A `confirmed_failing` set the detector itself distrusts must never be edited against. Asserted.
-- [ ] **`--dry-run`**: no fixer dispatched and no PR opened, mirroring the existing `DRY_RUN_SESSION_ID` short-circuit contract — the one command an operator reaches for to preview a run must stay previewable. Asserted.
-- [ ] **Truncation is NOT a disqualifier (round-5 negative assertion)**: a run whose `dispatch_nodes` exceeded `MAX_DISPATCH_NODES` still reaches the autonomous-fix path when its `new_failures` set is clean and within `NIGHTLY_FIX_MAX_FAILURES`. Pin the motivating case directly: **11 all-`newly_broken` failures → `autonomous-fix`, not `escalate`** — #2399's shape must pass the gate this feature was written for.
+### Verdict & Gate
+- [ ] Gate returns `escalate` on each of: non-empty `pre_existing`, non-empty `inconclusive`, `new_failures` ⊄ `newly_broken`, count over `NIGHTLY_FIX_MAX_FAILURES`, any node at `NIGHTLY_FIX_MAX_ATTEMPTS`.
+- [ ] **The motivating case passes its own gate**: 11 all-`newly_broken` failures → `autonomous-fix`. #2399's shape must not be disqualified by the feature written for it.
+- [ ] **Truncation is NOT a disqualifier**: a run whose `dispatch_nodes` exceeded `MAX_DISPATCH_NODES` still reaches `autonomous-fix` when its `new_failures` set is clean and within cap.
+- [ ] The verdict log line is emitted on every non-`off` run with a `reason=` token naming the first failing condition; asserted on both an `autonomous-fix` and an `escalate` run.
 
-### Mode Gating (round-5 blocker 3 — one pinned reading)
-- [ ] `NIGHTLY_FIX_MODE=off`: byte-identical to today's detect-and-page. The up-front `send_telegram` on the `new_failures` branch **fires**; no classification, no gate, no dispatch. Asserted via `send_telegram` call capture — this is the break-glass revert and it must never leave a red suite unannounced.
-- [ ] `NIGHTLY_FIX_MODE=shadow` (the default): the classifier and gate run and the verdict is logged under the `nightly-fix shadow-verdict:` prefix, the up-front page **still fires as today**, and NO fixer session is dispatched. Asserted: `send_telegram` called, `valor_session create` not called.
-- [ ] `NIGHTLY_FIX_MODE=active`: the up-front detection page is **suppressed** (this is the only mode where it is) and the escalate/notify tiers own all outbound messaging; full dispatch path exercised.
+### Run-Shape Disqualifiers
+- [ ] **Seed / re-baseline run** (`is_seed_run` L1027) → `escalate`, and the existing seed path is unchanged.
+- [ ] **Integrity-warned run** (non-empty `integrity_warnings` L1047) → `escalate`.
+- [ ] **`--dry-run`** → classification is skipped entirely (no worktree, no pytest) and the run stays a pure preview.
+
+### Mode Gating
+- [ ] `NIGHTLY_FIX_MODE=off`: byte-identical to today. The up-front `send_telegram` on the `new_failures` branch **fires**; no classification, no worktree, no gate, no verdict log. Asserted via `send_telegram` call capture.
+- [ ] `NIGHTLY_FIX_MODE=shadow` (the default): the classifier and gate run, the verdict is logged, **and the up-front page still fires exactly as today**. Asserted via `send_telegram` call capture.
+
+### Attempt-Map Semantics
+- [ ] A node newly entering `confirmed_failing` starts at 0; `classify_attempts[node]` increments once per attempt, before the baseline run.
+- [ ] A node no longer in `confirmed_failing` is pruned from the map (same rule as `carry_dispatched_nodes`); a re-regressed node starts fresh.
+- [ ] At `NIGHTLY_FIX_MAX_ATTEMPTS` the gate escalates rather than re-classifying.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_nightly_regression_tests.py` — UPDATE: the `new_failures` branch pages up front in `off` and `shadow` (unchanged from today) and **only** stops paging in `active`. Existing assertions expecting an immediate `send_telegram` on new failures therefore stay valid under the default (`shadow`) and under `off`; only the `active`-mode cases move to the escalate/notify paths. (Round 5 pinned this — the earlier "no longer pages in `off`/`active`" wording contradicted the Reversibility/Mode-Gating reading and would have made the break-glass revert silent.) If `maybe_dispatch_triage_session` is renamed, UPDATE its tests to the new name + bounded-fix prompt. **Do not disturb** the per-node dedup tests (`compute_dispatch_set` / `carry_dispatched_nodes` / `prior_dispatched` / `seeded_nodes`), the seed/re-baseline tests, or the run-integrity tests — this feature layers around them and must leave their behavior byte-identical.
-- [ ] Any test asserting the dispatch prompt contains "Do NOT attempt an auto-hotfix" — REPLACE: the mandate names only make-test-edits/run-tests/open-DRAFT-PR/hand-back/STOP (never `/do-merge`, never "run the pipeline"), and the never-auto-merge posture is asserted via the draft-PR flag (`gh pr create --draft`) plus the fail-closed watchdog guard.
-- [ ] `tests/unit/` baseline-verifier tests — **NOT affected.** `.claude/agents/baseline-verifier.md` is no longer modified by this plan (round-5 blocker 2: it has no Python invocation seam, so classification is in-process instead). Any test asserting its hardcoded `main` ref stays as-is; `/do-test` callers are untouched.
-- [ ] `tests/unit/` `valor-telegram` CLI tests — UPDATE/ADD: `send --silent` parses and puts `"silent": true` on the outbox payload; the default omits it (or sets `false`) so existing senders are byte-identical.
-- [ ] `tests/unit/` relay tests (`bridge/telegram_relay.py` send path) — UPDATE/ADD: a payload with `silent: true` forwards `silent=True` to `telegram_client.send_message`; a payload without it forwards `False`.
-- [ ] `tests/unit/` AgentSession model/schema tests — UPDATE/ADD: assert the new nullable `nightly_fix_handback` field round-trips via the ORM and reads `None` on legacy records.
-- [ ] If no direct nightly-runner unit tests exist yet, the build ADDS them (decision-gate, watchdog, hand-back parsing, mechanical guard, mode gating) — see Step by Step Tasks.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — UPDATE/ADD only. The up-front page fires in **both** modes this plan ships, so **every existing assertion expecting an immediate `send_telegram` on new failures stays valid unchanged.** Add the `send_telegram` returncode test and the `_spawn_pytest` `cwd` back-compat test. **Do not disturb** the per-node dedup tests (`compute_dispatch_set` / `carry_dispatched_nodes` / `prior_dispatched` / `seeded_nodes`), the seed/re-baseline tests, or the run-integrity tests.
+- [ ] Tests asserting the dispatch prompt contains "Do NOT attempt an auto-hotfix" — **NOT affected.** `_build_triage_prompt` (L830-855) and `maybe_dispatch_triage_session` (L856) are untouched by this plan; the mandate rewrite moves to #3076.
+- [ ] `tests/unit/` baseline-verifier tests — **NOT affected.** `.claude/agents/baseline-verifier.md` is unmodified; `/do-test` callers are untouched.
+- [ ] `tests/unit/` `valor-telegram` CLI tests — **NOT affected.** No `--silent` flag ships in this plan (deferred to #3076 with its only consumer).
+- [ ] `tests/unit/` relay tests — **NOT affected.** No `bridge/telegram_relay.py` change.
+- [ ] `tests/unit/` AgentSession model/schema tests — **NOT affected.** No schema change, therefore no migration.
+- [ ] New files: `tests/unit/test_nightly_classifier.py` (incl. the non-stubbed fixture-repo tests) and `tests/unit/test_nightly_decision_gate.py`.
 
-Justification for anything not affected: the base detector mechanics (`run_tests`, `reconfirm_serial`, run lock, TTFT gate, `load_env_or_die`) are untouched — this feature layers a classification/decision/escalation stage around the existing `new_failures` branch.
+Justification for anything not affected: the base detector mechanics (`run_tests`,
+`reconfirm_serial`, run lock, TTFT gate, `load_env_or_die`, dispatch, alerting) are
+untouched — this plan layers a classification + verdict-logging stage alongside the existing
+`new_failures` branch without changing a single outbound message.
 
 ## Rabbit Holes
 
-- **Building a general-purpose "is this test stale?" classifier.** Do not. The mechanical precondition (baseline-verifier vs last-green) plus the test-file-only session constraint plus escalate-on-doubt is the whole design. Trying to fully mechanize the test-stale judgment reproduces the #2399 Group-2 trap.
-- **Touching `baseline-verifier` at all.** Round 5 established it has no Python invocation seam; the plan builds a small in-process classifier instead. Do NOT parameterize the subagent, do not add a `baseline_ref` Input field, and do not route classification through a spawned session (that would make it asynchronous and turn one nightly run into a two-night handshake).
-- **A bespoke session-orchestration/steering substrate for the fixer.** It's a normal `AgentSession` with a narrow mandate (make test edits → run tests → open a DRAFT PR → hand-back → STOP). Do not invent a new runner; do not dispatch it as an auto-continuing eng session that would drive itself through Merge.
-- **A new permission subsystem for the fixer.** Do NOT build one. Round 1's `nightly-fixer` permission profile had no seam (bypass-mode spawns, no session permission field). The structural never-merge guarantee is server-side branch protection on `main` (external to the session); the draft flag + forbid-ready/merge mandate + fail-closed watchdog are deterrent/detective layers. Do not re-introduce a permission-deny-list spike, and do not claim any in-session mechanism structurally prevents merge — under `bypassPermissions` none can.
-- **Cowork migration now.** Deferred to #2405. Resisting it here is the point.
-- **Tuning the guardrail numbers to perfection.** Ship provisional env-overridable constants with grain-of-salt comments; tune from real nightly data later.
+- **Building the autonomous fixer anyway.** Do not. Its two load-bearing seams do not exist (Scope Boundary); it is #3076, gated on them.
+- **Adding `--silent` / the notify tier "while we're in there".** Do not. Without an `active` happy path it has no consumer, and it is a three-hop CLI surface change propagated to every machine for a flag nothing calls.
+- **Touching `baseline-verifier`.** It has no Python invocation seam. Do not parameterize the subagent, do not add a `baseline_ref` Input field, and do not route classification through a spawned session (asynchronous — a two-night handshake).
+- **A general-purpose "is this test stale?" classifier.** The mechanical precondition (passes at last-green, fails at HEAD) is all this plan claims. #2399 Group 2 proved a mechanical bucket is not a staleness proof; the plan says `newly_broken`, never `test-stale`.
+- **Bypassing `pytest-clean.sh` in the baseline worktree** to dodge the `.venv` requirement. That is exactly #3033's false-green: imports resolve through the primary checkout's editable path entry and the baseline run silently exercises HEAD's source.
+- **Falling back to `PROJECT_DIR` when worktree provisioning fails.** It would look like a working classifier while classifying everything `pre_existing`. Fail to `inconclusive`.
+- **A new permission subsystem.** No session is dispatched here at all.
+- **Tuning the guardrail numbers to perfection.** Ship provisional env-overridable constants; tune from real shadow data.
 
 ## Risks
 
-### Risk 1: The fixer weakens a test to make a genuine regression pass (the catastrophic case)
-**Impact:** A real bug is masked by a test edit and silently merged after a rubber-stamp review.
-**Mitigation:** Layered defense whose only structural leg is external to the session — (a) **review-required protection on `main` (leg A) combined with the fixer running under the non-admin `SDLC_AGENT_GH_TOKEN` bot (leg B)** (STRUCTURAL, load-bearing; GitHub-enforced, cannot be overridden by the session's bash; a non-admin author can neither bypass required review nor self-approve. Leg A is currently ABSENT per the 404 and leg B is machine-dependent, so both are code-enforced prerequisites for `active` mode via the runtime preflight. Round 4's repo-wide `enforce_admins == true` variant is deliberately reversed: it would break direct-to-`main` and `/do-merge` for everyone while still leaving the operator-authored fix PR unmergeable); (b) **shadow-first default** so nothing dispatches until a deliberate opt-in; (c) the **narrow mandate** (make test edits → run tests → open draft PR → STOP) that never names `/do-merge`/"run the pipeline" and **explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main`** — a deterrent, since bash is unrestricted; (d) the fixer opens a **DRAFT** PR with `gh pr create --draft` — a deterrent + detective marker, NOT a structural block (an in-session bash could flip it ready and merge; honest); (e) the watchdog's **fail-closed** diff-path guard AND the round-3 **merge/draft-state guard** (`gh pr view --json isDraft,state,mergedAt`) that detect a strayed merge next-night and page (detective, not preventive); (f) escalate on any inconclusive/regression bucket; (g) the fix branch re-runs the targeted tests to confirm no NEW regression. This is a stack of layers, with (a) the only structural guarantee — NOT a single permission gate, and NOT an in-session structural claim.
+### Risk 1: The classifier ships inert and nobody notices
+**Impact:** The feature's entire deliverable — the shadow verdict — is a constant. Either every node buckets `pre_existing` (ran against HEAD's source) or every node buckets `inconclusive` (wrapper aborted). Both look safe, both page as today, and both would pass a fully-stubbed test suite. This is the round-6 blocker and the single largest risk in the remaining scope.
+**Mitigation:** (a) The provisioning path is specified concretely against verified wrapper behavior (`pytest-clean.sh` L34-38 cwd-derived rootdir, L135-145 `.venv` requirement, L169-175 pin requirement) rather than left as "run it there"; (b) `_spawn_pytest` gains the `cwd` parameter it lacks, so the classifier cannot silently inherit `PROJECT_DIR`; (c) provisioning failure is `inconclusive`, never a `PROJECT_DIR` fallback; (d) **the non-stubbed two-commit fixture test** is the falsifier, and a companion case (`pre_existing` when the node fails at both commits) proves the classifier is not echoing HEAD; (e) shadow verdicts that are 100% one value across a month are themselves the operational tell, and the `reason=` token names which.
 
-### Risk 2: the in-process classifier's baseline is wrong or unavailable
-**Impact:** Wrong classification → either false autonomy (dangerous) or false escalation (noisy).
-**Mitigation:** The last-green-SHA mapping (`prev["head_commit"]`, never bare `main`) is the explicit design, and the SHA is interpolated as a literal so there is no shell default that can silently resolve to `main`. Every failure mode of the worktree/pytest path — missing SHA, worktree-add failure, collection error, timeout, any exception — lands in `inconclusive`, and `inconclusive` is a hard escalate. On a missing/absent baseline the gate escalates without classifying. Covered by the empty-input and classifier-failure tests.
+### Risk 2: The baseline is wrong or unavailable
+**Impact:** Wrong classification → a misleading shadow verdict.
+**Mitigation:** The last-green-SHA mapping (`prev["head_commit"]` L1092, never bare `main`) is explicit, and the SHA is interpolated as a literal so no shell default can resolve to `main`. Missing SHA → `escalate` without classifying. Every worktree/pytest failure mode lands in `inconclusive`, a hard escalate.
 
-### Risk 2b: the classifier's pytest run lengthens the nightly critical path
-**Impact:** A slow or hanging baseline run delays or wedges the nightly job.
-**Mitigation:** It runs only when `new_failures` is non-empty and only outside `off` mode, and it re-runs **only the failing node IDs**, not the suite. It carries its own timeout, and a timeout is `inconclusive` → escalate. The worktree is removed in a `finally`.
+### Risk 2b: The classifier lengthens the nightly critical path
+**Impact:** A slow or hanging baseline run delays the nightly job.
+**Mitigation:** It runs only when `new_failures` is non-empty and only outside `off` mode, re-runs **only the failing node IDs** with `-n0`, and carries its own timeout (a timeout is `inconclusive`). The baseline worktree is **persistent**, so the `uv sync` cost is paid once and thereafter only when `uv.lock` moves. A detached checkout of an existing worktree is near-instant.
 
-### Risk 3: Silence swallows a regression (session dies, no page ever fires)
-**Impact:** A red suite goes unnoticed — worse than today.
-**Mitigation:** The fail-safe watchdog pages on terminal-failure/hang. Note (per critique): because the watchdog is a next-run preamble, worst-case *detection* latency is ~one nightly cadence (~24h), not the 6h timeout — accepted for the first cut (shadow default; a hung fixer cannot merge and leaves the suite exactly as red as today's status quo). Intra-day watchdog filed as #2405 if needed. Explicitly tested.
+### Risk 3: The persistent baseline worktree accumulates or is garbage-collected
+**Impact:** Either disk growth or a surprise re-provision cost every night.
+**Mitigation:** One fixed path, never per-run. The build task explicitly reconciles it with `scripts/worktree-gc.sh` so it is neither swept nor duplicated. Its size is one checkout plus one venv.
 
-### Risk 4: Re-dispatch storm / cost blowup
-**Impact:** The same failing set spawns a fresh fixer session every night, burning tokens.
-**Mitigation:** the per-node `fix_attempts: {node_id: count}` map rides alongside the live `dispatched_nodes` dedup; past `NIGHTLY_FIX_MAX_ATTEMPTS` the node escalates instead of re-dispatching.
+### Risk 4: The shadow verdict is greppable but never actually read
+**Impact:** #3076 stays permanently ungated on evidence nobody looks at.
+**Mitigation:** The `reason=` token makes a single `grep` over a month of logs a complete answer, and #3076 names reading them as its entry condition. This is a process risk the plan can bound but not eliminate; it is accepted.
 
 ## Race Conditions
 
-### Race 1: Watchdog reads a hand-back the fixer session is still writing
-**Location:** `AgentSession.nightly_fix_handback` field write (fixer session, via `session.save()`) vs read (next nightly preamble, via `AgentSession.query`).
-**Trigger:** A long-running fixer session still executing when the next nightly fires.
-**Data prerequisite:** The hand-back must be complete before the watchdog treats it as authoritative.
-**State prerequisite:** A null/partial hand-back must not read as success.
-**Mitigation:** Moving the hand-back onto the `AgentSession` record (from the earlier file design) **removes the partial-read hazard entirely** — a Popoto record write is a single atomic hash write; a reader sees either the prior value or the fully-written new one, never a torn payload. The watchdog treats null/absent/malformed as "no hand-back" → fail-safe (never as success), and cross-checks the session's terminal status so a still-running (`updated_at` fresh, non-terminal) session is never mistaken for done. The nightly run lock still prevents two nightly runs overlapping.
-
-### Race 2: Two nightly invocations overlap
+### Race 1: Two nightly invocations overlap
 **Location:** `main()` entry.
-**Mitigation:** Unchanged — the existing `_acquire_run_lock()` flock already serializes nightly runs; the loser is a no-op.
+**Mitigation:** Unchanged — the existing `_acquire_run_lock()` flock serializes nightly runs; the loser is a no-op. The baseline worktree therefore has exactly one writer.
+
+### Race 2: A concurrent human `git worktree` operation touches the baseline worktree
+**Location:** `.worktrees/nightly-baseline/`.
+**Trigger:** A developer or another lane running `git worktree prune` or `scripts/worktree-gc.sh` mid-classification.
+**Data prerequisite:** The worktree must exist and be on the baseline SHA for the duration of one classification.
+**State prerequisite:** A pruned-mid-run worktree must not produce a *wrong* verdict.
+**Mitigation:** Any git or pytest failure during classification → `inconclusive` → escalate. The failure mode is a false escalation (noisy, safe), never a false `autonomous-fix`. The build task reconciles the path with `worktree-gc.sh` so the common case does not arise.
+
+*(The hand-back write/read race from earlier rounds is gone with the hand-back — it moves to #3076.)*
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2405] Migrating the nightly fixer dispatch to a Claude Cowork routine (parity with #2209). First cut stays in-process per open question 5.
-- [SEPARATE-SLUG #2405] Any cross-run learning / auto-tuning of the guardrail constants from historical nightly data — the constants ship provisional and env-overridable; adaptive tuning is out of scope.
-- [SEPARATE-SLUG #2405] A dedicated intra-day launchd watchdog to shrink the ~24h fail-safe detection latency — only warranted if the next-run-preamble latency proves too slow after `active` rollout; the first cut relies on the nightly-cadence preamble.
+- [SEPARATE-SLUG #3076] The autonomous fixer dispatch, the `GH_TOKEN`/per-session env seam, the `AgentSession.nightly_fix_handback` field and its helper CLI, the escalation/fail-safe watchdog, the fail-closed diff-path and merge/draft-state guards, the three-leg `active`-mode preflight, the `fix_sessions` map, and the `valor-telegram send --silent` notify transport. **Blocked on two seams that do not exist** (Scope Boundary) and on shadow evidence this plan produces.
+- [SEPARATE-SLUG #2405] Migrating the nightly dispatch to a Claude Cowork routine.
+- [SEPARATE-SLUG #2405] A dedicated intra-day launchd watchdog.
+- Any cross-run learning or auto-tuning of the guardrail constants — they ship provisional and env-overridable.
 
-The invariants "never auto-merge to main" and "never edit source (non-test) files to make a failing test pass" are NOT deferrals — they are permanent safety boundaries of this feature, enforced by a **layered defense whose only structural leg is external to the session**: **review-required protection on `main` (leg A) plus a non-admin fixer identity via `SDLC_AGENT_GH_TOKEN` (leg B)** (the two-leg load-bearing mechanism; GitHub-enforced, leg A currently ABSENT and leg B opt-in per machine, therefore both code-enforced `active`-mode prerequisites — where either cannot be satisfied, `active` mode is honestly unreachable on that machine and the plan says so rather than pretending otherwise), plus in-session **deterrents** (narrow mandate that never names `/do-merge` and forbids `gh pr ready`/`gh pr merge`; `gh pr create --draft`) and **detective** watchdog guards (fail-closed diff-path guard + fail-closed merge/draft-state guard). We do NOT claim any in-session mechanism structurally prevents merge — under hardcoded `bypassPermissions` none can. All layers are asserted as Verification anti-criteria below.
+The invariants "never auto-merge to main" and "never edit source files to make a failing
+test pass" remain permanent safety boundaries of the *eventual* feature. **This plan does not
+need them, because it dispatches nothing and edits nothing.** That is the point of the cut:
+rather than asserting a never-merge guarantee whose two legs are a 404 and a missing env
+seam, the plan ships the half that needs no such guarantee, and #3076 carries the half that
+does — gated in its own entry condition on both legs existing.
 
 ## Update System
 
-- New env-overridable constants (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`, `NIGHTLY_FIX_MAX_CHANGED_FILES`, `NIGHTLY_FIX_MAX_ATTEMPTS`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS`) have safe in-code defaults (`NIGHTLY_FIX_MODE` defaults to `shadow`), so no `.env` propagation is required for the feature to run. Document them in `.env.example` (commented) for discoverability only, noting the `off`/`shadow`/`active` rollout path. **Env-completeness nit (round-3): the `.env.example` completeness check requires a comment line immediately above each `KEY=` line** (per CLAUDE.md → "Adding a new secret"), so each of the five keys ships as a two-line block — a `#`-comment describing the knob + its default + (for `NIGHTLY_FIX_MODE`) the note that `active` requires branch protection on `main`, followed by the commented `# NIGHTLY_FIX_...=` placeholder. Add these blocks so the completeness check passes; a bare `KEY=` with no preceding comment would fail it.
-- **Popoto schema change**: the additive nullable `AgentSession.nightly_fix_handback` field is registered as an idempotent no-op entry in `scripts/update/migrations.py`'s `MIGRATIONS` dict per the repo convention. No data backfill runs (`_heal_descriptor_pollution` reads legacy records as `None`); the entry exists to satisfy the schema-change convention and record the field's introduction.
-- No new launchd job: the escalation/fail-safe watchdog runs as a preamble inside the existing nightly launchd invocation, so `scripts/install_nightly_tests.sh` needs no change. (A dedicated intra-day watchdog, if the ~24h fail-safe latency proves too slow after `active` rollout, is deferred to #2405.)
-- No new config files or permission subsystem. (Round 1's `config/permission_profiles/nightly_fixer.json` is removed from the design — it had no implementation seam.) **`SDLC_AGENT_GH_TOKEN` gains a new consumer** but is an already-declared, already-documented opt-in key — no `.env.example` addition, no new secret. Its absence is not an error: it simply means `active` mode is unavailable on that machine, which the preflight reports.
-- **`valor-telegram send --silent` is a CLI surface change that propagates to every machine.** The flag, its outbox payload key, and the relay's `silent=` forwarding must land together — a machine running an older relay would drop the key and send the notify at full urgency (degraded, not broken). Nothing to configure; the change rides the normal `/update` git sync plus the bridge restart that CLAUDE.md already mandates after relay changes.
-- No `data/` directory or gitignore entry is added (the hand-back moved onto the ORM record; the earlier file-based store is dropped).
-- No `/update` skill changes required — this is internal to an already-deployed scheduled job.
+- Three new env-overridable constants (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`, `NIGHTLY_FIX_MAX_ATTEMPTS`) have safe in-code defaults (`NIGHTLY_FIX_MODE` defaults to `shadow`), so no `.env` propagation is required. Document them in `.env.example` for discoverability. **Env-completeness note:** the check requires a comment line immediately above each `KEY=` line, so each ships as a two-line block — a `#` comment describing the knob and its default, then the commented `# NIGHTLY_FIX_...=` placeholder. A bare `KEY=` with no preceding comment fails the check.
+- **No Popoto schema change**, therefore **no `scripts/update/migrations.py` entry.** The `AgentSession` field moved to #3076 with the hand-back.
+- **No CLI surface change.** `valor-telegram` is untouched, so nothing must land in lockstep across machines and no bridge restart is required by this plan.
+- No new launchd job: classification runs inside the existing nightly invocation, so `scripts/install_nightly_tests.sh` needs no change.
+- No new config files, no permission subsystem, no new secrets.
+- **One filesystem addition:** the persistent baseline worktree at `.worktrees/nightly-baseline/`. `.worktrees/` is already gitignored; the build task confirms `scripts/worktree-gc.sh` leaves this fixed path alone rather than sweeping it as a stale lane worktree.
 
 ## Agent Integration
 
-- The dispatched fixer is an Eng `AgentSession` created via the existing `python -m tools.valor_session create --role eng --slug ... --json --message ...` path — already agent-reachable — spawned with **`GH_TOKEN=$SDLC_AGENT_GH_TOKEN` in its environment** (round-5 leg B: the session's `gh` must authenticate as the non-admin bot, not the operator, or the never-merge guarantee is vacuous) and with a **narrow mandate carried in its dispatch message** (make test edits → run tests → open a DRAFT PR → hand-back → STOP). No new session-create flag, no permission profile, no settings seam is required (round 1's assumption that one existed was false: `tools.valor_session create` has no permission flag, `AgentSession` no permission field, spawns are hardcoded `bypassPermissions`). The never-auto-merge guarantee lives entirely in the mandate + the `gh pr create --draft` call the fixer makes + the fail-closed watchdog — none of which needs a new capability.
-- New helper CLI `python -m tools.nightly_fix_handback` (write/read) so the fixer session has a documented, testable way to emit its structured hand-back. It loads the target `AgentSession` and persists the hand-back via `session.save()` (ORM only). Register it in `pyproject.toml [project.scripts]` if a console entry point is warranted (e.g. `valor-nightly-fix-handback`), otherwise `python -m` invocation is sufficient — decide at build time.
-- The nightly runner itself is a script, not a bridge tool; no bridge import changes.
-- Integration test: assert (a) the dispatched session's mandate names make-test-edits/run-tests/open-DRAFT-PR/hand-back/STOP, does NOT name `/do-merge` or "run the pipeline", explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main`, and includes `gh pr create --draft`; (b) a `fixed-silent` hand-back with a `tests/`-only PR diff AND a still-draft/OPEN/unmerged PR (both guards pass) emits a low-urgency notify (`send_telegram(..., silent=True)`) and no page; (c) a `fixed-silent` hand-back whose PR diff touches a non-`tests/` path — OR whose diff/merge-state guard command errors/returns empty — OR whose PR is not-draft/merged/closed — is voided → the PR is closed → page; (d) a `blocked-escalate` hand-back fires a page; (e) in `active` mode with branch protection absent (preflight 404), no fixer is dispatched and a page fires.
+**No agent integration is required — this plan dispatches no session and adds no
+agent-reachable surface.** The nightly runner is a launchd script, not a bridge tool; it
+gains an internal function and a log line. There is no new CLI entry point in
+`pyproject.toml [project.scripts]`, no bridge import, and no new `AgentSession` behavior.
+
+The existing `maybe_dispatch_triage_session` (L856) investigate-only dispatch continues
+unchanged. Rewriting that mandate into a bounded-fix mandate is #3076's work, and it is
+explicitly not started here — because without the per-session env seam the dispatched
+session's `gh` would carry the operator's admin credentials, which is the condition that
+made the never-merge guarantee vacuous in round 6.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/nightly-alert-triage.md` — the mandate flipped from investigate-only to bounded-fix-before-alert; document the classification gate, the never-weaken-assertions invariant, the **layered enforcement and its honest limits** (review-required protection on `main` PLUS a non-admin `SDLC_AGENT_GH_TOKEN` fixer identity as the ONLY structural never-merge legs — and the explicit statement that `active` mode is unreachable where either is unsatisfiable, including on this repo today; in-session `bypassPermissions` cannot mechanically block `gh pr ready`/`gh pr merge`; draft flag + forbid-ready/merge mandate are deterrents; fail-closed diff-path + merge/draft-state watchdog guards are detective/next-night; shadow-first default — explicitly NOT a permission gate and NOT an in-session structural claim), the branch-protection verification finding + the `active`-mode runtime preflight, the ORM-based hand-back protocol, the notify-vs-page tiering (`send_telegram(silent=True)`), the shadow→active rollout, and the guardrail constants.
-- [ ] Cross-link from `docs/features/nightly-regression-tests.md` (base detector) and note the new stage in the flow.
-- [ ] Add/confirm entry in `docs/features/README.md` index.
+- [ ] Update `docs/features/nightly-regression-tests.md` — document the new classification stage: the in-process `classify_against_baseline` function, the last-green baseline ref (`prev["head_commit"]`, never bare `main`), the **provisioned persistent baseline worktree and why it must have its own `.venv`** (#3033), the three buckets and the fail-toward-escalate rule, the pure decision gate, the `off`/`shadow` modes, the `nightly-fix shadow-verdict:` log contract, and the three guardrail constants.
+- [ ] Update `docs/features/nightly-alert-triage.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
+- [ ] Add/confirm entries in `docs/features/README.md` index.
 
 ### Inline Documentation
 - [ ] Each guardrail constant carries a grain-of-salt/provisional comment and its env-override name.
-- [ ] Docstring the decision-gate function, the hand-back schema, and the baseline-ref parameterization of `baseline-verifier`.
+- [ ] Docstring `decide_fix_or_escalate` (the gate's exact conditions and their order, since `reason=` reports the first failure) and `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]`, never bare `main`) plus its provisioning preconditions.
+- [ ] Docstring the `cwd` parameter added to `_spawn_pytest`, noting that the default preserves both existing callers byte-identically.
 
 ## Success Criteria
 
-- [ ] In `active` mode, on a run where every newly-confirmed failure is test-stale-candidate and within caps, **no up-front Telegram page** fires; a narrowly-mandated fixer session is dispatched and (on success) a **draft** PR exists plus a low-urgency notify — verified end-to-end in an integration test with a seeded state file.
-- [ ] The default `NIGHTLY_FIX_MODE=shadow` computes+logs the gate verdict (under the `nightly-fix shadow-verdict:` prefix) but dispatches nothing and **still pages up front as today**; `off` reproduces exact current behavior including that up-front page. Both asserted via `send_telegram` call capture — the up-front page is suppressed in `active` mode ONLY, so the break-glass revert can never leave a red suite unannounced.
-- [ ] The shadow verdict is discoverable: every non-`off` run logs `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason=... nodes=...` (grep-verifiable), so the shadow→active flip can be earned from logs rather than asserted.
-- [ ] Classification is **synchronous and in-process** — no subagent, no spawned session, no Task tool — and `.claude/agents/baseline-verifier.md` is unmodified by this change (grep-verifiable: `git diff --name-only` contains no `.claude/agents/` path; the classifier function lives in `scripts/nightly_regression_tests.py`).
-- [ ] The low-urgency notify actually reaches Telegram at low urgency: `valor-telegram send --silent` exists, `cmd_send` puts `silent` on the outbox payload, and the relay forwards `silent=` to `telegram_client.send_message` (all three asserted); and `send_telegram` logs a WARNING instead of a success line when the subprocess exits non-zero.
-- [ ] The plan's motivating case passes its own gate: a run with **11** newly-confirmed, all-`newly_broken` failures routes to `autonomous-fix` (asserted) — `MAX_DISPATCH_NODES` truncation is not a fixer disqualifier and `NIGHTLY_FIX_MAX_FAILURES` is not dead config.
-- [ ] A `fix_sessions` pointer whose `AgentSession` record is gone (TTL/sweep) pages instead of falling through, and is pruned so it does not re-page forever (asserted).
-- [ ] On any `regression`/`inconclusive` classification, on cap-exceeded, or on a missing last-green baseline, the run **escalates** (pages) and does NOT dispatch an autonomous fix.
-- [ ] The fixer opens a **DRAFT** PR (grep-verifiable: `gh pr create --draft` present in the dispatch instruction / fixer path); its mandate names only make-test-edits/run-tests/open-draft-PR/hand-back/STOP (grep-verifiable: no `do-merge`/`do_merge` in the fixer path) and explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main` (grep-verifiable: `grep -Ec "gh pr ready|gh pr merge"` == 0 in the runner; integration test asserts the dispatch prompt forbids them). The structural never-merge guarantee is **server-side branch protection on `main`** (external), NOT the draft state and NOT a permission profile (none exists); the draft flag is a deterrent/detective marker only.
-- [ ] Branch-protection state on `main` is verified and documented (`gh api repos/tomcounsell/ai/branches/main/protection`); in `active` mode a runtime preflight refuses to dispatch (and pages) unless ALL THREE hold: `required_pull_request_reviews.required_approving_review_count >= 1`, a non-empty `SDLC_AGENT_GH_TOKEN` resolving to a non-operator login, and that login's repo permission `!= "admin"` (grep-verifiable: `branches/main/protection` and `SDLC_AGENT_GH_TOKEN` present in the runner; tests assert each of the six failure modes → escalate, no dispatch).
-- [ ] The preflight does **NOT** require `enforce_admins` (round-5 reversal of round 4): a protection body with `enforce_admins.enabled == false` and review-count ≥ 1 still passes, so this repo's direct-to-`main` `docs/plans/` commits and `/do-merge` keep working. Asserted as a negative test, and `grep -c "enforce_admins" scripts/nightly_regression_tests.py == 0`.
-- [ ] The dispatched fixer session's environment carries `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` (asserted) — without it the preflight's identity legs are decorative.
-- [ ] The watchdog runs a fail-closed **merge/draft-state guard** (`gh pr view <pr> --json isDraft,state,mergedAt`): a not-draft / merged / closed / errored PR voids the fix → close (if open) + page (asserted, including the merged and command-error cases).
-- [ ] The watchdog's **fail-closed** mechanical test-file-only guard voids a `fixed-silent` PR (closes it) and pages on any non-`tests/` path, non-zero exit, error, empty output, or changed-file count exceeding `NIGHTLY_FIX_MAX_CHANGED_FILES` (asserted, including the error/empty and count-over-cap cases). `NIGHTLY_FIX_MAX_CHANGED_FILES` is wired into this guard (round-4 concern 2 — no longer a dead constant).
-- [ ] `blocked-escalate` hand-back → page with stuck-point content; `fixed-silent` + `tests/`-only PR (guard command succeeds) → low-urgency notify via `send_telegram(silent=True)` (no page); session-dead/hung-past-timeout → fail-safe page. All asserted via call-signature capture.
-- [ ] A seed/re-baseline run, an integrity-warned run, or a `--dry-run` **never** dispatches an autonomous fixer, even in `active` mode with a clean all-test-stale classification (asserted for each of the three).
-- [ ] The existing per-node dedup, seed/umbrella, and run-integrity behavior is unchanged: `tests/unit/test_nightly_regression_tests.py` passes without modification to any `compute_dispatch_set` / `carry_dispatched_nodes` / `seeded_nodes` / `validate_run_integrity` assertion.
-- [ ] Every guardrail number is a named env-overridable constant read via `os.environ.get` with a provisional comment (grep-verifiable: no bare magic numbers in the new code paths).
-- [ ] No raw-Redis operations on Popoto-managed keys in the new code (session status AND hand-back read/written via the ORM).
+- [ ] `send_telegram` logs a WARNING naming the return code (and does **not** log `"Telegram sent"`) when the subprocess exits non-zero — asserted by test. This lands first and is independently valuable.
+- [ ] `_spawn_pytest` accepts a `cwd` parameter defaulting to `PROJECT_DIR`, and `run_tests` / `reconfirm_serial` still spawn with `cwd=PROJECT_DIR` (asserted via `Popen` call capture).
+- [ ] **The classifier is demonstrably not inert**: a non-stubbed test over a two-commit fixture repo classifies a node that passes at the baseline SHA and fails at HEAD as `newly_broken`, and a node failing at both as `pre_existing`. This criterion cannot be satisfied by a stub.
+- [ ] Classification is **synchronous and in-process** — no subagent, no spawned session, no Task tool — and `.claude/agents/baseline-verifier.md` is unmodified (`git diff --name-only origin/main -- .claude/agents/` is empty).
+- [ ] The baseline worktree is provisioned with its own pin-matching `.venv`, and **every** provisioning failure (worktree add, detached checkout, `uv sync`) yields `inconclusive` → `escalate` with **no fallback to `PROJECT_DIR`** (asserted for each failure).
+- [ ] `NIGHTLY_FIX_MODE=off` reproduces current behavior exactly: the up-front page fires, and no classification, worktree, gate, or verdict log occurs. `NIGHTLY_FIX_MODE=shadow` (the default) classifies, gates, logs the verdict, **and still pages up front**. Both asserted via `send_telegram` call capture.
+- [ ] Every non-`off` run with a non-empty `new_failures` logs `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason=... nodes=...`, with `reason` naming the first failing gate condition.
+- [ ] The motivating case passes its own gate: 11 all-`newly_broken` failures → `autonomous-fix` (asserted). `MAX_DISPATCH_NODES` truncation is not a disqualifier and `NIGHTLY_FIX_MAX_FAILURES` is not dead config.
+- [ ] On any `pre_existing` / `inconclusive` bucket, on cap-exceeded, on attempts-exhausted, or on a missing last-green baseline, the gate returns `escalate`.
+- [ ] A seed/re-baseline run, an integrity-warned run, or a `--dry-run` never classifies and never returns `autonomous-fix` (asserted for each of the three).
+- [ ] `classify_attempts` increments before each attempt, prunes any node no longer in `confirmed_failing` (same rule as `carry_dispatched_nodes`), and escalates at `NIGHTLY_FIX_MAX_ATTEMPTS` (asserted).
+- [ ] Existing detector behavior is unchanged: `tests/unit/test_nightly_regression_tests.py` passes with no modification to any `compute_dispatch_set` / `carry_dispatched_nodes` / `seeded_nodes` / `validate_run_integrity` / dispatch-prompt assertion.
+- [ ] Every guardrail number is a named env-overridable constant read via `os.environ.get` with a provisional comment; **no constant is declared without a reader** (the two whose only consumers were the deferred guards are not declared).
+- [ ] **Nothing from the deferred #3076 stack ships**: no session dispatch change, no `nightly_fix_handback` field or migration, no watchdog, no PR guards, no preflight, no `--silent` flag (grep-verifiable — see Verification).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -497,114 +514,102 @@ The lead orchestrates; it never builds directly.
 
 ### Team Members
 
-- **Builder (classifier + decision gate)**
-  - Name: `gate-builder`
-  - Role: the in-process `classify_against_baseline` function (worktree + targeted pytest at the last-green SHA); the pure `decide_fix_or_escalate` function; consume `head_commit`; classification + mode-scoped-page wiring in `main()`.
+- **Builder (transport + spawn seam)**
+  - Name: `seam-builder`
+  - Role: the `send_telegram` `.returncode` check; the `_spawn_pytest` `cwd` parameter with byte-identical existing callers.
   - Agent Type: builder
-  - Domain: async/subprocess + git-archaeology framing (see DOMAIN_FRAMING.md)
+  - Domain: subprocess handling
   - Resume: true
 
-- **Builder (dispatch + hand-back + watchdog)**
-  - Name: `escalation-builder`
-  - Role: the Step-0 notify transport repair (`send_telegram` returncode check; `valor-telegram send --silent` → outbox payload → relay `silent=`); rewrite dispatch mandate (bounded-fix) incl. the `GH_TOKEN` bot-identity export; `tools.nightly_fix_handback` CLI; escalation/fail-safe watchdog preamble incl. the absent-record guard; per-node `fix_attempts` + `fix_sessions` dedup maps; guardrail constants.
+- **Builder (classifier + gate)**
+  - Name: `gate-builder`
+  - Role: baseline-worktree provisioning (`git worktree add --detach` + conditional `uv sync` + `worktree-gc.sh` reconciliation); `classify_against_baseline`; the pure `decide_fix_or_escalate`; the `classify_attempts` map; the three guardrail constants; the mode-scoped wiring and verdict log in `main()`.
   - Agent Type: builder
-  - Domain: Redis/Popoto (ORM-only session reads) + conversational-UX (escalation message content)
+  - Domain: git/subprocess + pytest-wrapper semantics
   - Resume: true
 
 - **Test engineer**
-  - Name: `fix-gate-tester`
-  - Role: unit tests for the decision gate + watchdog + hand-back parsing; integration test for the silent-fix and escalate paths with seeded state.
+  - Name: `classifier-tester`
+  - Role: the **non-stubbed two-commit fixture-repo tests** (the falsifiability suite), the stubbed gate/mode/attempt-map units, and the failure-path coverage.
   - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
-  - Name: `safety-validator`
-  - Role: verify the never-weaken-assertions surface — the branch-protection verification + the three-leg `active`-mode runtime preflight (the ONLY structural never-merge legs: review-required `main` AND a non-admin `SDLC_AGENT_GH_TOKEN` identity actually exported into the fixer's env; confirm `enforce_admins` is NOT required), the notify transport's three hops (a `silent=True` call that dead-ends in an unparsed flag is the round-5 blocker recurring), the deterrent layer (`gh pr create --draft` present; `gh pr ready`/`gh pr merge`/`do-merge` absent in the fixer path + dispatch prompt), the **fail-closed** diff-path guard AND the round-3 **merge/draft-state guard** (void+close+page on non-`tests/` diffs, non-draft/merged/closed PR, or guard-command error/empty output), escalate-on-doubt paths, the verifiable notify-vs-page tiering (`send_telegram(silent=True)`), shadow-mode default, fail-safe page, anti-criteria green. Confirm the plan makes NO in-session structural-prevention claim.
+  - Name: `scope-validator`
+  - Role: verify the classifier is not inert (the fixture tests genuinely exercise the real function, not a stub); verify provisioning never falls back to `PROJECT_DIR`; verify `off`/`shadow` both still page; verify **nothing from #3076 leaked in** (no dispatch-mandate change, no `nightly_fix_handback`, no watchdog, no `--silent`, no preflight); run every Verification command.
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `nightly-doc`
-  - Role: update the feature docs and index.
+  - Role: update the two feature docs and the index; ensure neither describes a fixer that does not exist.
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 0. Alert-transport repair (independently shippable prerequisite)
-- **Task ID**: build-notify-transport
+### 1. Alert-transport returncode check (independently shippable)
+- **Task ID**: build-returncode
 - **Depends On**: none
-- **Validates**: `tests/unit/` `send_telegram` returncode test; `valor-telegram send --silent` CLI test; relay `silent=` forwarding test
-- **Assigned To**: escalation-builder
+- **Validates**: `tests/unit/test_nightly_regression_tests.py` returncode test
+- **Assigned To**: seam-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add the `.returncode` check to `send_telegram` (`scripts/nightly_regression_tests.py` L626-634): capture the `CompletedProcess`, log `WARNING: telegram send failed rc=... stderr=...` on non-zero, and emit the success line only on zero. **This is a strict improvement to the existing detector and lands first** — without it a broken alert transport is invisible (round-5 blocker 1).
-- Add `--silent` to the `send` subparser (`tools/valor_telegram.py` ~L1373, `action="store_true"`).
-- Carry it through `cmd_send` (L798) as a `"silent"` key on the `telegram:outbox:{session_id}` payload.
-- Forward it in `bridge/telegram_relay.py`: `silent=message.get("silent", False)` on the text send and follow-up-text send (`telegram_client.send_message`, incl. L746). Default `False` keeps every existing sender byte-identical.
-- Add `silent: bool = False` to `send_telegram`, forwarded as `--silent`. Only now does the notify tier exist.
-- Restart the bridge after the relay change (`./scripts/valor-service.sh restart`), per CLAUDE.md.
+- In `send_telegram` (`scripts/nightly_regression_tests.py` L609-635), capture the `CompletedProcess` from the `subprocess.run` at L626, log `WARNING: telegram send failed rc=... stderr=...` on non-zero, and emit the `"Telegram sent: {msg}"` line (L633) **only** on zero.
+- No signature change, no new parameter. `--silent` is **not** added — it has no consumer in this plan (deferred to #3076).
+- This is a strict improvement to the existing detector and lands first: without it, any future transport failure is invisible.
 
-### 1. Consume the last-green baseline + build the in-process classifier
-- **Task ID**: build-classifier
+### 2. `_spawn_pytest` cwd seam
+- **Task ID**: build-cwd-seam
 - **Depends On**: none
-- **Validates**: `tests/unit/` new decision-gate/classification tests
+- **Validates**: `tests/unit/test_nightly_regression_tests.py` cwd back-compat test
+- **Assigned To**: seam-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `cwd: Path | str = PROJECT_DIR` to `_spawn_pytest` (L283) and forward it to the `Popen` call (currently hardcoded `cwd=PROJECT_DIR` at L302).
+- `run_tests` (L379) and `reconfirm_serial` (L587) pass nothing — assert both remain byte-identical in behavior via `Popen` call capture.
+- Docstring the parameter, noting the default preserves existing callers.
+
+### 3. Baseline worktree provisioning + in-process classifier
+- **Task ID**: build-classifier
+- **Depends On**: build-cwd-seam
+- **Validates**: `tests/unit/test_nightly_classifier.py` (create)
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- **`head_commit` is already persisted on main** (`current["head_commit"] = _get_head_commit()`, L1092; helper at L1344). Do NOT re-add it. This step *consumes* `prev["head_commit"]` as the last-green baseline ref and verifies it is written on every non-fatal path.
-- Write `classify_against_baseline(node_ids, baseline_sha) -> {newly_broken, pre_existing, inconclusive}` in `scripts/nightly_regression_tests.py`: `git worktree add <tmpdir> <baseline_sha> --detach`, re-run exactly those node IDs with the detector's pytest invocation, parse the report, remove the worktree in a `finally`, carry a timeout. Interpolate the SHA as a literal — no shell parameter expansion.
-- **Do NOT touch `.claude/agents/baseline-verifier.md`** and do NOT route classification through a spawned session (round-5 blocker 2: the subagent has no Python invocation seam, and a session would make classification asynchronous — a two-night handshake).
-- Every failure path (worktree-add failure, unknown SHA, collection error, timeout, any exception) → `inconclusive` → escalate.
-- Handle absent `prev["head_commit"]` → route to escalate (no unbaselined fix). Note this is the real first-run/`_fatal()`-refused-to-write-state case, not a hypothetical.
+- **Parallel**: false
+- **`head_commit` is already persisted** (`current["head_commit"] = _get_head_commit()`, L1092; helper L1344). Do NOT re-add it. Consume `prev["head_commit"]` as the last-green baseline ref.
+- Provision a **persistent** baseline worktree at a fixed path (`.worktrees/nightly-baseline/`): create with `git worktree add --detach <path> <baseline_sha>` + `uv sync` inside it if absent; otherwise `git -C <path> checkout --detach <baseline_sha>` and re-run `uv sync` **only when `uv.lock` changed** since the last provision (marker file inside the worktree). The `.venv` is mandatory — `scripts/pytest-clean.sh` L135-145 refuses a linked worktree without one (#3033) and L169-175 refuses an off-pin interpreter (#2617).
+- Reconcile the fixed path with `scripts/worktree-gc.sh` so it is not swept as a stale lane worktree.
+- Write `classify_against_baseline(node_ids, baseline_sha) -> {newly_broken, pre_existing, inconclusive}`: provision, then spawn the serial pytest form used by `reconfirm_serial` (L575-584 — `[str(PYTEST_CLEAN_SH), *node_ids, "-n0", "--tb=no", "-q", "--json-report", "--json-report-file=..."]`) via `_spawn_pytest(..., cwd=<worktree>)`, parse the JSON report, and bucket each node. Interpolate the SHA as a literal — no shell parameter expansion. Carry a timeout.
+- **Every** failure path (worktree add, checkout, `uv sync`, collection error, timeout, unparseable report, node absent from the report, any exception) → `inconclusive`. **Never fall back to running at `PROJECT_DIR`** — that fallback classifies everything `pre_existing` and looks like a working classifier.
+- **Do NOT touch `.claude/agents/baseline-verifier.md`** and do NOT route classification through a spawned session (no Python invocation seam; a session would make classification asynchronous — a two-night handshake).
+- Handle absent `prev["head_commit"]` → no classification, gate escalates with that reason.
 
-### 2. Decision gate + classification wiring
-- **Task ID**: build-decision-gate
+### 4. Decision gate, mode wiring, verdict log, attempt map
+- **Task ID**: build-gate
 - **Depends On**: build-classifier
 - **Validates**: `tests/unit/test_nightly_decision_gate.py` (create)
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Pure `decide_fix_or_escalate(classification, new_failures, caps, run_flags)` returning `autonomous-fix | escalate`. Three run-shape disqualifiers only (`is_seed_run`, `integrity_warnings`, `dry_run`) — **do NOT include a `MAX_DISPATCH_NODES` truncation clause** (round-5: it truncates the triage-filing set, not `new_failures`, and would disqualify the plan's own 11-failure motivating case while making `NIGHTLY_FIX_MAX_FAILURES` dead config).
-- Wire the in-process classifier into `main()`'s `new_failures` branch. **Scope the up-front page by mode, do not remove it**: `if NIGHTLY_FIX_MODE in ("off", "shadow"): send_telegram(msg, dry_run=args.dry_run)` on the `elif new_failures:` arm (~L1197-1207). Only `active` suppresses it (round-5 blocker 3 — `off` is the break-glass revert and must page exactly as today). Add the detection log line alongside.
-- Log the gate verdict on every non-`off` run under the stable prefix `nightly-fix shadow-verdict:` / `nightly-fix active-verdict:` with a `reason=` token naming the first failing condition.
+- Pure `decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"` with exactly the short-circuit in Technical Approach. Three run-shape disqualifiers only (`is_seed_run` L1027, non-empty `integrity_warnings` L1047, `args.dry_run`) — **do NOT include a `MAX_DISPATCH_NODES` truncation clause**: it truncates the triage-filing set (L1160-1166), not `new_failures` (L654), and would disqualify the plan's own 11-failure motivating case while making `NIGHTLY_FIX_MAX_FAILURES` dead config.
+- Three module-scope guardrail constants via `os.environ.get` with provisional comments: `NIGHTLY_FIX_MODE` (`off`|`shadow`, default `shadow`; unrecognized → treated as `off`), `NIGHTLY_FIX_MAX_FAILURES` (default 15), `NIGHTLY_FIX_MAX_ATTEMPTS` (default 1). **Declare no constant without a reader** — `NIGHTLY_FIX_MAX_CHANGED_FILES` and `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` belong to #3076's guards and are not declared here.
+- Wire classification + gate into `main()` alongside the `elif new_failures:` arm (L1207), **without changing the alert**: `send_telegram(msg, dry_run=args.dry_run)` (L1220) fires in both `off` and `shadow` exactly as today. `off` additionally skips classification and the gate entirely.
+- Log the verdict on every non-`off` run: `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing condition} nodes={n}`.
+- Add the per-node `classify_attempts: {node_id: count}` map to `data/nightly_tests_last_run.json`: increment before each attempt; prune any node no longer in `confirmed_failing` using the same keep-while-still-failing rule as `carry_dispatched_nodes` (L754) so it prunes in lockstep with `dispatched_nodes` and cannot grow unbounded. Do **not** add a second map — `fix_sessions` belongs to #3076's watchdog. Leave the scalar `dispatched_session_id` (L1090) untouched.
 
-### 3. Narrow-mandate draft-PR dispatch + ORM hand-back
-- **Task ID**: build-dispatch-handback
-- **Depends On**: none
-- **Validates**: `tests/unit/test_nightly_fix_dispatch.py`, `tests/unit/test_nightly_fix_handback.py` (create)
-- **Assigned To**: escalation-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Rewrite the dispatch prompt so the mandate names ONLY: make test-file-only edits → run the targeted tests → open a **DRAFT** PR (`gh pr create --draft`) → write the hand-back → STOP (cite the contract-moving commit). The mandate must **explicitly forbid `gh pr ready`, `gh pr merge`, and push-to-`main`** (deterrent — honest that in-session bash is unrestricted under `bypassPermissions`). It is dispatched as a narrowly-scoped session, NOT an auto-continuing eng session — never "run the SDLC pipeline," never `/do-merge`. Ensure the runner code itself never emits `gh pr ready`/`gh pr merge` (anti-criterion greps count 0). Rename `maybe_dispatch_triage_session` → `maybe_dispatch_fix_session`. **Export `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` into the fixer session's environment** so its `gh` authenticates as the non-admin bot rather than the operator (round-5 leg B — without this the branch-protection guarantee is vacuous); a dispatch that cannot set it takes the refuse-and-page arm. **No permission profile / settings seam** — round 1's `config/permission_profiles/nightly_fixer.json` is deleted from the design (no implementation seam exists).
-- Add the nullable `AgentSession.nightly_fix_handback` field + a no-op idempotent `MIGRATIONS` entry in `scripts/update/migrations.py`.
-- Add `tools/nightly_fix_handback.py` (loads the session, persists via `session.save()`; strict read treats null/absent/malformed as no-hand-back).
-
-### 4. Escalation + fail-safe watchdog + mechanical guard + guardrail constants + dedup
-- **Task ID**: build-watchdog
-- **Depends On**: build-dispatch-handback
-- **Validates**: `tests/unit/test_nightly_escalation_watchdog.py` (create)
-- **Assigned To**: escalation-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Watchdog preamble in `main()`: resolve each prior dispatch by iterating the per-node `fix_sessions: {node_id: agent_session_id}` map (de-duplicating session ids first) and loading each session; read its status + `nightly_fix_handback` (ORM); page on `blocked-escalate`, terminal-fail-with-no-handback, or hang-past-timeout. **First check, before any status/`updated_at` inspection: the record may be absent** — `AgentSession.query.filter(id=sid)` returns an empty **list** (not `None`) when TTL (`Meta.ttl`) or the `agent/session_health.py` sweep has removed it; `if not sessions:` → page "fixer session record missing — cannot verify outcome", prune that node from both maps, `continue`. Ordering matters: placed later, a missing record reads as a fresh non-terminal session and falls through every page branch (round-5 concern 1). Identify the fixer PR **only** by the `pr_url` in the hand-back — never enumerate/search PRs; a `fixed-silent` disposition with a null/absent/unparseable `pr_url` → fail-safe page.
-- Add the **fail-closed diff-path guard**: on `fixed-silent`, run `gh pr diff --name-only <pr_url>`; keep eligible for notify ONLY on zero-exit + non-empty + all-`tests/` + changed-file count `<= NIGHTLY_FIX_MAX_CHANGED_FILES` (round-4 concern 2 — wire the cap here); on ANY {non-zero exit, error, empty/unparseable output, non-`tests/` path, count over cap} → void.
-- Add the **fail-closed merge/draft-state guard (round-3)**: run `gh pr view <pr_url> --json isDraft,state,mergedAt`; keep eligible for notify ONLY when still draft AND `state == "OPEN"` AND `mergedAt` null; on ANY {not-draft, non-OPEN, merged, command error/empty} → void. Detective (next-night), catches a strayed `gh pr ready`/`gh pr merge`.
-- On ANY guard voiding the fix → `gh pr close <pr_url>` (if still open) + page; only both-guards-pass downgrades to notify.
-- **Verify + document current enforcement state (round-3, re-scoped round-5)**: run `gh api repos/tomcounsell/ai/branches/main/protection` and `gh repo view`; record the finding in `docs/features/nightly-alert-triage.md`. At plan time this returned `404 Not Found` (main NOT protected). The feature doc must state both `active`-mode prerequisites: **leg A** — review-required protection on `main` with `required_approving_review_count >= 1` and, deliberately, `enforce_admins` left at its default `false`; **leg B** — the fixer's `gh` running under a non-admin `SDLC_AGENT_GH_TOKEN`. It must also state plainly that `active` is **not adoptable** where either is unsatisfiable. **Do NOT require `enforce_admins == true`** (round-5 reversal of round 4): it is repo-wide, it would break the direct-to-`main` `docs/plans/` pushes CLAUDE.md mandates and `.githooks/pre-push` assumes, it would break `/do-merge` for every PR, and it still would not close the hole, since the operator would be the fix PR's author and cannot approve it.
-- **Active-mode runtime preflight (three legs, round-5)**: when `NIGHTLY_FIX_MODE == "active"`, before dispatching require all three in one boolean short-circuit — (1) `gh api repos/{owner}/{repo}/branches/main/protection` → `required_pull_request_reviews.required_approving_review_count >= 1`; (2) `SDLC_AGENT_GH_TOKEN` non-empty and `GH_TOKEN=$SDLC_AGENT_GH_TOKEN gh api user -q .login` != the operator's login; (3) `gh api repos/{owner}/{repo}/collaborators/{bot_login}/permission -q .permission` != `"admin"`. On any of {404, error, insufficient review count, absent token, operator identity, admin bot} → refuse to dispatch, log the specific failing condition, route to escalate-and-page (fail toward paging). This makes the shadow→active prerequisite a code gate and makes "is `active` adoptable here?" a runtime fact.
-- Consume `send_telegram(msg, silent=True)` for the happy-path notify (the transport itself is built in Step 0); pages keep `silent=False`.
-- Five named env-overridable guardrail constants (module-scope `os.environ.get`, provisional comments), incl. `NIGHTLY_FIX_MODE` (off/shadow/active, default shadow); gate the dispatch on mode. Add two **per-node-keyed** state maps alongside the live `dispatched_nodes` model (`dispatched_hash` no longer exists — #2559 retired it): **`fix_attempts: {node_id: count}`** (the sole canonical attempt-tracking name — no scalar `fix_attempt_count`) AND **`fix_sessions: {node_id: agent_session_id}`** (round-4 concern 1 — the watchdog resolves the fixer's `AgentSession` per node, so a second dispatch can't orphan the first pointer; keep it separate from the pre-existing scalar `dispatched_session_id` at L1090, which the triage path still owns). Increment `fix_attempts[node]` per dispatch attempt and record the session id in `fix_sessions[node]`; **prune from BOTH maps any node no longer in `confirmed_failing`, reusing `carry_dispatched_nodes`'s existing keep-while-still-failing rule** so all three maps prune in lockstep and none grows unbounded; at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate (page) instead of re-dispatching.
-- **Gate the fixer off the three run-shape disqualifiers** that landed after this plan was first written: `is_seed_run` (L1027), non-empty `integrity_warnings` (L1047), and `args.dry_run`. Each routes to escalate, never to autonomy. **`MAX_DISPATCH_NODES` (L185) is NOT one of them** — round 4 added it in error; it truncates `dispatch_nodes`, not `new_failures` (round-5 cap arithmetic).
-
-### 5. Tests (unit + integration)
+### 5. Tests
 - **Task ID**: build-tests
-- **Depends On**: build-decision-gate, build-watchdog
-- **Assigned To**: fix-gate-tester
+- **Depends On**: build-returncode, build-gate
+- **Assigned To**: classifier-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Unit: decision gate (all branches, **including the three run-shape disqualifiers: seed/re-baseline, integrity-warned, `--dry-run` → escalate, no dispatch**, plus the **negative**: a `MAX_DISPATCH_NODES`-truncated run with a clean 11-node `new_failures` set still routes to `autonomous-fix`), **in-process classifier** (worktree-add failure / unknown SHA / collection error / timeout / exception → `inconclusive` → escalate; worktree removed on every path), watchdog (all page paths + notify path, **including the absent-`AgentSession` record → page + prune**), hand-back parsing (valid/null/malformed, incl. null `pr_url` → fail-safe page), **fail-closed diff-path guard** (all-tests diff within `NIGHTLY_FIX_MAX_CHANGED_FILES` → eligible; non-tests diff, non-zero exit, raised exception, empty output, or count-over-cap → page+close), **fail-closed merge/draft-state guard** (still-draft+OPEN+unmerged → eligible; not-draft, MERGED/non-null mergedAt, CLOSED, error/empty → page+close), **active-mode three-leg preflight** (404/error/no-review-requirement/absent token/operator identity/admin bot → refuse+escalate+page; only all-three → dispatch; plus the negative that `enforce_admins == false` does NOT block), **notify transport** (`send_telegram` non-zero returncode → WARNING not success; `--silent` parses; `silent` rides the outbox payload; relay forwards `silent=` to Telethon), notify signature (`send_telegram(silent=True)` on happy path vs `silent=False` on pages), mode gating (off/shadow/active — `off` and `shadow` page up front, `active` does not), dedup keyed-map reset semantics (changed set → fresh key; pruned when green; cap-reached → escalate), empty-input and missing-baseline paths.
-- Integration: seeded `data/nightly_tests_last_run.json` → active-mode (with all three preflight legs stubbed satisfied) silent-fix path (no up-front page, `silent=True` notify, dispatch carrying `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` and a narrow mandate that includes `gh pr create --draft`, forbids `gh pr ready`/`gh pr merge`/push-to-`main`, and excludes `/do-merge`) and escalate path (page, no dispatch); active-mode with each preflight leg unsatisfied (refuse dispatch + page); shadow-mode (page + no dispatch + logged verdict); off-mode (page, no classification).
+- **Non-stubbed** (`tests/unit/test_nightly_classifier.py`): a two-commit fixture git repo where a trivial test passes at commit A and fails at commit B — provisioned the way the real classifier provisions its worktree — asserts `newly_broken` when classified at baseline A, and `pre_existing` for a node failing at both. **These two tests are the feature's falsifiability guarantee**; a fully-stubbed suite cannot distinguish a working classifier from an inert one.
+- Stubbed classifier failure paths: worktree-add non-zero, checkout non-zero (unknown SHA), `uv sync` non-zero, collection error, timeout, unparseable/missing report, node absent from the report → `inconclusive` → `escalate`; plus an explicit assertion that no spawn ever used `cwd=PROJECT_DIR` on the classifier path.
+- Gate units (`tests/unit/test_nightly_decision_gate.py`): every escalate branch; the three run-shape disqualifiers; the **positive motivating case** (11 all-`newly_broken` → `autonomous-fix`); the **negative** that a `MAX_DISPATCH_NODES`-truncated run is not disqualified; attempt-map increment/prune/cap semantics; missing-`head_commit`; empty `new_failures`; unrecognized `NIGHTLY_FIX_MODE` → treated as `off`.
+- Mode gating: `send_telegram` **is** called on the `new_failures` branch under **both** `off` and `shadow`; classification and the verdict log occur under `shadow` only.
+- Transport + seam: `send_telegram` non-zero returncode → WARNING, no success line; `run_tests` / `reconfirm_serial` still spawn with `cwd=PROJECT_DIR`.
+- Verdict-log format asserted on both an `autonomous-fix` and an `escalate` run, including the `reason=` token.
 
 ### 6. Documentation
 - **Task ID**: document-feature
@@ -612,15 +617,15 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: nightly-doc
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/nightly-alert-triage.md` + cross-links + index.
+- Update `docs/features/nightly-regression-tests.md` and `docs/features/nightly-alert-triage.md` + the index, per the Documentation section. Neither doc may describe a fixer, a watchdog, a hand-back, or a notify tier — those do not exist; point to #3076.
 
 ### 7. Final validation
 - **Task ID**: validate-all
 - **Depends On**: build-tests, document-feature
-- **Assigned To**: safety-validator
+- **Assigned To**: scope-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all Verification commands; confirm the never-weaken-assertions anti-criteria are green; confirm all success criteria.
+- Run every Verification command; confirm all Success Criteria; confirm no #3076 surface leaked into the diff.
 
 ## Verification
 
@@ -629,86 +634,112 @@ The lead orchestrates; it never builds directly.
 | Tests pass | `pytest tests/unit/ -x -q -k nightly` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Draft-PR deterrent flag present (anti-criterion — deterrent, not structural) | `grep -c "gh pr create --draft" scripts/nightly_regression_tests.py` | output > 0 |
-| Fixer mandate excludes `/do-merge`, dispatched narrow (anti-criterion — integration test, NOT a grep of a comment) | `pytest tests/unit/test_nightly_fix_dispatch.py -q` (asserts the built dispatch message contains `gh pr create --draft` and does NOT contain `do-merge`/"run the pipeline") | exit code 0 |
-| No auto-merge anywhere in the fixer path (anti-criterion) | `grep -c "do-merge\|do_merge" scripts/nightly_regression_tests.py` | match count == 0 |
-| Fixer path never emits `gh pr ready`/`gh pr merge` (deterrent anti-criterion — code AND dispatch prompt) | `grep -Ec "gh pr ready\|gh pr merge" scripts/nightly_regression_tests.py` | match count == 0 |
-| Dispatch mandate forbids ready/merge/push-to-main (anti-criterion — integration test) | `pytest tests/unit/test_nightly_fix_dispatch.py -q` (asserts the built dispatch message contains `gh pr create --draft`, explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main`, and excludes `do-merge`/"run the pipeline") | exit code 0 |
-| No resurrected permission-profile fiction (anti-criterion) | `test ! -e config/permission_profiles/nightly_fixer.json && echo ok` | prints `ok` |
-| Fail-closed test-file-only diff guard present (anti-criterion) | `grep -c "pr diff --name-only" scripts/nightly_regression_tests.py` | output > 0 |
-| `NIGHTLY_FIX_MAX_CHANGED_FILES` is wired into the diff-path guard, not dead (round-4 concern 2) | `grep -c "NIGHTLY_FIX_MAX_CHANGED_FILES" scripts/nightly_regression_tests.py` | output ≥ 2 (declaration + guard use) |
-| Fail-closed merge/draft-state watchdog guard present (round-3 detective anti-criterion) | `grep -c "pr view" scripts/nightly_regression_tests.py` (the `gh pr view <pr> --json isDraft,state,mergedAt` guard) | output > 0 |
-| Active-mode branch-protection runtime preflight present (round-3 shadow→active gate) | `grep -c "branches/main/protection" scripts/nightly_regression_tests.py` | output > 0 |
-| Preflight checks the fixer's identity, not admin enforcement (round-5 reversal of round 4) | `grep -c "SDLC_AGENT_GH_TOKEN" scripts/nightly_regression_tests.py` | output ≥ 2 (preflight + dispatch env) |
-| Preflight does NOT require `enforce_admins` — requiring it breaks direct-to-`main` and `/do-merge` repo-wide (round-5 blocker 4) | `grep -c "enforce_admins" scripts/nightly_regression_tests.py` | match count == 0 |
-| `baseline-verifier` untouched; classification is in-process (round-5 blocker 2) | `git diff --name-only origin/main -- .claude/agents/` | empty output |
+| `send_telegram` no longer claims success on a failed send | `pytest tests/unit/test_nightly_regression_tests.py -q -k "telegram_returncode"` | exit code 0 |
+| `_spawn_pytest` gained a `cwd` seam; existing callers unchanged | `pytest tests/unit/test_nightly_regression_tests.py -q -k "spawn_pytest_cwd"` | exit code 0 |
+| **The classifier is not inert** (non-stubbed fixture repo) | `pytest tests/unit/test_nightly_classifier.py -q -k "fixture_repo"` — a node passing at baseline and failing at HEAD classifies `newly_broken`; failing at both classifies `pre_existing` | exit code 0 |
+| Classifier never falls back to the main checkout | `pytest tests/unit/test_nightly_classifier.py -q -k "no_project_dir_fallback"` | exit code 0 |
 | In-process classifier present and synchronous | `grep -c "classify_against_baseline" scripts/nightly_regression_tests.py` | output ≥ 2 (definition + call) |
-| Notify transport actually exists end-to-end (round-5 blocker 1 — the flag was fiction) | `grep -c '"--silent"' tools/valor_telegram.py` and `grep -c "silent" bridge/telegram_relay.py` | both output > 0 |
-| `send_telegram` no longer claims success on a failed send (round-5 blocker 1) | `pytest tests/unit/test_nightly_regression_tests.py -q -k "telegram_returncode"` | exit code 0 |
-| Shadow verdict is greppable in logs (round-5 nit) | `grep -c "shadow-verdict" scripts/nightly_regression_tests.py` | output > 0 |
-| The motivating case passes its own gate (round-5 concern 2) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "eleven or motivating"` — 11 all-`newly_broken` failures → `autonomous-fix` | exit code 0 |
-| Truncation is not a fixer disqualifier (round-5 concern 2) | `grep -c "dispatch_truncated" scripts/nightly_regression_tests.py` | match count == 0 |
-| Watchdog handles an absent `AgentSession` record (round-5 concern 1) | `pytest tests/unit/test_nightly_escalation_watchdog.py -q -k "missing_record"` | exit code 0 |
-| No raw-Redis on Popoto keys in new code (anti-criterion) | `grep -Ec "\.hgetall\(\|\.hget\(\|r\.delete\(\|r\.srem\(\|r\.sadd\(" scripts/nightly_regression_tests.py tools/nightly_fix_handback.py` | match count == 0 |
-| Up-front page suppressed in `active` ONLY (behavioral anti-criterion, round-5 blocker 3) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "mode_gating"` — asserts `send_telegram` **IS** called on the `new_failures` detection branch under `off` and `shadow`, and **is NOT** called there under `active`. Behavioral assertion via call capture, no bespoke AST script. | exit code 0 |
-| Run-shape disqualifiers gate the fixer (seed / integrity-warned / dry-run — three, not four) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "seed or integrity or dry_run"` | exit code 0 |
-| Pre-existing detector behavior untouched (per-node dedup, seed umbrella, run integrity) | `pytest tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
-| Retired `dispatched_hash` not resurrected (the 2026-09-02 rebase re-keyed dedup per node) | `grep -c "dispatched_hash\|failing_set_hash" scripts/nightly_regression_tests.py` | match count == 0 |
-| Detection log sentinel present | `grep -c "nightly-fix.*detection" scripts/nightly_regression_tests.py` | output > 0 |
-| Guardrail constants are env-overridable (module-scope) | `grep -c "os.environ.get(\"NIGHTLY_FIX" scripts/nightly_regression_tests.py` | output ≥ 5 |
-| Low-urgency notify is a distinct call signature, not a bare string (anti-criterion) | `grep -c "send_telegram(.*silent=True" scripts/nightly_regression_tests.py` | output > 0 |
+| `baseline-verifier` untouched | `git diff --name-only origin/main -- .claude/agents/` | empty output |
+| Baseline worktree is provisioned with its own venv | `grep -c "uv" scripts/nightly_regression_tests.py` and `pytest tests/unit/test_nightly_classifier.py -q -k "provision"` | output > 0; exit code 0 |
+| Up-front page fires in BOTH shipped modes (behavioral) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "mode_gating"` — asserts `send_telegram` **is** called on the `new_failures` branch under `off` **and** under `shadow` | exit code 0 |
+| Shadow verdict is greppable in logs | `grep -c "shadow-verdict" scripts/nightly_regression_tests.py` | output > 0 |
+| The motivating case passes its own gate | `pytest tests/unit/test_nightly_decision_gate.py -q -k "eleven or motivating"` — 11 all-`newly_broken` → `autonomous-fix` | exit code 0 |
+| Truncation is not a disqualifier | `grep -c "dispatch_truncated" scripts/nightly_regression_tests.py` | match count == 0 |
+| Run-shape disqualifiers gate the verdict (three, not four) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "seed or integrity or dry_run"` | exit code 0 |
+| Guardrail constants are env-overridable (module-scope) | `grep -c 'os.environ.get("NIGHTLY_FIX' scripts/nightly_regression_tests.py` | output == 3 |
+| No constant declared without a reader (the two deferred knobs are absent) | `grep -Ec "NIGHTLY_FIX_MAX_CHANGED_FILES\|NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS" scripts/nightly_regression_tests.py` | match count == 0 |
+| Attempt map prunes in lockstep with the live dedup model | `pytest tests/unit/test_nightly_decision_gate.py -q -k "attempts"` | exit code 0 |
+| Retired `dispatched_hash` not resurrected | `grep -Ec "dispatched_hash\|failing_set_hash" scripts/nightly_regression_tests.py` | match count == 0 |
+| Pre-existing detector behavior untouched (dedup, seed umbrella, run integrity, dispatch prompt) | `pytest tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
+| **#3076 surface did not leak in — no fixer dispatch** | `grep -Ec "nightly_fix_handback\|maybe_dispatch_fix_session\|pr diff --name-only\|branches/main/protection\|SDLC_AGENT_GH_TOKEN" scripts/nightly_regression_tests.py` | match count == 0 |
+| **#3076 surface did not leak in — no notify transport** | `grep -c '"--silent"' tools/valor_telegram.py` | match count == 0 |
+| **#3076 surface did not leak in — no schema change** | `git diff --name-only origin/main -- models/ scripts/update/migrations.py` | empty output |
+| Investigate-only triage mandate is unchanged by this plan | `grep -c "auto-hotfix" scripts/nightly_regression_tests.py` | output > 0 (L846 intact) |
+
+**Note on `grep` alternation (round-7 correction).** `grep -E` treats `\|` as a **literal
+pipe**, not alternation — verified on a file containing both `gh pr ready` and `gh pr merge`:
+the `-E`-with-backslash form returns `0`, the unescaped `-E` form returns `2`. Two rows in
+earlier rounds used `grep -Ec "a\|b"` and therefore passed vacuously regardless of file
+contents, including a never-raw-Redis safety guard. Every `-E` row above uses **unescaped**
+alternation; every backslash-escaped alternation row uses plain `grep` (BRE). This distinction
+is load-bearing for any row whose expectation is `== 0`.
+
+**Note on unsatisfiable anti-criteria (round-7 correction).** Earlier rounds asserted
+`grep -Ec "gh pr ready\|gh pr merge" == 0` while simultaneously requiring the dispatch mandate
+to *explicitly forbid* those verbs — a prompt string in the same file. A correct implementation
+would have turned the safety anti-criterion red, pressuring a builder to weaken the mandate or
+obfuscate the strings. Both rows are **removed** along with the mandate rewrite they guarded
+(#3076). When #3076 reinstates them, the criterion must be behavioral ("the runner never
+*executes* those verbs", asserted over the runner's `subprocess` argv literals plus a positive
+assertion that the mandate string contains the prohibition), never a whole-file string absence.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room), round 2 — 2026-07-27. Verdict: NEEDS REVISION (1 blocker). Round-3, round-4, and round-5 rows appended below. Round 5 (2026-09-02, FULL depth, baseline b87fb26de): NEEDS REVISION — 4 blockers, 2 concerns, 2 nits. All 8 addressed in the round-5 revision pass at baseline 0b6688433; see the summary paragraph below the table. Round 6 (2026-09-02, FULL depth, baseline 33fe1d2c7): NEEDS REVISION — 3 blockers, 2 concerns, 2 nits, all pending. Note: the Agent/Task tool was disabled in the round-6 session, so the three FULL lenses were applied by the driving agent directly rather than by dispatched critics; no per-critic result files exist and the roster barrier was not used. Deviation named deliberately — see .critique-runs/2334-1788330647858217000/ROUND6-NOTE.md. -->
+<!-- Rounds 1-6 findings and their dispositions. Round 6 (2026-09-02, FULL depth, baseline
+     33fe1d2c7) returned NEEDS REVISION — 3 blockers, 2 concerns, 2 nits; all resolved in the
+     round-7 revision at baseline 2d60de31d, two of them by cutting scope rather than by
+     asserting a mechanism. Round-6 note: the Agent/Task tool was disabled in that session, so
+     the three FULL lenses were applied by the driving agent directly; deviation named in
+     .critique-runs/2334-1788330647858217000/ROUND6-NOTE.md. -->
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness + History & Consistency + Scope & Value (all 3 agreed) | The round-1 "structural never-merge" resolution has no implementation seam. `tools.valor_session create` exposes no `--permission`/`--settings`/profile flag; `AgentSession` has no settings/permission field; and every `claude-cli` spawn is hardcoded to `--permission-mode bypassPermissions` (`agent/session_runner/harness/claude.py` L154-168) while `PermissionRequest` hooks "do not fire under `claude -p`" (`agent/session_runner/hook_edge.py` L188-190). A deny-list has nowhere to attach and, even attached, bypass mode does not evaluate deny rules. | **RESOLVED (round 2)** | Permission-profile mechanism **deleted** from the plan (Technical Approach → "Enforcement design"; `config/permission_profiles/nightly_fixer.json` removed; a new anti-criterion asserts the file does not exist). Replaced with a buildable defense-in-depth substrate needing NO permission subsystem: (1) **narrow mandate** (make-test-edits → run-tests → open-DRAFT-PR → hand-back → STOP; not an auto-continuing eng session); (2) **`gh pr create --draft`** — GitHub structurally refuses to merge a draft until a human marks it ready-for-review (the load-bearing never-auto-merge mechanism); (3) fail-closed watchdog guard; (4) no-auto-merge + shadow-first. No spike needed. |
-| CONCERN | Risk & Robustness | The `gh pr diff --name-only` mechanical guard's failure path is unspecified: a PR-closed/auth-expired/network error returning an empty or errored path list could vacuously satisfy "every changed path under `tests/`" and silently notify instead of paging. | **RESOLVED (round 2)** | Guard made **fail-closed** (Technical Approach → watchdog; Solution key element; Step 4): downgrade to notify ONLY on zero-exit + non-empty + all-`tests/`; ANY {non-zero exit, error, empty/unparseable output, non-`tests/` path} → close PR + page. Failure-Path tests added for the non-zero, raised-exception, and empty-output cases. |
-| CONCERN | Scope & Value | The "notify vs. page" tiering — the mechanism that keeps the happy path "not fully silent" — is verified only by `grep -c "notify\|low.urgency\|fyi"`, but the sole alert primitive `send_telegram(msg, dry_run=...)` has no urgency parameter, so the check passes on a bare string literal even if the call is functionally identical to a page. | **RESOLVED (round 2)** | Added `silent: bool = False` to the `send_telegram` wrapper (forwarded to `valor-telegram send --silent` / `disable_notification`); happy-path notify uses `send_telegram(msg, silent=True)`, pages keep `silent=False`. Anti-criterion changed to `grep -c "send_telegram(.*silent=True"` (call signature, not a prose substring); tests assert the `silent` kwarg via call capture. |
-| CONCERN | History & Consistency | The plan is internally inconsistent about how settled the permission mechanism is: Resolved Decision #2 + Success Criteria treat structural denial as an accomplished, grep-verifiable fact, while Agent Integration hedges the wiring is an undetermined "build-time detail" to verify in an integration test written after the fact. | **RESOLVED (round 2)** | Resolved Decision #2 rewritten to a single honest enforcement decision (draft-PR + defense-in-depth, no permission profile); Agent Integration's "build-time detail" hedge removed (no session-create flag is needed). The `grep -c "nightly_fixer"` anti-criterion replaced with a pytest integration-test assertion (`test_nightly_fix_dispatch.py`) that the dispatch message contains `gh pr create --draft` and excludes `/do-merge`. |
-| BLOCKER | Risk & Robustness (round 3) | Round 2's "draft-PR structural no-auto-merge" guarantee is only prompt-strength. The fixer is a `--role eng` `AgentSession` spawned with hardcoded `--permission-mode bypassPermissions` = unrestricted bash (`agent/session_runner/harness/claude.py` L154-168); nothing stops it running `gh pr ready <url>` then `gh pr merge <url>`. The diff-path watchdog inspects only paths, not merge/draft state, and runs on the next nightly (~24h later, after any merge already landed). | **RESOLVED (round 3)** | Honest limitation stated plainly (Technical Approach → Enforcement design): under `bypassPermissions` an in-session bash cannot be mechanically blocked from `gh pr ready`/`gh pr merge`; no in-session structural-prevention claim is made. The real structural backstop moved OUTSIDE the session: **server-side branch protection on `main`** (require non-author review approval) — verified ABSENT at plan time (404), so enabling it is a hard prerequisite for `active` mode, enforced by an `active`-mode runtime preflight (`gh api .../branches/main/protection` → refuse+escalate on 404/error/missing-review). Shadow-first default bounds blast radius. Watchdog extended with a fail-closed **merge/draft-state guard** (`gh pr view --json isDraft,state,mergedAt` → void+close+page on not-draft/merged/closed/error) — honestly labeled DETECTIVE (next-night), not preventive. Mandate + anti-criteria now forbid `gh pr ready`/`gh pr merge`/push-to-`main` (deterrent) and assert `--draft`. |
-| CONCERN | Risk & Robustness (round 3) | `fix_attempt_count` dedup reset semantics were unspecified — when does a set's attempt count reset, and does the state grow unbounded? | **RESOLVED (round 3)** | Replaced scalar with a keyed `fix_attempts` map (Technical Approach → Dedup): increment per dispatch attempt; **prune keys no longer red** (bounded, and a later regression starts fresh); at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate instead of re-dispatch. *(Re-keyed from failing-set hash to node ID in the 2026-09-02 freshness rebase — the hash producer no longer exists; the reset semantics carried over unchanged.)* |
-| CONCERN | Scope & Value (round 3) | The bespoke AST verify script `scripts/_verify_no_page_in_new_failures_branch.py` is redundant with the mode-gating behavioral tests. | **RESOLVED (round 3)** | Removed the AST script + its Verification row; the up-front-page-removed anti-criterion is now the behavioral mode-gating test (`send_telegram` call capture on the `new_failures` run). |
-| CONCERN | History & Consistency (round 3) | The shadow→active flip prerequisite (branch protection) was prose-only and unenforceable. | **RESOLVED (round 3)** | Added an in-code `active`-mode runtime preflight that verifies review-required branch protection before any dispatch and fails toward paging when absent — the prerequisite is now a code gate, not a hope. Tested. |
-| CONCERN | Risk & Robustness (round 3) | The watchdog was ambiguous about which PR it inspects (new fixer PR vs a pre-existing PR). | **RESOLVED (round 3)** | Watchdog identifies the fixer PR **only** by the `pr_url` in the hand-back; never enumerates/searches PRs; a `fixed-silent` with null/absent/unparseable `pr_url` → fail-safe page (Technical Approach → new-vs-preexisting note). |
-| NIT | History & Consistency (round 3) | `.env.example` completeness check requires a comment line above each `KEY=`; the five new constants would fail it as bare keys. | **RESOLVED (round 3)** | Update System now specifies each of the five keys ships as a two-line block (comment describing knob + default, then commented placeholder), with `NIGHTLY_FIX_MODE`'s comment noting `active` requires branch protection. |
-| BLOCKER | Risk & Robustness (round 4) | The branch-protection preflight/verify gated only on `required_pull_request_reviews.required_approving_review_count >= 1`. GitHub exempts repo admins from required-review enforcement unless `enforce_admins.enabled == true` (default off), and the fixer's `gh` runs under the operator's admin-scoped token — so `gh pr merge` could land a zero-approval PR, defeating the sole structural never-merge leg. | **RESOLVED (round 4)** | Added `enforce_admins.enabled is True` to the SAME boolean short-circuit in all three sites: the `active`-mode runtime preflight (Technical Approach + Step 4), the manual builder verify step (Step 4), and the Success Criteria row. `active` mode now requires **BOTH** `required_approving_review_count >= 1` AND `enforce_admins.enabled == true`; the preflight fails toward paging otherwise. Prerequisites table, failure-path test (new `enforce_admins`-false case), unit-test list, validator scope, and a new `grep -c "enforce_admins"` Verification row updated to match. |
-| CONCERN | Risk & Robustness (round 4) | `dispatched_session_id` was a scalar but `fix_attempts` became a keyed map — a second dispatch (different failing set) would orphan the first session pointer, leaving the watchdog unable to resolve the earlier fixer's `AgentSession`. | **RESOLVED (round 4)** | Replaced the scalar with a keyed `fix_sessions: {node_id: agent_session_id}` map (Interface changes, Dedup section, watchdog, Step 4), sharing the `fix_attempts` key and pruned together when a node goes green. The watchdog iterates it to load exactly the record each still-red node was dispatched to. *(Named `dispatched_sessions` and hash-keyed in round 4; renamed + re-keyed in the 2026-09-02 rebase to avoid colliding with the live scalar `dispatched_session_id`.)* |
-| CONCERN | Scope & Value (round 4) | `NIGHTLY_FIX_MAX_CHANGED_FILES` was declared but never wired into any guard (a dead constant). | **RESOLVED (round 4)** | **Decision: WIRE it** into the fail-closed diff-path guard — a `fixed-silent` PR whose changed-file count exceeds `NIGHTLY_FIX_MAX_CHANGED_FILES` (even if all-`tests/`) is voided → close + page. Updated the guard (Technical Approach, Solution key element, flow, Step 4), the failure-path + unit tests (new count-over-cap case), a Success Criteria row, and a `grep -c` Verification row asserting ≥2 uses (declaration + guard). |
-| CONCERN | History & Consistency (round 4) | `fix_attempt_count` (scalar, increment-before-run) vs `fix_attempts` (keyed map) was a naming/semantics contradiction introduced in round 3. | **RESOLVED (round 4)** | Reconciled to ONE name + ONE semantics: **`fix_attempts` (the keyed map) is the sole canonical name; the scalar `fix_attempt_count` is fully retired.** The gate reads `all(fix_attempts.get(n, 0) < NIGHTLY_FIX_MAX_ATTEMPTS for n in new_failures)`; per-node count is `fix_attempts[node_id]`, incremented once per dispatch attempt. All references (Interface changes, gate, Risk 4, team role, failure-path test, Dedup section) updated. |
-| BLOCKER | Risk \& Robustness (round 5) | The notify-vs-page tier rests on forwarding `--silent` to `valor-telegram send`, but that flag does not exist — `valor-telegram send --help` lists no `--silent` and `disable_notification` has zero hits in `tools/valor_telegram.py` or `bridge/`. Step 4 tasks only the `send_telegram` wrapper, never the `send` subparser (L1367-1440) or the Telethon `send_message` path (`bridge/telegram_relay.py` L468/L488). | **RESOLVED (round 5)** | Re-verified on `0b6688433`: no `--silent`, zero `disable_notification` hits, and `send_telegram` L626-634 logs success unconditionally. Added **Step 0 (`build-notify-transport`)**, an independently-shippable prerequisite task covering all four hops: (1) the `.returncode` check on `send_telegram` — landing first, since it is what makes any future transport failure visible; (2) `--silent` on `send_parser`; (3) a `"silent"` key on the `telegram:outbox:` payload from `cmd_send` (the hop rounds 2-4 missed entirely); (4) `silent=message.get("silent", False)` forwarded to `telegram_client.send_message` in the relay. Technical Approach → "Verifiable low-urgency notify" rewritten with the chain; Verification rows now assert the CLI flag AND the relay key, so the anti-criterion can no longer pass on a wrapper kwarg that dead-ends; Test Impact adds CLI + relay tests; a failure-path test pins the non-zero-returncode WARNING. |
-| BLOCKER | Risk \& Robustness (round 5) | Data Flow step 2 assumes `scripts/nightly_regression_tests.py` can invoke `baseline-verifier`, but that subagent is reachable only via the Claude Task tool — sole caller `.claude/skills-global/do-test/baseline-verification.md` L81 (`subagent_type: "baseline-verifier"`). The nightly runner is a plain launchd Python script with no Task tool; no `.py` caller exists anywhere. The classification stage gating every other decision has no invocation seam. | **RESOLVED (round 5)** | Confirmed: zero `.py` callers repo-wide. **The subagent is dropped entirely and `.claude/agents/baseline-verifier.md` is no longer touched by this plan** (so `/do-test` callers are untouched and there is no shared-prompt coupling). Classification becomes a synchronous in-process function, `classify_against_baseline(node_ids, baseline_sha)`, in `scripts/nightly_regression_tests.py`: detached worktree at the last-green SHA + targeted pytest on just the failing node IDs, SHA interpolated as a literal so no shell default can resolve to `main`. This also disposes of the suggested session route, which the finding itself notes would make classification asynchronous (a two-night handshake) — explicitly listed as a Rabbit Hole. Every failure path (worktree-add, unknown SHA, collection error, timeout, exception) → `inconclusive` → escalate; worktree removed in a `finally`. New Risk 2b covers the added nightly critical-path cost. Step 1 renamed `build-classifier`. |
-| BLOCKER | History \& Consistency (round 5) | `NIGHTLY_FIX_MODE=off` carries two incompatible semantics. Reversibility, Mode Gating, and Success Criteria all say `off` reproduces the exact current detect-and-page behavior; Test Impact and the Verification "up-front page removed" row say the `new_failures` branch "no longer pages up front in `off`/`active` mode". Current behavior *does* page up front (L1197-1207), so the two readings are mutually exclusive — on the designated break-glass rollback. | **RESOLVED (round 5)** | Pinned to the reading the finding recommends, in every site: **the up-front page is retained verbatim for `off` and `shadow` and suppressed in `active` ONLY** — `if NIGHTLY_FIX_MODE in ("off", "shadow"): send_telegram(msg, dry_run=args.dry_run)` on the `elif new_failures:` arm. Updated: Solution key element (renamed from "Silent detection log" to "Mode-scoped detection page"), Flow, Test Impact (the contradictory "no longer pages in `off`/`active`" wording deleted, with a note saying why), Mode Gating tests (all three modes now assert `send_telegram` call capture explicitly), Success Criteria, Step 2, and the Verification row — whose selector changed from `-k "shadow or off or new_failures"` to `-k "mode_gating"` asserting the page **IS** called under `off`/`shadow` and **is NOT** under `active`. The break-glass revert can no longer leave a red suite unannounced. |
-| BLOCKER | History \& Consistency (round 5) | The `enforce_admins`-plus-required-review branch protection prerequisite is repo-wide, and its collateral is unexamined: it blocks the direct-to-`main` pushes this repo depends on (CLAUDE.md "Plans and md docs commit directly on main"; `.githooks/pre-push`; this critique skill's own finalize commit on `main`), and since the fixer's `gh` runs under the operator's token the operator is the PR author and cannot approve it — making the fix PR unmergeable and breaking `/do-merge` for every PR in the repo. | **RESOLVED (round 5) — reverses round 4's resolution; the deviation is named deliberately** | Round 4's finding was right in substance (*the identity that would merge the fixer's PR must not be review-exempt*) but chose the collateral-heavy remedy: removing **everyone's** exemption. Round 5 keeps the substance and changes the remedy — **make the fixer's identity non-exempt instead**. The guarantee is now explicitly TWO legs: **A** review-required protection on `main` (`required_approving_review_count >= 1`) with `enforce_admins` left at its default `false`, so the operator's admin token keeps direct-to-`main` pushes for `docs/plans/` and keeps `/do-merge` working — zero collateral; **B** the fixer's `gh` running under the non-admin `SDLC_AGENT_GH_TOKEN` bot (named explicitly, per the finding), which leg A therefore binds and which cannot self-approve. The `active`-mode preflight became a **three-leg** check (review count, non-operator token identity, non-admin bot permission) and the dispatch exports `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` into the fixer's env — without that export the preflight would be decorative. **`enforce_admins` is now asserted ABSENT** (`grep -c "enforce_admins" == 0`) rather than required. The plan also states the honest fallback the finding demanded: where leg A is missing (this repo today, 404) or leg B unavailable (a machine without a non-admin bot token — CLAUDE.md makes it opt-in per machine), **`active` mode is not adoptable there**, the preflight refuses and pages, and the feature still ships usefully in `shadow`. Updated: Prerequisites (two rows), Technical Approach → Enforcement design (with the collateral table), the preflight, Solution key element, Risk 1, No-Gos, Update System, Agent Integration, Documentation, Success Criteria (3 rows), Step 4, Step 5, validator scope, and 3 Verification rows. |
-| CONCERN | Risk \& Robustness (round 5) | The watchdog enumerates three fail-safe states (terminal failed/killed/abandoned, non-terminal-past-timeout, null/malformed hand-back) but never the case where the `AgentSession` record is **absent** when loaded by id. `AgentSession` carries `Meta.ttl` (30 days, `models/agent_session.py` L651) and rows are swept by `agent/session_health.py`, so a `fix_sessions[node]` pointer can resolve to nothing — falling through every page branch, leaving the suite red and nobody paged. | **RESOLVED (round 5)** | Added as the watchdog's **first** check, before any status/`updated_at` inspection (ordering is load-bearing — placed later, an absent record reads as a fresh non-terminal session): `sessions = AgentSession.query.filter(id=sid)`; `if not sessions:` → page "fixer session record missing — cannot verify outcome", prune the node from both `fix_attempts` and `fix_sessions`, `continue`. The empty-list-not-`None` return shape is called out explicitly so the guard is not written as a `None` check. Pruning after paging is what stops a dead pointer re-paging every night. Wired into Technical Approach → watchdog, Step 4, the failure-path tests, Success Criteria, and a Verification row. |
-| CONCERN | Scope \& Value (round 5) | The plan's own motivating case cannot pass its own gate. #2399 had **11** newly-confirmed failures, but the gate hard-disqualifies any run truncated by `MAX_DISPATCH_NODES = 10` (L185). Eleven all-new failures → dispatch set 11 > 10 → truncated → escalate, never autonomy. The single scenario justifying the feature would still have paged a human. | **RESOLVED (round 5)** | Took the second option the finding offers, because it is the one that matches the substrate: `MAX_DISPATCH_NODES` truncates `dispatch_nodes` (from `compute_dispatch_set`, L728, applied L1160-1166) — *"what has never been filed"* — and never touches `new_failures` (`compute_new_failures`, L654), which is not truncated anywhere. Round 4's `not run_flags.dispatch_truncated` clause was a category error, so it is **removed from the gate** rather than reconciled numerically. `NIGHTLY_FIX_MAX_FAILURES` (default 15) is the sole volume cap on the fixer path, governs an untruncated set, and is no longer dead config for values 11..15 — #2399's 11 failures now pass. Added a new Technical Approach → "Cap arithmetic" subsection, a **positive** test pinning the motivating case (11 all-`newly_broken` → `autonomous-fix`), a `grep -c "dispatch_truncated" == 0` Verification row, and updates to the gate pseudocode, Data Flow 3, Freshness Check, run-shape disqualifier list (four → three), Dedup, Success Criteria, Step 4, and Step 5. |
-| NIT | Scope \& Value (round 5) | The shadow→active flip depends on reviewing shadow logs, but no task, success criterion, or verification row makes the shadow verdict discoverable — the only log anti-criterion greps for `nightly-fix.*detection`, not the gate verdict. | **RESOLVED (round 5)** | Every non-`off` run logs `nightly-fix shadow-verdict: {autonomous-fix\|escalate} reason={first failing gate condition} nodes={n}` (`active-verdict:` in active mode), so a month of logs answers "why did the gate refuse?" without re-deriving it. Added to Technical Approach, Step 2, a Success Criteria row, and a `grep -c "shadow-verdict"` Verification row. |
-| NIT | History \& Consistency (round 5) | Freshness Check records baseline `3b6eb651b`; `origin/main` is now `b87fb26de`, six commits ahead. None touch `scripts/nightly_regression_tests.py` or `.claude/agents/baseline-verifier.md` and every line reference still resolves, so the drift is cosmetic. | **RESOLVED (round 5)** | Freshness Check baseline bumped to `0b6688433` (`git rev-parse origin/main`, re-fetched at revision time). All round-5 code claims were re-verified against that SHA, not taken on the critique's word. |
-| BLOCKER | Risk \& Robustness (round 6) | Leg B of the ONLY structural never-merge guarantee has no invocation seam. The plan asserts "the dispatch exports `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` into the fixer session's environment" and makes it load-bearing, but `maybe_dispatch_triage_session` spawns `subprocess.run([sys.executable, "-m", "tools.valor_session", "create", ...], cwd=PROJECT_DIR, ...)` with **no `env=` kwarg** (`scripts/nightly_regression_tests.py` L913-931), and `valor-session create --help` exposes no env/token flag (`--role/--message/--chat-id/--telegram-message-id/--parent/--project-key/--slug/--model/--needs-real-chrome/--job-id/--expect-what/--json` only). Worse, that CLI only **enqueues** an `AgentSession`; the **worker**, a separate launchd process, later spawns `claude -p`, so even adding `env=` to this subprocess would not reach the fixer's `gh`. The fixer would authenticate with the worker's ambient operator admin credentials, making leg B vacuous and leg A (review-required with admins exempt) non-binding. This is the **third recurrence of the same failure class** — round 1's permission profile and round 5's `--silent` flag were both load-bearing mechanisms asserted without a seam. | pending | The seam does not exist at the dispatch call site: `subprocess.run([... "tools.valor_session", "create" ...], cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30)`. Setting `env=` there configures the *enqueuing* CLI, not the worker subprocess that runs the session. A real fix must persist a per-session env override on the `AgentSession` row and have `agent/session_runner/harness/claude.py` merge it into the `claude -p` spawn env — the same file round 5 verified hardcodes `--permission-mode bypassPermissions` (L154-168) — and that is a new task with its own tests, not a dispatch-site one-liner. The alternative is to DROP leg B and state honestly that with admins exempt and no bot identity there is **no** structural never-merge guarantee, so `active` mode is unreachable and the feature ships `shadow`-only. Do not write a Success Criterion asserting the export until the seam is verified to exist. |
-| BLOCKER | Risk \& Robustness (round 6) | The in-process classifier has no working-tree or venv story, and as specified it can ship **completely inert while passing every one of its own criteria**. The plan says `git worktree add <tmpdir> <baseline_sha> --detach`, then "run the node IDs there with the same pytest invocation the detector uses" — but that invocation is `_spawn_pytest(argv, timeout, env)` → `subprocess.Popen(argv, cwd=PROJECT_DIR, ...)` with **cwd hardcoded to the main checkout** (`scripts/nightly_regression_tests.py` L297-306), routed through `scripts/pytest-clean.sh`, which per CLAUDE.md **aborts on an off-pin venv** — and a bare `git worktree add` yields a tree with no `.venv` at all. So the instruction resolves to one of three outcomes, all bad: (i) run at `PROJECT_DIR` → the baseline run imports HEAD's source, every node fails again, every node buckets `pre_existing`, gate escalates 100% of the time; (ii) run in the venv-less worktree → wrapper abort → `inconclusive` → escalate 100% of the time; (iii) `uv sync` the worktree, which the plan never mentions and which blows Risk 2b's "one targeted pytest run" cost budget. In cases (i) and (ii) the feature never fires, fails safe, and no listed test detects it because every classifier test stubs the classifier. | pending | `_spawn_pytest`'s signature is `_spawn_pytest(argv: list[str], timeout: int, env: dict \| None = None) -> int` with `cwd=PROJECT_DIR` baked into the `Popen` call; it must gain a `cwd` parameter defaulting to `PROJECT_DIR` (so `run_tests()` stays byte-identical) before the classifier can reuse it, and the classifier must decide explicitly whether it bypasses `scripts/pytest-clean.sh` or provisions a venv in the worktree. Add one non-stubbed test: a two-commit fixture repo where a node passes at the baseline SHA and fails at HEAD must classify `newly_broken`. A fully-stubbed classifier test cannot distinguish "working" from "inert but safe", which is exactly the state this plan would otherwise ship. |
-| BLOCKER | History \& Consistency (round 6) | Two Verification anti-criteria are self-defeating, one of them a repo-doctrine guard. **(a) Broken regex:** `grep -Ec "gh pr ready\|gh pr merge"` and `grep -Ec "\.hgetall\(\|\.hget\(\|r\.delete\(..."` use BRE alternation under `-E`, where `\|` matches a **literal** pipe — so both search for one long literal string and return 0 regardless of file contents. Demonstrated on a file containing both strings: the `-E`-with-`\|` form returns `0`; the correct `grep -Ec "gh pr ready\|gh pr merge"` form (unescaped alternation) returns `2`. Both anti-criteria pass vacuously, including the never-raw-Redis-on-Popoto-keys guard. **(b) Unsatisfiable expectation:** even corrected, `== 0` cannot hold — Step 3 requires "The mandate must **explicitly forbid `gh pr ready`, `gh pr merge`, and push-to-`main`**", and that mandate is a prompt string built inside `scripts/nightly_regression_tests.py` (as `_build_triage_prompt` is today, L830-855), so a **correct** implementation puts both literals in the file and turns the anti-criterion red. A builder facing a red safety anti-criterion will weaken the mandate or obfuscate the strings. | pending | `grep -E` treats `\|` as a literal pipe; plain `grep` (BRE) treats it as alternation — which is why the adjacent `grep -c "do-merge\|do_merge"` row is correct and only the two `-E` rows are broken. Fix the regexes by dropping the backslashes under `-E`. For (b), re-scope the criterion from "the file contains no such string" to "the runner never **executes** those verbs", asserted behaviorally in `test_nightly_fix_dispatch.py` exactly as the plan already does for the `do-merge` row: `assert "gh pr ready" in built_message` (the mandate forbids it) AND a scan of every `subprocess.run`/`Popen` argv literal in the runner for those verbs. |
-| CONCERN | Risk \& Robustness (round 6) | Step 4 (`build-watchdog`) consumes the notify transport that Step 0 (`build-notify-transport`) creates, but its `Depends On` names only `build-dispatch-handback`. Step 0 declares `Depends On: none` and `Parallel: true`, so nothing in the declared task graph orders the two. A builder honoring the graph can land Step 4 first, at which point `send_telegram(msg, silent=True)` raises `TypeError` — and because the notify path fires only on the `active`-mode happy path, the break lands where no default-mode test exercises it. | pending | `send_telegram`'s current signature is `def send_telegram(msg: str, dry_run: bool = False) -> None` (`scripts/nightly_regression_tests.py` L609); Step 0 is what adds `silent: bool = False`. Until it lands, `send_telegram(msg, silent=True)` raises `TypeError: send_telegram() got an unexpected keyword argument 'silent'`. One-line fix: Step 4's `- **Depends On**: build-dispatch-handback, build-notify-transport`, and add it to Step 5's list too since the notify-transport unit tests are enumerated there. |
-| CONCERN | Scope \& Value (round 6) | Day-one delivered value is thin and unvalidated. Branch protection is 404 and `SDLC_AGENT_GH_TOKEN` is opt-in per machine, so the plan concedes `active` is "not adoptable" here today; the default `shadow` mode "pages as today and dispatches nothing". What actually ships is the `send_telegram` returncode fix (Step 0, genuinely valuable and independently shippable), a `--silent` flag nothing yet uses at low urgency, and a log line — while the fixer, hand-back, watchdog, both guards, the ORM field, and the three-leg preflight are unreachable code behind a mode nobody can enable. No success criterion checks that the shadow verdict is **correct**, only that it is greppable. | pending | The plan already pins #2399 as a **unit** test on `decide_fix_or_escalate` with a stubbed classification ("11 all-`newly_broken` failures → `autonomous-fix`"), which asserts gate arithmetic, not the classifier. The missing validation is end-to-end: `classify_against_baseline(<the 11 node ids>, <the pre-#2402 SHA>)` must return all 11 in `newly_broken` against real commits. That single test is also what would catch the inert-classifier blocker above. Alternatively split the lane: ship Step 0 + classifier + shadow gate under this issue, and defer the fixer/dispatch/watchdog/enforcement stack to a follow-up gated on leg A actually existing. |
-| NIT | History \& Consistency (round 6) | The Freshness Check names two different baselines and both are stale: line 63 says "Baseline commit: `0b6688433`" while line 78 says "Every line reference below is re-resolved against `3b6eb651b`" (the superseded round-4 rebase baseline). `origin/main` is now `33fe1d2c7`. Leftover text from the round-5 pass, and it contradicts the no-historical-artifacts rule. | pending | State one baseline SHA once, bumped to `33fe1d2c7`, and delete the `3b6eb651b` sentence rather than adding a third. |
-| NIT | History \& Consistency (round 6) | Documentation → Inline Documentation still tasks documenting a mechanism round 5 deleted: "Docstring the decision-gate function, the hand-back schema, and the baseline-ref parameterization of `baseline-verifier`." Round 5 removed `baseline-verifier` from the plan entirely and added the Rabbit Hole "Touching `baseline-verifier` at all"; a documentarian following this bullet would violate the Verification row `git diff --name-only origin/main -- .claude/agents/` → empty. | pending | Replace the third clause with "…and `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]`, never bare `main`)". |
+| BLOCKER | Risk & Robustness + History & Consistency + Scope & Value (round 1, all 3 agreed) | The "structural never-merge" resolution has no implementation seam. `tools.valor_session create` exposes no permission flag; `AgentSession` has no permission field; every `claude-cli` spawn is hardcoded `--permission-mode bypassPermissions` (`agent/session_runner/harness/claude.py` L154-168); `PermissionRequest` hooks do not fire under `claude -p`. | **RESOLVED (round 2), and the underlying tier is now DEFERRED (round 7)** | The permission profile was deleted in round 2. Round 7 established that the *entire* enforcement stack it was replaced by is also unbuildable here (no per-session env seam, branch protection 404), so the fixer tier moved to **#3076** rather than shipping behind an unreachable flag. |
+| CONCERN | Risk & Robustness (round 2) | The `gh pr diff --name-only` guard's failure path was unspecified and could vacuously satisfy "every path under `tests/`". | **RESOLVED (round 2); DEFERRED (round 7)** | Guard was made fail-closed in round 2; the guard itself moves to #3076 with the watchdog. The fail-closed design is recorded there. |
+| CONCERN | Scope & Value (round 2) | The notify-vs-page tiering was verified only by a prose grep, but `send_telegram` has no urgency parameter. | **RESOLVED (round 2), re-resolved (round 5), DEFERRED (round 7)** | Rounds 2-5 progressively established the tier needed a real three-hop transport. Round 7 defers the whole notify tier to #3076 — without an `active` happy path it has no consumer, and a `--silent` flag nothing calls is a dead CLI surface on every machine. |
+| CONCERN | History & Consistency (round 2) | The plan was internally inconsistent about how settled the permission mechanism was. | **RESOLVED (round 2)** | Resolved Decision #2 rewritten to a single honest enforcement decision; the "build-time detail" hedge removed. |
+| BLOCKER | Risk & Robustness (round 3) | Round 2's "draft-PR structural no-auto-merge" guarantee is only prompt-strength — under `bypassPermissions` the session's bash can run `gh pr ready` then `gh pr merge`. | **RESOLVED (round 3); DEFERRED (round 7)** | The honest limitation was stated in round 3 and the real guarantee moved server-side. Round 7 verified that guarantee's legs do not exist here and cut the tier that needs them. |
+| CONCERN | Risk & Robustness (round 3) | `fix_attempt_count` dedup reset semantics unspecified; unbounded growth. | **RESOLVED (round 3-4); CARRIED (round 7)** | Keyed map with increment-per-attempt and prune-when-green survives as `classify_attempts`, pruned by `carry_dispatched_nodes`'s existing rule. |
+| CONCERN | Scope & Value (round 3) | The bespoke AST verify script was redundant with behavioral mode-gating tests. | **RESOLVED (round 3)** | Script and its Verification row removed; the anti-criterion is behavioral. |
+| CONCERN | History & Consistency (round 3) | The shadow→active flip prerequisite was prose-only and unenforceable. | **RESOLVED (round 3); SUPERSEDED (round 7)** | The runtime preflight moved to #3076 with `active` mode. The flip is now gated by #3076's entry condition (both seams existing) plus this plan's shadow-log evidence. |
+| CONCERN | Risk & Robustness (round 3) | Ambiguity about which PR the watchdog inspects. | **RESOLVED (round 3); DEFERRED (round 7)** | The hand-back-`pr_url`-only rule is recorded in #3076. |
+| NIT | History & Consistency (round 3) | `.env.example` requires a comment line above each `KEY=`. | **RESOLVED (round 3); CARRIED (round 7)** | Update System specifies two-line blocks for the three surviving constants. |
+| BLOCKER | Risk & Robustness (round 4) | The branch-protection preflight ignored `enforce_admins`, so an admin-scoped token could merge a zero-approval PR. | **RESOLVED (round 4), REVERSED (round 5), DEFERRED (round 7)** | Round 5 replaced the repo-wide `enforce_admins` requirement with a non-admin fixer identity. Round 7 found that identity has no injection seam, so the whole enforcement design moves to #3076 where the seam is a prerequisite. |
+| CONCERN | Risk & Robustness (round 4) | A scalar `dispatched_session_id` would be orphaned by a second dispatch. | **RESOLVED (round 4); DEFERRED (round 7)** | The keyed `fix_sessions` map existed to serve the watchdog; both move to #3076. This plan adds only `classify_attempts` and leaves the live scalar (L1090) untouched. |
+| CONCERN | Scope & Value (round 4) | `NIGHTLY_FIX_MAX_CHANGED_FILES` was declared but never wired (dead constant). | **RESOLVED (round 4); RE-RESOLVED (round 7)** | Round 4 wired it into the diff-path guard. Round 7 defers that guard, so the constant is **not declared here** — the lesson generalized into a Success Criterion and a Verification row asserting no constant ships without a reader. |
+| CONCERN | History & Consistency (round 4) | `fix_attempt_count` vs `fix_attempts` naming/semantics contradiction. | **RESOLVED (round 4); CARRIED (round 7)** | One name, one semantics — now `classify_attempts`, the only attempt map in the plan. |
+| BLOCKER | Risk & Robustness (round 5) | `valor-telegram send --silent` does not exist; `disable_notification` has zero hits; and `send_telegram` never checks `.returncode`, so a dropped notify would log success. | **RESOLVED (round 5); SPLIT (round 7)** | The `.returncode` half is a genuine standalone defect and **ships here as Step 1**. The `--silent` transport half moves to #3076 with its only consumer. |
+| BLOCKER | Risk & Robustness (round 5) | `baseline-verifier` is Task-tool-only with zero `.py` callers; the classification stage had no invocation seam. | **RESOLVED (round 5); CARRIED and COMPLETED (round 7)** | Classification is in-process. Round 7 completed the resolution by supplying the *execution* seam round 5 left open — see the next row. |
+| BLOCKER | History & Consistency (round 5) | `NIGHTLY_FIX_MODE=off` carried two incompatible semantics (pages as today vs. no longer pages). | **RESOLVED (round 5); SIMPLIFIED (round 7)** | With `active` cut, both shipped modes page exactly as today, so the contradiction cannot recur. Every existing `send_telegram`-on-new-failures test stays valid unmodified. |
+| BLOCKER | History & Consistency (round 5) | The `enforce_admins` prerequisite is repo-wide and breaks direct-to-`main` `docs/plans/` commits and `/do-merge`. | **RESOLVED (round 5); DEFERRED (round 7)** | The two-leg design is recorded in #3076. Nothing in this plan requires any branch protection. |
+| CONCERN | Risk & Robustness (round 5) | The watchdog never handled an absent `AgentSession` record (`query.filter` returns `[]`, not `None`). | **RESOLVED (round 5); DEFERRED (round 7)** | The absent-record-first ordering and the empty-list return shape are recorded in #3076 with the watchdog. |
+| CONCERN | Scope & Value (round 5) | The plan's own motivating case (#2399, 11 failures) could not pass its own gate under the `MAX_DISPATCH_NODES` disqualifier. | **RESOLVED (round 5); CARRIED (round 7)** | The truncation clause stays removed; the positive 11-failure test and the `dispatch_truncated == 0` row survive into this plan's gate. |
+| NIT | Scope & Value (round 5) | The shadow verdict was not discoverable. | **RESOLVED (round 5); PROMOTED (round 7)** | The greppable verdict line is now the plan's **primary deliverable**, not a nicety — it is #3076's entry condition. |
+| NIT | History & Consistency (round 5) | Freshness Check baseline stale. | **RESOLVED (round 5), recurred, RESOLVED again (round 7)** | See the round-6 nit below. |
+| BLOCKER | Risk & Robustness (round 6) | Leg B of the only structural never-merge guarantee has no invocation seam: `maybe_dispatch_triage_session` spawns `tools.valor_session create` with no `env=` (L913-931), that CLI has no env/token flag, and it only *enqueues* — the worker, a separate launchd process, later spawns `claude -p`. The fixer would use the operator's ambient admin credentials, making both legs vacuous. Third recurrence of the same failure class. | **RESOLVED (round 7) — by CUTTING, not by asserting** | Every hop was opened and read at `2d60de31d`; the finding is confirmed exactly, and the chain is now documented as a table in **Scope Boundary** with file:line for each hop, including the two the finding did not name: `role_driver.py::subscription_auth_env` L76-100 (called L204) is a *process-global* overlay, and `models/agent_session.py` has **no** env/token/permission field, so there is nowhere to persist a per-session override. `TurnRequest.env` (`harness/base.py` L52) is the plumbing that could carry it, but nothing session-specific reaches it. Per the supervisor directive to prefer cutting over asserting: the entire fixer/enforcement tier is **removed from this plan** and filed as **#3076**, whose first blocking item is building that seam with its own tests. **No Success Criterion in this plan asserts any env export.** |
+| BLOCKER | Risk & Robustness (round 6) | The in-process classifier has no working-tree or venv story and can ship completely inert while passing every one of its own criteria: `_spawn_pytest` hardcodes `cwd=PROJECT_DIR` (L297-306) and routes through `pytest-clean.sh`, which aborts on an off-pin venv — and a bare `git worktree add` has no `.venv`. Every resolution either classifies against HEAD's source (all `pre_existing`) or aborts (all `inconclusive`), and no listed test detects it because every classifier test stubs the classifier. | **RESOLVED (round 7)** | Confirmed at `2d60de31d`: `_spawn_pytest` is `(argv, timeout, env=None)` with `cwd=PROJECT_DIR` at L302. Also read the wrapper, which the finding's remedy depends on: `pytest-clean.sh` resolves `REPO_ROOT` from the **caller's cwd** (L34-38), so a `cwd=<worktree>` spawn genuinely targets the worktree — and it refuses a linked worktree with no `.venv` (L135-145, #3033) and an off-pin interpreter (L169-175, #2617). Three concrete changes now specified: (1) `_spawn_pytest` gains `cwd: Path \| str = PROJECT_DIR` (Step 2, with a back-compat test on both existing callers); (2) a **persistent provisioned** baseline worktree at a fixed path with its own pin-matching `.venv` via `uv sync`, re-synced only when `uv.lock` moves, reconciled with `worktree-gc.sh` (Step 3, and Risk 2b re-costed accordingly); (3) the classifier goes **through** the wrapper, never around it, and **never falls back to `PROJECT_DIR`** — provisioning failure is `inconclusive`. The finding's own remedy is adopted verbatim as a required test: a **non-stubbed two-commit fixture repo** where a node passing at baseline and failing at HEAD must classify `newly_broken`, plus a companion `pre_existing` case, promoted to a Success Criterion and a Verification row. Risk 1 is rewritten around this exact failure mode. |
+| BLOCKER | History & Consistency (round 6) | Two Verification anti-criteria are self-defeating. (a) `grep -Ec "gh pr ready\|gh pr merge"` and the raw-Redis guard use BRE alternation under `-E`, where `\|` is a literal pipe — both return 0 unconditionally. (b) Even corrected, `== 0` is unsatisfiable: Step 3 requires the mandate to explicitly forbid those verbs, and the mandate is a prompt string in that same file. | **RESOLVED (round 7)** | The regex claim was reproduced before acting: on a file containing both strings, `grep -Ec "gh pr ready\|gh pr merge"` returns `0` and the unescaped `-E` form returns `2`. Every `-E` row in the new Verification table uses **unescaped** alternation, and a standing note records the rule so it cannot silently recur. For (b): both offending rows are **removed** along with the dispatch-mandate rewrite they guarded (deferred to #3076), and the note prescribes the correct shape for when #3076 reinstates them — a behavioral assertion over the runner's `subprocess` argv literals plus a *positive* assertion that the mandate contains the prohibition, never a whole-file string absence. The raw-Redis row is dropped outright: this plan adds no Redis or ORM code (no schema change, no hand-back), so the guard has nothing to guard. |
+| CONCERN | Risk & Robustness (round 6) | Step 4 consumes Step 0's `send_telegram(..., silent=True)` transport but no dependency edge orders them; Step 0 declares `Depends On: none, Parallel: true`, so Step 4 could land first and raise `TypeError` on a path no default-mode test exercises. | **RESOLVED (round 7) — dissolved with the coupling** | `send_telegram`'s signature (L609) is unchanged by this plan: no `silent` parameter is added, no caller passes one, so the `TypeError` is unreachable. The returncode fix (Step 1) is genuinely independent. The remaining ordering constraint is real and **declared**: Step 3 (`build-classifier`) depends on Step 2 (`build-cwd-seam`), because `classify_against_baseline` cannot target the worktree until `_spawn_pytest` accepts `cwd`; Step 4 depends on Step 3; Step 5 depends on both Step 1 and Step 4. |
+| CONCERN | Scope & Value (round 6) | Day-one value is thin and unvalidated: leg A 404s, leg B is opt-in, so `active` is unreachable; what ships is a returncode fix, a flag nothing uses, and a log line, while the fixer/watchdog/preflight stack is unreachable code. No criterion checks the shadow verdict is *correct*, only greppable. | **RESOLVED (round 7)** | The finding's second option is taken: **split the lane.** Everything unreachable is removed from this plan and filed as #3076 — no dead flag, no unreachable code, no safety claim without a mechanism. What remains is three things that are all real and all reachable on the default path: the `send_telegram` returncode fix (a live defect: L633 logs `"Telegram sent"` unconditionally), the classifier, and the shadow gate. On correctness: the finding's suggested end-to-end check against #2399's real commits was considered and **not** adopted as a suite test — it needs a historical SHA, a live test DB, and a long run, which is a flaky nightly-suite dependency. The **two-commit fixture-repo test** is adopted instead: it exercises the same claim (`passes at baseline, fails at HEAD → newly_broken`) deterministically and in-suite, and it is precisely the test that would have caught the inert-classifier blocker. The unit-level 11-failure motivating case is retained for gate *arithmetic*, now clearly labeled as such. |
+| NIT | History & Consistency (round 6) | Freshness Check named two different stale baselines (`0b6688433` L63, `3b6eb651b` L78); `origin/main` was `33fe1d2c7`. | **RESOLVED (round 7)** | One baseline SHA stated once — `2d60de31d` (`git rev-parse origin/main` at revision time) — and the second sentence deleted rather than a third added. Every file:line reference in the plan was re-read against that SHA during this pass, not carried forward. |
+| NIT | History & Consistency (round 6) | Inline Documentation still tasked documenting "the baseline-ref parameterization of `baseline-verifier`", which round 5 deleted. | **RESOLVED (round 7)** | Replaced with `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]`, never bare `main`) and its provisioning preconditions, plus a new bullet for `_spawn_pytest`'s `cwd` parameter. |
 
 ---
 
-## Resolved Decisions (critique round 1)
+## Resolved Decisions
 
-These were the plan's original Open Questions; the critique (1 BLOCKER + 6 CONCERNs) resolved them. Recorded here so the next critique round sees the decisions rather than re-litigating them.
+1. **Baseline semantics + classifier mechanism.** The known-good ref is the *last-green nightly SHA* (`prev["head_commit"]`, L1092), not `main` — nightly runs on main and the failure IS on main, so diffing against `main` would mask a regression that already landed. The mechanism is an **in-process Python classifier**: `baseline-verifier` is Task-tool-only with zero `.py` callers, so a launchd script has no seam, and a `${baseline_ref:-main}` shell default could never be set by a prose dispatch. `.claude/agents/baseline-verifier.md` is untouched.
+2. **The classifier's execution environment (round 7).** It runs through `scripts/pytest-clean.sh` with `cwd` pointed at a **persistent, `uv sync`-provisioned** baseline worktree — never at `PROJECT_DIR`, never around the wrapper. This required adding a `cwd` parameter to `_spawn_pytest`, which did not exist. Any provisioning failure is `inconclusive`, never a fallback.
+3. **Enforcement of "never auto-merge" — deferred, not solved (round 7).** The only structural guarantee has two legs: review-required protection on `main` (404 today) and a non-admin fixer identity (no per-session env seam exists anywhere in the dispatch → worker → `claude -p` chain). Rather than assert either, the plan **cuts the tier that needs them**. #3076 owns it and names both as blocking prerequisites.
+4. **Guardrail constants home.** Three knobs as module-scope `os.environ.get` reads with provisional comments, deliberately not promoted to `config/settings.py` (single-consumer script). Provisional defaults: `NIGHTLY_FIX_MODE=shadow`, `NIGHTLY_FIX_MAX_FAILURES=15`, `NIGHTLY_FIX_MAX_ATTEMPTS=1`. The two knobs whose only consumers were the deferred guards are **not declared**.
+5. **Rollout.** `NIGHTLY_FIX_MODE` ships defaulting to `shadow` (classify + log the verdict, page as today). `off` restores byte-identical current behavior. There is no `active` in this plan; the flip is #3076's, gated on its two seams plus this plan's shadow evidence.
+6. **Alerting is unchanged.** Both shipped modes fire the existing up-front page. This plan changes no outbound message, which is why every existing `send_telegram` assertion stays valid unmodified.
 
-1. **Baseline semantics + classifier mechanism — RESOLVED (owner-confirmed on the ref; mechanism corrected in round 5).** Known-good ref maps to the *last-green nightly SHA* (`prev["head_commit"]`), not `main`, because nightly runs on main and the failure IS on main — diffing against `main` would mask a regression that already landed there. **The mechanism is an in-process Python classifier**, not the `baseline-verifier` subagent: round 5 established the subagent is Task-tool-only with zero `.py` callers, so a launchd script had no seam, and a `${baseline_ref:-main}` shell default could never be set by a prose dispatch (it would always resolve to literal `main`, reinstating the exact masking). `.claude/agents/baseline-verifier.md` is untouched and every `/do-test` caller is unaffected.
-2. **Never-auto-merge enforcement — RESOLVED (BLOCKER, round 3; round 2's answer was corrected).** The round-1 "structural permission profile" had no implementation seam (no session-create permission flag, no `AgentSession` permission field, spawns hardcoded `bypassPermissions`, `PermissionRequest` hooks do not fire under `claude -p`) and is **deleted**. Round 2 then wrongly called `gh pr create --draft` "the load-bearing structural guarantee" — but under `bypassPermissions` the fixer's unrestricted bash can issue `gh pr ready` then `gh pr merge`, so the draft flag is a deterrent, not a structural block. **Honest round-3 decision, re-scoped in round 5:** the ONLY structural never-merge guarantee lives outside the session and has **two legs** — **A** review-required protection on `main` (GitHub-enforced, cannot be overridden by in-session bash; currently ABSENT, verified 404) with `enforce_admins` deliberately left `false`, and **B** the fixer's `gh` running under the non-admin `SDLC_AGENT_GH_TOKEN` bot so leg A binds it while the operator keeps direct-to-`main` and `/do-merge`. Round 4's repo-wide `enforce_admins == true` variant is **reversed**: it broke the direct-to-`main` `docs/plans/` convention and `/do-merge` for every PR, and still left the operator-authored fix PR unmergeable. Both legs are hard `active`-mode prerequisites enforced by a three-leg runtime preflight; where either is unsatisfiable, `active` is not adoptable on that machine and the plan says so. Everything in-session (narrow mandate that forbids `gh pr ready`/`gh pr merge`, `gh pr create --draft`) is a **deterrent**; the fail-closed diff-path guard and the new fail-closed **merge/draft-state guard** are **detective** (next-night). No in-session structural-prevention claim is made. See Technical Approach → "Enforcement design."
-3. **Guardrail constants home — RESOLVED (CONCERN).** Five knobs as module-scope `os.environ.get` reads with provisional comments, deliberately NOT promoted to `config/settings.py` (single-consumer script; rationale in Technical Approach). Provisional defaults: `NIGHTLY_FIX_MAX_FAILURES=15`, `NIGHTLY_FIX_MAX_CHANGED_FILES=10`, `NIGHTLY_FIX_MAX_ATTEMPTS=1`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS=6`, `NIGHTLY_FIX_MODE=shadow`.
-4. **Shadow-first rollout — RESOLVED (CONCERN).** `NIGHTLY_FIX_MODE` ships defaulting to `shadow` (classify + log the gate verdict, page-as-today, dispatch nothing); flip to `active` after observing shadow logs. `off` restores exact current behavior.
-5. **Happy-path notification — RESOLVED (CONCERN; sharpened round 2, made real in round 5).** The `fixed-silent` path emits a low-urgency notify (not a page) so a human knows a fix draft PR is waiting; only genuine blockers page. Rounds 2-4 assumed `valor-telegram send --silent` existed — **it did not**, and `send_telegram`'s missing `.returncode` check would have hidden the resulting argparse exit-2 behind a `"Telegram sent"` log line. The tier is now built end to end (Step 0): returncode check → `--silent` subparser arg → `"silent"` on the outbox payload → `silent=` forwarded to Telethon in the relay. Anti-criteria assert the CLI flag and the relay key, not just the wrapper call signature.
-6. **Test-file-only mechanical guard — RESOLVED (CONCERN; made fail-closed round 2).** The watchdog runs `gh pr diff --name-only` OUTSIDE the fixer session and is **fail-closed**: it downgrades to a notify only on zero-exit + non-empty + all-`tests/`; ANY {non-zero exit, error, empty/unparseable output, non-`tests/` path} voids the fix (closes the PR) and pages. Independent of the prompt; never fails open.
-7. **Hand-back storage — RESOLVED (CONCERN).** Persisted on the `AgentSession` record via the ORM (nullable `nightly_fix_handback` field) rather than a duplicate file store, eliminating Race 1's torn-read hazard.
+No open questions remain.
 
-No open questions remain — ready for critique (round 3 findings absorbed: honest `bypassPermissions` limitation, branch-protection structural backstop + builder-verify + `active`-mode preflight, shadow-first gating, merge/draft-state watchdog guard, mandate/anti-criteria deterrent, dedup reset semantics, AST script removed, env-completeness; **round 4 findings absorbed: `enforce_admins.enabled == true` added to the preflight/verify/success-criteria boolean short-circuit so an admin-scoped token can't merge a zero-approval PR; keyed `dispatched_sessions` map so a second dispatch can't orphan the first session pointer; `NIGHTLY_FIX_MAX_CHANGED_FILES` wired into the diff-path guard; `fix_attempts` reconciled to the sole canonical name/semantics, scalar `fix_attempt_count` retired**; **round 5 findings absorbed: the notify transport built end-to-end instead of assumed, classification moved in-process because the subagent has no Python seam, `off` pinned to page-as-today, the `enforce_admins` prerequisite reversed in favor of a non-admin fixer identity, the absent-session-record page path added, and the truncation disqualifier removed so the motivating case passes its own gate**).
-
-**2026-09-02 round-5 revision (baseline `0b6688433`).** Four blockers resolved, each re-verified against the code rather than accepted on the critique's word: (1) the notify tier's `--silent` transport **did not exist** and `send_telegram` never checked `.returncode`, so a dropped notify would have logged success — a new independently-shippable **Step 0** builds all four hops; (2) `baseline-verifier` is Task-tool-only with **zero Python callers**, so the classifier is now a synchronous in-process function and the subagent is left untouched; (3) `NIGHTLY_FIX_MODE=off` is pinned to **page exactly as today** (the up-front page is suppressed in `active` only), restoring `off` as a true break-glass revert; (4) the round-4 repo-wide `enforce_admins == true` prerequisite is **reversed** — it would have broken direct-to-`main` `docs/plans/` commits and `/do-merge` for every PR while still leaving the fix PR unmergeable — and replaced by an identity requirement (review-required `main` + a non-admin `SDLC_AGENT_GH_TOKEN` fixer, checked by a three-leg preflight and exported into the fixer's env), with the honest statement that `active` is not adoptable where either leg is unsatisfiable. Both concerns resolved: an absent `AgentSession` record now pages instead of falling through every branch, and the `MAX_DISPATCH_NODES` truncation disqualifier is removed as a category error that had disqualified the plan's own 11-failure motivating case and made `NIGHTLY_FIX_MAX_FAILURES` dead config. Both nits resolved (greppable shadow verdict; baseline SHA bumped).
-
-**2026-09-02 freshness rebase (baseline `3b6eb651b`).** The premise is unchanged and re-verified — the up-front page and the investigate-only mandate are both still live — but the detector gained ~660 lines across nine commits, so the plan was rebased onto the current substrate: dedup re-keyed from the retired `dispatched_hash` to per-node `fix_attempts` / `fix_sessions` matching #2559's live model; `head_commit` recognized as already persisted (Step 1 degraded to consume-and-verify); the decision gate given four hard run-shape disqualifiers (seed/re-baseline, integrity-warned, `--dry-run`, `MAX_DISPATCH_NODES`-truncated) from the #2823 collection-aware baseline; all file:line references re-resolved; and a non-regression criterion added so the existing per-node dedup, seed-umbrella, and run-integrity behavior stays byte-identical. Branch protection on `main` re-checked and **still absent (404)**, so the `active`-mode preflight remains load-bearing exactly as designed.
+**2026-09-02 round-7 revision (baseline `2d60de31d`).** Three blockers resolved, two of
+them by **cutting scope rather than asserting capability**, per the supervisor directive
+following a third consecutive recurrence of "load-bearing mechanism asserted without a
+verified seam". (1) The `GH_TOKEN`-into-the-fixer seam was traced hop by hop and confirmed
+absent at every one — dispatch call site, CLI surface, process boundary, worker env overlay,
+and model schema — so the entire fixer/enforcement/watchdog/notify tier is deferred to the
+newly filed **#3076**, which names the missing seam as its first blocking item. (2) The
+classifier's inert-shipping hazard is closed with three concrete, source-verified changes
+(a `cwd` parameter on `_spawn_pytest`, a persistent `uv sync`-provisioned baseline worktree,
+and no-fallback-to-`PROJECT_DIR`) plus a **non-stubbed two-commit fixture test** that is the
+first thing in six rounds able to distinguish a working classifier from an inert one.
+(3) The two self-defeating Verification rows are removed with the mandate they guarded, and
+the `grep -E` alternation bug is reproduced, documented, and swept from every remaining row.
+Both concerns resolved (the Step 0/Step 4 ordering hazard dissolves with the transport
+coupling; day-one value is now three reachable things instead of one reachable thing and a
+stack of unreachable code). Both nits resolved. Appetite reduced Large → Medium to match.
