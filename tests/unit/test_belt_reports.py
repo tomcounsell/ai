@@ -353,3 +353,55 @@ class TestSkewReportAggregation:
         full = capsys.readouterr().out
         assert "pass --full" not in full
         assert full.count("sess-") >= belt_skew_report._COMPACT_ROW_LIMIT + 5
+
+
+class TestBaselinePerPRNormalization:
+    """The plan's headline metrics are per merged PR; the count is an explicit
+    input (never inferred), so an operator cannot publish a normalization
+    against the wrong window by accident."""
+
+    def test_normalization_requires_explicit_count(self, tmp_path, capsys):
+        telemetry = tmp_path / "session_telemetry"
+        _write_stream(telemetry, "s1", [_tool_cost({"Bash": _row(calls=4, inp=400, out=40)})])
+
+        code = belt_baseline.main(["--telemetry-dir", str(telemetry)])
+        out = capsys.readouterr().out
+        assert code == belt_baseline.EXIT_OK
+        assert "Per-PR normalization skipped" in out
+
+        code = belt_baseline.main(["--telemetry-dir", str(telemetry), "--merged-pr-count", "2"])
+        out = capsys.readouterr().out
+        assert code == belt_baseline.EXIT_OK
+        assert "Per merged PR (over 2 PRs)" in out
+        assert "tool calls / PR          2.0" in out
+
+    def test_nonpositive_count_is_a_structured_error(self, tmp_path, capsys):
+        telemetry = tmp_path / "session_telemetry"
+        telemetry.mkdir()
+        code = belt_baseline.main(["--telemetry-dir", str(telemetry), "--merged-pr-count", "0"])
+        assert code == belt_baseline.EXIT_UNREADABLE
+        assert "bad_merged_pr_count" in capsys.readouterr().err
+
+
+class TestSkewEventTypeContract:
+    def test_fixture_matches_the_pinned_constant(self):
+        """The report and the resolver share one event-type string through
+        session_telemetry.BELT_ENFORCE_SKEW_EVENT — a rename on either side
+        must fail here, not silently empty the report."""
+        from agent.session_telemetry import BELT_ENFORCE_SKEW_EVENT
+
+        assert _skew("h1")["type"] == BELT_ENFORCE_SKEW_EVENT
+
+    def test_last_ts_is_the_newest_event(self, tmp_path, capsys):
+        telemetry = tmp_path / "session_telemetry"
+        _write_stream(
+            telemetry,
+            "s1",
+            [
+                _skew("h1", ts="2026-09-02T10:00:00Z"),
+                _skew("h1", ts="2026-09-02T11:00:00Z"),
+            ],
+        )
+        belt_skew_report.main(["--telemetry-dir", str(telemetry), "--json"])
+        summary = json.loads(capsys.readouterr().out)
+        assert summary["by_session"]["s1"]["last_ts"] == "2026-09-02T11:00:00Z"
