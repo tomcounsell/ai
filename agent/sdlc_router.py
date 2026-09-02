@@ -1743,6 +1743,46 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     return _review_verdict_is_stale(stage_states)
 
 
+def _rule_patch_dispatched_not_completed(stage_states: dict, meta: dict, context: dict) -> bool:
+    """A dispatched ``/do-patch`` died before completing its stage — re-dispatch it.
+
+    Crashed-stage recovery on the PATCH side (same class as row 2c for
+    CRITIQUE, #1668, and the #3078 PLAN fix): ``/do-patch`` writes its
+    dispatch record, then dies before writing any PATCH marker. Observed live
+    on issue #2754 (2026-09-02): the crashed dispatch made the recorded
+    CHANGES REQUESTED verdict *classified stale* (``_review_verdict_is_stale``
+    compares against the latest patch DISPATCH, not a landed patch), at which
+    point no row owned the state — row 8 steps aside on staleness, row 8b
+    requires ``PATCH == completed``, rows 8c/8d/8e require an absent verdict,
+    and 8f/9/10/G6 require APPROVED. Router answered
+    ``Blocked('no matching dispatch rule')``.
+
+    Disjointness: row 8b requires ``PATCH == completed``; this row requires
+    the opposite. Rows 8c/8d/8e require the absence of a recorded REVIEW
+    verdict; this row requires one present. Row 8 fires only on a fresh
+    (non-stale) verdict; with ``last_dispatched_skill == /do-patch`` the
+    verdict necessarily predates that dispatch, so row 8 has already stepped
+    aside on every state this row owns.
+
+    Loop-bounded by G4: a deterministically crashing patch re-dispatches the
+    same skill on an identical stage snapshot (``_patch_cycle_count`` only
+    increments when the stage completes), so ``same_stage_dispatch_count``
+    climbs and G4 escalates.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if (meta.get("last_dispatched_skill") or "") != SKILL_DO_PATCH:
+        return False
+    if stage_states.get("PATCH") == STATUS_COMPLETED:
+        return False
+    # A recorded REVIEW verdict is what distinguishes "patch was warranted and
+    # died" from the no-verdict states rows 8c/8d/8e own.
+    if meta.get("latest_review_verdict"):
+        return True
+    verdicts = stage_states.get("_verdicts") or {}
+    return bool(_verdict_text(verdicts.get("REVIEW")))
+
+
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
     """REVIEW is in_progress but never recorded a verdict — re-dispatch review.
 
@@ -2083,6 +2123,15 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_patch_applied_after_review,
         skill=SKILL_DO_PR_REVIEW,
         reason="Re-review is REQUIRED after every patch",
+    ),
+    # Row 8g: /do-patch was dispatched but died before completing its stage —
+    # crashed-stage recovery on the PATCH side (mirrors 2c/8c; observed on
+    # #2754). Loop-bound by G4.
+    DispatchRule(
+        row_id="8g",
+        state_predicate=_rule_patch_dispatched_not_completed,
+        skill=SKILL_DO_PATCH,
+        reason="Patch dispatched but never completed — re-run patch",
     ),
     # Row 8c: REVIEW is in_progress with no recorded verdict and row 8b does not
     # apply (no patch applied after review). Mirrors row 2c on the CRITIQUE side.

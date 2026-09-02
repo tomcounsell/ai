@@ -16,6 +16,7 @@ from agent.sdlc_router import (
     SKILL_DO_BUILD,
     SKILL_DO_DOCS,
     SKILL_DO_MERGE,
+    SKILL_DO_PATCH,
     SKILL_DO_PLAN,
     SKILL_DO_PLAN_CRITIQUE,
     SKILL_DO_PR_REVIEW,
@@ -1266,6 +1267,80 @@ class TestCrashedPlanStageRecovery:
         meta = _base_meta(issue_number=2771, plan_exists=False, pr_number=42)
         result = decide_next_dispatch(states, meta, {})
         assert not (isinstance(result, Dispatch) and result.row_id in ("1", "2"))
+
+
+class TestCrashedPatchStageRecovery:
+    """Row 8g: a dispatched /do-patch that died before its marker must route.
+
+    Replays the #2754 wedge (2026-09-02): /do-patch wrote its dispatch record
+    then crashed. The recorded CHANGES REQUESTED verdict became classified
+    stale (staleness compares against the patch DISPATCH, not a landed
+    patch), row 8 stepped aside, 8b needed PATCH=completed, 8c/8d/8e needed
+    an absent verdict, 8f/9/10/G6 needed APPROVED — NO_RULE.
+    """
+
+    def _states(self):
+        return {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "ready",
+            "PATCH": "pending",
+            "REVIEW": "pending",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": "2026-09-02T07:43:32",
+                }
+            },
+            "_sdlc_dispatches": [
+                {
+                    "skill": SKILL_DO_PATCH,
+                    "at": "2026-09-02T09:36:50",
+                    "stage_snapshot": {},
+                }
+            ],
+        }
+
+    def _meta(self, **overrides):
+        base = dict(
+            pr_number=3077,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            last_dispatched_skill=SKILL_DO_PATCH,
+            latest_review_verdict="CHANGES REQUESTED",
+            latest_critique_verdict="READY TO BUILD (NO CONCERNS)",
+        )
+        base.update(overrides)
+        return _base_meta(**base)
+
+    def test_crashed_patch_redispatches_patch(self):
+        result = decide_next_dispatch(self._states(), self._meta(), {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8g"
+
+    def test_completed_patch_defers_to_8b(self):
+        states = self._states()
+        states["PATCH"] = "completed"
+        result = decide_next_dispatch(states, self._meta(), {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8b"
+
+    def test_no_recorded_verdict_does_not_match_8g(self):
+        """Absent verdict belongs to rows 8c/8d/8e — 8g must stand down."""
+        states = self._states()
+        del states["_verdicts"]
+        meta = self._meta(latest_review_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id == "8g")
+
+    def test_last_dispatch_not_patch_does_not_match_8g(self):
+        meta = self._meta(last_dispatched_skill=SKILL_DO_PR_REVIEW)
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id == "8g")
 
 
 # ---------------------------------------------------------------------------
