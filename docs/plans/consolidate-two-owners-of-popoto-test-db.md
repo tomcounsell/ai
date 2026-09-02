@@ -12,15 +12,99 @@ last_comment_id:
 
 ## Problem
 
-TBD
+Two independently-maintained mechanisms each believe they own the fact "which Redis db is popoto pointed at right now", and they disagree about *how* to own it.
+
+1. **popoto's bundled `pytest11` plugin** (`.venv/lib/python3.14/site-packages/popoto/pytest_plugin.py`) swaps the connection pool **in place** on the existing `POPOTO_REDIS_DB` object (`_swap_db`, lines 100-116). Since #2683 it is driven by `POPOTO_TEST_DB`, which `tests/conftest.py::pytest_configure` exports before collection.
+2. **`tests/conftest.py`'s `redis_test_db` autouse fixture** (line 914) throws a **new** `redis.Redis` object at `rdb.POPOTO_REDIS_DB` (line 964), then spends 20 lines cleaning up after that choice: a memoized `sys.modules` walk (`_popoto_modules_with_redis_db`, lines 659-710) that re-points every popoto submodule's stale `POPOTO_REDIS_DB` binding (lines 973-976), plus an eager `aioredis.Redis(...)` assignment to `rdb._POPOTO_ASYNC_REDIS_DB` (line 980), plus a three-way restore at teardown (lines 987-990).
+
+Every line in that second list exists *only* because conftest replaces the object instead of mutating it. Object replacement is what strands the submodule bindings; the repatch loop is the cleanup; the module cache is the performance patch on the cleanup; and the cache's two-signal invalidation (with its own dedicated test class) is the correctness patch on the performance patch. Four layers of machinery deriving from one avoidable decision.
+
+**Current behavior:**
+
+- The two owners can drift. This is the exact failure shape #2628 exists to remove: a call site re-derives an answer instead of asking the single source of truth.
+- The eager async bind at line 980 is not merely redundant, it is **actively wrong**. `get_async_redis_db()` (`popoto/redis_db.py:216-270`) deliberately mirrors the *current sync client's* `connection_pool.connection_kwargs` rather than re-reading `REDIS_URL`, precisely so the async path follows any runtime swap. The plugin's `_popoto_reset_async` nulls the global at setup *and* teardown of every test specifically so the client is built lazily **inside the test's own event loop** — its docstring says "a client built now would be bound to the wrong loop." conftest builds one in a synchronous setup context, which is the one thing that fixture exists to prevent. The recon's live ordering probe confirmed conftest sets up *after* the plugin, so the wrong-loop client is the one tests actually get.
+- Object replacement silently drops popoto's connection cap. popoto builds `POPOTO_REDIS_DB` on a `redis.BlockingConnectionPool` with `max_connections=128` (`redis_db.py:127-160`) to stop `MaxConnectionsError` under `asyncio.gather` bursts. conftest's bare `redis.Redis(host=..., port=..., db=...)` gets an unbounded plain `ConnectionPool`, so the entire suite runs without that protection.
+- The mechanism is expensive to reason about: `docs/features/test-isolation-hardening.md` spends its opening three paragraphs, and `tests/unit/test_conftest_isolation_guards.py` spends a whole test class, explaining a cache whose only consumer is a loop that should not exist.
+
+**Desired outcome:**
+
+One object, one authority per fact. `tests/conftest.py` remains the sole owner of **server resolution** (host/port, from `tests/db_claim.py` — this is load-bearing and cannot move, see the Technical Approach). popoto's plugin remains the sole owner of the **db number** (via the `POPOTO_TEST_DB` export it already honours). conftest mutates the canonical client's pool in place instead of replacing the object, and consequently:
+
+- the submodule repatch loop, the module cache, and the cache's invalidation tests are deleted as dead by construction;
+- the eager async bind is deleted, handing `_POPOTO_ASYNC_REDIS_DB` back to the plugin's lazy in-loop path (a behavioural improvement, not just a deletion);
+- popoto's `BlockingConnectionPool` and its 128-connection cap survive into the test session.
 
 ## Freshness Check
 
-TBD
+**Baseline commit:** `ebe0105b4` (plan time, 2026-09-02)
+**Issue filed at:** 2026-08-13T07:35:32Z
+**Recon audited at:** `3b6eb651b` (2026-09-02, same day as this plan)
+**Disposition:** Unchanged
+
+The issue's `## Recon Summary` was itself written today at `3b6eb651b`, and it already
+absorbed the drift that had accumulated between filing and recon. This check therefore
+verifies the recon's own pointers, not the stale ones in the issue's Background section.
+
+**File:line references re-verified (against `ebe0105b4`):**
+
+| Recon claim | Status |
+|---|---|
+| `tests/conftest.py:964` — `rdb.POPOTO_REDIS_DB = test_client` (object replacement) | Holds, exact line |
+| `tests/conftest.py:973-976` — submodule repatch loop | Holds, exact lines |
+| `tests/conftest.py:980` — eager `rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(...)` | Holds, exact line |
+| `tests/conftest.py:659-710` — `_popoto_modules_with_redis_db` + two-signal cache | Holds (comment block starts 659, function ends 710) |
+| `tests/conftest.py:987-990` — three-way teardown restore | Holds, exact lines |
+| `tests/conftest.py:887-911, 960-963` — `_assert_client_matches_claim_registry` and its call | Holds, exact lines |
+| `tests/conftest.py:277-305` — `_export_claimed_redis_url` (#2805) | Holds, exact lines |
+| `tests/conftest.py:323` — `os.environ["POPOTO_TEST_DB"] = str(db)` | Holds, exact line |
+| `tests/conftest.py:738-771` — `_popoto_client_ownership_check` | Holds, exact lines |
+| `popoto/pytest_plugin.py:100-116` — `_swap_db` in-place pool swap | Holds |
+| `popoto/redis_db.py:216-270` — `get_async_redis_db()` mirrors the sync kwargs | Holds |
+| `tests/unit/test_test_redis_server_resolution.py:44-54` — async test skips on `None` | Holds, exact lines |
+| `tests/unit/test_conftest_isolation_guards.py:264,339,375` (cache tests) | Minor drift: the class now spans ~240-360; the cache-invalidation tests are at 264 and 339, and line 375 is inside `TestPopotoSplitBrainRoundTrip`'s docstring rather than a cache test. Claim unaffected. |
+
+**Cited sibling issues/PRs re-checked:**
+
+- **#2628** — CLOSED. The ownership-enforcement work whose No-Gos deferred this item.
+- **PR #2683** (merged 2026-08-13, "Enforce test-DB ownership so the unit suite stops rotating") — the deferral's origin. Its No-Gos entry lives at `docs/archive/plans-completed/suite-failure-rotation-db-ownership.md:909-913` (the plan has been archived out of `docs/plans/` since the issue cited it) and names this work `[TRACKED → #2771]`.
+- **#2799** — CLOSED 2026-08-31, merged as `ff20e0311`. **This is the one that changed the answer**, and the recon caught it: `redis_test_db` now resolves host/port through `db_claim` and asserts the client against the claim registry. It creates a new, load-bearing reason conftest builds its own connection kwargs, which is why full delegation to the plugin is *not* the right consolidation direction.
+- **#2805** — CLOSED, merged as `d59f6509c` (PR #2958, 2026-08-25). Adds the process-wide `REDIS_URL` export. Its own docstring concedes it does not reach this process's popoto client, so it neither helps nor blocks this work.
+- **#2763 / PR #2786** — CLOSED/merged. Subprocess db inheritance via `db_claim.subprocess_env`. Untouched by this plan.
+- **#2655 / PR #2700** — merged. The AST recurrence guard against tests deriving their own `db=`. Relevant as a standing check that must stay green.
+- **#2680** — merged. Four-layer production-flush hardening, including the flush ownership guard installed at `tests/conftest.py:253`. This plan must not weaken it.
+- **#2037** — CLOSED. The original create-then-filter split-brain whose regression test (`TestPopotoSplitBrainRoundTrip`) this plan rewrites rather than deletes.
+- **#2770** — the upstream-popoto sibling of this issue (plugin-side hardening); it lives in `~/src/popoto`, not here.
+
+**Commits on main since the recon baseline touching referenced files:** none.
+`git log 3b6eb651b..HEAD -- tests/conftest.py tests/db_claim.py tests/unit/test_conftest_isolation_guards.py tests/unit/test_test_redis_server_resolution.py` returns empty.
+
+**Active plans in `docs/plans/` overlapping this area:** none. The nearest neighbours
+(`overclaim-guard-greps-whole-worktree`, `fix-red-main-unit-tests`,
+`module-scope-env-reads-migration`) touch the test suite but not popoto client
+construction or `redis_test_db`.
+
+**Notes:** This is not a bug fix in the "reproduce the symptom" sense — nothing is
+currently failing. It is a correctness-and-consolidation chore whose *observable*
+defects (wrong-loop async client, dropped connection cap) were established by the
+recon's live probe rather than by a red test. That probe's finding is restated as
+spike-1 below and must be re-confirmed by the builder before the deletions land.
 
 ## Prior Art
 
-TBD
+Six merged PRs have shaped `redis_test_db` and its neighbours. None of them attempted this
+consolidation — every one of them *added* a layer, and #2683 explicitly deferred the removal.
+
+- **PR #2061** (2026-07-13) *Fix xdist test-isolation flakes: popoto db-cache split-brain + agent-hooks corruption* — introduced the two-signal invalidation on `_popoto_modules_with_redis_db`'s cache. Succeeded at what it set out to do. This plan deletes the cache outright, which subsumes rather than contradicts it.
+- **PR #2117** (2026-07-16) *Fix cross-process Redis test-db collision (#2060)* — replaced the `gw{N}->db{N+1}` derivation with the flock-backed per-process claim in `tests/db_claim.py`. Established `claim_test_db()` as the single authority for the db *number*.
+- **PR #2680** (2026-08-13) *Harden production Redis against accidental flush (four layers)* — installed the flush ownership guard at `tests/conftest.py:253` and `tools/redis_flush_guard.py`. Constrains this work: whatever client conftest ends up with must still be on a claimed db before the first `flushdb()`.
+- **PR #2683** (2026-08-13) *Enforce test-DB ownership so the unit suite stops rotating (#2628)* — moved the claim into `pytest_configure` and added the `POPOTO_TEST_DB` export that made the plugin honour this process's db. **This is the PR that created the two-owner condition and consciously deferred resolving it** (round-4 review concern 2: removing the repatch loop is a different blast radius from the flush guard).
+- **PR #2700** (2026-08-13) *Recurrence guard: detect tests that derive their own Redis db= (#2655)* — AST guard in `tests/db_derivation_guard.py`. A standing constraint: the new conftest body must not trip it.
+- **PR #2786** (2026-08-13) *Make test subprocesses inherit the parent's claimed test DB (#2763)* — `db_claim.subprocess_env`. Orthogonal; this plan does not touch the subprocess path.
+- **PR #2958** (2026-08-25) *Pytest exports its own REDIS_URL; the line-keyed ALLOWLIST guard is deleted (#2805)* — process-wide `REDIS_URL` export. Explicitly documents that it cannot reach this process's own popoto client.
+- **`ff20e0311`** (#2799, closed 2026-08-31) *Connect to the Redis server the db-claim registry names* — routed conftest's client through `db_claim.redis_test_host()/redis_test_port()` and added `_assert_client_matches_claim_registry`. **The most important precedent here**: it is the reason conftest cannot simply hand db-and-server resolution to the plugin.
+
+**Upstream sibling:** #2770 tracks the mirror-image hardening inside `~/src/popoto` itself.
+This plan deliberately requires no upstream change (see No-Gos).
 
 ## Research
 
