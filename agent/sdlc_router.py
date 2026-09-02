@@ -1107,6 +1107,20 @@ def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     # can verify) AND the plan file is actually absent.
     if plan_status == "ready" and meta.get("issue_number") and not meta.get("plan_exists"):
         return True
+    # Crashed-stage recovery (#3078): PLAN="in_progress" with no plan doc on
+    # disk means the plan subagent died mid-flight — the marker has no status
+    # for "started, did not finish", so the wedge reads as still-working
+    # forever and previously dead-ended at Blocked('no matching dispatch
+    # rule'). Re-dispatching /do-plan is the recovery; same evidence
+    # discipline as the #1640 bootstrap case above (issue_number so we can
+    # verify, and the file genuinely absent), and loop-bound by G4 the same
+    # way row 2c bounds a crashed critique (#1668).
+    if (
+        plan_status == STATUS_IN_PROGRESS
+        and meta.get("issue_number")
+        and not meta.get("plan_exists")
+    ):
+        return True
     return False
 
 
@@ -1127,6 +1141,13 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
         return True  # completed implies a plan doc exists (#1275 case intact)
     if plan_status == "ready":
         return bool(meta.get("plan_exists"))  # "ready" needs real evidence (#1640)
+    # Crashed-stage recovery (#3078): PLAN="in_progress" but the plan doc IS
+    # on disk — the plan subagent wrote the doc, then died before marking the
+    # stage completed. The doc is the artifact critique reads, so with
+    # evidence it exists the lane can advance; a half-written doc comes back
+    # NEEDS REVISION and the ordinary revision loop (bounded by G2) owns it.
+    if plan_status == STATUS_IN_PROGRESS:
+        return bool(meta.get("plan_exists"))
     return False
 
 

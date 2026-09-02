@@ -1226,6 +1226,48 @@ class TestG2RevisionRoundCap:
         assert result.row_id == "G1"
 
 
+class TestCrashedPlanStageRecovery:
+    """#3078: PLAN="in_progress" after a dead plan subagent must route, not wedge.
+
+    Replays the #2771 wedge: two consecutive /do-plan subagents died
+    mid-flight, leaving the ledger asserting PLAN=in_progress with no plan
+    doc on disk. The router returned Blocked('no matching dispatch rule') and
+    the lane's only exits were outside the pipeline's contract.
+    """
+
+    def test_in_progress_no_doc_redispatches_plan(self):
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=False)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "1"
+
+    def test_in_progress_doc_on_disk_advances_to_critique(self):
+        """Died after writing the doc but before marking completed — the doc
+        is the artifact critique reads, so the lane advances."""
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=True, latest_critique_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+        assert result.row_id == "2"
+
+    def test_no_doc_and_no_issue_number_stays_blocked(self):
+        """Without an issue_number the absence of a plan doc is unverifiable
+        (#1640 evidence discipline) — refuse to guess."""
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=None, plan_exists=False, latest_critique_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+
+    def test_open_pr_defers_to_pr_stage_rows(self):
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=False, pr_number=42)
+        result = decide_next_dispatch(states, meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id in ("1", "2"))
+
+
 # ---------------------------------------------------------------------------
 # Issue #2062 (WS3a/b/d): row 10 verdict gate, row 8e no-verdict recovery,
 # row 8f head_sha staleness. The #1897 misroute replay is pinned by name in
