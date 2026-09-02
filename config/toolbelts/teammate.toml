@@ -1,0 +1,70 @@
+# Teammate persona toolbelt — Persona Toolbelts plan (#3081), Lane A.
+#
+# The version-pinned, client-shareable declaration of what the Teammate
+# persona ships with. Read cold, this file answers "Valor's Teammate runs
+# with these tools, scoped this way." Seeded 2026-09-02 by enumerating the
+# persona's ACTUAL ambient surface (faithful snapshot — activating
+# enforcement changes nothing). Bump belt_version on EVERY edit; the
+# resolver (agent/session_runner/belt_resolver.py) fails closed on a
+# version it was not asked to expect.
+#
+# Stated plainly: the Teammate write restriction (docs/meta paths only) is
+# NOT expressed in this belt yet. Today it is enforced after the fact by the
+# PreToolUse hook allowlist (agent/hooks/pre_tool_use.py::
+# _teammate_is_allowed_write). Lane B's first wrapper PR (#3081 task 5)
+# moves that boundary into the belt: general Write/Edit leaves the builtin
+# list and docs writes go through valor-docs-write. Until then this file is
+# a faithful snapshot of the offered surface — all built-ins visible, writes
+# hook-gated. Headless turns run `--permission-mode bypassPermissions`
+# (plan #2000, reaffirmed by #3081 Open Question 2).
+
+belt_version = 1
+
+# why: the Claude CLI version this belt's flag semantics were validated
+# against (#3081 Risk 2 — flag semantics can drift across CLI versions).
+claude_cli_validated = "2.1.236"
+
+[builtin]
+# why: today's Teammate surface OFFERS the CLI's full built-in set — the
+# write restriction above is a hook-level denial, not tool absence, so the
+# faithful snapshot is the CLI's own "default" sentinel. Lane B narrows
+# this list when valor-docs-write ships (with a belt_version bump).
+tools = "default"
+
+# MCP servers: only the servers declared here load once enforcement is on
+# (--strict-mcp-config). This is the repo-managed fleet surface installed on
+# every machine by scripts/update/mcp_*.py; host-local extras in
+# ~/.claude.json are ambient drift, which is exactly what belts eliminate.
+
+[mcp_servers.memory]
+# why: subconscious-memory recall — the mcp__memory__memory_get /
+# mcp__memory__memory_search tools that back <thought> stub expansion
+# (docs/features/subconscious-memory.md). Launched from the session's
+# working directory, so the relative PYTHONPATH resolves per-checkout and
+# this file stays byte-identical across hosts.
+command = "python3"
+args = ["-m", "mcp_servers.memory_server"]
+env = { PYTHONPATH = "." }
+
+[mcp_servers.byob]
+# why: browse and read the web through the user's real Chrome via the BYOB
+# bridge — the Teammate's research surface in group conversations.
+# Installed at a fixed $HOME-relative path on every machine by
+# scripts/update/mcp_byob.py; the shell expands $HOME at server launch, so
+# the declaration is byte-identical across hosts.
+command = "/bin/sh"
+args = [
+    "-c",
+    'exec "$HOME/.byob/packages/mcp-server/node_modules/.bin/tsx" "$HOME/.byob/packages/mcp-server/bin/byob-mcp.ts"',
+]
+env = { BYOB_ALLOW_EVAL = "1" }
+
+[permissions]
+# why (allowed): empty — under bypassPermissions a permission allowlist is
+# inert today; entries appear only when a tool must stay visible but scoped
+# (compiled to --allowedTools).
+allowed = []
+# why (disallowed): empty — the Teammate write restriction is hook-enforced
+# today (see the header note); it moves into the belt in Lane B rather than
+# being duplicated here as a permission rule.
+disallowed = []

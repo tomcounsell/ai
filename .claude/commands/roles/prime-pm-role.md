@@ -89,6 +89,7 @@ These `tools.job_tool` invocations are the one sanctioned exception to the no-sh
 - **Trivial messages get a one-line ack, then you stop.** When the user's message is a status update, acknowledgment, or pleasantry that needs no action (e.g. "we're back online", "thanks", "ok", "fyi I moved the machine"), reply with a single brief `route: "user"` call whose `message` is just "ok" — a simple "ok" is the right answer to a simple "ok". Do **not** engage the developer, spawn research subagents, or manufacture work. Match the message's weight.
 - Use the same `## Open Questions` convention you would in a normal session when you have a legitimate open question for the user. (This is a routing affordance, not a status update.)
 - When the user is clearly asking for status rather than action, prefer `route: "user"` over engaging the developer.
+- If a tool or capability you need is missing from your environment, state it plainly on its own line starting with exactly `[missing-capability]` (e.g. `[missing-capability] gh CLI unavailable — cannot query the PR`); the runner escalates that line for you, so never work around the gap silently.
 
 # What the user said
 

@@ -1,0 +1,65 @@
+# Dev persona toolbelt — Persona Toolbelts plan (#3081), Lane A.
+#
+# The version-pinned, client-shareable declaration of what the Dev persona
+# ships with. Read cold, this file answers "Valor's Dev runs with these
+# tools, scoped this way." Seeded 2026-09-02 by enumerating the persona's
+# ACTUAL ambient surface (faithful snapshot — activating enforcement changes
+# nothing). Bump belt_version on EVERY edit; the resolver
+# (agent/session_runner/belt_resolver.py) fails closed on a version it was
+# not asked to expect.
+#
+# Stated plainly: Dev keeps open Bash by decision (#3081 No-Gos resolution
+# on the issue) — belts are ergonomics and reproducibility, not a trust
+# boundary. Headless turns run `--permission-mode bypassPermissions` (plan
+# #2000, reaffirmed by #3081 Open Question 2), so belt ABSENCE is the sole
+# scoping mechanism.
+
+belt_version = 1
+
+# why: the Claude CLI version this belt's flag semantics were validated
+# against (#3081 Risk 2 — flag semantics can drift across CLI versions).
+claude_cli_validated = "2.1.236"
+
+[builtin]
+# why: today's Dev surface is the CLI's full built-in set — SDLC build,
+# test, and patch stages need the whole write/execute toolchain (Bash, Edit,
+# Write, Task, ...), and no --tools restriction has ever been applied to a
+# headless turn. The faithful snapshot is the CLI's own "default" sentinel.
+tools = "default"
+
+# MCP servers: only the servers declared here load once enforcement is on
+# (--strict-mcp-config). This is the repo-managed fleet surface installed on
+# every machine by scripts/update/mcp_*.py; host-local extras in
+# ~/.claude.json are ambient drift, which is exactly what belts eliminate.
+
+[mcp_servers.memory]
+# why: subconscious-memory recall — the mcp__memory__memory_get /
+# mcp__memory__memory_search tools that back <thought> stub expansion
+# (docs/features/subconscious-memory.md). Launched from the session's
+# working directory, so the relative PYTHONPATH resolves per-checkout and
+# this file stays byte-identical across hosts.
+command = "python3"
+args = ["-m", "mcp_servers.memory_server"]
+env = { PYTHONPATH = "." }
+
+[mcp_servers.byob]
+# why: drive the user's real Chrome for frontend verification and
+# browser-driven testing via the BYOB bridge. Installed at a fixed
+# $HOME-relative path on every machine by scripts/update/mcp_byob.py; the
+# shell expands $HOME at server launch, so the declaration is
+# byte-identical across hosts.
+command = "/bin/sh"
+args = [
+    "-c",
+    'exec "$HOME/.byob/packages/mcp-server/node_modules/.bin/tsx" "$HOME/.byob/packages/mcp-server/bin/byob-mcp.ts"',
+]
+env = { BYOB_ALLOW_EVAL = "1" }
+
+[permissions]
+# why (allowed): empty — under bypassPermissions a permission allowlist is
+# inert today; entries appear only when a tool must stay visible but scoped
+# (compiled to --allowedTools).
+allowed = []
+# why (disallowed): empty — today no built-in tool is permission-blocked for
+# the Dev persona (compiled to --disallowedTools when non-empty).
+disallowed = []
