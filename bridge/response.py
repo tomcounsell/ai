@@ -543,31 +543,58 @@ async def react_if_worker_down(client, chat_id, message_id, session_id) -> None:
 # `PollAnswer.option` is an arbitrary bytes blob Telegram echoes back verbatim on
 # read, and its only protocol constraint is uniqueness per option. We spend that
 # blob on a correlation id so a poll discovered on the wire can be matched back
-# to the outbox payload that produced it (Race 6). `f"{index}:{hex32}"` is at
-# most 35 bytes, comfortably inside Telegram's 100-byte ceiling — do not
-# substitute a longer id (a payload digest, a `session_id:timestamp` composite),
-# because exceeding the ceiling fails at the wire with no local signal.
-_OPTION_MAX_BYTES = 100
+# to the outbox payload that produced it (Race 6).
+#
+# THE CEILING IS 8 BYTES, NOT 100. Measured empirically against live MTProto on
+# 2026-09-02 while running the Task 1 gate: 8 bytes is accepted, 9 is rejected
+# with `A poll option used invalid data (the data may be too long)` at the wire.
+# The TL schema's `option:bytes` carries no visible bound and every reference the
+# plan consulted said 100, so this is only knowable by probing. Treat the number
+# below as a hard, verified protocol constant — a value that exceeds it fails at
+# the wire with no local signal, which is exactly the failure mode that would
+# ship a silently unroutable poll.
+#
+# The layout is therefore packed binary rather than the `f"{index}:{hex}"` text
+# form the plan sketched, which cannot fit: 1 byte of option index, then the
+# first 7 bytes of the 32-hex `poll_id_hint`. 56 bits is far more than orphan
+# adoption needs to disambiguate a bounded window of recent outbound polls in one
+# chat, and the adoption rule already bails with a warning on an ambiguous match,
+# so even a collision degrades to the existing safe path.
+_OPTION_MAX_BYTES = 8
+_OPTION_HINT_BYTES = _OPTION_MAX_BYTES - 1  # 7 — the index takes the first byte
 
 
 def encode_option(index: int, correlation_id: str | None = None) -> bytes:
     """Encode a poll option index (plus optional correlation id) into option bytes.
 
+    Layout: ``bytes([index])`` followed by the first ``_OPTION_HINT_BYTES`` bytes
+    of ``correlation_id`` decoded from hex. The bare one-byte form (no
+    correlation id) is a probe-only affordance.
+
     The inverse of :func:`decode_option`. Both live here, next to the only
     producer, so the translator, the orphan-adoption scan and the gate probes all
     parse one encoding rather than three copies of it.
     """
-    raw = (f"{index}:{correlation_id}" if correlation_id else f"{index}").encode()
-    if len(raw) > _OPTION_MAX_BYTES:
+    if not 0 <= index <= 255:
+        raise ValueError(f"poll option index {index} does not fit in one byte")
+    raw = bytes([index])
+    if correlation_id:
+        raw += _hint_bytes(correlation_id)
+    if len(raw) > _OPTION_MAX_BYTES:  # unreachable by construction; a guard, not a branch
         raise ValueError(
-            f"poll option bytes exceed Telegram's {_OPTION_MAX_BYTES}-byte ceiling "
-            f"({len(raw)} bytes); correlation id is too long"
+            f"poll option bytes exceed Telegram's verified {_OPTION_MAX_BYTES}-byte "
+            f"ceiling ({len(raw)} bytes)"
         )
     return raw
 
 
 def decode_option(raw: bytes | None) -> tuple[int | None, str | None]:
-    """Decode option bytes back into ``(index, correlation_id)``.
+    """Decode option bytes back into ``(index, correlation_id_prefix)``.
+
+    The returned correlation id is the **7-byte prefix as 14 hex chars**, not the
+    full 32-hex ``poll_id_hint`` — the ceiling does not allow carrying the whole
+    id. Callers match with :func:`correlation_matches` rather than comparing to a
+    full hint directly.
 
     Returns ``(index, None)`` for the bare probe-only form and ``(None, None)``
     when the bytes are absent or unparseable — a poll we did not send, or one
@@ -577,15 +604,35 @@ def decode_option(raw: bytes | None) -> tuple[int | None, str | None]:
     if not raw:
         return (None, None)
     try:
-        text = raw.decode() if isinstance(raw, bytes) else str(raw)
+        data = bytes(raw)
     except Exception:  # noqa: BLE001 — arbitrary server bytes
         return (None, None)
-    head, sep, tail = text.partition(":")
-    try:
-        index = int(head)
-    except (TypeError, ValueError):
+    if not data:
         return (None, None)
-    return (index, tail if sep and tail else None)
+    index = data[0]
+    tail = data[1:]
+    return (index, tail.hex() if tail else None)
+
+
+def correlation_matches(decoded_prefix: str | None, poll_id_hint: str | None) -> bool:
+    """Whether option bytes decoded off the wire belong to ``poll_id_hint``.
+
+    The option can only carry a 7-byte prefix of the hint, so an exact
+    string compare against the full 32-hex hint would never match. This is the
+    one place that asymmetry is handled; orphan adoption and the relay's
+    already-sent lookup both go through it rather than comparing by hand.
+    """
+    if not decoded_prefix or not poll_id_hint:
+        return False
+    try:
+        return decoded_prefix == _hint_bytes(poll_id_hint).hex()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hint_bytes(correlation_id: str) -> bytes:
+    """First ``_OPTION_HINT_BYTES`` bytes of a hex correlation id."""
+    return bytes.fromhex(correlation_id[: _OPTION_HINT_BYTES * 2])
 
 
 async def send_poll(
