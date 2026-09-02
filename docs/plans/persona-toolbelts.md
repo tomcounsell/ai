@@ -246,18 +246,18 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 
 - [ ] Baseline report exists: tool-surface tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts — published before activation.
 - [x] One manifest per persona in `config/toolbelts/`, version-pinned; resolver refuses unresolvable belts; flag off leaves the harness invocation byte-identical.
-- [ ] Reproducibility test fails when the same persona+version resolves different surfaces in two environments.
+- [x] Reproducibility test fails when the same persona+version resolves different surfaces in two environments.
 - [ ] Activation is a dedicated commit flipping `TOOLBELTS_ENFORCE`, nothing else in the diff.
-- [ ] Escalation line lands on the open-question channel, tagged, non-blocking.
-- [ ] A belt file, read cold, states what the persona can and cannot do without codebase context (every entry has a `# why` comment).
+- [x] Escalation line lands on the open-question channel, tagged, non-blocking.
+- [x] A belt file, read cold, states what the persona can and cannot do without codebase context (every entry has a `# why` comment).
 - [ ] AXI linter (built at the wrapper-count-3 floor) fails a tool violating any item of the eight-item AXI checklist in Technical Approach.
 - [ ] Escalation rollback gate is codified (`ESCALATION_CEILING_MULTIPLIER` + `ESCALATION_CEILING_FLOOR` in `config/settings.py`, belt-relevant baseline denominator) and armed at activation, with `tools.belt_skew_report` providing the cross-session watch path.
 - [ ] `valor-docs-write` replicates both resolution passes of the hook it replaces (shared extracted function), with the traversal and symlink-escape guard tests carried forward and the symlink mutation check demonstrated in the first-wrapper PR.
 - [ ] Top baseline-ranked tools wrapped, each its own PR, each retiring its redundant hook in the same PR with a mutation-checked guard test.
 - [ ] Teammate docs writes survive via `valor-docs-write` while general Write/Edit leaves its belt.
 - [ ] Post-rollout measurement against baseline reported (targets −40% context / −25% turns; first-pass review rate not regressed).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -359,7 +359,7 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Belt manifests exist | `ls config/toolbelts/pm.toml config/toolbelts/dev.toml config/toolbelts/teammate.toml \| wc -l` | output > 2 |
-| Resolver fails closed | `python -c "from agent.session_runner.belt_resolver import resolve_belt; resolve_belt('nonexistent')" 2>&1 \| grep -ci "unresolvable\|unknown persona"` | output > 0 |
+| Resolver fails closed | `python -c "from agent.session_runner.belt_resolver import resolve_belt; resolve_belt('nonexistent')" 2>&1 \| grep -ci "unresolvable"` | output > 0 |
 | CLI supports belt flags | `claude --help 2>&1 \| grep -c -- "--strict-mcp-config"` | output > 0 |
 | Escalation rollback gate codified (multiplier + floor) | `grep -c "ESCALATION_CEILING" config/settings.py` | output > 1 |
 | Skew report exists | `python -m tools.belt_skew_report --help >/dev/null 2>&1; echo $?` | output contains 0 |
