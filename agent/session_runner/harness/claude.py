@@ -395,8 +395,7 @@ async def get_response_via_harness(
             harness_cmd.extend(resolved_belt.flags)
             belt_version = resolved_belt.belt_version
             logger.info(
-                f"[harness] Belt v{belt_version} enforced for role={role} "
-                f"session_id={session_id}"
+                f"[harness] Belt v{belt_version} enforced for role={role} session_id={session_id}"
             )
         check_and_stamp_belt_state(session_id, enforce=belt_enforced, belt_version=belt_version)
 

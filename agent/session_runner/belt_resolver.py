@@ -126,9 +126,7 @@ def _require(condition: bool, persona: str, detail: str) -> None:
 
 
 def _is_str_list(value: object) -> bool:
-    return isinstance(value, list) and all(
-        isinstance(item, str) and item for item in value
-    )
+    return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
 
 
 def _validate_manifest(persona: str, manifest: dict) -> None:
@@ -163,7 +161,7 @@ def _validate_manifest(persona: str, manifest: dict) -> None:
     _require(
         tools == "default" or _is_str_list(tools),
         persona,
-        "[builtin].tools must be \"default\" or a list of tool names",
+        '[builtin].tools must be "default" or a list of tool names',
     )
 
     servers = manifest.get("mcp_servers", {})
@@ -212,9 +210,7 @@ def _load_manifest(persona: str, toolbelts_dir: Path) -> dict:
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        raise BeltResolutionError(
-            persona, "missing_manifest", f"no manifest at {path}"
-        ) from None
+        raise BeltResolutionError(persona, "missing_manifest", f"no manifest at {path}") from None
     except OSError as exc:
         raise BeltResolutionError(persona, "missing_manifest", str(exc)) from exc
     try:
@@ -365,9 +361,7 @@ def check_and_stamp_belt_state(
         session.belt_version = belt_version
         session.save(update_fields=["belt_enforce_state", "belt_version", "updated_at"])
     except Exception as exc:  # noqa: BLE001 — observability must never crash a turn
-        logger.debug(
-            "check_and_stamp_belt_state(%r) swallowed exception: %r", session_id, exc
-        )
+        logger.debug("check_and_stamp_belt_state(%r) swallowed exception: %r", session_id, exc)
 
 
 def forward_capability_escalations(

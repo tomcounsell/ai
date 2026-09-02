@@ -45,7 +45,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from config.settings import settings as app_settings
 from agent.session_runner.belt_resolver import (
     BELT_SKEW_EVENT_TYPE,
     ESCALATION_MARKER,
@@ -55,6 +54,7 @@ from agent.session_runner.belt_resolver import (
     forward_capability_escalations,
     resolve_belt,
 )
+from config.settings import settings as app_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -263,9 +263,7 @@ class TestResumeNarrowing:
 
     def test_resume_with_superset_history_logs_nothing(self, belts_dir: Path, caplog):
         with caplog.at_level("INFO"):
-            resolve_belt(
-                "pm", resumed_history_tools=frozenset({"Bash"}), toolbelts_dir=belts_dir
-            )
+            resolve_belt("pm", resumed_history_tools=frozenset({"Bash"}), toolbelts_dir=belts_dir)
         assert not any("narrower than resumed history" in r.message for r in caplog.records)
 
 
