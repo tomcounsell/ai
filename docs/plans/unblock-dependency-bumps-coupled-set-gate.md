@@ -1,11 +1,11 @@
 ---
 status: Ready
 type: bug
-appetite: Medium
+appetite: Large
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-09-02T05:55:00Z
+revision_applied_at: 2026-09-02T06:18:01Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
 last_comment_id: 5421299483
 ---
@@ -97,8 +97,11 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `3b6eb651b` (re-verified 2026-09-02, seven days after the
-round-3 reshape; the prior baseline was `d5d08615a`).
+**Baseline commit:** `b87fb26de` (round 5, 2026-09-02). The two commits since
+the round-4 baseline `3b6eb651b` are both plan/critique docs — no tracked source
+file moved — and every line reference in this table plus the five corrected body
+sites were re-run against `b87fb26de` during the round-5 pass. The prior
+baselines were `3b6eb651b` (round 4) and `d5d08615a` (round 3).
 **Issue filed at:** 2026-08-25T05:16:36Z
 **Disposition:** **Minor drift.** Every substantive premise holds: the
 `agent/llm/` module-scope imports, the five module-scope consumers,
@@ -304,7 +307,8 @@ Saved to memory as `9716dcf2cf4a46eda06bd480554ea1ff`.
 
 ### Today: how a bad pin reaches a running process (three routes, zero checks)
 
-1. **Auto-bump route** — `run.py:1302` Step 3.5 (maintainer-only, `run.py:1169`)
+1. **Auto-bump route** — `run.py`'s Step 3.5 `deps.auto_bump_deps(project_dir)`
+   call (maintainer-only, gated on `is_lockfile_maintainer`)
    → `auto_bump_deps` → pin rewrite → sync → `run_smoke_test` (import check +
    one pytest file — **the layer that failed to observe the break**) → commit +
    push.
@@ -394,9 +398,9 @@ Three channels, fired unconditionally on the first transition to degraded.
 
 | Channel | Mechanism | Why it actually fires |
 |---|---|---|
-| Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following `agent/index_drift.py:224` including its capture-failed fallback log. | `sentry-sdk`'s own HTTP transport; shares no code with the LLM stack. **Hibernation exemption required:** `bridge/telegram_bridge.py:70-77`'s `_sentry_before_send` drops every event while `is_hibernating()` — a persistent flag, not a brief window. The hook must pass events whose message carries the degraded sentinel token. Hibernation means "we cannot reach Telegram", which is exactly when a broken LLM stack most needs to be visible elsewhere. |
+| Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following `agent/index_drift.py:224` including its capture-failed fallback log. | `sentry-sdk`'s own HTTP transport; shares no code with the LLM stack. **Hibernation exemption required:** `bridge/telegram_bridge.py`'s `_sentry_before_send` (`:55`, wired into `configure_sentry` at `:80`) drops every event while `is_hibernating()` — a persistent flag, not a brief window. The hook must pass events whose message carries the degraded sentinel token. Hibernation means "we cannot reach Telegram", which is exactly when a broken LLM stack most needs to be visible elsewhere. |
 | Logs | `logger.critical` with a fixed, greppable sentinel token. | stdlib only. Survives a Sentry DSN outage. |
-| Dashboard | The resolver writes a marker file `data/llm-stack-degraded` (versions + `exc_type`); `dashboard_json` (`ui/app.py:906`) reads it with the siblings' fail-quiet `try/except OSError` and renders red. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
+| Dashboard | The resolver writes a marker file at `<repo>/data/llm-stack-degraded` (versions + `exc_type`), resolved from the module as `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"` — never cwd-relative, mirroring `ui/app.py:376`'s `Path(__file__).parent.parent / "data" / ...`; `dashboard_json` (`ui/app.py:907`) reads it with the siblings' fail-quiet `try/except OSError` and renders red. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
 
 A direct Telegram push was considered and **rejected**: no raw Bot-API send path
 exists in tracked code, and Telethon's send lives only in the bridge — it cannot
@@ -446,13 +450,48 @@ costs one stale cycle.
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large
+
+Re-labelled from Medium at round 5, per the round-4 nit. Nine tasks, four agent
+roles, three new test files, ~15 new integration tests, a wholesale `wrapper.py`
+module-scope rewrite, a `TimeoutSettings` migration, and three interface
+replacements in `deps.py` is not Medium-shaped work, and calling it Medium only
+buys a false sense of the review budget. The Large label is the honest one; the
+scope itself is unchanged.
 
 **Team:** Solo dev pair (runtime + update-scripts), test engineer, documentarian
 
 **Interactions:**
 - PM check-ins: 1 (only if alert-channel judgment is needed)
 - Review rounds: 1
+
+### Why this lane is not split into two PRs
+
+Round 4 proposed cutting a PR boundary at task 4 — half (A) import-safety +
+predicate + degraded posture, half (B) the `deps.py` coupled-set rewrite —
+noting the halves are file-disjoint and that half (B), being held, changes no
+production behavior. **Rejected**, for the record:
+
+- **The halves are not independent, only file-disjoint.** Task 6's `llm` gate
+  phase invokes `python -m agent.llm.compat --json`, and `verify.py`'s new
+  `ToolCheck` invokes the same entry point. Half (B) has no meaning without
+  half (A)'s artifact, so splitting serializes two full SDLC pipelines: (B)
+  cannot start until (A) merges, and its Verification rows cannot even be
+  written against a branch that lacks `compat.py`.
+- **The Rabbit Holes argument does not transfer.** That argument is about
+  co-landing a gate with *the dependency bump it gates* — where a failure is
+  genuinely ambiguous between "the gate is wrong" and "the bump is bad". Here
+  both halves are gate machinery with disjoint test files
+  (`test_llm_*.py` vs `test_remote_update.py`), so a red test names its own
+  half. This lane already forbids the actual hazard: the anti-criteria assert
+  no pin moves.
+- **The held set is the point, not a reason to defer it.** `hold` exists
+  precisely so the coupled-set structure can land inert. Deferring it to a
+  second lane leaves `AUTO_BUMP_PACKAGES` and the three spike-2 pin-helper
+  defects on `main` for another cycle — the defects that produced the
+  half-bump in the first place.
+
+The appetite re-label above is the concession taken instead.
 
 ## Prerequisites
 
@@ -492,6 +531,23 @@ costs one stale cycle.
   `allow_network=True` additionally makes one minimal `run_typed` call (catches
   the transport class). `python -m agent.llm.compat --json` is the subprocess
   entry point; no imports from `scripts/`.
+- **Two entry points, no shared state — the predicate is pure, the resolver
+  alerts.** `check_llm_stack_compat(allow_network=...)` returns a `CompatResult`
+  and does **nothing else**: it never touches the memoized degraded flag, never
+  calls `capture_message`, never writes or clears the marker file. Only
+  `_resolve_degraded_flag()` (the in-process, lazily-memoized reader used by
+  `run_typed` and the startup hooks) alerts, and only on the first transition to
+  degraded. `python -m agent.llm.compat --json` calls **only the pure
+  predicate**. This is load-bearing, not tidiness: the CLI's callers are
+  `verify.py` and the auto-bump `llm` gate phase, and the gate deliberately runs
+  the predicate against a stack it is *about to roll back*. If the CLI resolved
+  the flag, every **successful** rollback would fire a `level="fatal"` Sentry
+  capture and leave the standing `data/llm-stack-degraded` marker behind for a
+  failure the gate just prevented — reaching this plan's own named "stuck-red
+  dashboard equals no dashboard channel" mode through its happy path, and
+  alarming production twice during task 7. Asserted by a test: the CLI path on
+  an incompatible stack emits zero `capture_message` calls and creates no marker
+  file.
 - **Degraded flag + alert in the resolver** (see Failure Posture). Startup hooks
   in `bridge/telegram_bridge.py::main` and `worker/__main__.py` force early
   resolution; neither may exit on incompatibility.
@@ -505,8 +561,9 @@ costs one stale cycle.
   call. The `import` phase imports the set's own `import_names` — the hardcoded
   `import anthropic; import claude_agent_sdk` string is gone.
 - **`hold`** — a held set is skipped by `auto_bump_deps`, recording
-  `BumpResult(bumped=False, error=f"held: {set.hold}")` so `run.py:1317`'s log
-  stays legible. This is how `anthropic` returns to the auto-bump *structure*
+  `BumpResult(bumped=False, error=f"held: {set.hold}")` so `run.py`'s Step 3.5
+  per-bump log (the block containing `"Smoke test passed after bump"`,
+  `run.py:1514` at `b87fb26de`) stays legible. This is how `anthropic` returns to the auto-bump *structure*
   without the first post-merge cron tick auto-executing the Step 2 upgrade
   (`anthropic 1.0.0` + `pydantic-ai-slim 2.35.0` would pass the gate and push
   fleet-wide, unattended). Step 2's lane removes the hold as its final act.
@@ -569,14 +626,47 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   (`{project_dir}/.venv/bin/python -m agent.llm.compat --json`), following
   `_markitdown_importable`. In-process would exercise the pre-sync imports the
   update process already holds. Bounded by a subprocess timeout.
-- **`verify.py` uses the same subprocess shape.** `check_python_import`
+- **One argv construction, shared by the phase runner and the test.** The
+  command `[str(venv_python), "-m", "agent.llm.compat", "--json", "--allow-network"]`
+  is built by a single helper in `deps.py` (e.g. `llm_gate_argv(venv_python)`),
+  called by the `llm` phase runner and by task 7's leg (a) alike, with
+  `test_llm_phase_argv_matches_gate_helper` asserting the phase invokes exactly
+  what the helper returns. Without this, the only executions of the `llm` phase
+  this lane ever performs are hand-written invocations that could drift from the
+  production one and still pass — see the Success Criteria note on why the phase
+  is unreachable in production for this lane's whole life.
+- **`verify.py` uses the same subprocess shape — and the result must be
+  routed through `ToolCheck.error`, not `ToolCheck.detail`.** `check_python_import`
   (`verify.py:104`) and `check_venv_tool` (`verify.py:125`) already build
   `{venv}/bin/python` and shell out via `run_cmd`. Run the `--json` entry with
-  `check=False`, map onto
-  `ToolCheck(name=..., available=result["compatible"], detail=result["reason"])`,
-  carrying both resolved versions in `detail` (printed even on pass, #2541) so
-  a silently stale venv is visible. Unconditional — every `/update`, bump or no
-  bump.
+  `check=False` and return:
+
+  ```python
+  ToolCheck(
+      name="llm-stack-compat",
+      available=res["compatible"],
+      version=f"anthropic {res['anthropic_version']} / pydantic-ai {res['pydantic_ai_version']}",
+      error=None if res["compatible"] else res["reason"],
+      detail=<both resolved versions>,
+  )
+  ```
+
+  appended to `result.valor_tools` alongside its siblings (`verify.py:1225-1228`).
+  **`error` must be non-empty on failure or the leg is silent.** `run.py`'s
+  generic `valor_tools` loop (`run.py:2673-2684`) is literally
+  `if not tool.available and tool.error:` — with `error` unset, an incompatible
+  stack produces no log line, no `result.warnings` entry, and nothing for
+  `bridge/update.py::extract_update_warnings` to surface, which would ship a
+  dead check at the one call site covering Data Flow routes 2 and 3.
+  Do **not** rely on `detail` to carry the failure: `ToolCheck.detail` is not
+  read by that loop at all — the only site rendering it is the bespoke
+  `projects_json_check` block at `run.py:1907-1909`. Print-on-pass (#2541) is
+  therefore a *second* deliverable, not a property of `detail`: add a dedicated
+  call-site block in `run.py` modeled on `run.py:1907-1909` that logs the
+  compat check's `detail` every run, pass or fail, so a silently stale venv is
+  visible. Unconditional — every `/update`, bump or no bump.
+  `llm-stack-compat` is **not** added to `human_gated_tools`: it is
+  agent-resolvable, so it should re-warn every run until fixed.
 - **Import-cycle discipline inside the package**: `compat.py` reaches the stack
   only through the loader, inside function bodies. `wrapper.py` may import
   `compat`'s flag accessor at module scope (both are our own import-safe code).
@@ -664,7 +754,12 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
 - [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): compatible on the
   good pair; incompatible with verbatim reason on a simulated bad signature;
   incompatible on loader ImportError; introspection-failure → incompatible;
-  fallback tuple ⊆ introspected keys; local mode makes no network call.
+  fallback tuple ⊆ introspected keys; local mode makes no network call; **the
+  predicate is pure** — `check_llm_stack_compat` on an incompatible stack emits
+  zero `capture_message` calls, writes no marker file, and leaves the memoized
+  degraded flag unresolved; **the `--json` CLI path is pure by the same
+  assertions** (run it in a subprocess against an incompatible stack and assert
+  no marker file appears at the resolved path).
 - [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): alert
   fires **while `run_typed` raises** (independence proof); raising
   `capture_message` suppresses nothing else; marker file written on degraded,
@@ -673,6 +768,13 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   still enqueues an AgentSession).
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
   — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
+- [ ] `tests/integration/test_remote_update.py::test_verify_runs_compat_check_without_bump`
+  — ADD, and it must assert the leg is **loud**, not merely present: the
+  returned `ToolCheck` on an incompatible stack has a non-empty `.error`, the
+  check appears in `result.valor_tools`, and the emitted status lines produce a
+  matching entry from `bridge/update.py::extract_update_warnings`. A version
+  asserting only `available is False` would pass against the silent-check
+  implementation the round-4 blocker identified.
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_rollback_on_smoke_failure`
   — UPDATE: new phase-carrying return shape; assert the **set's** snapshot is
   restored (all members).
@@ -684,6 +786,7 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `test_partial_resolve_skips_whole_set`, `test_extras_pin_is_bumped`,
   `test_openai_pin_not_read_from_comment`, `test_openai_is_not_in_any_coupled_set`,
   `test_default_gates_exclude_llm_phase`, `test_held_set_is_skipped_and_legible`,
+  `test_llm_phase_argv_matches_gate_helper`,
   `test_llm_gate_failure_rolls_back_set`, `test_unrelated_set_survives_failed_set`,
   `test_gate_unavailable_is_fail_closed`, `test_restore_failure_blocks_commit`,
   `test_worktree_clean_after_every_rollback_path`,
@@ -761,7 +864,8 @@ and the resolver-bound alert covers that path too.
 ## Race Conditions
 
 ### Race 1: Concurrent `/update` runs on the maintainer machine
-**Location:** `run.py:1302-1345`, `deps.py::auto_bump_deps`
+**Location:** `run.py`'s Step 3.5 block (the `auto_bump_deps` call and its
+result handling, `run.py:1491-1534` at `b87fb26de`), `deps.py::auto_bump_deps`
 **Trigger:** Overlapping runs snapshot/edit `pyproject.toml`; one's rollback
 resurrects a pin the other moved.
 **Mitigation:** Pre-existing and unchanged — per-set snapshots narrow the window
@@ -806,14 +910,20 @@ This work **is** an update-system change.
 - `agent/llm/compat.py` — **new**, the predicate + degraded flag + alert; shared
   by runtime services (in-process) and update scripts (subprocess only).
 - `scripts/update/verify.py` — **new call site**: subprocess `--json` run mapped
-  to a `ToolCheck`, unconditional on every `/update` and `/update --cron`.
+  to a `ToolCheck` with the failure reason in `.error` (see Technical Approach —
+  `detail` alone yields a silent check), appended to `result.valor_tools`,
+  unconditional on every `/update` and `/update --cron`.
 - `scripts/update/deps.py` — the substantive change: `CoupledSet` (+`hold`),
   declaration-aware pin helpers, per-set gate phases (set-derived imports),
   per-set rollback with `restore_failed`, the `llm` phase subprocess.
-- `scripts/update/run.py` — minimal: surface the failed phase in the rolled-back
-  warning; guard the commit branch with `not bump.restore_failed`. The
+- `scripts/update/run.py` — surface the failed phase in the rolled-back
+  warning; guard the commit branch with `not bump.restore_failed`; add the
+  print-on-pass block for the compat check's `detail`, modeled on the
+  `projects_json_check` block at `run.py:1907-1909`. The
   commit/push/restart ordering per `sdlc-1091.md` is untouched.
-- `.claude/skills/update/SKILL.md` lines 66-72 — the auto-bump description
+- `.claude/skills/update/SKILL.md`, section `### Auto-Bump Critical Dependencies`
+  (cited by heading, not line range — the previously cited `66-72` spilled into
+  `### Critical Dependency Handling`) — the auto-bump description
   ("anthropic and claude-agent-sdk... import check + pytest") becomes wrong on
   both counts; correct it and note the new verify-time check.
 - `ui/app.py` — reads `data/llm-stack-degraded` into `/dashboard.json`.
@@ -851,7 +961,7 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] Add a row to `docs/features/README.md`.
 
 ### Existing Docs to Correct
-- [ ] `.claude/skills/update/SKILL.md` lines 66-72 (see Update System).
+- [ ] `.claude/skills/update/SKILL.md`, section `### Auto-Bump Critical Dependencies` (see Update System).
 - [ ] `pyproject.toml` — the two-line comment above the `anthropic` pin.
 - [ ] `docs/features/remote-update.md` — cross-reference.
 - [ ] `docs/features/nonharness-llm-wrapper.md` — the import-safety contract,
@@ -876,16 +986,33 @@ bridge command. But the runtime's boot and failure presentation change:
   — one test proves all four.
 - [ ] `check_llm_stack_compat()` exists in `agent/llm/compat.py`, importing
   nothing from `scripts/`, with `python -m agent.llm.compat --json` working.
-- [ ] The predicate is exercised from all four sites: `/update` verify
-  (unconditional, subprocess), bridge startup, worker startup, auto-bump `llm`
-  phase (subprocess, target venv).
+- [ ] The predicate is exercised from three sites **in production on this
+  lane's merge**: `/update` verify (unconditional, subprocess), bridge startup,
+  worker startup. The fourth site — the auto-bump `llm` phase — is wired and
+  covered by tests plus task 7's transcripts, but is **unreachable in
+  production for this lane's entire life** by design: the only set declaring
+  `gates=("llm", ...)` carries `hold="#3001 Step 2"`, and `CoupledSet.gates`
+  defaults exclude `llm`. Its first unattended production execution belongs to
+  Step 2's lane, which removes the hold. What this lane asserts instead is that
+  the wiring is real: `test_llm_phase_argv_matches_gate_helper` proves the
+  phase invokes exactly the argv the shared helper builds, and task 7 leg (a)
+  executes that same helper's argv unmocked.
+- [ ] `/update` verify's compat leg is **loud, not silent**: on an incompatible
+  stack the `ToolCheck` has a non-empty `.error`, `run.py`'s `valor_tools` loop
+  logs and appends a warning, and `extract_update_warnings` surfaces it. Both
+  resolved versions print on every run, pass or fail, from a dedicated
+  call-site block (not from `detail` in the generic loop, which never reads it).
+- [ ] The `--json` CLI calls the **pure** predicate: on an incompatible stack it
+  emits zero `capture_message` calls and creates no `data/llm-stack-degraded`
+  marker. Only `_resolve_degraded_flag()` alerts.
 - [ ] On an incompatible stack, bridge and worker **start**, and an inbound
   Telegram message still enqueues an AgentSession.
 - [ ] **The alert fires in a test where `run_typed` raises** (independence
   proof) and fires on the no-startup-hook path (resolver-bound proof).
 - [ ] A raising `capture_message` suppresses nothing else; the hibernation
   `before_send` passes the sentinel event; `data/llm-stack-degraded` is written
-  on degraded and **cleared on healthy** resolution.
+  on degraded and **cleared on healthy** resolution, at a path resolved from the
+  module (not cwd) and asserted equal to the path `ui/app.py` reads.
 - [ ] `LLMStackIncompatible` is a `LLMCallError` subclass — asserted.
 - [ ] The signature check derives its parameter set by introspection, with the
   fallback-tuple-subset test.
@@ -995,8 +1122,17 @@ bridge command. But the runtime's boot and failure presentation change:
   `run_typed` call.
 - Every failure path returns `compatible=False` with verbatim `reason` and
   `exc_type`. No bare `except Exception: pass`.
-- Add the `python -m agent.llm.compat --json` entry point. Import nothing from
-  `scripts/`; reach the stack only through the loader, inside function bodies.
+- **Keep the predicate pure.** `check_llm_stack_compat` never touches the
+  memoized degraded flag, never calls `capture_message`, never writes or clears
+  the marker file. Alerting belongs solely to `_resolve_degraded_flag()` in
+  task 4.
+- Add the `python -m agent.llm.compat --json` entry point, calling **only the
+  pure predicate** — its callers (`verify.py`, the auto-bump `llm` gate) must
+  not alarm production for a stack the gate is about to roll back. Import
+  nothing from `scripts/`; reach the stack only through the loader, inside
+  function bodies.
+- Test the purity of both the function and the CLI path: zero `capture_message`
+  calls, no marker file, flag unresolved, on an incompatible stack.
 
 ### 4. Degraded flag, resolver-bound alert, startup hooks
 - **Task ID**: `build-degraded-posture`
@@ -1010,7 +1146,12 @@ bridge command. But the runtime's boot and failure presentation change:
 - Lazily self-resolving memoized flag in `compat.py`; **the alert fires from
   the first transition to degraded inside the resolver** — Sentry fatal,
   `logger.critical` sentinel, `data/llm-stack-degraded` marker (versions +
-  `exc_type`). Healthy resolution clears the marker.
+  `exc_type`). Healthy resolution clears the marker. Resolve the marker path
+  from the module — `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"`
+  — never cwd-relative, and assert in the test that it equals the path
+  `ui/app.py` reads (`Path(__file__).parent.parent / "data" / ...`).
+- The resolver is the **only** alerting path; `check_llm_stack_compat` stays
+  pure (task 3).
 - `LLMStackIncompatible(LLMCallError)`; `run_typed`/`run_typed_local` raise it
   when degraded.
 - Startup calls in `bridge/telegram_bridge.py::main` and `worker/__main__.py`
@@ -1050,11 +1191,19 @@ bridge command. But the runtime's boot and failure presentation change:
 - All-or-nothing resolve/rewrite/sync/gate per set; skip on hold (legible
   `BumpResult`); skip sync when no pin changed; per-set snapshot/restore;
   `restore_failed` + `git checkout -- uv.lock`; guard `run.py`'s commit branch.
-- Gate phases: `llm` → subprocess `--json --allow-network` in the target venv;
-  `import` → the set's own `import_names`; `pytest` unchanged. Surface the
-  failed phase in the warning. Commit/push/restart ordering untouched.
-- `verify.py`: the unconditional subprocess `ToolCheck` (both versions in
-  `detail`).
+- Gate phases: `llm` → subprocess `--json --allow-network` in the target venv,
+  with the argv built by the shared `llm_gate_argv(venv_python)` helper (task 7
+  leg (a) calls the same helper; `test_llm_phase_argv_matches_gate_helper`
+  pins them together); `import` → the set's own `import_names`; `pytest`
+  unchanged. Surface the failed phase in the warning. Commit/push/restart
+  ordering untouched.
+- `verify.py`: the unconditional subprocess `ToolCheck` appended to
+  `result.valor_tools`, **with the failure reason in `.error`** (non-empty on
+  failure, or `run.py:2673-2684`'s `if not tool.available and tool.error:`
+  makes the whole leg silent) and both versions in `version`/`detail`. Add the
+  print-on-pass block in `run.py` modeled on `run.py:1907-1909` — the generic
+  loop never reads `detail`. Do not add `llm-stack-compat` to
+  `human_gated_tools`.
 - Replace the `pyproject.toml` stopgap comment with the two-line form.
 - Re-add `anthropic` (as a held-set member) **in this same task** — never as a
   separate earlier commit.
@@ -1067,8 +1216,11 @@ bridge command. But the runtime's boot and failure presentation change:
 - **Parallel**: false
 - **Leg (a), unmocked:** on a throwaway copy of the repo (never the shared
   checkout), write `anthropic==1.0.0` + `pydantic-ai-slim[anthropic]==2.9.0`,
-  `uv sync --all-extras`, invoke the gate subprocess directly; assert non-zero
-  exit with `unexpected keyword argument 'temperature'`.
+  `uv sync --all-extras`, invoke the gate subprocess **through
+  `llm_gate_argv(venv_python)`** — the same helper the `llm` phase runner calls,
+  never a hand-written command line; assert non-zero exit with
+  `unexpected keyword argument 'temperature'`. Also assert the run left **no**
+  `data/llm-stack-degraded` marker behind (the CLI calls the pure predicate).
 - **Leg (b), resolution-stubbed:** monkeypatch `get_pypi_latest` to the
   known-bad pair, temporarily clear the hold in the fixture, run
   `auto_bump_deps`, assert `rolled_back is True` and both pins restored.
@@ -1114,7 +1266,10 @@ Rows assert *declarations and executed paths*, not file text.
 | Import phase is set-derived, not hardcoded | `grep -c "import anthropic; import claude_agent_sdk" scripts/update/deps.py` | match count == 0 (the literal is replaced by `set.import_names`) |
 | Gate invocation is real, not a mention | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_gate" -q` | exit code 0 |
 | Held set is skipped and legible | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "held_set" -q` | exit code 0 |
-| Verify runs the check unconditionally | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
+| Verify runs the check unconditionally **and loudly** (non-empty `.error`, surfaced by `extract_update_warnings`) | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
+| The `llm` phase and the manual gate invocation share one argv construction | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_phase_argv" -q` | exit code 0 |
+| The `--json` CLI is pure — no alert, no marker | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
+| Marker path is module-resolved, not cwd-relative | `.venv/bin/python -c "import ast;s=open('agent/llm/compat.py').read();assert 'llm-stack-degraded' in s and 'parents[2]' in s"` | exit code 0 |
 | Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
 | Pin comment keeps the constraint and adds the pointer | `grep -c "AUTO_BUMP_SETS" pyproject.toml` | output > 0 |
@@ -1134,14 +1289,14 @@ Rows assert *declarations and executed paths*, not file text.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | The prescribed `verify.py` call signature `ToolCheck(name=..., available=result["compatible"], detail=result["reason"])` produces a **silent** verify leg. `run.py`'s `valor_tools` loop warns only under `if not tool.available and tool.error:`, so with `error` unset an incompatible stack emits no log line, no `result.warnings` entry, and nothing for `extract_update_warnings` to surface. The "(printed even on pass, #2541)" claim is also wrong: `detail` is rendered by one bespoke block for `projects_json_check` only; the generic loop never reads it. Followed literally, the build ships a dead check at the one call site covering Data Flow routes 2 and 3. | pending | Return `ToolCheck(name="llm-stack-compat", available=res["compatible"], version=<both versions>, error=None if res["compatible"] else res["reason"], detail=<both versions>)` and append to `result.valor_tools` (verify.py:1225-1228). `run.py`'s guard is literally `if not tool.available and tool.error:` — `error` must be non-empty or the leg is silent. For print-on-pass, add a dedicated call-site block modeled on run.py:1907-1909. Extend `test_verify_runs_compat_check_without_bump` to assert a non-empty `.error` AND presence in `extract_update_warnings(status_lines)`. |
-| CONCERN | Risk & Robustness | The plan never says whether `python -m agent.llm.compat --json` calls the pure predicate or the alerting resolver, and the two callers want opposite behavior. If the CLI resolves the degraded flag, every *successful* auto-bump rollback fires a `level="fatal"` Sentry capture and writes the standing `data/llm-stack-degraded` marker for a failure the gate just prevented — reaching the plan's own named "stuck-red dashboard equals no dashboard channel" mode via its happy path, and alarming production twice during task 7. | pending | Two entry points, no shared state: `check_llm_stack_compat(allow_network=False) -> CompatResult` is pure (never touches the memoized flag, never calls `capture_message`, never writes the marker); `_resolve_degraded_flag()` alerts on first transition. The `--json` CLI calls only the former. Add a test asserting the CLI path emits zero `capture_message` calls and creates no marker file on an incompatible stack. |
-| CONCERN | Scope & Value | The lane bundles two independently shippable, explicitly file-disjoint halves: (A) import-safety contract + predicate + degraded posture, and (B) the update-script coupled-set rewrite. The plan itself marks task 5 `**Parallel**: true (with tasks 2-4 — no shared files)` and argues in Rabbit Holes that co-landing a gate with what it gates "gives you no way to tell which half is at fault" — the same argument applies here. Half (A) alone closes routes 2 and 3; half (B), being held, changes no production behavior this lane. | pending | The split is latent in the task graph: `build-pin-helpers` depends only on `verify-phase0-pin`. Cut PR 1 at task 4; `build-coupled-sets` then re-acquires `agent/llm/compat.py` from merged `main` rather than a sibling branch. Nothing in tasks 5-6 touches a file tasks 2-4 touch. If the split is rejected, record the reason — the plan currently argues both sides. |
-| CONCERN | History & Consistency | The round-4 revision corrected drifted addresses only inside the Freshness Check table and did not propagate them into the body. Five body sites still carry references the same document declares stale: `run.py:1302`/`run.py:1169` (Data Flow), `bridge/telegram_bridge.py:70-77` and `ui/app.py:906` (Failure Posture channels table), `run.py:1317` (Solution `hold` bullet), `run.py:1302-1345` (Race 1). | pending | Substitutions re-verified at `5021a40aa`: `run.py:1302` → `:1493`; `run.py:1169` → `:1358` (gate at `:1485`/`:1491`); `run.py:1317` → `:1514`; `telegram_bridge.py:70-77` → `:55` (wired at `:80`); `ui/app.py:906` → `:907`. Prefer symbol names over any of these, per the plan's own "locate every site by symbol, not by line." |
-| CONCERN | History & Consistency | The Success Criterion "The predicate is exercised from all four sites: ... auto-bump `llm` phase" asserts coverage the design forecloses: the only set declaring `gates=("llm", ...)` carries `hold="#3001 Step 2"`, and `CoupledSet.gates` defaults exclude `llm`, so the phase is unreachable in production for this lane's whole life. It can only be satisfied by a test double and by task-7 transcripts that themselves stub resolution and clear the hold. | pending | Reword the criterion to name test + transcript coverage and record that first unattended production execution is Step 2's lane. Make task 7 leg (a) invoke the gate through the **same argv construction** `auto_bump_deps` uses — factor `[str(venv_python), "-m", "agent.llm.compat", "--json", "--allow-network"]` into one helper called by both the phase runner and the test, and add `test_llm_phase_argv_matches_gate_helper`. |
-| NIT | Risk & Robustness | The degraded marker path is given only as the bare relative string `data/llm-stack-degraded`; the reader is pinned (`ui/app.py:376`) but the writer's resolution rule is unstated, so a cwd-relative or worktree-rooted write lands a marker the dashboard never reads. | pending | Resolve from the module: `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"` in `agent/llm/compat.py`, mirroring `ui/app.py:376`. Assert in the marker test that the written path equals the path `ui/app.py` reads. |
-| NIT | History & Consistency | The auto-bump block in `.claude/skills/update/SKILL.md` is at lines 64-70, not the cited 66-72; the cited range spills into `### Critical Dependency Handling`. | pending | Cite the section heading `### Auto-Bump Critical Dependencies` instead of a line range. |
-| NIT | Scope & Value | Nine tasks, four agent roles, three new test files, ~13 new integration tests, a wholesale `wrapper.py` module-scope rewrite, a `TimeoutSettings` migration, and three interface replacements in `deps.py` is not Medium-shaped work. | pending | Re-label the appetite Large, or take the task-4/5 split, which makes each half genuinely Medium. |
+| BLOCKER | Risk & Robustness | The prescribed `verify.py` call signature `ToolCheck(name=..., available=result["compatible"], detail=result["reason"])` produces a **silent** verify leg. `run.py`'s `valor_tools` loop warns only under `if not tool.available and tool.error:`, so with `error` unset an incompatible stack emits no log line, no `result.warnings` entry, and nothing for `extract_update_warnings` to surface. The "(printed even on pass, #2541)" claim is also wrong: `detail` is rendered by one bespoke block for `projects_json_check` only; the generic loop never reads it. Followed literally, the build ships a dead check at the one call site covering Data Flow routes 2 and 3. | **Fixed (round 5)** — Technical Approach verify.py bullet rewritten with the full `ToolCheck(..., error=...)` shape and the `run.py:2673-2684` guard quoted; the false '(printed even on pass)' claim replaced by a separate print-on-pass block modeled on `run.py:1907-1909`; Update System, task 6, Test Impact, Success Criteria, and a Verification row all updated to require a non-empty `.error` and an `extract_update_warnings` hit. | Return `ToolCheck(name="llm-stack-compat", available=res["compatible"], version=<both versions>, error=None if res["compatible"] else res["reason"], detail=<both versions>)` and append to `result.valor_tools` (verify.py:1225-1228). `run.py`'s guard is literally `if not tool.available and tool.error:` — `error` must be non-empty or the leg is silent. For print-on-pass, add a dedicated call-site block modeled on run.py:1907-1909. Extend `test_verify_runs_compat_check_without_bump` to assert a non-empty `.error` AND presence in `extract_update_warnings(status_lines)`. |
+| CONCERN | Risk & Robustness | The plan never says whether `python -m agent.llm.compat --json` calls the pure predicate or the alerting resolver, and the two callers want opposite behavior. If the CLI resolves the degraded flag, every *successful* auto-bump rollback fires a `level="fatal"` Sentry capture and writes the standing `data/llm-stack-degraded` marker for a failure the gate just prevented — reaching the plan's own named "stuck-red dashboard equals no dashboard channel" mode via its happy path, and alarming production twice during task 7. | **Fixed (round 5)** — new Solution bullet: `check_llm_stack_compat` is pure (no flag, no `capture_message`, no marker), `_resolve_degraded_flag()` alone alerts, `--json` calls only the pure predicate. Tasks 3, 4, and 7 leg (a), Test Impact, Success Criteria, and a Verification row carry the purity assertions. | Two entry points, no shared state: `check_llm_stack_compat(allow_network=False) -> CompatResult` is pure (never touches the memoized flag, never calls `capture_message`, never writes the marker); `_resolve_degraded_flag()` alerts on first transition. The `--json` CLI calls only the former. Add a test asserting the CLI path emits zero `capture_message` calls and creates no marker file on an incompatible stack. |
+| CONCERN | Scope & Value | The lane bundles two independently shippable, explicitly file-disjoint halves: (A) import-safety contract + predicate + degraded posture, and (B) the update-script coupled-set rewrite. The plan itself marks task 5 `**Parallel**: true (with tasks 2-4 — no shared files)` and argues in Rabbit Holes that co-landing a gate with what it gates "gives you no way to tell which half is at fault" — the same argument applies here. Half (A) alone closes routes 2 and 3; half (B), being held, changes no production behavior this lane. | **Rejected, with reason recorded (round 5)** — see the new Appetite subsection 'Why this lane is not split into two PRs': the halves are file-disjoint but not independent (task 6 and `verify.py` both invoke `agent.llm.compat`), the Rabbit Holes argument is about gate-vs-bump not gate-vs-caller, and splitting leaves the three spike-2 pin-helper defects on `main` another cycle. The appetite re-label was taken as the concession instead. | The split is latent in the task graph: `build-pin-helpers` depends only on `verify-phase0-pin`. Cut PR 1 at task 4; `build-coupled-sets` then re-acquires `agent/llm/compat.py` from merged `main` rather than a sibling branch. Nothing in tasks 5-6 touches a file tasks 2-4 touch. If the split is rejected, record the reason — the plan currently argues both sides. |
+| CONCERN | History & Consistency | The round-4 revision corrected drifted addresses only inside the Freshness Check table and did not propagate them into the body. Five body sites still carry references the same document declares stale: `run.py:1302`/`run.py:1169` (Data Flow), `bridge/telegram_bridge.py:70-77` and `ui/app.py:906` (Failure Posture channels table), `run.py:1317` (Solution `hold` bullet), `run.py:1302-1345` (Race 1). | **Fixed (round 5)** — all five body sites re-verified at `b87fb26de` and rewritten to lead with symbols: Data Flow (`auto_bump_deps` call / `is_lockfile_maintainer`), Failure Posture channels table (`_sentry_before_send` `:55` wired at `:80`; `ui/app.py:907`), the `hold` bullet (`:1514`), and Race 1 (`run.py:1491-1534`). | Substitutions re-verified at `5021a40aa`: `run.py:1302` → `:1493`; `run.py:1169` → `:1358` (gate at `:1485`/`:1491`); `run.py:1317` → `:1514`; `telegram_bridge.py:70-77` → `:55` (wired at `:80`); `ui/app.py:906` → `:907`. Prefer symbol names over any of these, per the plan's own "locate every site by symbol, not by line." |
+| CONCERN | History & Consistency | The Success Criterion "The predicate is exercised from all four sites: ... auto-bump `llm` phase" asserts coverage the design forecloses: the only set declaring `gates=("llm", ...)` carries `hold="#3001 Step 2"`, and `CoupledSet.gates` defaults exclude `llm`, so the phase is unreachable in production for this lane's whole life. It can only be satisfied by a test double and by task-7 transcripts that themselves stub resolution and clear the hold. | **Fixed (round 5)** — the criterion now names three production sites plus the `llm` phase as test-and-transcript coverage, states the hold makes production execution Step 2's, and requires the shared `llm_gate_argv(venv_python)` helper plus `test_llm_phase_argv_matches_gate_helper`. Task 6, task 7 leg (a), Technical Approach, Test Impact, and a Verification row all wire it. | Reword the criterion to name test + transcript coverage and record that first unattended production execution is Step 2's lane. Make task 7 leg (a) invoke the gate through the **same argv construction** `auto_bump_deps` uses — factor `[str(venv_python), "-m", "agent.llm.compat", "--json", "--allow-network"]` into one helper called by both the phase runner and the test, and add `test_llm_phase_argv_matches_gate_helper`. |
+| NIT | Risk & Robustness | The degraded marker path is given only as the bare relative string `data/llm-stack-degraded`; the reader is pinned (`ui/app.py:376`) but the writer's resolution rule is unstated, so a cwd-relative or worktree-rooted write lands a marker the dashboard never reads. | **Fixed (round 5)** — the marker path is prescribed as `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"` in the channels table and task 4, with a Success Criterion and Verification row asserting equality with the path `ui/app.py:376` reads. | Resolve from the module: `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"` in `agent/llm/compat.py`, mirroring `ui/app.py:376`. Assert in the marker test that the written path equals the path `ui/app.py` reads. |
+| NIT | History & Consistency | The auto-bump block in `.claude/skills/update/SKILL.md` is at lines 64-70, not the cited 66-72; the cited range spills into `### Critical Dependency Handling`. | **Fixed (round 5)** — Update System and Documentation now cite the heading `### Auto-Bump Critical Dependencies` instead of a line range. | Cite the section heading `### Auto-Bump Critical Dependencies` instead of a line range. |
+| NIT | Scope & Value | Nine tasks, four agent roles, three new test files, ~13 new integration tests, a wholesale `wrapper.py` module-scope rewrite, a `TimeoutSettings` migration, and three interface replacements in `deps.py` is not Medium-shaped work. | **Adopted (round 5)** — appetite re-labelled Large in frontmatter and the Appetite section, with the split alternative explicitly rejected and reasoned above. | Re-label the appetite Large, or take the task-4/5 split, which makes each half genuinely Medium. |
 
 Structural checks all pass: required sections present and substantive; task numbering 1-9 contiguous with valid, acyclic `Depends On` references; every cited file path exists except the four intentionally-new ones (`agent/llm/compat.py`, `docs/features/llm-stack-compat-gate.md`, and the three new test files); every cited commit SHA verified to exist with the described content; every `file:line` reference in the Freshness table re-verified as holding.
 
@@ -1200,3 +1355,21 @@ What this pass changed:
 
 Round-4 critique verdict: **NEEDS REVISION** (1 blocker, 4 concerns, 3 nits) —
 recorded in the table at the top of this section.
+
+### Round-5 revision pass (2026-09-02) — round-4 findings, no reshape
+
+Every round-4 finding is dispositioned in the table above. No architectural
+decision changed: the import-safety contract, the resolver-bound alert, the
+coupled-set model, and the hold all stand as round 3 left them.
+
+What this pass changed:
+
+| Change | Why |
+|---|---|
+| `verify.py` prescription rewritten to route the failure through `ToolCheck.error`, plus a separate print-on-pass block in `run.py` | The round-4 blocker, re-verified at `b87fb26de`: `run.py:2673-2684` warns only under `if not tool.available and tool.error:`, and `ToolCheck.detail` is read by exactly one bespoke block (`run.py:1907-1909`) that valor_tools never reaches. The prescribed signature shipped a dead check at the one call site covering Data Flow routes 2 and 3. |
+| Pure predicate / alerting resolver split made explicit, with purity tests | The `--json` CLI's callers include the auto-bump gate, which runs the predicate against a stack it is about to roll back. A resolving CLI would alarm production and leave a standing red marker on the gate's *success* path. |
+| Five stale body references corrected, symbol-first | Round 4's revision fixed only the Freshness table. Re-verified at `b87fb26de`: `is_lockfile_maintainer` `:1358` (gate `:1485`/`:1491`), `auto_bump_deps` call `:1493`, `"Smoke test passed after bump"` `:1514`, `_sentry_before_send` `:55` (wired `:80`), `dashboard_json` `:907`. |
+| The four-site Success Criterion reworded; `llm_gate_argv` helper introduced | The `llm` phase is unreachable in production while the LLM set is held, so the old criterion could only be satisfied by doubles. The helper makes the wiring itself assertable and pins task 7 leg (a) to the production argv. |
+| Marker path pinned to a module-resolved absolute path | A cwd-relative write lands a marker `ui/app.py` never reads. |
+| `SKILL.md` cited by heading | The cited `66-72` spilled into the next section; verified the block is `64-72` today and will drift again. |
+| Appetite Medium → Large; the two-PR split explicitly rejected with reasons | Honest sizing. The split was rejected because the halves are file-disjoint but not independent, and deferring half (B) leaves the spike-2 pin-helper defects on `main`. |
