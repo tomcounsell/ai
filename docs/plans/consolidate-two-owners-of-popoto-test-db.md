@@ -270,7 +270,20 @@ Replace object assignment with pool mutation. The shape:
 
 ## Failure Path Test Strategy
 
-TBD
+### Exception Handling Coverage
+- [ ] `tests/conftest.py`'s `redis_test_db` has **no** `except` blocks today and must gain none. The `_assert_client_matches_claim_registry` call raises `RuntimeError` deliberately and that must stay unguarded — a swallowed registry mismatch is #2799 returning silently. Verify with `grep -n 'except' tests/conftest.py` scoped to the fixture's line range: expected zero.
+- [ ] The plugin's `_popoto_test_db` teardown wraps `flushdb()` in `except Exception: pass` (`pytest_plugin.py:169-172`). That is upstream code and out of scope to change, but the plan must not *rely* on that flush: conftest's own teardown flush is the one that matters and is unguarded.
+- [ ] `old_pool.disconnect()` is called without a guard. If the server is already gone at teardown, redis-py raises. Add a test asserting the fixture does not mask a genuine connection failure — an unreachable server must fail the test loudly rather than silently leaving the suite on the wrong pool.
+
+### Empty/Invalid Input Handling
+- [ ] `db_claim.redis_test_host()` / `redis_test_port()` already handle the set-but-empty env-var case via `or` rather than `.get(k, default)` (#2957), and `tests/unit/test_test_redis_server_resolution.py::TestEmptyEnvFallsThroughToDefault` covers it. The new fixture body must keep resolving through those functions and must not reintroduce a `.get(..., default)`; the existing tests then cover the empty-input path for free.
+- [ ] `rdb._SYNC_MAX_CONNECTIONS` is derived from `POPOTO_SYNC_MAX_CONNECTIONS` with popoto's own `ValueError` fallback to 128. Add a case asserting the fixture reads the attribute rather than hardcoding 128, so a machine that overrides the env var gets the override.
+- [ ] The idempotence guard compares `connection_kwargs.get("host")` and `.get("port")` — a pool built from a URL may carry `port` as `int` while `db_claim.redis_test_port()` returns `str`. Normalize both sides and add a case that a str/int mismatch does not cause an infinite re-swap every test.
+
+### Error State Rendering
+- [ ] The user-visible failure surface here is a pytest error message, and it must stay diagnostic. Assert that a deliberately mismatched client still produces `_assert_client_matches_claim_registry`'s full message (client host:port vs registry host:port, plus the #2799 reference) rather than a bare `AssertionError`.
+- [ ] Assert the session-scoped `_popoto_client_ownership_check` still fires its "a popoto client is pointed at db N which this process has not claimed" message when the sync client is on an unclaimed db. Deleting the async bind must not weaken this check — it already skips `None` async clients by design.
+- [ ] Failure must not be silent-by-skip. The rewritten `test_async_client_matches_the_sync_client` must **fail**, not `pytest.skip`, when the async client diverges from the sync one — the current skip-on-`None` shape is exactly the silent-pass this plan removes.
 
 ## Test Impact
 
@@ -283,15 +296,58 @@ TBD
 
 ## Rabbit Holes
 
-TBD
+- **Patching `~/src/popoto` to accept host/port in `_swap_db`.** Tempting because it looks like the "real" fix, and `_swap_db` already takes `**extra_kwargs`. It is a different repo, a different release cycle, and #2770 already owns that surface. Spike-3 established that conftest owning server resolution is sufficient here.
+- **Trying to make the plugin's and conftest's fixtures run in a chosen order.** The current ordering (plugin first, conftest second) is what the design relies on, and it falls out of pytest's plugin-before-conftest fixture resolution plus the explicit `_popoto_test_db` dependency on the session check. Do not add `pytest_collection_modifyitems` reordering, fixture-order shims, or `@pytest.mark.order`. If ordering ever needs asserting, assert it in a test; do not engineer it.
+- **Auditing the ~197 `redis_test_db` call sites.** They request a fixture by name and never touch its internals. Reading them is days of work that cannot change the answer. The contract is "same name, same autouse, same scope" — hold that and the call sites are irrelevant.
+- **Generalizing the connection-cap fix into a "pool policy" abstraction.** The cap is one integer read from one popoto attribute. A `PoolFactory` / policy object would be more code than the thing it configures.
+- **Chasing every bare `redis.Redis(db=...)` in the test tree.** `TestPopotoSplitBrainRoundTrip` has two, and fixing those two is in scope because the file is already being edited. A repo-wide sweep for the same shape is #2655's guard territory and, where it hits production code, #3003's.
+- **Rewriting `_popoto_client_ownership_check` to also assert the async client is non-`None`.** Its docstring explains at length why it must not: an `AttributeError` raised in a session fixture errors *every test in the process during setup*. Deleting the eager bind makes `None` even more firmly the correct state, not less.
+- **Fixing the flaky-looking failures the first full-suite run surfaces.** A 20-minute autouse-fixture change will surface unrelated pre-existing flakes. Classify against main (`baseline-verifier`) before touching anything; do not fold unrelated repairs into this diff.
 
 ## Risks
 
-TBD
+### Risk 1: A stranded submodule binding survives somewhere the identity test does not look
+**Impact:** A popoto submodule holds a `POPOTO_REDIS_DB` that is not the canonical object — the #2037 split-brain, which manifests as intermittent create-then-query misses under xdist rather than a clean failure. This is the failure mode the deleted repatch loop was built to prevent, so removing it without proof is the single biggest hazard in this plan.
+**Mitigation:** The new identity test enumerates `sys.modules` for *every* name starting with `popoto` that has a `POPOTO_REDIS_DB` symbol and asserts each `is rdb.POPOTO_REDIS_DB` — the same discovery query the deleted helper used, repurposed from "repair" to "assert". Because it is an assertion rather than a repair, a stranded binding fails loudly instead of being silently patched. Run it late in a full suite (not just standalone) so the maximum number of popoto submodules are imported. Additionally, `TestPopotoSplitBrainRoundTrip` is kept (not deleted) precisely to keep a live reproduction of the mechanism in the suite.
+
+### Risk 2: Dropping the eager async bind changes behaviour for tests that were silently relying on it
+**Impact:** Spike-1 proved the eager client is the one tests currently observe. Any async test that touches popoto and passes today might pass *because* of the wrong-loop client (e.g. it never actually awaits, or it reads `connection_kwargs` without connecting). Removing it could surface real failures.
+**Mitigation:** Treat any new async failure as a genuine find, not as collateral — the plugin's lazy in-loop path is the correct behaviour and popoto's own docstrings say so. Run `tests/integration/` as well as `tests/unit/`, since async popoto usage concentrates there. If a test fails, fix the test, do not restore the bind; restoring it is explicitly out of contract (there is an anti-criterion for it in Verification).
+
+### Risk 3: The idempotence guard misjudges "already correct" and the swap never happens
+**Impact:** Silent worst case — the fixture becomes a no-op, the suite runs on whatever server popoto imported from the ambient `REDIS_URL`, and if that is production db 0 the flush guard is the only thing standing between the suite and real data.
+**Mitigation:** `_assert_client_matches_claim_registry` runs **after** the guard on every test, unconditionally, so a wrong "already correct" verdict fails on the first test rather than being silently tolerated. Type-normalize host/port before comparing (str vs int `port` is the realistic way this misjudges). The four-layer flush hardening from #2680 remains a backstop, not the primary defence.
+
+### Risk 4: A pre-existing red suite masks a regression introduced here
+**Impact:** `main`'s unit suite has a history of a rotating failure set (#2628) and there is an open `fix-red-main-unit-tests` plan. Attributing a real regression to "pre-existing" is the exact mistake this repo has been burned by.
+**Mitigation:** Capture a full `tests/unit/` and `tests/integration/` baseline on `main` *before* the first edit, and classify every post-change failure against it with the `baseline-verifier` agent. Never dismiss a failure as pre-existing without that comparison.
+
+### Risk 5: A future popoto release changes `_swap_db` or `_SYNC_MAX_CONNECTIONS`
+**Impact:** The plan reads two private-ish popoto names (`_SYNC_MAX_CONNECTIONS`, and it depends on `_swap_db`'s in-place semantics). An upstream rename breaks the suite at import or leaves the cap unset.
+**Mitigation:** `_popoto_client_ownership_check` already exists as the "future popoto stopped honouring us" tripwire, and the new pool-class assertion extends it to the cap. Read the cap defensively (`getattr(rdb, "_SYNC_MAX_CONNECTIONS", 128)`) with a comment naming #2770 as the upstream coordination point. The dependency is already there today via the plugin; this plan makes it *visible* rather than adding it.
 
 ## Race Conditions
 
-TBD
+### Race 1: Pool swap versus in-flight commands on the old pool
+**Location:** `tests/conftest.py`, the new `redis_test_db` body (currently ~948-990) — the `client.connection_pool = new_pool; old_pool.disconnect()` pair.
+**Trigger:** `disconnect()` tears down every connection hosted by the old pool. Any caller holding a checked-out connection from it gets a broken socket mid-command (Research finding 1, redis-py #932).
+**Data prerequisite:** none.
+**State prerequisite:** no thread or coroutine may hold a checked-out connection from `old_pool` at the moment of disconnect.
+**Mitigation:** The swap runs in pytest's synchronous fixture-setup phase: the previous test's teardown has completed and the current test body has not started, so no test code holds a connection. popoto's `async_save`/`async_delete` funnel into the sync pool via a thread pool, but only from inside a running test. The plan states this precondition in a code comment and forbids moving the swap into a test body, an async context, or a session-scoped fixture that could overlap a running test. The same reasoning already licenses popoto's `_swap_db`, which does the identical thing.
+
+### Race 2: Concurrent pytest processes and the db-claim pool
+**Location:** `tests/db_claim.py` claim registry; `tests/conftest.py::pytest_configure`.
+**Trigger:** Several pytest processes run on this machine at once (a full-suite run plus a targeted one is routine here). Two processes on the same db number would flush each other's data mid-test.
+**Data prerequisite:** the claim registry directory keyed by the resolved port must exist and be writable.
+**State prerequisite:** each process holds an exclusive `fcntl.flock` on its db slot for its whole lifetime.
+**Mitigation:** Unchanged by this plan and deliberately so — `claim_test_db()` remains the sole authority for the number, and the OS releases flocks on process death. The plan must not introduce any second derivation of the db number; the anti-criteria in Verification enforce that conftest never writes a db anywhere except through `claim_test_db()`.
+
+### Race 3: Async client construction across event loops
+**Location:** `popoto/redis_db.py::get_async_redis_db` guarded by `_async_redis_lock`; `popoto/pytest_plugin.py::_popoto_reset_async`.
+**Trigger:** pytest-asyncio creates a fresh event loop per test function. A client created in one test's loop is bound to a closed loop in the next ("Future attached to a different loop"). Concurrent coroutines could also race to build the singleton.
+**Data prerequisite:** the sync client's `connection_kwargs` must already carry the correct host/port/db before the first `await`, since the async client mirrors them.
+**State prerequisite:** `_POPOTO_ASYNC_REDIS_DB` must be `None` at the start of every test, and the first construction must happen inside the running loop.
+**Mitigation:** This is precisely what deleting the eager bind *fixes*. The plugin nulls the global at setup and teardown of every test and rebuilds a fresh `asyncio.Lock()` with it; `get_async_redis_db()` double-checks under that lock. The data prerequisite is satisfied because conftest's in-place swap completes during synchronous setup, strictly before any test body can `await`. Today's code violates the state prerequisite by constructing the client synchronously at conftest:980.
 
 ## No-Gos (Out of Scope)
 

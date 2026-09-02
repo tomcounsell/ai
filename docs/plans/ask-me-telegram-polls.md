@@ -1020,7 +1020,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   (`dispatch_telegram_session` called exactly once — a second call would double-enqueue the session
   from one vote).
 - [ ] `mark_poll_dispatched` is called before any post-steer bookkeeping that can throw; a test that
-  makes `mark_poll_steered` raise still finds `dispatched` on the row.
+  makes `mark_poll_steered` raise still finds the `dispatched` key present.
 - [ ] `steered_at` is written only after the steer/re-enqueue returns, and
   `iter_unanswered_polls()` re-yields a row with a claim but no `steered_at` once the claim is older
   than one reconcile interval.
@@ -1650,11 +1650,13 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   `register_pending_poll(...)` is the first statement of `_send_queued_poll`, ahead of the
   eligibility re-check and every `await`, and each decline branch deletes it — so the
   LPOP-to-registry window carries no silent total-loss gap.
-- [ ] **Module homes are the ones the Verification table greps.** The registry helpers live in
-  `bridge/poll_registry.py`, `translate_poll_vote` lives in `bridge/poll_vote.py` (importing the
-  `answer_routing` seam rather than living inside it), the reconciliation loop and its heartbeat
-  live in `bridge/poll_reconcile.py` (started from, not inlined into, `bridge/telegram_bridge.py`),
-  and `is_group_chat` stays in `bridge/read_the_room.py`.
+- [ ] **The two module boundaries that carry an invariant hold.** `bridge/answer_routing.py` exists
+  as a poll-independent seam (so `git revert <9a-sha>` stays real) and does **not** contain
+  `translate_poll_vote`; the registry helpers and the index-set ownership live in
+  `bridge/poll_registry.py`; and `is_group_chat` stays in `bridge/read_the_room.py`. The
+  `poll_vote` / `poll_reconcile` split is **guidance, not a merge-blocking contract** — the binding
+  parts are only that the translator is outside `answer_routing.py` and the reconciliation loop is
+  outside `bridge/telegram_bridge.py`.
 - [ ] **Registry enumeration is index-backed.** `iter_unanswered_polls()` and `iter_pending_polls()`
   read the `POLL_OPEN_INDEX` / `POLL_PENDING_INDEX` SETs; **no `SCAN MATCH` or `scan_iter` over the
   shared production keyspace appears anywhere on the poll path.**
@@ -2291,12 +2293,14 @@ the ladder restructure, so if 9a and 9b share a commit, a post-merge regression 
 replies — a path with far more traffic than polls — has no narrow revert. With the split,
 `git revert <9a-sha>` is a real option.
 
-**9b. Add `translate_poll_vote(client, poll_id)` — in a new `bridge/poll_vote.py`, not in
-`answer_routing.py`.** The translator imports `resolve_answer_target` / `resume_completed_session`
-from `bridge/answer_routing.py` and the registry helpers from `bridge/poll_registry.py`. It must
-**not** be housed inside `answer_routing.py`: 9a's entire justification for that module is that it
-is a **poll-independent** seam shared with the reply-to ladder, landed as its own commit so
+**9b. Add `translate_poll_vote(client, poll_id)` — outside `answer_routing.py`.**
+`bridge/poll_vote.py` is the suggested home, and the filename is the builder's to own. The
+**binding** requirement is the anti-criterion, not the filename: the translator must **not** live
+inside `answer_routing.py`, because 9a's entire justification for that module is that it is a
+**poll-independent** seam shared with the reply-to ladder, landed as its own commit so
 `git revert <9a-sha>` is real. Putting the poll translator inside it re-fuses what 9a split apart.
+The translator imports `resolve_answer_target` / `resume_completed_session` from
+`bridge/answer_routing.py` and the registry helpers from `bridge/poll_registry.py`.
 - `lookup_poll`; unknown → return quietly.
 - Confirm with `messages.GetPollResultsRequest(peer=chat_id, msg_id=msg_id)` rather than trusting a
   possibly `min=True` update.
@@ -2327,8 +2331,8 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   (Risk 9) — **but only when the `dispatched` marker is absent** (next bullet).
 - **`dispatched` marker — the claim-release must not span the side effect.** The moment
   `push_steering_message` / `resume_completed_session` returns, and **before anything else that can
-  throw**, call `mark_poll_dispatched(poll_id)` (Task 6). The `except Exception` handler then reads
-  the row and calls `release_poll_claim(poll_id)` **only if `dispatched` is absent**. With
+  throw**, call `mark_poll_dispatched(poll_id)` (Task 6). The `except Exception` handler then calls
+  `poll_dispatched(poll_id)` and calls `release_poll_claim(poll_id)` **only if it is False**. With
   `dispatched` present the retry path re-attempts `mark_poll_steered(poll_id)` **only** — never the
   steer or the dispatch. Both markers are their own `SET NX` keys (Task 6), so
   `mark_poll_dispatched` is a single atomic command that cannot lose a concurrent read-modify-write
@@ -2379,11 +2383,12 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
-- **Create `bridge/poll_reconcile.py`, exporting `poll_reconcile_loop(client)`.** The loop body,
-  the heartbeat write, and the orphan-adoption sweep all live in that module — **not** in
-  `bridge/telegram_bridge.py`, which only imports and starts it. This is stated explicitly because
-  the Verification table greps the module by name: an implementation that inlines the loop into the
-  bridge fails a Verification row on an otherwise correct build.
+- **Put `poll_reconcile_loop(client)` in its own module — `bridge/poll_reconcile.py` is the
+  suggested name — carrying the loop body, the heartbeat write, and the orphan-adoption sweep.**
+  The **binding** requirement is only that the loop is *not* inlined into
+  `bridge/telegram_bridge.py`, which imports and starts it; the filename itself is guidance the
+  builder owns, and the Verification row is written against `bridge/` rather than a named file so a
+  different split does not fail an otherwise correct build (cycle-8 nit).
 - Start it alongside `relay_loop`: next to `from bridge.telegram_relay import relay_loop` /
   `asyncio.create_task(relay_loop(client))` in `bridge/telegram_bridge.py` (locate by symbol; the
   site is `~:3406-3408` on the verification baseline).
@@ -2683,14 +2688,17 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Eligibility re-check is thread-offloaded (anti-criterion) | `grep -n 'poll_eligible(' bridge/telegram_relay.py \| grep -v import \| grep -vc 'to_thread'` | match count == 0 |
 | Eligibility re-check is thread-offloaded (positive form) | `grep -c 'to_thread(poll_eligible' bridge/telegram_relay.py` | output > 0 |
 | Dispatch marker distinct from the steered marker | `grep -rn 'mark_poll_dispatched' bridge/ --include='*.py' \| wc -l` | output > 0 |
-| Claim release is guarded by the dispatch marker | `grep -B4 'release_poll_claim' bridge/poll_vote.py \| grep -c 'dispatched'` | output > 0 |
-| Vote translator has its own module, not `answer_routing` | `test -f bridge/poll_vote.py && grep -c 'def translate_poll_vote' bridge/poll_vote.py` | output == 1 |
+| Claim release is guarded by the dispatch marker | `grep -rB4 'release_poll_claim' bridge/ --include='*.py' \| grep -c 'dispatched'` | output > 0 |
+| Stale claim is takeable over (Risk 9 recovery is not inert) | `grep -rn 'takeover_poll_claim\|poll_claim_age_s' bridge/ --include='*.py' \| wc -l` | output > 0 |
+| Claim value is a timestamp, not the constant `1` (anti-criterion) | `grep -rnE "poll:answered:[^\"']*\", *1\b" bridge/ --include='*.py' \| wc -l` | match count == 0 |
+| Markers are separate keys, not JSON fields | `grep -c 'poll:dispatched:\|poll:steered_at:\|poll:warned:' bridge/poll_registry.py` | output > 0 |
+| Vote translator exists and is reachable | `grep -rn 'def translate_poll_vote' bridge/ --include='*.py' \| wc -l` | output == 1 |
 | Translator stays out of the poll-independent seam (anti-criterion) | `grep -c 'def translate_poll_vote' bridge/answer_routing.py` | match count == 0 |
 | Registry helpers have the grepped home | `test -f bridge/poll_registry.py && grep -c 'def register_pending_poll\|def release_poll_claim\|def iter_unanswered_polls' bridge/poll_registry.py` | output == 3 |
 | Provisional row precedes the eligibility re-check (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -k provisional -q` | exit code 0 |
-| Reconciliation loop has its declared home | `test -f bridge/poll_reconcile.py && grep -c 'def poll_reconcile_loop' bridge/poll_reconcile.py` | output == 1 |
-| Reconciliation heartbeat written (in the loop's own module) | `grep -c 'poll:reconcile:heartbeat' bridge/poll_reconcile.py` | output > 0 |
-| Registry enumeration is index-backed, not a keyspace scan (anti-criterion) | `grep -rn "scan_iter\|SCAN MATCH" bridge/poll_registry.py bridge/poll_reconcile.py \| wc -l` | output == 0 |
+| Reconciliation loop exists and is not inlined into the bridge | `grep -rn 'def poll_reconcile_loop' bridge/ --include='*.py' \| grep -vc telegram_bridge.py` | output == 1 |
+| Reconciliation heartbeat written | `grep -rn 'poll:reconcile:heartbeat' bridge/ --include='*.py' \| wc -l` | output > 0 |
+| Registry enumeration is index-backed, not a keyspace scan (anti-criterion) | `grep -rn "scan_iter\|SCAN MATCH" bridge/poll_registry.py $(grep -rl 'poll_reconcile_loop' bridge/ --include='*.py') \| wc -l` | output == 0 |
 | Registry index sets exist | `grep -c 'POLL_OPEN_INDEX\|POLL_PENDING_INDEX' bridge/poll_registry.py` | output > 0 |
 | Heartbeat read outside the loop | `grep -rln 'poll:reconcile:heartbeat' --include='*.py' . \| wc -l` | output >= 2 |
 | No expectation authored on the poll path (anti-criterion) | `grep -rn 'expectation' agent/output_handler.py \| grep -ci poll` | match count == 0 |
