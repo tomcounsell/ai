@@ -7,7 +7,7 @@ created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2701
 last_comment_id: 5237664288
 revision_applied: true
-revision_applied_at: 2026-09-02T06:46:53Z
+revision_applied_at: 2026-09-02T07:04:15Z
 ---
 
 # Render /ask-me questions as native Telegram polls (group chats, eng sessions)
@@ -110,6 +110,18 @@ capability at `:611` and `dropped_empty` at `:675`, `_is_group_chat` at `read_th
 `claim_message` at `dedup.py:171`, `_send_cb_accepts_file_paths` at `adapter.py:61`, `MessageDraft`
 at `message_drafter.py:193`, `_has_valor_reply_after`/`_render_transcript` in `agent_catchup.py`,
 and **zero `events.Raw` handlers repo-wide**.
+
+**Cycle-7 propagation note.** Cycle 5 recorded the corrections above but did not propagate all of
+them into the body, leaving the Freshness Check and the task text contradicting each other. Cycle 7
+propagated the two that were still stale at their remaining call sites: `_dead_letter_message`
+`:803`→`:946` (Technical Approach fallback bullet, Risk 5 items 1 and 2, Task 7's dead-letter
+bullet), `process_outbox` `:850`→`:1018` (Data Flow step 5), and the terminal-failure branch
+`:1029-1034`→`~:1196-1206` (Technical Approach, Risk 5, Task 7). Also corrected in cycle 7: the
+reconciliation-loop start site `:3231-3233`→`~:3406-3408` and the `events.Raw` registration site
+`:1165`→`~:1261`, both in Task 10. Historical *Implementation Note* cells under `## Critique
+Results` are **not** rewritten — they are the audit trail, and the column-semantics line already
+makes *Addressed By* authoritative. Everywhere else in this document an offset is a hint: **locate
+by symbol**; this Freshness Check list is the only place a builder is entitled to trust one.
 
 **The one substantive change — the steering overlap resolved against this plan, not for it.**
 `docs/plans/flip-steering-writers-to-room-key.md` was an *active* plan at cycle 4 and this document
@@ -431,7 +443,7 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
    with the same `OUTBOX_TTL` (`:431`). **It records no expectation**: its sibling `send` (`:611`)
    records none, and an expectation with no resolution path in any of Task 9b's four steering
    branches would be authored and never closed. Struck in revision cycle 5.
-5. **`bridge/telegram_relay.py::process_outbox`** (`:850`) — `"poll"` added to
+5. **`bridge/telegram_relay.py::process_outbox`** (`:1018`) — `"poll"` added to
    `KNOWN_MESSAGE_TYPES` (`:58`); new dispatch branch inside the `:917-931` if/elif chain calls
    `_send_queued_poll`, which **re-checks `poll_eligible(chat_id, session_id)` before the wire**
    (defense in depth: the CLI decided at ask time, the relay is the last writer before the send,
@@ -505,8 +517,13 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
     private `_is_group_chat` to the public `is_group_chat`) rather than owning it — a generic
     Telegram peer-type predicate must not live in a feature module, and read-the-room must not end
     up importing from a poll module. One definition, natural dependency direction.
-  - New module `bridge/poll_registry.py` holding the registry key constants and every registry
-    helper (Task 6).
+  - New module `bridge/poll_registry.py` holding the registry key constants, the two index SETs
+    (`POLL_OPEN_INDEX`, `POLL_PENDING_INDEX`) and every registry helper (Task 6).
+  - New module `bridge/poll_reconcile.py` exporting `poll_reconcile_loop(client)` — the loop body,
+    the `telegram:poll:reconcile:heartbeat` write and the orphan-adoption sweep. `bridge/telegram_bridge.py`
+    only imports and starts it, next to `relay_loop`; the `events.Raw` handler stays in the bridge.
+    The loop gets its own module for the same reason every other piece of this feature does, and it
+    is named here so the Verification table can grep it.
   - New module `bridge/poll_vote.py` holding `translate_poll_vote`, which imports
     `resolve_answer_target` / `resume_completed_session` from `bridge/answer_routing.py`. The
     translator is deliberately **not** housed in `answer_routing.py`: that module's whole purpose is
@@ -801,12 +818,12 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   `EmailOutputHandler` gets no `send_poll` and the capability probe (`hasattr`, mirroring
   `adapter.py:61`) keeps it valid.
 - **The plain-text fallback is an explicit re-enqueue, not the dead-letter queue.** Dead-lettering
-  is durability, not delivery: `_dead_letter_message` (`bridge/telegram_relay.py:803`) calls
+  is durability, not delivery: `_dead_letter_message` (`bridge/telegram_relay.py:946`) calls
   `persist_failed_delivery` into the `DeadLetter` model, and its only consumer,
   `replay_dead_letters`, runs from exactly one site — the bridge connect sequence
   (`bridge/telegram_bridge.py:2842`). A question routed only there reaches the human on the next
   bridge restart, which for a blocked agent is hours away or never. So on terminal failure of a
-  `"poll"` payload (`_relay_attempts >= MAX_RELAY_RETRIES`, `telegram_relay.py:1029-1034`) the poll
+  `"poll"` payload (`_relay_attempts >= MAX_RELAY_RETRIES`, `telegram_relay.py:~1196-1206`) the poll
   dispatch branch **rpushes a plain text payload onto the same `telegram:outbox:{session_id}` key**
   — `{"type": None, "chat_id": ..., "text": <question + numbered options>, "reply_to": ...,
   "session_id": ...}` with `_relay_attempts` reset so the text send gets its own retry budget. This
@@ -996,7 +1013,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   delivered on a later relay cycle. The test asserts the re-enqueue, not the dead-letter row — a
   `DeadLetter` alone only reaches the human on the next bridge restart (`replay_dead_letters` is
   invoked from one site, `bridge/telegram_bridge.py:2842`). This is the user-visible error path.
-- [ ] `_dead_letter_message` (`telegram_relay.py:803`) must **not** treat `"poll"` as ephemeral
+- [ ] `_dead_letter_message` (`telegram_relay.py:946`) must **not** treat `"poll"` as ephemeral
   (`:827`) — a dropped question is a stuck agent. Test asserts a poll payload dead-letters loudly
   instead of being discarded, **and separately** that it survives the `if chat_id and text` gate
   (`:836`), which a text-less payload would otherwise fall straight through. This is the durability
@@ -1038,9 +1055,12 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   present. Locate the existing suite by `grep -rln 'dashboard.json\|health' tests/unit/`; adding a
   new field to a shipped health payload without a test is how that surface silently drifts.
 
-- [ ] The `bridge/read_the_room.py` test suite (`grep -rln 'read_the_room' tests/`) — UPDATE only if
-  renaming `_is_group_chat` to the public `bridge/read_the_room.py::is_group_chat` changes a name a
-  test patches; RTR behavior itself must be unchanged and those tests are the regression net.
+- [ ] `tests/unit/test_read_the_room.py` — **UPDATE, unconditionally.** The Task 3 rename of
+  `_is_group_chat` to the public `is_group_chat` breaks this file: `:40` imports the private name
+  directly in the module's import block, and `:153` asserts on it
+  (`assert _is_group_chat(chat_id) is expected`, in `test_is_group_chat` at `:152`). Repoint both to
+  `is_group_chat`. This is not conditional — verified on the verification baseline. RTR behavior
+  itself must be unchanged and these tests are the regression net.
 
 New test files (greenfield, no prior coverage — grep of `tests/` for `poll` returns only
 `test_poll_interval_is_100ms`, an unrelated relay constant):
@@ -1194,14 +1214,14 @@ closing the poll on first translation so a re-vote is impossible at the source.
 prevent, made worse because the human sees nothing at all.
 **Mitigation, in delivery order:**
 1. **The user-visible path is an explicit re-enqueue, not the dead-letter queue.** On terminal
-   failure (`_relay_attempts >= MAX_RELAY_RETRIES`, `telegram_relay.py:1029-1034`) the poll branch
+   failure (`_relay_attempts >= MAX_RELAY_RETRIES`, `telegram_relay.py:~1196-1206`) the poll branch
    rpushes a plain-text payload (`type: None`, `text` = question + numbered options,
    `_relay_attempts` reset) back onto `telegram:outbox:{session_id}`. `process_outbox` is
    `while processed < RELAY_BATCH_SIZE` over `r.lpop` (`:895-897`), so the re-enqueue is picked up
    on a later cycle and cannot loop (the new payload is plain text and never re-enters the poll
    branch).
 2. **Dead-lettering is the durability backstop behind it, and is explicitly NOT prompt delivery.**
-   `_dead_letter_message` (`:803`) persists a `DeadLetter`; its only consumer,
+   `_dead_letter_message` (`:946`) persists a `DeadLetter`; its only consumer,
    `replay_dead_letters`, runs from one site in the bridge connect sequence
    (`bridge/telegram_bridge.py:2842`) — i.e. on the next bridge restart. Two guards must still both
    be handled or even that backstop is lost: `"poll"` stays out of the ephemeral-discard tuple
@@ -1469,7 +1489,10 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
 - [ ] The feature doc must carry the module map and say why each home was chosen:
   `bridge/poll_gating.py` (eligibility, importing `is_group_chat` from `bridge/read_the_room.py`
   rather than owning it), `bridge/poll_registry.py` (registry keys and helpers),
-  `bridge/poll_vote.py` (`translate_poll_vote`), and `bridge/answer_routing.py` (the
+  `bridge/poll_vote.py` (`translate_poll_vote`), `bridge/poll_reconcile.py`
+  (`poll_reconcile_loop`, the heartbeat write and the orphan-adoption sweep — the loop body is out
+  of `telegram_bridge.py`, which only imports and starts it, while the `events.Raw` handler stays in
+  the bridge), and `bridge/answer_routing.py` (the
   **poll-independent** seam shared with the reply-to ladder, which the translator deliberately
   imports rather than lives in, so it stays independently revertible).
 - [ ] Add an entry to `docs/features/README.md` index table.
@@ -1551,8 +1574,15 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   LPOP-to-registry window carries no silent total-loss gap.
 - [ ] **Module homes are the ones the Verification table greps.** The registry helpers live in
   `bridge/poll_registry.py`, `translate_poll_vote` lives in `bridge/poll_vote.py` (importing the
-  `answer_routing` seam rather than living inside it), and `is_group_chat` stays in
-  `bridge/read_the_room.py`.
+  `answer_routing` seam rather than living inside it), the reconciliation loop and its heartbeat
+  live in `bridge/poll_reconcile.py` (started from, not inlined into, `bridge/telegram_bridge.py`),
+  and `is_group_chat` stays in `bridge/read_the_room.py`.
+- [ ] **Registry enumeration is index-backed.** `iter_unanswered_polls()` and `iter_pending_polls()`
+  read the `POLL_OPEN_INDEX` / `POLL_PENDING_INDEX` SETs; **no `SCAN MATCH` or `scan_iter` over the
+  shared production keyspace appears anywhere on the poll path.**
+- [ ] **`tools/ask_poll.py` threads a `reply_to`** read from `TELEGRAM_REPLY_TO` with the sibling
+  send path's coercion idiom, so a poll lands threaded and `_bind_outbound_message_to_job` has
+  something to bind.
 - [ ] **An UNRESOLVED human-tap gate leaves the outbound half fully shippable.** Tasks 13a, 14 and
   15 all run with the inbound set paused, and Task 15 reports the inbound rows UNRESOLVED rather
   than passed. Checkable on the dependency graph, not only in prose: no outbound task and neither
@@ -1692,14 +1722,22 @@ Task 1 (automated), Task 2 (human tap, readback + attribution) and Task 10a (hum
 
 The **inbound set** is Tasks 9, 10, 10a and 13b. An UNRESOLVED `gate-poll-human-tap` pauses exactly
 that set. Tasks 3-8 and 11-12 depend on neither human gate, Task 13a depends on neither, and Tasks 14
-and 15 run under the *satisfied-by-pause* rule stated in Task 14 — so an unavailable operator pauses
-four tasks and leaves the outbound half fully built, tested, documented and validated, with the
+and 15 run under the *satisfied-by-pause* rule stated in Tasks 14 and 15 — so an unavailable operator
+pauses four tasks and leaves the outbound half fully built, tested, documented and validated, with the
 inbound rows reported UNRESOLVED rather than green.
+
+**Task 15 depends on `gate-poll-e2e` (added in cycle 7).** Without that edge Task 10a was a
+dependency-graph leaf — nothing listed it in `Depends On`, so the plan's only end-to-end assertion
+could be skipped entirely and the graph would still run to completion, with the claim resting on
+Task 15's prose. The edge does not weaken the pause property: `gate-poll-e2e` is inside the inbound
+set, and Task 15's *satisfied-by-pause* rule means a paused or UNRESOLVED gate lets Task 15 run and
+report the E2E row UNRESOLVED. Only a Task 10a **FAIL** stops the pipeline, which is the intent.
 
 That property is why Task 13 is split. Before cycle 6 the single `build-tests` depended on
 `build-vote-observation` and Tasks 14 and 15 chained behind it, so an UNRESOLVED gate blocked tests,
 docs and validation — the whole outbound half — while the plan claimed in three places that it did
-not. The dependency graph, not the prose, is now the thing that makes the claim true.
+not. The dependency graph, not the prose, is now the thing that makes the claim true — which is the
+same doctrine cycle 7 applied to `gate-poll-e2e` above.
 
 Task 2 runs **after** Task 8 so its probe poll originates through the shipped `valor-ask-poll` chain.
 It asserts **readback and attribution only**: the end-to-end "the tapped option reaches the session's
@@ -1822,6 +1860,13 @@ why reversibility depends on it.
   it is a generic Telegram peer-type predicate whose existing consumer is read-the-room, and
   hosting it in a feature module would make read-the-room import from a poll module, which is the
   naming inversion that later invites a second copy.
+- **The rename has exactly three call sites to repoint, and no alias is permitted.** In-module:
+  `bridge/read_the_room.py:526` (`if not _is_group_chat(chat_id):`). In tests:
+  `tests/unit/test_read_the_room.py:40` (import) and `:153` (assertion) — see Test Impact, where the
+  row is an unconditional UPDATE. **Do not leave a `_is_group_chat = is_group_chat` back-compat
+  alias.** The Verification row `grep -rn 'def is_group_chat\|def _is_group_chat' bridge/ \| wc -l`
+  expecting `1` counts `def`s only, so an alias would pass it while keeping two live names — the
+  second-copy drift this task exists to prevent. Locate all three by symbol; the offsets are hints.
 - Add `PollEligibility(ok: bool, reason: str)` and
   `poll_eligible(chat_id, session_id) -> PollEligibility`:
   - not a group → `not_a_group`
@@ -1940,7 +1985,24 @@ why reversibility depends on it.
 - **`iter_unanswered_polls()` treats a row as unanswered when it has no `steered_at`** — including a
   row whose claim exists but is older than one reconcile interval (Risk 9). It must not treat "claim
   present" alone as answered.
-- All TTLs are named env-overridable constants with grain-of-salt comments.
+- **Both iterators are backed by index SETs, never by a keyspace scan (cycle 7).** Add
+  `POLL_OPEN_INDEX = "telegram:poll:open"` and `POLL_PENDING_INDEX = "telegram:poll:pending:index"`
+  as Redis SETs in this module. `register_poll(...)` `SADD`s the server poll id in the same call that
+  writes the row; `register_pending_poll(...)` `SADD`s the `poll_id_hint`. `mark_poll_steered(...)`,
+  `promote_pending_poll(...)`, and the provisional-row delete on **every** decline branch of
+  `_send_queued_poll` (missing `poll_id_hint`, ineligible, terminal failure) `SREM` their id.
+  `iter_unanswered_polls()` and `iter_pending_polls()` `SSCAN` their index and `GET` each row,
+  skipping — and `SREM`ing — any id whose row has expired. **The index is a hint; the row stays
+  authoritative**, so a lost `SREM` costs one wasted `GET`, never a missed poll, and a lost `SADD`
+  is the only way to lose a poll (which is why both `SADD`s are in the same helper as their write).
+- **Do not use `scan_iter(match="telegram:poll:*")` or any `SCAN MATCH` over the keyspace.** Redis
+  filters `MATCH` server-side but still walks every key in the db, and this db is shared with
+  production Popoto keys — a per-tick full-keyspace walk at the fast reconcile interval. Spike-5's
+  precedent (`bridge/job_router.py:85-96`, `bridge/context.py:491`) does **not** cover this: those
+  registries are only ever point-looked-up and never enumerated. This plan is the first non-Popoto
+  registry in the repo that needs enumeration, so it carries its own index.
+- All TTLs are named env-overridable constants with grain-of-salt comments. The index SETs
+  themselves carry no TTL (a SET's members expire with their rows via the skip-and-`SREM` sweep).
 
 ### 7. Relay dispatch branch, eligibility re-check, dead-letter and fallback
 - **Task ID**: build-relay-dispatch
@@ -1983,7 +2045,7 @@ why reversibility depends on it.
   A payload arriving without the key is a producer bug: log at error and fall through to the
   plain-text delivery path rather than sending a poll no vote can ever be routed to.
 - Fix the dead-letter path for text-less payloads, which has **two** guards, not one:
-  (a) `_dead_letter_message` (`:803`) must not add `"poll"` to the ephemeral discard tuple
+  (a) `_dead_letter_message` (`:946`) must not add `"poll"` to the ephemeral discard tuple
   `if msg_type in ("reaction", "custom_emoji_message")` (`:827`); and (b) the persistence branch
   immediately below is gated on `if chat_id and text` (`:836`) — a poll payload has no `text` key, so
   keeping it out of the ephemeral tuple alone still drops it silently. The poll branch must supply
@@ -1991,7 +2053,7 @@ why reversibility depends on it.
   `replay_dead_letters` runs from one site in the bridge connect sequence
   (`bridge/telegram_bridge.py:2842`), i.e. next restart.
 - **Prompt user-visible fallback (the actual delivery path).** In the terminal-failure branch
-  (`:1029-1034`, `attempts >= MAX_RELAY_RETRIES`) for a `"poll"` payload, rpush a plain payload back
+  (`~:1196-1206`, `attempts >= MAX_RELAY_RETRIES`) for a `"poll"` payload, rpush a plain payload back
   onto the same `telegram:outbox:{session_id}` key:
   `{"type": None, "chat_id": chat_id, "text": <question + numbered options>, "reply_to": reply_to,
   "session_id": session_id}` with `_relay_attempts` **reset to 0**. Safe against looping: the loop is
@@ -2017,6 +2079,16 @@ why reversibility depends on it.
 - **Parallel**: false
 - Create `tools/ask_poll.py` with `main()`, reusing `_resolve_transport()` precedence
   (`tools/send_message.py:63`).
+- **`reply_to` comes from the environment, mirroring the sibling send path exactly.** Read
+  `reply_to = os.environ.get("TELEGRAM_REPLY_TO")` (as `tools/send_message.py` does when it reads its
+  env trio — locate by symbol, `~:187` on the verification baseline) and coerce it with the same
+  idiom the sibling payload builder uses, `int(reply_to) if reply_to else None`
+  (`tools/send_message.py:123`), then thread it into
+  `build_telegram_poll_outbox_payload(..., reply_to=reply_to, ...)`. **Do not introduce a
+  `--reply-to` flag as the primary source**: the env var is how a headless session already learns
+  its reply target, and a flag lets an agent pass a stale message id. A poll sent with
+  `reply_to=None` still delivers, but lands unthreaded and gives `_bind_outbound_message_to_job`
+  nothing to bind — which Task 13a separately requires a test for.
 - **Degradation happens here, once.** Non-telegram transport → numbered-list text through the
   existing `send_message` path. Telegram transport → call `poll_eligible(chat_id, session_id)`;
   ineligible → the same numbered-list text path, with the reason logged so a question that "should
@@ -2166,9 +2238,17 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
-- Add the reconciliation loop started alongside `relay_loop` (`:3231-3233`): iterate
-  `iter_unanswered_polls()` only, call `translate_poll_vote` on each, adaptive interval (fast for
-  `POLL_RECONCILE_FAST_WINDOW_S` after send, then slow), FloodWait backoff mirroring
+- **Create `bridge/poll_reconcile.py`, exporting `poll_reconcile_loop(client)`.** The loop body,
+  the heartbeat write, and the orphan-adoption sweep all live in that module — **not** in
+  `bridge/telegram_bridge.py`, which only imports and starts it. This is stated explicitly because
+  the Verification table greps the module by name: an implementation that inlines the loop into the
+  bridge fails a Verification row on an otherwise correct build.
+- Start it alongside `relay_loop`: next to `from bridge.telegram_relay import relay_loop` /
+  `asyncio.create_task(relay_loop(client))` in `bridge/telegram_bridge.py` (locate by symbol; the
+  site is `~:3406-3408` on the verification baseline).
+- The loop iterates `iter_unanswered_polls()` only — which reads the `POLL_OPEN_INDEX` SET, never a
+  keyspace scan (Task 6) — calls `translate_poll_vote` on each, runs on an adaptive interval (fast
+  for `POLL_RECONCILE_FAST_WINDOW_S` after send, then slow), with FloodWait backoff mirroring
   `telegram_relay.py:918-945`. **This loop is the primary mechanism** and is correct on its own.
 - **Loop heartbeat, readable from outside the loop (Risk 7).** At the top of **every** tick, before
   the scan, write `telegram:poll:reconcile:heartbeat` with
@@ -2178,8 +2258,10 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   the loop. This is the only detector for "the loop itself died": `poll_expired_unanswered` is
   emitted from inside `iter_unanswered_polls()`, so if the loop is what died that signal cannot
   fire. One new Redis key plus one read site; **do not add a new service or a second watchdog**.
-- Register the repo's **first** `@client.on(events.Raw)` handler in `bridge/telegram_bridge.py` near
-  `:1165`, filtering `UpdateMessagePoll` and calling
+- Register the repo's **first** `@client.on(events.Raw)` handler in `bridge/telegram_bridge.py` —
+  **the handler stays in the bridge module, only the loop moves out** — next to the existing
+  `@client.on(events.NewMessage)` registration (locate by symbol; `~:1261` on the verification
+  baseline), filtering `UpdateMessagePoll` and calling
   `bridge.poll_vote.translate_poll_vote(client, poll_id)`. It must never raise into Telethon's
   update loop.
 - **Emit `poll_update_observed` at info from inside that handler on every `UpdateMessagePoll`.**
@@ -2327,6 +2409,14 @@ the cycle-4 gate split was adopted to buy. The split restores it.
   branch), the plain-text terminal-failure re-enqueue, and Race 5 (the registry row survives a
   simulated restart). **Race 6's orphan *adoption* is Task 10 code and its tests belong to 13b** —
   13a covers only the write/promote/expire half of the provisional row.
+- **Cycle-7 additions.** (a) In `test_poll_registry.py`, assert the index contract: `register_poll` /
+  `register_pending_poll` `SADD` in the same call that writes the row; `mark_poll_steered`,
+  `promote_pending_poll` and every decline-branch delete `SREM`; `iter_unanswered_polls()` skips and
+  `SREM`s an index member whose row has expired (a lost `SREM` costs one wasted `GET`, never a
+  missed poll). (b) In `test_ask_poll_cli.py`, assert `TELEGRAM_REPLY_TO` is read and coerced with
+  `int(reply_to) if reply_to else None` and reaches
+  `build_telegram_poll_outbox_payload(..., reply_to=...)`, and that an unset env var yields
+  `reply_to=None` without failing the send.
 - **No test may send a poll into a DM or otherwise re-probe the settled capability matrix.** DM
   behavior is asserted by testing that the CLI queues prose, not by hitting Telegram.
 - Run with `scripts/pytest-clean.sh`, never bare `pytest`.
@@ -2370,11 +2460,22 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 
 ### 15. Final validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: document-feature, gate-poll-e2e
 - **Validates**: the Verification table
 - **Assigned To**: `poll-validator`
 - **Agent Type**: validator
 - **Parallel**: false
+- **The `gate-poll-e2e` edge is deliberate and load-bearing (cycle 7).** Task 10a is the plan's only
+  end-to-end assertion; without an inbound edge it is a dependency-graph leaf that the graph can run
+  to completion without ever scheduling, leaving the claim resting on prose. The edge is on **Task
+  15, not Task 14** — Task 14 does not consume the gate result, and depending on it there would
+  re-block documentation on an operator tap, which is exactly the property the 13a/13b split was
+  bought to protect.
+- **The existing satisfied-by-pause rule extends verbatim to `gate-poll-e2e`.** With the inbound set
+  paused, or with the gate returning UNRESOLVED on its bounded wait, this task **still runs** — it
+  is satisfied by the paused/UNRESOLVED state, not blocked by it — and reports the E2E row as
+  **UNRESOLVED**, never as passed. Only a Task 10a **FAIL** (a tap arrived and no steer reached the
+  session) stops the pipeline.
 - Run the **Verification** table.
 - Confirm every **Success Criteria** box, including that the Task 1, Task 2 **and Task 10a** gate
   outputs are in the PR description.
@@ -2427,20 +2528,33 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Translator stays out of the poll-independent seam (anti-criterion) | `grep -c 'def translate_poll_vote' bridge/answer_routing.py` | match count == 0 |
 | Registry helpers have the grepped home | `test -f bridge/poll_registry.py && grep -c 'def register_pending_poll\|def release_poll_claim\|def iter_unanswered_polls' bridge/poll_registry.py` | output == 3 |
 | Provisional row precedes the eligibility re-check (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -k provisional -q` | exit code 0 |
-| Reconciliation heartbeat written | `grep -rc 'poll:reconcile:heartbeat' bridge/telegram_bridge.py` | output > 0 |
+| Reconciliation loop has its declared home | `test -f bridge/poll_reconcile.py && grep -c 'def poll_reconcile_loop' bridge/poll_reconcile.py` | output == 1 |
+| Reconciliation heartbeat written (in the loop's own module) | `grep -c 'poll:reconcile:heartbeat' bridge/poll_reconcile.py` | output > 0 |
+| Registry enumeration is index-backed, not a keyspace scan (anti-criterion) | `grep -rn "scan_iter\|SCAN MATCH" bridge/poll_registry.py bridge/poll_reconcile.py \| wc -l` | output == 0 |
+| Registry index sets exist | `grep -c 'POLL_OPEN_INDEX\|POLL_PENDING_INDEX' bridge/poll_registry.py` | output > 0 |
 | Heartbeat read outside the loop | `grep -rln 'poll:reconcile:heartbeat' --include='*.py' . \| wc -l` | output >= 2 |
 | No expectation authored on the poll path (anti-criterion) | `grep -rn 'expectation' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Poll path never calls `draft_message` (anti-criterion) | `grep -n 'draft_message' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Text fallback re-enqueue exists (not dead-letter-only) | `grep -c '_relay_attempts' bridge/telegram_relay.py` | output > 0 (and the poll terminal branch rpushes a `type: None` payload — assert by test, not grep) |
 | Role primes reach `/ask-me` | `grep -lc 'ask-me' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
 | Role primes stay surface-agnostic (anti-criterion) | `grep -rn 'valor-ask-poll\|Telegram poll' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 0 |
-| Prime line is a conditional, not a bare directive | `grep -rn 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
+| Prime line is a conditional, not a bare directive | `grep -lc 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
 
 **Note on the steering anti-criterion.** The grep is deliberately narrowed to *key construction*
 (`rpush`/`lpush`/`set` applied to a `steering:` literal). The bare-token form returns **2** on a
 clean `main` — `bridge/message_drafter.py` contains the log string
 `"requesting self-draft via steering: %s"` twice, which is unrelated prose. **Do not "fix" that by
 editing those log lines.** Verified: the narrowed grep returns `0` on the verification baseline with a clean tree.
+
+**Note on the prime-conditional row (cycle 7).** It uses `grep -lc`, not `grep -rn`, on purpose.
+`.claude/commands/roles/prime-pm-role.md:89` already contains the phrase *"...when you have a
+legitimate open question for the user"* on a clean tree — unrelated `## Open Questions` routing
+guidance. `-l` collapses each file to at most one output line, so the row absorbs that pre-existing
+sentence instead of double-counting it; the `-rn` form returns **1** today and would return **4**
+after a correct Task 12, i.e. it is deterministically red on a correct build. **Do not "fix" this
+row by reverting it to `-rn`, and do not edit or delete `prime-pm-role.md:89`.** Verified on the
+verification baseline: the `-lc` form returns `1` with a clean tree and reaches `3` only when all
+three primes carry the line.
 
 ## Critique Results
 
@@ -2459,7 +2573,8 @@ prerequisites PASS (`scripts/check_prerequisites.py`); every cited symbol resolv
 `bridge/message_drafter.py:560`, `MessageDraft` at `:193`, `set_reaction` at `bridge/response.py:433`,
 `session_id = Field()` at `models/agent_session.py:157`, `session_type = KeyField(null=True)` at
 `:158`, `_drain_steering_boundary` at `agent/session_runner/runner.py:1307`, zero `events.Raw`
-handlers repo-wide); the only cited paths that do not exist are the seven modules and six test files
+handlers repo-wide); the only cited paths that do not exist are the eight modules (seven at critique
+time, plus `bridge/poll_reconcile.py` added by the cycle-7 revision) and six test files
 the plan intentionally creates. Every Verification anti-criterion re-run on the clean tree returns
 its stated value **except** the "Prime line is a conditional" row, which is the subject of a CONCERN
 below. Two findings (`gate-poll-e2e` as a graph leaf; the reconciliation loop's unnamed home)
@@ -2467,13 +2582,35 @@ are recurrences of failure classes cycle 6 named and fixed elsewhere in the docu
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | `iter_unanswered_polls()` / `iter_pending_polls()` are specified over plain Redis string keys with **no index**, so the only enumeration available is `SCAN MATCH telegram:poll:*`, which walks the entire shared production keyspace on every reconciliation tick — at the fast interval, for the first minutes after every poll. Risk 6's mitigation ("the reconciliation loop iterates only registry entries, never all chats") is about which *chats* are touched, not the scan cost. Spike-5's precedent does not cover it: `bridge/job_router.py:85-96` and `bridge/context.py:491` (`_get_cached_root`, a bare `r.get(key)`) only ever **point-look-up** their keys and are never enumerated. This plan is the first to require enumeration and inherits a non-Popoto posture chosen for a lookup workload. | pending | Add `POLL_OPEN_INDEX = "telegram:poll:open"` and `POLL_PENDING_INDEX = "telegram:poll:pending:index"` (Redis SETs) to `bridge/poll_registry.py`. `register_poll(...)` `SADD`s the poll id in the same call that writes the row; `register_pending_poll` `SADD`s the hint; `mark_poll_steered`, the provisional-row delete on every decline branch, and the TTL-expiry drop all `SREM`. `iter_unanswered_polls()` `SSCAN`s the index and `GET`s each row, skipping (and `SREM`ing) ids whose row has expired — the index is a hint, the row stays authoritative, so a lost `SREM` costs one wasted `GET` rather than a missed poll. Do **not** use `scan_iter(match="telegram:poll:*")`: Redis SCAN filters server-side but still walks every key in the db, and this db is shared with production Popoto keys. |
-| CONCERN | Risk & Robustness | The Verification row *Prime line is a conditional, not a bare directive* (`grep -rn 'legitimate open question' <the three primes> \| wc -l`, expected `3`) is **deterministically red on a correct build**. `grep -rn` counts lines, not files, and `.claude/commands/roles/prime-pm-role.md:89` already contains that exact phrase on a clean tree ("...when you have a legitimate open question for the user."). Verified: the row returns **1** today, so a correct Task 12 build adding one line per prime returns **4**. This is the same shape cycle 6 raised against the thread-offload anti-criterion ("A deterministically-red gate invites the builder to weaken or delete it"), reintroduced by a row cycle 6 itself added. | pending | Rewrite the row to `grep -lc 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` expecting `3` — `-l` collapses each file to at most one output line, absorbing the pre-existing `prime-pm-role.md:89` sentence instead of double-counting it. Do **not** "fix" this by editing or deleting that existing line; it is unrelated `## Open Questions` routing guidance. |
-| CONCERN | Risk & Robustness | Task 10 never names a home module for the reconciliation loop (only "started alongside `relay_loop`"), yet the Verification row `grep -rc 'poll:reconcile:heartbeat' bridge/telegram_bridge.py` expecting `> 0` silently pins the heartbeat write — and therefore the loop body — into `bridge/telegram_bridge.py`. The seven-path creation list contains no reconcile module, so a builder who houses the loop in its own module (the natural choice given how the rest of the feature is modularized) fails a Verification row on a correct build. This is verbatim the drift class cycle 6 raised for `bridge/poll_registry.py` ("a module named nowhere else in the plan"), left unfixed for the loop. Task 10's cited start site `:3231-3233` has also drifted: the relay task is created at `bridge/telegram_bridge.py:3406-3408` on `b2e15a9a0`. | pending | State in Task 10 that the loop lives in a new `bridge/poll_reconcile.py` exporting `poll_reconcile_loop(client)`, imported and started in `bridge/telegram_bridge.py` next to `from bridge.telegram_relay import relay_loop` / `asyncio.create_task(relay_loop(client))` (locate by symbol — now `:3406-3408`), and repoint the row to `grep -c 'poll:reconcile:heartbeat' bridge/poll_reconcile.py` expecting `> 0`. Keep the `events.Raw` handler in `bridge/telegram_bridge.py` (the `poll_update_observed` row greps that file correctly). Update the intentionally-created path list from seven to eight in the same edit — that list has gone stale in three consecutive cycles. |
-| CONCERN | Scope & Value | Task 10a (`gate-poll-e2e`) is a **dependency-graph leaf**: no task lists it in `Depends On` (Task 14 depends on `build-outbound-tests, build-inbound-tests`; Task 15 on `document-feature`). The plan's self-described "only end-to-end assertion that the nine subsystems are actually wired together" can therefore be skipped and the graph still runs to completion — the only thing holding it is Task 15's prose. Cycle 6's own doctrine for this exact problem was "The dependency graph, not the prose, is now the thing that makes the claim true", applied to the 13a/13b split but not to the task that split produced. | pending | Add `gate-poll-e2e` to **Task 15's** `Depends On` (`document-feature, gate-poll-e2e`), not Task 14's — Task 14 does not consume the gate result and adding it there would re-block documentation on an operator tap, the property the 13a/13b split was bought to protect. Extend Task 15's existing *satisfied-by-pause* rule verbatim to `gate-poll-e2e`: with the inbound set paused or the gate UNRESOLVED, Task 15 runs and reports the E2E row **UNRESOLVED**, never passed. Add `gate-poll-e2e` to every place the inbound set is enumerated as `9, 10, 10a, 13b` so the pause semantics and the dependency edge agree. |
-| NIT | Scope & Value | `build_telegram_poll_outbox_payload(chat_id, question, options, reply_to, session_id)` takes a `reply_to` argument and Task 8 never says where `tools/ask_poll.py` obtains it. Task 8 specifies reuse of `_resolve_transport()` (`tools/send_message.py:63`) only, but the sibling path also reads the reply target from the environment (`tools/send_message.py:187`: `reply_to = os.environ.get("TELEGRAM_REPLY_TO")`). A poll sent with `reply_to=None` still delivers but lands unthreaded and gives `_bind_outbound_message_to_job` nothing to bind — which the plan separately requires a test for. | pending | In `tools/ask_poll.py`, mirror `tools/send_message.py:187` exactly — `reply_to = os.environ.get("TELEGRAM_REPLY_TO")`, coerced with the same `int(reply_to) if reply_to else None` idiom at `tools/send_message.py:123` — and thread it into `build_telegram_poll_outbox_payload(..., reply_to=reply_to, ...)`. Do not introduce a `--reply-to` flag as the primary source; the env var is how a headless session already learns its reply target, and a flag lets an agent pass a stale id. |
-| NIT | History & Consistency | The Freshness Check claims the drifted offsets were "corrected in place" and explicitly lists `_dead_letter_message` `:803`→`:946` and `process_outbox` `:850`→`:1018`, but the corrections were never propagated: Data Flow step 5 still says `process_outbox` (`:850`), and `_dead_letter_message` is still `:803` in the Technical Approach, in Risk 5 (twice), and in Task 7. Verified on `b2e15a9a0`: `_dead_letter_message` is at `bridge/telegram_relay.py:946`, `process_outbox` at `:1018`, and the terminal-failure branch cited as `:1029-1034` is at `:1196-1206`. The locate-by-symbol convention contains the damage, but the Freshness Check is the one place a builder is entitled to trust an offset. | pending | Either propagate the corrected offsets to their remaining sites (`:803`→`:946` in the Technical Approach fallback bullet, Risk 5 items 1 and 2, and Task 7's dead-letter bullet; `:850`→`:1018` in Data Flow step 5; `:1029-1034`→`~:1196-1206` in the Technical Approach, Risk 5 and Task 7), **or** soften the Freshness Check sentence to "representative corrections are recorded in this list; individual offsets elsewhere are hints only, per the locate-by-symbol convention." Do not leave the two halves contradicting each other, which is the state today. |
-| NIT | History & Consistency | The Test Impact row for `bridge/read_the_room.py` hedges "UPDATE **only if** renaming `_is_group_chat` ... changes a name a test patches". It does, certainly: `tests/unit/test_read_the_room.py:40` imports the private name directly and `:153` asserts on it (`assert _is_group_chat(chat_id) is expected`). There is also a second in-module call site to repoint, `bridge/read_the_room.py:526`. An "only if" invites a builder to check nothing and skip, landing a red suite on an otherwise correct Task 3. | pending | Make the Test Impact row an unconditional UPDATE naming `tests/unit/test_read_the_room.py` line 40 (import) and line 153 (assertion), and add a Task 3 bullet noting the in-module call site at `bridge/read_the_room.py:526`. Do **not** leave a `_is_group_chat = is_group_chat` back-compat alias — the Verification row `grep -rn 'def is_group_chat\|def _is_group_chat' bridge/ \| wc -l` expecting `1` counts `def`s only and would pass with an alias, silently keeping two names alive, which is the second-copy drift Task 3 exists to prevent. |
+| CONCERN | Risk & Robustness | `iter_unanswered_polls()` / `iter_pending_polls()` are specified over plain Redis string keys with **no index**, so the only enumeration available is `SCAN MATCH telegram:poll:*`, which walks the entire shared production keyspace on every reconciliation tick — at the fast interval, for the first minutes after every poll. Risk 6's mitigation ("the reconciliation loop iterates only registry entries, never all chats") is about which *chats* are touched, not the scan cost. Spike-5's precedent does not cover it: `bridge/job_router.py:85-96` and `bridge/context.py:491` (`_get_cached_root`, a bare `r.get(key)`) only ever **point-look-up** their keys and are never enumerated. This plan is the first to require enumeration and inherits a non-Popoto posture chosen for a lookup workload. | **ADOPTED (cycle 7).** Task 6 now specifies `POLL_OPEN_INDEX = "telegram:poll:open"` and `POLL_PENDING_INDEX = "telegram:poll:pending:index"` as Redis SETs in `bridge/poll_registry.py`: `register_poll` / `register_pending_poll` `SADD` in the same call that writes the row; `mark_poll_steered`, `promote_pending_poll` and every `_send_queued_poll` decline branch `SREM`; both iterators `SSCAN` the index and `GET` each row, skipping and `SREM`ing expired ids. The index is a hint and the row stays authoritative, so a lost `SREM` costs one wasted `GET`. `scan_iter` / `SCAN MATCH` are banned in-task with the shared-keyspace reason, and the spike-5 non-coverage is stated in the plan text rather than only in this row. Task 10 restates that the loop reads the index. Two Verification rows (index constants present; a `scan_iter`/`SCAN MATCH` anti-criterion over both modules), a Success Criterion, and a Task 13a test bullet asserting the SADD/SREM/skip-and-SREM contract. | Add `POLL_OPEN_INDEX = "telegram:poll:open"` and `POLL_PENDING_INDEX = "telegram:poll:pending:index"` (Redis SETs) to `bridge/poll_registry.py`. `register_poll(...)` `SADD`s the poll id in the same call that writes the row; `register_pending_poll` `SADD`s the hint; `mark_poll_steered`, the provisional-row delete on every decline branch, and the TTL-expiry drop all `SREM`. `iter_unanswered_polls()` `SSCAN`s the index and `GET`s each row, skipping (and `SREM`ing) ids whose row has expired — the index is a hint, the row stays authoritative, so a lost `SREM` costs one wasted `GET` rather than a missed poll. Do **not** use `scan_iter(match="telegram:poll:*")`: Redis SCAN filters server-side but still walks every key in the db, and this db is shared with production Popoto keys. |
+| CONCERN | Risk & Robustness | The Verification row *Prime line is a conditional, not a bare directive* (`grep -rn 'legitimate open question' <the three primes> \| wc -l`, expected `3`) is **deterministically red on a correct build**. `grep -rn` counts lines, not files, and `.claude/commands/roles/prime-pm-role.md:89` already contains that exact phrase on a clean tree ("...when you have a legitimate open question for the user."). Verified: the row returns **1** today, so a correct Task 12 build adding one line per prime returns **4**. This is the same shape cycle 6 raised against the thread-offload anti-criterion ("A deterministically-red gate invites the builder to weaken or delete it"), reintroduced by a row cycle 6 itself added. | **ADOPTED (cycle 7).** The row is now `grep -lc 'legitimate open question' <the three primes> \| wc -l` expecting `3`. Verified on the verification baseline: the `-lc` form returns `1` on a clean tree (absorbing `prime-pm-role.md:89` as one file rather than one line) and reaches `3` only when all three primes carry the line; the old `-rn` form returns `1` today and `4` after a correct Task 12. A standing note under the Verification table records why `-l` is deliberate, so a future cycle does not "fix" it back to `-rn`, and states explicitly that `prime-pm-role.md:89` must not be edited or deleted. | Rewrite the row to `grep -lc 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` expecting `3` — `-l` collapses each file to at most one output line, absorbing the pre-existing `prime-pm-role.md:89` sentence instead of double-counting it. Do **not** "fix" this by editing or deleting that existing line; it is unrelated `## Open Questions` routing guidance. |
+| CONCERN | Risk & Robustness | Task 10 never names a home module for the reconciliation loop (only "started alongside `relay_loop`"), yet the Verification row `grep -rc 'poll:reconcile:heartbeat' bridge/telegram_bridge.py` expecting `> 0` silently pins the heartbeat write — and therefore the loop body — into `bridge/telegram_bridge.py`. The seven-path creation list contains no reconcile module, so a builder who houses the loop in its own module (the natural choice given how the rest of the feature is modularized) fails a Verification row on a correct build. This is verbatim the drift class cycle 6 raised for `bridge/poll_registry.py` ("a module named nowhere else in the plan"), left unfixed for the loop. Task 10's cited start site `:3231-3233` has also drifted: the relay task is created at `bridge/telegram_bridge.py:3406-3408` on `b2e15a9a0`. | **ADOPTED (cycle 7).** Task 10 now opens by creating `bridge/poll_reconcile.py` exporting `poll_reconcile_loop(client)` — loop body, heartbeat write and orphan-adoption sweep — imported and started from `bridge/telegram_bridge.py` next to `relay_loop` (locate by symbol; `~:3406-3408`). The `events.Raw` handler explicitly **stays** in `bridge/telegram_bridge.py`, and its stale `:1165` is corrected to `~:1261`. The heartbeat Verification row is repointed to `grep -c 'poll:reconcile:heartbeat' bridge/poll_reconcile.py` and a new row asserts the module has the `def`. The intentionally-created path list goes seven → **eight** in the same edit, restated in all three places it appears (structural audit, Architectural Impact module bullets, the feature doc's module map) plus the module-homes Success Criterion. | State in Task 10 that the loop lives in a new `bridge/poll_reconcile.py` exporting `poll_reconcile_loop(client)`, imported and started in `bridge/telegram_bridge.py` next to `from bridge.telegram_relay import relay_loop` / `asyncio.create_task(relay_loop(client))` (locate by symbol — now `:3406-3408`), and repoint the row to `grep -c 'poll:reconcile:heartbeat' bridge/poll_reconcile.py` expecting `> 0`. Keep the `events.Raw` handler in `bridge/telegram_bridge.py` (the `poll_update_observed` row greps that file correctly). Update the intentionally-created path list from seven to eight in the same edit — that list has gone stale in three consecutive cycles. |
+| CONCERN | Scope & Value | Task 10a (`gate-poll-e2e`) is a **dependency-graph leaf**: no task lists it in `Depends On` (Task 14 depends on `build-outbound-tests, build-inbound-tests`; Task 15 on `document-feature`). The plan's self-described "only end-to-end assertion that the nine subsystems are actually wired together" can therefore be skipped and the graph still runs to completion — the only thing holding it is Task 15's prose. Cycle 6's own doctrine for this exact problem was "The dependency graph, not the prose, is now the thing that makes the claim true", applied to the 13a/13b split but not to the task that split produced. | **ADOPTED (cycle 7), exactly as suggested.** Task 15's `Depends On` is now `document-feature, gate-poll-e2e` — on Task 15, **not** Task 14, so documentation is never re-blocked on an operator tap. Task 15 carries an in-task clause extending the *satisfied-by-pause* rule verbatim to `gate-poll-e2e`: paused or UNRESOLVED → Task 15 still runs and reports the E2E row UNRESOLVED, never passed; only a Task 10a **FAIL** stops the pipeline. The Gate-topology note records the edge and why it does not weaken the pause property. The inbound set was already enumerated as `9, 10, 10a, 13b` at all five sites, so the pause semantics and the new edge agree without further edits. | Add `gate-poll-e2e` to **Task 15's** `Depends On` (`document-feature, gate-poll-e2e`), not Task 14's — Task 14 does not consume the gate result and adding it there would re-block documentation on an operator tap, the property the 13a/13b split was bought to protect. Extend Task 15's existing *satisfied-by-pause* rule verbatim to `gate-poll-e2e`: with the inbound set paused or the gate UNRESOLVED, Task 15 runs and reports the E2E row **UNRESOLVED**, never passed. Add `gate-poll-e2e` to every place the inbound set is enumerated as `9, 10, 10a, 13b` so the pause semantics and the dependency edge agree. |
+| NIT | Scope & Value | `build_telegram_poll_outbox_payload(chat_id, question, options, reply_to, session_id)` takes a `reply_to` argument and Task 8 never says where `tools/ask_poll.py` obtains it. Task 8 specifies reuse of `_resolve_transport()` (`tools/send_message.py:63`) only, but the sibling path also reads the reply target from the environment (`tools/send_message.py:187`: `reply_to = os.environ.get("TELEGRAM_REPLY_TO")`). A poll sent with `reply_to=None` still delivers but lands unthreaded and gives `_bind_outbound_message_to_job` nothing to bind — which the plan separately requires a test for. | **ADOPTED (cycle 7).** Task 8 now specifies `reply_to = os.environ.get("TELEGRAM_REPLY_TO")` mirroring the sibling send path, coerced with `int(reply_to) if reply_to else None` (`tools/send_message.py:123`), threaded into `build_telegram_poll_outbox_payload(..., reply_to=reply_to, ...)`, with the `--reply-to`-flag alternative rejected in-task for the stale-id reason. A Success Criterion and a Task 13a test bullet cover both the set and unset cases. | In `tools/ask_poll.py`, mirror `tools/send_message.py:187` exactly — `reply_to = os.environ.get("TELEGRAM_REPLY_TO")`, coerced with the same `int(reply_to) if reply_to else None` idiom at `tools/send_message.py:123` — and thread it into `build_telegram_poll_outbox_payload(..., reply_to=reply_to, ...)`. Do not introduce a `--reply-to` flag as the primary source; the env var is how a headless session already learns its reply target, and a flag lets an agent pass a stale id. |
+| NIT | History & Consistency | The Freshness Check claims the drifted offsets were "corrected in place" and explicitly lists `_dead_letter_message` `:803`→`:946` and `process_outbox` `:850`→`:1018`, but the corrections were never propagated: Data Flow step 5 still says `process_outbox` (`:850`), and `_dead_letter_message` is still `:803` in the Technical Approach, in Risk 5 (twice), and in Task 7. Verified on `b2e15a9a0`: `_dead_letter_message` is at `bridge/telegram_relay.py:946`, `process_outbox` at `:1018`, and the terminal-failure branch cited as `:1029-1034` is at `:1196-1206`. The locate-by-symbol convention contains the damage, but the Freshness Check is the one place a builder is entitled to trust an offset. | **ADOPTED (cycle 7), first option — propagated, not softened.** `_dead_letter_message` `:803`→`:946` at all four remaining sites (Technical Approach fallback bullet, Risk 5 items 1 and 2, Task 7); `process_outbox` `:850`→`:1018` in Data Flow step 5; the terminal-failure branch `:1029-1034`→`~:1196-1206` in the Technical Approach, Risk 5 and Task 7. Also propagated in the same pass: Task 10's loop start site `:3231-3233`→`~:3406-3408` and its `events.Raw` site `:1165`→`~:1261`. A *Cycle-7 propagation note* in the Freshness Check records exactly what moved, states that historical *Implementation Note* cells are deliberately left alone, and restates that the Freshness Check list is the only place an offset is trustworthy. | Either propagate the corrected offsets to their remaining sites (`:803`→`:946` in the Technical Approach fallback bullet, Risk 5 items 1 and 2, and Task 7's dead-letter bullet; `:850`→`:1018` in Data Flow step 5; `:1029-1034`→`~:1196-1206` in the Technical Approach, Risk 5 and Task 7), **or** soften the Freshness Check sentence to "representative corrections are recorded in this list; individual offsets elsewhere are hints only, per the locate-by-symbol convention." Do not leave the two halves contradicting each other, which is the state today. |
+| NIT | History & Consistency | The Test Impact row for `bridge/read_the_room.py` hedges "UPDATE **only if** renaming `_is_group_chat` ... changes a name a test patches". It does, certainly: `tests/unit/test_read_the_room.py:40` imports the private name directly and `:153` asserts on it (`assert _is_group_chat(chat_id) is expected`). There is also a second in-module call site to repoint, `bridge/read_the_room.py:526`. An "only if" invites a builder to check nothing and skip, landing a red suite on an otherwise correct Task 3. | **ADOPTED (cycle 7).** The Test Impact row is now an unconditional UPDATE naming `tests/unit/test_read_the_room.py:40` (import) and `:153` (assertion in `test_is_group_chat` at `:152`), verified on the baseline. Task 3 gains a bullet enumerating all three call sites to repoint — the in-module `bridge/read_the_room.py:526` plus the two test sites — and bans a `_is_group_chat = is_group_chat` back-compat alias explicitly, with the reason the `def`-counting Verification row would pass with one. | Make the Test Impact row an unconditional UPDATE naming `tests/unit/test_read_the_room.py` line 40 (import) and line 153 (assertion), and add a Task 3 bullet noting the in-module call site at `bridge/read_the_room.py:526`. Do **not** leave a `_is_group_chat = is_group_chat` back-compat alias — the Verification row `grep -rn 'def is_group_chat\|def _is_group_chat' bridge/ \| wc -l` expecting `1` counts `def`s only and would pass with an alias, silently keeping two names alive, which is the second-copy drift Task 3 exists to prevent. |
+
+**Cycle 7 revision applied, 2026-09-02.** All seven findings are dispositioned — **zero rows in this
+document carry `pending`**. Cycle 7 raised no blockers, so this pass adds detail and closes drift
+rather than changing the plan's shape: scope, appetite, the settled capability matrix, the module
+topology and the task list are all unchanged. Two changes are structural rather than cosmetic:
+
+1. **The task graph gained one edge.** Task 15 now depends on `document-feature, gate-poll-e2e`.
+   That converts the plan's only end-to-end assertion from a graph leaf into a scheduled step, and
+   the *satisfied-by-pause* rule (extended verbatim to `gate-poll-e2e` in-task) keeps the property
+   the 13a/13b split was bought for: an unavailable operator still leaves the outbound half fully
+   built, tested, documented and validated, with the inbound rows reported UNRESOLVED.
+2. **The intentionally-created path list is eight, not seven.** `bridge/poll_reconcile.py` is now a
+   declared home for the reconciliation loop, its heartbeat and its orphan-adoption sweep, stated in
+   all three places the list appears plus the module-homes Success Criterion. The `events.Raw`
+   handler deliberately stays in `bridge/telegram_bridge.py`.
+
+The remaining five are detail: index SETs behind both registry iterators (replacing an unstated
+full-keyspace `SCAN`), the `grep -lc` fix to a deterministically-red Verification row, the
+`TELEGRAM_REPLY_TO` source for `tools/ask_poll.py`, the offset propagation the cycle-5 Freshness
+Check promised but never made, and the unconditional Test Impact row for
+`tests/unit/test_read_the_room.py`. Historical *Implementation Note* cells are untouched, per the
+column-semantics line above.
 
 **Critique cycle 6, 2026-09-02.** Run against the cycle-5 revision (plan text at `3bbefa49c`) with the
 repo at `3bbefa49c` (working tree carries only an unrelated `docs/plans/nightly-autonomous-fix-before-alert.md`
@@ -2616,6 +2753,14 @@ phrase — cycle 7's second CONCERN. (3) `gate-poll-e2e` resolves and introduces
 task depends on it, so it is a graph leaf rather than a scheduled step — cycle 7's fourth finding.
 Everything below is retained as the cycle-6 audit it was, amended only by these three items.
 
+**All three are closed by the cycle-7 revision.** (1) `bridge/poll_reconcile.py` is a declared home
+and the creation list reads **eight**. (2) The *Prime line is a conditional* row is now `grep -lc`,
+which returns `1` on a clean tree and `3` on a correct build. (3) `gate-poll-e2e` is now an edge on
+Task 15's `Depends On`; re-checked for cycles — `validate-all` → `gate-poll-e2e` →
+`build-vote-observation` → `build-vote-translation` → `build-relay-dispatch` / `gate-poll-human-tap`
+terminates, and nothing in that chain reaches `validate-all`, so the graph stays acyclic at
+**17 tasks**.
+
 Superseded audits: the cycle-3 paragraph that used to sit here described an 11-task graph and a
 four-file creation list, both invalidated by the cycle-4 re-scope; it was deleted in cycle 5. The
 cycle-5 audit it replaced is itself superseded by this one — its five-module creation list and its
@@ -2634,9 +2779,10 @@ dependencies still do not transitively reach `gate-poll-human-tap`. Every task c
 `**Validates**` field, including the three tasks added or split in cycle 6. All 4 prerequisites PASS
 (`scripts/check_prerequisites.py`).
 
-Every cited file exists except the **seven** paths the plan intentionally creates —
-`tools/ask_poll.py`, `bridge/answer_routing.py`, `bridge/poll_gating.py`,
-`bridge/poll_registry.py`, `bridge/poll_vote.py`, `.claude/skill-context/ask-me.md`,
+Every cited file exists except the **eight** paths the plan intentionally creates (corrected from
+seven in cycle 7) — `tools/ask_poll.py`, `bridge/answer_routing.py`, `bridge/poll_gating.py`,
+`bridge/poll_registry.py`, `bridge/poll_vote.py`, **`bridge/poll_reconcile.py`**,
+`.claude/skill-context/ask-me.md`,
 `docs/features/telegram-poll-questions.md` — plus the six new `tests/unit/` files. Every cited symbol
 re-verified present at its named location (offsets are approximate by the plan's stated convention;
 locate by symbol). No Popoto model changes, so the no-migration claim holds.
