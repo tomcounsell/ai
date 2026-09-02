@@ -5,9 +5,9 @@ appetite: Medium
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-08-26T11:40:00Z
+revision_applied_at: 2026-09-02T05:55:00Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
-last_comment_id: 5420202999
+last_comment_id: 5421299483
 ---
 
 # Import-safe LLM stack + run-boundary compat gate + coupled-set bumping
@@ -97,41 +97,102 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `d5d08615a` (re-verified at round-3 reshape, 2026-08-26).
+**Baseline commit:** `3b6eb651b` (re-verified 2026-09-02, seven days after the
+round-3 reshape; the prior baseline was `d5d08615a`).
 **Issue filed at:** 2026-08-25T05:16:36Z
-**Disposition:** No drift. `pyproject.toml:12` reads `"anthropic==0.125.0"`
-(restored by hotfix `7a30b88f7` after the second bad-pin arrival via
-`d0c02bde5`), the venv resolves 0.125.0, and the spike-1 probe passes. The
-two-arrivals history is retained in Problem and Prior Art because it is the
+**Disposition:** **Minor drift.** Every substantive premise holds: the
+`agent/llm/` module-scope imports, the five module-scope consumers,
+`AUTO_BUMP_PACKAGES`, the maintainer-only Step 3.5 shape, the `_sentry_before_send`
+hibernation drop, and the filesystem-derived dashboard health fields are all
+unchanged. `pyproject.toml:12` still reads `"anthropic==0.125.0"` (restored by
+hotfix `7a30b88f7` after the second bad-pin arrival via `d0c02bde5`), and
+`"pydantic-ai-slim[anthropic]==2.9.0"` and `"openai>=1.0.0"` are unchanged. What
+moved is `scripts/update/run.py` line numbering (`97672207d` rewrote ~594 lines
+of it) and `bridge/telegram_bridge.py`'s `_sentry_before_send` position;
+corrected below. One **new arrival** materially changes task 2's execution — the
+module-scope-env ratchet, recorded as its own subsection.
+
+The two-arrivals history is retained in Problem and Prior Art because it is the
 evidence for the run-boundary placement.
 
-### File:line references re-verified at reshape
+### File:line references re-verified 2026-09-02 at `3b6eb651b`
 
 | Reference | Claim | Status |
 |---|---|---|
-| `agent/llm/wrapper.py:44-50` | full third-party stack imported at module scope | **Holds** (verified 2026-08-26) |
+| `agent/llm/wrapper.py:44-50` | full third-party stack imported at module scope | **Holds** |
 | `agent/anthropic_client.py:44` | `import anthropic` at module scope, imported by wrapper | **Holds** |
 | module-scope consumers of `agent.llm` | routing:21, job_router:46, agent_catchup:59, memory_extraction:34, email_cs/triage:21 | **Holds** (grep-verified; six more import function-scope) |
 | `bridge/telegram_bridge.py:130` | `from bridge.routing import ...` at module scope; `main()` at `:1203` | **Holds** |
-| `scripts/update/deps.py:329` | `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]` | **Holds** |
-| `scripts/update/deps.py:474` | `auto_bump_deps` iterates packages independently | **Holds** |
-| `scripts/update/run.py:1304` / `:1169` | Step 3.5 calls `auto_bump_deps`, maintainer-only | **Holds** |
+| `scripts/update/deps.py:250` / `:277` / `:329` / `:391` / `:414` / `:463` / `:474` | `get_pinned_version`, `verify_critical_versions`, `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]`, `bump_pin_in_pyproject`, `run_smoke_test`, `auto_bump_deps` (iterating packages independently) | **Holds** — `deps.py` was not touched by any commit since the reshape |
+| ~~`scripts/update/run.py:1304` / `:1169`~~ → **`run.py:1493` / `:1358` and `:1485`** | Step 3.5 calls `auto_bump_deps`; `is_lockfile_maintainer` computed at `:1358` and gates Step 3.5 at `:1485`/`:1491` | **Drifted, claim holds.** `97672207d` (Wave-1 hotfix sweep) restructured `run.py`. The maintainer gate, the per-bump skip log, and the commit/push/restart ordering are structurally unchanged |
+| ~~`run.py:1317`~~ → **`run.py:1514`** | `"Smoke test passed after bump"` log line whose text `extract_update_warnings` parses | **Drifted, claim holds** |
 | `pyproject.toml:12` | `anthropic==0.125.0` | **Holds** |
 | `tests/unit/test_llm_wrapper_local.py:52` | tests monkeypatch `wrapper_mod.OpenAIChatModel` as the network-isolation seam | **Holds** (round-2 B-b) |
-| `bridge/telegram_bridge.py:70-77` | `_sentry_before_send` drops all events while hibernating | **Holds** (round-2 B-d) |
-| `ui/app.py:373` / `:511` / `:906` | dashboard health fields derive from filesystem artifacts, served by a separate process | **Holds** (round-2 blocker) |
+| ~~`bridge/telegram_bridge.py:70-77`~~ → **`:55`** (`configure_sentry` wired at `:80`) | `_sentry_before_send` drops all events while hibernating | **Drifted, claim holds** (round-2 B-d) |
+| `ui/app.py:373` (`_get_bridge_health`, stats `data/last_connected`) / `:511` (`_get_worker_health`) / ~~`:906`~~ → **`:907`** (`dashboard_json`) | dashboard health fields derive from filesystem artifacts, served by a separate process | **Holds** (round-2 blocker) |
+| `agent/llm/` package contents | `__init__.py`, `wrapper.py` only — no `compat.py` yet | **Holds** (nothing pre-empted this lane) |
 
-### Cited sibling issues/PRs
+**Builders: these line numbers are a re-verification record, not addresses.**
+Locate every site by symbol, not by line — `run.py` has now drifted twice.
 
-- **#2932** — closed, folded into #3001; its scope is Work Item 3, out of this lane.
+### New arrival: the module-scope-env ratchet blocks a naive task 2
+
+`2b926acae` (2026-09-01, five days after the reshape) **restored** the
+module-scope-env ratchet: `.claude/hooks/validators/validate_no_module_scope_env.py`
+blocks any commit that **adds or modifies** a line performing `os.environ.get` /
+`os.getenv` / `os.environ.setdefault` / `os.environ.pop` at module top level.
+Detection is AST-based and **diff-scoped** — pre-existing sites on untouched
+lines are exempt, but a *moved* one is not.
+
+`agent/llm/wrapper.py:167` is exactly such a site:
+
+```python
+LOCAL_TYPED_HARD_TIMEOUT = float(os.environ.get("LOCAL_TYPED_HARD_TIMEOUT", "20.0"))
+```
+
+Task 2 rewrites `wrapper.py`'s module scope wholesale. If that rewrite shifts,
+reflows, or re-indents line 167, the hook fires and the commit is **blocked** —
+a build-time surprise the round-3 plan could not have known about. The
+disposition is not to work around the hook: migrate the read to a lazily-read
+`config/settings.py` field (the `TimeoutSettings` pattern from #1968 that the
+guard's own docstring prescribes) as part of task 2. It is one field, it is the
+same direction the rest of the repo is draining toward, and it is strictly less
+work than tiptoeing around a line in the middle of the module being rewritten.
+Recorded as a task-2 bullet and a Test Impact row.
+
+This is also **useful prior art for the import-safety contract itself**: the
+ratchet is the repo's established shape for "an AST rule enforced at commit
+time, diff-scoped so it never blocks its own migration." The contract in this
+plan is enforced by a pytest architectural test rather than a hook, which is the
+right call for an invariant that starts at zero violations (nothing to drain, so
+nothing to scope) — but a reviewer asking "why not a hook?" now has an answer on
+the record.
+
+### Cited sibling issues/PRs — re-checked 2026-09-02
+
+- **#2932** — CLOSED 2026-08-25, folded into #3001; its scope is Work Item 3, out of this lane.
 - **#2960–#2999** — closed duplicates; their shared-root-cause diagnosis not relied on.
-- **#2949** / `69dc69568` — merged; owns Work Item 2, out of this lane.
-- **#3016** — independent `test_promise_gate_real_api` failure, separately filed.
+- **#2949** / `69dc69568` — MERGED 2026-08-24; owns Work Item 2, out of this lane.
+- **#3016** — still **OPEN**. Independent `test_promise_gate_real_api` failure, separately filed; not a blocker for this lane.
+- **#3001** — still OPEN, as required: Work Items 2 and 3 keep it open past this lane's merge.
+
+### Commits since the reshape that touched lane files
+
+`97672207d`, `37e60af6f`, `b4daa7861`, `b152b7d3c` (all `scripts/update/run.py`);
+`b152b7d3c` (`bridge/telegram_bridge.py`, import repointing off the
+`agent_session_queue` re-export hub); `2b926acae` and `97672207d`
+(`pyproject.toml`, `claude-agent-sdk` bumps only). **`scripts/update/deps.py`,
+`agent/llm/`, `agent/anthropic_client.py`, `ui/app.py`,
+`tests/integration/test_remote_update.py`, and `tests/unit/test_llm_wrapper_local.py`
+were not touched at all.** No commit partially addresses, changes the root cause
+of, or fixes this lane's problem.
 
 ### Active plans overlapping this area
 
-None. `grep -l "auto_bump\|anthropic" docs/plans/*.md` matches only incidental
-mentions with no overlap on `scripts/update/deps.py` or `agent/llm/`.
+None. `docs/plans/overclaim-guard-greps-whole-worktree.md` (#2807) names
+`agent/llm/wrapper.py` twice — once inside a prose example, once as a pathspec
+exclusion in a grep invocation. It modifies no file this lane touches. No other
+plan matches on `auto_bump`, `AUTO_BUMP`, `agent/llm`, or `anthropic==`.
 
 ## Prior Art
 
@@ -528,6 +589,10 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   instead (`monkeypatch.setattr(wrapper_mod, "_load_stack", fake_loader)`); the
   module docstring's isolation claim is updated, and a test asserts no real
   network call is reachable from that file.
+- **The `wrapper.py` rewrite trips a commit-time hook unless the env read moves
+  with it** — `validate_no_module_scope_env.py` is diff-scoped, so relocating
+  `LOCAL_TYPED_HARD_TIMEOUT` counts as introducing it. Migrating the read to
+  `TimeoutSettings` is a task-2 deliverable, not an incidental cleanup.
 - **Set semantics are all-or-nothing at every stage** — resolve, rewrite, sync,
   gate, rollback. Today's record-error-and-continue is exactly how the incident
   happened (spike-2 defect 3).
@@ -624,6 +689,11 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `test_worktree_clean_after_every_rollback_path`,
   `test_verify_critical_versions_unchanged_by_helper_rewrite`,
   `test_verify_runs_compat_check_without_bump`.
+- [ ] Any test asserting on `wrapper.LOCAL_TYPED_HARD_TIMEOUT` — UPDATE: the
+  constant becomes a lazily-read `TimeoutSettings` field (see task 2 and the
+  Freshness Check's module-scope-env ratchet subsection). Grep for the name
+  across `tests/` before editing; if there are no readers, state that in the
+  build report rather than assuming.
 - [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the
   gate's pytest phase.
 
@@ -902,6 +972,14 @@ bridge command. But the runtime's boot and failure presentation change:
 - Write the contract test's import half now (broken-stack stubs →
   `import agent.llm` and `import bridge.telegram_bridge` succeed); the
   alert/typed-exception half lands with task 4.
+- **Migrate `LOCAL_TYPED_HARD_TIMEOUT` (`wrapper.py:167`) to a lazily-read
+  `config/settings.py` `TimeoutSettings` field in this same commit.** The
+  module-scope-env ratchet (`validate_no_module_scope_env.py`, restored
+  `2b926acae`) blocks any commit that adds *or modifies* a module-scope
+  `os.environ.get` line, and this rewrite necessarily moves that line. Do not
+  attempt to preserve line 167 byte-identically to dodge the hook — migrate it,
+  per the pattern the guard's own docstring prescribes. Update every reader of
+  the constant.
 
 ### 3. The compat predicate
 - **Task ID**: `build-compat-predicate`
@@ -1029,6 +1107,7 @@ Rows assert *declarations and executed paths*, not file text.
 | Predicate does not import from `scripts/` | `.venv/bin/python -c "import ast;t=ast.parse(open('agent/llm/compat.py').read());assert not [n for n in ast.walk(t) if isinstance(n,(ast.Import,ast.ImportFrom)) and 'scripts' in (getattr(n,'module','') or '')+''.join(a.name for a in getattr(n,'names',[]))]"` | exit code 0 |
 | Import-safety contract | `./scripts/pytest-clean.sh tests/unit/test_llm_import_safety.py -q` | exit code 0 |
 | No module-scope third-party stack imports in `agent/llm/` | `.venv/bin/python -c "import ast,sys;bad={'anthropic','pydantic_ai'};files=['agent/llm/wrapper.py','agent/llm/compat.py','agent/anthropic_client.py'];hits=[(f,n.lineno) for f in files for n in ast.walk(ast.parse(open(f).read())) if isinstance(n,(ast.Import,ast.ImportFrom)) and n.col_offset==0 and any((getattr(n,'module','') or a.name).split('.')[0] in bad for a in n.names)];assert not hits,hits"` | exit code 0 |
+| Module-scope-env ratchet satisfied in `agent/llm/` | `.venv/bin/python -c "from scripts.scan_module_scope_env import find_module_scope_env_calls as f;import pathlib;p='agent/llm/wrapper.py';assert not f(pathlib.Path(p).read_text(),p)"` | exit code 0 (verified 2026-09-02 to return exactly one `EnvCall` today, at `wrapper.py:167` — this row is red on main and must go green) |
 | Coupled set declared with hold | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS as S; s=[x for x in S if 'anthropic' in x.members][0]; assert set(s.members)=={'anthropic','pydantic-ai-slim'} and s.hold"` | exit code 0 |
 | `openai` is in no coupled set | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS; assert 'openai' not in {m for s in AUTO_BUMP_SETS for m in s.members}"` | exit code 0 |
 | New sets do not inherit the billed llm phase | `.venv/bin/python -c "from scripts.update.deps import CoupledSet; assert CoupledSet(members=['x'], import_names=('x',), reason='t').gates == ('import','pytest')"` | exit code 0 |
@@ -1081,4 +1160,25 @@ remaining four keep their round-2 prescribed fixes verbatim.
 | NIT: `test_agent_llm_wrapper.py` does not exist | **Fixed:** Test Impact names the real files (`test_llm_wrapper.py`, `test_llm_wrapper_local.py`). |
 | NIT: TCC hazard on the `~/Desktop/Valor/.env` fallback under launchd | **Carried as a caution** in spike-3's wording; the maintainer-machine `llm` phase reads `repo/.env` first via `utils/api_keys.py`. |
 
-Awaiting round-3 critique.
+### Round-4 revision pass (2026-09-02) — freshness, not reshape
+
+Round 3's reshape was never critiqued: the lane sat for seven days between the
+reshape commit (`88f572d3a`, 2026-08-26) and this dispatch. The router routed
+back to `/do-plan` under the revision guard with the round-2 verdict still the
+latest recorded one, so this pass is **a re-verification of the reshaped plan's
+premises against current `main`**, not a further reshape. No architectural
+decision changed; the import-safety contract, the resolver-bound alert, the
+coupled-set model, and the hold all stand exactly as round 3 left them.
+
+What this pass changed:
+
+| Change | Why |
+|---|---|
+| Freshness Check re-baselined to `3b6eb651b`, disposition Minor drift | Seven days and 30+ commits elapsed; the old baseline `d5d08615a` and its "no drift" claim were stale as claims about *today*. |
+| `run.py:1304`/`:1169`/`:1317` corrected to `:1493`/`:1358`/`:1485`/`:1514`; `_sentry_before_send` `:70-77` → `:55`; `dashboard_json` `:906` → `:907` | `97672207d` rewrote ~594 lines of `run.py`; `b152b7d3c` shifted `telegram_bridge.py`. Every underlying claim survived; only addresses moved. Builders are now told explicitly to locate by symbol. |
+| **New**: module-scope-env ratchet subsection + task-2 bullet + Technical Approach note + Test Impact row + Verification row | `2b926acae` (2026-09-01) restored a commit-blocking AST hook that a wholesale `wrapper.py` module-scope rewrite will trip via `LOCAL_TYPED_HARD_TIMEOUT` at `wrapper.py:167`. This is a genuine new build blocker that did not exist at reshape time; disposition is to migrate the read to `TimeoutSettings`, not to dodge the hook. |
+| Commits-since-reshape subsection added | Records that `deps.py`, `agent/llm/`, `anthropic_client.py`, `ui/app.py`, and both named test files were untouched — the evidence for "no commit partially fixes this". |
+| Sibling issues re-checked with current states; overlap re-checked | #3016 confirmed still open; #2807's plan confirmed to touch no shared file. |
+| `last_comment_id` advanced `5420202999` → `5421299483` | The owner's design-decisions comment was already folded into Failure Posture at round 3 but never recorded in frontmatter. No unincorporated comment remains. |
+
+Awaiting round-4 critique.
