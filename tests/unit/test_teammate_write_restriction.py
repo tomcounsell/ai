@@ -589,19 +589,28 @@ class TestDenialTelemetryTaps:
     def test_missing_session_id_skips_recording_without_blocking(
         self, fake_project, mock_context, monkeypatch, denial_stream
     ):
-        """No resolvable session id means no event -- never an invented one,
-        and never a softened deny."""
+        """No resolvable session id means no recording at all -- never an
+        invented placeholder id, and never a softened deny.
+
+        The probe watches the recorder itself rather than the resulting files:
+        an invented id writes to a DIFFERENT stream, so reading this test's own
+        stream (or even globbing the directory, which the module's per-session
+        handle cache makes order-dependent) would report absence either way.
+        Asserting the call never happens is the claim stated exactly."""
         monkeypatch.delenv("SESSION_TYPE", raising=False)
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
-        result = asyncio.run(pre_tool_use_hook(_make_write_input(".env"), "tu-den-6", mock_context))
+        with patch("agent.session_telemetry.record_pre_tool_use_denial") as recorder:
+            result = asyncio.run(
+                pre_tool_use_hook(_make_write_input(".env"), "tu-den-6", mock_context)
+            )
 
         assert result.get("decision") == "block"
         assert "sensitive" in result.get("reason", "").lower()
-        assert denial_stream() == []
+        assert recorder.call_args_list == []
 
 
 class TestDenialTelemetryIsFailQuiet:
