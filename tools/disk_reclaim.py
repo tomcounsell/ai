@@ -89,6 +89,17 @@ _SESSION_ID_RE = re.compile(
 # regex and asserts the memory store still survives.
 PRESERVED_PROJECT_ENTRIES = frozenset({"memory"})
 
+# Worktree lanes that are infrastructure, not SDLC work, and must never be
+# reaped. `.worktrees/nightly-baseline/` is the persistent, provisioned
+# baseline checkout the nightly regression classifier re-points at the prior
+# run's HEAD SHA every night (issue #2334); reaping it forces a full
+# `uv sync` re-provision on the nightly critical path. It is genuinely in
+# sweep_worktrees' scope and survives today only by guard-order accident
+# (`too_young` while the nightly keeps touching it, then `merged_via_tree`
+# returning False for a branch that never existed), which inverts the moment
+# a branchless lane is treated as reapable.
+PROTECTED_WORKTREE_SLUGS = frozenset({"nightly-baseline"})
+
 # Matches cleanup_old_snapshots' own long-standing default (7 days).
 DEFAULT_SNAPSHOT_MAX_AGE_HOURS = 168
 
@@ -340,8 +351,9 @@ def sweep_worktrees(
     """Reap merged, idle worktree lanes through ``cleanup_after_merge``.
 
     Guards run cheapest-first and every one of them fails closed. A lane is
-    removed only when it is old enough, clean, unclaimed by any live session or
-    OS process, carries no open PR, and its branch has landed on main.
+    removed only when it is not in ``PROTECTED_WORKTREE_SLUGS``, old enough,
+    clean, unclaimed by any live session or OS process, carries no open PR,
+    and its branch has landed on main.
     """
     from agent.worktree_manager import (
         WORKTREES_DIR,
@@ -371,6 +383,12 @@ def sweep_worktrees(
         if not child.is_dir():
             continue
         slug = child.name
+
+        # First guard, ahead of `too_young`: a protected lane is never
+        # reapable no matter how old, clean, or idle it looks.
+        if slug in PROTECTED_WORKTREE_SLUGS:
+            sweep.skip(slug, "protected")
+            continue
 
         size, newest = _tree_stats(child)
         if newest > cutoff:
