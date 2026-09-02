@@ -461,6 +461,55 @@ touches a `memory/` store at any age.
 See [`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md)
 for the guard table, the arming rationale, and the reflection registration block.
 
+### Toolbelt Baseline (`tools.belt_baseline`)
+
+Publishes the pre-activation context-cost measurement that the persona-toolbelt
+targets are judged against: per-tool attributed tokens, tool-call turns, the
+tool-definition-bearing prompt prefix, and PreToolUse denial counts. Reads only
+the per-session telemetry JSONL under `logs/session_telemetry/`, so the same
+stream that produced a number can always reproduce it.
+
+```bash
+python -m tools.belt_baseline                       # whole stream
+python -m tools.belt_baseline --since 30d           # measurement window
+python -m tools.belt_baseline --merged-pr-count 42  # normalize per merged PR
+python -m tools.belt_baseline --full --json         # every tool, machine-readable
+```
+
+Denials split **belt-relevant** vs **belt-irrelevant**. A belt cannot prevent a
+denial whose cause it does not control, so `BELT_IRRELEVANT_CAUSES`
+(`sensitive_path`, `teammate_write`, `tool_budget`, `foreground_guard`) stays out
+of the denominator; `denials_belt_relevant` is the field the escalation rollback
+gate consumes. An unrecognised cause counts as belt-relevant — under-counting
+makes the ceiling tighter, which is the safe direction to be wrong.
+
+An empty or missing stream exits **3** and says the window was not measured. That
+is deliberate: a zero baseline would make the −40% context target trivially
+"met". Exit codes are stable — 0 report produced, 1 telemetry unreadable, 2 usage
+error, 3 nothing measured.
+
+Per-tool numbers come from `agent/tool_cost_attribution.py`
+(`assistant-usage-delta/v1`) and are a **ranking aid, not billing** — they
+attribute the growth of the prompt prefix between assistant messages to the tools
+called in between. `total_cost_usd` remains the only authority on spend.
+
+### Toolbelt Skew Report (`tools.belt_skew_report`)
+
+The cross-session view of `belt_enforce_skew` events that
+`read_session_timeline` (one session at a time) cannot provide. Run it during the
+`TOOLBELTS_ENFORCE` activation window to see whether the fleet has converged and
+which host is behind.
+
+```bash
+python -m tools.belt_skew_report                # every session file
+python -m tools.belt_skew_report --since 12h    # just the flip window
+python -m tools.belt_skew_report --full --json
+```
+
+Zero skew events is reported as an explicit "NO SKEW EVENTS FOUND", never as
+blank output. Exit codes: 0 report produced (empty state included), 1 telemetry
+unreadable, 2 usage error.
+
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
 Write stage progress markers (in_progress/completed/skipped) to the issue-keyed pipeline ledger in Redis. Called by each SDLC sub-skill at start and completion. The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd.
