@@ -280,7 +280,9 @@ def extract_failing_node_ids(report: dict) -> list[str]:
     return sorted(failing)
 
 
-def _spawn_pytest(argv: list[str], timeout: int, env: dict | None = None) -> int:
+def _spawn_pytest(
+    argv: list[str], timeout: int, env: dict | None = None, cwd: Path | str = PROJECT_DIR
+) -> int:
     """Run a pytest(-wrapper) subprocess in its own process group; return its exit code.
 
     ``start_new_session=True`` puts the subprocess (and, through the wrapper,
@@ -296,10 +298,13 @@ def _spawn_pytest(argv: list[str], timeout: int, env: dict | None = None) -> int
     lane's run because each invocation gets its own group. This is the
     orphan-reaping guarantee Task E (wrapper routing) is supposed to buy;
     without owning the group here, a timeout would defeat it.
+
+    ``cwd`` defaults to ``PROJECT_DIR``, preserving both existing callers
+    (``run_tests`` and ``reconfirm_serial``), which pass nothing.
     """
     proc = subprocess.Popen(
         argv,
-        cwd=PROJECT_DIR,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -625,13 +630,21 @@ def send_telegram(msg: str, dry_run: bool = False) -> None:
             return
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [str(bin_path), "send", "--chat", TELEGRAM_CHAT, msg],
             capture_output=True,
             text=True,
             timeout=30,  # timeout-guard: allow
         )
-        log(f"Telegram sent: {msg}")
+        if result.returncode != 0:
+            # The success line must stay on the zero branch: an unpaged night is
+            # only visible in the log if a failed send says so.
+            log(
+                f"WARNING: telegram send failed rc={result.returncode} "
+                f"stderr={(result.stderr or '').strip()}"
+            )
+        else:
+            log(f"Telegram sent: {msg}")
     except Exception as exc:
         log(f"WARNING: Failed to send Telegram: {exc}")
 
