@@ -470,8 +470,11 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
    on an adaptive interval and calls the same `translate_poll_vote(poll_id)`. This is what makes
    the feature survive a bridge restart, a dropped update, and the Task-1 unknown about whether
    `updateMessagePoll` reaches a user account for its own poll at all.
-4. **`bridge/poll_vote.py::translate_poll_vote(poll_id)`** — idempotent. Claims `SET telegram:poll:answered:{poll_id}
-   1 NX EX <ttl>`; a lost claim returns immediately. Confirms results with
+4. **`bridge/poll_vote.py::translate_poll_vote(poll_id)`** — idempotent. Claims
+   `SET telegram:poll:answered:{poll_id} <iso claim ts> NX EX <ttl>`; a lost claim returns
+   immediately **unless** the claim is stale (older than one slow reconcile interval) and carries no
+   `dispatched` marker, in which case it is taken over — the Risk 9 bridge-death recovery.
+   Confirms results with
    `messages.GetPollResultsRequest(peer=chat_id, msg_id=msg_id)` rather than trusting a possibly
    `min=True` update. Selects the chosen option under the **deterministic group rule** (see
    Technical Approach: exactly one `voters >= 1` → use it; several → highest `voters`, ties broken
@@ -914,9 +917,9 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   question. The drafter's role for `telegram_poll` is therefore **validation only**. The comms layer
   is not bypassed overall: the escape-hatch followup message, which is ordinary prose, still goes
   through the full `draft_message` path. The #1955 citation supports "add a medium", not "compose".
-- **No Popoto model, no migration.** Spike-5: `telegram:poll:{poll_id}` and
-  `telegram:poll:answered:{poll_id}` are plain Redis string keys with TTL, following
-  `bridge/job_router.py:85-96`. This keeps the change outside index-drift and `rebuild_indexes()`
+- **No Popoto model, no migration.** Spike-5: the descriptor row `telegram:poll:{poll_id}` and each
+  marker key (`answered`, `dispatched`, `steered_at`, `warned`) are plain Redis string keys with
+  TTL, following `bridge/job_router.py:85-96`. This keeps the change outside index-drift and `rebuild_indexes()`
   and avoids a `scripts/update/migrations.py` entry entirely.
 - **All tunables are named env-overridable constants** with a grain-of-salt comment marking them
   provisional: registry TTL, answered-claim TTL, reconciliation fast interval, reconciliation slow
@@ -1023,6 +1026,26 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   than one reconcile interval.
 - [ ] `poll_expired_unanswered` fires for a row with a claim but no `steered_at` — i.e. it keys on
   missing `steered_at`, not on a missing claim.
+- [ ] **Bridge-death recovery actually executes** (`tests/unit/test_poll_vote_translation.py`): with
+  the claim key present, **no** `dispatched` marker, and the claim timestamp older than
+  `POLL_RECONCILE_SLOW_INTERVAL_S` — the state a bridge death after the claim leaves behind, where
+  no `except` handler ever ran — `translate_poll_vote` **takes the claim over and steers exactly
+  once**, rather than returning on the lost claim. The mirror case is asserted too: the same state
+  **with** `dispatched` present re-attempts `mark_poll_steered` only and steers zero times.
+- [ ] A lost claim younger than one slow reconcile interval (a genuine concurrent translator)
+  returns without steering, closing, or taking over.
+- [ ] Marker writes are independent keys, not fields on the row: a test that writes the warn marker
+  concurrently with `mark_poll_dispatched` finds **both** afterwards.
+
+### Relay Retry Must Not Duplicate a Poll
+
+- [ ] `tests/unit/test_bridge_relay.py`: the first attempt's `send_poll` raises **after** the wire
+  (the stub client records the `SendMediaRequest`, then throws), the relay retries the same payload,
+  and **exactly one `SendMediaRequest` reaches the stub client**. The retry finds the already-sent
+  poll by `poll_id_hint`, calls `promote_pending_poll`, and returns without sending.
+- [ ] The same test asserts the provisional row is promoted (not left to age into an orphan) and
+  that Task 10's orphan sweep finds exactly one candidate — never the two that would trip its
+  "adopt nothing" bail.
 
 ### Error State Rendering
 
@@ -1271,11 +1294,14 @@ stale results, every question simply goes unanswered and every asking agent stay
 nothing in the plan reads registry state at expiry time, so this failure is invisible.
 **Mitigation:** The reconciliation loop's own `iter_unanswered_polls()` scan is the hook point
 (Task 10). When it observes a registry row at or past `POLL_EXPIRY_WARN_AGE_S` with **no
-`steered_at`** — deliberately keyed on the completion marker, not on a missing
-`telegram:poll:answered:{poll_id}` claim, or the signal would be blind to the Risk 9 swallow — it
-emits a single
+`telegram:poll:steered_at:{poll_id}` key** — deliberately keyed on the completion marker, not on a
+missing `telegram:poll:answered:{poll_id}` claim, or the signal would be blind to the Risk 9
+swallow — it emits a single
 `logger.warning("poll_expired_unanswered ...")` carrying poll id, chat id, session id, and age —
-one warning per poll, marked on the row so it is not re-emitted. The loop additionally logs a
+one warning per poll, deduplicated by `mark_poll_warned(poll_id)`
+(`SET telegram:poll:warned:{poll_id} 1 NX EX`), **not** by rewriting a field on the row: the loop's
+warn write and a concurrent translator's marker writes would otherwise be a read-modify-write race
+on one shared JSON value. The loop additionally logs a
 warning on consecutive `GetPollResultsRequest` failures. `poll_expired_unanswered` is the named,
 greppable signal an operator (or Sentry) watches; the feature doc names it explicitly.
 
@@ -2106,6 +2132,22 @@ why reversibility depends on it.
   then declines to send a poll (missing `poll_id_hint`, ineligible, terminal failure) **deletes the
   provisional row** as it converts to plain text, so a declined send never ages into a spurious
   orphan-adoption candidate.
+- **On a retry, look for an already-sent poll BEFORE re-sending (cycle-8 concern).** `send_poll`
+  logs and returns `None` when the Telethon client raises, and that `None` must stay distinguishable
+  so the relay retries — but Telegram accepting `SendMediaRequest` and the client *then* raising
+  (timeout, mid-RPC disconnect) is an ordinary MTProto outcome, not a freak one. Because
+  `poll_id_hint` is minted once per payload in `build_telegram_poll_outbox_payload` and never per
+  attempt, a naive retry puts **two** polls on screen decoding to the same hint — and Task 10's
+  "more than one candidate → adopt nothing" guard, written for an ambiguous match, then fires as the
+  systematic outcome of an ordinary retry, leaving the question permanently unroutable. So whenever
+  `message.get("_relay_attempts", 0) > 0`, `_send_queued_poll` first runs the **same orphan-adoption
+  lookup Task 10 defines**: scan the same bounded outbound window in that chat for a
+  `MessageMediaPoll` whose `decode_option(poll.answers[0].option)` yields this `poll_id_hint`. On a
+  hit, call `promote_pending_poll(...)` with the discovered `msg_id` / `poll.id` and **return
+  without sending**. This reuses Task 10's code (factor the lookup into a shared helper rather than
+  copying it), introduces no per-attempt id scheme — which would break the exact match against the
+  provisional row — and restores the invariant "at most one live poll per `poll_id_hint`" that the
+  adoption bail assumes.
 - **Re-check `poll_eligible(chat_id, session_id)` immediately after that write** (defense in
   depth: the CLI decided at ask time, the relay is the last writer before the wire, and a payload can
   sit in the outbox across a session-type change). Ineligible → **convert to the plain-text payload
@@ -2368,9 +2410,11 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   on the bridge's auth key. Document in the feature doc that if the signal never appears, the Raw
   handler is dead weight and should be deleted in a follow-up — a scope reduction, not a bug.
 - **Emit the inbound-half operator signal (Risk 7).** During the same scan, any registry row at or
-  past `POLL_EXPIRY_WARN_AGE_S` **with no `steered_at`** emits exactly one
-  `logger.warning("poll_expired_unanswered ...")` with poll id, chat id, session id, and age, marked
-  so it is not re-emitted. **Key on missing `steered_at`, never on a missing claim** — otherwise the
+  past `POLL_EXPIRY_WARN_AGE_S` **with no `telegram:poll:steered_at:{poll_id}` key** emits exactly
+  one `logger.warning("poll_expired_unanswered ...")` with poll id, chat id, session id, and age,
+  deduplicated by `mark_poll_warned(poll_id)` — an atomic `SET NX` on its own key, **never** a
+  field rewritten onto the descriptor row, which would race the translator's own marker writes
+  (Race 2). **Key on the absent steered marker, never on a missing claim** — otherwise the
   signal is blind to the Risk 9 swallow. Also warn on consecutive `GetPollResultsRequest` failures.
 - **Adopt orphaned provisional rows (Race 6), matched exactly — never on question text.** For each
   surviving `telegram:poll:pending:{poll_id_hint}` row, scan a bounded window of recent outbound

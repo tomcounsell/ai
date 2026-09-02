@@ -825,16 +825,16 @@ assertion that the mandate string contains the prohibition), never a whole-file 
 
 ## Critique Results
 
-<!-- Rounds 1-8 findings and their dispositions. Round 8 (2026-09-02, FULL depth, baseline
-     b2e15a9a0) returned NEEDS REVISION — 3 blockers, 2 concerns, 2 nits; rows at the bottom of
-     the table, ALL RESOLVED in the round-9 revision pass at baseline 5b35d5212. Round 6
-     (baseline 33fe1d2c7) also returned NEEDS REVISION and was fully resolved in the round-7
-     revision at baseline 2d60de31d, two of its blockers by cutting scope rather than by
-     asserting a mechanism. Round-6 and round-8 note: the Agent/Task tool was unavailable
-     in both sessions, so the three FULL lenses were applied by the driving agent directly;
-     the standing deviation note is .critique-runs/2334-1788331879504381000/ROUND8-NOTE.md
-     (the round-6 run dir was garbage-collected on completion). No row in this table is
-     `pending`. -->
+<!-- Rounds 1-10 findings and their dispositions. Rounds 1-9 are all RESOLVED. Round 10
+     (2026-09-02, FULL depth, baseline 7ad96644b) returned NEEDS REVISION — 2 blockers,
+     3 concerns, 3 nits; its rows are at the bottom of the table and are the only ones
+     marked `pending`. Round 8 (baseline b2e15a9a0) returned NEEDS REVISION — 3 blockers,
+     2 concerns, 2 nits — all resolved in the round-9 revision at baseline 5b35d5212.
+     Round 6 (baseline 33fe1d2c7) also returned NEEDS REVISION and was fully resolved in the
+     round-7 revision at baseline 2d60de31d, two of its blockers by cutting scope rather than
+     by asserting a mechanism. Standing deviation, recorded inline here rather than by
+     reference to an ephemeral run dir: in rounds 6, 8 and 10 the Agent/Task tool was
+     unavailable, so the three FULL lenses were applied by the driving agent directly. -->
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
