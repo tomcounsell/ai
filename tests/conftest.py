@@ -656,60 +656,6 @@ def shared_module_identity_guard(request):
         )
 
 
-# Cache of popoto modules that hold a `POPOTO_REDIS_DB` symbol. Built lazily
-# and refreshed only when sys.modules grows OR a cached module identity has
-# changed, so we don't walk all of sys.modules per test (was ~1500 entries ×
-# thousands of tests). See _popoto_modules_with_redis_db for why both triggers
-# are required.
-_POPOTO_MODULE_CACHE: dict[str, object] = {}
-_POPOTO_MODULE_CACHE_LEN: int = -1
-
-
-def _popoto_modules_with_redis_db():
-    """Return the list of popoto submodules holding a `POPOTO_REDIS_DB` symbol.
-
-    The cache is rebuilt when EITHER of two independent staleness signals
-    fires:
-
-    1. `len(sys.modules) != _POPOTO_MODULE_CACHE_LEN` -- catches brand-new,
-       lazily-imported db-holder modules that were never cached before. A
-       pure identity check over already-cached names cannot see these: if a
-       module hasn't been cached yet, there's no entry to compare identity
-       against, so an `any()` over the existing cache is vacuously False.
-
-    2. `any(sys.modules.get(name) is not mod for name, mod in cache.items())`
-       -- catches an equal-count eviction-then-reimport, where a module
-       object is replaced under the SAME name (e.g. `mock_claude_sdk_cleanup`
-       evicts `agent.*` from sys.modules between tests, and a later import
-       creates a new module object with the same dotted name). `len` alone
-       is non-monotonic under this eviction/reimport cycle -- it can produce
-       an EQUAL total module count with a DIFFERENT (stale) module object
-       cached under an unchanged name, so a len-only cache would silently
-       keep serving a module whose `POPOTO_REDIS_DB` binding was never
-       repointed to the test db, causing writes to land on db=0 while other
-       code paths derive db=1 from the canonical `rdb.POPOTO_REDIS_DB` --
-       a "split-brain" (see tests/integration/test_tool_budget_enforcement.py
-       flake and issue #2037).
-
-    Neither signal alone is sufficient -- they are OR'd together.
-    """
-    import sys as _sys
-
-    global _POPOTO_MODULE_CACHE, _POPOTO_MODULE_CACHE_LEN
-    cur_len = len(_sys.modules)
-    stale = cur_len != _POPOTO_MODULE_CACHE_LEN or any(
-        _sys.modules.get(name) is not mod for name, mod in _POPOTO_MODULE_CACHE.items()
-    )
-    if stale:
-        _POPOTO_MODULE_CACHE = {
-            name: mod
-            for name, mod in _sys.modules.items()
-            if mod is not None and name.startswith("popoto") and hasattr(mod, "POPOTO_REDIS_DB")
-        }
-        _POPOTO_MODULE_CACHE_LEN = cur_len
-    return list(_POPOTO_MODULE_CACHE.values())
-
-
 # ---------------------------------------------------------------------------
 # Per-process test-DB claim (issue #2060)
 # ---------------------------------------------------------------------------
