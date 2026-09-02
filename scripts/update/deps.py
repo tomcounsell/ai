@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+class PinDeclarationError(RuntimeError):
+    """Temporary red-state shim."""
+
+
 @dataclass
 class DepSyncResult:
     """Result of dependency sync operation."""
