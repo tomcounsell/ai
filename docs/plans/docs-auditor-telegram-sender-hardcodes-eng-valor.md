@@ -7,7 +7,7 @@ created: 2026-09-02
 tracking: https://github.com/tomcounsell/ai/issues/2754
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-02T06:34:00Z
+revision_applied_at: 2026-09-02T06:25:46Z
 ---
 
 # docs-auditor Telegram sender hardcodes "Eng: Valor" instead of using resolve_eng_group
@@ -202,10 +202,12 @@ internal routing change: no new libraries, no external APIs, no ecosystem patter
    `resolve_eng_group(project)` scans `project["telegram"]["groups"]` for the first key
    with the literal `Eng:` prefix and returns `(group_name, chat_id)` or `None`.
 6. **Output**: `valor-telegram send --chat <chat_id> <message>`.
-   `tools/valor_telegram.py::cmd_send` tries `resolve_chat(args.chat)` first and falls
-   back to accepting the raw value when `args.chat.lstrip("-").isdigit()`
-   (`tools/valor_telegram.py:836`) — so a numeric id is accepted and bypasses the
-   ambiguity-tolerant name cascade entirely.
+   `tools/valor_telegram.py::cmd_send` calls `resolve_chat(args.chat, strict=False)` first
+   (`:831`) — that resolver *does* run, performing its history and user lookups — and falls
+   back to accepting the raw value when it returns falsy and
+   `args.chat.lstrip("-").isdigit()` (`:836`). A numeric id therefore still enters the
+   cascade but can never match a title or username, so it always lands on the digit fallback
+   rather than on an ambiguous most-recent pick.
 
 ## Architectural Impact
 
@@ -216,10 +218,12 @@ internal routing change: no new libraries, no external APIs, no ecosystem patter
   placed at module scope (not function-local) — there is no cycle to defend against and
   a function-local import would be cargo-culted defensiveness.
 - **Interface changes**: `_send_telegram_notification(message)` becomes
-  `_send_telegram_notification(message, *, repo_root: Path = PROJECT_ROOT) -> bool`.
-  Message stays the first positional parameter; the new parameter is keyword-only with a
-  default, so every existing `patch(...)`-style test target stays valid. Return type goes
-  `None -> bool` — a widening, and no current caller reads the return value.
+  `_send_telegram_notification(message, *, repo_root: Path | None = None) -> bool`, with
+  `(repo_root or PROJECT_ROOT).resolve()` computed in the body so the module global is read
+  at call time and stays patchable. Message stays the first positional parameter; the new
+  parameter is keyword-only with a `None` default, so every existing `patch(...)`-style test
+  target stays valid. Return type goes `None -> bool` — a widening, and no current caller
+  reads the return value.
 - **Coupling**: increases coupling `docs_auditor -> utilities` by one function pair,
   and *decreases* coupling to a hardcoded deployment fact. Net positive.
 - **Data ownership**: unchanged. `projects.json` remains the single source of truth for
@@ -237,9 +241,30 @@ internal routing change: no new libraries, no external APIs, no ecosystem patter
 - PM check-ins: 0
 - Review rounds: 1
 
-One private helper, one modified sender, two call sites, five or six new tests, one doc
-line. Every genuine decision is settled in this plan (see **Settled Decisions**); nothing
-is left for the builder to rule on.
+One private helper, one modified sender (new `bool` contract threaded through both of its
+return branches), two updated call sites, **nine new tests** (seven `TestTelegramChatRouting`
+cases plus two suppression-summary cases) and **three assertion updates** to existing tests,
+**four Documentation bullets** (one feature-doc sentence at `:45`, one at `:344-347`, two
+docstrings, one stale section comment). Still Small: every file is one of three, and every
+genuine decision is settled in this plan (see **Settled Decisions**); nothing is left for
+the builder to rule on.
+
+**What this actually buys, stated plainly.** In production today `repo_root` is always
+`PROJECT_ROOT`, which always matches `valor`'s `working_directory` (see the Freshness Check
+table), and the Rabbit Holes deliberately foreclose the only work that would produce a
+different `repo_root`. So the *production* delta is narrow and honest: the destination stops
+being a hardcoded literal and starts being read from `projects.json`, addressed by numeric
+`chat_id` instead of an ambiguity-tolerant name, and a previously-discarded `valor-telegram`
+exit code becomes observable. Ladder steps 4-5 and the whole suppression branch are
+unreachable on production traffic — one of the seven routing cases covers it.
+
+That is a deliberate trade, not an oversight, and the ladder must **not** be trimmed to
+match. The suppression branch is the correctness precondition that makes Settled Decision
+2's fallback narrowing safe: without it, an unmatched checkout falls back to `Eng: Valor`
+and the misroute this issue exists to remove is re-created the moment #3072's sweep or any
+future multi-checkout auditor produces a non-`PROJECT_ROOT` `repo_root`. Those branches are
+paid for by unit tests rather than by production traffic, which is the cheap way to hold a
+precondition.
 
 ## Prerequisites
 
@@ -273,17 +298,39 @@ treat them as fixed, not provisional.
 3. **Route by numeric id, not by group name. DECIDED: by id.** `valor-telegram send
    --chat` accepts either, but a name goes through `resolve_chat_id`'s three-stage cascade
    which, in non-strict mode, silently picks the most-recent candidate on an ambiguous
-   match. A numeric id short-circuits that (`tools/valor_telegram.py:836`).
+   match. A numeric id still enters that cascade — `cmd_send` calls
+   `resolve_chat(args.chat, strict=False)` unconditionally at `tools/valor_telegram.py:831`
+   — but can never match a title or username, so it always falls through to the digit
+   fallback at `:836` and the ambiguous-pick branch is unreachable for it.
    `sdlc_upvote_lanes` already routes by id for the same reason. The cost — the valor
    path's observable argv changes from `"Eng: Valor"` to `"-1003449100931"` — is accepted,
    and is pinned by a test (see Test Impact) rather than by a manual post-merge eyeball.
-4. **Suppression is reported to the caller, not only logged. DECIDED: return `bool`.**
+4. **Suppression is reported to the caller, not only logged. DECIDED: return `bool`, and
+   the caller carries the notice in `summary` — not only in `findings`.**
    The step-9 message carries the PR URL and the review-required warning, and
    `docs/features/docs-auditor.md` names that Telegram message as *how* "review is
    required" is communicated. A suppressed send there means a real non-draft PR opens and
    nobody is told. The sender returns `False` on the no-destination path and both call
-   sites convert that into a `findings` entry, so the reflection report — the surface an
-   operator actually reads — carries it.
+   sites convert that into a suppression notice.
+
+   **`findings` alone does not reach an operator.** `docs_auditor` is a directly-registered
+   function reflection, and `agent/reflection_scheduler.py:644-649` persists **only**
+   `result["summary"]` (`output_summary=str(summary_str)[:500]`). The `findings` key is read
+   by `reflections/utilities.py:194` solely inside `run_per_project_audit` (which
+   `docs_auditor` does not use) and by `reflections/pm_briefings/__init__.py:236` against a
+   different structure; the dashboard renders `output_summary` only
+   (`ui/data/reflections.py:286`). So the notice **must** appear in `summary`:
+
+   - Zero-diff return (`reflections/docs_auditor.py:2441-2443`) becomes
+     `f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"`.
+   - Step-9 return (`:2553-2558`) gains
+     `f" [Telegram suppressed: no Eng: group for {repo_root}]"` inserted **before**
+     `PR={pr_url}`, so the 500-char truncation at `agent/reflection_scheduler.py:648` can
+     never cut the notice off the end.
+
+   The `findings` appends stay as well — they are free and they are what a future
+   `run_per_project_audit` consumer would read — but `summary` is the load-bearing channel
+   and is what the new tests assert on.
 
 ## Solution
 
@@ -293,12 +340,21 @@ treat them as fixed, not provisional.
   `reflections/docs_auditor.py`): maps the audited repo root to the string the `--chat`
   flag should carry, or `None` meaning *do not send*. Owns the entire resolution +
   fallback policy so the sender stays a thin subprocess wrapper.
-- **`_send_telegram_notification(message, *, repo_root=PROJECT_ROOT) -> bool`**
-  (modified): asks `_resolve_notify_chat` for a destination; on `None`, logs a warning
-  naming the repo root and **returns `False`** without shelling out; otherwise sends as
-  before and returns `True`.
-- **Two updated call sites**: both pass `repo_root=PROJECT_ROOT` and append a `findings`
-  entry when the call returns `False`.
+- **`_send_telegram_notification(message, *, repo_root: Path | None = None) -> bool`**
+  (modified): resolves `root = (repo_root or PROJECT_ROOT).resolve()` **in the body** —
+  the same idiom `audit()` uses at `reflections/docs_auditor.py:1547` — then asks
+  `_resolve_notify_chat` for a destination; on `None`, logs a warning naming the repo root
+  and **returns `False`** without shelling out; otherwise sends as before and returns
+  `True`. The default must **not** be `repo_root: Path = PROJECT_ROOT`: a default argument
+  binds once at `def` time and captures the real module-level `PROJECT_ROOT`, while ladder
+  step 4 re-reads `PROJECT_ROOT` at call time. Every `run_docs_auditor` test patches that
+  global (`tests/unit/test_docs_auditor_substrate.py:1367`, `:1403`, `:1448`, `:1477`, and
+  the shared `_run` helper), so a captured default and a call-time comparison would
+  disagree under test and on any call relying on the default.
+- **Two updated call sites**: both pass `repo_root=PROJECT_ROOT`, and when the call returns
+  `False` both append a `findings` entry **and** thread the suppression notice into the
+  returned `summary` (Settled Decision 4) — `summary` is the only field the reflection
+  scheduler persists.
 - **One named constant** replacing the literal: `FALLBACK_ENG_CHAT = "Eng: Valor"`. The
   string survives in exactly one place, as a named fallback rather than an inline argv
   element. **No `DEFAULT_PROJECT_KEY` constant is introduced** — the resolver is not keyed
@@ -316,8 +372,9 @@ Scheduled docs-auditor run → `run_docs_auditor` reaches a notify point →
 Alternate branch (foreign or unmatched checkout with no `Eng:` group): →
 `_resolve_notify_chat` returns `None` → `logger.warning` naming the repo root and both
 possible causes → **no message sent** → the sender returns `False` → the call site appends
-a `findings` entry naming the suppression and, at step 9, the PR URL that still needs
-review.
+a `findings` entry **and** splices the suppression notice into the returned `summary`
+(before `PR={pr_url}` on the step-9 path), which is the field
+`agent/reflection_scheduler.py:648` persists and the dashboard renders.
 
 Alternate branch (this checkout, `projects.json` unreadable or unmatched): →
 `_resolve_notify_chat` returns `FALLBACK_ENG_CHAT` → `--chat "Eng: Valor"` → today's exact
@@ -357,6 +414,29 @@ logger.warning(
 )
 ```
 
+**On the discarded `valor-telegram` exit code.** The sender today calls
+`subprocess.run(..., check=False)` and never inspects the result
+(`reflections/docs_auditor.py:1490-1496`), so a `valor-telegram` failure is silently
+discarded. Routing by numeric id makes this sharper, not milder: a bad *name* fails locally
+and loudly at `tools/valor_telegram.py:838` (`Error: Unknown chat`), while a bad *id* sails
+through the digit fallback at `:836` and fails remotely at the API. Bind the result and log
+the non-zero case:
+
+```python
+proc = subprocess.run(...)
+if proc.returncode != 0:
+    logger.warning(
+        "docs_auditor: valor-telegram exited %s for chat %s: %s",
+        proc.returncode,
+        chat,
+        (proc.stderr or "")[:200],
+    )
+```
+
+This is a **new warning only, not a new return value**. The function still returns `True`
+here: a destination was resolved and a send was attempted, which is exactly what keeps the
+caller's "no Eng: group configured" finding text accurate. Test case 7 pins that split.
+
 **On worktrees.** `PROJECT_ROOT` is derived from `__file__`, so a run executing inside
 `.worktrees/{slug}/` computes `PROJECT_ROOT` as that worktree path. The
 `working_directory` match then fails (worktrees are not registered in `projects.json`) and
@@ -395,10 +475,14 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
 - [ ] The user-visible surface here is the Telegram alert itself. The failure mode this
       plan introduces is *no alert*. That is made observable on two channels: a
       `logger.warning` carrying the resolved repo path (verified with `caplog`, not just
-      by asserting `subprocess.run` was not called), **and** a `findings` entry appended by
-      the caller, which is what reaches the aggregated reflection report.
-- [ ] On the step-9 path the finding must carry the PR URL, because a suppressed
-      notification there means a real non-draft PR is open with nobody notified. Asserted.
+      by asserting `subprocess.run` was not called), **and** a suppression notice spliced
+      into `result["summary"]` by the caller — the only result field the reflection
+      scheduler persists (`agent/reflection_scheduler.py:648`) and the dashboard renders
+      (`ui/data/reflections.py:286`). A matching `findings` entry is appended too, but
+      `findings` is read nowhere for this reflection and cannot be the mitigation.
+- [ ] On the step-9 path the notice must precede `PR={pr_url}` in the summary, because the
+      persisted field is truncated at 500 chars and a suppressed notification there means a
+      real non-draft PR is open with nobody notified. Asserted by index comparison.
 
 ## Test Impact
 
@@ -411,11 +495,17 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
       patch returns a truthy `Mock` by default, so the new `if not ...` branch at each
       call site does not fire and no existing assertion changes. Verify by running the
       file; only patch if something breaks.
-- [ ] `tests/unit/test_docs_auditor_substrate.py::test_..._withheld_alert` (`:1376`,
-      `:1413`) and the step-9 summary test (`:1453`) — **UPDATE**: add a
-      `notify.call_args.kwargs["repo_root"]` assertion to each, so the two call sites are
+- [ ] The three `run_docs_auditor` tests that inspect `notify` — **UPDATE**: add a
+      `notify.call_args.kwargs["repo_root"]` assertion to each, so both call sites are
       pinned to actually thread the repo root. Without this the sender could be fixed while
-      the call sites keep defaulting, and every test would still pass.
+      the call sites keep defaulting, and every test would still pass. Their roles, verified
+      at revision time (the previous revision had two of the three labels inverted):
+      - `:1376` — `test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
+        (asserts `status == "skipped"`) → the **zero-diff** call site.
+      - `:1413` — `test_rotation_result_surfaces_withheld_count` (asserts `status == "ok"`
+        with a mocked PR return) → the **step-9** call site.
+      - `:1453` — `test_all_withheld_zero_diff_run_still_notifies` (asserts
+        `status == "skipped"`, `"zero-diff" in summary`) → the **zero-diff** call site.
 - [ ] `tests/unit/test_docs_auditor_substrate.py` — **ADD** a new `TestTelegramChatRouting`
       class exercising `_send_telegram_notification` directly with
       `reflections.docs_auditor.subprocess.run` patched (the established pattern at
@@ -435,12 +525,19 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
       6. `load_local_projects` raising → swallowed, warning logged, `PROJECT_ROOT` falls
          back and a foreign path returns `False`;
       7. `subprocess.run` raising `FileNotFoundError` on a *resolved* destination → still
-         returns `True` (send attempted, not suppressed).
+         returns `True` (send attempted, not suppressed). Same case also covers a non-zero
+         `returncode` on a resolved destination: `True` is returned and a `logger.warning`
+         carrying the exit code is asserted via `caplog`.
 - [ ] `tests/unit/test_docs_auditor_substrate.py` — **ADD** two cases asserting the
-      suppression finding: patch `_send_telegram_notification` to return `False` and drive
-      `run_docs_auditor` through (a) the zero-diff withheld path and (b) the step-9 path,
-      asserting the returned `findings` list contains an entry naming the suppression, and
-      that the step-9 entry carries the PR URL.
+      suppression notice reaches the persisted field: patch `_send_telegram_notification`
+      to return `False` and drive `run_docs_auditor` through (a) the zero-diff withheld
+      path and (b) the step-9 path. Each must assert on **`result["summary"]`** — the only
+      field `agent/reflection_scheduler.py:648` persists — not merely on
+      `result["findings"]`. The step-9 case must additionally assert that the suppression
+      notice appears *before* `PR=` in the summary string (`summary.index("suppressed") <
+      summary.index("PR=")`), which is what makes it truncation-safe at 500 chars. Assert
+      the `findings` entry too, but a `findings`-only test would pass against an inert
+      mitigation and is therefore not sufficient on its own.
 - [ ] `tests/unit/reflections/test_utilities_resolve_eng_group.py` — **no change**.
       `resolve_eng_group` itself is untouched; its direct tests stay as-is.
 - [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` — **no change**. The other
@@ -517,8 +614,11 @@ already trusts to grant the engineer persona, and `sdlc_upvote_lanes` has been r
 `Eng:` announcements by id since PR #2721 without incident. Test case 1 pins the
 production path's argv explicitly rather than leaving it to a post-merge eyeball. The
 fallback branch also still uses the *name*, so a corrupted id degrades to today's exact
-behavior only when the project row is unmatched entirely. Post-merge, confirm one real
-docs-auditor alert lands in `Eng: Valor` before considering the lane closed.
+behavior only when the project row is unmatched entirely. Critically, this lane also stops
+discarding `valor-telegram`'s exit code (see Technical Approach): a bad id fails remotely
+at the API rather than locally, so the non-zero `returncode` warning is the only place that
+failure can surface at all. Post-merge, confirm one real docs-auditor alert lands in
+`Eng: Valor` before considering the lane closed.
 
 ### Risk 4: The narrowed fallback suppresses an alert an operator expected
 
@@ -528,8 +628,13 @@ can be mistaken for "nothing to report." On the step-9 path this is sharper: a r
 non-draft PR opens and the "review required" message reaches nobody.
 **Mitigation:** Two channels, not one. The skip logs a `logger.warning` naming the
 resolved repo path *and* both possible causes, and the sender returns `False` so each call
-site appends a `findings` entry — the step-9 one carrying the PR URL — to the dict the
-aggregated reflection report reads. This mirrors and extends the established precedent at
+site both appends a `findings` entry and splices the notice into `result["summary"]`.
+`summary` is the load-bearing half: it is the only field
+`agent/reflection_scheduler.py:648` persists (`output_summary`) and the only one
+`ui/data/reflections.py:286` renders, so a `findings`-only mitigation would leave the
+suppressed path with exactly the one-channel outcome this risk declares unacceptable. On
+the step-9 path the notice is spliced **before** `PR={pr_url}` so the 500-char truncation
+cannot drop it. This mirrors and extends the established precedent at
 `sdlc_upvote_lanes.py:443-447`, which deliberately returns status `"ok"` with a
 `"no Eng: group configured"` finding for exactly this case.
 
@@ -588,7 +693,16 @@ shells out to is already registered and unchanged.
       whose `working_directory` matches the audited repo root, addressed by numeric
       `chat_id`; it falls back to the `Eng: Valor` literal only when the audited repo is
       this checkout and no match is found; and it is otherwise suppressed with a logged
-      warning **and** a finding in the reflection report carrying the PR URL.
+      warning **and** a suppression notice in the run's `summary` (carried before the PR
+      URL so truncation cannot drop it).
+- [ ] Amend `docs/features/docs-auditor.md:344-347` — the withheld-set paragraph currently
+      says the withheld set is threaded into `findings`, `summary`, "and Telegram message —
+      which states plainly that review is required". That asserts *unconditional* Telegram
+      delivery, which this change falsifies, and the `:45` rewrite does not reach it.
+      Condition the claim ("…and, when a destination resolves, a Telegram message which
+      states plainly that review is required…") and state the suppression outcome there —
+      that block is already where the `findings`/`summary` threading is explained, so it is
+      also the right home for the summary-carrier behavior from Settled Decision 4.
 - [ ] No new entry in `docs/features/README.md` — `docs-auditor.md` is already indexed.
 
 ### External Documentation Site
@@ -622,11 +736,16 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - [ ] An audited repo with no resolvable `Eng:` group, other than this checkout, receives
       no notification, produces a `logger.warning` naming the repo path and both possible
       causes, and returns `False`.
-- [ ] A `False` return from either call site appends a `findings` entry; the step-9 entry
-      carries the PR URL.
+- [ ] A `False` return from either call site puts a suppression notice in
+      `result["summary"]` (the only persisted field), with the step-9 notice placed before
+      `PR={pr_url}` so 500-char truncation cannot cut it; a matching `findings` entry is
+      appended as well.
+- [ ] A non-zero `valor-telegram` exit code on a resolved destination logs a warning
+      carrying the exit code and still returns `True`.
 - [ ] Auditing this checkout with an unreadable or unmatched `projects.json` still sends
       to `Eng: Valor` — today's behavior preserved on the degraded path.
-- [ ] `docs/features/docs-auditor.md` no longer claims a fixed destination chat.
+- [ ] `docs/features/docs-auditor.md` no longer claims a fixed destination chat at `:45`
+      **and** no longer claims unconditional Telegram delivery at `:344-347`.
 - [ ] This PR touches no file named in #3072's sweep.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -678,18 +797,28 @@ Not applicable — this repo has no Sphinx/MkDocs site.
   ladder from Technical Approach. Return `str(chat_id)`, never the group name, on the
   resolved path. Use the exact dual-cause warning text given in Technical Approach.
 - Change `_send_telegram_notification(message: str) -> None` (currently `:1486`) to
-  `_send_telegram_notification(message: str, *, repo_root: Path = PROJECT_ROOT) -> bool`.
-  Message stays the first positional parameter. Resolve first; on `None`, emit the warning
-  and `return False` without invoking `subprocess.run`. Every other path returns `True`,
-  including the existing swallowed-failure handlers.
+  `_send_telegram_notification(message: str, *, repo_root: Path | None = None) -> bool`.
+  Message stays the first positional parameter. **Do not** default the parameter to
+  `PROJECT_ROOT` — use `(repo_root or PROJECT_ROOT).resolve()` in the body, the idiom
+  `audit()` already uses at `:1547`, so the patched global is read at call time. Resolve
+  first; on `None`, emit the warning and `return False` without invoking `subprocess.run`.
+  Every other path returns `True`, including the existing swallowed-failure handlers.
+- Bind the `subprocess.run` result and log a `logger.warning` on a non-zero `returncode`
+  (exact shape in Technical Approach). Still `return True` — a send was attempted.
 - Leave the existing `FileNotFoundError` / `TimeoutExpired` / `Exception` handlers in the
   sender otherwise exactly as they are (add only the `return True`).
 - Update the zero-diff withheld-alert call site (currently `:2434`) to pass
   `repo_root=PROJECT_ROOT` and, when it returns `False`, add a suppression entry to the
-  findings list that return branch builds.
+  findings list that return branch builds **and** append a `suppressed_note` to the
+  `summary` f-string at `:2441-2443`.
 - Update the step-9 pass summary call site (currently `:2521`) to pass
   `repo_root=PROJECT_ROOT` and, when it returns `False`, append to the in-scope `findings`
-  list an entry naming the suppression and carrying `pr_url`.
+  list an entry naming the suppression and carrying `pr_url`, **and** splice
+  `f" [Telegram suppressed: no Eng: group for {root}]"` into the `summary` f-string at
+  `:2553-2558` **before** the `PR={pr_url}` fragment. The summary edit is the load-bearing
+  half: `agent/reflection_scheduler.py:648` persists `summary` only and truncates it at 500
+  chars, so a notice appended after the PR URL can be cut and a `findings`-only change is
+  inert.
 
 ### 2. Add and update tests
 
@@ -703,11 +832,12 @@ Not applicable — this repo has no Sphinx/MkDocs site.
   patching `reflections.docs_auditor.subprocess.run` (pattern at `:1291`/`:1350`) and
   `reflections.docs_auditor.load_local_projects`. Implement all seven cases enumerated in
   **Test Impact**, starting with the production valor path (case 1).
-- Add the two suppression-finding tests (zero-diff path and step-9 path) described in
-  Test Impact.
-- Add `notify.call_args.kwargs["repo_root"]` assertions to the existing withheld-alert
-  tests (`:1376`, `:1413`) and the step-9 summary test (`:1453`) so both call sites are
-  pinned to thread the repo root.
+- Add the two suppression tests (zero-diff path and step-9 path) described in Test Impact.
+  Both assert on `result["summary"]`; the step-9 one also asserts the notice precedes
+  `PR=`.
+- Add `notify.call_args.kwargs["repo_root"]` assertions to the three existing tests that
+  inspect `notify` — `:1376` and `:1453` (zero-diff sites) and `:1413` (the step-9 site) —
+  so both call sites are pinned to thread the repo root.
 - Run the full file and confirm the other eight `patch(...)` sites still pass unchanged.
 
 ### 3. Documentation
@@ -719,6 +849,11 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Parallel**: false
 - Rewrite the destination sentence at `docs/features/docs-auditor.md:45` per the
   Documentation section.
+- Amend the withheld-set paragraph at `docs/features/docs-auditor.md:344-347` so the
+  Telegram delivery claim is conditional, and state there that a suppressed run carries the
+  notice in `summary` instead. Use the literal phrase "Telegram notification is suppressed"
+  so the Verification row anchors on something the pre-existing cap wording does not
+  already match.
 - Write the `_resolve_notify_chat` docstring including the rationale for the
   `PROJECT_ROOT`-only fallback.
 - Update `_send_telegram_notification`'s docstring, including the `bool` return contract.
@@ -751,7 +886,8 @@ than `grep -c`'s exit 1, which a validator reading exit codes would score as a f
 | Resolver's own tests untouched and green | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_resolve_eng_group.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
 | Anti-criterion: no #3072 file touched | `! git diff --name-only origin/main...HEAD \| grep -qE 'expectation_reconciler\|sentry_triage\|stall_advisory\|sdlc_progress\|memory_consolidation\|nightly_regression_tests'` | exit code 0 |
 | Anti-criterion: the sweep did not widen | `test "$(git grep -lF '"Eng: Valor"' -- '*.py' \| grep -v '^tests/' \| grep -v '^reflections/docs_auditor.py' \| wc -l)" -eq 6` | exit code 0 — the six #3072 sender files, verified at plan time: `expectation_reconciler`, `sdlc_progress`, `sentry_triage`, `stall_advisory`, `scripts/memory_consolidation`, `scripts/nightly_regression_tests`. The two prompt files use single quotes and are deliberately outside this double-quoted sweep. |
-| Feature doc no longer pins the chat | `! grep -q 'notifies the .Eng: Valor. Telegram chat' docs/features/docs-auditor.md` | exit code 0 |
+| Feature doc no longer pins the chat | `! grep -q 'Eng: Valor. Telegram chat' docs/features/docs-auditor.md` | exit code 0 — broader than the old `notifies the ...` anchor, so a reintroduced claim in any phrasing fails |
+| Feature doc documents suppression | `grep -q 'Telegram notification is suppressed' docs/features/docs-auditor.md` | exit code 0 — a distinct phrase, because a bare `suppress` grep already matches the pre-existing "entries past the cap are logged and suppressed" at `:343` and would pass vacuously |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
@@ -759,16 +895,16 @@ than `grep -c`'s exit 1, which a validator reading exit codes would score as a f
 
 **Verdict (2026-09-02, /do-plan-critique cycle 1, FULL depth):** NEEDS REVISION — 1 blocker, 5 concerns, 3 nits. All 9 findings were addressed by the cycle-1 revision pass; the blocker was upheld and the plan's causal premise rewritten around it. Those rows are superseded by the cycle-2 table below.
 
-**Verdict (2026-09-02, /do-plan-critique cycle 2, FULL depth):** NEEDS REVISION — 1 blocker, 4 concerns, 2 nits.
+**Verdict (2026-09-02, /do-plan-critique cycle 2, FULL depth):** NEEDS REVISION — 1 blocker, 4 concerns, 2 nits. **All 7 findings were addressed by the cycle-2 revision pass (2026-09-02T06:25:46Z), including both nits.** The `Addressed By` column below records where each landed.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Settled Decision 4 and Risk 4 rest on the returned `findings` list reaching an operator. It does not. `agent/reflection_scheduler.py:648` persists **only** `result["summary"]` (`output_summary=str(summary_str)[:500]`); the `findings` key of a directly-registered function reflection is read nowhere. `reflections/utilities.py:194` reads it only inside `run_per_project_audit`, which the plan establishes `docs_auditor` does not use; `reflections/pm_briefings/__init__.py:236` reads a different structure. On the suppressed path the result is no Telegram (by design), no dashboard signal (`ui/data/reflections.py:286` renders `output_summary` only), and a log line — exactly the one-channel outcome Risk 4 declares unacceptable on the step-9 path. | pending | `summary` is the only persisted field. Zero-diff return (`reflections/docs_auditor.py:2441-2443`): `f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"`. Step-9 return (`:2553-2558`): append `f" [Telegram suppressed: no Eng: group for {repo_root}]"` to the existing summary f-string, placed **before** `PR={pr_url}` so the 500-char truncation at `agent/reflection_scheduler.py:648` cannot cut it. Keep the `findings` appends as well. Two of the new tests must assert on `result["summary"]`, not on `result["findings"]`. |
-| CONCERN | Risk & Robustness | `_send_telegram_notification(message, *, repo_root: Path = PROJECT_ROOT)` binds the default once at def time, capturing the real module-level `PROJECT_ROOT`, while ladder step 4 compares `target == PROJECT_ROOT.resolve()` read at call time. Every existing `run_docs_auditor` test patches that global (`tests/unit/test_docs_auditor_substrate.py:1367`, `:1402`, `:1453`, `:1476`, and the shared `_run` helper), so the default and the comparison disagree under test and on any call relying on the default. | pending | Use the idiom `audit()` already uses at `reflections/docs_auditor.py:1547` (`root = (repo_root or PROJECT_ROOT).resolve()`): declare `repo_root: Path or None = None` and resolve in the body before calling `_resolve_notify_chat`. The Verification row `grep -c 'repo_root=PROJECT_ROOT' ... -ge 3` still holds — both call sites pass it explicitly; only the default changes. |
-| CONCERN | Risk & Robustness | Risk 3 names the stale-id failure and mitigates it with a test that pins the argv, which proves the id was passed, not that it delivered. The sender uses `subprocess.run(..., check=False)` and never inspects `returncode` (`reflections/docs_auditor.py:1490-1496`), so a `valor-telegram` failure is discarded and `True` is returned. Routing by id also removes the cheap local failure: a bad name fails at `tools/valor_telegram.py:838` with `Error: Unknown chat`, while a bad id passes the digit fallback at `:836` and fails remotely at the API. | pending | `proc = subprocess.run(...)` then `if proc.returncode != 0: logger.warning("docs_auditor: valor-telegram exited %s for chat %s: %s", proc.returncode, chat, (proc.stderr or "")[:200])`. Keep the `bool` contract exactly as Settled Decision 4 specifies — still `return True` here, because a destination was resolved and a send attempted, which is what keeps the caller's finding text accurate (test case 7 pins this split). A new warning only, not a new return value. |
-| CONCERN | History & Consistency | The Documentation section rewrites only `docs/features/docs-auditor.md:45`, and the Verification row greps only that sentence. The same doc makes a second claim this change falsifies, at `:344-347`: the withheld set is threaded into `findings`, `summary`, "and Telegram message — which states plainly that review is required". That asserts unconditional Telegram delivery. The `:45` rewrite does not reach it and the Success Criterion is satisfied while the doc still overclaims. Same class of miss as the cycle-1 No-Go finding: enumerating one site where a sweep was needed. | pending | Amend `:344-347` to condition the claim ("…and, when a destination resolves, a Telegram message which states plainly that review is required…") and document the suppression outcome there, since that block already explains the `findings`/`summary` threading and is where the BLOCKER's summary-carrier change also belongs. Replace the single Verification grep with `! grep -q 'Eng: Valor. Telegram chat' docs/features/docs-auditor.md` plus a second row `grep -q 'suppress' docs/features/docs-auditor.md`, so a reintroduced unconditional delivery claim fails loudly. |
-| CONCERN | Scope & Value | The cycle-1 correction hollowed out the change's value and the plan does not say so. `repo_root` is always `PROJECT_ROOT`, which always matches `valor`'s `working_directory` (the plan's own Freshness Check table), and the Rabbit Holes foreclose the only work that would produce a different `repo_root`. Ladder steps 4-5 and the whole suppression branch are unreachable in production; one of seven `TestTelegramChatRouting` cases covers production traffic. The sole production delta is the argv form, which Risk 3 concedes is strictly riskier. The Appetite's "five or six new tests, one doc line" also undercounts the specified work (nine new tests, three assertion updates, four docs bullets, a new `bool` contract through two return branches). | pending | Plan-text change, not a design change — do **not** trim the ladder. The suppression branch is what makes the Settled Decision 2 fallback narrowing safe; deleting it re-opens the misroute. Add one paragraph under Appetite naming the trade (production delta is de-hardcoding plus id-routing; the non-valor branches are a correctness precondition for #3072 and any future multi-checkout auditor, covered by unit tests rather than production traffic), and restate the Appetite counts to match Test Impact and Documentation as written. |
-| NIT | Scope & Value | Test-site role labels are inverted. The plan calls `:1376`/`:1413` the withheld-alert tests and `:1453` the step-9 summary test. Verified: `:1413` is in `test_rotation_result_surfaces_withheld_count` (asserts `status == "ok"` plus a mocked PR return) — the step-9 site; `:1453` is in `test_all_withheld_zero_diff_run_still_notifies` (asserts `status == "skipped"`, `"zero-diff" in summary`) — a zero-diff site. | pending | NIT — exempt. |
-| NIT | History & Consistency | Data Flow step 6 and Settled Decision 3 say a numeric id "bypasses the ambiguity-tolerant name cascade entirely". `cmd_send` actually calls `resolve_chat(args.chat, strict=False)` first (`tools/valor_telegram.py:831`) and reaches the digit fallback at `:836` only when that returns falsy. The conclusion holds (a numeric never matches a title or username) but the resolver is invoked and does perform history and user lookups. | pending | NIT — exempt. |
+| BLOCKER | Risk & Robustness | Settled Decision 4 and Risk 4 rest on the returned `findings` list reaching an operator. It does not. `agent/reflection_scheduler.py:648` persists **only** `result["summary"]` (`output_summary=str(summary_str)[:500]`); the `findings` key of a directly-registered function reflection is read nowhere. `reflections/utilities.py:194` reads it only inside `run_per_project_audit`, which the plan establishes `docs_auditor` does not use; `reflections/pm_briefings/__init__.py:236` reads a different structure. On the suppressed path the result is no Telegram (by design), no dashboard signal (`ui/data/reflections.py:286` renders `output_summary` only), and a log line — exactly the one-channel outcome Risk 4 declares unacceptable on the step-9 path. | **ADDRESSED** — Settled Decision 4 rewritten to make `summary` the load-bearing channel (with the persistence chain cited); Solution key elements, Flow, Risk 4 mitigation, Failure Path "Error State Rendering", Test Impact, Success Criteria, and task steps 1-2 all updated. The two new suppression tests now assert on `result["summary"]` and pin the step-9 notice ahead of `PR=` by index comparison. | `summary` is the only persisted field. Zero-diff return (`reflections/docs_auditor.py:2441-2443`): `f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"`. Step-9 return (`:2553-2558`): append `f" [Telegram suppressed: no Eng: group for {repo_root}]"` to the existing summary f-string, placed **before** `PR={pr_url}` so the 500-char truncation at `agent/reflection_scheduler.py:648` cannot cut it. Keep the `findings` appends as well. Two of the new tests must assert on `result["summary"]`, not on `result["findings"]`. |
+| CONCERN | Risk & Robustness | `_send_telegram_notification(message, *, repo_root: Path = PROJECT_ROOT)` binds the default once at def time, capturing the real module-level `PROJECT_ROOT`, while ladder step 4 compares `target == PROJECT_ROOT.resolve()` read at call time. Every existing `run_docs_auditor` test patches that global (`tests/unit/test_docs_auditor_substrate.py:1367`, `:1402`, `:1453`, `:1476`, and the shared `_run` helper), so the default and the comparison disagree under test and on any call relying on the default. | **ADDRESSED** — signature is now `repo_root: Path \| None = None` with `(repo_root or PROJECT_ROOT).resolve()` in the body, per `audit()`'s idiom at `:1547`. Updated in Architectural Impact, Solution key elements, and task step 1 (with an explicit "do not default to `PROJECT_ROOT`" instruction). Verified patch sites: `:1367`, `:1403`, `:1448`, `:1477`. | Use the idiom `audit()` already uses at `reflections/docs_auditor.py:1547` (`root = (repo_root or PROJECT_ROOT).resolve()`): declare `repo_root: Path or None = None` and resolve in the body before calling `_resolve_notify_chat`. The Verification row `grep -c 'repo_root=PROJECT_ROOT' ... -ge 3` still holds — both call sites pass it explicitly; only the default changes. |
+| CONCERN | Risk & Robustness | Risk 3 names the stale-id failure and mitigates it with a test that pins the argv, which proves the id was passed, not that it delivered. The sender uses `subprocess.run(..., check=False)` and never inspects `returncode` (`reflections/docs_auditor.py:1490-1496`), so a `valor-telegram` failure is discarded and `True` is returned. Routing by id also removes the cheap local failure: a bad name fails at `tools/valor_telegram.py:838` with `Error: Unknown chat`, while a bad id passes the digit fallback at `:836` and fails remotely at the API. | **ADDRESSED** — new "On the discarded `valor-telegram` exit code" subsection in Technical Approach gives the exact `proc.returncode` warning shape and states it is a warning only, not a return-value change. Threaded into Risk 3's mitigation, task step 1, Test Impact case 7, and a new Success Criterion. | `proc = subprocess.run(...)` then `if proc.returncode != 0: logger.warning("docs_auditor: valor-telegram exited %s for chat %s: %s", proc.returncode, chat, (proc.stderr or "")[:200])`. Keep the `bool` contract exactly as Settled Decision 4 specifies — still `return True` here, because a destination was resolved and a send attempted, which is what keeps the caller's finding text accurate (test case 7 pins this split). A new warning only, not a new return value. |
+| CONCERN | History & Consistency | The Documentation section rewrites only `docs/features/docs-auditor.md:45`, and the Verification row greps only that sentence. The same doc makes a second claim this change falsifies, at `:344-347`: the withheld set is threaded into `findings`, `summary`, "and Telegram message — which states plainly that review is required". That asserts unconditional Telegram delivery. The `:45` rewrite does not reach it and the Success Criterion is satisfied while the doc still overclaims. Same class of miss as the cycle-1 No-Go finding: enumerating one site where a sweep was needed. | **ADDRESSED** — new Documentation bullet and task-step-3 bullet amend `:344-347`; Success Criteria now names both sites. The Verification grep was broadened to `! grep -q 'Eng: Valor. Telegram chat'` and a second row added. That row anchors on the literal "Telegram notification is suppressed" rather than a bare `suppress`, which would have passed vacuously against the pre-existing cap wording at `:343`. | Amend `:344-347` to condition the claim ("…and, when a destination resolves, a Telegram message which states plainly that review is required…") and document the suppression outcome there, since that block already explains the `findings`/`summary` threading and is where the BLOCKER's summary-carrier change also belongs. Replace the single Verification grep with `! grep -q 'Eng: Valor. Telegram chat' docs/features/docs-auditor.md` plus a second row `grep -q 'suppress' docs/features/docs-auditor.md`, so a reintroduced unconditional delivery claim fails loudly. |
+| CONCERN | Scope & Value | The cycle-1 correction hollowed out the change's value and the plan does not say so. `repo_root` is always `PROJECT_ROOT`, which always matches `valor`'s `working_directory` (the plan's own Freshness Check table), and the Rabbit Holes foreclose the only work that would produce a different `repo_root`. Ladder steps 4-5 and the whole suppression branch are unreachable in production; one of seven `TestTelegramChatRouting` cases covers production traffic. The sole production delta is the argv form, which Risk 3 concedes is strictly riskier. The Appetite's "five or six new tests, one doc line" also undercounts the specified work (nine new tests, three assertion updates, four docs bullets, a new `bool` contract through two return branches). | **ADDRESSED** — plan-text only, ladder untouched. Appetite now states the counts accurately (nine new tests, three assertion updates, four docs bullets) and carries a new "What this actually buys, stated plainly" paragraph naming the production delta (de-hardcoding, id-routing, exit-code observability) and why the unreachable branches are a correctness precondition for Settled Decision 2's fallback narrowing rather than dead weight. | Plan-text change, not a design change — do **not** trim the ladder. The suppression branch is what makes the Settled Decision 2 fallback narrowing safe; deleting it re-opens the misroute. Add one paragraph under Appetite naming the trade (production delta is de-hardcoding plus id-routing; the non-valor branches are a correctness precondition for #3072 and any future multi-checkout auditor, covered by unit tests rather than production traffic), and restate the Appetite counts to match Test Impact and Documentation as written. |
+| NIT | Scope & Value | Test-site role labels are inverted. The plan calls `:1376`/`:1413` the withheld-alert tests and `:1453` the step-9 summary test. Verified: `:1413` is in `test_rotation_result_surfaces_withheld_count` (asserts `status == "ok"` plus a mocked PR return) — the step-9 site; `:1453` is in `test_all_withheld_zero_diff_run_still_notifies` (asserts `status == "skipped"`, `"zero-diff" in summary`) — a zero-diff site. | **ADDRESSED** (nit fixed anyway) | Re-verified independently at revision time and corrected in both Test Impact and task step 2: `:1376` (`test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`, `status == "skipped"`) and `:1453` are the zero-diff sites; `:1413` is the step-9 site. |
+| NIT | History & Consistency | Data Flow step 6 and Settled Decision 3 say a numeric id "bypasses the ambiguity-tolerant name cascade entirely". `cmd_send` actually calls `resolve_chat(args.chat, strict=False)` first (`tools/valor_telegram.py:831`) and reaches the digit fallback at `:836` only when that returns falsy. The conclusion holds (a numeric never matches a title or username) but the resolver is invoked and does perform history and user lookups. | **ADDRESSED** (nit fixed anyway) | Data Flow step 6 and Settled Decision 3 rewritten: `cmd_send` calls `resolve_chat(args.chat, strict=False)` unconditionally at `:831`, and a numeric id enters that cascade but can never match a title or username, so it always lands on the digit fallback at `:836` and the ambiguous most-recent pick is unreachable for it. |
 
 **Critique execution note (cycle 2):** no `Task`/`Agent` tool was available in this session, so the three FULL-depth critic lenses (Risk & Robustness, Scope & Value, History & Consistency) were executed in-process by the critique driver rather than as independent forked agents. The frozen `_roster.json` manifest, per-critic result files, terminal completion fence, and the `critique-roster-check --plan-path` grounding gate all ran as normal and reported `complete: true, ungrounded: []`.
