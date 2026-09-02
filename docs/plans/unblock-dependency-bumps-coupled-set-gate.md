@@ -5,7 +5,7 @@ appetite: Large
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-09-02T06:41:44Z
+revision_applied_at: 2026-09-02T07:01:43Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
 last_comment_id: 5505317383
 ---
@@ -97,12 +97,13 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `63e6c2299` — `main`'s tip at round 6 (2026-09-02). This is
+**Baseline commit:** `ce54eb3d6` — `main`'s tip at round 7 (2026-09-02). This is
 the single baseline for every claim in this section; earlier rounds' SHAs are
 deliberately not restated here. The round-5 critique independently re-verified
-every reference at `b37d67d98`, and all six commits between `b37d67d98` and
-`63e6c2299` touch only `docs/plans/*.md` (verified by
-`git log --name-only`), so no tracked source file has moved since.
+every reference at `b37d67d98`, the round-7 critique re-verified every one again
+by execution at `3714bd96f`, and every commit between `b37d67d98` and
+`ce54eb3d6` touches only `docs/plans/*.md` (verified by `git log --name-only`),
+so no tracked source file has moved since.
 **Issue filed at:** 2026-08-25T05:16:36Z
 **Disposition:** **Minor drift.** Every substantive premise holds: the
 `agent/llm/` module-scope imports, the five module-scope consumers,
@@ -407,7 +408,7 @@ Three channels, fired unconditionally on the first transition to degraded.
 |---|---|---|
 | Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following `agent/index_drift.py:224` including its capture-failed fallback log. | `sentry-sdk`'s own HTTP transport; shares no code with the LLM stack. **Hibernation exemption required:** `bridge/telegram_bridge.py`'s `_sentry_before_send` (`:55`, wired into `configure_sentry` at `:80`) drops every event while `is_hibernating()` — a persistent flag, not a brief window. The hook must pass events whose message carries the degraded sentinel token. Hibernation means "we cannot reach Telegram", which is exactly when a broken LLM stack most needs to be visible elsewhere. |
 | Logs | `logger.critical` with a fixed, greppable sentinel token. | stdlib only. Survives a Sentry DSN outage. |
-| Dashboard | The resolver writes a **per-process** marker file at `<repo>/data/llm-stack-degraded.{proc}` (versions + `exc_type` + which axis failed), resolved from the module as `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"` — never cwd-relative, mirroring `ui/app.py:376`'s `Path(__file__).parent.parent / "data" / ...`; `dashboard_json` (`ui/app.py:907`) reads `sorted((repo / "data").glob("llm-stack-degraded*"))` with the siblings' fail-quiet `try/except OSError` and renders red while **any** marker exists, naming the degraded processes. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
+| Dashboard | The resolver writes a **per-process** marker file at `<repo>/data/llm-stack-degraded.{proc}` (versions + `exc_type` + which axis failed) — **only for the two callers that pass a stable `proc`, `bridge` and `worker`**; every other caller writes none. The path comes from the module-level `_MARKER_DIR` seam (default `Path(__file__).resolve().parents[2] / "data"`) via `_marker_path(proc)` — never cwd-relative, mirroring `ui/app.py:376`'s `Path(__file__).parent.parent / "data" / ...`; `dashboard_json` (`ui/app.py:907`) reads `sorted((repo / "data").glob("llm-stack-degraded*"))` with the siblings' fail-quiet `try/except OSError` and renders red while **any** marker exists, naming the degraded processes. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
 
 ### Why the dashboard marker is per-process, not shared
 
@@ -424,11 +425,41 @@ polarity flipped, and worse, because nobody investigates a green board.
 
 So each resolver owns exactly one path and clears **only** its own
 (`marker.unlink(missing_ok=True)` on the process's own filename, never a glob
-and never another process's file). `proc` is `bridge` / `worker` for the
-long-lived services and a pid-suffixed name for one-shot callers, so a crashed
-one-shot cannot strand a permanent red. The read side globs and is red while any
-marker survives. Tested: clearing the bridge marker leaves the worker marker and
-the red state intact.
+and never another process's file).
+
+**Only a process that can clear its marker may write one.** `_resolve_degraded_flag(proc: str | None = None)`
+writes a marker **only** when `proc` is given: `bridge/telegram_bridge.py::main`
+passes `"bridge"`, `worker/__main__.py` passes `"worker"`, and every other
+caller — one-shot scripts, cron helpers, pytest processes that touch
+`run_typed` — passes nothing and writes **no** marker, while still getting the
+Sentry capture and the `logger.critical` sentinel, which are the channels
+appropriate to a process that will not be around to clear anything. This
+closes the round-7 operator finding: a pid-suffixed marker scheme has no clear
+leg for a process that exits while degraded (the clear only ever runs on a
+*healthy* resolution in the same process) and the read side has no liveness
+filter, so on a genuinely degraded machine every one-shot deposits another
+permanent red and the board stays red on the corpses after the fix lands —
+the plan's own "stuck-red dashboard equals no dashboard channel" mode, reached
+through the mechanism introduced to prevent its inverse. Two clearable writers
+is the whole marker population.
+
+The read side globs and is red while any marker survives. Tested: clearing the
+bridge marker leaves the worker marker and the red state intact.
+
+**The marker directory is a module-level seam, not a hardcoded path.**
+`_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"` at `compat.py`
+module scope, with every write and clear going through a `_marker_path(proc)`
+helper that reads it. The production default is unchanged — un-redirectable by
+cwd, exactly as the dashboard requires — but tests do
+`monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)` instead of writing into
+the live `data/` that a running bridge, worker, and dashboard share on the
+development machine. Without the seam, this lane's three new degraded-driving
+test files write real markers into the real `data/`, xdist workers race on the
+same filenames, and an interrupted test leaves the operator's actual dashboard
+red with no underlying fault. Each of the three files also asserts that
+`list((repo / "data").glob("llm-stack-degraded*"))` is unchanged across the
+test, so a future test that forgets the monkeypatch fails loudly instead of
+polluting the board.
 
 A direct Telegram push was considered and **rejected**: no raw Bot-API send path
 exists in tracked code, and Telethon's send lives only in the bridge — it cannot
@@ -543,6 +574,27 @@ The appetite re-label above is the concession taken instead.
   `import agent.llm` **and** `import bridge.telegram_bridge` both succeed,
   `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire.
   That single test is the invariant; consumer discipline is not.
+
+  **The import half MUST run in a fresh interpreter subprocess** (round-7
+  blocker). In-process it cannot fail: 31 existing test files already import
+  `bridge.telegram_bridge`, whose module scope pulls `bridge.routing` →
+  `agent.llm`, so under xdist both `import` statements are `sys.modules` cache
+  hits that execute no stack import at all — a test that passes unconditionally
+  and is counted as coverage. A `sys.modules`-purge variant is explicitly
+  rejected: `tests/unit/test_bridge_api_id_parse.py:112` shows the trap (it pops
+  only `bridge.telegram_bridge`, leaving a cached `bridge.routing` and
+  `agent.llm` to short-circuit the chain), and the correct purge set is the full
+  transitive closure (`bridge.telegram_bridge`, `bridge.routing`,
+  `bridge.job_router`, `bridge.agent_catchup`, `agent.llm`, `agent.llm.wrapper`,
+  `agent.llm.compat`, `agent.anthropic_client`, `agent.memory_extraction`,
+  `tools.email_cs.triage`) whose completeness nothing enforces. The shape:
+  write a shim dir into `tmp_path` holding `anthropic.py` and
+  `pydantic_ai/__init__.py` whose bodies are `raise ImportError("stubbed")`,
+  then assert
+  `subprocess.run([sys.executable, "-c", "import agent.llm, bridge.telegram_bridge"], cwd=<repo root>, env={**os.environ, "PYTHONPATH": f"{shim}:{repo}"}, capture_output=True).returncode == 0`,
+  with the captured stderr in the assertion message. The `run_typed`-raises and
+  alert-channel halves stay in-process; only the import half needs the
+  subprocess.
 - **`check_llm_stack_compat()` in `agent/llm/compat.py`**, returning
   `CompatResult` (`compatible`, `loader_ok`, `anthropic_version`,
   `pydantic_ai_version`, `reason`, `exc_type`). Local mode: run the loader
@@ -573,11 +625,26 @@ The appetite re-label above is the concession taken instead.
      `messages`, `model`, `tools`, `tool_choice`, `output_config`, `stream`,
      `cache_control`, `thinking`, `container`, `metadata`, `service_tier`,
      `timeout`, `extra_headers`, `extra_body`).
-  2. Resolve the **same** attribute path against a real client
+  2. **Exactly one site or fail closed.** `if len(sites) != 1`, return
+     `CompatResult(compatible=False, reason=f"expected exactly 1 self.client.*.create call site in pydantic_ai.models.anthropic, found {len(sites)}: {[s.path for s in sites]}")`.
+     Falling through to `sites[0]` is the silently-passing-predicate-whose-
+     target-moved failure this plan rejects, and a beta/non-beta branch split is
+     the most natural shape Step 2's 25-minor-version move takes.
+  3. Resolve the **same** attribute path against a real client
      (`client = anthropic.AsyncAnthropic(api_key="x")`, constructor-only, no
      network, no key needed), i.e. walk `beta.messages` off the instance and
      take `inspect.signature(target.create)`.
-  3. `compatible` iff every forwarded name is a parameter of that signature, or
+
+     **Why `AsyncAnthropic` specifically:** the call site names only the
+     attribute *path*, not the client class — `pydantic_ai.models.anthropic`
+     types `self.client` as the `AsyncAnthropicClient` union, which also admits
+     `AsyncAnthropicBedrock`, `AsyncAnthropicBedrockMantle`, and
+     `AsyncAnthropicVertex`. `AsyncAnthropic` is the correct resolution target
+     **because that is the class `agent/llm/wrapper.py` constructs**, and this
+     repo uses none of the others. Mirror this clause in `compat.py`'s
+     docstring beside the "read the target from the call site" note, so a future
+     reader debugging a Bedrock-shaped false positive has it on the record.
+  4. `compatible` iff every forwarded name is a parameter of that signature, or
      the signature has a `VAR_KEYWORD` param. Missing names go into `reason`
      verbatim.
 
@@ -589,7 +656,8 @@ The appetite re-label above is the concession taken instead.
   site.
 
   Introspection failures — `getsource` unavailable, zero `create` sites found,
-  the attribute path unresolvable on the client — return `compatible=False`
+  **more than one `create` site found**, the attribute path unresolvable on the
+  client — return `compatible=False`
   with the failure verbatim. A silently-passing predicate whose target moved is
   the same failure as no gate. Guarding that fail-closed direction against
   false positives is what the break-glass override below is for.
@@ -763,12 +831,34 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `bridge/update.py::extract_update_warnings` to surface, which would ship a
   dead check at the one call site covering Data Flow routes 2 and 3.
   Do **not** rely on `detail` to carry the failure: `ToolCheck.detail` is not
-  read by that loop at all — the only site rendering it is the bespoke
-  `projects_json_check` block at `run.py:1907-1909`. Print-on-pass (#2541) is
-  therefore a *second* deliverable, not a property of `detail`: add a dedicated
-  call-site block in `run.py` modeled on `run.py:1907-1909` that logs the
-  compat check's `detail` every run, pass or fail, so a silently stale venv is
-  visible. Unconditional — every `/update`, bump or no bump.
+  read by that loop at all. Print-on-pass (#2541) is therefore a *second*
+  deliverable, not a property of `detail`.
+
+  **Print-on-pass is a lookup by `name` in `result.verification.valor_tools`,
+  logged unconditionally — not a new `UpdateResult` field and not a second
+  `verify` call site** (round-7 consistency finding). The `projects_json_check`
+  block at `run.py:1907-1909` is the wrong structural model to copy literally:
+  it reads a dedicated `UpdateResult` dataclass field (`run.py:152`) that
+  `run.py` itself populates at `run.py:1904`. The compat `ToolCheck` is created
+  inside `verify.verify_environment` and appended to `result.valor_tools`
+  (`verify.py:1225-1228`); `run.py` only ever sees it as an element of
+  `result.verification.valor_tools`, obtained once at `run.py:2636`. A builder
+  copying the cited block literally either adds an `UpdateResult` field
+  `verify.py` never sets, or adds a second `verify` call and runs the compat
+  subprocess twice per update. The correct shape, immediately after
+  `result.verification = verify.verify_environment(...)` (`run.py:2636`, inside
+  `if config.do_verify:` — true in `UpdateConfig.full`, `.cron`, and
+  `.verify_only`, so the leg is genuinely unconditional) and before the existing
+  `valor_tools` warning loop at `run.py:2673`:
+
+  ```python
+  compat = next((t for t in result.verification.valor_tools if t.name == "llm-stack-compat"), None)
+  if compat is not None:
+      log(f"  llm-stack-compat: {compat.detail}", v, always=True)
+  ```
+
+  Same *style* as the `projects_json_check` detail block (report every run, pass
+  or fail, so a silently stale venv is visible); different plumbing.
   `llm-stack-compat` is **not** added to `human_gated_tools`: it is
   agent-resolvable, so it should re-warn every run until fixed.
 - **Import-cycle discipline inside the package**: `compat.py` reaches the stack
@@ -863,6 +953,12 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `import agent.llm` and `import bridge.telegram_bridge` succeed, `run_typed`
   raises `LLMStackIncompatible`, all three channels fire; plus the
   no-startup-hook path (first `run_typed` call resolves, alerts, raises typed).
+  **The import half runs in a fresh interpreter subprocess with a
+  raise-on-import shim dir on `PYTHONPATH`** — in-process (and under any
+  `sys.modules` purge) it is a cache hit that passes unconditionally, which is
+  the round-7 blocker. The alert/typed halves stay in-process. Monkeypatch
+  `compat._MARKER_DIR` to `tmp_path` and assert the live `data/` glob is
+  unchanged across the file.
 - [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): **the positive
   self-test — `check_llm_stack_compat().compatible is True` on the pinned pair**
   (the assertion whose absence produced the round-5 blocker); the derived kwarg
@@ -870,7 +966,8 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   the resolved target is the callable named by the call site's own attribute
   path; incompatible with verbatim reason on a simulated bad signature;
   `loader_ok is False` on loader ImportError; introspection-failure (zero
-  `create` sites, unresolvable path) → incompatible; local mode makes no network
+  `create` sites, **two `create` sites** fed from a synthetic module source,
+  unresolvable path) → incompatible; local mode makes no network
   call; **the
   predicate is pure** — `check_llm_stack_compat` on an incompatible stack emits
   zero `capture_message` calls, writes no marker file, and leaves the memoized
@@ -881,20 +978,27 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   fires **while `run_typed` raises** (independence proof); raising
   `capture_message` suppresses nothing else; per-process marker written on
   degraded and cleared on healthy, with **clearing the bridge marker leaving the
-  worker marker and the red state intact**; hibernation `before_send` passes the
+  worker marker and the red state intact**; **a resolver called with no `proc`
+  writes no marker at all while still emitting Sentry + the sentinel log**;
+  hibernation `before_send` passes the
   sentinel event while dropping others; process does not exit; degraded intake
   (inbound message still enqueues an AgentSession); **two-axis split** —
   `loader_ok` true + `compatible` false makes `run_typed` raise while
   `run_typed_local` completes against a stubbed `FunctionModel`; **override** —
   `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits the resolver, emits the
   OVERRIDDEN warning, and is ignored by the pure predicate and the `--json` CLI.
+  All marker-touching cases monkeypatch `compat._MARKER_DIR` to `tmp_path`, with
+  a live-`data/`-glob-unchanged assertion, plus one case asserting the *default*
+  `_MARKER_DIR` equals the directory `ui/app.py` reads.
 - [ ] `tests/unit/test_dashboard_llm_degraded.py` — ADD (new file): the
   dashboard read side. With a marker written (versions + `exc_type`),
   `dashboard_json()` returns a truthy degraded field carrying both versions and
   naming the process; with no marker it returns the healthy value; with two
   markers it names both; with a marker present but unreadable the call still
   returns 200 and does not raise, proving the `except OSError` leg. Without
-  this, the lane can go fully green with `dashboard_json` never wired.
+  this, the lane can go fully green with `dashboard_json` never wired. Markers
+  are written under a redirected directory, not the live `data/`, with the
+  glob-unchanged assertion.
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
   — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
 - [ ] `tests/integration/test_remote_update.py::test_verify_runs_compat_check_without_bump`
@@ -1096,8 +1200,9 @@ This work **is** an update-system change.
   per-set rollback with `restore_failed`, the `llm` phase subprocess.
 - `scripts/update/run.py` — surface the failed phase in the rolled-back
   warning; guard the commit branch with `not bump.restore_failed`; add the
-  print-on-pass block for the compat check's `detail`, modeled on the
-  `projects_json_check` block at `run.py:1907-1909`. The
+  print-on-pass block for the compat check's `detail` as a lookup by `name` in
+  `result.verification.valor_tools` (no new `UpdateResult` field, no second
+  `verify` call). The
   commit/push/restart ordering per `sdlc-1091.md` is untouched.
 - `.claude/skills/update/SKILL.md`, section `### Auto-Bump Critical Dependencies`
   (cited by heading, not line range — the previously cited `66-72` spilled into
@@ -1180,7 +1285,10 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] **Import-safety contract holds**: with `anthropic`/`pydantic_ai` broken at
   import, `import agent.llm` and `import bridge.telegram_bridge` succeed,
   `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire
-  — one test proves all four.
+  — one test proves all four. **The import half executes in a fresh interpreter
+  subprocess against a raise-on-import shim dir**, so the assertion is capable
+  of failing in a full xdist run; an in-process or `sys.modules`-purge form does
+  not satisfy this criterion.
 - [ ] `check_llm_stack_compat()` exists in `agent/llm/compat.py`, importing
   nothing from `scripts/`, with `python -m agent.llm.compat --json` working.
 - [ ] The predicate is exercised from three sites **in production on this
@@ -1209,9 +1317,18 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] A raising `capture_message` suppresses nothing else; the hibernation
   `before_send` passes the sentinel event; `data/llm-stack-degraded.{proc}` is
   written on degraded and **cleared on healthy** resolution — only the writing
-  process's own path — at a path resolved from the module (not cwd) whose
-  directory equals the one `ui/app.py` reads. Clearing one process's marker
-  leaves another's, and the board stays red.
+  process's own path — under the module-level `_MARKER_DIR` seam whose
+  **default** equals the directory `ui/app.py` reads. Clearing one process's
+  marker leaves another's, and the board stays red.
+- [ ] **Only `bridge` and `worker` write markers**: a resolver called without a
+  `proc` emits Sentry and the sentinel log but creates no marker file, so no
+  one-shot can strand a permanent red. No pid-suffixed markers exist.
+- [ ] **The suite does not pollute the operator's board**: every marker-writing
+  test redirects `_MARKER_DIR`, and each of the three new test files asserts the
+  live `data/llm-stack-degraded*` glob is unchanged across the test.
+- [ ] **The predicate fails closed on an ambiguous call site**: `len(sites) != 1`
+  (not just zero) returns `compatible=False` naming the count and the found
+  paths; covered by a synthetic two-site test.
 - [ ] **`/dashboard.json` actually renders it**: with a marker present,
   `dashboard_json()` returns a truthy degraded field carrying both versions and
   the degraded process; with none, the healthy value; with an unreadable marker,
@@ -1312,9 +1429,14 @@ bridge command. But the runtime's boot and failure presentation change:
 - Replace the `wrapper_mod.OpenAIChatModel` test seam with the loader seam;
   update `test_llm_wrapper_local.py` and its docstring; assert no real network
   call is reachable.
-- Write the contract test's import half now (broken-stack stubs →
-  `import agent.llm` and `import bridge.telegram_bridge` succeed); the
-  alert/typed-exception half lands with task 4.
+- Write the contract test's import half now, **in a fresh interpreter
+  subprocess with a raise-on-import shim dir on `PYTHONPATH`** — never
+  in-process, and never via a `sys.modules` purge. In-process the assertion
+  cannot fail: 31 test files already import `bridge.telegram_bridge` (→
+  `bridge.routing` → `agent.llm`), so under xdist both imports are cache hits.
+  See the Solution bullet for the exact subprocess/shim shape and why the purge
+  variant is rejected. The alert/typed-exception half lands with task 4 and may
+  stay in-process.
 - **Migrate `LOCAL_TYPED_HARD_TIMEOUT` (`wrapper.py:167`) to a lazily-read
   `config/settings.py` `TimeoutSettings` field in this same commit.** The
   module-scope-env ratchet (`validate_no_module_scope_env.py`, restored
@@ -1352,7 +1474,16 @@ bridge command. But the runtime's boot and failure presentation change:
   keys are absent from `create` on the pinned pair — the round-5 blocker) and
   **do not** hardcode `anthropic.resources.messages.AsyncMessages` (non-beta;
   missing four kwargs the call site passes). See the Solution bullet for the
-  three-step algorithm and the executed evidence.
+  four-step algorithm and the executed evidence.
+- **Fail closed on `len(sites) != 1`**, not just on zero sites — never fall
+  through to `sites[0]`. The reason names the count and the found paths
+  verbatim. Test the multi-site case beside the zero-site case, feeding a
+  synthetic module source with two `create` calls.
+- Record in the module docstring **why the target resolves against
+  `anthropic.AsyncAnthropic`**: the call site names only the attribute path, and
+  `pydantic_ai` types `self.client` as the `AsyncAnthropicClient` union
+  (Bedrock / BedrockMantle / Vertex included); `AsyncAnthropic` is right because
+  it is the class `wrapper.py` constructs.
 - **Write the positive self-test first**: `check_llm_stack_compat().compatible
   is True` on the pinned pair. Plus the shape assertions — the derived set
   contains `temperature`/`top_p`/`top_k` and no `anthropic_`-prefixed name.
@@ -1387,10 +1518,22 @@ bridge command. But the runtime's boot and failure presentation change:
   — Sentry fatal, `logger.critical` sentinel, and a **per-process**
   `data/llm-stack-degraded.{proc}` marker (versions + `exc_type` + which axis
   failed). Healthy resolution clears **only this process's own** path
-  (`marker.unlink(missing_ok=True)`), never a glob. Resolve the path from the
-  module — `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"`
-  — never cwd-relative, and assert in the test that its directory equals the
-  one `ui/app.py` reads (`Path(__file__).parent.parent / "data"`).
+  (`marker.unlink(missing_ok=True)`), never a glob.
+- **Signature: `_resolve_degraded_flag(proc: str | None = None)`; a marker is
+  written only when `proc` is given.** `bridge/telegram_bridge.py::main` passes
+  `"bridge"`, `worker/__main__.py` passes `"worker"`; every other caller passes
+  nothing and writes no marker, getting Sentry + the sentinel log only. No
+  pid-suffixed markers — a process that exits while degraded has no clear leg,
+  and the read side has no liveness filter, so pid markers strand permanent red.
+- **Marker directory is a module-level seam**: `_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"`
+  at module scope, with all writes/clears through `_marker_path(proc)`. Never
+  cwd-relative. Tests monkeypatch `_MARKER_DIR` to `tmp_path` — the three new
+  degraded-driving test files must **not** write into the live `data/` a
+  running bridge, worker, and dashboard share. Assert in the test that the
+  *default* `_MARKER_DIR` equals the directory `ui/app.py` reads
+  (`Path(__file__).parent.parent / "data"`), and add to each of the three files
+  an assertion that `list((repo / "data").glob("llm-stack-degraded*"))` is
+  unchanged across the test.
 - The resolver is the **only** alerting path; `check_llm_stack_compat` stays
   pure (task 3).
 - **Break-glass override**: read `LLM_STACK_COMPAT_OVERRIDE` **inside**
@@ -1455,9 +1598,13 @@ bridge command. But the runtime's boot and failure presentation change:
   `result.valor_tools`, **with the failure reason in `.error`** (non-empty on
   failure, or `run.py:2673-2684`'s `if not tool.available and tool.error:`
   makes the whole leg silent) and both versions in `version`/`detail`. Add the
-  print-on-pass block in `run.py` modeled on `run.py:1907-1909` — the generic
-  loop never reads `detail`. Do not add `llm-stack-compat` to
-  `human_gated_tools`.
+  print-on-pass block in `run.py` as a **lookup by `name` in
+  `result.verification.valor_tools`** right after `run.py:2636`'s
+  `verify_environment` call and before the warning loop at `run.py:2673` — the
+  generic loop never reads `detail`. **No new `UpdateResult` field and no second
+  `verify` call site**; see Technical Approach for the exact three lines and why
+  copying `run.py:1907-1909`'s plumbing literally is wrong. Do not add
+  `llm-stack-compat` to `human_gated_tools`.
 - Replace the `pyproject.toml` stopgap comment with the two-line form.
 - Re-add `anthropic` (as a held-set member) **in this same task** — never as a
   separate earlier commit.
@@ -1530,7 +1677,10 @@ Rows assert *declarations and executed paths*, not file text.
 | `run_typed_local` is not gated on the Anthropic signature axis | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "two_axis or loader_ok" -q` | exit code 0 |
 | Break-glass override works and is scoped to the resolver | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "override" -q` | exit code 0 |
 | The dashboard read side actually renders the degraded state | `./scripts/pytest-clean.sh tests/unit/test_dashboard_llm_degraded.py -q` | exit code 0 |
-| Marker path is module-resolved and per-process | `.venv/bin/python -c "s=open('agent/llm/compat.py').read();assert 'llm-stack-degraded' in s and 'parents[2]' in s and 'missing_ok' in s"` | exit code 0 |
+| Marker path is a module-level seam, per-process, and pid-free | `.venv/bin/python -c "s=open('agent/llm/compat.py').read();assert 'llm-stack-degraded' in s and '_MARKER_DIR' in s and 'parents[2]' in s and 'missing_ok' in s and 'getpid' not in s"` | exit code 0 |
+| The import-safety contract runs out-of-process (cannot pass on a `sys.modules` cache hit) | `.venv/bin/python -c "s=open('tests/unit/test_llm_import_safety.py').read();assert 'subprocess' in s and 'PYTHONPATH' in s"` | exit code 0 |
+| Only `bridge`/`worker` write markers (no-`proc` caller writes none) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "no_proc or marker_writer" -q` | exit code 0 |
+| Ambiguous `create` call site fails closed (`len(sites) != 1`) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "multi_site or introspection" -q` | exit code 0 |
 | The old env knob is retired from the package surface | `.venv/bin/python -c "import agent.llm as m;assert 'LOCAL_TYPED_HARD_TIMEOUT' not in m.__all__ and not hasattr(m,'LOCAL_TYPED_HARD_TIMEOUT');from config.settings import settings;assert settings.timeouts.local_typed_hard_s"` | exit code 0 |
 | Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
@@ -1547,7 +1697,7 @@ Rows assert *declarations and executed paths*, not file text.
 
 ## Critique Results
 
-### Round-7 war room (2026-09-02) — FULL roster, verdict NEEDS REVISION
+### Round-7 war room (2026-09-02) — FULL roster, verdict NEEDS REVISION (all findings addressed)
 
 **Dispatch deviation, recorded:** the critique agent had no Agent/Task spawn tool in
 its context, so the three FULL lenses (Risk & Robustness, Scope & Value, History &
@@ -1558,12 +1708,12 @@ inferred from a bundle. Attribution names the lens, not a separate agent.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness (Skeptic) | The import-safety contract test — the plan's single named enforcement mechanism ("That single test is the invariant; consumer discipline is not") — is specified in a way that passes unconditionally in a full-suite run. `tests/unit/test_llm_import_safety.py` is prescribed as "with `anthropic`/`pydantic_ai` stubbed to raise on import, `import agent.llm` and `import bridge.telegram_bridge` succeed", with no isolation prescription anywhere in Solution, Test Impact, task 2, or the Verification row. Thirty-one test files already import `bridge.telegram_bridge` (grep-verified), and its module scope pulls `bridge.routing` which pulls `agent.llm`; under xdist, file distribution is nondeterministic, so in the run that matters those modules are already in `sys.modules` and both `import` statements are cache hits that execute no stack import at all. The existing in-process precedent makes the trap concrete rather than theoretical: `tests/unit/test_bridge_api_id_parse.py:112` pops only `bridge.telegram_bridge` from `sys.modules` and reimports, which for this contract would leave a cached `bridge.routing` and `agent.llm` short-circuiting the very chain under test. This is the round-6 pass's own named defect class — "a test that cannot fail is worse than no test, because it is counted as coverage" — landing on the invariant the whole reshape exists to enforce. | pending | Run the import half in a **fresh interpreter subprocess**, never in-process. Write a stub shim dir into `tmp_path` containing `anthropic.py` and `pydantic_ai/__init__.py` whose bodies are `raise ImportError("stubbed")`, then assert `subprocess.run([sys.executable, "-c", "import agent.llm, bridge.telegram_bridge"], cwd=<repo root>, env={**os.environ, "PYTHONPATH": f"{shim}:{repo}"}, capture_output=True).returncode == 0`, with the stderr in the assertion message. Do **not** attempt a `sys.modules`-purge variant: purging `bridge.telegram_bridge` alone is insufficient, and the correct purge set is the full transitive closure (`bridge.telegram_bridge`, `bridge.routing`, `bridge.job_router`, `bridge.agent_catchup`, `agent.llm`, `agent.llm.wrapper`, `agent.llm.compat`, `agent.anthropic_client`, `agent.memory_extraction`, `tools.email_cs.triage`) whose completeness nothing enforces. The `run_typed`-raises and alert-channel halves can stay in-process; only the import half needs the subprocess. |
-| CONCERN | Risk & Robustness (Operator) | The per-process marker scheme strands permanent red markers, and the plan asserts the opposite. Failure Posture says `proc` is "a pid-suffixed name for one-shot callers, **so a crashed one-shot cannot strand a permanent red**" — but nothing in the plan delivers that property. A one-shot process that resolves degraded writes `data/llm-stack-degraded.{pid}` and then exits; the clear leg only ever runs on a *healthy* resolution inside the same process, so the marker outlives it forever. The read side is specified as `sorted((repo/"data").glob("llm-stack-degraded*"))`, red while **any** marker exists, with no liveness filter. On a genuinely degraded machine every one-shot script, cron helper, and pytest process that touches `run_typed` deposits another permanent marker; after the pin fix lands the bridge and worker clear theirs and the board stays red on the corpses. That is precisely the plan's own named "stuck-red dashboard equals no dashboard channel" mode, reached through the mechanism introduced to prevent its inverse. | pending | Restrict marker writing to processes that declare a stable, clearable `proc` name. Give the resolver an explicit opt-in (e.g. `_resolve_degraded_flag(proc: str \| None = None)`); `bridge/telegram_bridge.py::main` passes `"bridge"`, `worker/__main__.py` passes `"worker"`, and every other caller passes nothing and writes **no** marker — it still gets the Sentry capture and the `logger.critical` sentinel, which are the one-shot-appropriate channels. Then delete the pid-suffix sentence from Failure Posture rather than restating it. If pid-suffixed markers are kept instead, the read side must filter by liveness (`os.kill(pid, 0)` in a `try/except (OSError, ProcessLookupError)`) and that filter needs its own row in `tests/unit/test_dashboard_llm_degraded.py`. |
-| CONCERN | Risk & Robustness (Adversary) | The marker path is deliberately un-redirectable, so the lane's own tests write into the live `data/` directory that the running bridge, worker, and dashboard share. Task 4 pins the write to `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"` — "never cwd-relative" — which is right for production and leaves tests no seam: `monkeypatch.chdir(tmp_path)` cannot move it. Three new test files (`test_llm_import_safety.py`, `test_llm_stack_degraded_start.py`, `test_dashboard_llm_degraded.py`) each drive degraded resolutions, so on the development machine they write real markers into the real `data/` while a real bridge and worker are running against the same checkout, and parallel xdist workers race on the same filenames. A test that fails or is interrupted before its cleanup leaves the operator's actual dashboard red with no underlying fault — the failure this plan is built to make legible, manufactured by its own suite. | pending | Keep the module-resolved path as the **default**, not the only option: `_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"` at module scope in `agent/llm/compat.py`, with every write and clear going through a `_marker_path(proc)` helper that reads it. Tests then do `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)`. The existing Success Criterion still holds unchanged — assert the *default* `_MARKER_DIR` equals `Path(ui.app.__file__).parent.parent / "data"`. Add one assertion to each of the three new files that `list((repo/"data").glob("llm-stack-degraded*"))` is unchanged across the test, so a future test that forgets the monkeypatch fails loudly instead of polluting the operator's board. |
-| CONCERN | Risk & Robustness (Skeptic) | The fail-closed enumeration for introspection failures is explicit about three cases and silent about the one that Step 2's lane makes likely. Solution names "`getsource` unavailable, zero `create` sites found, the attribute path unresolvable on the client" as `compatible=False` paths, but says nothing about **more than one** `create` site. Verified on the pinned pair: `ast` over `inspect.getsource(pydantic_ai.models.anthropic)` yields exactly one `self.client.beta.messages.create` call carrying exactly the 24 literal kwargs the plan lists, and resolving `beta.messages` off `anthropic.AsyncAnthropic(api_key="x")` gives `missing == []`, so the round-6 algorithm is confirmed correct **today**. But the plan's own break-glass rationale states the predicate "introspects two third-party internals upstream is free to rename — including in Step 2's lane, which moves `pydantic-ai-slim` 25 minor versions", and a beta/non-beta branch split is the most natural shape that change takes. Falling through to `sites[0]` there is the silently-passing-predicate-whose-target-moved failure the plan explicitly rejects, and reaching it via an unenumerated branch means no test names it. | pending | Make the count an explicit gate, not an implicit index: after collecting sites, `if len(sites) != 1: return CompatResult(compatible=False, reason=f"expected exactly 1 self.client.*.create call site in pydantic_ai.models.anthropic, found {len(sites)}: {[s.path for s in sites]}", exc_type=None)`. Add the multi-site case beside the existing zero-site case in `tests/unit/test_llm_stack_compat.py`'s introspection-failure row (feed a synthetic module source with two `create` calls), and extend the Solution bullet's failure list from three cases to four. |
-| CONCERN | History & Consistency (Consistency Auditor) | The print-on-pass prescription cites a model that is structurally the wrong shape, in the exact leg a round-4 blocker already caught once. Technical Approach and task 6 say to "add a dedicated call-site block in `run.py` modeled on `run.py:1907-1909`" — but that block reads `result.projects_json_check.detail`, a **dedicated `UpdateResult` dataclass field** (`run.py:152`) populated by its own run.py call site at `run.py:1904`. The compat `ToolCheck` is created inside `verify.verify_environment` and appended to `result.valor_tools` (`verify.py:1225-1228`); run.py only ever sees it as an element of `result.verification.valor_tools`, which it obtains once at `run.py:2636`. A builder following the cited model literally either adds an `UpdateResult` field that verify.py never sets, or adds a second `verify` call site and runs the compat subprocess twice per update. | pending | No new `UpdateResult` field and no second call site. Immediately after `result.verification = verify.verify_environment(...)` (`run.py:2636`, inside `if config.do_verify:` — true in all three `UpdateConfig` presets, so the leg is genuinely unconditional), do `compat = next((t for t in result.verification.valor_tools if t.name == "llm-stack-compat"), None)` and, when it is not None, `log(f"  llm-stack-compat: {compat.detail}", v, always=True)` before the existing `valor_tools` warning loop at `run.py:2673`. Reword Technical Approach and task 6 to say "a lookup by `name` in `result.verification.valor_tools`, logged unconditionally, in the same style as the `projects_json_check` detail block" rather than "modeled on `run.py:1907-1909`". |
-| NIT | History & Consistency (Archaeologist) | Step 2 of the derivation resolves the target callable against `anthropic.AsyncAnthropic(api_key="x")`, but `pydantic_ai.models.anthropic` types `self.client` as `AsyncAnthropicClient` — a union that also admits `AsyncAnthropicBedrock`, `AsyncAnthropicBedrockMantle`, and `AsyncAnthropicVertex` (imported at that module's lines 106-109, grouped at `_NON_AUTOMATIC_CACHING_CLIENTS` and the tuple below it). The choice is correct for this repo, because `wrapper.py` constructs `AsyncAnthropic` directly, but the plan states the resolution rule as if the class were implied by the call site, which it is not — the call site names only the attribute *path*, not the client class. A future reader debugging a Bedrock-shaped false positive has nothing on the record. | pending | One clause in the Solution bullet: resolve the path against `anthropic.AsyncAnthropic` **because that is the class `agent/llm/wrapper.py` constructs**; `pydantic_ai` types `self.client` as the `AsyncAnthropicClient` union (Bedrock / BedrockMantle / Vertex included) and this repo uses none of the others. Mirror the clause in `agent/llm/compat.py`'s docstring beside the existing "read the target from the call site" note. |
+| BLOCKER | Risk & Robustness (Skeptic) | The import-safety contract test — the plan's single named enforcement mechanism ("That single test is the invariant; consumer discipline is not") — is specified in a way that passes unconditionally in a full-suite run. `tests/unit/test_llm_import_safety.py` is prescribed as "with `anthropic`/`pydantic_ai` stubbed to raise on import, `import agent.llm` and `import bridge.telegram_bridge` succeed", with no isolation prescription anywhere in Solution, Test Impact, task 2, or the Verification row. Thirty-one test files already import `bridge.telegram_bridge` (grep-verified), and its module scope pulls `bridge.routing` which pulls `agent.llm`; under xdist, file distribution is nondeterministic, so in the run that matters those modules are already in `sys.modules` and both `import` statements are cache hits that execute no stack import at all. The existing in-process precedent makes the trap concrete rather than theoretical: `tests/unit/test_bridge_api_id_parse.py:112` pops only `bridge.telegram_bridge` from `sys.modules` and reimports, which for this contract would leave a cached `bridge.routing` and `agent.llm` short-circuiting the very chain under test. This is the round-6 pass's own named defect class — "a test that cannot fail is worse than no test, because it is counted as coverage" — landing on the invariant the whole reshape exists to enforce. | **Fixed (round 7)** — adopted as prescribed. The Solution import-safety bullet, task 2, Test Impact, Success Criteria, and a new Verification row now require the import half to run in a **fresh interpreter subprocess** with a raise-on-import shim dir on `PYTHONPATH`, and explicitly reject both the in-process form and the `sys.modules`-purge variant (the transitive-closure argument and the `test_bridge_api_id_parse.py:112` precedent are recorded in the plan body). The `run_typed`-raises and alert-channel halves stay in-process. | Run the import half in a **fresh interpreter subprocess**, never in-process. Write a stub shim dir into `tmp_path` containing `anthropic.py` and `pydantic_ai/__init__.py` whose bodies are `raise ImportError("stubbed")`, then assert `subprocess.run([sys.executable, "-c", "import agent.llm, bridge.telegram_bridge"], cwd=<repo root>, env={**os.environ, "PYTHONPATH": f"{shim}:{repo}"}, capture_output=True).returncode == 0`, with the stderr in the assertion message. Do **not** attempt a `sys.modules`-purge variant: purging `bridge.telegram_bridge` alone is insufficient, and the correct purge set is the full transitive closure (`bridge.telegram_bridge`, `bridge.routing`, `bridge.job_router`, `bridge.agent_catchup`, `agent.llm`, `agent.llm.wrapper`, `agent.llm.compat`, `agent.anthropic_client`, `agent.memory_extraction`, `tools.email_cs.triage`) whose completeness nothing enforces. The `run_typed`-raises and alert-channel halves can stay in-process; only the import half needs the subprocess. |
+| CONCERN | Risk & Robustness (Operator) | The per-process marker scheme strands permanent red markers, and the plan asserts the opposite. Failure Posture says `proc` is "a pid-suffixed name for one-shot callers, **so a crashed one-shot cannot strand a permanent red**" — but nothing in the plan delivers that property. A one-shot process that resolves degraded writes `data/llm-stack-degraded.{pid}` and then exits; the clear leg only ever runs on a *healthy* resolution inside the same process, so the marker outlives it forever. The read side is specified as `sorted((repo/"data").glob("llm-stack-degraded*"))`, red while **any** marker exists, with no liveness filter. On a genuinely degraded machine every one-shot script, cron helper, and pytest process that touches `run_typed` deposits another permanent marker; after the pin fix lands the bridge and worker clear theirs and the board stays red on the corpses. That is precisely the plan's own named "stuck-red dashboard equals no dashboard channel" mode, reached through the mechanism introduced to prevent its inverse. | **Fixed (round 7)** — adopted as prescribed, first option. `_resolve_degraded_flag(proc: str \| None = None)` writes a marker **only** when `proc` is given; `bridge` and `worker` are the only two callers that pass one, and every other caller gets Sentry + the sentinel log and writes nothing. Pid-suffixed markers are gone, and the sentence claiming they prevent stranded red is deleted rather than restated. Recorded in Failure Posture (the per-process subsection and the channel table row), task 4, Test Impact, a Success Criterion, and a Verification row that greps `getpid` **out** of `compat.py`. | Restrict marker writing to processes that declare a stable, clearable `proc` name. Give the resolver an explicit opt-in (e.g. `_resolve_degraded_flag(proc: str \| None = None)`); `bridge/telegram_bridge.py::main` passes `"bridge"`, `worker/__main__.py` passes `"worker"`, and every other caller passes nothing and writes **no** marker — it still gets the Sentry capture and the `logger.critical` sentinel, which are the one-shot-appropriate channels. Then delete the pid-suffix sentence from Failure Posture rather than restating it. If pid-suffixed markers are kept instead, the read side must filter by liveness (`os.kill(pid, 0)` in a `try/except (OSError, ProcessLookupError)`) and that filter needs its own row in `tests/unit/test_dashboard_llm_degraded.py`. |
+| CONCERN | Risk & Robustness (Adversary) | The marker path is deliberately un-redirectable, so the lane's own tests write into the live `data/` directory that the running bridge, worker, and dashboard share. Task 4 pins the write to `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"` — "never cwd-relative" — which is right for production and leaves tests no seam: `monkeypatch.chdir(tmp_path)` cannot move it. Three new test files (`test_llm_import_safety.py`, `test_llm_stack_degraded_start.py`, `test_dashboard_llm_degraded.py`) each drive degraded resolutions, so on the development machine they write real markers into the real `data/` while a real bridge and worker are running against the same checkout, and parallel xdist workers race on the same filenames. A test that fails or is interrupted before its cleanup leaves the operator's actual dashboard red with no underlying fault — the failure this plan is built to make legible, manufactured by its own suite. | **Fixed (round 7)** — adopted as prescribed. `_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"` at `compat.py` module scope, all writes and clears through `_marker_path(proc)`; production default unchanged and still un-redirectable by cwd, tests monkeypatch the seam to `tmp_path`. Each of the three new test files asserts the live `data/llm-stack-degraded*` glob is unchanged across the test, and one case asserts the **default** `_MARKER_DIR` equals the directory `ui/app.py` reads. Recorded in Failure Posture, task 4, all three Test Impact rows, two Success Criteria, and the amended marker Verification row. | Keep the module-resolved path as the **default**, not the only option: `_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"` at module scope in `agent/llm/compat.py`, with every write and clear going through a `_marker_path(proc)` helper that reads it. Tests then do `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)`. The existing Success Criterion still holds unchanged — assert the *default* `_MARKER_DIR` equals `Path(ui.app.__file__).parent.parent / "data"`. Add one assertion to each of the three new files that `list((repo/"data").glob("llm-stack-degraded*"))` is unchanged across the test, so a future test that forgets the monkeypatch fails loudly instead of polluting the operator's board. |
+| CONCERN | Risk & Robustness (Skeptic) | The fail-closed enumeration for introspection failures is explicit about three cases and silent about the one that Step 2's lane makes likely. Solution names "`getsource` unavailable, zero `create` sites found, the attribute path unresolvable on the client" as `compatible=False` paths, but says nothing about **more than one** `create` site. Verified on the pinned pair: `ast` over `inspect.getsource(pydantic_ai.models.anthropic)` yields exactly one `self.client.beta.messages.create` call carrying exactly the 24 literal kwargs the plan lists, and resolving `beta.messages` off `anthropic.AsyncAnthropic(api_key="x")` gives `missing == []`, so the round-6 algorithm is confirmed correct **today**. But the plan's own break-glass rationale states the predicate "introspects two third-party internals upstream is free to rename — including in Step 2's lane, which moves `pydantic-ai-slim` 25 minor versions", and a beta/non-beta branch split is the most natural shape that change takes. Falling through to `sites[0]` there is the silently-passing-predicate-whose-target-moved failure the plan explicitly rejects, and reaching it via an unenumerated branch means no test names it. | **Fixed (round 7)** — adopted as prescribed. The derivation is now four steps, with step 2 an explicit `len(sites) != 1` fail-closed gate returning the count and the found paths verbatim — never a fall-through to `sites[0]`. The Solution failure enumeration is extended from three cases to four, task 3 carries the gate as its own bullet, Test Impact adds the synthetic two-site case beside the zero-site case, and there is a Success Criterion and a Verification row. | Make the count an explicit gate, not an implicit index: after collecting sites, `if len(sites) != 1: return CompatResult(compatible=False, reason=f"expected exactly 1 self.client.*.create call site in pydantic_ai.models.anthropic, found {len(sites)}: {[s.path for s in sites]}", exc_type=None)`. Add the multi-site case beside the existing zero-site case in `tests/unit/test_llm_stack_compat.py`'s introspection-failure row (feed a synthetic module source with two `create` calls), and extend the Solution bullet's failure list from three cases to four. |
+| CONCERN | History & Consistency (Consistency Auditor) | The print-on-pass prescription cites a model that is structurally the wrong shape, in the exact leg a round-4 blocker already caught once. Technical Approach and task 6 say to "add a dedicated call-site block in `run.py` modeled on `run.py:1907-1909`" — but that block reads `result.projects_json_check.detail`, a **dedicated `UpdateResult` dataclass field** (`run.py:152`) populated by its own run.py call site at `run.py:1904`. The compat `ToolCheck` is created inside `verify.verify_environment` and appended to `result.valor_tools` (`verify.py:1225-1228`); run.py only ever sees it as an element of `result.verification.valor_tools`, which it obtains once at `run.py:2636`. A builder following the cited model literally either adds an `UpdateResult` field that verify.py never sets, or adds a second `verify` call site and runs the compat subprocess twice per update. | **Fixed (round 7)** — adopted as prescribed. Technical Approach and task 6 now specify a **lookup by `name` in `result.verification.valor_tools`** placed immediately after `run.py:2636` and before the warning loop at `run.py:2673`, with the three-line form written out, and state explicitly that there is **no new `UpdateResult` field and no second `verify` call site**. The `projects_json_check` block is cited as the *style* (report every run, pass or fail) and named as the wrong *plumbing* to copy, with the reason (it reads a dedicated `UpdateResult` field `run.py` itself populates). Update System's `run.py` bullet is reworded to match. Verified in the tree: `run.py:2636` is the sole `verify_environment` call and sits inside `if config.do_verify:`. | No new `UpdateResult` field and no second call site. Immediately after `result.verification = verify.verify_environment(...)` (`run.py:2636`, inside `if config.do_verify:` — true in all three `UpdateConfig` presets, so the leg is genuinely unconditional), do `compat = next((t for t in result.verification.valor_tools if t.name == "llm-stack-compat"), None)` and, when it is not None, `log(f"  llm-stack-compat: {compat.detail}", v, always=True)` before the existing `valor_tools` warning loop at `run.py:2673`. Reword Technical Approach and task 6 to say "a lookup by `name` in `result.verification.valor_tools`, logged unconditionally, in the same style as the `projects_json_check` detail block" rather than "modeled on `run.py:1907-1909`". |
+| NIT | History & Consistency (Archaeologist) | Step 2 of the derivation resolves the target callable against `anthropic.AsyncAnthropic(api_key="x")`, but `pydantic_ai.models.anthropic` types `self.client` as `AsyncAnthropicClient` — a union that also admits `AsyncAnthropicBedrock`, `AsyncAnthropicBedrockMantle`, and `AsyncAnthropicVertex` (imported at that module's lines 106-109, grouped at `_NON_AUTOMATIC_CACHING_CLIENTS` and the tuple below it). The choice is correct for this repo, because `wrapper.py` constructs `AsyncAnthropic` directly, but the plan states the resolution rule as if the class were implied by the call site, which it is not — the call site names only the attribute *path*, not the client class. A future reader debugging a Bedrock-shaped false positive has nothing on the record. | **Fixed (round 7)** — adopted as prescribed. The derivation's client-resolution step now carries the clause: the call site names only the attribute *path*, `pydantic_ai` types `self.client` as the `AsyncAnthropicClient` union (Bedrock / BedrockMantle / Vertex included), and `AsyncAnthropic` is the right target **because it is the class `agent/llm/wrapper.py` constructs** — this repo uses none of the others. Task 3 requires the same clause in `compat.py`'s docstring beside the "read the target from the call site" note. | One clause in the Solution bullet: resolve the path against `anthropic.AsyncAnthropic` **because that is the class `agent/llm/wrapper.py` constructs**; `pydantic_ai` types `self.client` as the `AsyncAnthropicClient` union (Bedrock / BedrockMantle / Vertex included) and this repo uses none of the others. Mirror the clause in `agent/llm/compat.py`'s docstring beside the existing "read the target from the call site" note. |
 
 Structural checks all pass. Required sections present and substantive (Documentation carries `docs/features/llm-stack-compat-gate.md` as a checkbox path; Update System addresses `scripts/update/` and records that no Popoto migration applies; Agent Integration addresses the runtime surface and the absence of an MCP entry; Test Impact lists UPDATE/ADD dispositions). Task numbering 1-9 is contiguous, every `Depends On` resolves to a declared Task ID, the graph is acyclic, and every task carries a `Validates`. Every cited file path exists except the six intentionally-new ones (`agent/llm/compat.py`, `docs/features/llm-stack-compat-gate.md`, and the four new test files). All four Prerequisite check commands were executed and pass. The round-6 blocker fix was independently re-derived by execution on the live venv: the AST walk over `inspect.getsource(pydantic_ai.models.anthropic)` returns exactly one `self.client.beta.messages.create` site carrying the 24 literal kwargs the plan enumerates, and resolving `beta.messages` off `anthropic.AsyncAnthropic(api_key="x")` yields `missing == []` on `anthropic 0.125.0` + `pydantic-ai-slim 2.9.0`, so the corrected predicate does return `compatible=True` on the pinned pair. The round-5 verify-leg prescriptions re-verified: `ToolCheck` carries `error` and `detail` (`verify.py:35-44`), `run.py:2647` and `run.py:2674` are both literally `if not tool.available and tool.error:`, the non-gated branch at `run.py:2683-2684` logs and calls `_append_warning`, and `bridge/update.py::extract_update_warnings` parses those bullets. `do_verify=True` in `UpdateConfig.full`, `.cron`, and `.verify_only`, so "unconditional on every `/update`" holds. `agent/llm/wrapper.py:44-50` still imports the full third-party stack at module scope, `agent/anthropic_client.py:44` still imports `anthropic` at module scope, `wrapper.py:167` is still the single `EnvCall` `scripts/scan_module_scope_env.find_module_scope_env_calls` reports for that file, and the `LOCAL_TYPED_HARD_TIMEOUT` re-export is at `agent/llm/__init__.py:14` and `:26` exactly as claimed, with two further in-module readers at `wrapper.py:192` and `:209` and the doc paragraph at `docs/features/nonharness-llm-wrapper.md:56`. `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]` at `deps.py:329`; `get_pinned_version`/`verify_critical_versions`/`bump_pin_in_pyproject`/`run_smoke_test`/`auto_bump_deps` at `:250`/`:277`/`:391`/`:414`/`:463`. `_sentry_before_send` at `telegram_bridge.py:55` wired at `:80`; `main()` at `:1203`; `bridge.routing` imported at module scope well above it. `ui/app.py:376` reads `Path(__file__).parent.parent / "data" / "last_connected"` and `dashboard_json` is at `:907`. The `! grep -q "import check" .claude/skills/update/SKILL.md` anti-row targets exactly one line, `SKILL.md:70`, inside the `### Auto-Bump Critical Dependencies` block the plan corrects. The Freshness baseline `63e6c2299` is six commits behind `origin/main` (`3714bd96f`) and all six touch only `docs/plans/*.md` (`git log --name-only`), so every premise carries forward unchanged and the baseline is not restated as a finding.
 
