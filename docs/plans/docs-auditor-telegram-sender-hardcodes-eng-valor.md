@@ -733,7 +733,7 @@ shells out to is already registered and unchanged.
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/docs-auditor.md:45` — it currently states the auditor
+- [ ] Update `docs/features/docs-auditor.md` at `:45` — it currently states the auditor
       "notifies the `Eng: Valor` Telegram chat that review is required". Replace with the
       derived-destination rule: the notification goes to the `Eng:` group of the project
       whose `working_directory` matches the audited repo root, addressed by numeric
@@ -741,7 +741,7 @@ shells out to is already registered and unchanged.
       this checkout and no match is found; and it is otherwise suppressed with a logged
       warning **and** a suppression notice in the run's `summary` (carried before the PR
       URL so truncation cannot drop it).
-- [ ] Amend `docs/features/docs-auditor.md:344-347` — the withheld-set paragraph currently
+- [ ] Amend `docs/features/docs-auditor.md` at `:344-347` — the withheld-set paragraph currently
       says the withheld set is threaded into `findings`, `summary`, "and Telegram message —
       which states plainly that review is required". That asserts *unconditional* Telegram
       delivery, which this change falsifies, and the `:45` rewrite does not reach it.
