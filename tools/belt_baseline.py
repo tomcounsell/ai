@@ -34,7 +34,8 @@ Without it the report prints window totals and says how to normalize.
 Exit codes (stable):
     0 — report produced from at least one measured event
     1 — the telemetry directory could not be read
-    2 — usage error (argparse)
+    2 — usage error: a bad flag value, whether argparse rejected it or
+        ``--since`` / ``--merged-pr-count`` failed their own validation
     3 — no measurements in the window (explicit empty state; NOT a zero baseline)
 """
 
@@ -51,6 +52,10 @@ from agent.session_telemetry import _get_telemetry_dir
 
 EXIT_OK = 0
 EXIT_UNREADABLE = 1
+#: Caller's mistake (a malformed flag value), distinct from an unreadable
+#: stream — argparse returns this for the errors it catches itself, and the
+#: hand-validated flag values below must agree with it.
+EXIT_USAGE = 2
 EXIT_NO_DATA = 3
 
 #: Per-tool rows shown before ``--full`` is needed.
@@ -355,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps({"error": "bad_merged_pr_count", "value": args.merged_pr_count}),
             file=sys.stderr,
         )
-        return EXIT_UNREADABLE
+        return EXIT_USAGE
 
     cutoff = None
     if args.since:
@@ -365,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps({"error": "bad_since", "value": args.since, "expected": "30d|12h|90m"}),
                 file=sys.stderr,
             )
-            return EXIT_UNREADABLE
+            return EXIT_USAGE
         cutoff = datetime.now(UTC) - delta
 
     telemetry_dir = args.telemetry_dir or _get_telemetry_dir()

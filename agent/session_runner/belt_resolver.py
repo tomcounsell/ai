@@ -43,14 +43,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent.session_telemetry import record_telemetry_event
+from agent.session_telemetry import BELT_ENFORCE_SKEW_EVENT, record_telemetry_event
 
 logger = logging.getLogger(__name__)
 
 # Race 3 skew event type — the string tools/belt_skew_report.py filters on.
-# Pinned as a shared contract in the lane's PROGRESS.md; keep the two in sync
-# by importing this constant rather than re-typing the literal.
-BELT_SKEW_EVENT_TYPE = "belt_enforce_skew"
+# One definition, in agent/session_telemetry.py: this alias re-exports it under
+# the emitter-side name so a rename on either side cannot silently empty the
+# report.
+BELT_SKEW_EVENT_TYPE = BELT_ENFORCE_SKEW_EVENT
 
 # Escalation marker for missing-capability lines (plan #3081 Phase 1
 # escalation path). The role priming skills instruct the agent to state a

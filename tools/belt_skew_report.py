@@ -20,7 +20,8 @@ blank output.
 Exit codes (stable):
     0 — report produced, including the no-skew-found empty state
     1 — the telemetry directory could not be read
-    2 — usage error (argparse)
+    2 — usage error: a bad flag value, whether argparse rejected it or
+        ``--since`` failed its own validation
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ from agent.session_telemetry import BELT_ENFORCE_SKEW_EVENT, _get_telemetry_dir
 
 EXIT_OK = 0
 EXIT_UNREADABLE = 1
+#: Caller's mistake (a malformed flag value), distinct from an unreadable
+#: stream — argparse returns this for the errors it catches itself, and the
+#: hand-validated ``--since`` below must agree with it.
+EXIT_USAGE = 2
 
 #: Rows shown before ``--full`` is needed.
 _COMPACT_ROW_LIMIT = 20
@@ -229,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps({"error": "bad_since", "value": args.since, "expected": "30d|12h|90m"}),
                 file=sys.stderr,
             )
-            return EXIT_UNREADABLE
+            return EXIT_USAGE
         cutoff = datetime.now(UTC) - delta
 
     telemetry_dir = args.telemetry_dir or _get_telemetry_dir()

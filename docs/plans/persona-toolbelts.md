@@ -245,7 +245,7 @@ Nothing else deferred. MCP wholesale replacement, TOON adoption, and a third-par
 ## Success Criteria
 
 - [ ] Baseline report exists: tool-surface tokens per merged PR, tool-call turns per merged PR, PreToolUse denial counts — published before activation.
-- [ ] One manifest per persona in `config/toolbelts/`, version-pinned; resolver refuses unresolvable belts; flag off leaves the harness invocation byte-identical.
+- [x] One manifest per persona in `config/toolbelts/`, version-pinned; resolver refuses unresolvable belts; flag off leaves the harness invocation byte-identical.
 - [ ] Reproducibility test fails when the same persona+version resolves different surfaces in two environments.
 - [ ] Activation is a dedicated commit flipping `TOOLBELTS_ENFORCE`, nothing else in the diff.
 - [ ] Escalation line lands on the open-question channel, tagged, non-blocking.

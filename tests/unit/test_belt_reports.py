@@ -73,6 +73,17 @@ class TestBaselineEmptyStates:
         payload = json.loads(capsys.readouterr().err)
         assert payload["error"] == "telemetry_dir_missing"
 
+    def test_bad_since_is_a_usage_error_not_an_unreadable_stream(self, tmp_path, capsys):
+        """A typo'd --since is the caller's mistake, not an unreadable telemetry
+        directory. The two must not share an exit code or a script cannot tell
+        "fix your flag" from "the stream is gone"."""
+        telemetry = tmp_path / "session_telemetry"
+        telemetry.mkdir()
+        code = belt_baseline.main(["--telemetry-dir", str(telemetry), "--since", "yesterday"])
+        assert code == belt_baseline.EXIT_USAGE
+        assert belt_baseline.EXIT_USAGE != belt_baseline.EXIT_UNREADABLE
+        assert json.loads(capsys.readouterr().err)["error"] == "bad_since"
+
     def test_empty_stream_says_so_instead_of_reporting_zeros(self, tmp_path, capsys):
         """The plan's Empty/Invalid Input contract, stated as a test."""
         telemetry = tmp_path / "session_telemetry"
@@ -374,7 +385,7 @@ class TestSkewReportAggregation:
         telemetry = tmp_path / "session_telemetry"
         telemetry.mkdir()
         code = belt_skew_report.main(["--telemetry-dir", str(telemetry), "--since", "yesterday"])
-        assert code == belt_skew_report.EXIT_UNREADABLE
+        assert code == belt_skew_report.EXIT_USAGE
         assert json.loads(capsys.readouterr().err)["error"] == "bad_since"
 
     def test_json_output_is_parseable(self, tmp_path, capsys):
@@ -422,7 +433,7 @@ class TestBaselinePerPRNormalization:
         telemetry = tmp_path / "session_telemetry"
         telemetry.mkdir()
         code = belt_baseline.main(["--telemetry-dir", str(telemetry), "--merged-pr-count", "0"])
-        assert code == belt_baseline.EXIT_UNREADABLE
+        assert code == belt_baseline.EXIT_USAGE
         assert "bad_merged_pr_count" in capsys.readouterr().err
 
 

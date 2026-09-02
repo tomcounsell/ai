@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -209,6 +210,104 @@ class TestResolution:
             mcp_flag = next(f for f in first.flags if f.startswith("--mcp-config="))
             servers = json.loads(mcp_flag.split("=", 1)[1])["mcpServers"]
             assert set(servers) == {"memory", "byob"}
+
+
+# ---------------------------------------------------------------------------
+# Faithful-snapshot contract: the belts must reproduce what /update installs
+# ---------------------------------------------------------------------------
+
+
+def _committed_server(persona: str, name: str) -> dict:
+    """Return one server entry as the resolver compiles it for a shipped belt."""
+    flags = resolve_belt(persona).flags
+    mcp_flag = next(f for f in flags if f.startswith("--mcp-config="))
+    return json.loads(mcp_flag.split("=", 1)[1])["mcpServers"][name]
+
+
+def _sh_expand(persona: str, name: str) -> list[str]:
+    """Run the entry's ``sh -c`` script with ``exec`` swapped for ``echo``.
+
+    Returns the argv the entry would have exec'd, with ``$HOME`` and any
+    layout probing resolved exactly as it would be at server launch.
+    """
+    entry = _committed_server(persona, name)
+    assert entry["command"] == "/bin/sh"
+    script = entry["args"][1]
+    assert "exec " in script, "the entry must exec its server, not fork a child shell"
+    probe = subprocess.run(
+        ["/bin/sh", "-c", script.replace("exec ", "echo ", 1)],
+        capture_output=True,
+        text=True,
+        cwd="/",  # a neutral cwd: no session ever runs from the repo by luck
+        timeout=10,
+    )
+    assert probe.returncode == 0, probe.stderr
+    return probe.stdout.split()
+
+
+class TestManifestsMatchInstalledSurface:
+    """Lane A's premise is that a belt is a faithful snapshot of the ambient
+    surface, so flipping ``TOOLBELTS_ENFORCE`` later changes nothing. These
+    pin each MCP entry against what ``scripts/update/mcp_*.py`` actually
+    installs — a belt that only works from the repo's own working directory,
+    or on one of two BYOB layouts, breaks that premise silently.
+    """
+
+    @pytest.mark.parametrize("persona", ("pm", "dev", "teammate"))
+    def test_memory_pythonpath_is_absolute_not_cwd_relative(self, persona):
+        """``mcp_memory._expected_entry`` installs the ABSOLUTE repo root.
+
+        Most sessions run inside another project's checkout (projects.json
+        maps a dozen repos), where a cwd-relative PYTHONPATH holds no
+        ``mcp_servers`` package and the memory tools would vanish.
+        """
+        entry = _committed_server(persona, "memory")
+        declared = json.dumps(entry)
+        assert '"PYTHONPATH": "."' not in declared
+        assert 'PYTHONPATH="."' not in declared
+
+        argv = _sh_expand(persona, "memory")
+        # The launch line is `PYTHONPATH=<root> exec python3 -m <module>`, so
+        # swapping exec for echo prints the interpreter + module argv; the
+        # assignment prefix is applied to that command, not printed.
+        assert argv[:3] == ["python3", "-m", "mcp_servers.memory_server"]
+
+        script = _committed_server(persona, "memory")["args"][1]
+        root = subprocess.run(
+            ["/bin/sh", "-c", script.split(" exec ", 1)[0] + '; printf %s "$PYTHONPATH"'],
+            capture_output=True,
+            text=True,
+            cwd="/",
+            timeout=10,
+        ).stdout
+        assert Path(root).is_absolute()
+        assert (Path(root) / "mcp_servers" / "memory_server.py").is_file(), (
+            f"belt PYTHONPATH {root!r} holds no mcp_servers package"
+        )
+
+    @pytest.mark.parametrize("persona", ("pm", "dev", "teammate"))
+    def test_byob_entry_covers_both_installer_layouts(self, persona):
+        """``mcp_byob._resolve_tsx_bin`` prefers the workspace-root tsx and
+        falls back to the package-local one; ``_byob_binaries_present``
+        accepts either. A belt pinning one layout spawns nothing on a host
+        that has the other."""
+        from scripts.update import mcp_byob
+
+        script = _committed_server(persona, "byob")["args"][1]
+        home = str(Path.home())
+        root_rel = str(mcp_byob.BYOB_TSX_BIN).replace(home, "$HOME", 1)
+        pkg_rel = str(mcp_byob.BYOB_TSX_BIN_PKG).replace(home, "$HOME", 1)
+
+        assert root_rel in script, "workspace-root tsx layout is unreachable from this belt"
+        assert pkg_rel in script, "package-local tsx layout is unreachable from this belt"
+        assert script.index(root_rel) < script.index(pkg_rel), (
+            "the belt must try the layouts in the installer's preference order"
+        )
+
+        if not mcp_byob._byob_binaries_present():
+            pytest.skip("BYOB not installed on this machine")
+        argv = _sh_expand(persona, "byob")
+        assert argv == [str(mcp_byob._resolve_tsx_bin()), str(mcp_byob.BYOB_MCP_SERVER_TS)]
 
 
 # ---------------------------------------------------------------------------

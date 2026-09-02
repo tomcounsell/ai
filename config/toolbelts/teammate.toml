@@ -39,23 +39,29 @@ tools = "default"
 [mcp_servers.memory]
 # why: subconscious-memory recall — the mcp__memory__memory_get /
 # mcp__memory__memory_search tools that back <thought> stub expansion
-# (docs/features/subconscious-memory.md). Launched from the session's
-# working directory, so the relative PYTHONPATH resolves per-checkout and
-# this file stays byte-identical across hosts.
-command = "python3"
-args = ["-m", "mcp_servers.memory_server"]
-env = { PYTHONPATH = "." }
+# (docs/features/subconscious-memory.md). PYTHONPATH must point at the `ai`
+# checkout itself, not at the session's cwd: scripts/update/mcp_memory.py::
+# _expected_entry writes the ABSOLUTE repo root into ~/.claude.json, and most
+# sessions run inside some other project's repo (projects.json maps a dozen),
+# where a relative path holds no mcp_servers package. The shell expands $HOME
+# at server launch, so this reproduces the installed entry from any working
+# directory while staying byte-identical across hosts.
+command = "/bin/sh"
+args = ["-c", 'PYTHONPATH="$HOME/src/ai" exec python3 -m mcp_servers.memory_server']
 
 [mcp_servers.byob]
 # why: browse and read the web through the user's real Chrome via the BYOB
 # bridge — the Teammate's research surface in group conversations.
-# Installed at a fixed $HOME-relative path on every machine by
-# scripts/update/mcp_byob.py; the shell expands $HOME at server launch, so
-# the declaration is byte-identical across hosts.
+# scripts/update/mcp_byob.py::_resolve_tsx_bin registers whichever of two tsx
+# layouts a machine's `bun install` produced — workspace-root first,
+# package-local as fallback — so this line resolves the same two, in the same
+# order. The byob-mcp.ts entrypoint has one location on every layout. The
+# shell expands $HOME at server launch, so the declaration stays
+# byte-identical across hosts.
 command = "/bin/sh"
 args = [
     "-c",
-    'exec "$HOME/.byob/packages/mcp-server/node_modules/.bin/tsx" "$HOME/.byob/packages/mcp-server/bin/byob-mcp.ts"',
+    'TSX="$HOME/.byob/node_modules/.bin/tsx"; [ -e "$TSX" ] || TSX="$HOME/.byob/packages/mcp-server/node_modules/.bin/tsx"; exec "$TSX" "$HOME/.byob/packages/mcp-server/bin/byob-mcp.ts"',
 ]
 env = { BYOB_ALLOW_EVAL = "1" }
 

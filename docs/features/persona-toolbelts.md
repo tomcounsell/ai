@@ -41,9 +41,8 @@ claude_cli_validated = "2.1.236"
 tools = "default"
 
 [mcp_servers.memory]
-command = "python3"
-args = ["-m", "mcp_servers.memory_server"]
-env = { PYTHONPATH = "." }
+command = "/bin/sh"
+args = ["-c", 'PYTHONPATH="$HOME/src/ai" exec python3 -m mcp_servers.memory_server']
 
 [permissions]
 allowed = []
@@ -68,6 +67,26 @@ faithful snapshot of each persona's actual ambient surface, so activating
 enforcement changes nothing about what a session can reach. Narrowing is a
 later, deliberate edit ranked by the baseline numbers, with a
 `belt_version` bump.
+
+### Server paths are resolved at launch, not at resolution
+
+Both MCP entries launch through `/bin/sh -c` so the shell expands `$HOME` when
+the server starts. This keeps the manifests byte-identical across hosts while
+still reproducing what `/update` installs into `~/.claude.json`:
+
+- **memory** — `scripts/update/mcp_memory.py::_expected_entry` writes the
+  absolute repo root as `PYTHONPATH`. A session's working directory is usually
+  some other project's checkout (`projects.json` maps a dozen repos), which holds
+  no `mcp_servers` package, so a cwd-relative path would drop
+  `mcp__memory__*` for most sessions.
+- **byob** — `scripts/update/mcp_byob.py::_resolve_tsx_bin` accepts two layouts
+  that `bun install` may produce, preferring the workspace-root
+  `~/.byob/node_modules/.bin/tsx` and falling back to the package-local
+  `~/.byob/packages/mcp-server/node_modules/.bin/tsx`. The belt's launch script
+  probes the same two in the same order.
+
+`tests/unit/test_belt_resolver.py::TestManifestsMatchInstalledSurface` pins both
+against the installer modules.
 
 ### The `# why` convention
 
