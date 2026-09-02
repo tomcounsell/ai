@@ -37,8 +37,8 @@ from bridge.read_the_room import (
     TRIM_TOO_SHORT_THRESHOLD,
     _format_snapshot_for_prompt,
     _humanize_age,
-    _is_group_chat,
     _parse_verdict_block,
+    is_group_chat,
     read_the_room,
 )
 
@@ -149,8 +149,8 @@ def _patch_trigger_age(monkeypatch, age_seconds):
         ("not-an-int", False),
     ],
 )
-def test_is_group_chat(chat_id, expected):
-    assert _is_group_chat(chat_id) is expected
+def testis_group_chat(chat_id, expected):
+    assert is_group_chat(chat_id) is expected
 
 
 def test_dm_excluded_returns_send(monkeypatch):
