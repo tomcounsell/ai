@@ -15,7 +15,10 @@ best-effort failure summarizer, and triage-session dispatch added (issue #2192
 Scope 1) — see `docs/features/nightly-alert-triage.md` for those three
 additions; collection widened from `tests/unit/` to the default collection,
 run-integrity guard, collection-aware baseline, and worker-role install gate
-added (issue #2823).
+added (issue #2823); baseline classification stage and shadow decision gate
+added (issue #2334) — see "Baseline Classification (Shadow Mode)" below.
+Autonomous-fix action on the gate's verdict is **not shipped**; it is deferred
+to #3076.
 
 ## What It Does
 
@@ -75,6 +78,198 @@ Telegram alert without changing the script's exit code. The gate never
 crashes the run: a missing log file, a parse failure, or any other exception
 is swallowed and logged as non-fatal.
 
+## Baseline Classification (Shadow Mode)
+
+Every non-`off` run additionally asks, for each newly-confirmed failure, "did
+this test already fail at the prior run's HEAD SHA, or did HEAD just break
+it?" — and logs the answer alongside a verdict on whether the gate *would*
+have attempted an autonomous fix. **Nothing acts on that verdict.** Acting on
+it (a fixer, a watchdog, a hand-back to a human, a notify tier, a `--silent`
+flag) is entirely out of scope here and tracked as #3076.
+
+### `classify_against_baseline`
+
+`classify_against_baseline(node_ids, baseline_sha, *, repo_root=PROJECT_DIR,
+worktree_path=BASELINE_WORKTREE, wrapper=PYTEST_CLEAN_SH,
+report_path=PYTEST_BASELINE_JSON_TMP)` buckets each node ID by whether it was
+already failing at `baseline_sha`. It is synchronous and runs in-process — no
+subagent, no spawned session, no Task tool. It provisions the baseline
+worktree, re-runs exactly `node_ids` there through `scripts/pytest-clean.sh`
+(`-n0`, `--json-report`), and reads the resulting report.
+
+The four parameters after `node_ids` and `baseline_sha` are keyword-only and
+exist as the injection seam a non-stubbed fixture test drives without
+monkeypatching module globals:
+
+- `repo_root` — the checkout `git worktree add` runs from.
+- `worktree_path` — the provisioned baseline worktree pytest runs in.
+- `wrapper` — the `pytest-clean.sh` the run routes **through**, never around;
+  its `.venv`, interpreter-pin, and rootdir guards are load-bearing here.
+- `report_path` — the classifier's own JSON report target.
+
+Their production defaults keep `main()`'s call site a two-argument call.
+
+### The baseline ref: the prior run's HEAD SHA, not "last-green"
+
+`baseline_sha` is **the prior run's HEAD SHA** (`prev["head_commit"]`), never
+bare `main` and never called "last-green" or "last-known-good": that key is
+written on every non-fatal run (`main()` writes `head_commit` on every
+`save_last_run()` call, not only on a clean one), and nothing in the detector
+records greenness. The soundness argument is per-node, not global: a
+*newly-confirmed* failure was by definition absent from the prior run's
+confirmed-failing set, so at that SHA the node specifically was not failing —
+that says nothing about whether the rest of the suite was green at that SHA.
+
+### The seven classification preconditions
+
+`classify_precondition_reason` and `gate_reason` share one ordered list —
+this is the single canonical enumeration, evaluated in this order, and the
+`reason=` token in the shadow-verdict log is the name of whichever one fails
+first:
+
+1. `NIGHTLY_FIX_MODE` is not `off` (checked by the caller before
+   `log_shadow_verdict` runs at all — not itself a `reason=` token).
+2. `new_failures` is non-empty (also checked by the caller).
+3. `seed_run` — the run is a first-run/re-baseline seed, not an ordinary
+   delta.
+4. `integrity_warnings` — `validate_run_integrity` produced a warning (e.g.
+   the shallow-shrink case).
+5. `dry_run` — the run was invoked with `--dry-run`.
+6. `no_baseline_sha` — `prev["head_commit"]` is missing or empty.
+7. `over_max_failures` — `len(new_failures) > NIGHTLY_FIX_MAX_FAILURES`.
+
+`classify_precondition_reason` covers preconditions 3-7 (the first two are
+the call site's business, since they gate whether classification runs at
+all). `gate_reason` runs the same five checks first, then adds three more
+post-classification clauses (`pre_existing`, `inconclusive`,
+`not_all_newly_broken`) before returning `"none"`.
+
+### The classifier's own JSON report path
+
+The classifier writes to `PYTEST_BASELINE_JSON_TMP`
+(`/tmp/nightly_pytest_baseline_report.json`), never
+`PYTEST_SERIAL_JSON_TMP` or `PYTEST_JSON_TMP`. `main()` re-reads
+`PYTEST_SERIAL_JSON_TMP` **after** the classifier runs, to build the human's
+alert text via `summarize_failures()`. If the classifier overwrote that path
+with the baseline commit's results, the alert would be built from a report in
+which every newly-broken node appears to have passed — summarizing the wrong
+run.
+
+### The provisioned baseline worktree needs its own `.venv`
+
+`provision_baseline_worktree` points the persistent worktree at
+`.worktrees/nightly-baseline/` (`BASELINE_WORKTREE`) at `baseline_sha`,
+creating it with `git worktree add --detach` plus a full `uv sync` when
+absent, or re-pointing it with `git checkout --detach` and re-running
+`uv sync` only when `uv.lock` changed since the last provision (tracked by a
+`.nightly-baseline-provisioned` marker file holding the lockfile's SHA-256
+digest). This keeps the amortized nightly cost near zero.
+
+The `.venv` is mandatory, not an optimization: `scripts/pytest-clean.sh`
+refuses to run in a linked worktree with no `.venv` (#3033) and refuses an
+off-pin interpreter (#2617); the committed `.python-version` is what makes a
+bare `uv sync` land on the pinned interpreter. Provisioning failure — of any
+kind, at any step — buckets every node `inconclusive` and **never** falls
+back to running against `PROJECT_DIR`: a fallback would classify against
+HEAD's own source, marking every node `pre_existing`, which looks exactly
+like a working classifier while being silently wrong. See
+`docs/features/scheduled-disk-reclaim.md` for why this worktree is never
+swept away.
+
+### The three buckets, and the fail-toward-escalate rule
+
+`classify_against_baseline` returns `{"newly_broken": [...], "pre_existing":
+[...], "inconclusive": [...]}`:
+
+- **`newly_broken`** — passed at `baseline_sha`, fails at HEAD.
+- **`pre_existing`** — failed at `baseline_sha` too.
+- **`inconclusive`** — every failure path: a missing SHA, worktree
+  provisioning failure, collection error, timeout, an unparseable or missing
+  report, a node absent from the report, or any raised exception. Never
+  guessed, never assumed-passed.
+
+The gate (`gate_reason` / `decide_fix_or_escalate`) fails toward
+`"escalate"`: any `pre_existing` node, any `inconclusive` node, or a
+`newly_broken` set that does not exactly match `new_failures` all route to
+`"escalate"`. Only a run where every single newly-confirmed node classifies
+cleanly `newly_broken` reaches `"none"`.
+
+### What the classifier discriminates that `compute_new_failures` does not
+
+`compute_new_failures` (the existing alert-delta function) proves a node was
+**absent from the prior run's confirmed-failing set** — a Telegram-level
+"first time we've seen this fail" signal. `classify_against_baseline` proves
+something narrower and stronger: that the node **actually passed** at the
+prior run's HEAD SHA, by running it there. They differ exactly when the node
+was not collected at the prior SHA, was a filtered artifact of that run, or
+the prior run itself was untrusted (an integrity-guard warning) — cases where
+`compute_new_failures` would still call the node "new" but the classifier
+correctly reports `inconclusive` rather than asserting it passed.
+
+### The pure decision gate
+
+`decide_fix_or_escalate(classification, new_failures, caps, run_flags)`
+returns `"autonomous-fix"` iff `gate_reason(...) == "none"`, else
+`"escalate"`. It is pure — no I/O, no subprocess, no state — so it is tested
+directly against constructed `classification`/`new_failures`/`caps`/
+`run_flags` values. In this tier, `"autonomous-fix"` means only "the gate
+would have attempted a fix"; it triggers nothing further (#3076).
+
+### `off` / `shadow` modes
+
+`NIGHTLY_FIX_MODE` (env-overridable, default `"shadow"`) resolves through
+`resolve_fix_mode` to exactly `"off"` or `"shadow"`; any other value is
+treated as `"off"` (fail toward the detector's pre-feature behavior) and
+warned about once per process.
+
+- **`off`** — classification, the gate, and the verdict log are skipped
+  entirely. The detector behaves exactly as it did before this feature.
+- **`shadow`** — classifies, gates, and **logs** the verdict that would have
+  been acted on, while paging a human exactly as today. Nothing is fixed,
+  and alerting behavior is unchanged in both modes — see
+  `docs/features/nightly-alert-triage.md`.
+
+### The `nightly-fix shadow-verdict:` log contract
+
+`log_shadow_verdict(new_failures, caps, run_flags)` emits, on **every**
+non-`off` call with a non-empty `new_failures`:
+
+```
+nightly-fix shadow-verdict: {verdict} reason={reason} nodes={len(new_failures)}
+```
+
+`verdict` is `autonomous-fix` or `escalate`; `reason` is the `reason=` token
+from `gate_reason` (see the seven-precondition list above — `none` when the
+gate would have fired). This line is emitted even on a night a precondition
+skipped classification outright, in which case `reason=` names that
+precondition and no pytest ran in the baseline worktree.
+
+The sibling line, `nightly-fix shadow-buckets:`, is emitted only when
+classification actually ran (i.e. no precondition skipped it):
+
+```
+nightly-fix shadow-buckets: newly_broken={n} pre_existing={n} inconclusive={n} not_newly_broken={comma-joined node IDs}
+```
+
+`not_newly_broken` is the union of `pre_existing` and `inconclusive` node
+IDs. The verdict line alone answers "would the gate have fired?"; the buckets
+line is what lets a human later judge "would it have been *right*?" from the
+log history.
+
+### Bounds
+
+`PYTEST_BASELINE_TIMEOUT_SECONDS` (1800s / 30 minutes, a plain module
+constant, not an env knob — matching `PYTEST_RECONFIRM_TIMEOUT_SECONDS`'s
+convention) bounds the classifier's pytest subprocess, since it only re-runs
+the (already capped) newly-confirmed set serially in the baseline worktree.
+
+Two further constants guard baseline **provisioning** specifically, so a
+`git worktree add` or `uv sync` can never hang the nightly run:
+`BASELINE_GIT_TIMEOUT_SECONDS` (300s) bounds each git subprocess, and
+`BASELINE_UV_SYNC_TIMEOUT_SECONDS` (900s) bounds `uv sync`. A
+`TimeoutExpired` on either is reported as failure exactly like a non-zero
+exit, bucketing every node `inconclusive`.
+
 ## Files
 
 | File | Purpose |
@@ -87,6 +282,9 @@ is swallowed and logged as non-fatal.
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
+| `.worktrees/nightly-baseline/` | Persistent, provisioned baseline worktree the classifier re-points at the prior run's HEAD SHA and runs pytest in; carries its own `.venv` (gitignored, protected from `tools/disk_reclaim.py` — see `docs/features/scheduled-disk-reclaim.md`) |
+| `.worktrees/nightly-baseline/.nightly-baseline-provisioned` | Marker recording the `uv.lock` SHA-256 digest the worktree's `.venv` was last synced against, so re-provisioning only re-runs `uv sync` when the lockfile actually moved (gitignored) |
+| `/tmp/nightly_pytest_baseline_report.json` | The classifier's own `--json-report` output (`PYTEST_BASELINE_JSON_TMP`); never shares a path with `PYTEST_JSON_TMP` or `PYTEST_SERIAL_JSON_TMP` |
 
 ## Design Decisions
 
@@ -302,4 +500,8 @@ rm ~/Library/LaunchAgents/com.valor.nightly-tests.plist
 ## See Also
 
 - `docs/features/nightly-alert-triage.md` — the run lock, best-effort LLM summarizer,
-  and triage-session dispatch layered around this base detector (issue #2192 Scope 1)
+  and triage-session dispatch layered around this base detector (issue #2192 Scope 1);
+  also states that alerting is unchanged by the classification stage and that
+  autonomous-fix action is deferred to #3076
+- `docs/features/scheduled-disk-reclaim.md` — why `.worktrees/nightly-baseline/` is
+  protected from the disk-reclaim sweeper

@@ -87,6 +87,7 @@ A worktree lane is removed only when all of these hold:
 
 | Guard | Skip reason when it trips |
 |---|---|
+| Slug not in `PROTECTED_WORKTREE_SLUGS` | `protected` |
 | Newest mtime older than the age floor | `too_young` |
 | `git status --porcelain` is empty | `uncommitted_changes` |
 | ...and git could answer at all | `git_status_unavailable` |
@@ -100,6 +101,26 @@ A worktree lane is removed only when all of these hold:
 Removal then delegates to `cleanup_after_merge`, which re-checks the busy guard,
 preserves uncommitted changes, refuses to delete an unmerged branch, and
 enforces path containment. `force=True` is never passed.
+
+### `PROTECTED_WORKTREE_SLUGS`
+
+`PROTECTED_WORKTREE_SLUGS = frozenset({"nightly-baseline"})` is checked
+**first**, ahead of every other guard, inside `sweep_worktrees`'s loop over
+`.worktrees/` children — a protected slug is skipped with reason `protected`
+no matter how old, clean, or idle it looks.
+
+`.worktrees/nightly-baseline/` is the persistent, provisioned baseline
+checkout the nightly regression classifier re-points at the prior run's HEAD
+SHA every night (`docs/features/nightly-regression-tests.md`). It is
+genuinely in `sweep_worktrees`'s scope — the loop iterates every child of
+`.worktrees/` with no named-lane exclusion otherwise — and reaping it would
+force a full `uv sync` re-provision (`BASELINE_UV_SYNC_TIMEOUT_SECONDS`,
+900s) on the nightly critical path the next time it runs. Before this
+constant existed, the lane survived only by guard-order accident: `too_young`
+while the nightly kept touching it, then `merged_via_tree` returning `False`
+for a `session/nightly-baseline` branch that never existed, landing on
+`unmerged`. That accident inverts the moment a branchless lane is ever
+treated as reapable, so the guard is now explicit rather than incidental.
 
 ### The busy-check posture, and why there are two functions
 
@@ -150,3 +171,5 @@ transcripts — the preserved `memory/` stores are text files measured in KB.
 - `docs/features/worktree-venv-isolation.md` — how lanes get their env, and the measurement
 - `docs/features/adding-reflection-tasks.md` — the reflection contract
 - `agent/worktree_manager.py` — `cleanup_after_merge`, `worktree_busy_probe`
+- `docs/features/nightly-regression-tests.md` — the nightly baseline classifier that
+  owns `.worktrees/nightly-baseline/`, the one lane `PROTECTED_WORKTREE_SLUGS` excludes
