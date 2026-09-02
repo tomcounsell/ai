@@ -206,8 +206,11 @@ at the bottom:
 2. **`settings.models.session_default_model`** (machine-local override) —
    pydantic-settings field, env var `MODELS__SESSION_DEFAULT_MODEL`, sourced
    from `~/Desktop/Valor/.env` (iCloud-synced).
-3. **Codebase default `"opus"`** — hard-coded as the pydantic `Field`
-   default in `config/settings.py::ModelSettings`.
+3. **Codebase default `"fable"`** — hard-coded as the pydantic `Field`
+   default in `config/settings.py::ModelSettings`. Every worker-run session
+   (PM, Teammate, and the Dev subagent a PM spawns, which inherits its
+   parent's model) therefore runs on Fable 5.1 unless a session or machine
+   says otherwise.
 
 Implemented in `agent.session_executor._resolve_session_model()`:
 
@@ -250,8 +253,13 @@ Operators can flip the default on a per-machine basis:
 MODELS__SESSION_DEFAULT_MODEL=sonnet
 ```
 
-Short aliases (`opus`/`sonnet`/`haiku`) are preferred; full version names
-(`claude-opus-4-7`) also accepted and passed verbatim to the CLI.
+Short aliases (`fable`/`opus`/`sonnet`/`haiku`) are preferred; full version
+names are passed verbatim to the CLI. Under subscription-only CLI auth the
+alias resolves to the latest model in its family while a pinned full id such
+as `claude-fable-5-1` is rejected with an `api_error`, so pin a full id only
+on a machine whose auth accepts it. `config/models.py::_MODEL_ALIASES` maps
+each alias to a registry entry so the per-turn context-usage warning knows
+the model's window (1M tokens for Fable).
 
 ### PM Final-Delivery Drafter (2-Pass, Always-Opus)
 

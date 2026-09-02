@@ -57,7 +57,7 @@ def _stub_subprocess(mock_exec, result_text: str = "ok", session_id: str = "sess
 
 
 class TestResolveSessionModelCascade:
-    """D1 precedence: session.model > settings > codebase default 'opus'."""
+    """D1 precedence: session.model > settings > codebase default 'fable'."""
 
     def test_explicit_session_model_wins(self):
         from agent.session_executor import _resolve_session_model
@@ -93,16 +93,22 @@ class TestResolveSessionModelCascade:
         ):
             assert _resolve_session_model(session) == "sonnet"
 
-    def test_settings_default_is_opus(self):
-        """Codebase default (settings default) is 'opus' when operator doesn't override."""
+    def test_settings_default_is_fable(self):
+        """Codebase default (settings default) is 'fable' when operator doesn't override."""
         from agent.session_executor import _resolve_session_model
-        from config.settings import settings
+        from config.settings import ModelSettings
 
         session = MagicMock()
         session.model = None
-        # Use live settings (pydantic default is 'opus').
-        assert settings.models.session_default_model == "opus"
-        assert _resolve_session_model(session) == "opus"
+        # Read the pydantic Field default directly so a machine-local
+        # MODELS__SESSION_DEFAULT_MODEL override in the ambient env cannot
+        # flip this assertion.
+        assert ModelSettings.model_fields["session_default_model"].default == "fable"
+        with patch(
+            "agent.session_executor.settings",
+            MagicMock(models=MagicMock(session_default_model="fable")),
+        ):
+            assert _resolve_session_model(session) == "fable"
 
     def test_empty_settings_default_returns_none(self):
         """Operator misconfiguration (empty string) → cascade returns None gracefully."""

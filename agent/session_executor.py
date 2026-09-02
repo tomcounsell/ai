@@ -130,10 +130,10 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
          ``valor-session create --model <name>``)
       2. ``settings.models.session_default_model`` (machine-local override,
          env var ``MODELS__SESSION_DEFAULT_MODEL``)
-      3. codebase default ``"opus"`` (set on the pydantic Field default in
+      3. codebase default ``"fable"`` (set on the pydantic Field default in
          ``config/settings.py``)
 
-    Returns the resolved model alias (e.g. ``"opus"``, ``"sonnet"``), or
+    Returns the resolved model alias (e.g. ``"fable"``, ``"opus"``), or
     ``None`` if the cascade resolves to an empty string (operator-
     misconfigured settings default to ``""``). ``None`` is treated by
     ``get_response_via_harness()`` as "omit ``--model``, use CLI default."

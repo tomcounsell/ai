@@ -38,6 +38,13 @@ SONNET_4 = "claude-sonnet-4-20250514"
 # Strengths: Highest quality output, best at handling ambiguity
 OPUS = "claude-opus-4-5-20251101"
 
+# Fable 5.1 - Mythos-class tier above Opus; the default model for every
+# worker-run session (PM, Teammate, and the Dev subagent they spawn).
+# Sessions reach it through the CLI alias "fable" (see _MODEL_ALIASES): the
+# pinned id is rejected under subscription-only auth, so this constant is for
+# registry lookups (context window, metadata), not for passing to the harness.
+FABLE = "claude-fable-5-1"
+
 
 # =============================================================================
 # OPENROUTER API ENDPOINTS
@@ -381,6 +388,22 @@ MODEL_INFO = {
             "Difficult edge cases",
         ],
     },
+    FABLE: {
+        "name": "Claude Fable 5.1",
+        "tier": "best",
+        "vision": True,
+        "context_window": 1_000_000,
+        "strengths": [
+            "Most capable generally available Claude model",
+            "1M-token context window",
+            "Strongest long-horizon agentic reasoning",
+        ],
+        "use_cases": [
+            "Interactive PM and Teammate sessions",
+            "Long multi-turn engineering sessions",
+            "Ambiguous, judgment-heavy work",
+        ],
+    },
     OPENROUTER_KIMI_K2_5: {
         "name": "Kimi K2.5 (via OpenRouter)",
         "tier": "experiment",
@@ -412,13 +435,14 @@ _MODEL_ALIASES: dict[str, str] = {
     "haiku": HAIKU,
     "sonnet": SONNET,
     "opus": OPUS,
+    "fable": FABLE,
 }
 
 
 def get_model_context_window(model_name: str | None) -> int | None:
     """Return the context window (in tokens) for a registered model.
 
-    Accepts either a short alias (``"opus"``/``"sonnet"``/``"haiku"``) or a
+    Accepts either a short alias (``"fable"``/``"opus"``/``"sonnet"``/``"haiku"``) or a
     full Anthropic model id (e.g. ``"claude-opus-4-5-20251101"``). Returns
     ``None`` when the model is not registered in ``MODEL_INFO`` — callers
     (e.g. ``agent/sdk_client.py::_log_context_usage_if_risky``) treat ``None``

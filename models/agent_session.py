@@ -395,15 +395,15 @@ class AgentSession(Model):
     parent_agent_session_id = KeyField(null=True)
 
     # === Per-session model selection ===
-    # Claude model name for this session (short aliases preferred: "opus",
-    # "sonnet", "haiku"; full names like "claude-opus-4-7" also accepted).
+    # Claude model name for this session (short aliases preferred: "fable",
+    # "opus", "sonnet", "haiku"; full names like "claude-opus-4-7" also accepted).
     #
     # Flows to the CLI harness subprocess as `--model <value>` via
     # `agent.session_executor._resolve_session_model()` and
     # `agent.sdk_client.get_response_via_harness(model=...)`. When None/empty,
     # the D1 precedence cascade falls through to
     # `settings.models.session_default_model` and finally the codebase
-    # default "opus". See `docs/features/agent-session-model.md` for details.
+    # default "fable". See `docs/features/agent-session-model.md` for details.
     model = Field(null=True)
 
     # === BUILD session retention for hard-PATCH resume ===
