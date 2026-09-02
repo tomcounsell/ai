@@ -131,7 +131,12 @@ first:
    `log_shadow_verdict` runs at all — not itself a `reason=` token).
 2. `new_failures` is non-empty (also checked by the caller).
 3. `seed_run` — the run is a first-run/re-baseline seed, not an ordinary
-   delta.
+   delta. Unreachable from today's only production call site (the shadow
+   block lives in the `elif new_failures:` arm of `if is_seed_run:`, so
+   `is_seed_run` is provably false there); retained as cheap
+   defense-in-depth so a future caller outside that `elif` cannot regress
+   into gating a re-baseline night, and so this list and `gate_reason` keep
+   sharing one clause implementation.
 4. `integrity_warnings` — `validate_run_integrity` produced a warning (e.g.
    the shallow-shrink case).
 5. `dry_run` — the run was invoked with `--dry-run`.
@@ -220,13 +225,24 @@ would have attempted a fix"; it triggers nothing further (#3076).
 `NIGHTLY_FIX_MODE` (env-overridable, default `"shadow"`) resolves through
 `resolve_fix_mode` to exactly `"off"` or `"shadow"`; any other value is
 treated as `"off"` (fail toward the detector's pre-feature behavior) and
-warned about once per process.
+warned about once per process. Both `NIGHTLY_FIX_*` knobs are read from
+`os.environ` **at call time**, never at module import: the vault `.env` only
+reaches the environment via `load_env_or_die()` inside `main()`, and the
+launchd job supplies just `PATH` and `HOME`, so an import-time read would
+freeze the in-code defaults and make the off switch inert on the only
+surface that matters. A malformed `NIGHTLY_FIX_MAX_FAILURES` degrades to the
+in-code default with a warning.
 
 - **`off`** — classification, the gate, and the verdict log are skipped
   entirely. The detector behaves exactly as it did before this feature.
 - **`shadow`** — classifies, gates, and **logs** the verdict that would have
-  been acted on, while paging a human exactly as today. Nothing is fixed,
-  and alerting behavior is unchanged in both modes — see
+  been acted on, then pages a human with **byte-identical alert text** to
+  `off` mode. Nothing is fixed. Because classification runs before the page
+  (so the eventual active tier, #3076, can substitute a fix attempt for the
+  alert), on a failing night the page is **delayed by up to the
+  classification bound** — the provision timeouts plus the baseline pytest
+  timeout. The tier is non-fatal by construction: any exception inside it is
+  logged and swallowed, and the page still fires — see
   `docs/features/nightly-alert-triage.md`.
 
 ### The `nightly-fix shadow-verdict:` log contract
@@ -283,7 +299,7 @@ exit, bucketing every node `inconclusive`.
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
 | `.worktrees/nightly-baseline/` | Persistent, provisioned baseline worktree the classifier re-points at the prior run's HEAD SHA and runs pytest in; carries its own `.venv` (gitignored, protected from `tools/disk_reclaim.py` — see `docs/features/scheduled-disk-reclaim.md`) |
-| `.worktrees/nightly-baseline/.nightly-baseline-provisioned` | Marker recording the `uv.lock` SHA-256 digest the worktree's `.venv` was last synced against, so re-provisioning only re-runs `uv sync` when the lockfile actually moved (gitignored) |
+| `.worktrees/nightly-baseline/.nightly-baseline-provisioned` | Marker recording the `uv.lock` SHA-256 digest the worktree's `.venv` was last synced against, so re-provisioning only re-runs `uv sync` when the lockfile actually moved. Ignored via a root `.gitignore` entry (effective inside the lane once the baseline SHA carries it); either way the lane's `protected` guard in `sweep_worktrees` pre-empts any dirty-tree signal the untracked file could raise |
 | `/tmp/nightly_pytest_baseline_report.json` | The classifier's own `--json-report` output (`PYTEST_BASELINE_JSON_TMP`); never shares a path with `PYTEST_JSON_TMP` or `PYTEST_SERIAL_JSON_TMP` |
 
 ## Design Decisions

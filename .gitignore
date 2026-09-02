@@ -470,6 +470,12 @@ data/doc_embeddings.json
 .worktrees/
 .claude/worktrees/
 
+# Nightly baseline-classifier provision marker (issue #2334). The `.worktrees/`
+# entry above only covers the primary checkout's view of that directory; inside
+# the linked baseline worktree this file sits at the worktree root, so it needs
+# its own entry to be ignored there.
+.nightly-baseline-provisioned
+
 # Ephemeral war-room critique run artifacts (do-plan-critique roster barrier, #1690)
 .critique-runs/
 

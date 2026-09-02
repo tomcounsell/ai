@@ -16,12 +16,17 @@ later PR and has not shipped yet.** This document covers Scope 1 only — the ni
 test detector side. Do not treat Sentry-side auto-triage as implemented until that
 PR lands.
 
-**Alerting behavior is unchanged by the baseline classification stage (issue
-#2334).** The up-front Telegram page for a newly-confirmed failure fires
-identically in both shipped `NIGHTLY_FIX_MODE` values (`off` and `shadow`) —
-see `docs/features/nightly-regression-tests.md#baseline-classification-shadow-mode`.
-`shadow` mode adds only a `nightly-fix shadow-verdict:` log line; it changes
-no Telegram message, no dispatch behavior, and no exit code. **No fixer,
+**The alert text is unchanged by the baseline classification stage (issue
+#2334).** The up-front Telegram page for a newly-confirmed failure fires with
+byte-identical text in both shipped `NIGHTLY_FIX_MODE` values (`off` and
+`shadow`) — see
+`docs/features/nightly-regression-tests.md#baseline-classification-shadow-mode`.
+`shadow` mode adds a `nightly-fix shadow-verdict:` log line and, because
+classification runs before the page, delays the page on a failing night by up
+to the classification bound (the provision timeouts plus the baseline pytest
+timeout); it changes no Telegram message, no dispatch behavior, and no exit
+code, and an exception inside the tier is logged non-fatally with the page
+still firing. **No fixer,
 watchdog, hand-back, notify tier, or `--silent` flag exists in this repo.**
 Autonomous action on the shadow verdict is deferred to #3076, which is
 blocked on two seams that do not exist yet: a per-session env seam for a
