@@ -3052,9 +3052,9 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Provisional row precedes the eligibility re-check (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -k provisional -q` | exit code 0 |
 | Reconciliation loop exists and is not inlined into the bridge | `grep -rn 'def poll_reconcile_loop' bridge/ --include='*.py' \| grep -vc telegram_bridge.py` | output == 1 |
 | Reconciliation heartbeat written | `grep -rn 'poll:reconcile:heartbeat' bridge/ --include='*.py' \| wc -l` | output > 0 |
-| Registry enumeration is index-backed, not a keyspace scan (anti-criterion) | `grep -rn "scan_iter\|SCAN MATCH" bridge/poll_registry.py $(grep -rl 'poll_reconcile_loop' bridge/ --include='*.py') \| wc -l` | output == 0 |
+| Registry enumeration is index-backed, not a keyspace scan (anti-criterion; an AST test, **not** a grep — see the note below) | `scripts/pytest-clean.sh tests/unit/test_poll_registry.py -k keyspace_scan -q` | exit code 0 |
 | Registry index sets exist | `grep -c 'POLL_OPEN_INDEX\|POLL_PENDING_INDEX' bridge/poll_registry.py` | output > 0 |
-| Heartbeat read outside the loop | `grep -rln 'poll:reconcile:heartbeat' --include='*.py' . \| wc -l` | output >= 2 |
+| Heartbeat read outside the loop | `grep -c 'poll_reconcile' ui/app.py` | output > 0 (the key literal lives once, behind the named `RECONCILE_HEARTBEAT_KEY`; the read site imports `heartbeat_age_s` rather than repeating the string, so grep for the *reader*, not the literal) |
 | No expectation authored on the poll path (anti-criterion) | `grep -rn 'expectation' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Poll path never calls `draft_message` (anti-criterion) | `grep -n 'draft_message' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Text fallback re-enqueue exists (not dead-letter-only) | `grep -c '_relay_attempts' bridge/telegram_relay.py` | output > 0 (and the poll terminal branch rpushes a `type: None` payload — assert by test, not grep) |
@@ -3063,7 +3063,7 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Prime line is a conditional, not a bare directive | `grep -lc 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
 | Nudge-pause branch exists | `grep -c 'pause_open_question' agent/output_router.py` | output > 0 |
 | Pause branch precedes the eng+sdlc nudge (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_output_router.py -q` | exit code 0 |
-| Router stays pure — no Redis read in the decision function (anti-criterion) | `grep -cE 'poll_registry\|redis\|POPOTO' agent/output_router.py` | match count == 0 |
+| Router stays pure — no Redis read in the decision function (purity is about imports and calls, not prose, so it is an AST test rather than a grep) | `scripts/pytest-clean.sh tests/unit/test_output_router.py -k router_performs_no_io -q` | exit code 0 |
 | Open-question read has the grepped home | `grep -c 'def session_has_open_poll' bridge/poll_registry.py` | output == 1 |
 | Executor fills the keyword off the registry | `grep -c 'session_has_open_poll' agent/session_executor.py` | output > 0 |
 | Needs-human matcher untouched (anti-criterion) | `git diff main -- agent/session_runner/hook_edge.py \| wc -l` | match count == 0 |
@@ -3074,6 +3074,26 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 clean `main` — `bridge/message_drafter.py` contains the log string
 `"requesting self-draft via steering: %s"` twice, which is unrelated prose. **Do not "fix" that by
 editing those log lines.** Verified: the narrowed grep returns `0` on the verification baseline with a clean tree.
+
+**Note on the three rows that are tests rather than greps (BUILD, 2026-09-02).** Three
+anti-criteria were written as text greps and each one flags a **correct** implementation, so they
+were converted to assertions rather than left to fail an honest build:
+
+1. *Registry enumeration.* `grep "scan_iter"` matches `sscan_iter` — which is the **approved**
+   index-backed mechanism — and `grep "SCAN MATCH"` matches this plan's own rationale quoted in the
+   module docstring. On a correct build the row returns `3`.
+2. *Router purity.* `grep -E 'poll_registry|redis'` over `agent/output_router.py` matches the
+   docstring that deliberately names `bridge.poll_registry.session_has_open_poll` as **the caller's**
+   job — the very contract the row is trying to enforce. Returns `1` on a correct build.
+3. *Heartbeat read site.* The key literal is defined once as the named constant
+   `RECONCILE_HEARTBEAT_KEY`, and `ui/app.py` imports `heartbeat_age_s` rather than repeating the
+   string — so a two-file literal grep returns `1`, penalising the better factoring.
+
+The general rule this makes explicit, and which the plan already applied to the provisional-row
+ordering row: **a property about imports, calls, or ordering is an AST or behavioral assertion, not
+a substring search.** A grep cannot tell an import from an explanation of why that import is absent,
+and every one of these anti-criteria is *about* code structure. Three separate test assertions hit
+exactly this during BUILD before being rewritten.
 
 **Note on the prime-conditional row (cycle 7).** It uses `grep -lc`, not `grep -rn`, on purpose.
 `.claude/commands/roles/prime-pm-role.md` already contains the phrase *"...when you have a
