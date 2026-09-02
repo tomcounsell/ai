@@ -7,7 +7,7 @@ created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/2334
 last_comment_id: 5086978978
 revision_applied: true
-revision_applied_at: 2026-07-27T04:48:02Z
+revision_applied_at: 2026-09-02T06:01:21Z
 ---
 
 # Nightly Regression: Attempt an Autonomous Fix Before Paging a Human
@@ -55,43 +55,100 @@ safe; a silent wrong fix is not.
 
 ## Freshness Check
 
-**Baseline commit:** `66a433bd9` (`git rev-parse HEAD` at plan time)
-**Issue filed at:** 2026-07-24T06:45:58Z
-**Disposition:** Minor drift
+<!-- Round 2 re-verification, 2026-09-02. The original 2026-07-27 check against
+     66a433bd9 is superseded: nine commits reshaped the detector between then and
+     now. Only the current baseline is recorded, per the no-historical-artifacts
+     rule. -->
 
-**File:line references re-verified (against current `scripts/nightly_regression_tests.py`):**
-- `main()` up-front page on the `elif new_failures:` branch (`send_telegram(...)`, ~L645-666) — **still holds**; this is the "human is first responder" defect.
-- `maybe_dispatch_triage_session()` (L437-509), prompt "Do NOT attempt an auto-hotfix" (L473-474), `dispatched_hash` sha256 dedup persisted in `data/nightly_tests_last_run.json` (L463-466, carried forward L628-629) — **still holds**.
-- `reconfirm_serial()` serial re-confirmation gate (L212-256), `confirmed_failing` authoritative set — **still holds**.
-- `baseline-verifier` subagent (`.claude/agents/baseline-verifier.md`) — confirmed it exists and returns `{regressions, pre_existing, inconclusive}` JSON. **Confirmed drift worth noting:** it hardcodes `main` as the baseline ref (Step 2: `BASELINE_COMMIT=$(git rev-parse main)`; `git worktree add "$BASELINE_DIR" main`). Reuse in the nightly context requires pointing that ref at the last-known-good commit instead — see Technical Approach.
+**Baseline commit:** `3b6eb651b` (`git rev-parse origin/main`, 2026-09-02)
+**Issue filed at:** 2026-07-24T06:45:58Z · **Plan first written:** 2026-07-27 (baseline `66a433bd9`)
+**Disposition:** Minor drift — **the premise is intact, the substrate moved substantially.**
 
-**Cited sibling issues/PRs re-checked:**
-- #2192 / PR #2195 — **merged 2026-07-24**; established the triage-dispatch flow this issue reframes. Prerequisite satisfied.
-- #2399 / PR #2402 — **merged 2026-07-26**; the worked example (11 test-stale failures). Read in full.
-- #2209 — **merged**; sentry-issue-triage migrated to Claude Cowork + reusable Cowork skill. Informs the in-process-vs-Cowork decision (open question 5).
-- #2327 — **merged**; `load_env_or_die()` replaced the TCC-blocked bash `source .env`. Already integrated in the current file.
+The defect this plan exists to fix is unchanged: `main()` still pages a human up front
+on the `elif new_failures:` branch (`send_telegram(msg, dry_run=args.dry_run)`, ~L1197-1207),
+and the dispatched session is still investigate-only (`"...auto-hotfix — this is an
+investigation-and-file-an-issue task only"`, L846 in `_build_triage_prompt`; the seed
+prompt repeats it at L1127). Nothing else has taken over the concern, and no merged PR
+fixes it. **Proceed.**
 
-**Commits on main since issue was filed (touching `scripts/nightly_regression_tests.py`):**
-- `fb1ad8c57` env-loading in the Python entrypoint (#2327) — integrated, read directly. Irrelevant to the reframe except that new dispatch code inherits the loaded env.
-- `1b0a2bced` merge gate simplification (#2378) — irrelevant.
-- `fcfbeed0b` triage dispatch (#2195) — this is the flow being reframed.
+What *did* move is the machinery the plan's dedup and dispatch design was written
+against. `scripts/nightly_regression_tests.py` grew from ~700 to **1366 lines** across
+nine commits (`3264ce7ff`, `e48199979`, `c8d06886f`, `f57a10b4a`, `3578882c7`,
+`af8cd6aac`, `5a37cef05`, `1831b6883`, `b8e08ece4`). Every line reference below is
+re-resolved against `3b6eb651b`.
 
-**Active plans in `docs/plans/` overlapping this area:** `nightly-serial-reconfirm.md` (the #2180 serial-gate base — a dependency this plan builds on, not a conflict). No conflicting active plan.
+**Re-verified — claims that still hold:**
 
-**Notes:** The prerequisite (#2192/#2195) is merged, so this plan builds on a live flow rather than a hypothetical one.
+| Claim | Current location | Status |
+|---|---|---|
+| Up-front unconditional page on newly-confirmed failures | `main()`, `elif new_failures:` → `send_telegram(...)` ~L1197-1207 | **Holds** — the defect |
+| Investigate-only mandate ("Do NOT attempt an auto-hotfix") | `_build_triage_prompt` L846; seed prompt L1127 | **Holds** |
+| `maybe_dispatch_triage_session()` is the dispatch seam | L856-988 (gained `prompt` / `slug_suffix` / `dry_run` kwargs) | **Holds**, signature widened |
+| `reconfirm_serial()` serial gate → `confirmed_failing` | L532 | **Holds** |
+| `send_telegram(msg, dry_run=False)` has **no** urgency parameter | L609 | **Holds** — the `silent=` addition is still required and still non-vacuous |
+| `baseline-verifier` hardcodes `main` as the baseline ref | `.claude/agents/baseline-verifier.md` L54 (`BASELINE_COMMIT=$(git rev-parse main)`), L56 (`git worktree add "$BASELINE_DIR" main --detach`) | **Holds** — `--detach` added; still two literal `main` tokens to parameterize |
+| `main` branch protection is **ABSENT** | `gh api repos/tomcounsell/ai/branches/main/protection` → `404 Not Found` | **Holds, re-verified 2026-09-02** — the sole structural never-merge leg still does not exist |
+| #2405 (Cowork parity / intra-day watchdog follow-up) open | `gh issue view 2405` → OPEN | **Holds** |
+
+**Re-verified — claims that DRIFTED and forced design changes (all propagated below):**
+
+1. **`dispatched_hash` no longer exists.** #2559 / PR #2581 (`3264ce7ff`) replaced
+   sha256-of-the-failing-set dedup with **per-node** dedup. The live mechanism is now
+   `dispatched_nodes` (a node-ID set in `data/nightly_tests_last_run.json`) plus three
+   pure helpers: `prior_dispatched(prev)` (L669), `compute_dispatch_set(prev, confirmed_failing)`
+   (L728), `carry_dispatched_nodes(prev, confirmed_failing, just_dispatched)` (L754).
+   **Consequence:** the plan's `fix_attempts: {failing_set_hash: count}` and
+   `dispatched_sessions: {failing_set_hash: agent_session_id}` maps were keyed on a hash
+   that no longer has a producer. Both are **re-keyed per node ID** — see Technical
+   Approach → Dedup. The round-4 concerns those maps resolved (orphaned session pointer,
+   canonical attempt-count naming) survive intact under the new key; only the key changed.
+
+2. **`compute_new_failures` and `compute_dispatch_set` are now different sets, deliberately.**
+   `compute_new_failures` (L654) drives the *alert*; `compute_dispatch_set` (L728) asks the
+   different question of *what has never been filed*. The decision gate must be explicit
+   about which set it consumes — it consumes `new_failures` (that is the population this
+   feature promises to fix before paging), while attempt-count dedup rides on the per-node
+   `dispatched_nodes` model. Stated in Technical Approach.
+
+3. **`head_commit` is ALREADY persisted.** `current["head_commit"] = _get_head_commit()`
+   at L1092 (`_get_head_commit()` L1344). Step 1's first bullet is **already done on main**;
+   it degrades to a verify-and-consume step. The plan no longer claims to add it.
+
+4. **`current["dispatched_session_id"]` (scalar) already exists in state** (L1090, carried
+   from `prev`). The plan's round-4 replacement of a scalar session pointer with a keyed map
+   is therefore now a *change to live code*, not a greenfield choice. Named in Interface changes.
+
+5. **Three new mechanisms the plan must not break, none of which existed at plan time:**
+   - **Seed / re-baseline runs** (`is_first_run`, `is_reseed` L1026, `is_seed_run` L1027,
+     `seeded_nodes()` L683, `seed_size`, `min_expected_collected`). A seed run declares a
+     known-failing population rather than discovering a regression. **The autonomous fixer
+     must never dispatch on a seed run** — added as a hard gate condition.
+   - **`MAX_DISPATCH_NODES = 10`** (L185) truncation of the dispatch set, with the remainder
+     retried next run. The fixer's caps must compose with this rather than duplicate it.
+   - **`validate_run_integrity()` → `integrity_warnings`** (L1047) and the `_fatal()`
+     never-write-state-on-an-untrusted-run invariant, plus the `DRY_RUN_SESSION_ID` truthy
+     sentinel so `--dry-run` exercises the success path without spawning a session.
+     **An integrity-warned run or a `--dry-run` must never dispatch a fixer** — added as
+     gate conditions.
+
+**Overlapping active plans:** `nightly-serial-reconfirm.md` (the #2180 serial gate — a
+dependency, not a conflict). The #2559/#2823 detector work that caused the drift above has
+already landed; no in-flight lane owns `scripts/nightly_regression_tests.py`.
 
 ## Prior Art
 
 - **#2192 / PR #2195** — added `maybe_dispatch_triage_session` (investigate-and-file-an-issue) + the run lock + LLM summarizer. **Deliberately deferred auto-hotfix as a No-Go** (unreviewed merge to main was the concern). This plan does NOT reverse that No-Go — it introduces a *narrower, review-gated* bounded fix (propose-a-PR, never merge), which preserves the original concern (a human still reviews before anything lands on main).
 - **#2399 / PR #2402** — the worked example. 11 test-stale failures across 3 groups. Two groups were mechanical carry-forward; **Group 2 hid a genuine design fork** (self-heal intended vs. a safety hole) that required a human reading #2144's intent to resolve. **Lesson baked into scoping:** "classifies as test-stale" is *necessary but not sufficient* for autonomy — a test-stale carry-forward that turns on a contract-direction judgment must still escalate.
 - **#410** — Autoexperiment (autonomous prompt-optimization loop). Prior art for a bounded autonomous loop with caps; informs the guardrail-constant design (max attempts, dedupe).
-- **#2405** — follow-up filed by this plan for the Cowork-parity migration (open question 5).
+- **#2405** — follow-up filed by this plan for the Cowork-parity migration (open question 5). Still OPEN as of 2026-09-02.
+- **#2559 / PR #2581** — replaced set-hash triage dedup with per-node dedup (`dispatched_nodes`, `compute_dispatch_set`, `carry_dispatched_nodes`) to end the #2429/#2430/#2462 duplicate-issue churn. **Landed after this plan was first written and retired the `dispatched_hash` this plan originally extended** — the dedup design is re-keyed per node to match (Technical Approach → Dedup). Its lesson also applies directly here: a second, parallel keying scheme in the same state file is how the churn started.
+- **#2823 (collection-aware baseline, `e48199979`…`b8e08ece4`)** — added seed/re-baseline runs, the umbrella-issue seed path, `MAX_DISPATCH_NODES` truncation, and `validate_run_integrity`. These are the four run shapes on which an autonomous fixer must refuse to act; folded into the decision gate as hard disqualifiers.
 
 ## Data Flow
 
 1. **Entry point**: launchd fires `python scripts/nightly_regression_tests.py`. `load_env_or_die()`, run lock, `run_tests()`, `reconfirm_serial()` → `confirmed_failing` set, `new_failures` = newly-confirmed vs `prev["failing_tests"]`. (Unchanged.)
 2. **Classification** *(new)*: for the `new_failures` set, run the adapted baseline-verifier comparing current HEAD against `prev["head_commit"]` (the last-known-good SHA — by definition these tests passed there, since they are *newly* confirmed). Produces `{regressions, pre_existing, inconclusive}` buckets keyed to the nightly context (see Technical Approach for the semantic mapping).
-3. **Decision gate** *(new)*: eligible-for-autonomy iff every `new_failure` lands in the "test-stale-candidate" bucket (passed at baseline, no `regressions`, no `inconclusive`) AND count ≤ `NIGHTLY_FIX_MAX_FAILURES`. Otherwise → escalate path.
+3. **Decision gate** *(new)*: eligible-for-autonomy iff every `new_failure` lands in the "test-stale-candidate" bucket (passed at baseline, no `regressions`, no `inconclusive`) AND count ≤ `NIGHTLY_FIX_MAX_FAILURES` AND per-node attempt counts are under cap. **Four hard disqualifiers added in the 2026-09-02 refresh, from mechanisms that landed after the plan was first written:** the run is a seed/re-baseline run (`is_seed_run`), the run carried `integrity_warnings`, the run is `--dry-run`, or the dispatch set was truncated by `MAX_DISPATCH_NODES`. Any of these → escalate path, never autonomy: a seed run is a *declaration* of known-failing state rather than a discovery, an integrity-warned run's `confirmed_failing` set is not trustworthy enough to edit tests against, `--dry-run` must never spawn a session, and a truncated run is by definition looking at an incomplete picture. Otherwise → escalate path.
 4. **Autonomous fix path** *(new)*: dispatch a **narrowly-scoped** fixer session — NOT an auto-continuing full-SDLC eng session (an eng session drives itself to `/do-merge`). Its mandate is exactly: make test-file-only edits on a branch, run the targeted tests, open a **DRAFT** PR (`gh pr create --draft`), write the structured hand-back, and STOP. The mandate never names "run the SDLC pipeline" and never names `/do-merge`, and explicitly forbids `gh pr ready`/`gh pr merge`/push-to-`main`. The `--draft` flag is a deterrent/detective signal, NOT a structural in-session block — under hardcoded `bypassPermissions` the session's bash could still self-merge; the load-bearing structural never-merge guarantee is **server-side branch protection on `main`**, external to the session (see Technical Approach → Enforcement design). Bounded: test-file-only edits, cite the source-contract-moving commit. No up-front page.
 5. **Structured hand-back** *(new)*: the dispatched session persists its terminal hand-back **on its own `AgentSession` record via the Popoto ORM** (nullable `nightly_fix_handback` JSON field — not a separate file), so the watchdog (which already reads the session via the ORM) has a single, atomic source of truth: `{disposition, pr_url, what_broke, classification, tried, blocked_reason, decision_requested, written_at}`.
 6. **Test-file-only mechanical guard** *(new)*: before the watchdog honors a `fixed-silent` disposition, it fetches the PR's changed paths (`gh pr diff --name-only`) and **rejects the fix mechanically if any path is outside `tests/`** — a source-file edit voids `fixed-silent` and converts it to an escalation page. This does not rely on the session honoring the prompt.
@@ -101,7 +158,7 @@ safe; a silent wrong fix is not.
 ## Architectural Impact
 
 - **New dependencies**: none external. Reuses `baseline-verifier` (parameterized), `tools.valor_session create`, the existing local-JSON state file, and `send_telegram`.
-- **Interface changes**: `baseline-verifier` gains a documented `baseline_ref` **Input field** (default `main` via a `${baseline_ref:-main}` shell default in the prompt body, preserving every existing `/do-test` caller). `AgentSession` gains a nullable `nightly_fix_handback` JSON field (the structured hand-back contract). `data/nightly_tests_last_run.json` gains `head_commit`, the keyed `fix_attempts: {failing_set_hash: count}` attempt-count map, and the keyed `dispatched_sessions: {failing_set_hash: agent_session_id}` map (round-4 concern 1 — a scalar dispatched-session pointer would be orphaned by a second dispatch keyed to a different failing set; the map lets the watchdog look up exactly which `AgentSession` a given still-red set was handed to). Both maps are keyed by the same sha256-of-sorted-node-ids hash and pruned together when a set goes green.
+- **Interface changes**: `baseline-verifier` gains a documented `baseline_ref` **Input field** (default `main` via a `${baseline_ref:-main}` shell default in the prompt body, preserving every existing `/do-test` caller). `AgentSession` gains a nullable `nightly_fix_handback` JSON field (the structured hand-back contract). `data/nightly_tests_last_run.json` **already carries `head_commit`** (landed on main, L1092 — consumed, not added) and gains two **per-node-keyed** maps: `fix_attempts: {node_id: count}` and `fix_sessions: {node_id: agent_session_id}`. Both are keyed by pytest node ID, matching the live per-node dedup model (`dispatched_nodes` / `compute_dispatch_set`) that #2559 put in place of the retired `dispatched_hash`; they are pruned together by exactly the rule `carry_dispatched_nodes` already uses — a node that stops appearing in `confirmed_failing` drops out of both. The keyed (rather than scalar) shape is what stops a second dispatch from orphaning the first fixer's session pointer (round-4 concern 1); note the *existing* scalar `current["dispatched_session_id"]` (L1090) stays as-is for the unchanged triage path — the fixer path uses `fix_sessions` and does not overload it.
 - **Coupling**: the nightly runner already reads Redis for the fixer's session status in the watchdog; persisting the hand-back on that same `AgentSession` record (rather than a parallel JSON file) keeps one source of truth and removes a file-write race. Local-JSON stays the store for detection/dedup state only. The fixer session runs a **narrowly-mandated** make-test-edits → run-tests → open-DRAFT-PR → hand-back → STOP flow (NOT a self-driving pipeline) — no new orchestration substrate and, critically, **no new permission subsystem**.
 - **Data ownership**: nightly detection/dedup state stays local JSON; the fixer session is a normal `AgentSession` owned by the worker, and its hand-back lives on that record via the Popoto ORM (`session.save()` — never raw-Redis writes).
 - **Reversibility**: high — gated behind `NIGHTLY_FIX_MODE` (`off` | `shadow` | `active`). `off` restores the exact current detect-and-page behavior; `shadow` (the first-deploy default) runs classification + the decision gate and logs the decision it *would* have made, but still pages as today and dispatches nothing.
@@ -189,12 +246,26 @@ The enforcement is this stack, with branch protection (#1) the only structural l
 
 **Runtime `active`-mode branch-protection preflight (enforces the shadow→active flip, round-3 concern).** Because "flip `NIGHTLY_FIX_MODE=active` only after branch protection is enabled" is unenforceable as prose, the runner enforces it: when `NIGHTLY_FIX_MODE == "active"`, before dispatching any fixer the runner calls `gh api repos/{owner}/{repo}/branches/main/protection` and confirms review-required protection is present. `active` mode requires **BOTH** legs of the same boolean short-circuit to hold: `data["required_pull_request_reviews"]["required_approving_review_count"] >= 1` **AND** `data["enforce_admins"]["enabled"] is True`. The `enforce_admins` leg is load-bearing, not decorative: GitHub **exempts repo admins from required-review enforcement unless `enforce_admins.enabled == true`** (the default is off), and the fixer's `gh` runs under the operator's admin-scoped token — so without this leg an admin token could `gh pr merge` a zero-approval PR straight to `main`, defeating the sole structural never-merge backstop. On 404 / error / missing-review-requirement / `enforce_admins` absent-or-false, the runner **refuses to dispatch, logs the reason, and falls back to the escalate-and-page path** (fail toward paging) — `active` mode cannot dispatch an autonomous fixer into an unprotected (or admin-exempt) `main`. This makes the prerequisite a code gate, not a hope.
 
-**Decision gate** (`decide_fix_or_escalate(classification, new_failures, caps) -> "autonomous-fix" | "escalate"`): pure, unit-testable. Autonomy iff `classification.regressions == [] and classification.inconclusive == [] and set(new_failures) ⊆ set(test_stale_candidates) and len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES and fix_attempts.get(failing_set_hash, 0) < NIGHTLY_FIX_MAX_ATTEMPTS`. baseline-verifier returns discrete buckets (no numeric score), so "high confidence" is expressed as bucket membership, not a threshold float. In `shadow` mode the gate's verdict is computed and logged but not acted on.
+**Decision gate** (`decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"`): pure, unit-testable, no I/O. Autonomy iff **all** of:
+
+```
+not run_flags.is_seed_run              # a re-baseline declares state, it does not discover a regression
+and not run_flags.integrity_warnings   # an untrusted confirmed set must not be edited against
+and not run_flags.dry_run              # --dry-run never spawns a fixer
+and not run_flags.dispatch_truncated   # MAX_DISPATCH_NODES cut the picture short
+and classification.regressions == []
+and classification.inconclusive == []
+and set(new_failures) <= set(test_stale_candidates)
+and len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES
+and all(fix_attempts.get(n, 0) < NIGHTLY_FIX_MAX_ATTEMPTS for n in new_failures)
+```
+
+The gate consumes **`new_failures`** (from `compute_new_failures`, L654) — that is the population this feature promises to fix before paging. It is deliberately *not* `compute_dispatch_set`'s output, which answers the different question of what has never been filed; the two sets diverged in #2559 and conflating them would let a standing, already-filed failure enter the autonomous-fix path. Attempt-count dedup nonetheless rides on the per-node model, hence the `all(...)` over node IDs rather than a single set-hash lookup. baseline-verifier returns discrete buckets (no numeric score), so "high confidence" is bucket membership, not a threshold float. In `shadow` mode the verdict is computed and logged but not acted on.
 
 **Structured hand-back — persisted on the `AgentSession` record via the ORM (reconsidered per critique).** The fixer is *already* a normal `AgentSession` the worker owns, and the watchdog *already* reads that record via `AgentSession.query`. So rather than duplicate a parallel file-based store (with its own atomic-write dance and read/write race), the hand-back lives on the session itself: add a nullable `nightly_fix_handback` JSON field to `AgentSession`. The fixer writes it at terminal through a thin, documented helper CLI (`python -m tools.nightly_fix_handback write ...`) that loads the session by id and calls `session.save()` — **ORM only, never raw Redis**. Schema: `{disposition: "fixed-silent"|"blocked-escalate"|"still-working", pr_url, what_broke, classification, tried, blocked_reason, decision_requested, written_at}`. This is an additive nullable field: per `_heal_descriptor_pollution` (issues #1099/#1172) existing records read it as `None` with no backcompat code; it is still registered as a no-op idempotent entry in `scripts/update/migrations.py` per the repo's Popoto-schema-change convention.
 
-**Escalation watchdog + fail-safe.** At the start of each nightly run, before running tests, inspect each *prior* dispatch (if any) by iterating `dispatched_sessions` and loading each `agent_session_id` — read its session status **and its `nightly_fix_handback` field** via `AgentSession.query` (ORM — never raw Redis). The keyed `dispatched_sessions` map (round-4 concern 1) is what lets the watchdog resolve exactly which record belongs to each still-red set, even across multiple concurrent dispatches.
-- `blocked-escalate` → **page** with the hand-back's stuck-point content; prune that hash's entry from `fix_attempts` and `dispatched_sessions`.
+**Escalation watchdog + fail-safe.** At the start of each nightly run, before running tests, inspect each *prior* dispatch (if any) by iterating `fix_sessions` and loading each `agent_session_id` — read its session status **and its `nightly_fix_handback` field** via `AgentSession.query` (ORM — never raw Redis). The keyed `fix_sessions` map (round-4 concern 1) is what lets the watchdog resolve exactly which record belongs to each still-red node, even across multiple concurrent dispatches. Distinct session ids are de-duplicated before loading, since one fixer session covers several nodes.
+- `blocked-escalate` → **page** with the hand-back's stuck-point content; prune those nodes' entries from `fix_attempts` and `fix_sessions`.
 - session terminal `failed`/`killed`/`abandoned` with no `fixed-silent` hand-back → fail-safe **page**.
 - session non-terminal but older than `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` → fail-safe **page** ("fix attempt hung, suite still red").
 - `fixed-silent` with a `pr_url` → run **two fail-closed mechanical guards**, both against the exact `pr_url` persisted in the hand-back (never a PR discovered by branch/search — see the new-vs-preexisting note below):
@@ -208,12 +279,18 @@ The enforcement is this stack, with branch protection (#1) the only structural l
 
 **Worst-case fail-safe latency (critique correction).** The watchdog is a *preamble to the next nightly run*, so `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` does not bound *detection* latency — it only decides whether a still-running dispatch is judged "hung" when the preamble next fires. The true worst-case latency for surfacing a hung/dead fixer is therefore **~one nightly cadence (~24h)**, not the 6h timeout. This is **accepted for the first cut**: (a) `shadow` mode is the default, so no real dispatch happens until we opt in; (b) a hung fixer produces no merge (structurally impossible) and leaves the suite in exactly the red state a human would have seen under today's detect-and-page anyway — the feature cannot make latency *worse* than the status quo, only the happy path faster. If ~24h proves unacceptable after `active` rollout, a dedicated intra-day launchd watchdog is filed as follow-up **#2405**; it is deliberately out of scope here to avoid a second scheduled job before the core gate is proven.
 
-**Dedup extension + reset semantics (round-3 concern; naming reconciled + session pointer keyed, round-4).** Extend the existing `dispatched_hash` mechanism to persist a small map `fix_attempts: {failing_set_hash: count}` (not a single scalar), keyed by the sha256 of the *sorted* newly-confirmed failing-test node-id set — so the same failing set is not re-attempted beyond `NIGHTLY_FIX_MAX_ATTEMPTS`, while a *different* set gets its own fresh count. **Canonical naming (round-4 concern 3): `fix_attempts` (the keyed map) is the ONE name and the ONE semantics for attempt tracking. There is no scalar `fix_attempt_count`; the earlier scalar name is fully retired. The per-set count is `fix_attempts[failing_set_hash]`, incremented once per dispatch attempt.** Alongside it, persist a parallel keyed map `dispatched_sessions: {failing_set_hash: agent_session_id}` (round-4 concern 1) recording which `AgentSession` each still-red set was dispatched to — a scalar session pointer would be orphaned the moment a second, differently-keyed set is dispatched, leaving the watchdog unable to find the first fixer's record. The two maps share the same key and are pruned together. Explicit reset semantics (the round-3 gap):
-- **Key = content, so a changed set resets naturally.** If any failing test enters/leaves the set, the hash changes and the new hash starts at count 0 — no stale carry-over.
-- **A hash's count increments once per dispatch attempt** (at dispatch time, before the session runs), so a crash mid-attempt still counts (fail toward escalate, never infinite-retry).
-- **Success clears the key.** When a failing_set_hash no longer appears in the current run's `new_failures` (the tests went green, i.e. the fix landed or the flake cleared), its entry is **pruned from BOTH `fix_attempts` and `dispatched_sessions`** — the maps only hold hashes for currently-red sets, so they cannot grow unbounded and a set that later regresses starts fresh with no stale session pointer.
-- **Cap-exceeded escalates, does not silently drop.** When a hash's count has reached `NIGHTLY_FIX_MAX_ATTEMPTS`, the run escalates (pages) instead of re-dispatching — the set is surfaced to a human rather than retried nightly forever.
-This keyed-with-pruning design is what makes "attempt at most N times, then escalate, and reset when the world changes" deterministic rather than an ever-growing scalar.
+**Dedup — per-node keying, matching the live model (rebased 2026-09-02).** The plan originally extended `dispatched_hash`, a sha256-of-the-sorted-failing-set key. **That mechanism no longer exists**: #2559 / PR #2581 replaced set-hash dedup with **per-node** dedup, and the live substrate is `dispatched_nodes` plus `prior_dispatched()` / `compute_dispatch_set()` / `carry_dispatched_nodes()`. Re-keying to match is not cosmetic — a set-hash key has no producer left, and inventing a second, parallel keying scheme in the same state file would reintroduce exactly the two-sources-of-truth shape #2559 removed.
+
+Persist two maps in `data/nightly_tests_last_run.json`, both keyed by **pytest node ID**:
+- `fix_attempts: {node_id: count}` — how many times an autonomous fix has been attempted for that node. **This is the ONE name and the ONE semantics for attempt tracking; there is no scalar `fix_attempt_count`** (round-4 concern 3, preserved).
+- `fix_sessions: {node_id: agent_session_id}` — which `AgentSession` each still-red node was handed to, so the watchdog can resolve exactly the right record. Keyed rather than scalar because a scalar pointer is orphaned the moment a second dispatch happens (round-4 concern 1, preserved). It is a *separate* key from the pre-existing scalar `dispatched_session_id` (L1090), which continues to serve the unchanged triage path untouched.
+
+Reset semantics, expressed in terms of the live helpers:
+- **A node entering the failing set starts at 0.** No hash to invalidate; a node absent from both maps is simply unattempted.
+- **`fix_attempts[node]` increments once per dispatch attempt**, at dispatch time before the session runs, so a crash mid-attempt still counts (fail toward escalate, never infinite-retry).
+- **Going green prunes the node from BOTH maps**, by the same rule `carry_dispatched_nodes` already applies to `dispatched_nodes`: keep a key only while its node is still in `confirmed_failing`. The maps therefore hold only currently-red nodes, cannot grow unbounded, and a node that later re-regresses starts fresh with no stale session pointer. Reusing the existing carry rule (rather than a bespoke one) keeps all three maps pruning in lockstep.
+- **Cap-exceeded escalates, does not silently drop.** When any node in `new_failures` has reached `NIGHTLY_FIX_MAX_ATTEMPTS`, the run escalates (pages) instead of re-dispatching.
+- **Composes with, does not duplicate, `MAX_DISPATCH_NODES`.** That cap (L185) governs triage dispatch volume; `NIGHTLY_FIX_MAX_FAILURES` governs autonomy eligibility. A truncated run is a hard disqualifier for autonomy (see the decision gate), so the two caps never have to be reconciled numerically.
 
 **In-process, not Cowork, for the first cut** (open question 5): reuse the existing `maybe_dispatch_triage_session` machinery (rename → `maybe_dispatch_fix_session` with the new mandate). Cowork parity is filed as follow-up **#2405**.
 
@@ -222,7 +299,7 @@ This keyed-with-pruning design is what makes "attempt at most N times, then esca
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The existing `except Exception` swallow in `maybe_dispatch_*` (dispatch failure → "no dispatch") is preserved; add a test asserting a failed dispatch logs a warning AND leaves the `fix_attempts`/`dispatched_sessions` entry for that failing-set hash untouched so a retry is possible.
+- [ ] The existing `except Exception` swallow in `maybe_dispatch_*` (dispatch failure → "no dispatch") is preserved; add a test asserting a failed dispatch logs a warning AND leaves the `fix_attempts`/`fix_sessions` entries for those node IDs untouched so a retry is possible.
 - [ ] baseline-verifier invocation failure (worktree add fails, timeout) → classified `inconclusive` → **must route to escalate**, not to autonomous-fix. Test the fail-toward-paging path explicitly.
 - [ ] `nightly_fix_handback` field absent/null/malformed on the session record when the watchdog reads it → treated as "no hand-back" → fail-safe page (never silently assume success). Test with a `None` field and a non-dict/invalid payload.
 - [ ] `fixed-silent` hand-back whose PR diff touches a non-`tests/` path → the mechanical guard voids the fix (closes the PR) → **page** (not a notify). Test by stubbing `gh pr diff --name-only` to return a `src/` path.
@@ -241,6 +318,12 @@ This keyed-with-pruning design is what makes "attempt at most N times, then esca
 - [ ] Fail-safe page fires (asserted via `send_telegram` call capture) when the session is terminal-failed with no hand-back.
 - [ ] `fixed-silent` + guard-pass emits a **low-urgency notify** via `send_telegram(msg, silent=True)` — a distinct call signature from the high-urgency page (`silent=False`), asserted via call capture on the `silent` kwarg (not a prose substring) — the happy path is not fully silent.
 
+### Run-Shape Disqualifiers (added in the 2026-09-02 freshness rebase)
+- [ ] **Seed / re-baseline run** (`is_seed_run` true — first run, or `prev["collection"] != COLLECTION_PATHS`): even in `active` mode with an all-test-stale classification, NO fixer is dispatched; the run takes its existing seed path. A baseline declares known-failing state; autonomously "fixing" an absorbed population would rewrite tests wholesale. Asserted: `valor_session create` not called on the fixer path.
+- [ ] **Integrity-warned run** (`validate_run_integrity` returned non-empty `integrity_warnings`, e.g. the shallow-shrink warning): no dispatch → escalate. A `confirmed_failing` set the detector itself distrusts must never be edited against. Asserted.
+- [ ] **`--dry-run`**: no fixer dispatched and no PR opened, mirroring the existing `DRY_RUN_SESSION_ID` short-circuit contract — the one command an operator reaches for to preview a run must stay previewable. Asserted.
+- [ ] **Truncated dispatch** (`len(dispatch_nodes) > MAX_DISPATCH_NODES`): no autonomous fix on a run whose picture is knowingly incomplete → escalate. Asserted.
+
 ### Mode Gating
 - [ ] `NIGHTLY_FIX_MODE=shadow` (the default): the decision gate runs and logs its verdict, but NO fixer session is dispatched AND the up-front page still fires as today. Asserted: `valor_session create` not called, `send_telegram` called.
 - [ ] `NIGHTLY_FIX_MODE=off`: exact current detect-and-page behavior; no classification, no gate. Asserted.
@@ -248,7 +331,7 @@ This keyed-with-pruning design is what makes "attempt at most N times, then esca
 
 ## Test Impact
 
-- [ ] `scripts/nightly_regression_tests.py` tests (search `tests/unit/` for `nightly` / `maybe_dispatch_triage_session` / `dispatched_hash`) — UPDATE: the `new_failures` branch no longer pages up front; assertions that expect an immediate `send_telegram` on new failures must move to the escalate/fail-safe paths. If `maybe_dispatch_triage_session` is renamed, UPDATE its tests to the new name + bounded-fix prompt.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — UPDATE: the `new_failures` branch no longer pages up front in `off`/`active` mode; assertions expecting an immediate `send_telegram` on new failures must move to the escalate/fail-safe paths (or be pinned to `shadow`, which still pages as today). If `maybe_dispatch_triage_session` is renamed, UPDATE its tests to the new name + bounded-fix prompt. **Do not disturb** the per-node dedup tests (`compute_dispatch_set` / `carry_dispatched_nodes` / `prior_dispatched` / `seeded_nodes`), the seed/re-baseline tests, or the run-integrity tests — this feature layers around them and must leave their behavior byte-identical.
 - [ ] Any test asserting the dispatch prompt contains "Do NOT attempt an auto-hotfix" — REPLACE: the mandate names only make-test-edits/run-tests/open-DRAFT-PR/hand-back/STOP (never `/do-merge`, never "run the pipeline"), and the never-auto-merge posture is asserted via the draft-PR flag (`gh pr create --draft`) plus the fail-closed watchdog guard.
 - [ ] `tests/unit/` baseline-verifier tests (if any assert the hardcoded `main` ref) — UPDATE: `baseline_ref` Input field with `${baseline_ref:-main}` default; assert the default still resolves to `main` for existing callers.
 - [ ] `tests/unit/` AgentSession model/schema tests — UPDATE/ADD: assert the new nullable `nightly_fix_handback` field round-trips via the ORM and reads `None` on legacy records.
@@ -281,7 +364,7 @@ Justification for anything not affected: the base detector mechanics (`run_tests
 
 ### Risk 4: Re-dispatch storm / cost blowup
 **Impact:** The same failing set spawns a fresh fixer session every night, burning tokens.
-**Mitigation:** the keyed `fix_attempts: {failing_set_hash: count}` map extends `dispatched_hash` dedup; past `NIGHTLY_FIX_MAX_ATTEMPTS` the set escalates instead of re-dispatching.
+**Mitigation:** the per-node `fix_attempts: {node_id: count}` map rides alongside the live `dispatched_nodes` dedup; past `NIGHTLY_FIX_MAX_ATTEMPTS` the node escalates instead of re-dispatching.
 
 ## Race Conditions
 
@@ -341,6 +424,8 @@ The invariants "never auto-merge to main" and "never edit source (non-test) file
 - [ ] The watchdog runs a fail-closed **merge/draft-state guard** (`gh pr view <pr> --json isDraft,state,mergedAt`): a not-draft / merged / closed / errored PR voids the fix → close (if open) + page (asserted, including the merged and command-error cases).
 - [ ] The watchdog's **fail-closed** mechanical test-file-only guard voids a `fixed-silent` PR (closes it) and pages on any non-`tests/` path, non-zero exit, error, empty output, or changed-file count exceeding `NIGHTLY_FIX_MAX_CHANGED_FILES` (asserted, including the error/empty and count-over-cap cases). `NIGHTLY_FIX_MAX_CHANGED_FILES` is wired into this guard (round-4 concern 2 — no longer a dead constant).
 - [ ] `blocked-escalate` hand-back → page with stuck-point content; `fixed-silent` + `tests/`-only PR (guard command succeeds) → low-urgency notify via `send_telegram(silent=True)` (no page); session-dead/hung-past-timeout → fail-safe page. All asserted via call-signature capture.
+- [ ] A seed/re-baseline run, an integrity-warned run, a `--dry-run`, or a `MAX_DISPATCH_NODES`-truncated run **never** dispatches an autonomous fixer, even in `active` mode with a clean all-test-stale classification (asserted for each of the four).
+- [ ] The existing per-node dedup, seed/umbrella, and run-integrity behavior is unchanged: `tests/unit/test_nightly_regression_tests.py` passes without modification to any `compute_dispatch_set` / `carry_dispatched_nodes` / `seeded_nodes` / `validate_run_integrity` assertion.
 - [ ] Every guardrail number is a named env-overridable constant read via `os.environ.get` with a provisional comment (grep-verifiable: no bare magic numbers in the new code paths).
 - [ ] No raw-Redis operations on Popoto-managed keys in the new code (session status AND hand-back read/written via the ORM).
 - [ ] Tests pass (`/do-test`)
@@ -361,7 +446,7 @@ The lead orchestrates; it never builds directly.
 
 - **Builder (dispatch + hand-back + watchdog)**
   - Name: `escalation-builder`
-  - Role: rewrite dispatch mandate (bounded-fix); `tools.nightly_fix_handback` CLI; escalation/fail-safe watchdog preamble; keyed `fix_attempts` + `dispatched_sessions` dedup maps; guardrail constants.
+  - Role: rewrite dispatch mandate (bounded-fix); `tools.nightly_fix_handback` CLI; escalation/fail-safe watchdog preamble; per-node `fix_attempts` + `fix_sessions` dedup maps; guardrail constants.
   - Agent Type: builder
   - Domain: Redis/Popoto (ORM-only session reads) + conversational-UX (escalation message content)
   - Resume: true
@@ -393,9 +478,9 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Persist `head_commit = git rev-parse HEAD` into `data/nightly_tests_last_run.json` each run; use it (NOT bare `main`) as the nightly baseline.
-- Add a documented `baseline_ref` Input field to `.claude/agents/baseline-verifier.md` with a `${baseline_ref:-main}` shell default replacing the two hardcoded `main` tokens at Step 2 (~lines 54-56) — do not break `/do-test` callers.
-- Handle absent `prev["head_commit"]` → route to escalate (no unbaselined fix).
+- **`head_commit` is already persisted on main** (`current["head_commit"] = _get_head_commit()`, L1092; helper at L1344). Do NOT re-add it. This step *consumes* `prev["head_commit"]` as the last-green baseline ref and verifies it is written on every non-fatal path.
+- Add a documented `baseline_ref` Input field to `.claude/agents/baseline-verifier.md` with a `${baseline_ref:-main}` shell default replacing the two hardcoded `main` tokens at Step 2 (`BASELINE_COMMIT=$(git rev-parse main)` L54; `git worktree add "$BASELINE_DIR" main --detach` L56) — do not break `/do-test` callers.
+- Handle absent `prev["head_commit"]` → route to escalate (no unbaselined fix). Note this is the real first-run/`_fatal()`-refused-to-write-state case, not a hypothetical.
 
 ### 2. Decision gate + classification wiring
 - **Task ID**: build-decision-gate
@@ -425,14 +510,15 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: escalation-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Watchdog preamble in `main()`: resolve each prior dispatch by iterating the keyed `dispatched_sessions: {failing_set_hash: agent_session_id}` map and loading each session; read its status + `nightly_fix_handback` (ORM); page on `blocked-escalate`, terminal-fail-with-no-handback, or hang-past-timeout. Identify the fixer PR **only** by the `pr_url` in the hand-back — never enumerate/search PRs; a `fixed-silent` disposition with a null/absent/unparseable `pr_url` → fail-safe page.
+- Watchdog preamble in `main()`: resolve each prior dispatch by iterating the per-node `fix_sessions: {node_id: agent_session_id}` map (de-duplicating session ids first) and loading each session; read its status + `nightly_fix_handback` (ORM); page on `blocked-escalate`, terminal-fail-with-no-handback, or hang-past-timeout. Identify the fixer PR **only** by the `pr_url` in the hand-back — never enumerate/search PRs; a `fixed-silent` disposition with a null/absent/unparseable `pr_url` → fail-safe page.
 - Add the **fail-closed diff-path guard**: on `fixed-silent`, run `gh pr diff --name-only <pr_url>`; keep eligible for notify ONLY on zero-exit + non-empty + all-`tests/` + changed-file count `<= NIGHTLY_FIX_MAX_CHANGED_FILES` (round-4 concern 2 — wire the cap here); on ANY {non-zero exit, error, empty/unparseable output, non-`tests/` path, count over cap} → void.
 - Add the **fail-closed merge/draft-state guard (round-3)**: run `gh pr view <pr_url> --json isDraft,state,mergedAt`; keep eligible for notify ONLY when still draft AND `state == "OPEN"` AND `mergedAt` null; on ANY {not-draft, non-OPEN, merged, command error/empty} → void. Detective (next-night), catches a strayed `gh pr ready`/`gh pr merge`.
 - On ANY guard voiding the fix → `gh pr close <pr_url>` (if still open) + page; only both-guards-pass downgrades to notify.
 - **Verify + document current branch-protection state (round-3, prerequisite)**: run `gh api repos/tomcounsell/ai/branches/main/protection` and `gh repo view`; record the finding in `docs/features/nightly-alert-triage.md`. At plan time this returned `404 Not Found` (main NOT protected). If still absent, the feature doc must state that enabling protection on `main` is a hard prerequisite for `NIGHTLY_FIX_MODE=active`, and that protection must satisfy BOTH `required_pull_request_reviews.required_approving_review_count >= 1` **AND** `enforce_admins.enabled == true` — the `enforce_admins` leg is mandatory because GitHub exempts repo admins (the operator token's scope) from required review otherwise, which would let an admin-token `gh pr merge` land a zero-approval PR.
 - **Active-mode branch-protection runtime preflight (round-3, hardened round-4)**: when `NIGHTLY_FIX_MODE == "active"`, before dispatching call `gh api repos/{owner}/{repo}/branches/main/protection` and require BOTH legs of the same boolean short-circuit: `required_pull_request_reviews.required_approving_review_count >= 1` **AND** `enforce_admins.enabled is True` (the round-4 blocker: without `enforce_admins` the operator's admin-scoped token is exempt from required review and could merge a zero-approval PR). On 404/error/missing-review/`enforce_admins` absent-or-false → refuse to dispatch, log the reason, route to escalate-and-page (fail toward paging). This makes the shadow→active prerequisite a code gate.
 - Add `silent: bool = False` to the `send_telegram` wrapper (forwarded to `valor-telegram send --silent`); the happy-path notify uses `send_telegram(msg, silent=True)`, pages keep `silent=False`.
-- Five named env-overridable guardrail constants (module-scope `os.environ.get`, provisional comments), incl. `NIGHTLY_FIX_MODE` (off/shadow/active, default shadow); gate the dispatch on mode. Extend `dispatched_hash` state with a **keyed `fix_attempts: {failing_set_hash: count}` map** (round-3 reset semantics; `fix_attempts` is the sole canonical name — no scalar `fix_attempt_count`) AND a parallel **keyed `dispatched_sessions: {failing_set_hash: agent_session_id}` map** (round-4 concern 1 — the watchdog looks up the fixer's `AgentSession` by set hash, so a second dispatch can't orphan the first pointer): increment `fix_attempts[hash]` per dispatch attempt and record the session id in `dispatched_sessions[hash]`; a changed failing set gets a fresh key in both; **prune keys whose set is no longer red from BOTH maps** so they only hold currently-red sets; at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate (page) instead of re-dispatching.
+- Five named env-overridable guardrail constants (module-scope `os.environ.get`, provisional comments), incl. `NIGHTLY_FIX_MODE` (off/shadow/active, default shadow); gate the dispatch on mode. Add two **per-node-keyed** state maps alongside the live `dispatched_nodes` model (`dispatched_hash` no longer exists — #2559 retired it): **`fix_attempts: {node_id: count}`** (the sole canonical attempt-tracking name — no scalar `fix_attempt_count`) AND **`fix_sessions: {node_id: agent_session_id}`** (round-4 concern 1 — the watchdog resolves the fixer's `AgentSession` per node, so a second dispatch can't orphan the first pointer; keep it separate from the pre-existing scalar `dispatched_session_id` at L1090, which the triage path still owns). Increment `fix_attempts[node]` per dispatch attempt and record the session id in `fix_sessions[node]`; **prune from BOTH maps any node no longer in `confirmed_failing`, reusing `carry_dispatched_nodes`'s existing keep-while-still-failing rule** so all three maps prune in lockstep and none grows unbounded; at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate (page) instead of re-dispatching.
+- **Gate the fixer off the four run-shape disqualifiers** that landed after this plan was first written: `is_seed_run` (L1027), non-empty `integrity_warnings` (L1047), `args.dry_run`, and a dispatch set truncated by `MAX_DISPATCH_NODES` (L185). Each routes to escalate, never to autonomy.
 
 ### 5. Tests (unit + integration)
 - **Task ID**: build-tests
@@ -440,7 +526,7 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: fix-gate-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Unit: decision gate (all branches), watchdog (all page paths + notify path), hand-back parsing (valid/null/malformed, incl. null `pr_url` → fail-safe page), **fail-closed diff-path guard** (all-tests diff within `NIGHTLY_FIX_MAX_CHANGED_FILES` → eligible; non-tests diff, non-zero exit, raised exception, empty output, or count-over-cap → page+close), **fail-closed merge/draft-state guard** (still-draft+OPEN+unmerged → eligible; not-draft, MERGED/non-null mergedAt, CLOSED, error/empty → page+close), **active-mode branch-protection preflight** (404/error/no-review-requirement/`enforce_admins`-false-or-absent → refuse+escalate+page; only both-review-count≥1-AND-`enforce_admins.enabled==true` → dispatch), notify signature (`send_telegram(silent=True)` on happy path vs `silent=False` on pages), mode gating (off/shadow/active), dedup keyed-map reset semantics (changed set → fresh key; pruned when green; cap-reached → escalate), empty-input and missing-baseline paths.
+- Unit: decision gate (all branches, **including the four run-shape disqualifiers: seed/re-baseline, integrity-warned, `--dry-run`, `MAX_DISPATCH_NODES`-truncated → escalate, no dispatch**), watchdog (all page paths + notify path), hand-back parsing (valid/null/malformed, incl. null `pr_url` → fail-safe page), **fail-closed diff-path guard** (all-tests diff within `NIGHTLY_FIX_MAX_CHANGED_FILES` → eligible; non-tests diff, non-zero exit, raised exception, empty output, or count-over-cap → page+close), **fail-closed merge/draft-state guard** (still-draft+OPEN+unmerged → eligible; not-draft, MERGED/non-null mergedAt, CLOSED, error/empty → page+close), **active-mode branch-protection preflight** (404/error/no-review-requirement/`enforce_admins`-false-or-absent → refuse+escalate+page; only both-review-count≥1-AND-`enforce_admins.enabled==true` → dispatch), notify signature (`send_telegram(silent=True)` on happy path vs `silent=False` on pages), mode gating (off/shadow/active), dedup keyed-map reset semantics (changed set → fresh key; pruned when green; cap-reached → escalate), empty-input and missing-baseline paths.
 - Integration: seeded `data/nightly_tests_last_run.json` → active-mode (with branch-protection preflight stubbed present) silent-fix path (no page, `silent=True` notify, dispatch with a narrow mandate that includes `gh pr create --draft`, forbids `gh pr ready`/`gh pr merge`/push-to-`main`, and excludes `/do-merge`) and escalate path (page, no dispatch); active-mode-without-protection (refuse dispatch + page); shadow-mode (page + no dispatch).
 
 ### 6. Documentation
@@ -479,6 +565,9 @@ The lead orchestrates; it never builds directly.
 | Preflight requires `enforce_admins` (round-4 blocker — admin tokens are review-exempt without it) | `grep -c "enforce_admins" scripts/nightly_regression_tests.py` | output > 0 |
 | No raw-Redis on Popoto keys in new code (anti-criterion) | `grep -Ec "\.hgetall\(\|\.hget\(\|r\.delete\(\|r\.srem\(\|r\.sadd\(" scripts/nightly_regression_tests.py tools/nightly_fix_handback.py` | match count == 0 |
 | Up-front page removed from the `new_failures` branch (behavioral anti-criterion) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "shadow or off or new_failures"` — the mode-gating + detection tests assert that on a `new_failures` run in `off`/`active` mode NO up-front page fires from the detection branch (only escalate/fail-safe paths page); `shadow` still pages as today. Behavioral assertion via `send_telegram` call capture, no bespoke AST script. | exit code 0 |
+| Run-shape disqualifiers gate the fixer (seed / integrity-warned / dry-run / truncated) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "seed or integrity or dry_run or truncated"` | exit code 0 |
+| Pre-existing detector behavior untouched (per-node dedup, seed umbrella, run integrity) | `pytest tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
+| Retired `dispatched_hash` not resurrected (the 2026-09-02 rebase re-keyed dedup per node) | `grep -c "dispatched_hash\|failing_set_hash" scripts/nightly_regression_tests.py` | match count == 0 |
 | Detection log sentinel present | `grep -c "nightly-fix.*detection" scripts/nightly_regression_tests.py` | output > 0 |
 | Guardrail constants are env-overridable (module-scope) | `grep -c "os.environ.get(\"NIGHTLY_FIX" scripts/nightly_regression_tests.py` | output ≥ 5 |
 | Low-urgency notify is a distinct call signature, not a bare string (anti-criterion) | `grep -c "send_telegram(.*silent=True" scripts/nightly_regression_tests.py` | output > 0 |
@@ -493,15 +582,15 @@ The lead orchestrates; it never builds directly.
 | CONCERN | Scope & Value | The "notify vs. page" tiering — the mechanism that keeps the happy path "not fully silent" — is verified only by `grep -c "notify\|low.urgency\|fyi"`, but the sole alert primitive `send_telegram(msg, dry_run=...)` has no urgency parameter, so the check passes on a bare string literal even if the call is functionally identical to a page. | **RESOLVED (round 2)** | Added `silent: bool = False` to the `send_telegram` wrapper (forwarded to `valor-telegram send --silent` / `disable_notification`); happy-path notify uses `send_telegram(msg, silent=True)`, pages keep `silent=False`. Anti-criterion changed to `grep -c "send_telegram(.*silent=True"` (call signature, not a prose substring); tests assert the `silent` kwarg via call capture. |
 | CONCERN | History & Consistency | The plan is internally inconsistent about how settled the permission mechanism is: Resolved Decision #2 + Success Criteria treat structural denial as an accomplished, grep-verifiable fact, while Agent Integration hedges the wiring is an undetermined "build-time detail" to verify in an integration test written after the fact. | **RESOLVED (round 2)** | Resolved Decision #2 rewritten to a single honest enforcement decision (draft-PR + defense-in-depth, no permission profile); Agent Integration's "build-time detail" hedge removed (no session-create flag is needed). The `grep -c "nightly_fixer"` anti-criterion replaced with a pytest integration-test assertion (`test_nightly_fix_dispatch.py`) that the dispatch message contains `gh pr create --draft` and excludes `/do-merge`. |
 | BLOCKER | Risk & Robustness (round 3) | Round 2's "draft-PR structural no-auto-merge" guarantee is only prompt-strength. The fixer is a `--role eng` `AgentSession` spawned with hardcoded `--permission-mode bypassPermissions` = unrestricted bash (`agent/session_runner/harness/claude.py` L154-168); nothing stops it running `gh pr ready <url>` then `gh pr merge <url>`. The diff-path watchdog inspects only paths, not merge/draft state, and runs on the next nightly (~24h later, after any merge already landed). | **RESOLVED (round 3)** | Honest limitation stated plainly (Technical Approach → Enforcement design): under `bypassPermissions` an in-session bash cannot be mechanically blocked from `gh pr ready`/`gh pr merge`; no in-session structural-prevention claim is made. The real structural backstop moved OUTSIDE the session: **server-side branch protection on `main`** (require non-author review approval) — verified ABSENT at plan time (404), so enabling it is a hard prerequisite for `active` mode, enforced by an `active`-mode runtime preflight (`gh api .../branches/main/protection` → refuse+escalate on 404/error/missing-review). Shadow-first default bounds blast radius. Watchdog extended with a fail-closed **merge/draft-state guard** (`gh pr view --json isDraft,state,mergedAt` → void+close+page on not-draft/merged/closed/error) — honestly labeled DETECTIVE (next-night), not preventive. Mandate + anti-criteria now forbid `gh pr ready`/`gh pr merge`/push-to-`main` (deterrent) and assert `--draft`. |
-| CONCERN | Risk & Robustness (round 3) | `fix_attempt_count` dedup reset semantics were unspecified — when does a set's attempt count reset, and does the state grow unbounded? | **RESOLVED (round 3)** | Replaced scalar with a keyed `fix_attempts: {failing_set_hash: count}` map (Technical Approach → Dedup): key = sha256 of the sorted failing node-id set (changed set → fresh count); increment per dispatch attempt; **prune keys no longer red** (bounded, and a later regression starts fresh); at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate instead of re-dispatch. |
+| CONCERN | Risk & Robustness (round 3) | `fix_attempt_count` dedup reset semantics were unspecified — when does a set's attempt count reset, and does the state grow unbounded? | **RESOLVED (round 3)** | Replaced scalar with a keyed `fix_attempts` map (Technical Approach → Dedup): increment per dispatch attempt; **prune keys no longer red** (bounded, and a later regression starts fresh); at `NIGHTLY_FIX_MAX_ATTEMPTS` escalate instead of re-dispatch. *(Re-keyed from failing-set hash to node ID in the 2026-09-02 freshness rebase — the hash producer no longer exists; the reset semantics carried over unchanged.)* |
 | CONCERN | Scope & Value (round 3) | The bespoke AST verify script `scripts/_verify_no_page_in_new_failures_branch.py` is redundant with the mode-gating behavioral tests. | **RESOLVED (round 3)** | Removed the AST script + its Verification row; the up-front-page-removed anti-criterion is now the behavioral mode-gating test (`send_telegram` call capture on the `new_failures` run). |
 | CONCERN | History & Consistency (round 3) | The shadow→active flip prerequisite (branch protection) was prose-only and unenforceable. | **RESOLVED (round 3)** | Added an in-code `active`-mode runtime preflight that verifies review-required branch protection before any dispatch and fails toward paging when absent — the prerequisite is now a code gate, not a hope. Tested. |
 | CONCERN | Risk & Robustness (round 3) | The watchdog was ambiguous about which PR it inspects (new fixer PR vs a pre-existing PR). | **RESOLVED (round 3)** | Watchdog identifies the fixer PR **only** by the `pr_url` in the hand-back; never enumerates/searches PRs; a `fixed-silent` with null/absent/unparseable `pr_url` → fail-safe page (Technical Approach → new-vs-preexisting note). |
 | NIT | History & Consistency (round 3) | `.env.example` completeness check requires a comment line above each `KEY=`; the five new constants would fail it as bare keys. | **RESOLVED (round 3)** | Update System now specifies each of the five keys ships as a two-line block (comment describing knob + default, then commented placeholder), with `NIGHTLY_FIX_MODE`'s comment noting `active` requires branch protection. |
 | BLOCKER | Risk & Robustness (round 4) | The branch-protection preflight/verify gated only on `required_pull_request_reviews.required_approving_review_count >= 1`. GitHub exempts repo admins from required-review enforcement unless `enforce_admins.enabled == true` (default off), and the fixer's `gh` runs under the operator's admin-scoped token — so `gh pr merge` could land a zero-approval PR, defeating the sole structural never-merge leg. | **RESOLVED (round 4)** | Added `enforce_admins.enabled is True` to the SAME boolean short-circuit in all three sites: the `active`-mode runtime preflight (Technical Approach + Step 4), the manual builder verify step (Step 4), and the Success Criteria row. `active` mode now requires **BOTH** `required_approving_review_count >= 1` AND `enforce_admins.enabled == true`; the preflight fails toward paging otherwise. Prerequisites table, failure-path test (new `enforce_admins`-false case), unit-test list, validator scope, and a new `grep -c "enforce_admins"` Verification row updated to match. |
-| CONCERN | Risk & Robustness (round 4) | `dispatched_session_id` was a scalar but `fix_attempts` became a keyed map — a second dispatch (different failing set) would orphan the first session pointer, leaving the watchdog unable to resolve the earlier fixer's `AgentSession`. | **RESOLVED (round 4)** | Replaced the scalar with a keyed `dispatched_sessions: {failing_set_hash: agent_session_id}` map (Interface changes, Dedup section, watchdog, Step 4), sharing the `fix_attempts` key and pruned together when a set goes green. The watchdog iterates it to load exactly the record each still-red set was dispatched to. |
+| CONCERN | Risk & Robustness (round 4) | `dispatched_session_id` was a scalar but `fix_attempts` became a keyed map — a second dispatch (different failing set) would orphan the first session pointer, leaving the watchdog unable to resolve the earlier fixer's `AgentSession`. | **RESOLVED (round 4)** | Replaced the scalar with a keyed `fix_sessions: {node_id: agent_session_id}` map (Interface changes, Dedup section, watchdog, Step 4), sharing the `fix_attempts` key and pruned together when a node goes green. The watchdog iterates it to load exactly the record each still-red node was dispatched to. *(Named `dispatched_sessions` and hash-keyed in round 4; renamed + re-keyed in the 2026-09-02 rebase to avoid colliding with the live scalar `dispatched_session_id`.)* |
 | CONCERN | Scope & Value (round 4) | `NIGHTLY_FIX_MAX_CHANGED_FILES` was declared but never wired into any guard (a dead constant). | **RESOLVED (round 4)** | **Decision: WIRE it** into the fail-closed diff-path guard — a `fixed-silent` PR whose changed-file count exceeds `NIGHTLY_FIX_MAX_CHANGED_FILES` (even if all-`tests/`) is voided → close + page. Updated the guard (Technical Approach, Solution key element, flow, Step 4), the failure-path + unit tests (new count-over-cap case), a Success Criteria row, and a `grep -c` Verification row asserting ≥2 uses (declaration + guard). |
-| CONCERN | History & Consistency (round 4) | `fix_attempt_count` (scalar, increment-before-run) vs `fix_attempts` (keyed map) was a naming/semantics contradiction introduced in round 3. | **RESOLVED (round 4)** | Reconciled to ONE name + ONE semantics: **`fix_attempts` (the keyed `{failing_set_hash: count}` map) is the sole canonical name; the scalar `fix_attempt_count` is fully retired.** The gate reads `fix_attempts.get(failing_set_hash, 0) < NIGHTLY_FIX_MAX_ATTEMPTS`; per-set count is `fix_attempts[hash]`, incremented once per dispatch attempt. All references (Interface changes, gate, Risk 4, team role, failure-path test, Dedup section) updated. |
+| CONCERN | History & Consistency (round 4) | `fix_attempt_count` (scalar, increment-before-run) vs `fix_attempts` (keyed map) was a naming/semantics contradiction introduced in round 3. | **RESOLVED (round 4)** | Reconciled to ONE name + ONE semantics: **`fix_attempts` (the keyed map) is the sole canonical name; the scalar `fix_attempt_count` is fully retired.** The gate reads `all(fix_attempts.get(n, 0) < NIGHTLY_FIX_MAX_ATTEMPTS for n in new_failures)`; per-node count is `fix_attempts[node_id]`, incremented once per dispatch attempt. All references (Interface changes, gate, Risk 4, team role, failure-path test, Dedup section) updated. |
 
 ---
 
@@ -518,3 +607,5 @@ These were the plan's original Open Questions; the critique (1 BLOCKER + 6 CONCE
 7. **Hand-back storage — RESOLVED (CONCERN).** Persisted on the `AgentSession` record via the ORM (nullable `nightly_fix_handback` field) rather than a duplicate file store, eliminating Race 1's torn-read hazard.
 
 No open questions remain — ready for critique (round 3 findings absorbed: honest `bypassPermissions` limitation, branch-protection structural backstop + builder-verify + `active`-mode preflight, shadow-first gating, merge/draft-state watchdog guard, mandate/anti-criteria deterrent, dedup reset semantics, AST script removed, env-completeness; **round 4 findings absorbed: `enforce_admins.enabled == true` added to the preflight/verify/success-criteria boolean short-circuit so an admin-scoped token can't merge a zero-approval PR; keyed `dispatched_sessions` map so a second dispatch can't orphan the first session pointer; `NIGHTLY_FIX_MAX_CHANGED_FILES` wired into the diff-path guard; `fix_attempts` reconciled to the sole canonical name/semantics, scalar `fix_attempt_count` retired**).
+
+**2026-09-02 freshness rebase (baseline `3b6eb651b`).** The premise is unchanged and re-verified — the up-front page and the investigate-only mandate are both still live — but the detector gained ~660 lines across nine commits, so the plan was rebased onto the current substrate: dedup re-keyed from the retired `dispatched_hash` to per-node `fix_attempts` / `fix_sessions` matching #2559's live model; `head_commit` recognized as already persisted (Step 1 degraded to consume-and-verify); the decision gate given four hard run-shape disqualifiers (seed/re-baseline, integrity-warned, `--dry-run`, `MAX_DISPATCH_NODES`-truncated) from the #2823 collection-aware baseline; all file:line references re-resolved; and a non-regression criterion added so the existing per-node dedup, seed-umbrella, and run-integrity behavior stays byte-identical. Branch protection on `main` re-checked and **still absent (404)**, so the `active`-mode preflight remains load-bearing exactly as designed.
