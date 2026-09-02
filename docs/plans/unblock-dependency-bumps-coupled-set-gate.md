@@ -45,9 +45,12 @@ picture — the pin arrived through `git add pyproject.toml`.
   `agent/llm/wrapper.py:44-50` imports the entire third-party stack
   (`anthropic` plus five `pydantic_ai` symbols) at module scope, and
   `agent/anthropic_client.py:44` (which wrapper imports) imports `anthropic` at
-  module scope too. `agent.llm` has **five module-scope consumers**
+  module scope too. `agent.llm` has **six module-scope consumers**
   (`bridge/routing.py:21`, `bridge/job_router.py:46`, `bridge/agent_catchup.py:59`,
-  `agent/memory_extraction.py:34`, `tools/email_cs/triage.py:21`).
+  `agent/memory_extraction.py:34`, `tools/email_cs/triage.py:21`, and
+  `scripts/nightly_regression_tests.py:97` — the nightly detector itself, so
+  under today's module-scope imports an ImportError kills the very job that is
+  supposed to notice).
   `bridge/telegram_bridge.py:130` imports `bridge.routing` at module scope,
   ~1070 lines before `main()`. An ImportError anywhere in the stack (the exact
   mode spike-5 reproduced) therefore kills the bridge at import time and launchd
@@ -97,16 +100,15 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `ce54eb3d6` — `main`'s tip at round 7 (2026-09-02). This is
+**Baseline commit:** `93fb790ef` — `main`'s tip at round 8 (2026-09-02). This is
 the single baseline for every claim in this section; earlier rounds' SHAs are
-deliberately not restated here. The round-5 critique independently re-verified
-every reference at `b37d67d98`, the round-7 critique re-verified every one again
-by execution at `3714bd96f`, and every commit between `b37d67d98` and
-`ce54eb3d6` touches only `docs/plans/*.md` (verified by `git log --name-only`),
+deliberately not restated here. The round-8 critique re-verified every reference
+below by execution at this commit, and every commit between it and the tip at
+this revision touches only `docs/plans/*.md` (verified by `git log --name-only`),
 so no tracked source file has moved since.
 **Issue filed at:** 2026-08-25T05:16:36Z
 **Disposition:** **Minor drift.** Every substantive premise holds: the
-`agent/llm/` module-scope imports, the five module-scope consumers,
+`agent/llm/` module-scope imports, the six module-scope consumers,
 `AUTO_BUMP_PACKAGES`, the maintainer-only Step 3.5 shape, the `_sentry_before_send`
 hibernation drop, and the filesystem-derived dashboard health fields are all
 unchanged. `pyproject.toml:12` still reads `"anthropic==0.125.0"` (restored by
@@ -126,7 +128,7 @@ evidence for the run-boundary placement.
 |---|---|---|
 | `agent/llm/wrapper.py:44-50` | full third-party stack imported at module scope | **Holds** |
 | `agent/anthropic_client.py:44` | `import anthropic` at module scope, imported by wrapper | **Holds** |
-| module-scope consumers of `agent.llm` | routing:21, job_router:46, agent_catchup:59, memory_extraction:34, email_cs/triage:21 | **Holds** (grep-verified; six more import function-scope) |
+| module-scope consumers of `agent.llm` | routing:21, job_router:46, agent_catchup:59, memory_extraction:34, email_cs/triage:21, nightly_regression_tests:97 | **Holds** — six, not five. Re-grepped at the baseline with `grep -rnE '^(from agent\.llm(\.[a-z_]+)? import\|import agent\.llm)'`, which catches the submodule form the earlier `from agent.llm import` grep missed |
 | `bridge/telegram_bridge.py:130` | `from bridge.routing import ...` at module scope; `main()` at `:1203` | **Holds** |
 | `scripts/update/deps.py:250` / `:277` / `:329` / `:391` / `:414` / `:463` / `:474` | `get_pinned_version`, `verify_critical_versions`, `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]`, `bump_pin_in_pyproject`, `run_smoke_test`, `auto_bump_deps` (iterating packages independently) | **Holds** — `deps.py` was not touched by any commit since the reshape |
 | ~~`scripts/update/run.py:1304` / `:1169`~~ → **`run.py:1493` / `:1358` and `:1485`** | Step 3.5 calls `auto_bump_deps`; `is_lockfile_maintainer` computed at `:1358` and gates Step 3.5 at `:1485`/`:1491` | **Drifted, claim holds.** `97672207d` (Wave-1 hotfix sweep) restructured `run.py`. The maintainer gate, the per-bump skip log, and the commit/push/restart ordering are structurally unchanged |
@@ -453,13 +455,37 @@ helper that reads it. The production default is unchanged — un-redirectable by
 cwd, exactly as the dashboard requires — but tests do
 `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)` instead of writing into
 the live `data/` that a running bridge, worker, and dashboard share on the
-development machine. Without the seam, this lane's three new degraded-driving
-test files write real markers into the real `data/`, xdist workers race on the
-same filenames, and an interrupted test leaves the operator's actual dashboard
-red with no underlying fault. Each of the three files also asserts that
-`list((repo / "data").glob("llm-stack-degraded*"))` is unchanged across the
-test, so a future test that forgets the monkeypatch fails loudly instead of
-polluting the board.
+development machine. Without the seam, this lane's degraded-driving test files
+write real markers into the real `data/`, xdist workers race on the same
+filenames, and an interrupted test leaves the operator's actual dashboard red
+with no underlying fault.
+
+**The redirect is a mechanism, not a per-file convention** (round-8 concern).
+Requiring each new test file to remember `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)`
+plus its own live-`data/` glob-unchanged assertion is exactly the
+"consumer discipline" shape this plan rejects for `agent/llm/` — and the gap was
+already visible: `tests/unit/test_llm_stack_compat.py` drives degraded
+resolutions but was not one of the files carrying the guard. So the redirect
+moves into `tests/conftest.py` as an **`autouse=True`, function-scoped fixture**:
+
+```python
+@pytest.fixture(autouse=True)
+def _redirect_llm_marker_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)
+```
+
+`raising=False` keeps it inert until `compat.py` exists and for every test that
+never imports it. The per-file glob-unchanged instruction is then **deleted**
+from task 4 and from the Test Impact rows — it was the hand-replicated half. One
+case still asserts the **default**, and it must not read the patched global:
+resolve `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly
+and compare it to `Path(ui.app.__file__).parent.parent / "data"`.
+
+An in-process fixture cannot reach the subprocess CLI case in
+`test_llm_stack_compat.py`, so that case passes the redirect explicitly to the
+child via the environment — which requires `_marker_path()` to read the override
+**lazily inside the function** (a module-scope `os.environ.get` is blocked by
+`validate_no_module_scope_env.py`).
 
 A direct Telegram push was considered and **rejected**: no raw Bot-API send path
 exists in tracked code, and Telethon's send lives only in the bridge — it cannot
@@ -576,7 +602,7 @@ The appetite re-label above is the concession taken instead.
   That single test is the invariant; consumer discipline is not.
 
   **The import half MUST run in a fresh interpreter subprocess** (round-7
-  blocker). In-process it cannot fail: 31 existing test files already import
+  blocker). In-process it cannot fail: existing test files already import
   `bridge.telegram_bridge`, whose module scope pulls `bridge.routing` →
   `agent.llm`, so under xdist both `import` statements are `sys.modules` cache
   hits that execute no stack import at all — a test that passes unconditionally
@@ -644,7 +670,39 @@ The appetite re-label above is the concession taken instead.
      repo uses none of the others. Mirror this clause in `compat.py`'s
      docstring beside the "read the target from the call site" note, so a future
      reader debugging a Bedrock-shaped false positive has it on the record.
-  4. `compatible` iff every forwarded name is a parameter of that signature, or
+  4. **A splat-only call site fails closed.** Collect the site's literal keyword
+     names — `forwarded = [k.arg for k in site.keywords if k.arg]` — and, *before*
+     the subset test in step 5:
+
+     ```python
+     if not forwarded:
+         return CompatResult(
+             compatible=False,
+             loader_ok=True,
+             reason=(
+                 "self.client.*.create call site in pydantic_ai.models.anthropic "
+                 f"forwards no literal keywords (splat-only: "
+                 f"{sum(1 for k in site.keywords if k.arg is None)} ** entries) "
+                 "— derivation cannot verify the signature"
+             ),
+             exc_type=None,
+         )
+     ```
+
+     This is the round-8 blocker and it is **distinct from step 2's count gate**:
+     on a site refactored to `self.client.beta.messages.create(**kwargs)` there
+     is still exactly one site, the path still resolves, and `getsource` is still
+     available — so none of the other four fail-closed cases fires, `forwarded`
+     is empty, and step 5's "every forwarded name is a parameter" is **vacuously
+     true**, returning `compatible=True` against the known-bad pair. Collapsing
+     an argument list into a splat is a routine refactor at the distance Step 2's
+     lane moves `pydantic-ai-slim` (25 minor versions). The
+     `temperature`/`top_p`/`top_k` shape assertions do **not** compensate: they
+     live in `tests/unit/test_llm_stack_compat.py` and never run at `/update`
+     verify or at bridge/worker startup, which is exactly Data Flow route 3 —
+     the follower machine this lane exists to protect. Without this gate the
+     predicate defeats the lane.
+  5. `compatible` iff every forwarded name is a parameter of that signature, or
      the signature has a `VAR_KEYWORD` param. Missing names go into `reason`
      verbatim.
 
@@ -655,10 +713,10 @@ The appetite re-label above is the concession taken instead.
   against it. The call site names its own target; read the target from the call
   site.
 
-  Introspection failures — `getsource` unavailable, zero `create` sites found,
-  **more than one `create` site found**, the attribute path unresolvable on the
-  client — return `compatible=False`
-  with the failure verbatim. A silently-passing predicate whose target moved is
+  Introspection failures — five cases, all returning `compatible=False` with the
+  failure verbatim: `getsource` unavailable, zero `create` sites found, **more
+  than one `create` site found**, the attribute path unresolvable on the client,
+  and **the single site forwarding no literal keywords (splat-only)**. A silently-passing predicate whose target moved is
   the same failure as no gate. Guarding that fail-closed direction against
   false positives is what the break-glass override below is for.
 
@@ -693,7 +751,30 @@ The appetite re-label above is the concession taken instead.
   `os.environ.get("LLM_STACK_COMPAT_OVERRIDE")` **inside the function** (a
   module-scope read is blocked by `validate_no_module_scope_env.py`); the value
   `"healthy"` short-circuits to not-degraded after a
-  `logger.warning(<sentinel> + " OVERRIDDEN")`. The predicate introspects two
+  `logger.warning(<sentinel> + " OVERRIDDEN")`.
+
+  **The override branch must run the same marker clear the healthy branch runs**
+  (round-8 concern), gated on `proc` exactly as the write is:
+
+  ```python
+  if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy":
+      logger.warning(SENTINEL + " OVERRIDDEN")
+      if proc:
+          _marker_path(proc).unlink(missing_ok=True)
+      return False
+  ```
+
+  Without the clear, the override strands a permanent red marker in precisely
+  the scenario it exists for: a false positive degrades the fleet, the bridge
+  writes `data/llm-stack-degraded.bridge`, the operator sets the override and
+  restarts — and because the short-circuit happens *before* the predicate, no
+  future resolution can ever reach the healthy branch that clears. The board
+  stays red forever on a machine the operator has declared healthy, recoverable
+  only by a human `rm`. `missing_ok=True` keeps the clear a no-op for a process
+  that never wrote a marker; the `if proc:` guard preserves the rule that only
+  `bridge` and `worker` touch marker paths.
+
+  The predicate introspects two
   third-party internals upstream is free to rename — including in Step 2's
   lane, which moves `pydantic-ai-slim` 25 minor versions — and the fail-closed
   direction means a false positive raises at every non-harness call site on all
@@ -717,9 +798,30 @@ The appetite re-label above is the concession taken instead.
   capture and leave the standing `data/llm-stack-degraded` marker behind for a
   failure the gate just prevented — reaching this plan's own named "stuck-red
   dashboard equals no dashboard channel" mode through its happy path, and
-  alarming production twice during task 7. Asserted by a test: the CLI path on
-  an incompatible stack emits zero `capture_message` calls and creates no marker
-  file.
+  alarming production twice during task 7.
+
+  **How purity is asserted (round-8 concern: the marker clause was
+  unfalsifiable).** Since the round-7 rule is that `_resolve_degraded_flag`
+  writes a marker **only** when a `proc` is passed, and the CLI passes none, "the
+  CLI creates no marker" passes whether the CLI is pure or routes through the
+  resolver — a test that cannot fail, counted as coverage. The criterion is
+  therefore split in two, and the marker clause is dropped:
+
+  1. **In-process, discriminating:** call the CLI's JSON entry function directly
+     with `capture_message` monkeypatched to a counting stub on an incompatible
+     stack; assert the count is `0` **and** that `compat`'s memoized flag global
+     is still unresolved afterwards (`compat._DEGRADED is None`). The memo
+     assertion is the one that separates pure from impure, and it is only
+     available in-process.
+  2. **Subprocess, contract-only:** keep the `python -m agent.llm.compat --json`
+     run, but prove only what a parent can see — the child's stdout is
+     well-formed JSON carrying `compatible`, `loader_ok`, and both versions, and
+     its exit status matches. That is the out-of-process CLI contract, not a
+     purity claim.
+
+  "Creates no marker" is deleted as a purity assertion here and in task 7 leg
+  (a); where it is retained it is restated honestly as a consequence of the
+  writer rule (no caller passes `proc`), never as evidence of purity.
 - **Degraded flag + alert in the resolver** (see Failure Posture). Startup hooks
   in `bridge/telegram_bridge.py::main` and `worker/__main__.py` force early
   resolution; neither may exit on incompatibility.
@@ -735,7 +837,7 @@ The appetite re-label above is the concession taken instead.
 - **`hold`** — a held set is skipped by `auto_bump_deps`, recording
   `BumpResult(bumped=False, error=f"held: {set.hold}")` so `run.py`'s Step 3.5
   per-bump log (the block containing `"Smoke test passed after bump"`,
-  `run.py:1514` at `b87fb26de`) stays legible. This is how `anthropic` returns to the auto-bump *structure*
+  `run.py:1514` at the baseline commit) stays legible. This is how `anthropic` returns to the auto-bump *structure*
   without the first post-merge cron tick auto-executing the Step 2 upgrade
   (`anthropic 1.0.0` + `pydantic-ai-slim 2.35.0` would pass the gate and push
   fleet-wide, unattended). Step 2's lane removes the hold as its final act.
@@ -956,9 +1058,9 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   **The import half runs in a fresh interpreter subprocess with a
   raise-on-import shim dir on `PYTHONPATH`** — in-process (and under any
   `sys.modules` purge) it is a cache hit that passes unconditionally, which is
-  the round-7 blocker. The alert/typed halves stay in-process. Monkeypatch
-  `compat._MARKER_DIR` to `tmp_path` and assert the live `data/` glob is
-  unchanged across the file.
+  the round-7 blocker. The alert/typed halves stay in-process. The marker
+  redirect is supplied by the autouse `tests/conftest.py` fixture (see Failure
+  Posture) — no per-file monkeypatch and no per-file glob assertion.
 - [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): **the positive
   self-test — `check_llm_stack_compat().compatible is True` on the pinned pair**
   (the assertion whose absence produced the round-5 blocker); the derived kwarg
@@ -967,13 +1069,21 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   path; incompatible with verbatim reason on a simulated bad signature;
   `loader_ok is False` on loader ImportError; introspection-failure (zero
   `create` sites, **two `create` sites** fed from a synthetic module source,
-  unresolvable path) → incompatible; local mode makes no network
-  call; **the
+  unresolvable path) → incompatible; **`test_splat_only_call_site_fails_closed`**
+  — a synthetic module source whose sole `create` call is
+  `self.client.beta.messages.create(**kwargs)` yields `compatible is False` with
+  the splat reason (round-8 blocker; same synthetic-source mechanism the two-site
+  case uses); local mode makes no network call; **the
   predicate is pure** — `check_llm_stack_compat` on an incompatible stack emits
-  zero `capture_message` calls, writes no marker file, and leaves the memoized
-  degraded flag unresolved; **the `--json` CLI path is pure by the same
-  assertions** (run it in a subprocess against an incompatible stack and assert
-  no marker file appears at the resolved path).
+  zero `capture_message` calls and leaves the memoized degraded flag unresolved;
+  **the CLI is pure, asserted in-process** — call the `--json` entry function
+  directly with a counting `capture_message` stub, assert zero calls **and**
+  `compat._DEGRADED is None` afterwards; **the CLI contract out-of-process** —
+  the subprocess run's stdout is well-formed JSON carrying `compatible`,
+  `loader_ok`, and both versions, with a matching exit status (no marker
+  assertion: it cannot fail, per the round-8 concern). The subprocess case
+  receives the marker-directory redirect explicitly through the child's
+  environment, since the autouse in-process fixture cannot reach it.
 - [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): alert
   fires **while `run_typed` raises** (independence proof); raising
   `capture_message` suppresses nothing else; per-process marker written on
@@ -986,10 +1096,16 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `loader_ok` true + `compatible` false makes `run_typed` raise while
   `run_typed_local` completes against a stubbed `FunctionModel`; **override** —
   `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits the resolver, emits the
-  OVERRIDDEN warning, and is ignored by the pure predicate and the `--json` CLI.
-  All marker-touching cases monkeypatch `compat._MARKER_DIR` to `tmp_path`, with
-  a live-`data/`-glob-unchanged assertion, plus one case asserting the *default*
-  `_MARKER_DIR` equals the directory `ui/app.py` reads.
+  OVERRIDDEN warning, and is ignored by the pure predicate and the `--json` CLI;
+  **override clears the marker** (round-8 concern) — resolve degraded with
+  `proc="bridge"` so the marker is written, reset the memo, set
+  `LLM_STACK_COMPAT_OVERRIDE=healthy`, resolve again with `proc="bridge"`, and
+  assert the marker is gone and the OVERRIDDEN warning was emitted.
+  Marker redirection comes from the autouse `tests/conftest.py` fixture, so no
+  case monkeypatches `_MARKER_DIR` by hand and none carries a glob-unchanged
+  assertion. One case still asserts the *default* — resolving
+  `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly (never
+  the patched global) and comparing it to `Path(ui.app.__file__).parent.parent / "data"`.
 - [ ] `tests/unit/test_dashboard_llm_degraded.py` — ADD (new file): the
   dashboard read side. With a marker written (versions + `exc_type`),
   `dashboard_json()` returns a truthy degraded field carrying both versions and
@@ -997,8 +1113,8 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   markers it names both; with a marker present but unreadable the call still
   returns 200 and does not raise, proving the `except OSError` leg. Without
   this, the lane can go fully green with `dashboard_json` never wired. Markers
-  are written under a redirected directory, not the live `data/`, with the
-  glob-unchanged assertion.
+  are written under the directory the autouse `tests/conftest.py` fixture
+  redirects to, never the live `data/`.
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
   — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
 - [ ] `tests/integration/test_remote_update.py::test_verify_runs_compat_check_without_bump`
@@ -1033,6 +1149,12 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `agent/llm/`, state that in the build report rather than assuming.
 - [ ] `tests/unit/test_settings.py` — UPDATE: cover the new `local_typed_hard_s` field and its
   `TIMEOUTS__LOCAL_TYPED_HARD_S` override, matching how its siblings are tested.
+- [ ] `tests/conftest.py` — UPDATE: add the `autouse=True`, function-scoped
+  `_redirect_llm_marker_dir` fixture doing
+  `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`.
+  This replaces the per-file redirect convention across all four
+  degraded-driving test files (round-8 concern) — `raising=False` keeps it inert
+  for every test that never imports `compat`.
 - [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the
   gate's pytest phase.
 
@@ -1307,9 +1429,15 @@ bridge command. But the runtime's boot and failure presentation change:
   logs and appends a warning, and `extract_update_warnings` surfaces it. Both
   resolved versions print on every run, pass or fail, from a dedicated
   call-site block (not from `detail` in the generic loop, which never reads it).
-- [ ] The `--json` CLI calls the **pure** predicate: on an incompatible stack it
-  emits zero `capture_message` calls and creates no `data/llm-stack-degraded`
-  marker. Only `_resolve_degraded_flag()` alerts.
+- [ ] The `--json` CLI calls the **pure** predicate, asserted where the assertion
+  can fail: **in-process**, calling the CLI's JSON entry function on an
+  incompatible stack with a counting `capture_message` stub emits zero calls
+  **and** leaves `compat._DEGRADED` unresolved (`None`). The "creates no marker"
+  clause is deleted — under the round-7 writer rule no caller passes `proc`, so
+  it holds whether the CLI is pure or not. **Out-of-process**, the subprocess run
+  proves only the CLI contract: well-formed JSON on stdout carrying
+  `compatible`/`loader_ok`/both versions, with a matching exit status. Only
+  `_resolve_degraded_flag()` alerts.
 - [ ] On an incompatible stack, bridge and worker **start**, and an inbound
   Telegram message still enqueues an AgentSession.
 - [ ] **The alert fires in a test where `run_typed` raises** (independence
@@ -1323,12 +1451,20 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] **Only `bridge` and `worker` write markers**: a resolver called without a
   `proc` emits Sentry and the sentinel log but creates no marker file, so no
   one-shot can strand a permanent red. No pid-suffixed markers exist.
-- [ ] **The suite does not pollute the operator's board**: every marker-writing
-  test redirects `_MARKER_DIR`, and each of the three new test files asserts the
-  live `data/llm-stack-degraded*` glob is unchanged across the test.
+- [ ] **The suite does not pollute the operator's board, by mechanism**: the
+  redirect is an `autouse=True` fixture in `tests/conftest.py`
+  (`monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`),
+  not a convention each file re-implements; no test file carries a
+  hand-written `_MARKER_DIR` monkeypatch or a live-glob assertion, and the
+  subprocess CLI case receives the redirect through the child's environment.
 - [ ] **The predicate fails closed on an ambiguous call site**: `len(sites) != 1`
   (not just zero) returns `compatible=False` naming the count and the found
   paths; covered by a synthetic two-site test.
+- [ ] **The predicate fails closed on a splat-only call site**: a single
+  `create` site forwarding no literal keywords (e.g.
+  `self.client.beta.messages.create(**kwargs)`) returns `compatible=False`
+  naming the splat-entry count — never `True` by a vacuous subset test. Covered
+  by `test_splat_only_call_site_fails_closed` against a synthetic module source.
 - [ ] **`/dashboard.json` actually renders it**: with a marker present,
   `dashboard_json()` returns a truthy degraded field carrying both versions and
   the degraded process; with none, the healthy value; with an unreadable marker,
@@ -1345,7 +1481,10 @@ bridge command. But the runtime's boot and failure presentation change:
   completes. Both raise when the loader fails.
 - [ ] `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits `_resolve_degraded_flag()`
   with a sentinel OVERRIDDEN warning, and is ignored by the pure predicate, the
-  `--json` CLI, and the auto-bump `llm` gate.
+  `--json` CLI, and the auto-bump `llm` gate. **The override branch also clears
+  the caller's own marker** when a `proc` was passed, so it cannot strand a
+  permanent red on a machine the operator has declared healthy — asserted by
+  writing a bridge marker, resetting the memo, then resolving under the override.
 - [ ] `LOCAL_TYPED_HARD_TIMEOUT` is gone from `agent/llm/__init__.py`'s
   `__all__`, replaced by `TIMEOUTS__LOCAL_TYPED_HARD_S`, with
   `docs/features/nonharness-llm-wrapper.md:56` corrected.
@@ -1432,7 +1571,7 @@ bridge command. But the runtime's boot and failure presentation change:
 - Write the contract test's import half now, **in a fresh interpreter
   subprocess with a raise-on-import shim dir on `PYTHONPATH`** — never
   in-process, and never via a `sys.modules` purge. In-process the assertion
-  cannot fail: 31 test files already import `bridge.telegram_bridge` (→
+  cannot fail: existing test files already import `bridge.telegram_bridge` (→
   `bridge.routing` → `agent.llm`), so under xdist both imports are cache hits.
   See the Solution bullet for the exact subprocess/shim shape and why the purge
   variant is rejected. The alert/typed-exception half lands with task 4 and may
@@ -1474,11 +1613,24 @@ bridge command. But the runtime's boot and failure presentation change:
   keys are absent from `create` on the pinned pair — the round-5 blocker) and
   **do not** hardcode `anthropic.resources.messages.AsyncMessages` (non-beta;
   missing four kwargs the call site passes). See the Solution bullet for the
-  four-step algorithm and the executed evidence.
+  five-step algorithm and the executed evidence.
 - **Fail closed on `len(sites) != 1`**, not just on zero sites — never fall
   through to `sites[0]`. The reason names the count and the found paths
   verbatim. Test the multi-site case beside the zero-site case, feeding a
   synthetic module source with two `create` calls.
+- **Fail closed on a splat-only site** (round-8 blocker). After collecting the
+  single site's literal keywords (`forwarded = [k.arg for k in site.keywords if k.arg]`)
+  and **before** the subset test, `if not forwarded:` return
+  `compatible=False` with a reason naming the splat-entry count
+  (`sum(1 for k in site.keywords if k.arg is None)`). This is a *separate* gate
+  from the count gate: with one splat-only site the count is 1, the path
+  resolves, `getsource` works, `forwarded` is empty, and the subset test is
+  vacuously true — `compatible=True` against the known-bad pair, on the exact
+  Data Flow route 3 this lane exists to close. Add
+  `test_splat_only_call_site_fails_closed` fed a synthetic module source whose
+  sole `create` call is `self.client.beta.messages.create(**kwargs)`. Do **not**
+  treat the `temperature`/`top_p`/`top_k` shape assertions as the control here:
+  they are suite-only and never run at `/update` verify or service startup.
 - Record in the module docstring **why the target resolves against
   `anthropic.AsyncAnthropic`**: the call site names only the attribute path, and
   `pydantic_ai` types `self.client` as the `AsyncAnthropicClient` union
@@ -1501,8 +1653,15 @@ bridge command. But the runtime's boot and failure presentation change:
   not alarm production for a stack the gate is about to roll back. Import
   nothing from `scripts/`; reach the stack only through the loader, inside
   function bodies.
-- Test the purity of both the function and the CLI path: zero `capture_message`
-  calls, no marker file, flag unresolved, on an incompatible stack.
+- Test purity where the test can actually fail: **in-process**, call the
+  function and the CLI's JSON entry directly on an incompatible stack with a
+  counting `capture_message` stub — zero calls **and** `compat._DEGRADED is None`
+  afterwards. Do **not** assert "no marker file" as purity evidence: no caller
+  passes `proc`, so that assertion holds either way (round-8 concern). Keep a
+  subprocess run only to prove the out-of-process CLI contract (well-formed JSON
+  with `compatible`/`loader_ok`/both versions, matching exit status), passing the
+  marker-directory redirect through the child's environment — which requires
+  `_marker_path()` to read that override lazily inside the function.
 
 ### 4. Degraded flag, resolver-bound alert, startup hooks
 - **Task ID**: `build-degraded-posture`
@@ -1527,13 +1686,20 @@ bridge command. But the runtime's boot and failure presentation change:
   and the read side has no liveness filter, so pid markers strand permanent red.
 - **Marker directory is a module-level seam**: `_MARKER_DIR = Path(__file__).resolve().parents[2] / "data"`
   at module scope, with all writes/clears through `_marker_path(proc)`. Never
-  cwd-relative. Tests monkeypatch `_MARKER_DIR` to `tmp_path` — the three new
-  degraded-driving test files must **not** write into the live `data/` a
-  running bridge, worker, and dashboard share. Assert in the test that the
-  *default* `_MARKER_DIR` equals the directory `ui/app.py` reads
-  (`Path(__file__).parent.parent / "data"`), and add to each of the three files
-  an assertion that `list((repo / "data").glob("llm-stack-degraded*"))` is
-  unchanged across the test.
+  cwd-relative. **The redirect is enforced by mechanism, not per-file
+  convention** (round-8 concern): add an `autouse=True`, function-scoped fixture
+  to `tests/conftest.py` doing
+  `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`,
+  so no degraded-driving test can write into the live `data/` a running bridge,
+  worker, and dashboard share — including `tests/unit/test_llm_stack_compat.py`,
+  which the per-file convention had missed. Do **not** add per-file
+  `_MARKER_DIR` monkeypatches or per-file live-glob assertions. Keep one case
+  asserting the *default*, resolving
+  `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly (not
+  the patched global) and comparing it to `Path(ui.app.__file__).parent.parent / "data"`.
+  The subprocess CLI case, which an in-process fixture cannot reach, gets the
+  redirect through the child's environment via a lazily-read override inside
+  `_marker_path()`.
 - The resolver is the **only** alerting path; `check_llm_stack_compat` stays
   pure (task 3).
 - **Break-glass override**: read `LLM_STACK_COMPAT_OVERRIDE` **inside**
@@ -1541,6 +1707,14 @@ bridge command. But the runtime's boot and failure presentation change:
   `validate_no_module_scope_env.py`); `"healthy"` short-circuits to
   not-degraded after a `logger.warning(<sentinel> + " OVERRIDDEN")`. Not
   honoured by the pure predicate, the `--json` CLI, or the auto-bump gate.
+  **The override branch must clear this process's own marker before returning**
+  (`if proc: _marker_path(proc).unlink(missing_ok=True)`) — the short-circuit
+  happens before the predicate, so without it no future resolution can ever
+  reach the healthy branch's clear and the board stays red forever on a machine
+  the operator declared healthy (round-8 concern). Test: write the bridge marker
+  via a degraded resolution, reset the memo, set the override, resolve again
+  with `proc="bridge"`, assert the marker is gone and the OVERRIDDEN warning
+  fired.
 - `LLMStackIncompatible(LLMCallError)`. `run_typed` raises it when
   `not loader_ok or not compatible`; `run_typed_local` raises **only** when
   `not loader_ok` — an Anthropic signature break must not fall the Ollama
@@ -1620,8 +1794,11 @@ bridge command. But the runtime's boot and failure presentation change:
   `uv sync --all-extras`, invoke the gate subprocess **through
   `llm_gate_argv(venv_python)`** — the same helper the `llm` phase runner calls,
   never a hand-written command line; assert non-zero exit with
-  `unexpected keyword argument 'temperature'`. Also assert the run left **no**
-  `data/llm-stack-degraded` marker behind (the CLI calls the pure predicate).
+  `unexpected keyword argument 'temperature'`, and that stdout is well-formed
+  JSON carrying `compatible`/`loader_ok`/both versions. The "left no marker
+  behind" clause is **dropped** as purity evidence (round-8 concern): the CLI
+  passes no `proc`, so under the writer rule it writes none whether it is pure
+  or not. CLI purity is asserted in-process in task 3.
 - **Leg (b), resolution-stubbed:** monkeypatch `get_pypi_latest` to the
   known-bad pair, temporarily clear the hold in the fixture, run
   `auto_bump_deps`, assert `rolled_back is True` and both pins restored.
@@ -1671,7 +1848,8 @@ Rows assert *declarations and executed paths*, not file text.
 | Held set is skipped and legible | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "held_set" -q` | exit code 0 |
 | Verify runs the check unconditionally **and loudly** (non-empty `.error`, surfaced by `extract_update_warnings`) | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
 | The `llm` phase and the manual gate invocation share one argv construction | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_phase_argv" -q` | exit code 0 |
-| The `--json` CLI is pure — no alert, no marker | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
+| The `--json` CLI is pure — zero `capture_message` calls **and** the memoized flag left unresolved, asserted in-process | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
+| The marker redirect is a mechanism, not a per-file convention | `.venv/bin/python -c "s=open('tests/conftest.py').read();assert '_MARKER_DIR' in s and 'autouse=True' in s"` | exit code 0 |
 | The predicate reports the pinned pair **compatible** (the round-5 blocker's red state) | `.venv/bin/python -c "from agent.llm.compat import check_llm_stack_compat as c;r=c();assert r.compatible and r.loader_ok, r.reason"` | exit code 0 |
 | The derived kwarg set comes from the call site, not the settings TypedDict | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "derived or forwarded" -q` | exit code 0 (asserts `temperature`/`top_p`/`top_k` present, no `anthropic_`-prefixed name) |
 | `run_typed_local` is not gated on the Anthropic signature axis | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "two_axis or loader_ok" -q` | exit code 0 |
@@ -1681,6 +1859,8 @@ Rows assert *declarations and executed paths*, not file text.
 | The import-safety contract runs out-of-process (cannot pass on a `sys.modules` cache hit) | `.venv/bin/python -c "s=open('tests/unit/test_llm_import_safety.py').read();assert 'subprocess' in s and 'PYTHONPATH' in s"` | exit code 0 |
 | Only `bridge`/`worker` write markers (no-`proc` caller writes none) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "no_proc or marker_writer" -q` | exit code 0 |
 | Ambiguous `create` call site fails closed (`len(sites) != 1`) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "multi_site or introspection" -q` | exit code 0 |
+| Splat-only `create` call site fails closed (no vacuous pass) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "splat_only" -q` | exit code 0 |
+| Break-glass override clears its own marker | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "override_clears_marker" -q` | exit code 0 |
 | The old env knob is retired from the package surface | `.venv/bin/python -c "import agent.llm as m;assert 'LOCAL_TYPED_HARD_TIMEOUT' not in m.__all__ and not hasattr(m,'LOCAL_TYPED_HARD_TIMEOUT');from config.settings import settings;assert settings.timeouts.local_typed_hard_s"` | exit code 0 |
 | Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
@@ -1709,12 +1889,12 @@ names the lens, not a separate agent.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness (Skeptic) | The four-step derivation fails **open**, not closed, when the `create` call site forwards by splat instead of literal keywords. Executed on the pinned pair: the AST walk finds exactly one `self.client.beta.messages.create` site carrying 24 literal kwarg names, no `**` splat, and step 4 yields `missing: []` → `compatible: True`. But step 4's test is "every forwarded name is a parameter of the signature" — on a site refactored to `self.client.beta.messages.create(**kwargs)` the forwarded set is empty and that test is **vacuously true**, returning `compatible=True` against any stack including the known-bad pair. One site, resolvable path, `getsource` available: none of the four enumerated fail-closed cases fires. The plan's own break-glass rationale says the predicate "introspects two third-party internals upstream is free to rename — including in Step 2's lane, which moves `pydantic-ai-slim` 25 minor versions", and collapsing an argument list into a splat is a routine refactor at that distance. The only compensating control — the shape assertions that the derived set contains `temperature`/`top_p`/`top_k` — lives solely in `tests/unit/test_llm_stack_compat.py`, so it covers the CI/dev path and **not** Data Flow route 3: a follower machine that pulls a bad pin runs `/update` verify and bridge/worker startup, which call the predicate and not the suite, and boots green on a broken stack. That is the exact route this lane exists to close, defeated by the lane's own predicate. | pending | Add the empty-forwarded-set case as a fifth explicit fail-closed gate. After collecting the single site's keywords, before the subset test: `forwarded = [k.arg for k in site.keywords if k.arg]` then `if not forwarded: return CompatResult(compatible=False, loader_ok=True, reason=f"self.client.*.create call site in pydantic_ai.models.anthropic forwards no literal keywords (splat-only: {sum(1 for k in site.keywords if k.arg is None)} ** entries) — derivation cannot verify the signature", exc_type=None)`. This is distinct from the `len(sites) != 1` gate: the count is 1 and the path resolves, so that gate does not fire. Extend the Solution bullet's failure list from four cases to five, add a Success Criterion, and add `test_splat_only_call_site_fails_closed` in `tests/unit/test_llm_stack_compat.py` fed a synthetic module source whose sole `create` call is `self.client.beta.messages.create(**kwargs)` — the same synthetic-source mechanism the two-site case already uses. Do **not** rely on the `temperature`/`top_p`/`top_k` shape assertions for this: they are suite-only and never run at `/update` verify or at bridge/worker startup on a follower machine. |
-| CONCERN | Risk & Robustness (Operator) | The break-glass override strands a permanent red marker, in precisely the scenario it exists for. `_resolve_degraded_flag()` reads `LLM_STACK_COMPAT_OVERRIDE` and `"healthy"` short-circuits to not-degraded — short-circuiting **before** the predicate is evaluated, therefore before the "healthy resolution clears the marker" leg the plan makes load-bearing ("The marker must be cleared on a healthy resolution — a stuck-red dashboard equals no dashboard channel"). Sequence: a false positive degrades the fleet, the bridge writes `data/llm-stack-degraded.bridge`, the operator sets the override and restarts. The new process resolves not-degraded by override and never touches the marker; every subsequent resolution short-circuits the same way, so no future healthy resolution can ever clear it. The board stays red forever on a machine the operator has explicitly declared healthy, and the only recovery is a human `rm`. The plan names this failure mode and gives the clear leg its own test, but the override path bypasses that test's subject entirely. | pending | The override branch must run the same clear the healthy branch runs, gated on `proc` exactly as the write is: `if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy": logger.warning(SENTINEL + " OVERRIDDEN"); if proc: _marker_path(proc).unlink(missing_ok=True); return False`. `missing_ok=True` keeps it a no-op for a process that never wrote one, and the `if proc:` guard preserves the round-7 rule that only `bridge` and `worker` touch marker paths. Add a case to `tests/unit/test_llm_stack_degraded_start.py`: resolve degraded with `proc="bridge"` (marker written), reset the memo, set `LLM_STACK_COMPAT_OVERRIDE=healthy`, resolve again with `proc="bridge"`, assert the marker is gone and the OVERRIDDEN warning was emitted — under the `_MARKER_DIR` redirect, not the live `data/`. |
-| CONCERN | Risk & Robustness (Adversary) | Round 7's marker-writer restriction silently made the marker half of the CLI-purity guard **unfalsifiable**. Task 4 now specifies that `_resolve_degraded_flag(proc: str \| None = None)` "writes a marker **only** when `proc` is given", and the `--json` CLI is a one-shot that passes no `proc`. So a CLI that is fully **impure** — one routing through `_resolve_degraded_flag()` instead of the pure predicate — still writes no marker, and the assertion "creates no `data/llm-stack-degraded` marker" passes either way. The prescribed subprocess form makes it worse: from a parent process you cannot count `capture_message` calls inside a child, so in the subprocess variant the *only* checkable assertion is the vacuous one. Task 7 leg (a) carries the identical assertion with the identical parenthetical justification and is vacuous for the same reason. This is the round-7 blocker's own named defect class — "a test that cannot fail is worse than no test, because it is counted as coverage" — landing on the purity property the round-4 concern was raised to protect. | pending | Split the criterion. (1) In-process: call the CLI's JSON entry directly with `capture_message` monkeypatched to a counting stub and assert the count is 0 **and** that `compat`'s memoized flag global is still unresolved (e.g. `compat._DEGRADED is None`) after the call — this is the assertion that discriminates pure from impure, and it is unavailable in a subprocess. (2) Keep the subprocess run but change what it proves: the child's stdout is well-formed JSON carrying `compatible`/`loader_ok`/both versions and its exit status matches, i.e. the CLI contract works out-of-process at all. (3) Delete the "creates no marker" clause from the Success Criterion and from task 7 leg (a), or restate it honestly as "no marker is written because no caller passes `proc`" — a property of the round-7 writer rule, not evidence of CLI purity. |
-| CONCERN | Scope & Value | The suite-pollution guard is specified as a hand-replicated per-file convention, which is the shape this plan's own central argument rejects. `agent/llm/` gets an *enforcement mechanism* — one architectural test — precisely because "That single test is the invariant; consumer discipline is not". The marker seam gets the opposite: three named test files must each remember to `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)` and each must additionally carry its own live-`data/` glob-unchanged assertion, with nothing enforcing either. The gap is already visible in this plan: `tests/unit/test_llm_stack_compat.py` drives degraded resolutions (loader-ImportError cases, simulated-bad-signature cases, and a subprocess CLI run) but is **not** one of the three files required to redirect the seam or carry the glob assertion — so the one file whose subprocess cannot see a parent monkeypatch at all is also the one with no live-`data/` guard. | pending | Add to `tests/conftest.py` an `autouse=True`, function-scoped fixture doing `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)` — `raising=False` so it is inert until `compat.py` exists and for any test that never imports it. Then delete the per-file glob-unchanged instruction from task 4 and the three Test Impact rows, and keep the single case asserting the *default* — which must not read the patched global: resolve `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly and compare to `Path(ui.app.__file__).parent.parent / "data"`. An in-process fixture cannot help the subprocess CLI case in `test_llm_stack_compat.py`; pass the redirect explicitly to the child, which requires `_marker_path()` to read an override **lazily inside the function** (a module-scope `os.environ.get` is blocked by `validate_no_module_scope_env.py`). |
-| NIT | History & Consistency (Archaeologist) | Both grep-derived counts the plan cites as evidence are wrong, and one omits a materially interesting site. There are **six** module-scope consumers of `agent.llm`, not five: `scripts/nightly_regression_tests.py:97` does `from agent.llm.wrapper import run_typed` at column 0, missed because the plan's grep matched only `from agent.llm import`. That sixth site is the nightly regression detector — the launchd job that surfaced the 2026-08-24 incident — so under today's module-scope imports an ImportError kills the thing that is supposed to notice, which strengthens the plan's argument rather than weakening it. Separately, "31 test files already import `bridge.telegram_bridge`" is not reproducible: 6 files import it at module scope, 21 reference it in any import form. The xdist cache-hit argument holds at any count above zero, so the number is decorative and only creates a maintenance liability. | pending | Reword Problem to "`agent.llm` has module-scope consumers in `bridge/routing.py:21`, `bridge/job_router.py:46`, `bridge/agent_catchup.py:59`, `agent/memory_extraction.py:34`, `tools/email_cs/triage.py:21`, and `scripts/nightly_regression_tests.py:97` (the nightly detector itself)" and update the Freshness table row to match. In the Solution import-safety bullet and task 2, replace "31 existing test files already import `bridge.telegram_bridge`" with "existing test files already import `bridge.telegram_bridge`" — the argument is that *any* prior import in the same xdist worker makes both statements cache hits, and it does not depend on a count. Reproducing greps: `grep -rnE '^(from agent\.llm(\.[a-z_]+)? import\|import agent\.llm)' --include='*.py' agent bridge tools scripts worker ui models config utils monitoring` and `grep -rlE '^(from bridge\.telegram_bridge import\|import bridge\.telegram_bridge)' tests/ \| wc -l`. |
-| NIT | History & Consistency (Consistency Auditor) | The stated Freshness baseline `ce54eb3d6` is two commits behind `main`'s tip. `main` is now at `93fb790ef` (this plan's own round-7 revision), with `5b35d5212` between. Independently re-checked with `git log --name-only ce54eb3d6..93fb790ef`: both intervening commits touch only `docs/plans/*.md`, so every premise in the Freshness table carries forward unchanged and this is a labelling defect, not a stale-claim defect. Same class as the round-5 baseline nit that round 6 fixed by committing to a single stated baseline — the discipline needs re-applying each round, not only once. | pending | Change the header to "**Baseline commit:** `93fb790ef` — `main`'s tip at round 8 (2026-09-02)" and keep the existing sentence pattern: every commit between `ce54eb3d6` and `93fb790ef` touches only `docs/plans/*.md` (verified by `git log --name-only`), so no tracked source file has moved. Do not restate `ce54eb3d6` alongside it — one baseline per round, per the round-6 fix. |
+| BLOCKER | Risk & Robustness (Skeptic) | The four-step derivation fails **open**, not closed, when the `create` call site forwards by splat instead of literal keywords. Executed on the pinned pair: the AST walk finds exactly one `self.client.beta.messages.create` site carrying 24 literal kwarg names, no `**` splat, and step 4 yields `missing: []` → `compatible: True`. But step 4's test is "every forwarded name is a parameter of the signature" — on a site refactored to `self.client.beta.messages.create(**kwargs)` the forwarded set is empty and that test is **vacuously true**, returning `compatible=True` against any stack including the known-bad pair. One site, resolvable path, `getsource` available: none of the four enumerated fail-closed cases fires. The plan's own break-glass rationale says the predicate "introspects two third-party internals upstream is free to rename — including in Step 2's lane, which moves `pydantic-ai-slim` 25 minor versions", and collapsing an argument list into a splat is a routine refactor at that distance. The only compensating control — the shape assertions that the derived set contains `temperature`/`top_p`/`top_k` — lives solely in `tests/unit/test_llm_stack_compat.py`, so it covers the CI/dev path and **not** Data Flow route 3: a follower machine that pulls a bad pin runs `/update` verify and bridge/worker startup, which call the predicate and not the suite, and boots green on a broken stack. That is the exact route this lane exists to close, defeated by the lane's own predicate. | **Fixed (round 8)** — adopted as prescribed. The derivation is now five steps, with a new step 4 that collects the site's literal keywords and returns `compatible=False` naming the splat-entry count when the set is empty — placed before the subset test and explicitly distinct from the `len(sites) != 1` gate. Solution's failure enumeration goes from four cases to five, task 3 carries the gate as its own bullet with the reason the shape assertions cannot compensate (suite-only, absent from `/update` verify and service startup), Test Impact adds `test_splat_only_call_site_fails_closed` on a synthetic splat-only module source, and there is a Success Criterion plus a Verification row. | Add the empty-forwarded-set case as a fifth explicit fail-closed gate. After collecting the single site's keywords, before the subset test: `forwarded = [k.arg for k in site.keywords if k.arg]` then `if not forwarded: return CompatResult(compatible=False, loader_ok=True, reason=f"self.client.*.create call site in pydantic_ai.models.anthropic forwards no literal keywords (splat-only: {sum(1 for k in site.keywords if k.arg is None)} ** entries) — derivation cannot verify the signature", exc_type=None)`. This is distinct from the `len(sites) != 1` gate: the count is 1 and the path resolves, so that gate does not fire. Extend the Solution bullet's failure list from four cases to five, add a Success Criterion, and add `test_splat_only_call_site_fails_closed` in `tests/unit/test_llm_stack_compat.py` fed a synthetic module source whose sole `create` call is `self.client.beta.messages.create(**kwargs)` — the same synthetic-source mechanism the two-site case already uses. Do **not** rely on the `temperature`/`top_p`/`top_k` shape assertions for this: they are suite-only and never run at `/update` verify or at bridge/worker startup on a follower machine. |
+| CONCERN | Risk & Robustness (Operator) | The break-glass override strands a permanent red marker, in precisely the scenario it exists for. `_resolve_degraded_flag()` reads `LLM_STACK_COMPAT_OVERRIDE` and `"healthy"` short-circuits to not-degraded — short-circuiting **before** the predicate is evaluated, therefore before the "healthy resolution clears the marker" leg the plan makes load-bearing ("The marker must be cleared on a healthy resolution — a stuck-red dashboard equals no dashboard channel"). Sequence: a false positive degrades the fleet, the bridge writes `data/llm-stack-degraded.bridge`, the operator sets the override and restarts. The new process resolves not-degraded by override and never touches the marker; every subsequent resolution short-circuits the same way, so no future healthy resolution can ever clear it. The board stays red forever on a machine the operator has explicitly declared healthy, and the only recovery is a human `rm`. The plan names this failure mode and gives the clear leg its own test, but the override path bypasses that test's subject entirely. | **Fixed (round 8)** — adopted as prescribed. The override branch now runs `if proc: _marker_path(proc).unlink(missing_ok=True)` before returning, recorded in the Solution break-glass bullet (with the code block and the strand-forever sequence), task 4, Test Impact, a Success Criterion, and a Verification row (`-k override_clears_marker`). The test writes a bridge marker by a degraded resolution, resets the memo, sets the override, resolves again with `proc="bridge"`, and asserts the marker is gone and the OVERRIDDEN warning fired. | The override branch must run the same clear the healthy branch runs, gated on `proc` exactly as the write is: `if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy": logger.warning(SENTINEL + " OVERRIDDEN"); if proc: _marker_path(proc).unlink(missing_ok=True); return False`. `missing_ok=True` keeps it a no-op for a process that never wrote one, and the `if proc:` guard preserves the round-7 rule that only `bridge` and `worker` touch marker paths. Add a case to `tests/unit/test_llm_stack_degraded_start.py`: resolve degraded with `proc="bridge"` (marker written), reset the memo, set `LLM_STACK_COMPAT_OVERRIDE=healthy`, resolve again with `proc="bridge"`, assert the marker is gone and the OVERRIDDEN warning was emitted — under the `_MARKER_DIR` redirect, not the live `data/`. |
+| CONCERN | Risk & Robustness (Adversary) | Round 7's marker-writer restriction silently made the marker half of the CLI-purity guard **unfalsifiable**. Task 4 now specifies that `_resolve_degraded_flag(proc: str \| None = None)` "writes a marker **only** when `proc` is given", and the `--json` CLI is a one-shot that passes no `proc`. So a CLI that is fully **impure** — one routing through `_resolve_degraded_flag()` instead of the pure predicate — still writes no marker, and the assertion "creates no `data/llm-stack-degraded` marker" passes either way. The prescribed subprocess form makes it worse: from a parent process you cannot count `capture_message` calls inside a child, so in the subprocess variant the *only* checkable assertion is the vacuous one. Task 7 leg (a) carries the identical assertion with the identical parenthetical justification and is vacuous for the same reason. This is the round-7 blocker's own named defect class — "a test that cannot fail is worse than no test, because it is counted as coverage" — landing on the purity property the round-4 concern was raised to protect. | **Fixed (round 8)** — adopted as prescribed, all three parts. The purity criterion is split: in-process, the CLI's JSON entry is called directly with a counting `capture_message` stub and asserts zero calls **and** `compat._DEGRADED is None`; the subprocess run is retained but proves only the out-of-process CLI contract (well-formed JSON with `compatible`/`loader_ok`/both versions, matching exit status). The "creates no marker" clause is deleted from the Success Criterion, from task 3, from Test Impact, and from task 7 leg (a), with the reason recorded (no caller passes `proc`, so it holds either way under the round-7 writer rule). The Verification row is reworded to name the discriminating assertion. | Split the criterion. (1) In-process: call the CLI's JSON entry directly with `capture_message` monkeypatched to a counting stub and assert the count is 0 **and** that `compat`'s memoized flag global is still unresolved (e.g. `compat._DEGRADED is None`) after the call — this is the assertion that discriminates pure from impure, and it is unavailable in a subprocess. (2) Keep the subprocess run but change what it proves: the child's stdout is well-formed JSON carrying `compatible`/`loader_ok`/both versions and its exit status matches, i.e. the CLI contract works out-of-process at all. (3) Delete the "creates no marker" clause from the Success Criterion and from task 7 leg (a), or restate it honestly as "no marker is written because no caller passes `proc`" — a property of the round-7 writer rule, not evidence of CLI purity. |
+| CONCERN | Scope & Value | The suite-pollution guard is specified as a hand-replicated per-file convention, which is the shape this plan's own central argument rejects. `agent/llm/` gets an *enforcement mechanism* — one architectural test — precisely because "That single test is the invariant; consumer discipline is not". The marker seam gets the opposite: three named test files must each remember to `monkeypatch.setattr(compat, "_MARKER_DIR", tmp_path)` and each must additionally carry its own live-`data/` glob-unchanged assertion, with nothing enforcing either. The gap is already visible in this plan: `tests/unit/test_llm_stack_compat.py` drives degraded resolutions (loader-ImportError cases, simulated-bad-signature cases, and a subprocess CLI run) but is **not** one of the three files required to redirect the seam or carry the glob assertion — so the one file whose subprocess cannot see a parent monkeypatch at all is also the one with no live-`data/` guard. | **Fixed (round 8)** — adopted as prescribed. The redirect moves into `tests/conftest.py` as an `autouse=True`, function-scoped fixture (`monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`), which also covers `tests/unit/test_llm_stack_compat.py` — the file the per-file convention had missed. The per-file monkeypatch instruction and every per-file glob-unchanged assertion are deleted from task 4 and the Test Impact rows; the default-path case remains and now resolves `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly rather than reading the patched global. The subprocess CLI case receives the redirect through the child's environment via a lazily-read override inside `_marker_path()`. New Test Impact row for `tests/conftest.py`, a reworded Success Criterion, and a Verification row asserting the fixture exists. | Add to `tests/conftest.py` an `autouse=True`, function-scoped fixture doing `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)` — `raising=False` so it is inert until `compat.py` exists and for any test that never imports it. Then delete the per-file glob-unchanged instruction from task 4 and the three Test Impact rows, and keep the single case asserting the *default* — which must not read the patched global: resolve `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly and compare to `Path(ui.app.__file__).parent.parent / "data"`. An in-process fixture cannot help the subprocess CLI case in `test_llm_stack_compat.py`; pass the redirect explicitly to the child, which requires `_marker_path()` to read an override **lazily inside the function** (a module-scope `os.environ.get` is blocked by `validate_no_module_scope_env.py`). |
+| NIT | History & Consistency (Archaeologist) | Both grep-derived counts the plan cites as evidence are wrong, and one omits a materially interesting site. There are **six** module-scope consumers of `agent.llm`, not five: `scripts/nightly_regression_tests.py:97` does `from agent.llm.wrapper import run_typed` at column 0, missed because the plan's grep matched only `from agent.llm import`. That sixth site is the nightly regression detector — the launchd job that surfaced the 2026-08-24 incident — so under today's module-scope imports an ImportError kills the thing that is supposed to notice, which strengthens the plan's argument rather than weakening it. Separately, "31 test files already import `bridge.telegram_bridge`" is not reproducible: 6 files import it at module scope, 21 reference it in any import form. The xdist cache-hit argument holds at any count above zero, so the number is decorative and only creates a maintenance liability. | **Fixed (round 8)** — both counts corrected, re-grepped at the baseline. Problem and the Freshness table now read **six** module-scope consumers including `scripts/nightly_regression_tests.py:97`, with the point the finding makes (an ImportError kills the nightly detector that is supposed to notice) carried in the Problem bullet, and the Freshness row records the corrected grep that catches the submodule import form. The "31 existing test files" count is replaced by "existing test files" in both the Solution import-safety bullet and task 2 — the xdist cache-hit argument holds at any count above zero. | Reword Problem to "`agent.llm` has module-scope consumers in `bridge/routing.py:21`, `bridge/job_router.py:46`, `bridge/agent_catchup.py:59`, `agent/memory_extraction.py:34`, `tools/email_cs/triage.py:21`, and `scripts/nightly_regression_tests.py:97` (the nightly detector itself)" and update the Freshness table row to match. In the Solution import-safety bullet and task 2, replace "31 existing test files already import `bridge.telegram_bridge`" with "existing test files already import `bridge.telegram_bridge`" — the argument is that *any* prior import in the same xdist worker makes both statements cache hits, and it does not depend on a count. Reproducing greps: `grep -rnE '^(from agent\.llm(\.[a-z_]+)? import\|import agent\.llm)' --include='*.py' agent bridge tools scripts worker ui models config utils monitoring` and `grep -rlE '^(from bridge\.telegram_bridge import\|import bridge\.telegram_bridge)' tests/ \| wc -l`. |
+| NIT | History & Consistency (Consistency Auditor) | The stated Freshness baseline `ce54eb3d6` is two commits behind `main`'s tip. `main` is now at `93fb790ef` (this plan's own round-7 revision), with `5b35d5212` between. Independently re-checked with `git log --name-only ce54eb3d6..93fb790ef`: both intervening commits touch only `docs/plans/*.md`, so every premise in the Freshness table carries forward unchanged and this is a labelling defect, not a stale-claim defect. Same class as the round-5 baseline nit that round 6 fixed by committing to a single stated baseline — the discipline needs re-applying each round, not only once. | **Fixed (round 8)** — the Freshness header now reads `93fb790ef` (`main`'s tip at round 8) as the single baseline, with the same sentence pattern: every commit between it and the tip at this revision touches only `docs/plans/*.md` (verified by `git log --name-only`), so no tracked source file has moved. `ce54eb3d6` is not restated alongside it. One further body site carrying a stale inline SHA (`run.py:1514` at `b87fb26de`) is reworded to "at the baseline commit", so the one-baseline-per-round discipline holds across the whole document, not just the header. | Change the header to "**Baseline commit:** `93fb790ef` — `main`'s tip at round 8 (2026-09-02)" and keep the existing sentence pattern: every commit between `ce54eb3d6` and `93fb790ef` touches only `docs/plans/*.md` (verified by `git log --name-only`), so no tracked source file has moved. Do not restate `ce54eb3d6` alongside it — one baseline per round, per the round-6 fix. |
 
 Structural checks all pass. Required sections present and substantive (Documentation carries `docs/features/llm-stack-compat-gate.md` as a checkbox path; Update System addresses `scripts/update/` and records that no Popoto migration applies; Agent Integration addresses the runtime surface and the absence of an MCP entry; Test Impact lists UPDATE/ADD dispositions). Task numbering 1-9 is contiguous, every `Depends On` resolves to a declared Task ID, the graph is acyclic, and every task carries a `Validates`. Every cited file path exists except the six intentionally-new ones. Every `file:line` reference in the Freshness table was re-verified by execution at `93fb790ef` and **all hold exactly**: `wrapper.py:44-50`, `anthropic_client.py:44`, `telegram_bridge.py:55`/`:80`/`:130`/`:1203`, `deps.py:250`/`:277`/`:329`/`:391`/`:414`/`:463` (`AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]`), `run.py:1358`/`:1485`/`:1491`/`:1493`/`:1514`/`:1907-1909`/`:2636`/`:2673-2684` (the `valor_tools` loop's non-gated branch at `:2683-2684` logs and calls `_append_warning`; `:2647` is the *system_tools* loop's identical guard, a near-miss a builder should not confuse), `verify.py:1225-1228`, `ui/app.py:373`/`:376`/`:511`/`:907`, `pyproject.toml:12`, `agent/llm/__init__.py:14`/`:26`, `docs/features/nonharness-llm-wrapper.md:56`. `scripts.scan_module_scope_env.find_module_scope_env_calls` returns exactly one `EnvCall` for `agent/llm/wrapper.py`, at `:167`, so that Verification row is correctly red on main. The `! grep -q "import check" .claude/skills/update/SKILL.md` anti-row targets exactly one line, `SKILL.md:70`, inside `### Auto-Bump Critical Dependencies`. The round-6/7 predicate algorithm was re-executed end to end: one `self.client.beta.messages.create` site carrying exactly the 24 literal kwargs enumerated, attribute path `client.beta.messages` resolving off `anthropic.AsyncAnthropic(api_key="x")`, `missing == []`, `compatible: True` on `anthropic 0.125.0` + `pydantic-ai-slim 2.9.0`; measured cost 0.553s total of which 0.526s is the stack import and 26ms the `getsource` + `ast.parse` + signature work, so "sub-second, no network" holds. The round-7 subprocess shim mechanism was executed and reproduces its own red state: baseline `import agent.llm, bridge.telegram_bridge` succeeds, and with a raise-on-import shim dir on `PYTHONPATH` it fails at `agent/llm/wrapper.py:44`. The degraded-intake acceptance property was checked against production code rather than assumed: `bridge/routing.py::classify_work_request` wraps `_classify_work_request_llm` in `except Exception` and defaults to `ClassificationType.QUESTION` (`:1052-1060`), so an `LLMStackIncompatible` on the intake path does not drop the message.
 

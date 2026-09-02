@@ -297,7 +297,7 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
 7. **`session_type` is reachable on the relay path for one query.** `bridge/telegram_relay.py`
    already runs `AgentSession.query.filter(session_id=session_id)` in `_record_sent_message`
    (`:655`), `_record_relay_sent_draft` (`:679`) and `_bind_outbound_message_to_job` (`:258`), and
-   `session_type` is a first-class `KeyField` on the model (`models/agent_session.py:156`). So the
+   `session_type` is a first-class `KeyField` on the model (`models/agent_session.py`). So the
    eng-only gate costs one existing-shaped lookup, not a new plumbing path.
    *Informs:* Task 3 (`bridge/poll_gating.py`) rather than threading `session_type` through the
    outbox payload, which would let a stale payload outlive a session's real type.
@@ -480,16 +480,31 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
    **first-voter-wins** boundary, and it is deliberate: the poll exists to unblock one agent, not to
    take a vote of the room.
 5. **`resolve_answer_target(session_id)` + branch** (new `bridge/answer_routing.py`) — the
-   side-effect-free status ladder factored out of `bridge/telegram_bridge.py:1799-1866`, returning
-   `LIVE` / `PENDING` / `LIVE_GUARD` / `COMPLETED` / `NONE`. Steer kinds →
-   `push_steering_message`. `COMPLETED` → `resume_completed_session(...)`, the dispatch block
-   factored out of `~:2051-2124`, called with the poll's own `msg_id` and no reply chain. `NONE` →
-   log and return. See the Technical Approach for the full signatures and the per-branch contract.
-6. **`agent/steering.py:176 push_steering_message(session_id, text, sender, room_id=...)`** — the
-   sole inbox. `room_id` is derived by the caller via `models.room.room_id_for_session`; omitting it
-   silently downgrades the write to the legacy key (see Technical Approach).
-7. **Worker turn boundary** — `runner.py:1290 _drain_steering_boundary()` merges the steer into
-   the next `claude --resume` turn's user message.
+   side-effect-free status ladder factored out of `bridge/telegram_bridge.py`'s reply-to steering
+   ladder (locate by symbol — start at `_steering_session_enqueued = False`), returning
+   `LIVE` / `PENDING` / `LIVE_GUARD` / `COMPLETED` / `NONE`.
+
+   **`COMPLETED` is the mainline for this feature, not an edge case.** `/ask-me` ends the turn on
+   the `needs_human` edge, and `PM_NEEDS_HUMAN` is declared clean **and** wrap-up-eligible in
+   `agent/session_runner/router.py` (`("pm_needs_human", True, True, False)`), so
+   `_is_non_clean_runner_exit` is False and `_runner_final_status` (`agent/session_executor.py`)
+   finalizes the AgentSession `"completed"` as soon as the asking turn ends. The human is then
+   given up to `POLL_PROBE_TAP_WAIT_S` (default 1800 s) to tap. **By the time nearly every real tap
+   lands, the asking session is already `completed`.** So the branch that ships in production is
+   `COMPLETED` → `resume_completed_session(...)` — the dispatch block factored out of the reply-to
+   ladder's completed branch (locate by symbol), called with the poll's own `msg_id` (the
+   `claim_message` dedup key) and no reply chain. `dispatch_telegram_session` then resumes the
+   session with the chosen option text inside `_build_completed_resume_text`'s preamble.
+6. **`LIVE` / `PENDING` / `LIVE_GUARD` — the "tap landed inside a still-running turn" case.** A tap
+   fast enough to beat the turn's own end, or a session that came back to life between the send and
+   the tap, routes to `agent/steering.py::push_steering_message(session_id, text, sender,
+   room_id=...)` — the sole steering inbox. `room_id` is derived by the caller via
+   `models.room.room_id_for_session`; omitting it silently downgrades the write to the legacy key
+   (see Technical Approach). This path is real and must work, but it is the exception; it is
+   asserted by unit test rather than by the one end-to-end tap (Task 10a).
+7. **Worker turn boundary (steer path only)** — `runner.py::_drain_steering_boundary()` merges the
+   steer into the next `claude --resume` turn's user message. `NONE` → log and return; never create
+   a session. See the Technical Approach for the full signatures and the per-branch contract.
 8. **Output** — the session resumes with the chosen option text in its input. If the choice was
    `Other: wait for followup message`, the steer instructs the agent to send a narrowed plain-text
    followup, which the human answers by reply-to — resuming the same session through the
@@ -650,7 +665,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   2. `session_type == SessionType.ENG` read off the `AgentSession` record found by
      `AgentSession.query.filter(session_id=session_id)`. **Exact match only.** A `teammate` record →
      `not_eng_session`. A missing record or a `null`/unknown `session_type` → `unknown_session_type`,
-     which is **ineligible** — the field is `null=True` (`models/agent_session.py:156`), and a
+     which is **ineligible** — the field is `null=True` (`models/agent_session.py`), and a
      question rendered as prose to an eng session is a cosmetic loss while a poll rendered into a
      teammate chat is a scope violation. Fail closed.
   3. Any exception → ineligible, reason `eligibility_error`, logged at warning. Never raises.
@@ -713,7 +728,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
 - **Split the routing ladder at the seam that is actually shared; do not pretend it is one
   function.** The reply-to ladder is an inline block inside `handler(event)`
   (`bridge/telegram_bridge.py:1787-2012`), and most of it consumes objects a poll vote does not
-  have: `_ack_steering_routed(client, event, message, ...)` (`:904`) branches on `message.media`
+  have: `_ack_steering_routed(client, event, message, ...)` branches on `message.media`
   and reacts on `message.id`; the completed branch calls `is_duplicate_message(event.chat_id,
   message.id)` (`:1890`), `fetch_reply_chain(client, event.chat_id, message.reply_to_msg_id)`
   (`:1918`), `react_if_worker_down(...)` (`:1987`), and `dispatch_telegram_session(...)` (`:1988`).
@@ -727,19 +742,13 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
      (running/active), `PENDING`, `LIVE_GUARD` (a completed record exists but a
      pending/running/active one appeared concurrently), `COMPLETED`, or `NONE`.
 
-     **This is a restructure, not a verbatim lift, and the plan says so.** The source range
-     `:1799-1866` interleaves the `query.filter` ladder with `await _ack_steering_routed(...)` +
-     `return` at every branch, so the side effects must be pulled out to the caller. Its
-     behavior-preservation checklist is four concrete items, not a hand-wave:
-     - `matched_status` is carried because the LIVE log embeds `matching_session.status` and the
-       LIVE_GUARD log embeds `live_guard.status`.
-     - `pending_age_s` is carried because the PENDING log embeds `age=%.1f` computed by
-       `_pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`).
-     - `COMPLETED` returns the record chosen by the **existing most-recent-`created_at` sort**
-       (`_completed_created_at`, `:1898`), **not** `completed_sessions[0]` — the wrong record
-       silently degrades `_build_completed_resume_text`'s `context_summary`.
-     - `_steering_session_enqueued = True` (`:2006`) stays **caller-side**;
-       `resume_completed_session` returns `None` and does not own that flag.
+     **This is a restructure, not a verbatim lift, and the plan says so.** The source interleaves
+     the `query.filter` ladder with `await _ack_steering_routed(...)` + `return` at every branch, so
+     the side effects must be pulled out to the caller. **The behavior-preservation checklist has
+     exactly one home: Task 9a.** It is not restated here — two copies drifted apart once already
+     (cycle-8 nit), and the item that went missing was the mandatory `room_id` derivation, whose
+     omission is a silent regression rather than a crash. Read Task 9a's five-item checklist before
+     touching this extraction.
   2. **`resume_completed_session(*, completed, text, sender_name, telegram_chat_id,
      telegram_message_id, chat_title=None, sender_id=None, project=None, project_key=None,
      working_dir=None, telegram_message_key=None, reply_chain_context=None,
@@ -821,7 +830,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   is durability, not delivery: `_dead_letter_message` (`bridge/telegram_relay.py:946`) calls
   `persist_failed_delivery` into the `DeadLetter` model, and its only consumer,
   `replay_dead_letters`, runs from exactly one site — the bridge connect sequence
-  (`bridge/telegram_bridge.py:2842`). A question routed only there reaches the human on the next
+  (`bridge/telegram_bridge.py`). A question routed only there reaches the human on the next
   bridge restart, which for a blocked agent is hours away or never. So on terminal failure of a
   `"poll"` payload (`_relay_attempts >= MAX_RELAY_RETRIES`, `telegram_relay.py:~1196-1206`) the poll
   dispatch branch **rpushes a plain text payload onto the same `telegram:outbox:{session_id}` key**
@@ -1012,7 +1021,7 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
   `telegram:outbox:{session_id}` as a plain-text payload with `_relay_attempts` reset**, and is
   delivered on a later relay cycle. The test asserts the re-enqueue, not the dead-letter row — a
   `DeadLetter` alone only reaches the human on the next bridge restart (`replay_dead_letters` is
-  invoked from one site, `bridge/telegram_bridge.py:2842`). This is the user-visible error path.
+  invoked from one site in `bridge/telegram_bridge.py`). This is the user-visible error path.
 - [ ] `_dead_letter_message` (`telegram_relay.py:946`) must **not** treat `"poll"` as ephemeral
   (`:827`) — a dropped question is a stuck agent. Test asserts a poll payload dead-letters loudly
   instead of being discarded, **and separately** that it survives the `if chat_id and text` gate
@@ -1194,14 +1203,20 @@ does not. The steer text names the voter when `GetPollVotesRequest` resolves the
 is visible and correctable by an ordinary reply-to message on the existing path. Quorum, weighting,
 and voter allowlists are named Rabbit Holes.
 
-### Risk 3: an answered poll never reaches its session because the session finished
-**Impact:** The human taps, sees the poll close, and nothing happens. Worst-case UX: the affordance
-looks broken and trust in it is gone after one occurrence.
+### Risk 3: the completed-session branch is the mainline, not a rare edge
+**This is stated as a risk only because the plan used to treat it as one.** The asking session is
+*expected* to be `completed` by the time a human taps: `/ask-me` ends the turn on the `needs_human`
+edge, `PM_NEEDS_HUMAN` is clean and wrap-up-eligible in `agent/session_runner/router.py`, and
+`_runner_final_status` (`agent/session_executor.py`) therefore finalizes the AgentSession
+`"completed"` at turn end — while the human has up to 1800 s to decide.
+**Impact if the `COMPLETED` branch is dropped or broken:** not a rare lost vote — **every** vote is
+lost. The human taps, sees the poll close, and nothing happens.
 **Mitigation:** the vote translator branches on `resolve_answer_target(session_id)` rather than
 calling `push_steering_message` blindly, and the `COMPLETED` branch calls
-`resume_completed_session(...)` — the same dispatch block a typed reply uses, factored out of
-`bridge/telegram_bridge.py` ~`:2051-2124`. Explicitly covered by an integration test against a
-`completed` session.
+`resume_completed_session(...)` — the same dispatch block a typed reply uses, factored out of the
+reply-to ladder's completed branch in `bridge/telegram_bridge.py` (locate by symbol). Because this
+is the mainline, it is what **Task 10a's single end-to-end tap asserts**, not what a unit test
+covers alone; the `LIVE` branch is the one covered by unit test only.
 
 ### Risk 4: duplicate or repeated translation of one vote
 **Impact:** The agent receives the same answer several times, or a retracted-and-changed vote
@@ -1223,7 +1238,7 @@ prevent, made worse because the human sees nothing at all.
 2. **Dead-lettering is the durability backstop behind it, and is explicitly NOT prompt delivery.**
    `_dead_letter_message` (`:946`) persists a `DeadLetter`; its only consumer,
    `replay_dead_letters`, runs from one site in the bridge connect sequence
-   (`bridge/telegram_bridge.py:2842`) — i.e. on the next bridge restart. Two guards must still both
+   (`bridge/telegram_bridge.py`) — i.e. on the next bridge restart. Two guards must still both
    be handled or even that backstop is lost: `"poll"` stays out of the ephemeral-discard tuple
    (`:827`), **and** the persistence branch's `if chat_id and text` gate (`:836`) must receive the
    question as `text`, since a poll payload carries no `text` key and would otherwise fall through
@@ -1308,8 +1323,12 @@ consequence is bounded added latency, not loss.
 without steering or closing.
 
 ### Race 3: session transitions running → completed while the human is deciding
+**Note the direction of the odds.** This is not a narrow window: the transition happens at the end
+of the asking turn, so `completed` is the *expected* state at tap time (Risk 3). The race worth
+guarding is the rarer opposite — the session coming back to life between send and tap, which is
+what `LIVE_GUARD` exists for.
 **Location:** `resolve_answer_target` / `resume_completed_session` (new `bridge/answer_routing.py`,
-factored from `bridge/telegram_bridge.py:1799-2005`).
+factored from the reply-to steering ladder in `bridge/telegram_bridge.py`).
 **Trigger:** The turn ends and the session finalizes before the tap.
 **Data prerequisite:** The session must be re-read at translation time, not cached at send time —
 `resolve_answer_target(session_id)` is called inside `translate_poll_vote`, never at send time.
@@ -1540,13 +1559,22 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   set — Tasks 9, 10, 10a and 13b — and is recorded on #2701. This gate asserts readback and
   attribution; it deliberately does **not** assert the steer, because nothing observes a vote until
   Task 10 lands.
+- [ ] **`COMPLETED` is the normal path for a poll answer, and the plan is built for it.** `/ask-me`
+  ends its turn on the `needs_human` edge; `PM_NEEDS_HUMAN` is clean and wrap-up-eligible, so the
+  asking AgentSession finalizes `"completed"` long before a human taps.
+  `resolve_answer_target` therefore returns `COMPLETED` on the ordinary run, and
+  `resume_completed_session` → `dispatch_telegram_session` is the shipped mainline. `LIVE` /
+  `PENDING` / `LIVE_GUARD` are the "tap beat the turn end" exceptions and are covered by unit test.
 - [ ] **End-to-end, once, through the shipped chain (Task 10a).** A poll originated by invoking the
-  real `valor-ask-poll` CLI from a **live** eng session bound to the machine-owned eng group — not by
+  real `valor-ask-poll` CLI from an eng session bound to the machine-owned eng group — not by
   a direct `send_poll` call — exercises `tools/ask_poll.py`, `poll_eligible`,
   `build_telegram_poll_outbox_payload` (including the `poll_id_hint` mint), the outbox, the relay
-  dispatch branch, the registry, the vote observer and `translate_poll_vote`. After the human tap the
-  poll closes, the registry row gains `dispatched` then `steered_at`, and **the chosen option text
-  appears in that session's next turn input.** Every other check in this plan is a unit test with a
+  dispatch branch, the registry, the vote observer and `translate_poll_vote`. The session is left in
+  its **natural post-`/ask-me` state**, so the run takes the `COMPLETED` branch. After the human tap
+  the poll closes, the `dispatched` then `steered` marker keys appear, `dispatch_telegram_session`
+  is invoked **exactly once** with no second dispatch on the following reconcile tick, and **the
+  chosen option text appears in the resumed session's input inside the
+  `_build_completed_resume_text` preamble.** Every other check in this plan is a unit test with a
   stubbed handler or a grep; this is the only assertion that the nine subsystems are actually wired
   together, and it is scheduled after Task 10 because that is the first point where it can pass.
 - [ ] **The Race-6 correlation key has exactly one producer.** `poll_id_hint` is minted in
@@ -1874,7 +1902,7 @@ why reversibility depends on it.
     `session_type == SessionType.ENG` → `ok=True`, reason `eligible`
   - record with `session_type == SessionType.TEAMMATE` → `not_eng_session`
   - no record, or a `null`/unrecognized `session_type` → `unknown_session_type` (**ineligible** —
-    the field is `null=True`, `models/agent_session.py:156`, and prose to an eng session is a
+    the field is `null=True`, `models/agent_session.py`, and prose to an eng session is a
     cosmetic loss while a poll to a teammate chat is a scope violation)
   - any exception → `eligibility_error`, logged at warning
 - **Never raises.** Fail closed on every ambiguity.
@@ -1960,19 +1988,49 @@ why reversibility depends on it.
 - **Parallel**: false
 - **Create `bridge/poll_registry.py`** holding the registry key constants and every helper this
   task defines: `register_poll(...)`, `lookup_poll(poll_id)`, `claim_poll_answer(poll_id)`,
-  `release_poll_claim(poll_id)`, `mark_poll_dispatched(poll_id)`, `mark_poll_steered(poll_id)`,
+  `poll_claim_age_s(poll_id)`, `takeover_poll_claim(poll_id)`, `release_poll_claim(poll_id)`,
+  `mark_poll_dispatched(poll_id)`, `poll_dispatched(poll_id)`, `mark_poll_steered(poll_id)`,
+  `poll_steered(poll_id)`, `mark_poll_warned(poll_id)`,
   `register_pending_poll(...)`, `iter_pending_polls()`, `promote_pending_poll(...)`, and
   `iter_unanswered_polls()`. This is the module the Verification table's `poll_id_hint` row greps;
   housing these helpers anywhere else fails a Verification row on an otherwise correct build.
-- Write `telegram:poll:{poll_id}` →
-  `{chat_id, msg_id, session_id, question, options, created_at, dispatched, steered_at}` with
+- **The row is immutable; every mutable marker is its own atomic key (cycle-8 concern).** Write
+  `telegram:poll:{poll_id}` → `{chat_id, msg_id, session_id, question, options, created_at}` with
   `SET ... NX EX <POLL_REGISTRY_TTL_S>`, following `bridge/job_router.py:85-96` and
-  `bridge/context.py:513-529`. `dispatched` and `steered_at` both start absent.
+  `bridge/context.py:513-529`, and **never write that key again**. Storing `dispatched` /
+  `steered_at` / the warn marker as fields inside one JSON string value makes every marker write a
+  read-modify-write on a shared key, and the reconciliation loop's warn-marker write races the
+  Raw-fast-path translator's marker writes — the pair Race 2 names. The claim serializes
+  *translation*, not the loop's own scan-side write, so a lost update there drops `steered_at` (the
+  row is re-yielded forever) or drops `dispatched` (the double-enqueue the marker exists to
+  prevent). Each marker therefore gets its own single-command, idempotent key, TTL-aligned with the
+  row:
+
+  | Marker | Key | Write | Read |
+  |---|---|---|---|
+  | answer claim | `telegram:poll:answered:{poll_id}` | `SET <iso claim ts> NX EX POLL_ANSWER_CLAIM_TTL_S` | `poll_claim_age_s` |
+  | dispatched | `telegram:poll:dispatched:{poll_id}` | `SET <iso> NX EX POLL_REGISTRY_TTL_S` | `poll_dispatched` (`EXISTS`) |
+  | steered | `telegram:poll:steered_at:{poll_id}` | `SET <iso> NX EX POLL_REGISTRY_TTL_S` | `poll_steered` (`EXISTS`) |
+  | warned | `telegram:poll:warned:{poll_id}` | `SET 1 NX EX POLL_REGISTRY_TTL_S` | `EXISTS` |
+
+  `NX` makes each write idempotent under retry with no read step. A Redis hash with `HSETNX` would
+  be equally correct but departs from the `bridge/job_router.py:85-96` string precedent this plan
+  cites as its non-Popoto justification, so separate string keys are the smaller change. The
+  steered key deliberately keeps the `steered_at` token in its name so the Verification row
+  `grep -rn 'steered_at' bridge/` still means what it says.
+- **The claim value is the claim timestamp, never the constant `1`.** `claim_poll_answer` writes an
+  ISO-8601 UTC timestamp, and `poll_claim_age_s(poll_id)` returns the claim's age in seconds
+  (`None` when the key is absent). Without a readable value a stale claim is indistinguishable from
+  a live one, and the Risk 9 bridge-death recovery cannot execute at all (cycle-8 blocker).
+  `takeover_poll_claim(poll_id)` re-stamps with `SET ... XX EX` — `XX`, so it takes over an
+  *existing* stale claim and never resurrects one that just expired — returning False if the key
+  vanished first.
 - **`dispatched` and `steered_at` are two distinct markers, not one.** `dispatched` records "the
   steer/re-enqueue side effect has happened and must never be repeated"; `steered_at` records "the
   translation completed cleanly". `iter_unanswered_polls()` keys on missing `steered_at`;
-  `translate_poll_vote`'s exception handler keys on missing `dispatched` (Task 9b). Collapsing them
-  into one field re-opens either Risk 9 (a swallowed question) or the double-enqueue.
+  `translate_poll_vote`'s exception handler and its stale-claim takeover both key on missing
+  `dispatched` (Task 9b). Collapsing them into one marker re-opens either Risk 9 (a swallowed
+  question) or the double-enqueue.
 - Plain Redis string keys. **No Popoto model, no `scripts/update/migrations.py` entry.** Comment the
   rationale pointing at `bridge/job_router.py:6-18`.
 - Provide the Race-6 provisional row `telegram:poll:pending:{poll_id_hint}`, written **before**
@@ -2051,7 +2109,7 @@ why reversibility depends on it.
   keeping it out of the ephemeral tuple alone still drops it silently. The poll branch must supply
   the question as the dead-letter `text`. This is the **durability backstop only** —
   `replay_dead_letters` runs from one site in the bridge connect sequence
-  (`bridge/telegram_bridge.py:2842`), i.e. next restart.
+  (`bridge/telegram_bridge.py`), i.e. next restart.
 - **Prompt user-visible fallback (the actual delivery path).** In the terminal-failure branch
   (`~:1196-1206`, `attempts >= MAX_RELAY_RETRIES`) for a `"poll"` payload, rpush a plain payload back
   onto the same `telegram:outbox:{session_id}` key:
@@ -2300,10 +2358,21 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   the machine-owned eng group — not by a direct `send_poll` call — so the run exercises
   `tools/ask_poll.py` → `poll_eligible` → `build_telegram_poll_outbox_payload` (including the
   `poll_id_hint` mint) → `telegram:outbox:{session_id}` → `_send_queued_poll` → `send_poll` → the
-  registry → the observer → `translate_poll_vote` → `push_steering_message` →
-  `_drain_steering_boundary`.
-- The session must be a **live eng session**, so the run takes the `LIVE` branch of
-  `resolve_answer_target` — the `COMPLETED` and `NONE` branches are covered by unit tests, not here.
+  registry → the observer → `translate_poll_vote` → `resolve_answer_target` → the branch it
+  actually returns.
+- **Do not force the session live. Observe the natural post-`/ask-me` state, which is `completed`.**
+  The asking session ends its turn on the `needs_human` edge; `PM_NEEDS_HUMAN` is clean and
+  wrap-up-eligible (`agent/session_runner/router.py`) so `_runner_final_status`
+  (`agent/session_executor.py`) finalizes it `"completed"` before the operator can plausibly tap.
+  `resolve_answer_target` will therefore return `COMPLETED`, and the run exercises
+  `resume_completed_session` → `dispatch_telegram_session` — **including `claim_message` and the
+  double-enqueue exposure the `dispatched` marker guards**, the seam nothing else in this plan
+  touches end to end. Pinning the gate to a `LIVE` session would spend the one operator tap on the
+  exception and ship the mainline unexercised (cycle-8 blocker). No second tap is needed; the
+  natural one is the assertion.
+- **The `LIVE` branch keeps a unit assertion instead** (Task 13b): with the session still `running`,
+  `push_steering_message` is called exactly once with
+  `room_id=room_id_for_session(target.session)` non-`None`. `NONE` likewise stays a unit test.
 - Ask the operator for a tap with a caption naming exactly what is being asked and the deadline:
   *"End-to-end gate for #2701 — please tap either option on the poll above. If no tap arrives within
   30 minutes the build reports this gate unresolved."* Then surface a **legitimate open question**
@@ -2311,11 +2380,17 @@ is a **poll-independent** seam shared with the reply-to ladder, landed as its ow
   note is auto-continued past by the nudge loop.
 - **Bounded wait:** at most `POLL_PROBE_TAP_WAIT_S` (the same named constant Task 2 uses, default
   1800 s), then report.
-- **PASS** requires all four, in order: (a) the poll closes; (b) the registry row gains
-  `dispatched` and then `steered_at`; (c) `push_steering_message` was called with a non-`None`
-  `room_id` for that session; (d) **the chosen option text appears in that session's next turn
-  input** — the steer merged by `runner.py:1290 _drain_steering_boundary()` (locate by symbol).
-  (d) is the assertion this gate exists for; (a)-(c) localize a failure.
+- **PASS** requires all four, in order: (a) the poll closes; (b) the `dispatched` marker key appears
+  and then the `steered` marker key (Task 6 — separate `SET NX` keys, not JSON fields); (c)
+  `dispatch_telegram_session` is invoked **exactly once** for that `session_id`, and **no second
+  dispatch follows on the next reconcile tick** (watch at least one full
+  `POLL_RECONCILE_SLOW_INTERVAL_S` before reporting); (d) **the resumed session's input carries the
+  chosen option text, inside the `_build_completed_resume_text` preamble.** (d) is the assertion
+  this gate exists for; (a)-(c) localize a failure. If the run unexpectedly resolves `LIVE`
+  (an operator tap that beat the turn end), substitute (c)/(d) with "`push_steering_message` called
+  once with a non-`None` `room_id`" and "the option text appears in the next turn input via
+  `_drain_steering_boundary`" — and say in the PR description that the `COMPLETED` mainline went
+  unexercised, which is an UNRESOLVED result for the mainline, not a pass.
 - Paste the observed steer text and the registry row verbatim into the PR description.
 - **FAIL** (a tap arrives but no steer reaches the session) → **stop and report.** This is the one
   wiring break the rest of the plan cannot detect: everything else is a unit test with a stubbed

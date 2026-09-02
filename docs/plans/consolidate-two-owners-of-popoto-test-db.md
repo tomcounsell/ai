@@ -108,7 +108,28 @@ This plan deliberately requires no upstream change (see No-Gos).
 
 ## Research
 
-TBD
+**Queries used:**
+- `redis-py swap connection_pool on existing Redis client in place safe disconnect`
+
+**Key findings:**
+
+1. **There is no public API for hot-swapping `connection_pool`; the attribute assignment is the sanctioned-by-practice route, and its one hazard is the disconnect timing.** Assigning `client.connection_pool = new_pool` affects only *subsequent* `get_connection()` calls — commands already holding a checked-out connection keep using the old pool, so calling `old_pool.disconnect()` immediately "will break commands still using them." Source: [redis-py connections docs](https://redis.readthedocs.io/en/stable/connections.html), [redis-py #932](https://github.com/andymccurdy/redis-py/issues/932).
+   **How it informs the plan:** popoto's `_swap_db` disconnects the old pool immediately, and conftest's new in-place swap will do the same. That is safe *here specifically* because both run in pytest's synchronous fixture-setup phase, where no test code holds a connection — but the plan makes that precondition explicit in the docstring and in Race 1 rather than leaving it as an accident. It also means the swap must never be moved into a test body or an async context.
+
+2. **`redis.Redis(connection_pool=pool)` does not take ownership of the pool; `Redis.from_pool()` does.** A client built with the plain constructor "will not close it," so the pool can be safely shared across clients. Verified locally: `redis.Redis(connection_pool=p).auto_close_connection_pool` is `False`. popoto builds `POPOTO_REDIS_DB = redis.Redis(connection_pool=pool)` (`redis_db.py:148,158`) — the plain form.
+   **How it informs the plan:** the current teardown calls `test_client.close()` (conftest:986). Under in-place mutation that call would target the *canonical shared* client. Because the client does not own its pool, `close()` is not catastrophic — but it is meaningless, and the plan drops it in favour of explicitly disconnecting the pool object conftest itself created. Source: [redis-py connections docs](https://redis.readthedocs.io/en/stable/connections.html), [redis-py #2901](https://github.com/redis/redis-py/issues/2901).
+
+3. **`max_connections` is not carried in `connection_kwargs`** — verified directly in this repo's venv: a `BlockingConnectionPool(max_connections=128)` reports `connection_kwargs == {db, host, port, socket_timeout}`. It is a pool-constructor argument, not a connection argument.
+   **How it informs the plan:** this is why popoto's own `_swap_db` silently downgrades the pool. It reads `current_kwargs = dict(db_obj.connection_pool.connection_kwargs)` and rebuilds with `redis.ConnectionPool(connection_class=..., **current_kwargs)` — preserving the *connection* class but neither the `BlockingConnectionPool` *pool* class nor the 128-connection cap. The plugin's session-scoped `_popoto_test_db` therefore already strips the cap before conftest runs, so conftest cannot simply "preserve what's there": it must reconstruct a `BlockingConnectionPool` and read the cap from `popoto.redis_db._SYNC_MAX_CONNECTIONS` (which is itself `POPOTO_SYNC_MAX_CONNECTIONS`-overridable). Restoring the cap is a genuine side-benefit of this work, not a no-op.
+
+4. **`redis.asyncio` has no GC fallback for pool cleanup** — an async pool must be explicitly `await`-disconnected. Source: [redis-py asyncio examples](https://redis.readthedocs.io/en/stable/examples/asyncio_examples.html).
+   **How it informs the plan:** the current conftest creates an `aioredis.Redis` per test at line 980 and never awaits a disconnect on it — it merely rebinds the global at teardown. Deleting that line removes a per-test async pool leak in addition to the wrong-loop bug.
+
+Sources:
+- [Connecting to Redis — redis-py docs](https://redis.readthedocs.io/en/stable/connections.html)
+- [Asyncio Examples — redis-py docs](https://redis.readthedocs.io/en/stable/examples/asyncio_examples.html)
+- [redis-py #932 — Graceful reconnection with connection pooling](https://github.com/andymccurdy/redis-py/issues/932)
+- [redis-py #2901 — `auto_close_connection_pool` ignored](https://github.com/redis/redis-py/issues/2901)
 
 ## Spike Results
 
