@@ -568,8 +568,52 @@ def _validate_for_medium(text: str, medium: str) -> list[Violation]:
         violations.extend(validate_telegram(text))
     elif medium == "email":
         violations.extend(validate_email(text))
+    elif medium == "telegram_poll":
+        violations.extend(validate_telegram_poll(text))
     violations.extend(detect_local_file_reference(text))
     return violations
+
+
+# Telegram renders a poll question in a fixed-size UI element; anything longer
+# is truncated on screen. Provisional and tunable — grain of salt.
+POLL_QUESTION_MAX_CHARS = 300
+
+
+def validate_telegram_poll(question: str) -> list[Violation]:
+    """Validate a poll QUESTION. Question text only — never the options.
+
+    ``_validate_for_medium`` takes ``(text, medium)`` and physically cannot see
+    the options, so option-count and option-length checks deliberately live in
+    ``tools/ask_poll.py`` instead. Widening this signature would ripple through
+    every ``draft_message`` call site and ``tests/unit/test_medium_validators.py``
+    for no gain.
+    """
+    violations: list[Violation] = []
+    if not question or not question.strip():
+        violations.append(Violation(rule="poll_question_empty", snippet=""))
+        return violations
+    if len(question) > POLL_QUESTION_MAX_CHARS:
+        violations.append(
+            Violation(
+                rule="poll_question_too_long",
+                snippet=f"{len(question)} chars > {POLL_QUESTION_MAX_CHARS}",
+            )
+        )
+    return violations
+
+
+def validate_poll_question(question: str) -> list[Violation]:
+    """Validate a poll question against the ``telegram_poll`` medium. No composition.
+
+    **The public seam the poll path uses, and the reason it exists.**
+    ``_validate_for_medium`` is private and reachable only from inside
+    ``draft_message``, which runs ``_compose_structured_draft`` *before*
+    validating — so routing a poll question through ``draft_message`` would
+    return it with the emoji prefix, stage line and link footer attached.
+    "Validate via the drafter" and "bypass composition" are only compatible
+    through a dedicated entry point. This is it.
+    """
+    return _validate_for_medium(question, "telegram_poll")
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:
