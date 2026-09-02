@@ -6,14 +6,21 @@ is the single construction point for those calls — same typed-output
 contract as ``run_typed``, but against the local Ollama daemon (no
 Anthropic client, no shared Anthropic semaphore, no API key).
 
-Network isolation: every test monkeypatches ``wrapper_mod.OpenAIChatModel``
-with a PydanticAI ``FunctionModel`` factory so no test talks to a real
-Ollama daemon.
+Network isolation (#3001): the third-party stack is no longer imported at
+``wrapper``'s module scope, so ``wrapper_mod.OpenAIChatModel`` is gone as a
+monkeypatch seam. Every test instead replaces the memoized loader
+``wrapper_mod._load_stack`` with one returning a stack whose
+``OpenAIChatModel`` is a PydanticAI ``FunctionModel`` factory. That seam is
+strictly stronger than the old one: it is the *only* path by which
+``run_typed_local`` can reach a provider class at all, so no real Ollama (or
+Anthropic) client is constructible from this file --
+``test_no_real_network_client_is_reachable`` asserts that directly.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 from pydantic import BaseModel
@@ -37,7 +44,13 @@ def _tool_response(info: AgentInfo, args: dict) -> ModelResponse:
 
 
 def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
-    """Swap ``wrapper_mod.OpenAIChatModel`` for an in-process FunctionModel.
+    """Swap the loader's ``OpenAIChatModel`` for an in-process FunctionModel.
+
+    Replaces ``wrapper_mod._load_stack`` wholesale, so the real
+    ``OpenAIChatModel`` is never constructed and no socket is opened. The
+    remaining stack members are taken from the real loader (they are inert
+    here -- ``run_typed_local`` uses only ``OllamaProvider``,
+    ``OpenAIChatModel``, and ``Agent``).
 
     ``capture`` (when given) records the ``model_name`` and ``provider``
     the wrapper would have used, for post-call assertions.
@@ -49,7 +62,47 @@ def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
             capture["provider"] = provider
         return FunctionModel(fn, model_name=model_name)
 
-    monkeypatch.setattr(wrapper_mod, "OpenAIChatModel", fake_openai_chat_model)
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(real, OpenAIChatModel=fake_openai_chat_model)
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+
+
+class TestNetworkIsolation:
+    """The loader is the *only* route from this module to a real client."""
+
+    def test_no_third_party_stack_attributes_on_module(self):
+        # The old seam (`wrapper_mod.OpenAIChatModel`) must be gone, along
+        # with every other module-scope stack symbol -- otherwise a future
+        # edit could reintroduce a path around `_load_stack`.
+        for name in (
+            "OpenAIChatModel",
+            "OllamaProvider",
+            "AnthropicModel",
+            "AnthropicProvider",
+            "Agent",
+            "anthropic",
+        ):
+            assert not hasattr(wrapper_mod, name), f"{name} leaked back to module scope"
+
+    async def test_no_real_network_client_is_reachable(self, monkeypatch):
+        """With the loader severed, no provider/model can be constructed.
+
+        This is the discriminating form of the isolation claim: if any
+        alternate path to a real ``OpenAIChatModel``/``OllamaProvider``
+        existed, the call would proceed past the severed loader and try to
+        reach a live Ollama daemon instead of surfacing this sentinel.
+        """
+
+        class LoaderSeveredError(RuntimeError):
+            pass
+
+        def _sever():
+            raise LoaderSeveredError("no stack for you")
+
+        monkeypatch.setattr(wrapper_mod, "_load_stack", _sever)
+
+        with pytest.raises(LoaderSeveredError):
+            await run_typed_local("route: hello", Decision)
 
 
 class TestStructuredOutputSuccess:

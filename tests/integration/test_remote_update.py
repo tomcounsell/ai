@@ -18,10 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scripts.update.deps import (
+    PinDeclarationError,
     auto_bump_deps,
     bump_pin_in_pyproject,
     get_pinned_version,
     get_pypi_latest,
+    verify_critical_versions,
 )
 
 # Project root
@@ -470,6 +472,138 @@ class TestGetPypiLatest:
         assert version is None
 
 
+# Mirrors the real ``pyproject.toml`` shape the pin helpers must survive:
+# a floor declaration (``openai>=1.0.0``) whose package name also appears
+# inside another line's *comment*, an extras pin
+# (``pydantic-ai-slim[anthropic]``) that contains a second package's name,
+# and that extras line placed ABOVE the ``anthropic`` declaration so a
+# line-order-dependent reader resolves the wrong one.
+REALISTIC_PYPROJECT = """[project]
+name = "ai"
+dependencies = [
+    "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
+    # CRITICAL — slim + anthropic extra only (avoids the openai/google/mcp
+    # extras pulled in by the pydantic-ai meta-package)
+    "pydantic-ai-slim[anthropic]==2.9.0",
+    "anthropic==0.125.0", # CRITICAL — pin exact
+    "claude-agent-sdk==0.2.151", # CRITICAL — pin exact
+    "openai>=1.0.0", # Embedding API for semantic doc impact finder
+]
+"""
+
+
+class TestPinDeclarationDefects:
+    """Regression tests for the three spike-2 pin-helper defects (#3001).
+
+    Each defect silently produced the half-bump the coupled-set gate exists
+    to prevent, so each gets its own test.
+    """
+
+    def test_openai_pin_not_read_from_comment(self, tmp_path: Path):
+        """Defect 1: the reader scraped a version out of a *comment*.
+
+        ``openai`` appears inside the ``pydantic-ai-slim`` comment block, so
+        the old substring scan returned that line's ``2.9.0``. The real
+        declaration is a floor with no ``==`` at all, which must read as
+        "no exact pin" (``None``), never a version.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "openai") is None
+
+    def test_anthropic_pin_not_read_from_extras_line(self, tmp_path: Path):
+        """Defect 2: ``anthropic`` resolved correctly only by line order.
+
+        ``pydantic-ai-slim[anthropic]==2.9.0`` contains both ``anthropic``
+        and ``==``. With that line above the real declaration, the old
+        reader returned ``2.9.0``.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "anthropic") == "0.125.0"
+        assert get_pinned_version(tmp_path, "pydantic-ai-slim") == "2.9.0"
+
+    def test_extras_pin_is_bumped(self, tmp_path: Path):
+        """Defect 3: the writer could not match an extras pin.
+
+        ``"{package}==[^"]*"`` never matches
+        ``"pydantic-ai-slim[anthropic]==2.9.0"``, so the writer silently
+        no-opped while the rest of the coupled set moved.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(REALISTIC_PYPROJECT)
+
+        bump_pin_in_pyproject(tmp_path, "pydantic-ai-slim", "2.35.0")
+
+        content = pyproject.read_text()
+        assert '"pydantic-ai-slim[anthropic]==2.35.0"' in content
+        # The extras marker and the neighbouring declarations are untouched.
+        assert '"anthropic==0.125.0"' in content
+        assert '"openai>=1.0.0"' in content
+        assert "avoids the openai/google/mcp" in content
+
+
+class TestPinHelpersRefuseLoudly:
+    """Neither helper may return a wrong-but-plausible answer."""
+
+    def test_writer_raises_when_declaration_absent(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "nonexistent", "1.0.0")
+
+    def test_writer_raises_on_floor_declaration(self, tmp_path: Path):
+        """A floor is not a pin — rewriting it would invent a pin."""
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "openai", "2.30.0")
+
+    def test_reader_raises_on_conflicting_declarations(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\ndependencies = [\n    "anthropic==0.125.0",\n    "anthropic==0.62.0",\n]\n'
+        )
+        with pytest.raises(PinDeclarationError):
+            get_pinned_version(tmp_path, "anthropic")
+
+    def test_reader_returns_none_when_package_absent(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "not-declared-anywhere") is None
+
+
+class TestVerifyCriticalVersions:
+    def test_verify_critical_versions_unchanged_by_helper_rewrite(self, tmp_path: Path):
+        """The helper rewrite must not move ``verify_critical_versions``.
+
+        Expected pins still come from the real declarations, and the
+        installed-vs-expected comparison is untouched.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+
+        installed = {
+            "telethon": "1.42.0",
+            "anthropic": "0.62.0",
+            "claude-agent-sdk": None,
+        }
+        with patch(
+            "scripts.update.deps.get_installed_version",
+            side_effect=lambda _dir, pkg: installed[pkg],
+        ):
+            results = verify_critical_versions(tmp_path)
+
+        by_package = {r.package: r for r in results}
+        assert [r.package for r in results] == [
+            "telethon",
+            "anthropic",
+            "claude-agent-sdk",
+        ]
+        assert by_package["telethon"].expected == "1.42.0"
+        assert by_package["telethon"].matches is True
+        # Installed disagrees with the pin -> mismatch.
+        assert by_package["anthropic"].expected == "0.125.0"
+        assert by_package["anthropic"].matches is False
+        # Pinned but not installed -> mismatch, expected still reported.
+        assert by_package["claude-agent-sdk"].expected == "0.2.151"
+        assert by_package["claude-agent-sdk"].version is None
+        assert by_package["claude-agent-sdk"].matches is False
+
+
 class TestBumpPinInPyproject:
     def test_bumps_existing_pin(self, tmp_path: Path):
         pyproject = tmp_path / "pyproject.toml"
@@ -492,18 +626,6 @@ class TestBumpPinInPyproject:
         content = pyproject.read_text()
         assert "# CRITICAL" in content
         assert '"anthropic==0.99.0"' in content
-
-    def test_returns_false_for_missing_package(self, tmp_path: Path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("[project]\ndependencies = []\n")
-        assert bump_pin_in_pyproject(tmp_path, "nonexistent", "1.0.0") is False
-
-
-class TestGetPinnedVersion:
-    def test_reads_pinned_version(self, tmp_path: Path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('    "anthropic==0.62.0",  # CRITICAL\n')
-        assert get_pinned_version(tmp_path, "anthropic") == "0.62.0"
 
 
 class TestAutoBumpDeps:

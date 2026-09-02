@@ -33,23 +33,29 @@ Provider errors and exhausted schema-validation retries are logged, then
 re-raised as :class:`LLMCallError`. Each call site owns its own
 conservative default (respond / escalate / send / skip) on failure -- see
 "Preserve fail-safe posture per site" in the plan's Solution section.
+
+Import-safety contract (#3001): module scope here is **stdlib and our own
+code only**. Every third-party LLM-stack symbol (``anthropic``,
+``pydantic_ai.*``) is resolved through
+:func:`agent.anthropic_client._load_stack`, the one memoized loader, and
+only from inside the call paths below. A machine with a broken or missing
+stack can still ``import agent.llm`` (and therefore
+``import bridge.telegram_bridge``); the failure surfaces at the call, where
+it can be reported. ``_load_stack`` is imported into this module's
+namespace, so ``monkeypatch.setattr(wrapper_mod, "_load_stack", ...)`` is
+the network-isolation seam for tests -- it replaces the old
+``wrapper_mod.OpenAIChatModel`` seam, which no longer exists because
+``OpenAIChatModel`` is not a module attribute of anything here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
-import anthropic
 from pydantic import BaseModel
-from pydantic_ai import Agent
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
-from pydantic_ai.providers.ollama import OllamaProvider
 
-from agent.anthropic_client import semaphore_slot
+from agent.anthropic_client import _load_stack, semaphore_slot
 from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
@@ -124,13 +130,15 @@ async def run_typed(
     if not prompt or not prompt.strip():
         raise ValueError("run_typed requires a non-empty, non-whitespace prompt")
 
+    stack = _load_stack()
+
     async with semaphore_slot():
-        async with anthropic.AsyncAnthropic(
+        async with stack.anthropic.AsyncAnthropic(
             api_key=get_anthropic_api_key(), timeout=sdk_timeout
         ) as client:
-            provider = AnthropicProvider(anthropic_client=client)
-            pydantic_model = AnthropicModel(model, provider=provider)
-            agent = Agent(pydantic_model, output_type=output_type)
+            provider = stack.AnthropicProvider(anthropic_client=client)
+            pydantic_model = stack.AnthropicModel(model, provider=provider)
+            agent = stack.Agent(pydantic_model, output_type=output_type)
 
             try:
                 if hard_timeout is not None:
@@ -159,14 +167,6 @@ async def run_typed(
     return result.output
 
 
-# Wall-clock cap for local granite calls (seconds). GRAIN OF SALT: provisional
-# and tunable via env — sized from spike-3's measured router latency (median
-# ~1.1s / p95 ~1.4s against the live granite daemon) with generous headroom for
-# a cold model load. Local calls fail open at the call site, so a timeout here
-# costs a conservative default, never a lost message.
-LOCAL_TYPED_HARD_TIMEOUT = float(os.environ.get("LOCAL_TYPED_HARD_TIMEOUT", "20.0"))
-
-
 async def run_typed_local(
     prompt: str,
     output_type: type[BaseModel],
@@ -189,7 +189,9 @@ async def run_typed_local(
       ``settings.models.ollama_host`` (the ``/v1`` OpenAI-compatible surface),
       model defaulting to ``config.models.OLLAMA_CLASSIFIER_MODEL`` (granite).
     * **Single timeout** — one outer ``asyncio.wait_for`` wall-clock cap
-      (``LOCAL_TYPED_HARD_TIMEOUT``). The hotfix-#1055 double-timeout pattern
+      (``settings.timeouts.local_typed_hard_s``, env-overridable via
+      ``TIMEOUTS__LOCAL_TYPED_HARD_S`` and read here per call, not at
+      module scope). The hotfix-#1055 double-timeout pattern
       exists for half-open WAN sockets; a localhost daemon either answers or
       refuses, so one cap suffices.
 
@@ -206,12 +208,14 @@ async def run_typed_local(
         raise ValueError("run_typed_local requires a non-empty, non-whitespace prompt")
 
     if hard_timeout is None:
-        hard_timeout = LOCAL_TYPED_HARD_TIMEOUT
+        hard_timeout = settings.timeouts.local_typed_hard_s
+
+    stack = _load_stack()
 
     base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"
-    provider = OllamaProvider(base_url=base_url)
-    pydantic_model = OpenAIChatModel(model, provider=provider)
-    agent = Agent(pydantic_model, output_type=output_type)
+    provider = stack.OllamaProvider(base_url=base_url)
+    pydantic_model = stack.OpenAIChatModel(model, provider=provider)
+    agent = stack.Agent(pydantic_model, output_type=output_type)
 
     try:
         result = await asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)

@@ -372,6 +372,25 @@ class TimeoutSettings(BaseModel):
             "Env: TIMEOUTS__ANTHROPIC_HARD_S."
         ),
     )
+    local_typed_hard_s: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Wall-clock cap (seconds) for local granite/Ollama calls via "
+            "`agent/llm/wrapper.py::run_typed_local`, read inside the "
+            "function so a bump takes effect without a module reload. "
+            "GRAIN OF SALT: provisional and tunable -- sized from spike-3's "
+            "measured router latency (median ~1.1s / p95 ~1.4s against the "
+            "live granite daemon) with generous headroom for a cold model "
+            "load. Unlike the Anthropic pair above this is a SINGLE timer: "
+            "a localhost daemon either answers or refuses, so the "
+            "half-open-socket case the two-timer structure guards does not "
+            "arise. Local calls fail open at the call site, so a timeout "
+            "here costs a conservative default, never a lost message. "
+            "Env: TIMEOUTS__LOCAL_TYPED_HARD_S."
+        ),
+    )
 
     # --- Session-lifecycle TTLs (Decision #3, issue #1927 drift) ---------
     # AgentSession and session-used Popoto objects may run up to 30 days
