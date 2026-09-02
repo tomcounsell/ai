@@ -673,9 +673,33 @@ TWO_SET_PYPROJECT = (
 )
 
 
+PRE_BUMP_LOCK = 'version = 1\n\n[[package]]\nname = "httpcore"\nversion = "1.0.9"\n'
+# What a restore's re-sync actually produced live: unrelated transitive drift
+# that has nothing to do with the set being rolled back.
+DRIFTED_LOCK = 'version = 1\n\n[[package]]\nname = "httpcore"\nversion = "1.0.10"\n'
+POST_BUMP_LOCK = 'version = 1\n\n[[package]]\nname = "claude-agent-sdk"\nversion = "0.9.9"\n'
+
+
 def _latest(mapping: dict[str, str]):
     """A `get_pypi_latest` stub driven by an explicit per-package table."""
     return lambda package, timeout=10: mapping.get(package)
+
+
+def _drifting_sync(lock: Path, result):
+    """A `sync_dependencies` stub that rewrites `uv.lock` the way uv does.
+
+    A stub that leaves the lockfile alone cannot see this defect at all —
+    that blindness is why the dirty-lockfile bug shipped. Only an unfrozen
+    sync re-resolves; `uv sync --frozen` installs from the lock and leaves
+    it byte-identical.
+    """
+
+    def _sync(project_dir, reinstall=False, frozen=True):
+        if not frozen:
+            lock.write_text(DRIFTED_LOCK)
+        return result
+
+    return _sync
 
 
 class TestCoupledSetDeclaration:
@@ -934,12 +958,23 @@ class TestAutoBumpDeps:
         """
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(TWO_SET_PYPROJECT)
+        lock = tmp_path / "uv.lock"
+        lock.write_text(PRE_BUMP_LOCK)
 
-        syncs = [
-            MagicMock(success=True, error=None),  # post-bump sync
-            MagicMock(success=False, error="resolver exploded"),  # restore sync
+        results = [
+            MagicMock(success=True, error=None),  # SET_A post-bump sync
+            MagicMock(success=False, error="resolver exploded"),  # SET_A restore sync
             MagicMock(success=True, error=None),  # SET_B post-bump sync
         ]
+        resolved = [DRIFTED_LOCK, POST_BUMP_LOCK]  # what each unfrozen sync resolves to
+        observed: list[tuple[bool, str]] = []
+
+        def _sync(project_dir, reinstall=False, frozen=True):
+            observed.append((frozen, lock.read_text()))
+            if not frozen:
+                lock.write_text(resolved.pop(0))
+            return results.pop(0)
+
         with (
             patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A, SET_B]),
             patch(
@@ -952,26 +987,34 @@ class TestAutoBumpDeps:
                     }
                 ),
             ),
-            patch("scripts.update.deps.sync_dependencies", side_effect=syncs),
+            patch("scripts.update.deps.sync_dependencies", side_effect=_sync),
             patch(
                 "scripts.update.deps.run_gate_phases",
                 side_effect=lambda _d, s: (
                     (False, "import", "boom") if "anthropic" in s.members else (True, None, "ok")
                 ),
             ),
-            patch("scripts.update.deps.run_cmd") as run_cmd,
         ):
             result = auto_bump_deps(tmp_path)
 
         assert result.restore_failed is True
-        # The poisoned lockfile is discarded, not left for `git add`.
-        assert run_cmd.call_args_list[0].args[0] == ["git", "checkout", "--", "uv.lock"]
+        # The poisoned lockfile is discarded BEFORE the restore re-sync, and
+        # that re-sync is frozen so it cannot resolve a new one.
+        assert observed[1] == (True, PRE_BUMP_LOCK)
         # A good set still bumped, which is exactly why the flag must gate.
         assert result.any_bumped
 
     def test_worktree_clean_after_every_rollback_path(self, tmp_path: Path):
-        """Sync failure, gate failure, and rewrite refusal all leave the file pristine."""
+        """Sync failure, gate failure, and rewrite refusal all leave the tree pristine.
+
+        "Pristine" means BOTH tracked files: `pyproject.toml` **and**
+        `uv.lock`. A restore that re-syncs and keeps whatever uv resolved
+        leaves the lockfile carrying unrelated transitive drift, which a
+        later set's good bump then commits — the poisoned-lockfile class
+        this gate exists to prevent, reached on the success path.
+        """
         pyproject = tmp_path / "pyproject.toml"
+        lock = tmp_path / "uv.lock"
 
         scenarios = [
             # (sync result, gate result)
@@ -980,21 +1023,27 @@ class TestAutoBumpDeps:
         ]
         for sync_result, gate_result in scenarios:
             pyproject.write_text(TWO_SET_PYPROJECT)
+            lock.write_text(PRE_BUMP_LOCK)
             with (
                 patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
                 patch(
                     "scripts.update.deps.get_pypi_latest",
                     _latest({"anthropic": "1.0.0", "pydantic-ai-slim": "2.35.0"}),
                 ),
-                patch("scripts.update.deps.sync_dependencies", return_value=sync_result),
+                patch(
+                    "scripts.update.deps.sync_dependencies",
+                    side_effect=_drifting_sync(lock, sync_result),
+                ),
                 patch("scripts.update.deps.run_gate_phases", return_value=gate_result),
             ):
                 result = auto_bump_deps(tmp_path)
             assert result.rolled_back
             assert pyproject.read_text() == TWO_SET_PYPROJECT
+            assert lock.read_text() == PRE_BUMP_LOCK
 
         # A writer refusal mid-set abandons the set with the file restored.
         pyproject.write_text(TWO_SET_PYPROJECT)
+        lock.write_text(PRE_BUMP_LOCK)
         with (
             patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
             patch(
@@ -1011,7 +1060,57 @@ class TestAutoBumpDeps:
 
         sync.assert_not_called()
         assert pyproject.read_text() == TWO_SET_PYPROJECT
+        assert lock.read_text() == PRE_BUMP_LOCK
         assert all("set abandoned" in (b.error or "") for b in result.bumps)
+
+    def test_rollback_keeps_an_earlier_sets_good_lockfile(self, tmp_path: Path):
+        """Per-set, not per-run: the restore is scoped to the set that failed.
+
+        A blanket `git checkout -- uv.lock` would revert the *earlier*
+        set's legitimately-bumped lockfile too, leaving its pin in
+        `pyproject.toml` with no lock entry behind it — spike-4's failure
+        mode, on the lockfile axis.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+        lock = tmp_path / "uv.lock"
+        lock.write_text(PRE_BUMP_LOCK)
+
+        # What each unfrozen sync resolves to, in call order: SET_B's good
+        # bump, then SET_A's bump, then SET_A's restore re-sync.
+        resolved = [POST_BUMP_LOCK, DRIFTED_LOCK, DRIFTED_LOCK]
+
+        def _sync(project_dir, reinstall=False, frozen=True):
+            if not frozen:
+                lock.write_text(resolved.pop(0))
+            return MagicMock(success=True, error=None)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_B, SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest(
+                    {
+                        "anthropic": "1.0.0",
+                        "pydantic-ai-slim": "2.35.0",
+                        "claude-agent-sdk": "0.9.9",
+                    }
+                ),
+            ),
+            patch("scripts.update.deps.sync_dependencies", side_effect=_sync),
+            patch(
+                "scripts.update.deps.run_gate_phases",
+                side_effect=lambda _d, s: (
+                    (False, "import", "boom") if "anthropic" in s.members else (True, None, "ok")
+                ),
+            ),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert result.rolled_back
+        assert {b.package for b in result.bumps if b.bumped} == {"claude-agent-sdk"}
+        # SET_B's lockfile survives SET_A's rollback; SET_A's drift does not.
+        assert lock.read_text() == POST_BUMP_LOCK
 
 
 # =============================================================================

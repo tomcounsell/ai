@@ -735,33 +735,81 @@ def _record_set(
         )
 
 
-def _restore_set(project_dir: Path, snapshot: str, result: AutoBumpResult, resync: bool) -> None:
-    """Put this set's pins back, and record it loudly if that fails.
+@dataclass
+class SetSnapshot:
+    """The two tracked files one coupled set's bump can touch, pre-bump.
+
+    `None` means the file did not exist before the bump, so restoring it
+    means deleting whatever the bump's sync created — not writing an empty
+    file, which would itself be a dirty worktree.
+    """
+
+    pyproject: str | None
+    lock: str | None
+
+    @classmethod
+    def take(cls, project_dir: Path) -> SetSnapshot:
+        return cls(
+            pyproject=_read_or_none(project_dir / "pyproject.toml"),
+            lock=_read_or_none(project_dir / "uv.lock"),
+        )
+
+    def restore(self, project_dir: Path) -> None:
+        _write_or_unlink(project_dir / "pyproject.toml", self.pyproject)
+        _write_or_unlink(project_dir / "uv.lock", self.lock)
+
+
+def _read_or_none(path: Path) -> str | None:
+    return path.read_text() if path.exists() else None
+
+
+def _write_or_unlink(path: Path, content: str | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(content)
+
+
+def _restore_set(
+    project_dir: Path,
+    snapshot: SetSnapshot,
+    result: AutoBumpResult,
+    resync: bool,
+) -> None:
+    """Put this set's pins AND lockfile back, and record it loudly if that fails.
 
     The snapshot is PER-SET, taken immediately before the set's own rewrite.
     A whole-file snapshot taken once before the loop would revert every
-    other set's good bump on one bad set (spike-4).
+    other set's good bump on one bad set (spike-4). The same reasoning is
+    why `uv.lock` is restored from the per-set snapshot rather than with a
+    blanket `git checkout -- uv.lock`, which would throw away an earlier
+    set's legitimately-bumped lockfile and leave its pin unbacked.
+
+    Both files, always: a successful restore that re-syncs and keeps
+    whatever uv resolved leaves `uv.lock` carrying unrelated transitive
+    drift. `run.py` commits on `any_bumped and not restore_failed`, so a
+    later set's good bump would ship that drift fleet-wide — the poisoned
+    lockfile this whole gate exists to prevent, reached on the success path.
     """
-    (project_dir / "pyproject.toml").write_text(snapshot)
+    snapshot.restore(project_dir)
     if not resync:
         return
 
-    restore_sync = sync_dependencies(project_dir, frozen=False)
+    # `frozen=True`: pyproject.toml and uv.lock are back to the pre-bump
+    # pair, so uv must install FROM that lock rather than re-resolve and
+    # rewrite it. An unfrozen re-sync here is precisely what dirtied the
+    # lockfile on the success path.
+    restore_sync = sync_dependencies(project_dir, frozen=True)
     if restore_sync.success:
         return
 
     # The environment is NOT back to its pre-bump state. Say so — a
     # swallowed restore failure is how a poisoned lockfile ships fleet-wide.
     result.restore_failed = True
-    try:
-        run_cmd(["git", "checkout", "--", "uv.lock"], cwd=project_dir, check=False, timeout=60)
-    except (subprocess.SubprocessError, OSError):
-        pass
 
 
 def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBumpResult) -> None:
     """Resolve, rewrite, sync, and gate one coupled set — all or nothing."""
-    pyproject = project_dir / "pyproject.toml"
     current: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
 
@@ -796,7 +844,7 @@ def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBu
         _record_set(result, coupled_set, current, latest)
         return
 
-    snapshot = pyproject.read_text() if pyproject.exists() else ""
+    snapshot = SetSnapshot.take(project_dir)
 
     try:
         for member, new_version in changed.items():

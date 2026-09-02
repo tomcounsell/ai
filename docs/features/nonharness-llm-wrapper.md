@@ -53,7 +53,26 @@ An empty, `None`, or whitespace-only `prompt` raises `ValueError` before any cli
 
 ### `run_typed_local` — the granite-on-Ollama leg (durability M3, #2494)
 
-`agent/llm/wrapper.py` also exposes `run_typed_local(prompt, output_type, *, model=OLLAMA_CLASSIFIER_MODEL, hard_timeout=None)` for calls that run on the **local granite model** via Ollama — the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) route through it. Same typed-output contract and `LLMCallError` surface as `run_typed`, with three deliberate differences: no Anthropic client and no shared Anthropic semaphore (the call never leaves the machine), an `OllamaProvider` against `settings.models.ollama_host`'s `/v1` surface, and a single wall-clock cap (`LOCAL_TYPED_HARD_TIMEOUT`, env-overridable, default 20s) instead of the WAN double-timeout pattern. Call sites keep their own conservative failure defaults (intake → `new_work`, router → NEW Job).
+`agent/llm/wrapper.py` also exposes `run_typed_local(prompt, output_type, *, model=OLLAMA_CLASSIFIER_MODEL, hard_timeout=None)` for calls that run on the **local granite model** via Ollama — the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) route through it. Same typed-output contract and `LLMCallError` surface as `run_typed`, with three deliberate differences: no Anthropic client and no shared Anthropic semaphore (the call never leaves the machine), an `OllamaProvider` against `settings.models.ollama_host`'s `/v1` surface, and a single wall-clock cap instead of the WAN double-timeout pattern. Call sites keep their own conservative failure defaults (intake → `new_work`, router → NEW Job).
+
+The cap is `settings.timeouts.local_typed_hard_s` (default 20.0s, env key `TIMEOUTS__LOCAL_TYPED_HARD_S`), read **inside** `run_typed_local` on each call rather than at module scope, so an override takes effect without a code change. See [Config Timeout Catalog](config-timeout-catalog.md).
+
+### Import safety and the degraded-stack guard
+
+Module scope in `agent/llm/wrapper.py`, `agent/llm/compat.py`, and `agent/anthropic_client.py` holds **stdlib and our own code only**. Every third-party symbol (`anthropic`, `pydantic_ai.*`) is resolved through `agent/anthropic_client.py::_load_stack`, one `functools.cache`-memoized whole-stack loader, called only from inside the call paths. A machine whose installed stack is broken can still `import agent.llm` — and therefore `import bridge.telegram_bridge` — with the failure surfacing at the call, where it can be reported. `tests/unit/test_llm_import_safety.py` enforces this out-of-process.
+
+`_load_stack` is imported into `wrapper.py`'s namespace, so `monkeypatch.setattr(wrapper_mod, "_load_stack", ...)` is the network-isolation seam for tests.
+
+Both entry points first call `_guard_stack`, which forces resolution of the memoized degraded flag and raises **`LLMStackIncompatible`** on a bad stack. It subclasses `LLMCallError`, so every existing `except LLMCallError` fail-safe applies unchanged and each call site keeps its own conservative default.
+
+The gate is two-axis and the axes are applied differently:
+
+| Entry point | Blocked by a stack that fails to import | Blocked by an `anthropic`/`pydantic-ai` signature mismatch |
+|---|---|---|
+| `run_typed` | yes | yes |
+| `run_typed_local` | yes | **no** |
+
+`run_typed_local` never touches `anthropic`, so an Anthropic create-signature break must not fall the two hot-path classifiers back to their conservative defaults fleet-wide. Full design in [LLM Stack Compat Gate](llm-stack-compat-gate.md).
 
 ## Adding a New Classifier
 
@@ -97,5 +116,6 @@ Every site below moved from a hand-rolled client (or `ollama.chat()`) to `run_ty
 ## See Also
 
 - `agent/llm/wrapper.py` — the wrapper implementation and its full per-call invariant docstring
+- [LLM Stack Compat Gate](llm-stack-compat-gate.md) — the import-safety contract, the compat predicate, degraded posture, and coupled-set auto-bumping
 - [Headless Session Runner](headless-session-runner.md) — the harness half of LLM calls
 - `docs/plans/pydantic-ai-nonharness-llm-standardization.md` — design spikes and the full call-site inventory audit

@@ -63,13 +63,25 @@ The CLI propagates via `pip install -e .` during the dependency-sync step (`[pro
 
 ### Auto-Bump Critical Dependencies
 
-Every run checks PyPI for newer `anthropic` and `claude-agent-sdk` versions (only the lockfile-maintainer machine runs auto-bump; others skip to avoid racing). When a newer version is available:
+Auto-bump works in **coupled sets** — packages that move together or not at all — declared as `AUTO_BUMP_SETS` in `scripts/update/deps.py`. Only the lockfile-maintainer machine runs auto-bump; others skip to avoid racing.
 
-1. Bumps the pin in `pyproject.toml`
-2. Runs `uv sync` to install the new version
-3. Runs a smoke test (import check + `pytest tests/unit/test_docs_auditor_substrate.py -x -q`)
-4. If smoke test passes: commits and pushes the bump
-5. If smoke test fails: rolls back `pyproject.toml` and re-syncs old versions
+Two sets are declared: `anthropic` + `pydantic-ai-slim` (currently **held** on `#3001 Step 2`, so it is skipped and the hold is recorded), and `claude-agent-sdk`.
+
+Per set, every run:
+
+1. Skips the set if it carries a `hold`, recording `held: <reason>`.
+2. Resolves the latest PyPI version for **every** member. One unresolvable member skips the whole set.
+3. Skips the set if no member's pin actually changed — a quiet cycle never re-resolves the lockfile.
+4. Snapshots `pyproject.toml`, then rewrites **all** changed member pins.
+5. Runs `uv sync` (unfrozen) to re-resolve and install.
+6. Runs the set's declared gate phases in order, stopping at the first failure and naming it:
+   - `llm` — `{venv}/bin/python -m agent.llm.compat --json --allow-network` (the `anthropic` + `pydantic-ai` pair only; makes one real billed call)
+   - `import` — imports the set's own `import_names`
+   - `pytest` — `pytest tests/unit/test_docs_auditor_substrate.py -x -q`
+7. All gates pass: the set's pins survive and are committed and pushed.
+8. Any gate or the sync fails: restores **that set's own** snapshot, re-syncs, records `rolled_back` plus the failed phase, and moves to the next set. If the restore's own re-sync fails, `restore_failed` is set and nothing is committed that run.
+
+Separately, **every** `/update` and `/update --cron` on **every** machine runs a verify-time LLM stack compat check (`python -m agent.llm.compat --json` in the project venv) and reports it as the `llm-stack-compat` tool check. That leg covers hand-staged pins and follower machines, which never auto-bump. See [LLM Stack Compat Gate](../../../docs/features/llm-stack-compat-gate.md).
 
 ### Critical Dependency Handling (git-driven changes)
 

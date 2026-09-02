@@ -56,7 +56,6 @@ import logging
 from pydantic import BaseModel
 
 from agent.anthropic_client import _load_stack, semaphore_slot
-from agent.llm.compat import stack_axes
 from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
@@ -113,7 +112,17 @@ def _guard_stack(caller: str, *, signature_axis: bool) -> None:
     ``signature_axis`` is ``False`` for the local granite leg, which never
     touches ``anthropic`` -- an Anthropic create-signature break must not
     fall the two hot-path classifiers over.
+
+    ``stack_axes`` is imported here rather than at module scope so that
+    importing the ``agent.llm`` package does not import
+    ``agent.llm.compat``. `python -m agent.llm.compat` -- the argv the
+    update gate and `verify.py` both run -- imports the package before
+    executing the module, and a pre-imported ``compat`` makes runpy emit a
+    "found in sys.modules" RuntimeWarning onto stderr that is quoted
+    verbatim into operator-facing gate output.
     """
+    from agent.llm.compat import stack_axes  # noqa: PLC0415
+
     loader_ok, compatible = stack_axes()
     if not loader_ok:
         raise LLMStackIncompatible(

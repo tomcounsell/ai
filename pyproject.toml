@@ -6,7 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
     # CRITICAL — coupled set: anthropic + pydantic-ai-slim move together.
-    # anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. See AUTO_BUMP_SETS in scripts/update/deps.py.
+    # anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. Gated by AUTO_BUMP_SETS in
+    # scripts/update/deps.py; see docs/features/llm-stack-compat-gate.md.
     "anthropic==0.125.0",
     "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
     "claude-agent-sdk==0.2.151", # CRITICAL — pin exact, upgrade via /update only

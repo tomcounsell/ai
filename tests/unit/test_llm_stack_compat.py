@@ -333,6 +333,10 @@ def test_cli_contract_out_of_process(tmp_path: Path) -> None:
     assert payload["anthropic_version"]
     assert payload["pydantic_ai_version"]
     assert proc.returncode == (0 if payload["compatible"] else 1), proc.stderr
+    # stderr is operator-facing: it is quoted verbatim into every gate-failure
+    # message and into `verify.py`'s output. A `-m` double-import
+    # RuntimeWarning there reads like a real defect in the gate.
+    assert proc.stderr == "", f"the CLI wrote to stderr on a clean run:\n{proc.stderr}"
 
 
 def test_cli_imports_nothing_from_scripts() -> None:
