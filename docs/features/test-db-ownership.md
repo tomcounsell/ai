@@ -97,6 +97,8 @@ whole-process setup outage, turning a documented graceful degradation into an ou
 
 ## Installed pytest plugins
 
+**Ownership is split by fact, not by preference.** `tests/db_claim.py` owns two facts: the db NUMBER and the SERVER (host/port) the claim registry is keyed to. Applying those facts is split across two owners: popoto's bundled `pytest11` plugin applies the db number — it reads the `POPOTO_TEST_DB` that `pytest_configure` exports and calls its own `_swap_db` — while `tests/conftest.py`'s session-scoped `_popoto_pool_install` fixture applies the server. Applying the server cannot be delegated to `_swap_db`: that helper preserves whatever host/port the pool it rebuilds already carries, and that pool was built at popoto import time from the ambient `REDIS_URL`. Under `REDIS_PORT=641x` the claim registry keys to the private port while `_swap_db` alone would leave the client on 6379 — the run opts OUT of the machine-global pool and flushes production db N (#2799). The split is the design, not a compromise: collapsing it into a single owner is only safe once `_swap_db` itself learns to resolve host/port from the claim registry, a change that belongs to popoto's own repo (#2770), not this one.
+
 `popoto` registers `pytest11 = popoto.pytest_plugin`, which this repo loads on every run:
 `pyproject.toml` addopts disable `postgresql` only. With neither `POPOTO_TEST_DB` nor the
 `popoto_test_db` ini option set, the plugin's function-scoped autouse `_popoto_flush_db`
@@ -121,6 +123,13 @@ instead of the suite quietly resuming rotation.
 no client binds to a stale event loop. Skip it; never assert it is non-`None`. An
 `AttributeError` raised inside a session-scoped autouse fixture errors every test in the
 process during setup.
+
+`tests/conftest.py` never constructs or binds the async client. `popoto.redis_db.get_async_redis_db()`
+builds it lazily, inside the running test's own event loop, mirroring the canonical sync
+client's host/port/db kwargs at construction time. That laziness is what keeps the client
+attached to the loop it is actually used from — a synchronous, fixture-time bind (the old
+shape) produces a client bound to whichever loop happened to be current at fixture setup,
+which pytest-asyncio tears down before the test body's own loop ever runs.
 
 ## Why enforcement
 
