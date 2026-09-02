@@ -5,7 +5,7 @@ appetite: Large
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-09-02T07:01:43Z
+revision_applied_at: 2026-09-02T07:22:31Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
 last_comment_id: 5505317383
 ---
@@ -1371,9 +1371,11 @@ bridge command. But the runtime's boot and failure presentation change:
 
 ### Feature Documentation
 - [ ] Create `docs/features/llm-stack-compat-gate.md` — the import-safety
-  contract and its single enforcement test; the predicate and its four call
-  sites; the resolver-bound degraded/alert contract and why not fail-closed;
-  the three channels, the hibernation exemption, the marker-file clear leg, and
+  contract and its single enforcement test; the predicate, its four call sites,
+  and its **five fail-closed cases** (including the splat-only call site);
+  the resolver-bound degraded/alert contract and why not fail-closed;
+  the three channels, the hibernation exemption, the marker-file clear leg
+  (including the break-glass override's own clear), and
   the named drafter-convention exception; the coupled-set model, the
   `pydantic-ai-slim>=2.33.0` boundary, the `hold` and who removes it; why
   `openai` is in no set; what the gate checks and cannot check.
@@ -2044,3 +2046,20 @@ beyond what the findings required.
 | Route 2's commit-time leg declined, residual recorded in No-Gos | A pre-push predicate run reports on the *installed* stack, which at push time is not the stack the pin declares — it would have passed `d0c02bde5` and added a false all-clear. The sound form (a venv-free declaration check against the compat boundary) is named as a follow-up. |
 | Two `grep -c` rows → `! grep -q`; one baseline SHA in Freshness Check | The two nits. The whole Verification table is now exit-0-on-pass. |
 | `last_comment_id` advanced `5421299483` → `5505317383`; No-Gos re-slugged to #3073 / #3074 / #3075; task 9's `Refs`-vs-`Closes` note reworded | Phase 2.7 sync. The owner filed the three deferred chunks as their own issues on 2026-09-02 and corrected the record on Work Item 2 (its headline fix landed in `56e80d843`; #3074 owns only the residue). This lane's scope is unchanged and its Work-Item-2 anti-criterion still holds, now owned by #3074. |
+
+### Round-8 revision pass (2026-09-02) — one fail-closed gate, three guard fixes
+
+All six round-8 findings are dispositioned in the round-8 table above: six
+fixed, none declined. No architectural decision changed and no scope was added
+beyond what the findings required — the import-safety contract, the
+resolver-bound alert, the two-axis split, the coupled-set model, and the hold
+all stand.
+
+| Change | Why |
+|---|---|
+| **A fifth fail-closed gate: a `create` site forwarding no literal keywords returns `compatible=False`** | The round-8 blocker. With one splat-only site the count gate does not fire, the path resolves, `getsource` works, and the subset test is *vacuously true* — the predicate returns `compatible=True` against the known-bad pair. The only compensating control lived in the test suite, which never runs at `/update` verify or service startup, so Data Flow route 3 — the follower machine this lane exists to protect — was defeated by the lane's own predicate. |
+| The override branch clears the caller's own marker | The break-glass short-circuit runs *before* the predicate, so it can never reach the healthy branch's clear. Setting the override on a falsely-degraded machine stranded a permanent red board recoverable only by a human `rm` — the plan's own "stuck-red equals no dashboard channel" mode, reached through the escape hatch. |
+| The CLI-purity criterion split: in-process memo assertion, subprocess contract-only, marker clause deleted | Round 7's writer restriction (`proc`-gated marker writes) made "the CLI creates no marker" hold whether the CLI is pure or not, and a parent cannot count `capture_message` calls inside a child. The purity property was being asserted by a test that could not fail — the defect class the round-7 blocker named, landed on the property round 4 raised the concern to protect. |
+| The `_MARKER_DIR` redirect becomes an autouse `tests/conftest.py` fixture | A hand-replicated per-file convention is the shape this plan rejects for `agent/llm/`, and the gap was already real: `test_llm_stack_compat.py` drives degraded resolutions and was not one of the files carrying the guard. One fixture covers every present and future test; the per-file glob assertions are deleted as the redundant half. |
+| Consumer count corrected to six; the "31 test files" count removed | `scripts/nightly_regression_tests.py:97` imports `agent.llm.wrapper` at module scope — the nightly detector itself, so today an ImportError kills the job that is supposed to notice. The xdist cache-hit argument holds at any count above zero, so the test-file number was decorative and a maintenance liability. |
+| Freshness baseline restated as `93fb790ef`; one stale inline SHA reworded | One baseline per round, applied to the whole document rather than only the header. Both intervening commits touch only `docs/plans/*.md`, so every premise carries forward unchanged — a labelling defect, not a stale-claim defect. |
