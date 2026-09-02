@@ -240,6 +240,27 @@ def record_budget_trip(session, verdict: BudgetVerdict) -> None:
         except Exception as e:
             logger.warning("[tool-budget] failed to increment denied_calls counter: %s", e)
 
+        # Lane A instrumentation (plan #3081): mirror EVERY deny onto the
+        # session-telemetry JSONL stream — before the per-session dedup gate,
+        # matching denied_calls — so tools.belt_baseline can count PreToolUse
+        # denials (with the session's call/cost readings at deny time) from the
+        # stream alone. This single tap covers BOTH PreToolUse surfaces, since
+        # both actuate their budget deny through record_budget_trip. Its own
+        # isolated try/except: a telemetry blip must not swallow the counters,
+        # WARNING log, flag write, or auto-pause below.
+        try:
+            from agent.session_telemetry import record_pre_tool_use_denial
+
+            record_pre_tool_use_denial(
+                session_id,
+                cause="tool_budget",
+                reason=verdict.reason,
+                tool_call_count=getattr(session, "tool_call_count", None),
+                total_cost_usd=getattr(session, "total_cost_usd", None),
+            )
+        except Exception as e:
+            logger.warning("[tool-budget] denial telemetry tap failed (non-fatal): %s", e)
+
         # Dedup the SIDE EFFECTS (not the block) to once per session.
         # #1873 item 3: an id-less session (no session_id AND no agent_session_id)
         # must NOT collapse into a shared ``...:tripped_applied:None`` slot — that

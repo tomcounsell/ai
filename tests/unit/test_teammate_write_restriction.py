@@ -1,4 +1,4 @@
-"""Tests for teammate session write enforcement.
+"""Tests for teammate session write enforcement and the PreToolUse denial taps.
 
 Covers ``_teammate_is_allowed_write`` and the teammate branch in
 ``pre_tool_use_hook`` for Write/Edit/MultiEdit:
@@ -10,6 +10,13 @@ Covers ``_teammate_is_allowed_write`` and the teammate branch in
   empty/invalid).
 - MultiEdit parity with Write/Edit.
 
+It also covers the denial-telemetry taps this hook's deny branches carry
+(plan #3081 Risk 1): every sensitive-path and teammate-write deny mirrors a
+``pre_tool_use_denial`` event onto the session telemetry stream, which is
+where ``tools.belt_baseline`` gets its escalation-ceiling denominator.
+Those taps are telemetry ONLY -- ``TestDenialTelemetryIsFailQuiet`` pins that
+a broken recorder cannot soften a deny.
+
 The cwd contract is established with ``monkeypatch.chdir(tmp_path)`` so the
 project root used by ``_teammate_is_allowed_write`` is a predictable temp
 directory. The vault prefix is patched to live under ``tmp_path`` so symlink
@@ -20,7 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from unittest.mock import MagicMock
+import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -426,3 +434,251 @@ class TestNonTeammateUnaffected:
         result = asyncio.run(pre_tool_use_hook(input_data, "tu-other-2", mock_context))
 
         assert result.get("decision") != "block"
+
+
+# --- PreToolUse denial telemetry (plan #3081 Risk 1) ---------------------------
+
+
+def _make_bash_input(command: str) -> dict:
+    return {
+        "session_id": "sdk-session-teammate",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_use_id": "tu-denial-bash",
+    }
+
+
+@pytest.fixture()
+def denial_stream(tmp_path, monkeypatch, request):
+    """Redirect the telemetry stream to tmp_path and give the hook a session id.
+
+    ``_record_denial`` resolves the session id from the environment with the
+    same precedence ``agent/tool_budget.py`` uses for its own denial tap
+    (``session_id`` first, then ``agent_session_id`` -- ``VALOR_SESSION_ID``
+    then ``AGENT_SESSION_ID`` on the hook side), so setting the env var is the
+    whole setup. Yields a reader that returns the events written for it.
+    """
+    from agent import session_telemetry as telemetry_mod
+
+    # Slugged: the telemetry stream is one file per session id, so a '/' from a
+    # parametrized test name would land the write in a nonexistent subdirectory.
+    session_id = "denial-" + re.sub(r"[^A-Za-z0-9_.-]", "-", request.node.name)
+    monkeypatch.setattr(telemetry_mod, "_TELEMETRY_DIR_RELATIVE", tmp_path / "session_telemetry")
+    monkeypatch.setenv("VALOR_SESSION_ID", session_id)
+    monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+    def _events() -> list[dict]:
+        return telemetry_mod.read_session_timeline(session_id)
+
+    yield _events
+
+    # The module caches an open file handle per session; a handle left open on
+    # a torn-down tmp_path would leak into the next test.
+    fh = telemetry_mod._handles.pop(session_id, None)
+    if fh:
+        try:
+            fh.close()
+        except Exception:  # swallow-ok: fixture teardown, handle may already be closed
+            pass
+    telemetry_mod._locks.pop(session_id, None)
+    telemetry_mod._last_event_monotonic.pop(session_id, None)
+    telemetry_mod._event_counts.pop(session_id, None)
+    telemetry_mod._truncated.discard(session_id)
+
+
+class TestDenialTelemetryTaps:
+    """Every deny branch this hook owns mirrors a ``pre_tool_use_denial`` event
+    onto the session telemetry stream, tagged with the cause
+    ``tools.belt_baseline`` splits on. Without these taps the two causes the
+    baseline excludes are never emitted and its exclusion filter never runs
+    against real data."""
+
+    def test_sensitive_path_write_deny_is_recorded(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        result = asyncio.run(pre_tool_use_hook(_make_write_input(".env"), "tu-den-1", mock_context))
+
+        assert result.get("decision") == "block"
+        events = denial_stream()
+        assert len(events) == 1
+        assert events[0]["type"] == "pre_tool_use_denial"
+        assert events[0]["cause"] == "sensitive_path"
+        assert events[0]["tool_name"] == "Write"
+
+    def test_sensitive_fragment_write_deny_is_recorded(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        """The SENSITIVE_FRAGMENTS half of the same block, not just the
+        exact-basename half."""
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        result = asyncio.run(
+            pre_tool_use_hook(
+                _make_write_input("config/secrets/token.json", tool_name="Edit"),
+                "tu-den-2",
+                mock_context,
+            )
+        )
+
+        assert result.get("decision") == "block"
+        events = denial_stream()
+        assert [e["cause"] for e in events] == ["sensitive_path"]
+        assert events[0]["tool_name"] == "Edit"
+
+    def test_teammate_write_deny_is_recorded(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        result = asyncio.run(
+            pre_tool_use_hook(
+                _make_write_input("agent/sdk_client.py", tool_name="MultiEdit"),
+                "tu-den-3",
+                mock_context,
+            )
+        )
+
+        assert result.get("decision") == "block"
+        events = denial_stream()
+        assert [e["cause"] for e in events] == ["teammate_write"]
+        assert events[0]["tool_name"] == "MultiEdit"
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo secret > .env", "cp /tmp/x .env", "tee -a .env"],
+    )
+    def test_bash_sensitive_write_deny_is_recorded(
+        self, command, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        result = asyncio.run(pre_tool_use_hook(_make_bash_input(command), "tu-den-4", mock_context))
+
+        assert result.get("decision") == "block"
+        events = denial_stream()
+        assert [e["cause"] for e in events] == ["sensitive_path"]
+        assert events[0]["tool_name"] == "Bash"
+
+    def test_allowed_write_records_nothing(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        """The tap fires on denies only -- an allowed write must not inflate
+        the baseline's denominator."""
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        result = asyncio.run(
+            pre_tool_use_hook(_make_write_input("docs/notes.md"), "tu-den-5", mock_context)
+        )
+
+        assert result.get("decision") != "block"
+        assert denial_stream() == []
+
+    def test_missing_session_id_skips_recording_without_blocking(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        """No resolvable session id means no recording at all -- never an
+        invented placeholder id, and never a softened deny.
+
+        The probe watches the recorder itself rather than the resulting files:
+        an invented id writes to a DIFFERENT stream, so reading this test's own
+        stream (or even globbing the directory, which the module's per-session
+        handle cache makes order-dependent) would report absence either way.
+        Asserting the call never happens is the claim stated exactly."""
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        with patch("agent.session_telemetry.record_pre_tool_use_denial") as recorder:
+            result = asyncio.run(
+                pre_tool_use_hook(_make_write_input(".env"), "tu-den-6", mock_context)
+            )
+
+        assert result.get("decision") == "block"
+        assert "sensitive" in result.get("reason", "").lower()
+        assert recorder.call_args_list == []
+
+
+class TestDenialTelemetryIsFailQuiet:
+    """The taps are telemetry. A recorder that explodes, or an import that
+    fails, must leave the deny decision, its message, and its shape untouched
+    -- the hook must never become dependent on the telemetry stream."""
+
+    def _expected_teammate_block(self, fake_project, mock_context, monkeypatch):
+        """The deny this hook produces with telemetry working normally."""
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        return asyncio.run(
+            pre_tool_use_hook(_make_write_input("agent/sdk_client.py"), "tu-fq-base", mock_context)
+        )
+
+    def test_raising_recorder_still_denies_identically(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        baseline = self._expected_teammate_block(fake_project, mock_context, monkeypatch)
+        assert baseline.get("decision") == "block"
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        with patch(
+            "agent.session_telemetry.record_pre_tool_use_denial",
+            side_effect=RuntimeError("telemetry exploded"),
+        ):
+            result = asyncio.run(
+                pre_tool_use_hook(_make_write_input("agent/sdk_client.py"), "tu-fq-1", mock_context)
+            )
+
+        assert result == baseline
+
+    def test_failed_import_still_denies_identically(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        """Simulates the lazy import itself failing."""
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        with patch(
+            "agent.hooks.session_resolver.inflight_cooldown_key",
+            side_effect=ImportError("no module"),
+        ):
+            result = asyncio.run(
+                pre_tool_use_hook(_make_write_input(".env"), "tu-fq-2", mock_context)
+            )
+
+        assert result.get("decision") == "block"
+        assert "sensitive" in result.get("reason", "").lower()
+        assert ".env" in result.get("reason", "")
+
+    def test_raising_recorder_still_denies_bash_sensitive_write(
+        self, fake_project, mock_context, monkeypatch, denial_stream
+    ):
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        with patch(
+            "agent.session_telemetry.record_pre_tool_use_denial",
+            side_effect=RuntimeError("telemetry exploded"),
+        ):
+            result = asyncio.run(
+                pre_tool_use_hook(_make_bash_input("cp /tmp/x .env"), "tu-fq-3", mock_context)
+            )
+
+        assert result.get("decision") == "block"
+        assert "sensitive" in result.get("reason", "").lower()

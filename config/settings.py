@@ -996,6 +996,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Persona toolbelts activation flag (plan #3081, Lane A — ships dark).
+    # When False (the committed default), the headless harness never calls the
+    # belt resolver and every `claude -p` invocation stays byte-identical to
+    # pre-belt ambient behavior. Flipped on in a dedicated commit (task 4 of
+    # the plan) only after the baseline measurement window closes; the env
+    # override exists as break-glass rollback only, never for per-machine
+    # activation (the fleet activates together via git sync + /update).
+    toolbelts_enforce: bool = Field(
+        default=False,
+        description=(
+            "Enforce per-persona toolbelt manifests (config/toolbelts/) on "
+            "headless harness turns. Default OFF (dark). Env: TOOLBELTS_ENFORCE."
+        ),
+    )
+
+    # Escalation rollback gate constants (plan #3081, Risk 1). The gate itself
+    # is armed at activation time (task 4, out of scope for the dark build):
+    # escalation-tagged lines per persona per week above
+    # max(ESCALATION_CEILING_MULTIPLIER x belt-relevant denial baseline,
+    # ESCALATION_CEILING_FLOOR) for two consecutive weeks flips
+    # TOOLBELTS_ENFORCE back off. The baseline denominator excludes denial
+    # causes a belt cannot affect (sensitive-path and, pre-Lane-B, the
+    # teammate write-restriction blocks). The floor keeps a near-zero
+    # baseline — plausible for PM/Dev under bypassPermissions — from tripping
+    # the gate on the first-ever escalation line.
+    escalation_ceiling_multiplier: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Multiplier over the belt-relevant denial baseline for the "
+            "escalation rollback ceiling. Env: ESCALATION_CEILING_MULTIPLIER."
+        ),
+    )
+    escalation_ceiling_floor: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Absolute floor for the escalation rollback ceiling, so a "
+            "near-zero baseline cannot trip the gate on the first escalation "
+            "line. Env: ESCALATION_CEILING_FLOOR."
+        ),
+    )
+
     # Email resolver persistent-unavailability alert (issue #1817, workstream A2).
     # Provisional/tunable — chosen to absorb a one-off transient resolver blip
     # without paging, while still catching a genuinely stuck resolver (e.g. an

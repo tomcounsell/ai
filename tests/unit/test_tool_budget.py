@@ -149,6 +149,52 @@ def test_denied_calls_counts_across_distinct_sessions(_fake_redis):
     assert _fake_redis.counters.get("testproj:tool-budget:tripped") == 2
 
 
+def test_deny_records_denial_telemetry_with_context_cost_fields(_fake_redis, monkeypatch):
+    """Lane A (#3081): every deny mirrors onto the session-telemetry stream
+    with the session's context-cost readings (tool_call_count, total_cost_usd)
+    alongside the cause — the JSONL source tools.belt_baseline counts
+    PreToolUse denials from. NOT deduped per session: two denies ⇒ two events,
+    mirroring ``denied_calls``."""
+    import agent.session_telemetry as st
+
+    recorded = []
+    monkeypatch.setattr(
+        st, "record_pre_tool_use_denial", lambda sid, **kw: recorded.append((sid, kw))
+    )
+
+    session = _FakeSession("sess-T")
+    session.total_cost_usd = 12.5
+    verdict = BudgetVerdict(allow=False, reason="per-session tool-call budget reached (999/1000)")
+
+    tool_budget.record_budget_trip(session, verdict)
+    tool_budget.record_budget_trip(session, verdict)
+
+    assert len(recorded) == 2
+    sid, kwargs = recorded[0]
+    assert sid == "sess-T"
+    assert kwargs["cause"] == "tool_budget"
+    assert kwargs["tool_call_count"] == 999
+    assert kwargs["total_cost_usd"] == 12.5
+    assert "budget" in kwargs["reason"]
+
+
+def test_denial_telemetry_failure_never_blocks_surfacing(_fake_redis, monkeypatch):
+    """A broken telemetry tap must not stop the Redis counters (fail-quiet)."""
+    import agent.session_telemetry as st
+
+    def _boom(*a, **k):
+        raise OSError("telemetry down")
+
+    monkeypatch.setattr(st, "record_pre_tool_use_denial", _boom)
+
+    session = _FakeSession("sess-U")
+    verdict = BudgetVerdict(allow=False, reason="per-session cost cap reached ($50.00/$50.00)")
+    tool_budget.record_budget_trip(session, verdict)
+
+    assert _fake_redis.counters.get("testproj:tool-budget:denied_calls") == 1
+    assert _fake_redis.counters.get("testproj:tool-budget:tripped") == 1
+
+
 def test_denied_calls_counts_id_less_sessions_without_dedup_key(_fake_redis):
     """An id-less session bypasses the NX dedup gate (issue #1873 item 3) — its
     denies must still be counted on every call, never collapsed into a shared

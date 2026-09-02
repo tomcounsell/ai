@@ -49,6 +49,12 @@ worker claims AgentSession → executor builds a SessionRunner (no transport
 resolution — there is exactly one transport)
     │
     ▼
+turn-start belt resolution (`belt_resolver.resolve_belt`, dark behind
+`TOOLBELTS_ENFORCE`): compiles the role's `config/toolbelts/{role}.toml` into
+`--tools` / `--mcp-config` / `--strict-mcp-config` argv, ahead of the
+positional message. An unresolvable belt refuses the turn with no spawn.
+    │
+    ▼
 runner.run_turn(): spawn `claude -p --output-format stream-json [--resume <uuid>]`
   in the session's working_dir
     │  turn 1 → primes via the role's `/roles:prime-{pm,dev,teammate}-role`
@@ -71,6 +77,12 @@ PM output → SessionRunner._classify_turn() (schema-first, plan #2000 Task 2.3)
 turn end reconciled: stream-json `result` event (usage, cost, is_error)
   cross-checked against the hook-edge `Stop` envelope
 ```
+
+Belt resolution runs only when the spawn carries a `role`, so the drafter,
+probe, and drafter-review spawns are untouched. With `TOOLBELTS_ENFORCE` off
+(the committed default) `resolve_belt` is never called and the argv is
+byte-identical to the pre-belt form; the turn-start enforce-state stamp runs
+either way. See [Persona Toolbelts](persona-toolbelts.md).
 
 ## Steer-Preempt (D4)
 
@@ -551,6 +563,7 @@ prior substrate was retired outright rather than patched again.
 | `agent/session_runner/runner.py` | Turn loop, steer-preempt watcher, resume-scalar timing |
 | `agent/session_runner/role_driver.py` | Drives one turn through `HarnessAdapter`, prime vs. resume, turn-end reconciliation |
 | `agent/session_runner/harness/{base,claude,events}.py` | `HarnessAdapter` protocol, `TurnRequest`/`TurnResult`/`TurnEvent`, the `claude -p` adapter — see [HarnessAdapter Seam](harness-adapter.md) |
+| `agent/session_runner/belt_resolver.py` | Turn-start persona toolbelt resolution, enforce-state stamp, `[missing-capability]` escalation forwarding |
 | `agent/session_runner/router.py` | `classify_pm_prefix`, `ExitReason` StrEnum, `TurnFailure`, derived exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
 | `agent/session_runner/transcript_tailer.py` | Dashboard telemetry transcript reads |
@@ -563,6 +576,7 @@ prior substrate was retired outright rather than patched again.
 ## See Also
 
 - [HarnessAdapter Seam](harness-adapter.md) — the extracted claude-`-p` subprocess/argv/stream-json knowledge this runner drives through
+- [Persona Toolbelts](persona-toolbelts.md): the turn-start belt resolution, its fail-closed cases, and the per-tool cost attribution folded into the stream-json parse path
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — where the runner sits in the enqueue → execute → deliver pipeline
 - [Eng Session Architecture](eng-session-architecture.md) — session-type discriminator and routing
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes

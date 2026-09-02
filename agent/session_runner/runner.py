@@ -66,6 +66,7 @@ from agent.session_runner.adapter import (
     sidechain_transcript_path,
     subagent_in_flight,
 )
+from agent.session_runner.belt_resolver import forward_capability_escalations
 from agent.session_runner.completion_guard import (
     CompletionDecision,
     evaluate_completion,
@@ -425,6 +426,10 @@ class SessionRunner:
         # the ladder does NOT restart from zero on session resume (a resumed
         # runner is a fresh instance). ``None`` = not yet loaded.
         self._completion_refusal_count: int | None = None
+        # Missing-capability escalation lines already forwarded this run
+        # (plan #3081): dedup set so a re-stated gap rides the open-question
+        # channel once, not once per turn.
+        self._forwarded_escalations: set[str] = set()
 
         # Test seam for the sidechain scan root (~/.claude/projects).
         self._projects_root = projects_root
@@ -1491,6 +1496,18 @@ class SessionRunner:
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
+        # Missing-capability escalation (plan #3081): tag and forward any
+        # `[missing-capability]` lines on the open-question channel before
+        # routing. Non-blocking — never changes the routing decision, and the
+        # telemetry event makes the line render in the session report even
+        # when the turn otherwise succeeds. Fail-quiet by contract.
+        forward_capability_escalations(
+            text or "",
+            forwarded=self._forwarded_escalations,
+            deliver=self._adapter.on_user_payload,
+            record=self._record_telemetry,
+            role=getattr(self._driver, "role", None),
+        )
         classification = self._classify_turn(outcome)
         miss = classification.compliance_miss
 
