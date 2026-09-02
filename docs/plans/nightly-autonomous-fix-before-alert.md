@@ -681,8 +681,8 @@ assertion that the mandate string contains the prohibition), never a whole-file 
      in the round-7 revision at baseline 2d60de31d, two of its blockers by cutting scope rather
      than by asserting a mechanism. Round-6 and round-8 note: the Agent/Task tool was unavailable
      in both sessions, so the three FULL lenses were applied by the driving agent directly;
-     deviations named in .critique-runs/2334-1788330647858217000/ROUND6-NOTE.md and
-     .critique-runs/2334-1788331879504381000/ROUND8-NOTE.md. -->
+     the standing deviation note is .critique-runs/2334-1788331879504381000/ROUND8-NOTE.md
+     (the round-6 run dir was garbage-collected on completion). -->
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
