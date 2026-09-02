@@ -1612,7 +1612,7 @@ class TestPersistedStateKeyInvariance:
         }
         with (
             patch("sys.argv", ["nightly_regression_tests.py"]),
-            patch.object(nrt, "NIGHTLY_FIX_MODE", mode),
+            patch.object(nrt, "resolve_fix_mode", return_value=mode),
             patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
             patch.object(nrt, "load_env_or_die", return_value=(42, None)),
             patch.object(
