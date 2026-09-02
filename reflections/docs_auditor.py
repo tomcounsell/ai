@@ -32,10 +32,15 @@ from pathlib import Path
 
 from config.machine import get_machine_display_name
 from config.settings import settings
+from reflections.utilities import load_local_projects, resolve_eng_group
 
 logger = logging.getLogger("reflections.docs_auditor")
 
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# Fallback Telegram destination used only when the audited repo IS this checkout
+# and projects.json is unreadable or unmatched — see _resolve_notify_chat.
+FALLBACK_ENG_CHAT = "Eng: Valor"
 
 # ---------------------------------------------------------------------------
 # Module-level configuration
@@ -1479,26 +1484,101 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Telegram notification (mirrors _send_log_review_telegram pattern)
+# Telegram notification (destination resolved from the audited repo root)
 # ---------------------------------------------------------------------------
 
 
-def _send_telegram_notification(message: str) -> None:
-    """Best-effort Telegram notification. Swallows all subprocess failures."""
+def _resolve_notify_chat(repo_root: Path) -> str | None:
+    """Map the audited repo root to a ``--chat`` destination, or ``None``.
+
+    Ladder:
+      1. Match ``repo_root`` against a ``projects.json`` entry's
+         ``working_directory``.
+      2. If matched, resolve that project's ``Eng:`` group via
+         ``resolve_eng_group`` and return its numeric ``chat_id`` as a string
+         (never the group name — a name re-enters ``valor-telegram``'s
+         ambiguity-tolerant resolve_chat cascade; an id cannot).
+      3. If no project matches, or the matched project has no properly
+         configured ``Eng:`` group, return ``FALLBACK_ENG_CHAT`` **only when**
+         ``repo_root`` is this very checkout (``PROJECT_ROOT``) — never for a
+         foreign or unregistered repo. This is a deliberate narrowing: an
+         unconditional fallback would re-create the exact misroute this
+         function exists to remove, paging the valor engineers about a repo
+         they don't own. This checkout's own engineer group genuinely is
+         ``Eng: Valor``, so the fallback is provably correct only in that one
+         case — do not "simplify" this back into an unconditional default.
+      4. Any exception during lookup is swallowed, logged, and falls through
+         to the step-3 rule (best-effort: a notification failure must never
+         break an audit run).
+
+    Returns ``None`` to mean "do not send" — the caller must not shell out.
+    """
+    target = repo_root.resolve()
     try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
+        for project in load_local_projects():
+            wd = project.get("working_directory")
+            if wd and Path(wd).resolve() == target:
+                resolved = resolve_eng_group(project)
+                if resolved is not None:
+                    _, chat_id = resolved
+                    return str(chat_id)
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("docs_auditor: project lookup for Telegram routing failed: %s", exc)
+
+    if target == PROJECT_ROOT.resolve():
+        return FALLBACK_ENG_CHAT
+
+    logger.warning(
+        "docs_auditor: no Eng: group for audited repo %s (repo not registered in "
+        "projects.json, or its project has no configured Eng: group); "
+        "Telegram notification suppressed",
+        target,
+    )
+    return None
+
+
+def _send_telegram_notification(message: str, *, repo_root: Path | None = None) -> bool:
+    """Best-effort Telegram notification, addressed by the audited repo root.
+
+    Resolves the destination via ``_resolve_notify_chat((repo_root or
+    PROJECT_ROOT).resolve())`` — computed here, not defaulted in the
+    signature, so a test that patches the module-level ``PROJECT_ROOT``
+    global is honored at call time rather than at import time.
+
+    Returns ``False`` **only** when no destination resolved — no subprocess
+    is invoked in that case. Every other path, including a swallowed
+    ``FileNotFoundError``/``TimeoutExpired``/``Exception`` or a non-zero
+    ``valor-telegram`` exit code, returns ``True``: a destination was
+    resolved and a send was attempted, so the caller's "no Eng: group
+    configured" finding text stays accurate only for the ``False`` case.
+    """
+    root = (repo_root or PROJECT_ROOT).resolve()
+    chat = _resolve_notify_chat(root)
+    if chat is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["valor-telegram", "send", "--chat", chat, message],
             capture_output=True,
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
             check=False,
         )
+        if proc.returncode != 0:
+            logger.warning(
+                "docs_auditor: valor-telegram exited %s for chat %s: %s",
+                proc.returncode,
+                chat,
+                (proc.stderr or "")[:200],
+            )
     except FileNotFoundError:
         logger.warning("docs_auditor: valor-telegram not on PATH; skipping Telegram notify")
     except subprocess.TimeoutExpired:
         logger.warning("docs_auditor: valor-telegram send timed out")
     except Exception as e:
         logger.warning(f"docs_auditor: valor-telegram send failed: {e}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2430,16 +2510,31 @@ def run_docs_auditor() -> dict:
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
             _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
+            # Initialized unconditionally (mirroring withheld_note above): the
+            # summary f-string below interpolates this on every zero-diff
+            # return, including the clean path where the notify call never
+            # runs. Assigning it only inside the `if fixes_withheld:` guard
+            # would raise NameError on that common path, which the enclosing
+            # `except Exception` silently converts into {"status": "error"}.
+            suppressed_note = ""
+            zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
             if fixes_withheld:
-                _send_telegram_notification(
+                sent = _send_telegram_notification(
                     f"docs-auditor pass for {slug}: zero-diff, no PR"
                     f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                    "nothing was written and no PR was opened to review them"
+                    "nothing was written and no PR was opened to review them",
+                    repo_root=PROJECT_ROOT,
                 )
+                if not sent:
+                    suppressed_note = f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
+                    zero_diff_findings.append(
+                        f"docs-auditor: Telegram notification suppressed — no Eng: "
+                        f"group for {PROJECT_ROOT}"
+                    )
             return {
                 "status": "skipped",
-                "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
-                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
+                "findings": zero_diff_findings,
+                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}",
             }
 
         # 7. Memory refresh hook (fire-and-forget) — fired after commit
@@ -2518,7 +2613,17 @@ def run_docs_auditor() -> dict:
             + f"\nPR: {pr_url}"
             + f"\nReview required — closed unmerged after {STALE_PR_AGE_DAYS} days if unreviewed."
         )
-        _send_telegram_notification(msg)
+        # Initialized unconditionally even though the sender is called
+        # unconditionally on this path — mirrors the zero-diff path's
+        # initialize-first rule so neither branch can leave this name unbound.
+        suppressed_note = ""
+        sent = _send_telegram_notification(msg, repo_root=PROJECT_ROOT)
+        if not sent:
+            suppressed_note = f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
+            findings.append(
+                f"docs-auditor: Telegram notification suppressed for PR {pr_url} — "
+                f"no Eng: group for {PROJECT_ROOT}"
+            )
 
         # 10. Update rotation hash for all touched files
         _update_rotation_hash(project_key, files_touched)
@@ -2553,7 +2658,7 @@ def run_docs_auditor() -> dict:
             "findings": findings,
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
-                f"{result.get('fixes_applied', 0)} fixes{withheld_note}, "
+                f"{result.get('fixes_applied', 0)} fixes{withheld_note}{suppressed_note}, "
                 f"PR={pr_url}"
             ),
         }
