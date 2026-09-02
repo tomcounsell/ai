@@ -5,9 +5,9 @@ appetite: Large
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-09-02T06:18:01Z
+revision_applied_at: 2026-09-02T06:41:44Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
-last_comment_id: 5421299483
+last_comment_id: 5505317383
 ---
 
 # Import-safe LLM stack + run-boundary compat gate + coupled-set bumping
@@ -97,11 +97,12 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `b87fb26de` (round 5, 2026-09-02). The two commits since
-the round-4 baseline `3b6eb651b` are both plan/critique docs — no tracked source
-file moved — and every line reference in this table plus the five corrected body
-sites were re-run against `b87fb26de` during the round-5 pass. The prior
-baselines were `3b6eb651b` (round 4) and `d5d08615a` (round 3).
+**Baseline commit:** `63e6c2299` — `main`'s tip at round 6 (2026-09-02). This is
+the single baseline for every claim in this section; earlier rounds' SHAs are
+deliberately not restated here. The round-5 critique independently re-verified
+every reference at `b37d67d98`, and all six commits between `b37d67d98` and
+`63e6c2299` touch only `docs/plans/*.md` (verified by
+`git log --name-only`), so no tracked source file has moved since.
 **Issue filed at:** 2026-08-25T05:16:36Z
 **Disposition:** **Minor drift.** Every substantive premise holds: the
 `agent/llm/` module-scope imports, the five module-scope consumers,
@@ -118,7 +119,7 @@ module-scope-env ratchet, recorded as its own subsection.
 The two-arrivals history is retained in Problem and Prior Art because it is the
 evidence for the run-boundary placement.
 
-### File:line references re-verified 2026-09-02 at `3b6eb651b`
+### File:line references re-verified at the baseline commit above
 
 | Reference | Claim | Status |
 |---|---|---|
@@ -177,7 +178,13 @@ the record.
 - **#2960–#2999** — closed duplicates; their shared-root-cause diagnosis not relied on.
 - **#2949** / `69dc69568` — MERGED 2026-08-24; owns Work Item 2, out of this lane.
 - **#3016** — still **OPEN**. Independent `test_promise_gate_real_api` failure, separately filed; not a blocker for this lane.
-- **#3001** — still OPEN, as required: Work Items 2 and 3 keep it open past this lane's merge.
+- **#3073 / #3074 / #3075** — filed 2026-09-02 (issue comment `5505317383`),
+  carrying the three chunks this lane defers: Step 2's upgrade (#3073, blocked
+  on this lane), the `worker_key` residue (#3074), and nightly triage filing
+  (#3075). Recorded in No-Gos with their own slugs.
+- **#3001** — still OPEN. With all three chunks separately tracked, the owner
+  may prefer to close it on this lane's merge; task 9 keeps `Refs #3001` as the
+  default and defers the choice.
 
 ### Commits since the reshape that touched lane files
 
@@ -400,7 +407,28 @@ Three channels, fired unconditionally on the first transition to degraded.
 |---|---|---|
 | Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following `agent/index_drift.py:224` including its capture-failed fallback log. | `sentry-sdk`'s own HTTP transport; shares no code with the LLM stack. **Hibernation exemption required:** `bridge/telegram_bridge.py`'s `_sentry_before_send` (`:55`, wired into `configure_sentry` at `:80`) drops every event while `is_hibernating()` — a persistent flag, not a brief window. The hook must pass events whose message carries the degraded sentinel token. Hibernation means "we cannot reach Telegram", which is exactly when a broken LLM stack most needs to be visible elsewhere. |
 | Logs | `logger.critical` with a fixed, greppable sentinel token. | stdlib only. Survives a Sentry DSN outage. |
-| Dashboard | The resolver writes a marker file at `<repo>/data/llm-stack-degraded` (versions + `exc_type`), resolved from the module as `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"` — never cwd-relative, mirroring `ui/app.py:376`'s `Path(__file__).parent.parent / "data" / ...`; `dashboard_json` (`ui/app.py:907`) reads it with the siblings' fail-quiet `try/except OSError` and renders red. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
+| Dashboard | The resolver writes a **per-process** marker file at `<repo>/data/llm-stack-degraded.{proc}` (versions + `exc_type` + which axis failed), resolved from the module as `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"` — never cwd-relative, mirroring `ui/app.py:376`'s `Path(__file__).parent.parent / "data" / ...`; `dashboard_json` (`ui/app.py:907`) reads `sorted((repo / "data").glob("llm-stack-degraded*"))` with the siblings' fail-quiet `try/except OSError` and renders red while **any** marker exists, naming the degraded processes. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
+
+### Why the dashboard marker is per-process, not shared
+
+A single shared marker has no writer ownership, and the clear leg makes that
+fatal in the *green* direction. After a pin fix lands, the bridge takes the
+graceful restart (`agent/agent_session_queue.py::_check_restart_flag`),
+re-resolves healthy, and clears the marker — while the worker, whose restart
+`_check_restart_flag` defers whenever jobs are running
+(`tests/integration/test_remote_update.py::test_check_restart_flag_defers_when_jobs_running`),
+still holds its memoized degraded flag and keeps raising
+`LLMStackIncompatible`. The dashboard would render green against a still-broken
+worker: the same "stuck dashboard equals no dashboard channel" failure with the
+polarity flipped, and worse, because nobody investigates a green board.
+
+So each resolver owns exactly one path and clears **only** its own
+(`marker.unlink(missing_ok=True)` on the process's own filename, never a glob
+and never another process's file). `proc` is `bridge` / `worker` for the
+long-lived services and a pid-suffixed name for one-shot callers, so a crashed
+one-shot cannot strand a permanent red. The read side globs and is red while any
+marker survives. Tested: clearing the bridge marker leaves the worker marker and
+the red state intact.
 
 A direct Telegram push was considered and **rejected**: no raw Bot-API send path
 exists in tracked code, and Telethon's send lives only in the bridge — it cannot
@@ -516,21 +544,97 @@ The appetite re-label above is the concession taken instead.
   `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire.
   That single test is the invariant; consumer discipline is not.
 - **`check_llm_stack_compat()` in `agent/llm/compat.py`**, returning
-  `CompatResult` (`compatible`, `anthropic_version`, `pydantic_ai_version`,
-  `reason`, `exc_type`). Local mode: run the loader (catches the ImportError
-  class), then verify the installed `anthropic` message-create signature
-  accepts what the installed `pydantic_ai` passes — **derived by
-  introspection**, not hardcoded: bind
-  `pydantic_ai.models.anthropic.AnthropicModelSettings.__annotations__` keys
-  against `inspect.signature(anthropic.resources.messages.AsyncMessages.create).parameters`,
-  flagging any key absent and not absorbed by `**kwargs`. Introspection
-  failures (an internals rename) return `compatible=False` — a silently-passing
-  predicate whose target moved is the same failure as no gate. A module-level
-  literal fallback tuple carries the pydantic-ai version in a comment plus a
-  test asserting it is a subset of the introspected keys.
+  `CompatResult` (`compatible`, `loader_ok`, `anthropic_version`,
+  `pydantic_ai_version`, `reason`, `exc_type`). Local mode: run the loader
+  (catches the ImportError class — this is the `loader_ok` axis), then verify
+  the installed `anthropic` create signature accepts what the installed
+  `pydantic_ai` **actually forwards** (the `compatible` axis).
+
+  **The derivation is from the call site, not from the settings TypedDict.**
+  Round 5 established, by execution, that
+  `AnthropicModelSettings.__annotations__` is the wrong source: on the pinned,
+  verified-working pair it has 31 keys of which **20 are absent** from any
+  `create` signature (`anthropic_betas`, `anthropic_thinking`,
+  `frequency_penalty`, `logit_bias`, `parallel_tool_calls`, `seed`, …). It is a
+  declared *superset* of provider-agnostic and anthropic-namespaced settings
+  that `AnthropicModel` translates, renames into headers, or drops — not the
+  kwargs that reach the client. Deriving from it makes the predicate report
+  `compatible=False` on a healthy fleet.
+
+  The algorithm (prototyped end to end during this revision; it returns
+  `compatible=True` on `anthropic 0.125.0` + `pydantic-ai-slim 2.9.0`):
+
+  1. `ast.parse(inspect.getsource(pydantic_ai.models.anthropic))`; collect every
+     `ast.Call` whose `func` is an `ast.Attribute` named `create` on a dotted
+     path rooted at `self.client`. On 2.9.0 there is exactly one such site,
+     `self.client.beta.messages.create`, carrying **24 literal keyword names**
+     (`temperature`, `top_p`, `top_k`, `stop_sequences`, `betas`,
+     `context_management`, `mcp_servers`, `speed`, `max_tokens`, `system`,
+     `messages`, `model`, `tools`, `tool_choice`, `output_config`, `stream`,
+     `cache_control`, `thinking`, `container`, `metadata`, `service_tier`,
+     `timeout`, `extra_headers`, `extra_body`).
+  2. Resolve the **same** attribute path against a real client
+     (`client = anthropic.AsyncAnthropic(api_key="x")`, constructor-only, no
+     network, no key needed), i.e. walk `beta.messages` off the instance and
+     take `inspect.signature(target.create)`.
+  3. `compatible` iff every forwarded name is a parameter of that signature, or
+     the signature has a `VAR_KEYWORD` param. Missing names go into `reason`
+     verbatim.
+
+  **Resolving the path is load-bearing, not incidental.** Round 5's prescription
+  also named the wrong *class*: `anthropic.resources.messages.AsyncMessages`
+  (non-beta) is missing `betas`, `context_management`, `mcp_servers`, and
+  `speed`, so even the correct kwarg set would report four false positives
+  against it. The call site names its own target; read the target from the call
+  site.
+
+  Introspection failures — `getsource` unavailable, zero `create` sites found,
+  the attribute path unresolvable on the client — return `compatible=False`
+  with the failure verbatim. A silently-passing predicate whose target moved is
+  the same failure as no gate. Guarding that fail-closed direction against
+  false positives is what the break-glass override below is for.
+
+  Two guards replace round 5's trivially-passing subset test:
+  - **Positive self-test**: `check_llm_stack_compat().compatible is True` on the
+    pinned pair, run in CI. This is the assertion whose absence let the
+    round-5 blocker through.
+  - **Shape assertions on the derived set**: it contains `temperature`,
+    `top_p`, and `top_k` (the three the 2026-08-24 incident removed) and
+    contains **no** `anthropic_`-prefixed name (the tell that the derivation
+    slipped back onto the settings TypedDict). The module-level literal tuple
+    is kept only as those three names' home — it is the *assertion* target, not
+    a fallback the predicate silently degrades to.
+
   `allow_network=True` additionally makes one minimal `run_typed` call (catches
   the transport class). `python -m agent.llm.compat --json` is the subprocess
   entry point; no imports from `scripts/`.
+- **Two axes, not one boolean — `run_typed_local` is not gated on the Anthropic
+  signature.** `CompatResult` carries `loader_ok` (the third-party stack
+  imports) beside `compatible` (the Anthropic create-signature check), and
+  `_resolve_degraded_flag()` memoizes both. `run_typed` raises
+  `LLMStackIncompatible` when `not loader_ok or not compatible`;
+  `run_typed_local` raises **only** when `not loader_ok`. Rationale: the local
+  leg constructs `OpenAIChatModel` against `OllamaProvider` and talks to
+  localhost Ollama — it never touches `anthropic`, so an Anthropic signature
+  break must not fall the two hot-path classifiers (intake intent in
+  `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) back to
+  their conservative defaults fleet-wide. Spike-5 already separated these
+  domains; a single boolean would re-collapse them. The alert still fires on
+  either axis, naming which.
+- **Break-glass override.** `_resolve_degraded_flag()` reads
+  `os.environ.get("LLM_STACK_COMPAT_OVERRIDE")` **inside the function** (a
+  module-scope read is blocked by `validate_no_module_scope_env.py`); the value
+  `"healthy"` short-circuits to not-degraded after a
+  `logger.warning(<sentinel> + " OVERRIDDEN")`. The predicate introspects two
+  third-party internals upstream is free to rename — including in Step 2's
+  lane, which moves `pydantic-ai-slim` 25 minor versions — and the fail-closed
+  direction means a false positive raises at every non-harness call site on all
+  four machines until a code revert completes a full SDLC round trip. The
+  override makes recovery an operator action. It is **not** honoured by
+  `check_llm_stack_compat()` (which stays pure), by the `--json` CLI, or by the
+  auto-bump `llm` gate: an override must never let a bad pin pass the bump gate.
+  Documented as break-glass only, with the sentinel warning making its use
+  visible in logs.
 - **Two entry points, no shared state — the predicate is pure, the resolver
   alerts.** `check_llm_stack_compat(allow_network=...)` returns a `CompatResult`
   and does **nothing else**: it never touches the memoized degraded flag, never
@@ -682,7 +786,15 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
 - **The `wrapper.py` rewrite trips a commit-time hook unless the env read moves
   with it** — `validate_no_module_scope_env.py` is diff-scoped, so relocating
   `LOCAL_TYPED_HARD_TIMEOUT` counts as introducing it. Migrating the read to
-  `TimeoutSettings` is a task-2 deliverable, not an incidental cleanup.
+  `TimeoutSettings` is a task-2 deliverable, not an incidental cleanup, and it
+  is a **public-surface change, not an internal rename**: the constant is
+  re-exported from `agent/llm/__init__.py` (lines 14 and 26, `__all__`
+  included) and documented by name in `docs/features/nonharness-llm-wrapper.md:56`
+  as "env-overridable, default 20s". All three move together — new field
+  `settings.timeouts.local_typed_hard_s` (env `TIMEOUTS__LOCAL_TYPED_HARD_S`)
+  read inside `run_typed_local`, re-export deleted, doc corrected. Grep for
+  `LOCAL_TYPED_HARD_TIMEOUT` across the **whole tracked tree**, not just
+  `tests/`.
 - **Set semantics are all-or-nothing at every stage** — resolve, rewrite, sync,
   gate, rollback. Today's record-error-and-continue is exactly how the incident
   happened (spike-2 defect 3).
@@ -751,10 +863,15 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `import agent.llm` and `import bridge.telegram_bridge` succeed, `run_typed`
   raises `LLMStackIncompatible`, all three channels fire; plus the
   no-startup-hook path (first `run_typed` call resolves, alerts, raises typed).
-- [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): compatible on the
-  good pair; incompatible with verbatim reason on a simulated bad signature;
-  incompatible on loader ImportError; introspection-failure → incompatible;
-  fallback tuple ⊆ introspected keys; local mode makes no network call; **the
+- [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): **the positive
+  self-test — `check_llm_stack_compat().compatible is True` on the pinned pair**
+  (the assertion whose absence produced the round-5 blocker); the derived kwarg
+  set contains `temperature`/`top_p`/`top_k` and no `anthropic_`-prefixed name;
+  the resolved target is the callable named by the call site's own attribute
+  path; incompatible with verbatim reason on a simulated bad signature;
+  `loader_ok is False` on loader ImportError; introspection-failure (zero
+  `create` sites, unresolvable path) → incompatible; local mode makes no network
+  call; **the
   predicate is pure** — `check_llm_stack_compat` on an incompatible stack emits
   zero `capture_message` calls, writes no marker file, and leaves the memoized
   degraded flag unresolved; **the `--json` CLI path is pure by the same
@@ -762,10 +879,22 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   no marker file appears at the resolved path).
 - [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): alert
   fires **while `run_typed` raises** (independence proof); raising
-  `capture_message` suppresses nothing else; marker file written on degraded,
-  cleared on healthy; hibernation `before_send` passes the sentinel event while
-  dropping others; process does not exit; degraded intake (inbound message
-  still enqueues an AgentSession).
+  `capture_message` suppresses nothing else; per-process marker written on
+  degraded and cleared on healthy, with **clearing the bridge marker leaving the
+  worker marker and the red state intact**; hibernation `before_send` passes the
+  sentinel event while dropping others; process does not exit; degraded intake
+  (inbound message still enqueues an AgentSession); **two-axis split** —
+  `loader_ok` true + `compatible` false makes `run_typed` raise while
+  `run_typed_local` completes against a stubbed `FunctionModel`; **override** —
+  `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits the resolver, emits the
+  OVERRIDDEN warning, and is ignored by the pure predicate and the `--json` CLI.
+- [ ] `tests/unit/test_dashboard_llm_degraded.py` — ADD (new file): the
+  dashboard read side. With a marker written (versions + `exc_type`),
+  `dashboard_json()` returns a truthy degraded field carrying both versions and
+  naming the process; with no marker it returns the healthy value; with two
+  markers it names both; with a marker present but unreadable the call still
+  returns 200 and does not raise, proving the `except OSError` leg. Without
+  this, the lane can go fully green with `dashboard_json` never wired.
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
   — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
 - [ ] `tests/integration/test_remote_update.py::test_verify_runs_compat_check_without_bump`
@@ -792,11 +921,14 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `test_worktree_clean_after_every_rollback_path`,
   `test_verify_critical_versions_unchanged_by_helper_rewrite`,
   `test_verify_runs_compat_check_without_bump`.
-- [ ] Any test asserting on `wrapper.LOCAL_TYPED_HARD_TIMEOUT` — UPDATE: the
-  constant becomes a lazily-read `TimeoutSettings` field (see task 2 and the
-  Freshness Check's module-scope-env ratchet subsection). Grep for the name
-  across `tests/` before editing; if there are no readers, state that in the
-  build report rather than assuming.
+- [ ] Any reader of `LOCAL_TYPED_HARD_TIMEOUT` — UPDATE: the constant becomes
+  `settings.timeouts.local_typed_hard_s` and its `agent/llm/__init__.py`
+  re-export (lines 14, 26, `__all__`) is deleted (see task 2 and the Freshness
+  Check's module-scope-env ratchet subsection). Grep the **whole tracked tree**,
+  not just `tests/` — it is a public re-export; if there are no readers outside
+  `agent/llm/`, state that in the build report rather than assuming.
+- [ ] `tests/unit/test_settings.py` — UPDATE: cover the new `local_typed_hard_s` field and its
+  `TIMEOUTS__LOCAL_TYPED_HARD_S` override, matching how its siblings are tested.
 - [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the
   gate's pytest phase.
 
@@ -830,7 +962,11 @@ simultaneously.
 makes it immediately visible, and it is one revert away. The introspection
 derivation makes the check track the installed pair rather than the 2026-08-24
 incident specifically; the positive case runs against the real pinned pair in
-CI so a false negative fails the suite before shipping.
+CI so a false negative fails the suite before shipping — round 5 caught exactly
+this failure in the prescribed derivation, and the positive self-test is the
+guard that would have caught it automatically. Recovery is no longer a code
+revert: `LLM_STACK_COMPAT_OVERRIDE=healthy` is an operator action on the
+affected machine (see the break-glass bullet in Solution).
 
 ### Risk 2: The auto-bump gate makes `/update` depend on Anthropic being up
 **Impact:** A provider outage turns maintainer auto-bump cycles into rollbacks.
@@ -884,16 +1020,36 @@ and the alert is bound to resolution (Failure Posture), so ordering between
 startup and first call is irrelevant by construction. The contract test covers
 the no-startup-hook path explicitly.
 
+### Race 4: Two processes race on the dashboard marker
+**Location:** `agent/llm/compat.py::_resolve_degraded_flag` write/clear,
+`ui/app.py::dashboard_json` read
+**Trigger:** Bridge and worker resolve the flag at different times (the worker's
+graceful restart defers while jobs run), so one process's healthy clear would
+erase another's live degraded state.
+**Status:** **Designed away**, not mitigated — per-process marker filenames give
+each writer sole ownership of its own path, and the reader is red while any
+marker exists. See "Why the dashboard marker is per-process" in Failure Posture.
+The residual is the opposite and benign direction: a process killed while
+degraded leaves a stale red marker until it next resolves healthy, which is the
+safe way to be wrong.
+
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #3001] **The dependency upgrade itself** — `pydantic-ai-slim`
-  → 2.33.0+, `anthropic` → 1.x, `openai` 2.x → 3.x, and exercising the modules
-  that import `openai` directly. Step 2, behind this gate, in its own lane;
-  removing the LLM set's `hold` is that lane's final act.
-- [SEPARATE-SLUG #3001] **Work Item 2 — the dead `worker_key` regression guard**
-  (`69dc69568`/#2949). File-disjoint from this lane; implementation gotchas are
-  in the issue comments.
-- [SEPARATE-SLUG #3001] **Work Item 3 — duplicate/noisy triage filing.**
+- [SEPARATE-SLUG #3073] **The dependency upgrade itself** — `pydantic-ai-slim`
+  → 2.33.0+, `anthropic` → 1.x, the `openai` 2.x → 3.x decision, the
+  `CRITICAL — pin exact` staleness audit, and exercising the modules that import
+  `openai` directly. Step 2, behind this gate, in its own lane; #3073 is
+  **blocked on this lane merging**, and removing the LLM set's `hold` is its
+  final act.
+- [SEPARATE-SLUG #3074] **Work Item 2 — the `worker_key` regression guard.** The
+  headline fix already landed in `56e80d843` (2026-08-31, `Refs #2852`);
+  `_make_session` sets `stage_states` through the setter and carries a fixture
+  self-check. #3074 owns the residue: the `save` stub masking a `TypeError` on
+  stage-setting construction, the #2949 kwarg-drop audit, and the
+  reject-unknown-kwargs decision. File-disjoint from this lane, and this lane's
+  anti-criterion (`models/agent_session.py` and `tests/unit/test_agent_session.py`
+  untouched) still holds.
+- [SEPARATE-SLUG #3075] **Work Item 3 — duplicate/noisy nightly triage filing.**
 - [SEPARATE-SLUG #3016] **The `test_promise_gate_real_api` failure.**
 - [SEPARATE-SLUG #3001] **Auditing remaining `CRITICAL — pin exact` deps for
   staleness** — belongs with Step 2, where findings can be acted on.
@@ -902,6 +1058,28 @@ the no-startup-hook path explicitly.
   regression test's target. The floor stays.
 - **A paging alert channel.** Risk 4 names this as accepted residual.
 - **Extending the compat predicate to other subsystems.**
+- **A commit-time or push-time leg for route 2 — declined, with the residual
+  named.** Round 5 asked why the plan applies the diff-scoped-AST-hook lesson to
+  the import-safety *contract* but not to the *pin*, whose route (hand-staged
+  commit) has two demonstrated occurrences. The proposed form was a
+  `.githooks/pre-push` leg running `python -m agent.llm.compat --json` when the
+  pushed diff touches an `anthropic` / `pydantic-ai-slim` pin. **It would not
+  have caught either occurrence.** The predicate reports on the *installed*
+  stack, and at push time the venv reflects the last `uv sync`, not the pin
+  being pushed — `d0c02bde5` swept in an already-staged bump the author had not
+  synced, so the hook would have introspected the good, still-installed pair and
+  passed, adding a false all-clear on top of the bad pin. Making it sound
+  requires syncing at push time: minutes of wall clock and a mutation of the
+  pusher's venv on every push, well outside this appetite.
+  **Accepted residual:** route 2 stays detected at the *next* run boundary —
+  the next `/update` verify (every machine, unconditional) or the next bridge or
+  worker start — which is after `origin/main` carries the bad pin. Followers
+  cannot boot on it silently, which is the property this lane buys. A sound
+  commit-time leg would be a **declaration-level** check (compare the pinned
+  versions in the diff against the `anthropic>=1.0.0 → pydantic-ai-slim>=2.33.0`
+  boundary, needing no venv at all); that is a named follow-up candidate, not
+  this lane's work, and it needs the version-boundary table Rabbit Holes
+  currently forbid.
 
 ## Update System
 
@@ -926,9 +1104,23 @@ This work **is** an update-system change.
   `### Critical Dependency Handling`) — the auto-bump description
   ("anthropic and claude-agent-sdk... import check + pytest") becomes wrong on
   both counts; correct it and note the new verify-time check.
-- `ui/app.py` — reads `data/llm-stack-degraded` into `/dashboard.json`.
-- **No new config files or env keys.** `ANTHROPIC_API_KEY` and `SENTRY_DSN` are
-  already declared.
+- `ui/app.py` — globs `data/llm-stack-degraded*` into `/dashboard.json`, red
+  while any marker exists, with its own read-side test.
+- `config/settings.py` — **one new `TimeoutSettings` field**,
+  `local_typed_hard_s: float = Field(default=20.0, ge=1.0, le=300.0)`, env key
+  `TIMEOUTS__LOCAL_TYPED_HARD_S`, read **inside** `run_typed_local` as
+  `settings.timeouts.local_typed_hard_s` (a module-scope read would defeat the
+  migration). It **retires** the documented `LOCAL_TYPED_HARD_TIMEOUT` env knob,
+  so `agent/llm/__init__.py`'s re-export (lines 14 and 26, including its
+  `__all__` entry) is deleted and
+  `docs/features/nonharness-llm-wrapper.md:56` is corrected.
+- **No new config files.** One new `TIMEOUTS__` field (above) and one
+  break-glass env read, `LLM_STACK_COMPAT_OVERRIDE`, consumed lazily inside
+  `_resolve_degraded_flag()`. Neither is a credential and neither is required:
+  `LLM_STACK_COMPAT_OVERRIDE` is deliberately **not** added to `.env.example` —
+  it is an operator-set, break-glass-only variable, and declaring it would make
+  `check_env_completeness` require it on every machine forever.
+  `ANTHROPIC_API_KEY` and `SENTRY_DSN` are already declared.
 - **No migration.** Followers never auto-bump but now get the verify-time and
   startup checks — which is the point: route 3 was previously unguarded.
 
@@ -965,7 +1157,12 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] `pyproject.toml` — the two-line comment above the `anthropic` pin.
 - [ ] `docs/features/remote-update.md` — cross-reference.
 - [ ] `docs/features/nonharness-llm-wrapper.md` — the import-safety contract,
-  the lazy loader and its test seam, `LLMStackIncompatible`, the degraded flag.
+  the lazy loader and its test seam, `LLMStackIncompatible`, the degraded flag,
+  the two-axis split (`run_typed_local` is **not** gated on the Anthropic
+  signature), and **line 56's env knob rename**: `LOCAL_TYPED_HARD_TIMEOUT` →
+  `TIMEOUTS__LOCAL_TYPED_HARD_S`. The old name is gone from
+  `agent/llm/__init__.py`'s `__all__`, so leaving the paragraph documents a
+  variable that no longer exists.
 
 ### Inline Documentation
 - [ ] Each `CoupledSet` carries a prose `reason`; the LLM set's `hold` names
@@ -1010,12 +1207,31 @@ bridge command. But the runtime's boot and failure presentation change:
 - [ ] **The alert fires in a test where `run_typed` raises** (independence
   proof) and fires on the no-startup-hook path (resolver-bound proof).
 - [ ] A raising `capture_message` suppresses nothing else; the hibernation
-  `before_send` passes the sentinel event; `data/llm-stack-degraded` is written
-  on degraded and **cleared on healthy** resolution, at a path resolved from the
-  module (not cwd) and asserted equal to the path `ui/app.py` reads.
+  `before_send` passes the sentinel event; `data/llm-stack-degraded.{proc}` is
+  written on degraded and **cleared on healthy** resolution — only the writing
+  process's own path — at a path resolved from the module (not cwd) whose
+  directory equals the one `ui/app.py` reads. Clearing one process's marker
+  leaves another's, and the board stays red.
+- [ ] **`/dashboard.json` actually renders it**: with a marker present,
+  `dashboard_json()` returns a truthy degraded field carrying both versions and
+  the degraded process; with none, the healthy value; with an unreadable marker,
+  a 200 and no raise.
 - [ ] `LLMStackIncompatible` is a `LLMCallError` subclass — asserted.
-- [ ] The signature check derives its parameter set by introspection, with the
-  fallback-tuple-subset test.
+- [ ] **`check_llm_stack_compat().compatible is True` on the branch's pinned
+  pair** — the positive self-test, run in CI. The derived kwarg set is taken
+  from `pydantic_ai.models.anthropic`'s `.create(` call site (not from
+  `AnthropicModelSettings.__annotations__`) and the target callable from that
+  call's own attribute path; the set contains `temperature`/`top_p`/`top_k` and
+  no `anthropic_`-prefixed name.
+- [ ] **Two axes, not one**: with the loader healthy and the signature check
+  failing, `run_typed` raises `LLMStackIncompatible` and `run_typed_local`
+  completes. Both raise when the loader fails.
+- [ ] `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits `_resolve_degraded_flag()`
+  with a sentinel OVERRIDDEN warning, and is ignored by the pure predicate, the
+  `--json` CLI, and the auto-bump `llm` gate.
+- [ ] `LOCAL_TYPED_HARD_TIMEOUT` is gone from `agent/llm/__init__.py`'s
+  `__all__`, replaced by `TIMEOUTS__LOCAL_TYPED_HARD_S`, with
+  `docs/features/nonharness-llm-wrapper.md:56` corrected.
 - [ ] `AUTO_BUMP_SETS` declares `{anthropic, pydantic-ai-slim}` as one set with
   a truthy `hold`; `claude-agent-sdk` as its own unheld set; `openai` in no set
   (asserted in code); `CoupledSet.gates` defaults exclude `llm`.
@@ -1105,8 +1321,17 @@ bridge command. But the runtime's boot and failure presentation change:
   `2b926acae`) blocks any commit that adds *or modifies* a module-scope
   `os.environ.get` line, and this rewrite necessarily moves that line. Do not
   attempt to preserve line 167 byte-identically to dodge the hook — migrate it,
-  per the pattern the guard's own docstring prescribes. Update every reader of
-  the constant.
+  per the pattern the guard's own docstring prescribes. Add
+  `local_typed_hard_s: float = Field(default=20.0, ge=1.0, le=300.0, ...)` to
+  `TimeoutSettings` (env `TIMEOUTS__LOCAL_TYPED_HARD_S`) and read it **inside**
+  `run_typed_local`, never at module scope.
+- **Delete the `LOCAL_TYPED_HARD_TIMEOUT` re-export from
+  `agent/llm/__init__.py` (lines 14 and 26, `__all__` included)** — it is a
+  public attribute, not an internal constant, so the migration is a surface
+  change. Grep the **whole tracked tree** (not just `tests/`) for readers; if
+  there are none outside these files, say so in the build report rather than
+  assuming. `docs/features/nonharness-llm-wrapper.md:56` documents the old env
+  knob by name and is a task-8 correction.
 
 ### 3. The compat predicate
 - **Task ID**: `build-compat-predicate`
@@ -1115,11 +1340,25 @@ bridge command. But the runtime's boot and failure presentation change:
 - **Informed By**: spike-1, spike-3; round-2 introspection concern
 - **Assigned To**: `compat-builder`
 - **Parallel**: false
-- Create `agent/llm/compat.py`: `CompatResult`,
-  `check_llm_stack_compat(allow_network: bool = False)`. Local mode: run the
-  loader, then the introspection-derived signature check (with the guarded
-  fallback tuple + subset test). `allow_network=True` adds one minimal
-  `run_typed` call.
+- Create `agent/llm/compat.py`: `CompatResult` (with **both** `loader_ok` and
+  `compatible`), `check_llm_stack_compat(allow_network: bool = False)`. Local
+  mode: run the loader (`loader_ok`), then the **call-site-derived** signature
+  check (`compatible`). `allow_network=True` adds one minimal `run_typed` call.
+- **Derive the forwarded kwargs from `pydantic_ai.models.anthropic`'s `.create(`
+  call site via `ast` over `inspect.getsource`, and resolve the target callable
+  from that same call's attribute path** (`self.client.beta.messages` on 2.9.0)
+  against `anthropic.AsyncAnthropic(api_key="x")` — constructor only, no
+  network. **Do not** use `AnthropicModelSettings.__annotations__` (20 of its 31
+  keys are absent from `create` on the pinned pair — the round-5 blocker) and
+  **do not** hardcode `anthropic.resources.messages.AsyncMessages` (non-beta;
+  missing four kwargs the call site passes). See the Solution bullet for the
+  three-step algorithm and the executed evidence.
+- **Write the positive self-test first**: `check_llm_stack_compat().compatible
+  is True` on the pinned pair. Plus the shape assertions — the derived set
+  contains `temperature`/`top_p`/`top_k` and no `anthropic_`-prefixed name.
+  Round 5's subset-only test passed trivially against a predicate that would
+  have degraded the whole fleet; this pair of tests is what makes that
+  impossible.
 - Every failure path returns `compatible=False` with verbatim `reason` and
   `exc_type`. No bare `except Exception: pass`.
 - **Keep the predicate pure.** `check_llm_stack_compat` never touches the
@@ -1143,25 +1382,40 @@ bridge command. But the runtime's boot and failure presentation change:
   dashboard-transport blocker
 - **Assigned To**: `compat-builder`
 - **Parallel**: false
-- Lazily self-resolving memoized flag in `compat.py`; **the alert fires from
-  the first transition to degraded inside the resolver** — Sentry fatal,
-  `logger.critical` sentinel, `data/llm-stack-degraded` marker (versions +
-  `exc_type`). Healthy resolution clears the marker. Resolve the marker path
-  from the module — `Path(__file__).resolve().parents[2] / "data" / "llm-stack-degraded"`
-  — never cwd-relative, and assert in the test that it equals the path
-  `ui/app.py` reads (`Path(__file__).parent.parent / "data" / ...`).
+- Lazily self-resolving memoized flag in `compat.py` (memoizing **both** axes);
+  **the alert fires from the first transition to degraded inside the resolver**
+  — Sentry fatal, `logger.critical` sentinel, and a **per-process**
+  `data/llm-stack-degraded.{proc}` marker (versions + `exc_type` + which axis
+  failed). Healthy resolution clears **only this process's own** path
+  (`marker.unlink(missing_ok=True)`), never a glob. Resolve the path from the
+  module — `Path(__file__).resolve().parents[2] / "data" / f"llm-stack-degraded.{proc}"`
+  — never cwd-relative, and assert in the test that its directory equals the
+  one `ui/app.py` reads (`Path(__file__).parent.parent / "data"`).
 - The resolver is the **only** alerting path; `check_llm_stack_compat` stays
   pure (task 3).
-- `LLMStackIncompatible(LLMCallError)`; `run_typed`/`run_typed_local` raise it
-  when degraded.
+- **Break-glass override**: read `LLM_STACK_COMPAT_OVERRIDE` **inside**
+  `_resolve_degraded_flag()` (module scope is blocked by
+  `validate_no_module_scope_env.py`); `"healthy"` short-circuits to
+  not-degraded after a `logger.warning(<sentinel> + " OVERRIDDEN")`. Not
+  honoured by the pure predicate, the `--json` CLI, or the auto-bump gate.
+- `LLMStackIncompatible(LLMCallError)`. `run_typed` raises it when
+  `not loader_ok or not compatible`; `run_typed_local` raises **only** when
+  `not loader_ok` — an Anthropic signature break must not fall the Ollama
+  classifiers over. Test: loader OK + signature check failing → `run_typed`
+  raises, `run_typed_local` completes against a stubbed `FunctionModel`.
 - Startup calls in `bridge/telegram_bridge.py::main` and `worker/__main__.py`
   force resolution; neither exits on incompatibility.
 - Exempt the sentinel from `_sentry_before_send`'s hibernation drop.
-- Dashboard read side in `ui/app.py::dashboard_json`, fail-quiet like its
-  siblings.
+- Dashboard read side in `ui/app.py::dashboard_json`: glob
+  `data/llm-stack-degraded*`, red while any marker exists, naming the degraded
+  processes; fail-quiet `except OSError` like its siblings. **This leg gets its
+  own test file** (`tests/unit/test_dashboard_llm_degraded.py`) — round 5
+  caught the same defect class on the verify leg, and a channel this plan calls
+  its only *standing* signal cannot ship untested.
 - Tests: independence (alert while `run_typed` raises), no-startup-hook path,
-  Sentry-failure tolerance, marker clear leg, hibernation exemption, intake
-  survives degraded.
+  Sentry-failure tolerance, per-process marker clear leg (clearing the bridge
+  marker leaves the worker's, and the board stays red), hibernation exemption,
+  intake survives degraded, the two-axis split, and the override short-circuit.
 
 ### 5. Declaration-aware pin helpers
 - **Task ID**: `build-pin-helpers`
@@ -1245,8 +1499,10 @@ bridge command. But the runtime's boot and failure presentation change:
 - **Assigned To**: `deps-tester`
 - **Parallel**: false
 - Run every Verification row; confirm each Success Criterion, both transcripts
-  in the PR description, and that the PR body says `Refs #3001`, **not**
-  `Closes #3001` — Work Items 2 and 3 keep the issue open.
+  in the PR description, and that the PR body says `Refs #3001` by default.
+  Work Items 2 and 3 now live in #3074 and #3075 and Step 2 in #3073, so
+  `Closes #3001` is a defensible alternative — but it is the **owner's** call
+  (issue comment `5505317383`), not the builder's. Do not switch it unilaterally.
 
 ## Verification
 
@@ -1263,13 +1519,19 @@ Rows assert *declarations and executed paths*, not file text.
 | Coupled set declared with hold | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS as S; s=[x for x in S if 'anthropic' in x.members][0]; assert set(s.members)=={'anthropic','pydantic-ai-slim'} and s.hold"` | exit code 0 |
 | `openai` is in no coupled set | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS; assert 'openai' not in {m for s in AUTO_BUMP_SETS for m in s.members}"` | exit code 0 |
 | New sets do not inherit the billed llm phase | `.venv/bin/python -c "from scripts.update.deps import CoupledSet; assert CoupledSet(members=['x'], import_names=('x',), reason='t').gates == ('import','pytest')"` | exit code 0 |
-| Import phase is set-derived, not hardcoded | `grep -c "import anthropic; import claude_agent_sdk" scripts/update/deps.py` | match count == 0 (the literal is replaced by `set.import_names`) |
+| Import phase is set-derived, not hardcoded | `! grep -q "import anthropic; import claude_agent_sdk" scripts/update/deps.py` | exit code 0 (the literal is replaced by `set.import_names`) |
 | Gate invocation is real, not a mention | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_gate" -q` | exit code 0 |
 | Held set is skipped and legible | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "held_set" -q` | exit code 0 |
 | Verify runs the check unconditionally **and loudly** (non-empty `.error`, surfaced by `extract_update_warnings`) | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
 | The `llm` phase and the manual gate invocation share one argv construction | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_phase_argv" -q` | exit code 0 |
 | The `--json` CLI is pure — no alert, no marker | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
-| Marker path is module-resolved, not cwd-relative | `.venv/bin/python -c "import ast;s=open('agent/llm/compat.py').read();assert 'llm-stack-degraded' in s and 'parents[2]' in s"` | exit code 0 |
+| The predicate reports the pinned pair **compatible** (the round-5 blocker's red state) | `.venv/bin/python -c "from agent.llm.compat import check_llm_stack_compat as c;r=c();assert r.compatible and r.loader_ok, r.reason"` | exit code 0 |
+| The derived kwarg set comes from the call site, not the settings TypedDict | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "derived or forwarded" -q` | exit code 0 (asserts `temperature`/`top_p`/`top_k` present, no `anthropic_`-prefixed name) |
+| `run_typed_local` is not gated on the Anthropic signature axis | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "two_axis or loader_ok" -q` | exit code 0 |
+| Break-glass override works and is scoped to the resolver | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "override" -q` | exit code 0 |
+| The dashboard read side actually renders the degraded state | `./scripts/pytest-clean.sh tests/unit/test_dashboard_llm_degraded.py -q` | exit code 0 |
+| Marker path is module-resolved and per-process | `.venv/bin/python -c "s=open('agent/llm/compat.py').read();assert 'llm-stack-degraded' in s and 'parents[2]' in s and 'missing_ok' in s"` | exit code 0 |
+| The old env knob is retired from the package surface | `.venv/bin/python -c "import agent.llm as m;assert 'LOCAL_TYPED_HARD_TIMEOUT' not in m.__all__ and not hasattr(m,'LOCAL_TYPED_HARD_TIMEOUT');from config.settings import settings;assert settings.timeouts.local_typed_hard_s"` | exit code 0 |
 | Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
 | Pin comment keeps the constraint and adds the pointer | `grep -c "AUTO_BUMP_SETS" pyproject.toml` | output > 0 |
@@ -1280,7 +1542,7 @@ Rows assert *declarations and executed paths*, not file text.
 | Anti-criterion: `anthropic` pin unchanged by this lane | `grep -c '"anthropic==0.125.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `openai` floor unchanged | `grep -c '"openai>=1.0.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | output is 0 |
-| Update skill doc corrected | `grep -c "import check" .claude/skills/update/SKILL.md` | match count == 0 |
+| Update skill doc corrected | `! grep -q "import check" .claude/skills/update/SKILL.md` | exit code 0 |
 | Feature doc exists | `test -f docs/features/llm-stack-compat-gate.md` | exit code 0 |
 
 ## Critique Results
@@ -1289,15 +1551,15 @@ Rows assert *declarations and executed paths*, not file text.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | The prescribed introspection derivation returns `compatible=False` on the currently pinned, verified-working pair. Executed against the live venv (anthropic 0.125.0 + pydantic-ai-slim 2.9.0), `AnthropicModelSettings.__annotations__` has 31 keys, `inspect.signature(AsyncMessages.create).parameters` has 24, and **20 annotation keys are absent** from `create` with no `**kwargs` to absorb them (`anthropic_betas`, `anthropic_cache`, `anthropic_thinking`, `frequency_penalty`, `logit_bias`, `parallel_tool_calls`, `presence_penalty`, `seed`, and 12 more). `AnthropicModelSettings` is a declared *superset* of provider-agnostic and anthropic-namespaced settings that `AnthropicModel` translates or drops; it is not the set of kwargs pydantic-ai forwards to `create()`. Followed literally, this lane merges and every bridge and worker boots degraded, all three alert channels fire fleet-wide, `run_typed` raises `LLMStackIncompatible` at every non-harness call site, and `/update` verify warns on all four machines — Risk 1's named false negative, realized by the plan's own algorithm. The plan's guard does not catch it: the "fallback tuple ⊆ introspected keys" test passes trivially because `{temperature, top_p, top_k}` *is* a subset of the 31 keys. | pending | Red-state proof is one command: `.venv/bin/python -c "import inspect,anthropic;from pydantic_ai.models.anthropic import AnthropicModelSettings as S;p=set(inspect.signature(anthropic.resources.messages.AsyncMessages.create).parameters);print(sorted(set(S.__annotations__)-p))"` prints 20 keys today on the pair the anti-criteria pin. Derive from what pydantic-ai **forwards**, not what it declares: intersect the annotation keys with the kwargs literally passed at the `.create(` call in `pydantic_ai.models.anthropic.AnthropicModel` (reachable via `inspect.getsource`), or invert — start from the module-level literal tuple and use introspection only to confirm each member is still a declared setting. Add the inverse regression test beside the subset test: `assert check_llm_stack_compat().compatible is True` on the pinned pair, and assert the derived candidate set contains no `anthropic_`-prefixed key. |
-| CONCERN | Risk & Robustness (component also flagged by Scope & Value) | One `data/llm-stack-degraded` marker is shared by every process that resolves the flag, with no writer ownership, so one process's healthy clear erases another's live degraded state. After a pin fix lands, the bridge takes the graceful restart (`agent/agent_session_queue.py::_check_restart_flag`), re-resolves healthy and clears the marker — while the worker, whose restart `_check_restart_flag` **defers whenever jobs are running** (`tests/integration/test_remote_update.py::test_check_restart_flag_defers_when_jobs_running`), still holds its memoized degraded flag and keeps raising `LLMStackIncompatible`. The dashboard renders green against a still-broken worker: the plan's own "stuck-red dashboard equals no dashboard channel" failure with the polarity flipped, and worse, because a false green is not investigated. No Race Condition covers a multi-writer marker. | pending | Write `data/llm-stack-degraded.{proc}` where `proc` is `bridge` / `worker` / a pid-suffixed name for one-shot callers; the resolver clears **only its own** path (`marker.unlink(missing_ok=True)`), never a glob. `ui/app.py::dashboard_json` reads `sorted((repo/"data").glob("llm-stack-degraded*"))` and renders red while any marker exists, naming the degraded processes. Test that clearing the bridge marker leaves the worker marker and the red state intact. |
-| CONCERN | Risk & Robustness | No break-glass override for a false-positive degradation. The predicate is deliberately fail-closed on introspection failure, and it introspects two third-party internals (`AnthropicModelSettings.__annotations__`, `AsyncMessages.create`) upstream is free to rename — including in the very next lane, which moves `pydantic-ai-slim` 25 minor versions. When that fires, every non-harness LLM call on all four machines raises until a code revert is authored, merged, pulled and each service restarted. Risk 1's "one revert away" understates recovery: a revert is a full SDLC round trip, not an operator action, and Emergency recovery is empty. | pending | In `_resolve_degraded_flag()`, before evaluating the predicate: `if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy": logger.warning(<sentinel> " OVERRIDDEN"); return False`. Read it lazily **inside** the function — a module-scope `os.environ.get` in a new `agent/llm/compat.py` is blocked by `validate_no_module_scope_env.py`. Do not wire the override into `check_llm_stack_compat()` (must stay pure per the round-5 split), and do not honour it in the `--json` CLI or the auto-bump `llm` gate: an override must never let a bad pin pass the bump gate. Document as break-glass only. |
-| CONCERN | Scope & Value (component also flagged by Risk & Robustness) | The dashboard channel — the one the plan singles out as its only *standing* signal and defends at most length — ships with no test and no Verification row on the read side. Test Impact names five test files, none touching `ui/`. Success Criteria assert only that the marker is written, cleared, and path-equal to what `ui/app.py` reads; nothing asserts `dashboard_json` surfaces the state. The Verification table's 24 rows include none under `ui/`. The lane can go fully green with `dashboard_json` never wired, or wired and raising into its own fail-quiet `except OSError`. This is the identical defect class the round-4 blocker caught on the verify leg: a channel present but silent. | pending | Add Test Impact row `tests/unit/test_dashboard_llm_degraded.py` — ADD: with the marker written (versions + `exc_type`), `dashboard_json()` returns a truthy degraded field carrying both versions; with the marker absent it returns the healthy value; with the marker present but unreadable the call still returns 200 and does not raise, proving the `except OSError` leg. Add Verification row `./scripts/pytest-clean.sh tests/unit/test_dashboard_llm_degraded.py -q` → exit 0, and a Success Criterion naming `/dashboard.json` rendering rather than marker path equality alone. |
-| CONCERN | Scope & Value | A single boolean gates two unrelated fault domains, so an Anthropic-only signature break needlessly kills the local granite path. `run_typed_local` constructs `OpenAIChatModel` against `OllamaProvider` and talks to localhost Ollama (`agent/llm/wrapper.py:213`); it never touches `anthropic`. The signature check is entirely about `AsyncMessages.create`, yet the plan has `run_typed_local` raise `LLMStackIncompatible` on the same flag. The two hot-path classifiers routing through it (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) would fall back to conservative defaults (`new_work` / NEW Job) fleet-wide for a fault that provably does not affect them. Spike-5 already distinguishes the domains — ImportError breaks local, a signature break does not — but the design collapses them. | pending | Add `loader_ok: bool` alongside `compatible: bool` on `CompatResult` (loader success is the import-class axis; `compatible` stays the anthropic-signature axis); `_resolve_degraded_flag()` memoizes both. `run_typed` raises when `not loader_ok or not compatible`; `run_typed_local` raises **only** when `not loader_ok`. Test: loader succeeding and signature check failing → `run_typed` raises, `run_typed_local` completes against a stubbed FunctionModel. |
-| CONCERN | History & Consistency | Update System asserts "**No new config files or env keys.**" while task 2 requires migrating `LOCAL_TYPED_HARD_TIMEOUT` onto a `TimeoutSettings` field — which by that group's contract creates a new `TIMEOUTS__*` key and retires the documented one. Two consequences the plan does not carry: `docs/features/nonharness-llm-wrapper.md:56` documents the knob by name as "env-overridable, default 20s" and is **not** in Existing Docs to Correct for that change; and `agent/llm/__init__.py` re-exports `LOCAL_TYPED_HARD_TIMEOUT` at lines 14 and 26 (it is in `__all__`), a public attribute the task-2 "update every reader" bullet never names and that Test Impact's grep instruction scopes to `tests/` only. Followed literally the builder leaves a dangling `__all__` entry and a doc paragraph describing an env var that no longer exists. | pending | Add `local_typed_hard_s: float = Field(default=20.0, ge=1.0, le=300.0, ...)` to `TimeoutSettings` (env `TIMEOUTS__LOCAL_TYPED_HARD_S`). Read it **inside** `run_typed_local` (`settings.timeouts.local_typed_hard_s`), not at module scope — the module-scope form defeats the migration's purpose. Delete `LOCAL_TYPED_HARD_TIMEOUT` from `agent/llm/__init__.py` lines 14 and 26. Add `docs/features/nonharness-llm-wrapper.md` to Existing Docs to Correct with the env-key rename, and change Update System to "one new `TIMEOUTS__` field; no new config files." |
-| CONCERN | History & Consistency | The plan's central thesis is that the bad pin arrives by three routes so the check cannot live on one, yet route 2 — the hand-staged commit, with **two demonstrated occurrences** (`9d1488ccb`'s re-application swept into `d0c02bde5`, reverted by `7a30b88f7`) — is still detected only *after* the pin is committed and pushed. Every remedy is a run boundary: the next `/update` verify or the next service start, both after `origin/main` already carries the bad pin and followers have pulled it. The plan cites `2b926acae`'s `validate_no_module_scope_env.py` as "the repo's established shape for an AST rule enforced at commit time, diff-scoped", applying that lesson to the *contract* but never to the *pin* — the thing with the recurrence record. No No-Go or Rabbit Hole excludes a commit-time leg, so its absence reads as oversight rather than decision. | pending | Cheapest sufficient form is a `.githooks/pre-push` leg (the repo already ships `.githooks/pre-push` for the hotfix-issue-disposition gate): if `git diff --name-only @{push}..HEAD` contains `pyproject.toml` **and** `git diff @{push}..HEAD -- pyproject.toml` touches a line matching `^\+.*"(anthropic\|pydantic-ai-slim)`, run `.venv/bin/python -m agent.llm.compat --json` and refuse the push on `"compatible": false`. Reuses the pure CLI, adds no new predicate, and must stay `--no-verify`-skippable so it cannot wedge an emergency revert. If declined, add an accepted-residual line to No-Gos naming route 2's post-push detection window. |
-| NIT | Scope & Value | Two Verification rows are `grep -c` invocations whose Expected value is "match count == 0" (the `import anthropic; import claude_agent_sdk` row and the `import check` SKILL.md row). `grep -c` exits 1 when it matches nothing, so the passing state of both rows is a non-zero exit — the opposite convention from the other 22 rows, all of which expect exit 0. A runner keying on exit status marks the success case as a failure. | pending | Replace with `! grep -q "import anthropic; import claude_agent_sdk" scripts/update/deps.py` and `! grep -q "import check" .claude/skills/update/SKILL.md`, Expected "exit code 0" — matching the `grep -q` form task 1's Validates field already uses. |
-| NIT | History & Consistency | The Freshness Check names three different commits as the baseline for one set of claims: the prose says "**Baseline commit:** `b87fb26de`", the table below is headed "re-verified 2026-09-02 at `3b6eb651b`", and the round-4 disposition row says "re-verified at `5021a40aa`". All three exist, but `b87fb26de` and `5021a40aa` are this lane's own round-4 critique and revision doc commits and `3b6eb651b` belongs to a different lane; none is `main`'s tip (`b37d67d98`). Independently re-checked at `b37d67d98`: every claim in the table still holds, so this is a labelling defect, not a stale-claim defect. | pending | State one baseline SHA in the section header and have the table header read "re-verified at the baseline commit above"; drop the second and third SHAs rather than reconciling them. |
+| BLOCKER | Risk & Robustness | The prescribed introspection derivation returns `compatible=False` on the currently pinned, verified-working pair. Executed against the live venv (anthropic 0.125.0 + pydantic-ai-slim 2.9.0), `AnthropicModelSettings.__annotations__` has 31 keys, `inspect.signature(AsyncMessages.create).parameters` has 24, and **20 annotation keys are absent** from `create` with no `**kwargs` to absorb them (`anthropic_betas`, `anthropic_cache`, `anthropic_thinking`, `frequency_penalty`, `logit_bias`, `parallel_tool_calls`, `presence_penalty`, `seed`, and 12 more). `AnthropicModelSettings` is a declared *superset* of provider-agnostic and anthropic-namespaced settings that `AnthropicModel` translates or drops; it is not the set of kwargs pydantic-ai forwards to `create()`. Followed literally, this lane merges and every bridge and worker boots degraded, all three alert channels fire fleet-wide, `run_typed` raises `LLMStackIncompatible` at every non-harness call site, and `/update` verify warns on all four machines — Risk 1's named false negative, realized by the plan's own algorithm. The plan's guard does not catch it: the "fallback tuple ⊆ introspected keys" test passes trivially because `{temperature, top_p, top_k}` *is* a subset of the 31 keys. | **Fixed (round 6)** — the blocker was reproduced (20 missing keys confirmed on the live venv) and the corrected algorithm was **prototyped end to end during the revision**, returning `compatible=True` on the pinned pair. The Solution bullet now derives the kwarg set from `pydantic_ai.models.anthropic`'s `.create(` call site by `ast` over `inspect.getsource`, and resolves the target callable from that call's own attribute path. A second defect the finding did not name was found and fixed: 2.9.0 calls `self.client.beta.messages.create`, not `anthropic.resources.messages.AsyncMessages.create` — the non-beta class is missing `betas`, `context_management`, `mcp_servers`, `speed`, so the prescribed target would have produced four false positives even with the right kwargs. The trivially-passing subset test is replaced by the positive self-test plus shape assertions; task 3 and Test Impact require the self-test to be written first. | Red-state proof is one command: `.venv/bin/python -c "import inspect,anthropic;from pydantic_ai.models.anthropic import AnthropicModelSettings as S;p=set(inspect.signature(anthropic.resources.messages.AsyncMessages.create).parameters);print(sorted(set(S.__annotations__)-p))"` prints 20 keys today on the pair the anti-criteria pin. Derive from what pydantic-ai **forwards**, not what it declares: intersect the annotation keys with the kwargs literally passed at the `.create(` call in `pydantic_ai.models.anthropic.AnthropicModel` (reachable via `inspect.getsource`), or invert — start from the module-level literal tuple and use introspection only to confirm each member is still a declared setting. Add the inverse regression test beside the subset test: `assert check_llm_stack_compat().compatible is True` on the pinned pair, and assert the derived candidate set contains no `anthropic_`-prefixed key. |
+| CONCERN | Risk & Robustness (component also flagged by Scope & Value) | One `data/llm-stack-degraded` marker is shared by every process that resolves the flag, with no writer ownership, so one process's healthy clear erases another's live degraded state. After a pin fix lands, the bridge takes the graceful restart (`agent/agent_session_queue.py::_check_restart_flag`), re-resolves healthy and clears the marker — while the worker, whose restart `_check_restart_flag` **defers whenever jobs are running** (`tests/integration/test_remote_update.py::test_check_restart_flag_defers_when_jobs_running`), still holds its memoized degraded flag and keeps raising `LLMStackIncompatible`. The dashboard renders green against a still-broken worker: the plan's own "stuck-red dashboard equals no dashboard channel" failure with the polarity flipped, and worse, because a false green is not investigated. No Race Condition covers a multi-writer marker. | **Fixed (round 6)** — adopted as prescribed. Per-process `data/llm-stack-degraded.{proc}`; each resolver clears only its own path (`missing_ok=True`, never a glob); `ui/app.py` globs and is red while any marker survives, naming the degraded processes. New Failure Posture subsection "Why the dashboard marker is per-process", new **Race 4** (designed away, with the benign stale-red residual named), plus task 4, Test Impact, Success Criteria, and a Verification row. | Write `data/llm-stack-degraded.{proc}` where `proc` is `bridge` / `worker` / a pid-suffixed name for one-shot callers; the resolver clears **only its own** path (`marker.unlink(missing_ok=True)`), never a glob. `ui/app.py::dashboard_json` reads `sorted((repo/"data").glob("llm-stack-degraded*"))` and renders red while any marker exists, naming the degraded processes. Test that clearing the bridge marker leaves the worker marker and the red state intact. |
+| CONCERN | Risk & Robustness | No break-glass override for a false-positive degradation. The predicate is deliberately fail-closed on introspection failure, and it introspects two third-party internals (`AnthropicModelSettings.__annotations__`, `AsyncMessages.create`) upstream is free to rename — including in the very next lane, which moves `pydantic-ai-slim` 25 minor versions. When that fires, every non-harness LLM call on all four machines raises until a code revert is authored, merged, pulled and each service restarted. Risk 1's "one revert away" understates recovery: a revert is a full SDLC round trip, not an operator action, and Emergency recovery is empty. | **Fixed (round 6)** — adopted as prescribed. `LLM_STACK_COMPAT_OVERRIDE=healthy` read lazily **inside** `_resolve_degraded_flag()`, short-circuiting after a sentinel OVERRIDDEN warning; not honoured by the pure predicate, the `--json` CLI, or the auto-bump gate. New Solution bullet, task-4 bullet, Test Impact case, Success Criterion, Verification row. Update System records it as an env read deliberately **not** declared in `.env.example` (declaring it would make `check_env_completeness` require an operator-only break-glass var on every machine). | In `_resolve_degraded_flag()`, before evaluating the predicate: `if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy": logger.warning(<sentinel> " OVERRIDDEN"); return False`. Read it lazily **inside** the function — a module-scope `os.environ.get` in a new `agent/llm/compat.py` is blocked by `validate_no_module_scope_env.py`. Do not wire the override into `check_llm_stack_compat()` (must stay pure per the round-5 split), and do not honour it in the `--json` CLI or the auto-bump `llm` gate: an override must never let a bad pin pass the bump gate. Document as break-glass only. |
+| CONCERN | Scope & Value (component also flagged by Risk & Robustness) | The dashboard channel — the one the plan singles out as its only *standing* signal and defends at most length — ships with no test and no Verification row on the read side. Test Impact names five test files, none touching `ui/`. Success Criteria assert only that the marker is written, cleared, and path-equal to what `ui/app.py` reads; nothing asserts `dashboard_json` surfaces the state. The Verification table's 24 rows include none under `ui/`. The lane can go fully green with `dashboard_json` never wired, or wired and raising into its own fail-quiet `except OSError`. This is the identical defect class the round-4 blocker caught on the verify leg: a channel present but silent. | **Fixed (round 6)** — adopted as prescribed. `tests/unit/test_dashboard_llm_degraded.py` added to Test Impact (marker present → truthy degraded field with both versions and the process name; absent → healthy; two markers → both named; unreadable → 200 and no raise, exercising the `except OSError` leg), with a Verification row and a Success Criterion that names `/dashboard.json` rendering rather than marker path equality. Task 4's dashboard bullet now requires the test file by name. | Add Test Impact row `tests/unit/test_dashboard_llm_degraded.py` — ADD: with the marker written (versions + `exc_type`), `dashboard_json()` returns a truthy degraded field carrying both versions; with the marker absent it returns the healthy value; with the marker present but unreadable the call still returns 200 and does not raise, proving the `except OSError` leg. Add Verification row `./scripts/pytest-clean.sh tests/unit/test_dashboard_llm_degraded.py -q` → exit 0, and a Success Criterion naming `/dashboard.json` rendering rather than marker path equality alone. |
+| CONCERN | Scope & Value | A single boolean gates two unrelated fault domains, so an Anthropic-only signature break needlessly kills the local granite path. `run_typed_local` constructs `OpenAIChatModel` against `OllamaProvider` and talks to localhost Ollama (`agent/llm/wrapper.py:213`); it never touches `anthropic`. The signature check is entirely about `AsyncMessages.create`, yet the plan has `run_typed_local` raise `LLMStackIncompatible` on the same flag. The two hot-path classifiers routing through it (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) would fall back to conservative defaults (`new_work` / NEW Job) fleet-wide for a fault that provably does not affect them. Spike-5 already distinguishes the domains — ImportError breaks local, a signature break does not — but the design collapses them. | **Fixed (round 6)** — adopted as prescribed. `CompatResult` carries `loader_ok` beside `compatible` and `_resolve_degraded_flag()` memoizes both; `run_typed` raises on `not loader_ok or not compatible`, `run_typed_local` **only** on `not loader_ok`. New Solution bullet, task-3 and task-4 bullets, the stubbed-`FunctionModel` test in Test Impact, a Success Criterion, and a Verification row. The alert still fires on either axis and names which. | Add `loader_ok: bool` alongside `compatible: bool` on `CompatResult` (loader success is the import-class axis; `compatible` stays the anthropic-signature axis); `_resolve_degraded_flag()` memoizes both. `run_typed` raises when `not loader_ok or not compatible`; `run_typed_local` raises **only** when `not loader_ok`. Test: loader succeeding and signature check failing → `run_typed` raises, `run_typed_local` completes against a stubbed FunctionModel. |
+| CONCERN | History & Consistency | Update System asserts "**No new config files or env keys.**" while task 2 requires migrating `LOCAL_TYPED_HARD_TIMEOUT` onto a `TimeoutSettings` field — which by that group's contract creates a new `TIMEOUTS__*` key and retires the documented one. Two consequences the plan does not carry: `docs/features/nonharness-llm-wrapper.md:56` documents the knob by name as "env-overridable, default 20s" and is **not** in Existing Docs to Correct for that change; and `agent/llm/__init__.py` re-exports `LOCAL_TYPED_HARD_TIMEOUT` at lines 14 and 26 (it is in `__all__`), a public attribute the task-2 "update every reader" bullet never names and that Test Impact's grep instruction scopes to `tests/` only. Followed literally the builder leaves a dangling `__all__` entry and a doc paragraph describing an env var that no longer exists. | **Fixed (round 6)** — adopted as prescribed. Update System now reads "**No new config files.** One new `TIMEOUTS__` field" and spells out `local_typed_hard_s` / `TIMEOUTS__LOCAL_TYPED_HARD_S`, read inside `run_typed_local`. Task 2 gains an explicit bullet deleting the `agent/llm/__init__.py` re-export (lines 14, 26, `__all__`) and orders a whole-tracked-tree grep, not a `tests/`-scoped one; `docs/features/nonharness-llm-wrapper.md` is in Existing Docs to Correct with the env-key rename called out at line 56; Test Impact adds `tests/unit/test_settings.py`; a Verification row asserts the old name is gone from the package surface and the new field resolves. | Add `local_typed_hard_s: float = Field(default=20.0, ge=1.0, le=300.0, ...)` to `TimeoutSettings` (env `TIMEOUTS__LOCAL_TYPED_HARD_S`). Read it **inside** `run_typed_local` (`settings.timeouts.local_typed_hard_s`), not at module scope — the module-scope form defeats the migration's purpose. Delete `LOCAL_TYPED_HARD_TIMEOUT` from `agent/llm/__init__.py` lines 14 and 26. Add `docs/features/nonharness-llm-wrapper.md` to Existing Docs to Correct with the env-key rename, and change Update System to "one new `TIMEOUTS__` field; no new config files." |
+| CONCERN | History & Consistency | The plan's central thesis is that the bad pin arrives by three routes so the check cannot live on one, yet route 2 — the hand-staged commit, with **two demonstrated occurrences** (`9d1488ccb`'s re-application swept into `d0c02bde5`, reverted by `7a30b88f7`) — is still detected only *after* the pin is committed and pushed. Every remedy is a run boundary: the next `/update` verify or the next service start, both after `origin/main` already carries the bad pin and followers have pulled it. The plan cites `2b926acae`'s `validate_no_module_scope_env.py` as "the repo's established shape for an AST rule enforced at commit time, diff-scoped", applying that lesson to the *contract* but never to the *pin* — the thing with the recurrence record. No No-Go or Rabbit Hole excludes a commit-time leg, so its absence reads as oversight rather than decision. | **Declined (round 6), with the residual named** — taking the finding's own stated fallback. The proposed `pre-push` leg **would not have caught either occurrence**: the predicate reports on the *installed* stack, and at push time the venv reflects the last `uv sync`, not the pin being pushed. `d0c02bde5` swept in an already-staged bump that was not synced, so the hook would have introspected the good, still-installed pair and passed — adding a false all-clear on top of the bad pin. Making it sound requires a push-time `uv sync`: minutes of wall clock plus a mutation of the pusher's venv on every push, outside this appetite. New No-Go entry records the decision, the reasoning, the accepted residual (route 2 detected at the next run boundary, after `origin/main` carries the pin, though no follower can *boot* on it silently), and names the sound alternative — a **declaration-level** diff check against the `anthropic>=1.0.0 → pydantic-ai-slim>=2.33.0` boundary, needing no venv — as a follow-up candidate. | Cheapest sufficient form is a `.githooks/pre-push` leg (the repo already ships `.githooks/pre-push` for the hotfix-issue-disposition gate): if `git diff --name-only @{push}..HEAD` contains `pyproject.toml` **and** `git diff @{push}..HEAD -- pyproject.toml` touches a line matching `^\+.*"(anthropic\|pydantic-ai-slim)`, run `.venv/bin/python -m agent.llm.compat --json` and refuse the push on `"compatible": false`. Reuses the pure CLI, adds no new predicate, and must stay `--no-verify`-skippable so it cannot wedge an emergency revert. If declined, add an accepted-residual line to No-Gos naming route 2's post-push detection window. |
+| NIT | Scope & Value | Two Verification rows are `grep -c` invocations whose Expected value is "match count == 0" (the `import anthropic; import claude_agent_sdk` row and the `import check` SKILL.md row). `grep -c` exits 1 when it matches nothing, so the passing state of both rows is a non-zero exit — the opposite convention from the other 22 rows, all of which expect exit 0. A runner keying on exit status marks the success case as a failure. | **Fixed (round 6)** — both rows are now `! grep -q ...` with Expected "exit code 0". The remaining `grep -c` rows all expect a match (exit 0 on success), so the whole table is exit-0-on-pass. | Replace with `! grep -q "import anthropic; import claude_agent_sdk" scripts/update/deps.py` and `! grep -q "import check" .claude/skills/update/SKILL.md`, Expected "exit code 0" — matching the `grep -q` form task 1's Validates field already uses. |
+| NIT | History & Consistency | The Freshness Check names three different commits as the baseline for one set of claims: the prose says "**Baseline commit:** `b87fb26de`", the table below is headed "re-verified 2026-09-02 at `3b6eb651b`", and the round-4 disposition row says "re-verified at `5021a40aa`". All three exist, but `b87fb26de` and `5021a40aa` are this lane's own round-4 critique and revision doc commits and `3b6eb651b` belongs to a different lane; none is `main`'s tip (`b37d67d98`). Independently re-checked at `b37d67d98`: every claim in the table still holds, so this is a labelling defect, not a stale-claim defect. | **Fixed (round 6)** — the Freshness Check now states one baseline, `63e6c2299` (`main`'s tip at round 6), and the table header reads "re-verified at the baseline commit above". Confirmed by `git log --name-only b37d67d98..63e6c2299` that all six intervening commits touch only `docs/plans/*.md`, so the round-5 re-verification at `b37d67d98` carries forward unchanged. Earlier rounds' SHAs survive only in the historical change-log tables at the bottom, where they describe what a past pass did rather than asserting a current baseline. | State one baseline SHA in the section header and have the table header read "re-verified at the baseline commit above"; drop the second and third SHAs rather than reconciling them. |
 
 Structural checks all pass. Required sections present and substantive (Documentation carries a `docs/features/` checkbox path; Update System addresses `scripts/update/` and records that no Popoto migration applies; Agent Integration addresses the runtime surface and the absence of an MCP entry; Test Impact lists dispositions). Task numbering 1-9 is contiguous with valid, acyclic `Depends On` references and every task carries a `Validates`. Every cited file path exists except the five intentionally-new ones (`agent/llm/compat.py`, `docs/features/llm-stack-compat-gate.md`, and the three new test files). All sixteen cited commit SHAs were confirmed to exist with the described content. Every `file:line` reference in the Freshness table plus the five round-5-corrected body sites was independently re-verified at `b37d67d98` and holds, including `run.py:2673-2684`'s `if not tool.available and tool.error:` guard, `run.py:1907-1909`'s `projects_json_check` detail block, `_sentry_before_send` at `telegram_bridge.py:55` wired at `:80`, `ui/app.py:376`/`:907`, and `wrapper.py:167`'s single `EnvCall`. All four Prerequisite check commands were executed and pass. The module-scope import closure of `bridge.telegram_bridge`, `worker.__main__`, and `agent.llm` was computed: outside `agent/llm/wrapper.py` and `agent/anthropic_client.py` there are **zero** module-scope `anthropic`/`pydantic_ai` imports on those graphs, so the import-safety contract's stated file scope is sufficient for the contract test.
 
@@ -1389,3 +1651,25 @@ What this pass changed:
 | Marker path pinned to a module-resolved absolute path | A cwd-relative write lands a marker `ui/app.py` never reads. |
 | `SKILL.md` cited by heading | The cited `66-72` spilled into the next section; verified the block is `64-72` today and will drift again. |
 | Appetite Medium → Large; the two-PR split explicitly rejected with reasons | Honest sizing. The split was rejected because the halves are file-disjoint but not independent, and deferring half (B) leaves the spike-2 pin-helper defects on `main`. |
+
+### Round-6 revision pass (2026-09-02) — the compat derivation, no reshape
+
+Every round-5 finding is dispositioned in the table above: seven fixed, one
+declined with the residual named. No architectural decision changed — the
+import-safety contract, the resolver-bound alert, the coupled-set model, and the
+hold all stand as round 3 left them. Scope did not expand: nothing was added
+beyond what the findings required.
+
+| Change | Why |
+|---|---|
+| **The compat derivation is rewritten to read the `.create(` call site instead of `AnthropicModelSettings.__annotations__`** | The round-5 blocker, reproduced on the live venv: 20 of the settings TypedDict's 31 keys are absent from any `create` signature, so the prescribed predicate would have booted every bridge and worker degraded on the pinned, working pair. The corrected algorithm was prototyped end to end during this revision and returns `compatible=True` today. |
+| A second, unnamed defect fixed alongside it: the target callable is resolved from the call site's own attribute path | pydantic-ai 2.9.0 calls `self.client.beta.messages.create`. The round-5 prescription named `anthropic.resources.messages.AsyncMessages` (non-beta), which is missing `betas`, `context_management`, `mcp_servers`, and `speed` — four false positives even with the correct kwarg set. Hardcoding the target is the same class of mistake as hardcoding the kwargs. |
+| Positive self-test + shape assertions replace the subset test | `{temperature, top_p, top_k} ⊆ <31 keys>` passed against a predicate that would have degraded the fleet. A test that cannot fail is worse than no test, because it is counted as coverage. |
+| `CompatResult` gains `loader_ok`; `run_typed_local` gated only on it | One boolean was gating two unrelated fault domains; an Anthropic signature break would have fallen both hot-path Ollama classifiers back to conservative defaults for a fault that cannot affect them. |
+| Per-process dashboard markers, with ownership and Race 4 | A shared marker with no writer ownership fails **green**: the bridge's restart clears it while the worker, whose restart defers under load, is still degraded. A false green is worse than a stuck red because nobody investigates it. |
+| Break-glass `LLM_STACK_COMPAT_OVERRIDE`, resolver-only | The predicate is fail-closed on introspection failure over two third-party internals that Step 2's lane moves 25 minor versions. Without an override, a false positive costs a full SDLC round trip on every machine. |
+| Dashboard read side gets a test file, a Verification row, and a rendering criterion | The channel the plan defends at most length shipped with no read-side coverage — the round-4 blocker's defect class (present but silent) repeated on a different leg. |
+| `TimeoutSettings` migration carried through the public surface and the docs | The migration retires a documented env knob and a name in `agent/llm/__init__.py`'s `__all__`; "no new env keys" was false and the `tests/`-scoped grep would have missed the re-export. |
+| Route 2's commit-time leg declined, residual recorded in No-Gos | A pre-push predicate run reports on the *installed* stack, which at push time is not the stack the pin declares — it would have passed `d0c02bde5` and added a false all-clear. The sound form (a venv-free declaration check against the compat boundary) is named as a follow-up. |
+| Two `grep -c` rows → `! grep -q`; one baseline SHA in Freshness Check | The two nits. The whole Verification table is now exit-0-on-pass. |
+| `last_comment_id` advanced `5421299483` → `5505317383`; No-Gos re-slugged to #3073 / #3074 / #3075; task 9's `Refs`-vs-`Closes` note reworded | Phase 2.7 sync. The owner filed the three deferred chunks as their own issues on 2026-09-02 and corrected the record on Work Item 2 (its headline fix landed in `56e80d843`; #3074 owns only the residue). This lane's scope is unchanged and its Work-Item-2 anti-criterion still holds, now owned by #3074. |
