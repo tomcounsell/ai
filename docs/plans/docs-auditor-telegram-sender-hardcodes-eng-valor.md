@@ -7,7 +7,7 @@ created: 2026-09-02
 tracking: https://github.com/tomcounsell/ai/issues/2754
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-02T06:25:46Z
+revision_applied_at: 2026-09-02T06:46:12Z
 ---
 
 # docs-auditor Telegram sender hardcodes "Eng: Valor" instead of using resolve_eng_group
@@ -242,8 +242,10 @@ internal routing change: no new libraries, no external APIs, no ecosystem patter
 - Review rounds: 1
 
 One private helper, one modified sender (new `bool` contract threaded through both of its
-return branches), two updated call sites, **nine new tests** (seven `TestTelegramChatRouting`
-cases plus two suppression-summary cases) and **three assertion updates** to existing tests,
+return branches), two updated call sites, **ten new tests** (eight `TestTelegramChatRouting`
+cases — 1-6, 7a, 7b — plus two suppression-summary cases), **three `repo_root` assertion
+updates** to existing tests plus **one status assertion** added to
+`test_clean_zero_diff_run_does_not_notify`,
 **four Documentation bullets** (one feature-doc sentence at `:45`, one at `:344-347`, two
 docstrings, one stale section comment). Still Small: every file is one of three, and every
 genuine decision is settled in this plan (see **Settled Decisions**); nothing is left for
@@ -256,7 +258,7 @@ different `repo_root`. So the *production* delta is narrow and honest: the desti
 being a hardcoded literal and starts being read from `projects.json`, addressed by numeric
 `chat_id` instead of an ambiguity-tolerant name, and a previously-discarded `valor-telegram`
 exit code becomes observable. Ladder steps 4-5 and the whole suppression branch are
-unreachable on production traffic — one of the seven routing cases covers it.
+unreachable on production traffic — the routing cases cover them.
 
 That is a deliberate trade, not an oversight, and the ladder must **not** be trimmed to
 match. The suppression branch is the correctness precondition that makes Settled Decision
@@ -274,7 +276,7 @@ runtime and already required by the reflections package; the new tests stub
 
 ## Settled Decisions
 
-These were Open Questions in the pre-critique draft. Both are now **decided**; the
+These were Open Questions in the pre-critique draft. All are now **decided**; the
 Solution, Tasks, and Success Criteria below implement these rulings and a builder should
 treat them as fixed, not provisional.
 
@@ -331,6 +333,35 @@ treat them as fixed, not provisional.
    The `findings` appends stay as well — they are free and they are what a future
    `run_per_project_audit` consumer would read — but `summary` is the load-bearing channel
    and is what the new tests assert on.
+
+   **`suppressed_note` must be initialized before the branch that may assign it.** The
+   notify call on the zero-diff path sits inside `if fixes_withheld:`
+   (`reflections/docs_auditor.py:2434`), but the `summary` f-string that interpolates the
+   note is evaluated on **every** zero-diff return (`:2440-2443`) — including the clean
+   path, which is the common production outcome. Bind `suppressed_note = ""`
+   unconditionally immediately before the `if fixes_withheld:` guard at `:2433`, mirroring
+   how `withheld_note` is already computed unconditionally, and assign a non-empty value
+   only inside the `if not _send_telegram_notification(...)` branch. Apply the same
+   initialize-first rule on the step-9 path even though the sender is unconditional there.
+
+5. **`config/project_key_resolver.py::resolve_project_key` is deliberately NOT reused.
+   DECIDED: hand-roll the repo-path match in `_resolve_notify_chat`.** That module's
+   docstring advertises "projects.json `working_directory` prefix match against cwd" as its
+   priority-3 rule, so a builder or reviewer will find it and ask why it is not the
+   resolver here. Three named reasons it cannot be:
+
+   - Its priority chain returns `VALOR_PROJECT_KEY` **before** consulting the path
+     (`config/project_key_resolver.py:120-125`). Routing through it would re-create exactly
+     the env-keyed misroute the Problem section rules out — `VALOR_PROJECT_KEY=popoto` would
+     send an ai-repo audit to `Eng: Popoto`.
+   - It returns a bare `str` key, not the project **dict** that `resolve_eng_group(project)`
+     requires; the dict would still have to be re-fetched from `load_local_projects()`.
+   - Its module-level `_projects_cache` makes the lookup stale across a long-lived process,
+     which is precisely the staleness Risk 2 rejects ("No caching is added").
+
+   Task 1 therefore carries an explicit "do not import from `config.project_key_resolver`"
+   bullet, so the rejection is visible to both the builder and review rather than left to be
+   rediscovered.
 
 ## Solution
 
@@ -524,10 +555,15 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
       5. registered repo whose group is malformed (`royop` shape) → not called, `False`;
       6. `load_local_projects` raising → swallowed, warning logged, `PROJECT_ROOT` falls
          back and a foreign path returns `False`;
-      7. `subprocess.run` raising `FileNotFoundError` on a *resolved* destination → still
-         returns `True` (send attempted, not suppressed). Same case also covers a non-zero
-         `returncode` on a resolved destination: `True` is returned and a `logger.warning`
-         carrying the exit code is asserted via `caplog`.
+      7a. `patch("reflections.docs_auditor.subprocess.run", side_effect=FileNotFoundError)`
+         on a *resolved* destination → still returns `True` (send attempted, not
+         suppressed);
+      7b. a `CompletedProcess`-shaped mock with `returncode=1` and `stderr="boom"` on a
+         resolved destination → returns `True` **and** `caplog` carries the
+         "valor-telegram exited 1" warning.
+
+      (7a and 7b need different mock configurations and assert different things, so they
+      cannot share one test body. That makes eight routing cases, ten new tests total.)
 - [ ] `tests/unit/test_docs_auditor_substrate.py` — **ADD** two cases asserting the
       suppression notice reaches the persisted field: patch `_send_telegram_notification`
       to return `False` and drive `run_docs_auditor` through (a) the zero-diff withheld
@@ -538,6 +574,16 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
       summary.index("PR=")`), which is what makes it truncation-safe at 500 chars. Assert
       the `findings` entry too, but a `findings`-only test would pass against an inert
       mitigation and is therefore not sufficient on its own.
+- [ ] `tests/unit/test_docs_auditor_substrate.py:1471` —
+      `test_clean_zero_diff_run_does_not_notify` — **UPDATE**: it currently calls
+      `run_docs_auditor()` without binding the result and asserts only
+      `notify.call_count == 0`. Bind the result and add
+      `assert result["status"] == "skipped"`. `run_docs_auditor` wraps its body in `try:`
+      (`:2301`) / `except Exception` (`:2561`), so an unbound-`suppressed_note` `NameError`
+      — or any other name or attribute slip this change introduces on the clean zero-diff
+      path — degrades silently to `{"status": "error"}` and the existing assertion still
+      passes. Both new suppression tests drive the *suppressed* path and would also pass, so
+      this is the only test that can catch it.
 - [ ] `tests/unit/reflections/test_utilities_resolve_eng_group.py` — **no change**.
       `resolve_eng_group` itself is untouched; its direct tests stay as-is.
 - [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` — **no change**. The other
@@ -792,7 +838,17 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - Add module-scope `FALLBACK_ENG_CHAT = "Eng: Valor"` near the existing module constants
   in `reflections/docs_auditor.py`. Do **not** add a `DEFAULT_PROJECT_KEY` constant.
 - Add a module-scope `from reflections.utilities import load_local_projects,
-  resolve_eng_group` (no cycle — verified in Architectural Impact).
+  resolve_eng_group` (no cycle — verified in Architectural Impact). Import **exactly those
+  two names, never `PROJECT_ROOT`** — `reflections/utilities.py` also exports a
+  `PROJECT_ROOT` and every existing consumer in the tree pulls it in alongside
+  (`reflections/audits/pr_review_audit.py:29`, `reflections/audits/task_backlog_check.py:22`,
+  `reflections/sentry_triage.py:44`, `reflections/housekeeping/merged_branch_cleanup.py:33`),
+  so copying that idiom would rebind `docs_auditor`'s own `PROJECT_ROOT` from `:38`. The two
+  values are identical today, but the rebind would survive a future change to either
+  definition and would leave every `patch("reflections.docs_auditor.PROJECT_ROOT", repo)`
+  site patching a name owned by a different module.
+- **Do not import from `config.project_key_resolver`.** See Settled Decision 5 for the
+  three reasons `resolve_project_key` is the wrong resolver here.
 - Add `_resolve_notify_chat(repo_root: Path) -> str | None` implementing the five-step
   ladder from Technical Approach. Return `str(chat_id)`, never the group name, on the
   resolved path. Use the exact dual-cause warning text given in Technical Approach.
@@ -807,10 +863,17 @@ Not applicable — this repo has no Sphinx/MkDocs site.
   (exact shape in Technical Approach). Still `return True` — a send was attempted.
 - Leave the existing `FileNotFoundError` / `TimeoutExpired` / `Exception` handlers in the
   sender otherwise exactly as they are (add only the `return True`).
+- Bind `suppressed_note = ""` **unconditionally, immediately before** the
+  `if fixes_withheld:` guard at `:2433` — mirroring how `withheld_note` is already computed
+  unconditionally — because the `summary` f-string that interpolates it is evaluated on
+  every zero-diff return, including the clean path where the notify call never runs.
+  Assigning it only inside the guard produces a `NameError` that `run_docs_auditor`'s
+  `except Exception` at `:2561` silently converts into `{"status": "error"}`. Apply the same
+  initialize-first rule on the step-9 path even though the sender is unconditional there.
 - Update the zero-diff withheld-alert call site (currently `:2434`) to pass
   `repo_root=PROJECT_ROOT` and, when it returns `False`, add a suppression entry to the
-  findings list that return branch builds **and** append a `suppressed_note` to the
-  `summary` f-string at `:2441-2443`.
+  findings list that return branch builds **and** assign the non-empty `suppressed_note`
+  interpolated into the `summary` f-string at `:2441-2443`.
 - Update the step-9 pass summary call site (currently `:2521`) to pass
   `repo_root=PROJECT_ROOT` and, when it returns `False`, append to the in-scope `findings`
   list an entry naming the suppression and carrying `pr_url`, **and** splice
@@ -830,11 +893,14 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Parallel**: false
 - Add a `TestTelegramChatRouting` class to `tests/unit/test_docs_auditor_substrate.py`
   patching `reflections.docs_auditor.subprocess.run` (pattern at `:1291`/`:1350`) and
-  `reflections.docs_auditor.load_local_projects`. Implement all seven cases enumerated in
-  **Test Impact**, starting with the production valor path (case 1).
+  `reflections.docs_auditor.load_local_projects`. Implement all eight cases enumerated in
+  **Test Impact** (1-6, 7a, 7b), starting with the production valor path (case 1).
 - Add the two suppression tests (zero-diff path and step-9 path) described in Test Impact.
   Both assert on `result["summary"]`; the step-9 one also asserts the notice precedes
   `PR=`.
+- Tighten `test_clean_zero_diff_run_does_not_notify` (`:1471`): bind the `run_docs_auditor`
+  result and add `assert result["status"] == "skipped"`, so an unbound-`suppressed_note`
+  `NameError` on the clean zero-diff path cannot pass as green.
 - Add `notify.call_args.kwargs["repo_root"]` assertions to the three existing tests that
   inspect `notify` — `:1376` and `:1453` (zero-diff sites) and `:1413` (the step-9 site) —
   so both call sites are pinned to thread the repo root.
@@ -880,14 +946,14 @@ than `grep -c`'s exit 1, which a validator reading exit codes would score as a f
 |-------|---------|----------|
 | No hardcoded chat argv | `! grep -q '"--chat", "Eng: Valor"' reflections/docs_auditor.py` | exit code 0 |
 | Sender uses the resolver | `grep -q 'resolve_eng_group' reflections/docs_auditor.py` | exit code 0 |
-| Both call sites thread the repo root | `test "$(grep -c 'repo_root=PROJECT_ROOT' reflections/docs_auditor.py)" -ge 3` | exit code 0 (2 notify sites + the existing `audit()` call) |
+| Both call sites thread the repo root | `test "$(grep -c 'repo_root=PROJECT_ROOT' reflections/docs_auditor.py)" -ge 3` | exit code 0 (2 notify sites + the existing `audit()` call). **Weak check, not proof:** a count cannot tell *which* three lines matched, so a build threading the root at one notify site plus an unrelated kwarg satisfies it. The authoritative check for Risk 1 is the three `notify.call_args.kwargs["repo_root"]` assertions in Task 2; a validator must not read this row as a substitute. |
 | Routing tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
 | Git-surface tests still pass | `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py -q` | exit code 0 |
 | Resolver's own tests untouched and green | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_resolve_eng_group.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
 | Anti-criterion: no #3072 file touched | `! git diff --name-only origin/main...HEAD \| grep -qE 'expectation_reconciler\|sentry_triage\|stall_advisory\|sdlc_progress\|memory_consolidation\|nightly_regression_tests'` | exit code 0 |
 | Anti-criterion: the sweep did not widen | `test "$(git grep -lF '"Eng: Valor"' -- '*.py' \| grep -v '^tests/' \| grep -v '^reflections/docs_auditor.py' \| wc -l)" -eq 6` | exit code 0 — the six #3072 sender files, verified at plan time: `expectation_reconciler`, `sdlc_progress`, `sentry_triage`, `stall_advisory`, `scripts/memory_consolidation`, `scripts/nightly_regression_tests`. The two prompt files use single quotes and are deliberately outside this double-quoted sweep. |
 | Feature doc no longer pins the chat | `! grep -q 'Eng: Valor. Telegram chat' docs/features/docs-auditor.md` | exit code 0 — broader than the old `notifies the ...` anchor, so a reintroduced claim in any phrasing fails |
-| Feature doc documents suppression | `grep -q 'Telegram notification is suppressed' docs/features/docs-auditor.md` | exit code 0 — a distinct phrase, because a bare `suppress` grep already matches the pre-existing "entries past the cap are logged and suppressed" at `:343` and would pass vacuously |
+| Feature doc documents suppression | `grep -q 'Telegram notification is suppressed' docs/features/docs-auditor.md` | exit code 0 — a distinct phrase, because a bare `suppress` grep already matches the pre-existing "entries past the cap are logged and suppressed" at `:344` and would pass vacuously |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
@@ -897,16 +963,19 @@ than `grep -c`'s exit 1, which a validator reading exit codes would score as a f
 
 **Verdict (2026-09-02, /do-plan-critique cycle 2, FULL depth):** NEEDS REVISION — 1 blocker, 4 concerns, 2 nits. All 7 findings were addressed by the cycle-2 revision pass (2026-09-02T06:25:46Z), including both nits: the `summary` field became the load-bearing suppression channel, the sender's `repo_root` default became `None`, the discarded `valor-telegram` exit code gained a warning, `docs/features/docs-auditor.md:344-347` joined the Documentation scope, the Appetite gained the "What this actually buys" paragraph, and the two test-role/`resolve_chat` nits were corrected. Superseded.
 
-**Verdict (2026-09-02, /do-plan-critique cycle 3, FULL depth):** READY TO BUILD (with concerns) — 0 blockers, 2 concerns, 4 nits. All cycle-2 findings re-verified as landed. Every line-number, test-role, sweep-count, and import-graph claim in the plan was re-checked against HEAD and holds. The two concerns below are specification gaps a builder can trip on, not design defects.
+**Verdict (2026-09-02, /do-plan-critique cycle 3, FULL depth):** READY TO BUILD (with
+concerns) — 0 blockers, 2 concerns, 4 nits. **All 6 findings folded in by the cycle-3
+concern-closing pass** (see the Addressed By column); the plan is approved and this was the
+last plan touch before BUILD. No scope was added or re-argued. All cycle-2 findings re-verified as landed. Every line-number, test-role, sweep-count, and import-graph claim in the plan was re-checked against HEAD and holds. The two concerns below are specification gaps a builder can trip on, not design defects.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | `suppressed_note` is assigned only inside the branch that calls the sender, but it is interpolated into a `summary` f-string evaluated on **every** zero-diff return. The notify call at `reflections/docs_auditor.py:2434` sits inside `if fixes_withheld:`; the return at `:2440-2443` is outside it. A literal reading of Task 1 produces a `NameError` on the clean zero-diff path — the common production path, since most rotation runs withhold nothing. `run_docs_auditor` wraps everything in `try:` at `:2301` / `except Exception` at `:2561`, so the `NameError` never raises: it degrades to `{"status": "error"}` plus a `logger.warning`. The only existing test on that path, `test_clean_zero_diff_run_does_not_notify` (`tests/unit/test_docs_auditor_substrate.py:1471`), calls `run_docs_auditor()` without binding the result and asserts only `notify.call_count == 0`, so it passes against the broken build; both new suppression tests drive the suppressed path and would also pass. | pending | Mandate `suppressed_note = ""` immediately before the `if fixes_withheld:` guard at `:2433`, mirroring how `withheld_note` is already computed unconditionally, and assign it only inside the `if not _send_telegram_notification(..., repo_root=PROJECT_ROOT):` branch. Apply the same initialize-first rule on the step-9 path even though the sender is unconditional there. Then extend `test_clean_zero_diff_run_does_not_notify` to bind the result and assert `result["status"] == "skipped"` — without that assertion the `except Exception` at `:2561` converts any name or attribute slip this change introduces into a green test run and a silently broken production reflection. |
-| CONCERN | History & Consistency | The plan hand-rolls a repo-path to project match without acknowledging that `config/project_key_resolver.py::resolve_project_key` already owns that mapping — its module docstring advertises "projects.json working_directory prefix match against cwd" as priority 3. Two costs: review has no recorded answer for why the canonical resolver was not reused, and a builder who finds it would re-introduce exactly the defect this plan removes, because its priority chain returns `VALOR_PROJECT_KEY` **before** consulting the path (`config/project_key_resolver.py:120-125`) — the `project_key` routing the Problem section rules out as creating a misroute rather than removing one. Its module-level `_projects_cache` also contradicts Risk 2's explicit "No caching is added", and it returns a bare key rather than the project dict `resolve_eng_group` requires. | pending | Add a paragraph under Architectural Impact, or a fifth Settled Decision, recording that `config/project_key_resolver.py::resolve_project_key` is deliberately **not** used, for three named reasons: its `VALOR_PROJECT_KEY` precedence at `:120-125` would re-create the env-keyed misroute the Problem section voids; it returns a `str` key, not the project dict `resolve_eng_group(project)` needs; and its `_projects_cache` is the staleness Risk 2 rejects. Then add a Task 1 bullet: "Do not import from `config.project_key_resolver`." Without that line the rejection is invisible to both the builder and review. |
-| NIT | Risk & Robustness | Task 1 says "Add a module-scope `from reflections.utilities import load_local_projects, resolve_eng_group`". `reflections/utilities.py` also exports `PROJECT_ROOT`, and every existing consumer of that import in the tree pulls it in together (`reflections/audits/pr_review_audit.py:29`, `reflections/audits/task_backlog_check.py:22`, `reflections/sentry_triage.py:44`, `reflections/housekeeping/merged_branch_cleanup.py:33`). A builder copying the established idiom would rebind `docs_auditor`'s own `PROJECT_ROOT` from `:38`. | pending | Import exactly `load_local_projects` and `resolve_eng_group`, never `PROJECT_ROOT`. The values are identical today (both `Path(__file__).parent.parent` of a file in `reflections/`), so the rebind is currently harmless — but it would survive a future change to either definition, and every `patch("reflections.docs_auditor.PROJECT_ROOT", repo)` site would then be patching a name owned by a different module. |
-| NIT | Scope & Value | Test Impact case 7 bundles two behaviours that cannot share one test body: `subprocess.run` raising `FileNotFoundError`, and `subprocess.run` returning a non-zero `returncode`. They need different mock configurations and assert different things. As one case it is unimplementable; as two the Appetite's "nine new tests" becomes ten. | pending | Split into 7a — `patch("reflections.docs_auditor.subprocess.run", side_effect=FileNotFoundError)`, assert the call returns `True` (send attempted, not suppressed) — and 7b — a `CompletedProcess`-shaped mock with `returncode=1` and `stderr="boom"`, assert `True` **and** that `caplog` carries the "valor-telegram exited 1" warning. Restate the Appetite count as ten. Bookkeeping only; drop neither behaviour. |
-| NIT | Scope & Value | The Verification row "Feature doc documents suppression" cites the pre-existing cap wording at `docs/features/docs-auditor.md:343`; the wrapped line actually lands at `:344`, and 20-plus other `suppress` hits exist in that file. The row's reasoning is right and its chosen anchor `grep -q 'Telegram notification is suppressed'` matches zero lines at HEAD, so it is a genuine post-Task-3 check. | pending | Cosmetic — correct `:343` to `:344` or drop the line citation. The Verification row itself needs no change. |
-| NIT | History & Consistency | The Verification row `test "$(grep -c 'repo_root=PROJECT_ROOT' reflections/docs_auditor.py)" -ge 3` cannot tell *which* three lines matched; a build threading the root at one notify site plus an unrelated kwarg satisfies it. The plan's Risk 1 names this exact failure and mitigates it with the `notify.call_args.kwargs["repo_root"]` assertions, so this is the weaker of two overlapping checks, not a gap. | pending | No change required. Noted so a validator reading the Verification table in isolation does not treat this row as proof of Risk 1's mitigation — the authoritative check is the three `notify.call_args.kwargs["repo_root"]` assertions in Task 2. |
+| CONCERN | Risk & Robustness | `suppressed_note` is assigned only inside the branch that calls the sender, but it is interpolated into a `summary` f-string evaluated on **every** zero-diff return. The notify call at `reflections/docs_auditor.py:2434` sits inside `if fixes_withheld:`; the return at `:2440-2443` is outside it. A literal reading of Task 1 produces a `NameError` on the clean zero-diff path — the common production path, since most rotation runs withhold nothing. `run_docs_auditor` wraps everything in `try:` at `:2301` / `except Exception` at `:2561`, so the `NameError` never raises: it degrades to `{"status": "error"}` plus a `logger.warning`. The only existing test on that path, `test_clean_zero_diff_run_does_not_notify` (`tests/unit/test_docs_auditor_substrate.py:1471`), calls `run_docs_auditor()` without binding the result and asserts only `notify.call_count == 0`, so it passes against the broken build; both new suppression tests drive the suppressed path and would also pass. | Settled Decision 4 (`suppressed_note` must be initialized) + Task 1 initialize-first bullet + Test Impact row for `:1471` | Mandate `suppressed_note = ""` immediately before the `if fixes_withheld:` guard at `:2433`, mirroring how `withheld_note` is already computed unconditionally, and assign it only inside the `if not _send_telegram_notification(..., repo_root=PROJECT_ROOT):` branch. Apply the same initialize-first rule on the step-9 path even though the sender is unconditional there. Then extend `test_clean_zero_diff_run_does_not_notify` to bind the result and assert `result["status"] == "skipped"` — without that assertion the `except Exception` at `:2561` converts any name or attribute slip this change introduces into a green test run and a silently broken production reflection. |
+| CONCERN | History & Consistency | The plan hand-rolls a repo-path to project match without acknowledging that `config/project_key_resolver.py::resolve_project_key` already owns that mapping — its module docstring advertises "projects.json working_directory prefix match against cwd" as priority 3. Two costs: review has no recorded answer for why the canonical resolver was not reused, and a builder who finds it would re-introduce exactly the defect this plan removes, because its priority chain returns `VALOR_PROJECT_KEY` **before** consulting the path (`config/project_key_resolver.py:120-125`) — the `project_key` routing the Problem section rules out as creating a misroute rather than removing one. Its module-level `_projects_cache` also contradicts Risk 2's explicit "No caching is added", and it returns a bare key rather than the project dict `resolve_eng_group` requires. | Settled Decision 5 + Task 1 "do not import from `config.project_key_resolver`" bullet | Add a paragraph under Architectural Impact, or a fifth Settled Decision, recording that `config/project_key_resolver.py::resolve_project_key` is deliberately **not** used, for three named reasons: its `VALOR_PROJECT_KEY` precedence at `:120-125` would re-create the env-keyed misroute the Problem section voids; it returns a `str` key, not the project dict `resolve_eng_group(project)` needs; and its `_projects_cache` is the staleness Risk 2 rejects. Then add a Task 1 bullet: "Do not import from `config.project_key_resolver`." Without that line the rejection is invisible to both the builder and review. |
+| NIT | Risk & Robustness | Task 1 says "Add a module-scope `from reflections.utilities import load_local_projects, resolve_eng_group`". `reflections/utilities.py` also exports `PROJECT_ROOT`, and every existing consumer of that import in the tree pulls it in together (`reflections/audits/pr_review_audit.py:29`, `reflections/audits/task_backlog_check.py:22`, `reflections/sentry_triage.py:44`, `reflections/housekeeping/merged_branch_cleanup.py:33`). A builder copying the established idiom would rebind `docs_auditor`'s own `PROJECT_ROOT` from `:38`. | Task 1 import bullet (names the four copy-source consumers) | Import exactly `load_local_projects` and `resolve_eng_group`, never `PROJECT_ROOT`. The values are identical today (both `Path(__file__).parent.parent` of a file in `reflections/`), so the rebind is currently harmless — but it would survive a future change to either definition, and every `patch("reflections.docs_auditor.PROJECT_ROOT", repo)` site would then be patching a name owned by a different module. |
+| NIT | Scope & Value | Test Impact case 7 bundles two behaviours that cannot share one test body: `subprocess.run` raising `FileNotFoundError`, and `subprocess.run` returning a non-zero `returncode`. They need different mock configurations and assert different things. As one case it is unimplementable; as two the Appetite's "nine new tests" becomes ten. | Test Impact cases 7a/7b + Task 2 ("all eight cases") + Appetite restated to ten new tests | Split into 7a — `patch("reflections.docs_auditor.subprocess.run", side_effect=FileNotFoundError)`, assert the call returns `True` (send attempted, not suppressed) — and 7b — a `CompletedProcess`-shaped mock with `returncode=1` and `stderr="boom"`, assert `True` **and** that `caplog` carries the "valor-telegram exited 1" warning. Restate the Appetite count as ten. Bookkeeping only; drop neither behaviour. |
+| NIT | Scope & Value | The Verification row "Feature doc documents suppression" cites the pre-existing cap wording at `docs/features/docs-auditor.md:343`; the wrapped line actually lands at `:344`, and 20-plus other `suppress` hits exist in that file. The row's reasoning is right and its chosen anchor `grep -q 'Telegram notification is suppressed'` matches zero lines at HEAD, so it is a genuine post-Task-3 check. | Verification row's line citation corrected to `:344` | Cosmetic — correct `:343` to `:344` or drop the line citation. The Verification row itself needs no change. |
+| NIT | History & Consistency | The Verification row `test "$(grep -c 'repo_root=PROJECT_ROOT' reflections/docs_auditor.py)" -ge 3` cannot tell *which* three lines matched; a build threading the root at one notify site plus an unrelated kwarg satisfies it. The plan's Risk 1 names this exact failure and mitigates it with the `notify.call_args.kwargs["repo_root"]` assertions, so this is the weaker of two overlapping checks, not a gap. | Verification row's Expected column now states it is a weak check and names the three `call_args.kwargs` assertions as authoritative | No change required. Noted so a validator reading the Verification table in isolation does not treat this row as proof of Risk 1's mitigation — the authoritative check is the three `notify.call_args.kwargs["repo_root"]` assertions in Task 2. |
 
 **Structural checks (cycle 3):** required sections present; task numbering 1-4 with no gaps; `Depends On` graph acyclic and every reference valid; all 15 referenced file paths exist; every Success Criterion maps to a task; no Rabbit Hole or No-Go appears in the Solution or tasks as planned work; no prerequisites to check. The `git grep -lF '"Eng: Valor"' -- '*.py'` sweep returns exactly the six #3072 files the plan names, and `grep -c 'repo_root=PROJECT_ROOT'` is 1 at HEAD, so the `-ge 3` target is correct.
 
