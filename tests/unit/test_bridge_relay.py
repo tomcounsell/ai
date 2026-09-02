@@ -48,7 +48,12 @@ class TestRelayConstants:
         assert MAX_RELAY_RETRIES == 3
 
     def test_known_message_types(self):
-        assert KNOWN_MESSAGE_TYPES == {None, "reaction", "custom_emoji_message"}
+        assert KNOWN_MESSAGE_TYPES == {None, "reaction", "custom_emoji_message", "poll"}
+
+    def test_poll_is_a_known_type(self):
+        """#2701: an unknown type is discarded with no retry, which for a poll
+        would be a stuck agent."""
+        assert "poll" in KNOWN_MESSAGE_TYPES
 
 
 class TestSendQueuedMessage:
@@ -1508,3 +1513,315 @@ class TestZeroPeerGuard:
                 f"relay and utils.peer disagree on {odd!r}: "
                 f"relay sent={sent}, utils.peer={deliverable_telegram_peer(odd)}"
             )
+
+
+class TestPollDispatch:
+    """#2701: the `type: "poll"` outbox variant.
+
+    Every assertion here is about a property that is invisible on reading the
+    code in order — write ordering, which branch deletes what, and which thread
+    a call lands on.
+    """
+
+    @staticmethod
+    def _payload(**overrides):
+        payload = {
+            "type": "poll",
+            "chat_id": "-1003449100931",
+            "reply_to": None,
+            "question": "Which approach?",
+            "options": ["A", "B", "Other: wait for followup message"],
+            "session_id": "sess-1",
+            "poll_id_hint": "a" * 32,
+        }
+        payload.update(overrides)
+        return payload
+
+    @pytest.mark.asyncio
+    async def test_provisional_row_is_written_before_the_eligibility_check(self):
+        """The LPOP-to-registry window is a silent total-loss gap.
+
+        `process_outbox` has already consumed the work item atomically by the
+        time this branch runs, so until a row exists the question has no durable
+        record anywhere — orphan adoption would have nothing to adopt and
+        `poll_expired_unanswered` no row to fire on. Asserted on call ORDER with
+        a recording stub, not on timing.
+        """
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        calls = []
+
+        def _register(*_a, **_kw):
+            calls.append("register_pending_poll")
+            return True
+
+        def _eligible(*_a, **_kw):
+            calls.append("poll_eligible")
+            return PollEligibility(ok=True, reason="eligible")
+
+        async def _send(*_a, **_kw):
+            calls.append("send_poll")
+            return (111, 222)
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", side_effect=_register),
+            patch("bridge.poll_gating.poll_eligible", side_effect=_eligible),
+            patch("bridge.response.send_poll", side_effect=_send),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert calls[0] == "register_pending_poll", calls
+        assert calls.index("register_pending_poll") < calls.index("poll_eligible")
+        assert calls.index("poll_eligible") < calls.index("send_poll")
+
+    @pytest.mark.asyncio
+    async def test_ineligible_session_delivers_text_and_sends_no_poll(self):
+        """Never drop. A prose question is a cosmetic loss; a lost one is a stuck agent."""
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        mock_redis = MagicMock()
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll") as mock_delete,
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+        ):
+            result = await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert result is None
+        send_poll.assert_not_called()
+        # The provisional row is removed so a declined send never ages into a
+        # spurious orphan-adoption candidate.
+        mock_delete.assert_called_once_with("a" * 32)
+        mock_redis.rpush.assert_called_once()
+        requeued = json.loads(mock_redis.rpush.call_args[0][1])
+        assert requeued["type"] is None
+        assert "Which approach?" in requeued["text"]
+        assert requeued["_relay_attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_poll_id_hint_logs_error_and_delivers_text(self):
+        """A payload without the correlation key is a producer bug.
+
+        Sending anyway would put a poll on screen that no vote could ever be
+        routed to — worse than prose.
+        """
+        from bridge.telegram_relay import _send_queued_poll
+
+        mock_redis = MagicMock()
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+        ):
+            result = await _send_queued_poll(
+                MagicMock(),
+                self._payload(poll_id_hint=None),
+                "telegram:outbox:sess-1",
+            )
+
+        assert result is None
+        send_poll.assert_not_called()
+        requeued = json.loads(mock_redis.rpush.call_args[0][1])
+        assert requeued["type"] is None
+        assert "Which approach?" in requeued["text"]
+
+    @pytest.mark.asyncio
+    async def test_retry_finds_already_sent_poll_and_does_not_resend(self):
+        """Telegram accepting the send and the client THEN raising is ordinary.
+
+        `poll_id_hint` is minted per payload, not per attempt, so a naive retry
+        would put two polls on screen decoding to the same hint — turning the
+        orphan-adoption ambiguity bail (a safety guard) into the systematic
+        outcome of a routine retry, and leaving the question permanently
+        unroutable.
+        """
+        from bridge.telegram_relay import _send_queued_poll
+
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch(
+                "bridge.telegram_relay._find_already_sent_poll",
+                new_callable=AsyncMock,
+                return_value=(1408, 99887766),
+            ),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True) as promote,
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            result = await _send_queued_poll(
+                MagicMock(),
+                self._payload(_relay_attempts=1),
+                "telegram:outbox:sess-1",
+            )
+
+        assert result == 1408
+        send_poll.assert_not_called()  # exactly one SendMediaRequest total
+        promote.assert_called_once_with("a" * 32, 99887766, msg_id=1408)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_does_not_run_the_already_sent_lookup(self):
+        """The lookup costs a history scan; it is only worth it on a retry."""
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        lookup = AsyncMock(return_value=None)
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._find_already_sent_poll", lookup),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=(1, 2)),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        lookup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_failure_keeps_the_provisional_row(self):
+        """The row is what the retry lookup and orphan adoption need.
+
+        A `None` from `send_poll` does NOT mean nothing reached Telegram — the
+        client may have raised after the wire. Deleting the row here would
+        discard the only evidence of that.
+        """
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll") as mock_delete,
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=None),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            result = await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert result is None  # distinguishable, so the bounded retry engages
+        mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_eligibility_recheck_never_runs_on_the_event_loop_thread(self):
+        """`poll_eligible` does an unindexed AgentSession scan.
+
+        Running it inline would stall every other bridge coroutine for seconds
+        per poll send. This is a correctness assertion about WHICH THREAD the
+        scan executes on — deliberately not a duration assertion.
+        """
+        import threading
+
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        loop_thread = threading.current_thread()
+        recorded = {}
+
+        def _eligible(*_a, **_kw):
+            recorded["thread"] = threading.current_thread()
+            return PollEligibility(ok=True, reason="eligible")
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_gating.poll_eligible", side_effect=_eligible),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=(1, 2)),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert recorded["thread"] is not loop_thread
+
+
+class TestPollDeadLetterAndFallback:
+    """#2701 Risk 5: a dropped question is a stuck agent."""
+
+    @pytest.mark.asyncio
+    async def test_poll_is_not_discarded_as_ephemeral(self):
+        """Reactions are ephemeral and discardable. A question is not."""
+        from bridge.telegram_relay import _dead_letter_message
+
+        with patch("bridge.dead_letters.persist_failed_delivery") as persist:
+            await _dead_letter_message(
+                {
+                    "type": "poll",
+                    "chat_id": "-1003449100931",
+                    "question": "Which approach?",
+                    "options": ["A", "B"],
+                },
+                reason="max retries exceeded",
+            )
+
+        persist.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_survives_the_chat_id_and_text_gate(self):
+        """A poll payload has no `text` key.
+
+        Keeping "poll" out of the ephemeral discard tuple is NOT sufficient on
+        its own — the persistence branch is gated on `if chat_id and text`, so a
+        text-less payload falls through both branches into silence. The question
+        must be supplied as the dead-letter text. Asserted separately from the
+        ephemeral check because they are two independent guards.
+        """
+        from bridge.telegram_relay import _dead_letter_message
+
+        with patch("bridge.dead_letters.persist_failed_delivery") as persist:
+            await _dead_letter_message(
+                {
+                    "type": "poll",
+                    "chat_id": "-1003449100931",
+                    "question": "Which approach?",
+                    "options": ["A", "B"],
+                },
+                reason="max retries exceeded",
+            )
+
+        persisted_text = persist.call_args.kwargs.get("text") or persist.call_args[0][1]
+        assert "Which approach?" in persisted_text
+        assert "1. A" in persisted_text
+
+    def test_text_payload_never_re_enters_the_poll_branch(self):
+        """The re-enqueue cannot loop.
+
+        `process_outbox` is `while processed < RELAY_BATCH_SIZE` over `r.lpop`
+        of the same key, so a same-cycle rpush is consumed on a later cycle —
+        and the payload it pushes is plain text with `type: None`.
+        """
+        from bridge.telegram_relay import _poll_text_payload
+
+        payload = _poll_text_payload(
+            {
+                "chat_id": "-100",
+                "question": "Q?",
+                "options": ["a", "b"],
+                "reply_to": 5,
+                "session_id": "s",
+                "_relay_attempts": 3,
+            }
+        )
+        assert payload["type"] is None
+        assert payload["type"] not in ("poll",)
+        assert payload["_relay_attempts"] == 0  # its own retry budget
+        assert payload["reply_to"] == 5
+        assert payload["text"] == "Q?\n\n1. a\n2. b"
