@@ -24,16 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import nightly_regression_tests as nrt  # noqa: E402
 
-
-def _flags(**kwargs) -> nrt.RunFlags:
-    base = {
-        "is_seed_run": False,
-        "integrity_warnings": [],
-        "dry_run": False,
-        "baseline_sha": "cafef00d",
-    }
-    base.update(kwargs)
-    return nrt.RunFlags(**base)
+from tests.unit.nightly_shadow_helpers import make_run_flags as _flags  # noqa: E402
 
 
 def _caps(max_failures: int = 15) -> nrt.GateCaps:
@@ -218,7 +209,7 @@ class TestRunShapeDisqualifiers:
     def test_gate_has_no_dispatch_truncation_clause(self) -> None:
         """A run whose dispatch set was truncated is still gate-eligible."""
         nodes = [f"a::t{i}" for i in range(nrt.MAX_DISPATCH_NODES + 3)]
-        assert len(nodes) <= nrt.NIGHTLY_FIX_MAX_FAILURES
+        assert len(nodes) <= nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT
         assert _decide(_clean(nodes), nodes) == ("autonomous-fix", "none")
 
 
@@ -247,11 +238,39 @@ class TestResolveFixMode:
         log_text = (tmp_path / "nightly.log").read_text()
         assert log_text.count("unrecognized NIGHTLY_FIX_MODE") == 1
 
-    def test_default_reads_the_module_constant(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(nrt, "NIGHTLY_FIX_MODE", "off")
+    def test_default_reads_the_environment_at_call_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blocker fix (#3082 review): a value set AFTER module import — the
+        shape load_env_or_die() produces inside main() under launchd — must be
+        honored. An import-time read would freeze the in-code default."""
+        monkeypatch.setenv("NIGHTLY_FIX_MODE", "off")
         assert nrt.resolve_fix_mode() == "off"
-        monkeypatch.setattr(nrt, "NIGHTLY_FIX_MODE", "shadow")
+        monkeypatch.setenv("NIGHTLY_FIX_MODE", "shadow")
         assert nrt.resolve_fix_mode() == "shadow"
+        monkeypatch.delenv("NIGHTLY_FIX_MODE")
+        assert nrt.resolve_fix_mode() == nrt.NIGHTLY_FIX_MODE_DEFAULT
+
+
+class TestResolveFixMaxFailures:
+    @pytest.fixture(autouse=True)
+    def _log(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+    def test_env_value_set_after_import_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NIGHTLY_FIX_MAX_FAILURES", "7")
+        assert nrt.resolve_fix_max_failures() == 7
+
+    def test_absent_env_uses_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("NIGHTLY_FIX_MAX_FAILURES", raising=False)
+        assert nrt.resolve_fix_max_failures() == nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT
+
+    def test_malformed_env_degrades_to_the_default_with_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NIGHTLY_FIX_MAX_FAILURES", "fifteen")
+        assert nrt.resolve_fix_max_failures() == nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT
+        assert "malformed NIGHTLY_FIX_MAX_FAILURES" in (tmp_path / "nightly.log").read_text()
 
 
 # --- verdict log format ------------------------------------------------------
@@ -347,7 +366,7 @@ def _run_main(
         patch.object(nrt, "LOCK_FILE", tmp_path / "nightly.lock"),
         patch.object(nrt, "LAST_RUN_FILE", last_run),
         patch.object(nrt, "PYTEST_SERIAL_JSON_TMP", str(serial_report)),
-        patch.object(nrt, "NIGHTLY_FIX_MODE", mode),
+        patch.dict(nrt.os.environ, {"NIGHTLY_FIX_MODE": mode}),
         patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
         patch("sys.argv", ["nightly_regression_tests.py"]),
         patch.object(nrt, "load_env_or_die", return_value=(42, None)),

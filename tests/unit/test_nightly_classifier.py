@@ -40,6 +40,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import nightly_regression_tests as nrt  # noqa: E402
 
+from tests.unit.nightly_shadow_helpers import make_run_flags as _flags  # noqa: E402
+
 NODE = "tests/test_thing.py::test_thing"
 
 FIXTURE_PYPROJECT = """\
@@ -247,11 +249,10 @@ def test_fixture_repo_node_passing_at_baseline_is_newly_broken(
     """THE falsifier: passes at the baseline SHA, fails at HEAD → newly_broken.
 
     The real `classify_against_baseline` is called through its keyword-only
-    injection seam. No module global is monkeypatched (only LOG_FILE, which is
-    pure test hygiene and not on any code path under test).
+    injection seam. No module global is monkeypatched (the autouse
+    `_quiet_log` fixture redirects LOG_FILE, which is pure test hygiene and
+    not on any code path under test).
     """
-    monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-
     result = nrt.classify_against_baseline(
         [NODE],
         fixture_repo.sha_a,
@@ -276,8 +277,6 @@ def test_fixture_repo_node_failing_at_both_commits_is_pre_existing(
     Proves the classifier is not simply echoing HEAD's result — if it were,
     both this and the newly_broken case would land in the same bucket.
     """
-    monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-
     result = nrt.classify_against_baseline(
         [NODE],
         fixture_repo.sha_b,
@@ -304,7 +303,6 @@ def test_fixture_repo_without_venv_is_inconclusive(
     if it had not, pytest-clean.sh L136-146 refuses a linked worktree with no
     `.venv` of its own (asserted directly below).
     """
-    monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
     assert not (fixture_repo.bare_worktree / ".venv").exists()
 
     wrapper_abort = _run([str(nrt.PYTEST_CLEAN_SH), NODE, "-n0", "-q"], fixture_repo.bare_worktree)
@@ -328,7 +326,7 @@ def test_fixture_repo_without_venv_is_inconclusive(
 
 def _step_token(argv: list[str]) -> str:
     if argv[:2] == ["git", "worktree"]:
-        return "worktree_add"
+        return "worktree_prune" if "prune" in argv else "worktree_add"
     if "checkout" in argv:
         return "checkout"
     if argv[0] == "uv":
@@ -336,21 +334,48 @@ def _step_token(argv: list[str]) -> str:
     return "other"
 
 
+class _FakeProc:
+    """A Popen stand-in whose ``communicate`` can time out like a hung child.
+
+    ``pid`` is above macOS/Linux pid ceilings, so the timeout path's
+    ``os.getpgid`` raises ``ProcessLookupError`` and the killpg cleanup is a
+    no-op — the shape of a child that died between the timeout and the kill.
+    """
+
+    def __init__(self, argv: list[str], returncode: int, *, timeout: bool, fake=None):
+        self.pid = 99999999
+        self.returncode = returncode
+        self._argv = argv
+        self._timeout = timeout
+        self._fake = fake
+
+    def communicate(self, timeout=None):
+        if self._fake is not None:
+            self._fake.timeouts.append(timeout)
+        if self._timeout:
+            raise subprocess.TimeoutExpired(cmd=self._argv, timeout=timeout or 1)
+        return ("", "provisioning step failed")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 class _ProvisionFake:
-    """A subprocess.run stand-in for the three bounded provisioning steps."""
+    """A subprocess.Popen stand-in for the bounded provisioning steps."""
 
     def __init__(self, *, fail: set[str] | None = None, timeout: set[str] | None = None):
         self.fail = fail or set()
         self.timeout = timeout or set()
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
+        self.timeouts: list = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        self.kwargs.append(dict(kwargs))
         token = _step_token(list(argv))
-        if token in self.timeout:
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 1))
         rc = 1 if token in self.fail else 0
-        return subprocess.CompletedProcess(argv, rc, "", "provisioning step failed")
+        return _FakeProc(list(argv), rc, timeout=token in self.timeout, fake=self)
 
     @property
     def tokens(self) -> list[str]:
@@ -365,6 +390,10 @@ def _ready_worktree(tmp_path: Path) -> Path:
     (wt / "uv.lock").write_text("lock\n")
     digest = hashlib.sha256((wt / "uv.lock").read_bytes()).hexdigest()
     (wt / nrt.BASELINE_PROVISION_MARKER).write_text(digest + "\n")
+    # The classifier pre-filters node IDs whose test file is absent at the
+    # baseline checkout; the stub tests use nodes "a::t1" / "b::t2".
+    (wt / "a").write_text("")
+    (wt / "b").write_text("")
     return wt
 
 
@@ -401,7 +430,7 @@ class TestProvisionFailures:
             (wt / nrt.BASELINE_PROVISION_MARKER).write_text("stale-digest\n")
         fake = _ProvisionFake(fail={token})
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt)
@@ -414,12 +443,14 @@ class TestProvisionFailures:
         wt = _ready_worktree(tmp_path)
         fake = _ProvisionFake(fail={"checkout"})
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt, baseline_sha="0badc0de")
         assert result["inconclusive"] == ["a::t1"]
-        assert fake.tokens == ["checkout"]
+        # An unknown SHA fails the checkout, and the prune-and-retry self-heal
+        # (for desynced admin entries) runs before the classifier gives up.
+        assert fake.tokens == ["checkout", "worktree_prune", "checkout"]
         spawn.assert_not_called()
 
     @pytest.mark.parametrize("token", ["worktree_add", "checkout", "uv_sync"])
@@ -430,7 +461,7 @@ class TestProvisionFailures:
             (wt / nrt.BASELINE_PROVISION_MARKER).write_text("stale-digest\n")
         fake = _ProvisionFake(timeout={token})
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt)
@@ -441,26 +472,22 @@ class TestProvisionFailures:
         """`uv sync` must target the worktree, never the primary checkout."""
         wt = _ready_worktree(tmp_path)
         (wt / nrt.BASELINE_PROVISION_MARKER).write_text("stale-digest\n")
-        recorded: list[dict] = []
+        fake = _ProvisionFake()
 
-        def _fake(argv, **kwargs):
-            recorded.append({"argv": list(argv), **kwargs})
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
-        with patch.object(nrt.subprocess, "run", _fake):
+        with patch.object(nrt.subprocess, "Popen", fake):
             assert nrt.provision_baseline_worktree(
                 "cafef00d", repo_root=tmp_path / "repo-root", worktree_path=wt
             )
-        uv_calls = [c for c in recorded if c["argv"][0] == "uv"]
-        assert uv_calls and uv_calls[0]["argv"] == ["uv", "sync"]
-        assert uv_calls[0]["cwd"] == str(wt)
-        assert uv_calls[0]["timeout"] == nrt.BASELINE_UV_SYNC_TIMEOUT_SECONDS
+        uv_idx = [i for i, c in enumerate(fake.calls) if c[0] == "uv"]
+        assert uv_idx and fake.calls[uv_idx[0]] == ["uv", "sync"]
+        assert fake.kwargs[uv_idx[0]]["cwd"] == str(wt)
+        assert fake.timeouts[uv_idx[0]] == nrt.BASELINE_UV_SYNC_TIMEOUT_SECONDS
 
     def test_provision_skips_uv_sync_when_the_lock_has_not_moved(self, tmp_path: Path) -> None:
         """The amortization that keeps the common night near zero cost."""
         wt = _ready_worktree(tmp_path)
         fake = _ProvisionFake()
-        with patch.object(nrt.subprocess, "run", fake):
+        with patch.object(nrt.subprocess, "Popen", fake):
             assert nrt.provision_baseline_worktree(
                 "cafef00d", repo_root=tmp_path / "repo-root", worktree_path=wt
             )
@@ -470,7 +497,7 @@ class TestProvisionFailures:
         wt = _ready_worktree(tmp_path)
         (wt / "uv.lock").unlink()
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt)
@@ -485,7 +512,7 @@ class TestNoProjectDirFallback:
         wt = tmp_path / "absent-wt"
         fake = _ProvisionFake(fail={"worktree_add"})
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt)
@@ -505,7 +532,7 @@ class TestNoProjectDirFallback:
             return 1
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             result = _classify(tmp_path, wt, report_path=report)
@@ -538,7 +565,7 @@ class TestReportPathIsolation:
             return 1
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             result = _classify(tmp_path, wt, report_path=report)
@@ -560,7 +587,7 @@ class TestReportPathIsolation:
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             result = _classify(tmp_path, wt)
@@ -590,7 +617,7 @@ class TestClassifierSpawnEnv:
             return 1
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             _classify(tmp_path, wt, report_path=report)
@@ -613,7 +640,7 @@ class TestClassifierRunFailures:
             return rc
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             return _classify(tmp_path, wt, nodes=nodes, report_path=report)
@@ -646,7 +673,7 @@ class TestClassifierRunFailures:
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=_spawn),
         ):
             result = _classify(tmp_path, wt)
@@ -656,7 +683,7 @@ class TestClassifierRunFailures:
         """The db-claim abort shape: the spawn raises and nothing is guessed."""
         wt = _ready_worktree(tmp_path)
         with (
-            patch.object(nrt.subprocess, "run", _ProvisionFake()),
+            patch.object(nrt.subprocess, "Popen", _ProvisionFake()),
             patch.object(nrt, "_spawn_pytest", side_effect=RuntimeError("db claim exhausted")),
         ):
             result = _classify(tmp_path, wt)
@@ -666,7 +693,7 @@ class TestClassifierRunFailures:
         wt = _ready_worktree(tmp_path)
         fake = _ProvisionFake()
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt, baseline_sha="")
@@ -678,7 +705,7 @@ class TestClassifierRunFailures:
         wt = _ready_worktree(tmp_path)
         fake = _ProvisionFake()
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             result = _classify(tmp_path, wt, nodes=[])
@@ -690,17 +717,6 @@ class TestClassifierRunFailures:
 # --- the five refusable classification preconditions -------------------------
 
 
-def _flags(**kwargs) -> nrt.RunFlags:
-    base = {
-        "is_seed_run": False,
-        "integrity_warnings": [],
-        "dry_run": False,
-        "baseline_sha": "cafef00d",
-    }
-    base.update(kwargs)
-    return nrt.RunFlags(**base)
-
-
 PRECONDITION_CASES = [
     ("seed_run", {"is_seed_run": True}, ["a::t1"]),
     ("integrity_warnings", {"integrity_warnings": ["total shrank"]}, ["a::t1"]),
@@ -708,7 +724,11 @@ PRECONDITION_CASES = [
     ("no_baseline_sha", {"baseline_sha": ""}, ["a::t1"]),
     # The re-baseline shape: a population far above the cap must be refused
     # BEFORE the cost of classifying it is paid.
-    ("over_max_failures", {}, [f"a::t{i}" for i in range(nrt.NIGHTLY_FIX_MAX_FAILURES + 40)]),
+    (
+        "over_max_failures",
+        {},
+        [f"a::t{i}" for i in range(nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT + 40)],
+    ),
 ]
 
 
@@ -724,13 +744,13 @@ class TestClassificationPreconditions:
         self, tmp_path: Path, reason: str, flag_kwargs: dict, new_failures: list[str]
     ) -> None:
         flags = _flags(**flag_kwargs)
-        caps = nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES)
+        caps = nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT)
 
         assert nrt.classify_precondition_reason(new_failures, caps, flags) == reason
 
         fake = _ProvisionFake()
         with (
-            patch.object(nrt.subprocess, "run", fake),
+            patch.object(nrt.subprocess, "Popen", fake),
             patch.object(nrt, "_spawn_pytest") as spawn,
         ):
             nrt.log_shadow_verdict(new_failures, caps, flags)
@@ -754,7 +774,7 @@ class TestClassificationPreconditions:
         self, reason: str, flag_kwargs: dict, new_failures: list[str]
     ) -> None:
         """The call-site list and the gate's first five clauses cannot diverge."""
-        caps = nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES)
+        caps = nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT)
         assert (
             nrt.gate_reason(nrt.empty_classification(), new_failures, caps, _flags(**flag_kwargs))
             == reason
@@ -766,7 +786,7 @@ class TestSkippedNightStillLogs:
         """A silent skip would lose this tier's only deliverable on the noisiest nights."""
         nrt.log_shadow_verdict(
             ["a::t1", "b::t2"],
-            nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES),
+            nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT),
             _flags(is_seed_run=True),
         )
         log_text = (tmp_path / "nightly.log").read_text()
@@ -782,7 +802,7 @@ class TestSkippedNightStillLogs:
         with patch.object(nrt, "classify_against_baseline", return_value=classification):
             nrt.log_shadow_verdict(
                 ["a::t1", "b::t2"],
-                nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES),
+                nrt.GateCaps(max_failures=nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT),
                 _flags(),
             )
         log_text = (tmp_path / "nightly.log").read_text()
