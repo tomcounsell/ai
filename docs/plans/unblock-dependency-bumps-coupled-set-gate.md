@@ -5,7 +5,7 @@ appetite: Large
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-09-02T07:22:31Z
+revision_applied_at: 2026-09-02T07:42:42Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
 last_comment_id: 5505317383
 ---
@@ -466,26 +466,72 @@ plus its own live-`data/` glob-unchanged assertion is exactly the
 "consumer discipline" shape this plan rejects for `agent/llm/` — and the gap was
 already visible: `tests/unit/test_llm_stack_compat.py` drives degraded
 resolutions but was not one of the files carrying the guard. So the redirect
-moves into `tests/conftest.py` as an **`autouse=True`, function-scoped fixture**:
+moves into `tests/unit/conftest.py` as an **`autouse=True`, function-scoped
+fixture**:
 
 ```python
 @pytest.fixture(autouse=True)
-def _redirect_llm_marker_dir(monkeypatch, tmp_path):
-    monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)
+def _redirect_llm_marker_dir(monkeypatch, tmp_path_factory):
+    try:
+        from agent.llm import compat as _compat
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        _compat, "_MARKER_DIR", tmp_path_factory.mktemp("llm-marker"), raising=False
+    )
 ```
 
-`raising=False` keeps it inert until `compat.py` exists and for every test that
-never imports it. The per-file glob-unchanged instruction is then **deleted**
-from task 4 and from the Test Impact rows — it was the hand-replicated half. One
-case still asserts the **default**, and it must not read the patched global:
-resolve `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly
-and compare it to `Path(ui.app.__file__).parent.parent / "data"`.
+**The guarded import is what makes this inert, not `raising=False`** (round-9
+blocker). The string-target form `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", ..., raising=False)`
+does **not** degrade gracefully: `raising` suppresses only the *attribute*
+existence check, while the string form first calls `derive_importpath`, whose
+`resolve(module)` performs a real import and raises before `raising` is
+consulted. Verified on `main` today —
+`.venv/bin/python -c "from _pytest.monkeypatch import derive_importpath; derive_importpath('agent.llm.compat._MARKER_DIR', False)"`
+raises `ImportError: import error in agent.llm.compat: No module named 'agent.llm.compat'`,
+and an autouse fixture in that form ERRORs every test in the repo at setup for
+as long as `compat.py` is absent (the task-2 commit, a `git bisect`, a revert of
+task 3, or a builder who lands the conftest change before task 3). The string
+form is also never inert *after* `compat.py` exists: it force-imports
+`agent.llm.compat` for every test in the suite. The module-object form skips
+`derive_importpath` entirely; `raising=False` is retained only for the narrow
+window where `compat.py` exists but `_MARKER_DIR` has not been added yet.
+
+**The fixture must not bill the whole suite for an isolation four files need**
+(round-9 concern). Two reductions, both in the block above. (1) It takes
+session-scoped `tmp_path_factory` and calls `mktemp` **only on the branch where
+`compat` imported**, so a test that returns early materializes no directory —
+`tmp_path` would have created one unconditionally. Measured by the critic: 300
+parametrized no-op tests under the unconditional shape produced 600 directories
+under the session tmp root; the repo has ~14,216 test functions, so a full run
+manufactured on the order of 28,000 unread temp directories, retained three
+sessions deep, on a memory-constrained machine several agents share. (2) It
+lives in `tests/unit/conftest.py`, not the root `tests/conftest.py`: all four
+marker-driving files (`test_llm_import_safety.py`,
+`test_llm_stack_degraded_start.py`, `test_dashboard_llm_degraded.py`,
+`test_llm_stack_compat.py`) are under `tests/unit/`, so the mechanism property
+is preserved — no file re-implements the redirect — while `tests/integration/`
+pays nothing. `tests/unit/conftest.py` already exists.
+
+The per-file glob-unchanged instruction is **deleted** from task 4 and from the
+Test Impact rows — it was the hand-replicated half. One case still asserts the
+**default**, and it must not read the patched global: resolve
+`Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly and
+compare it to `Path(ui.app.__file__).parent.parent / "data"`.
 
 An in-process fixture cannot reach the subprocess CLI case in
 `test_llm_stack_compat.py`, so that case passes the redirect explicitly to the
-child via the environment — which requires `_marker_path()` to read the override
-**lazily inside the function** (a module-scope `os.environ.get` is blocked by
-`validate_no_module_scope_env.py`).
+child via the environment variable **`LLM_STACK_MARKER_DIR`** — which requires
+`_marker_path()` to read it **lazily inside the function** (a module-scope
+`os.environ.get` is blocked by `validate_no_module_scope_env.py`). The override
+is **not silent** (round-9 concern): when it is set and differs from
+`_MARKER_DIR`'s default, `_marker_path()` logs once at `logger.warning` with the
+same sentinel token the `LLM_STACK_COMPAT_OVERRIDE` OVERRIDDEN warning carries,
+so one sentinel grep finds both break-glass paths. Without the announce, a stale
+value inherited from a launchd plist, an exported shell var, or a cron env would
+relocate the write path of this plan's only *standing* signal and leave the
+board green on a degraded bridge with nothing saying why — the false-green
+polarity of the plan's own "stuck dashboard equals no dashboard channel" mode.
 
 A direct Telegram push was considered and **rejected**: no raw Bot-API send path
 exists in tracked code, and Telethon's send lives only in the bridge — it cannot
@@ -747,6 +793,27 @@ The appetite re-label above is the concession taken instead.
   their conservative defaults fleet-wide. Spike-5 already separated these
   domains; a single boolean would re-collapse them. The alert still fires on
   either axis, naming which.
+
+  **Accepted residual: `loader_ok` is stack-wide, so only the *signature* axis
+  is separated** (round-9 concern). One memoized `_load_stack()` imports the
+  entire third-party set — deliberately, with no per-symbol option menu — so an
+  `anthropic` **ImportError** sets `loader_ok=False` and `run_typed_local`
+  raises `LLMStackIncompatible` too. That is exactly today's behavior (an
+  `anthropic` import failure at `wrapper.py` module scope already fells the
+  whole module), so it is a **no-regression residual, not a new fault**; the
+  split's actual delivery is that an Anthropic *signature* break — the failure
+  mode this lane was opened for, and the one the pinned pair exhibits — leaves
+  the local classifiers running. Splitting the loader into `_load_anthropic_stack()`
+  and `_load_local_stack()` legs would make the ImportError axis independent
+  too, and is the honest upgrade if experience shows it matters; it is **out of
+  scope for this lane** (it adds a second memo, a conjunction rule on
+  `CompatResult.loader_ok`, and a separate `_resolve_degraded_flag` memoization
+  path to a plan already re-labelled Large). Recorded beside Risk 5. This is not
+  hypothetical for the lane immediately downstream — anthropic 1.0.0 moves its
+  HTTP layer to `httpx2` (Research), an ImportError-class hazard, and #3073
+  moves that pin — so the behavior is **asserted rather than incidental**:
+  `test_anthropic_import_error_local_path` stubs **only** `anthropic` to raise
+  on import and asserts `run_typed_local` raises `LLMStackIncompatible`.
 - **Break-glass override.** `_resolve_degraded_flag()` reads
   `os.environ.get("LLM_STACK_COMPAT_OVERRIDE")` **inside the function** (a
   module-scope read is blocked by `validate_no_module_scope_env.py`); the value
@@ -984,9 +1051,17 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   included) and documented by name in `docs/features/nonharness-llm-wrapper.md:56`
   as "env-overridable, default 20s". All three move together — new field
   `settings.timeouts.local_typed_hard_s` (env `TIMEOUTS__LOCAL_TYPED_HARD_S`)
-  read inside `run_typed_local`, re-export deleted, doc corrected. Grep for
-  `LOCAL_TYPED_HARD_TIMEOUT` across the **whole tracked tree**, not just
-  `tests/`.
+  read inside `run_typed_local`, re-export deleted, doc corrected. **The reader
+  set is already resolved** (round-9 nit): `git grep -n LOCAL_TYPED_HARD_TIMEOUT`
+  at the current tip returns exactly five code hits, all inside `agent/llm/` —
+  `__init__.py:14` and `:26` (the re-export and its `__all__` entry),
+  `wrapper.py:167` (the module-scope read being migrated), `:192` (a docstring
+  reference in `run_typed_local`, reworded to the new field name), and `:209`
+  (the sole functional reader) — plus the one prose hit at
+  `docs/features/nonharness-llm-wrapper.md:56`, already a task-8 item. **Zero**
+  readers exist outside the package. Re-run the grep to confirm nothing arrived;
+  a non-empty result outside `agent/llm/` is a premise change that stops the
+  task.
 - **Set semantics are all-or-nothing at every stage** — resolve, rewrite, sync,
   gate, rollback. Today's record-error-and-continue is exactly how the incident
   happened (spike-2 defect 3).
@@ -1059,7 +1134,7 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   raise-on-import shim dir on `PYTHONPATH`** — in-process (and under any
   `sys.modules` purge) it is a cache hit that passes unconditionally, which is
   the round-7 blocker. The alert/typed halves stay in-process. The marker
-  redirect is supplied by the autouse `tests/conftest.py` fixture (see Failure
+  redirect is supplied by the autouse `tests/unit/conftest.py` fixture (see Failure
   Posture) — no per-file monkeypatch and no per-file glob assertion.
 - [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): **the positive
   self-test — `check_llm_stack_compat().compatible is True` on the pinned pair**
@@ -1083,7 +1158,7 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   `loader_ok`, and both versions, with a matching exit status (no marker
   assertion: it cannot fail, per the round-8 concern). The subprocess case
   receives the marker-directory redirect explicitly through the child's
-  environment, since the autouse in-process fixture cannot reach it.
+  `LLM_STACK_MARKER_DIR`, since the autouse in-process fixture cannot reach it.
 - [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): alert
   fires **while `run_typed` raises** (independence proof); raising
   `capture_message` suppresses nothing else; per-process marker written on
@@ -1094,14 +1169,24 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   sentinel event while dropping others; process does not exit; degraded intake
   (inbound message still enqueues an AgentSession); **two-axis split** —
   `loader_ok` true + `compatible` false makes `run_typed` raise while
-  `run_typed_local` completes against a stubbed `FunctionModel`; **override** —
+  `run_typed_local` completes against a stubbed `FunctionModel`;
+  `test_anthropic_import_error_local_path` — with **only** `anthropic` stubbed
+  to raise on import, assert `run_typed_local` raises `LLMStackIncompatible`
+  explicitly (the stack-wide `loader_ok` residual, below — asserted, not left to
+  fall out of a shared boolean); `test_marker_dir_override_warns` — with
+  `LLM_STACK_MARKER_DIR` set to a non-default value, `_marker_path()` emits one
+  sentinel `logger.warning`; `test_marker_redirect_is_autouse` — import
+  `agent.llm.compat`, resolve degraded with `proc="bridge"` carrying **no**
+  per-file monkeypatch, assert the marker landed under the fixture's tmp dir and
+  **not** under `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"`;
+  **override** —
   `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits the resolver, emits the
   OVERRIDDEN warning, and is ignored by the pure predicate and the `--json` CLI;
   **override clears the marker** (round-8 concern) — resolve degraded with
   `proc="bridge"` so the marker is written, reset the memo, set
   `LLM_STACK_COMPAT_OVERRIDE=healthy`, resolve again with `proc="bridge"`, and
   assert the marker is gone and the OVERRIDDEN warning was emitted.
-  Marker redirection comes from the autouse `tests/conftest.py` fixture, so no
+  Marker redirection comes from the autouse `tests/unit/conftest.py` fixture, so no
   case monkeypatches `_MARKER_DIR` by hand and none carries a glob-unchanged
   assertion. One case still asserts the *default* — resolving
   `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly (never
@@ -1113,7 +1198,7 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
   markers it names both; with a marker present but unreadable the call still
   returns 200 and does not raise, proving the `except OSError` leg. Without
   this, the lane can go fully green with `dashboard_json` never wired. Markers
-  are written under the directory the autouse `tests/conftest.py` fixture
+  are written under the directory the autouse `tests/unit/conftest.py` fixture
   redirects to, never the live `data/`.
 - [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
   — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
@@ -1144,17 +1229,28 @@ any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
 - [ ] Any reader of `LOCAL_TYPED_HARD_TIMEOUT` — UPDATE: the constant becomes
   `settings.timeouts.local_typed_hard_s` and its `agent/llm/__init__.py`
   re-export (lines 14, 26, `__all__`) is deleted (see task 2 and the Freshness
-  Check's module-scope-env ratchet subsection). Grep the **whole tracked tree**,
-  not just `tests/` — it is a public re-export; if there are no readers outside
-  `agent/llm/`, state that in the build report rather than assuming.
+  Check's module-scope-env ratchet subsection). **Resolved, not open**
+  (round-9 nit): the five code hits are `agent/llm/__init__.py:14`/`:26` and
+  `agent/llm/wrapper.py:167`/`:192`/`:209`, with zero readers outside
+  `agent/llm/`; `docs/features/nonharness-llm-wrapper.md:56` is the one prose
+  hit and is a task-8 item. Re-run `git grep -n LOCAL_TYPED_HARD_TIMEOUT` to
+  confirm and stop the task if anything new appears.
 - [ ] `tests/unit/test_settings.py` — UPDATE: cover the new `local_typed_hard_s` field and its
   `TIMEOUTS__LOCAL_TYPED_HARD_S` override, matching how its siblings are tested.
-- [ ] `tests/conftest.py` — UPDATE: add the `autouse=True`, function-scoped
-  `_redirect_llm_marker_dir` fixture doing
-  `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`.
+- [ ] `tests/unit/conftest.py` — UPDATE: add the `autouse=True`, function-scoped
+  `_redirect_llm_marker_dir` fixture in the **guarded module-object** form given
+  in Failure Posture — `try: from agent.llm import compat as _compat / except
+  ImportError: return`, then
+  `monkeypatch.setattr(_compat, "_MARKER_DIR", tmp_path_factory.mktemp("llm-marker"), raising=False)`.
   This replaces the per-file redirect convention across all four
-  degraded-driving test files (round-8 concern) — `raising=False` keeps it inert
-  for every test that never imports `compat`.
+  degraded-driving test files (round-8 concern). **Do not use the string-target
+  form**: `raising=False` does not make it inert — `derive_importpath` imports
+  the module first and raises, erroring every test in the repo while `compat.py`
+  is absent (round-9 blocker). The guarded import is what delivers inertness.
+  `tmp_path_factory` (not `tmp_path`) keeps the early-return branch from
+  materializing a temp directory for every test in the suite, and
+  `tests/unit/` (not root `tests/`) scopes the cost to where the four
+  marker-driving files live.
 - [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the
   gate's pytest phase.
 
@@ -1222,6 +1318,28 @@ instead of at boot.
 of start, running the full loader — so detection latency stays boot-time in
 practice. Only a process that never runs a startup hook learns at first call,
 and the resolver-bound alert covers that path too.
+
+### Risk 6 (accepted residual): `loader_ok` is stack-wide, so the two-axis split protects only the signature axis
+**Impact:** An `anthropic` **ImportError** — a live hazard, since anthropic
+1.0.0 moves its HTTP layer to `httpx2` (Research) and #3073 moves that pin —
+sets `loader_ok=False` from the single memoized `_load_stack()`, so
+`run_typed_local` raises `LLMStackIncompatible` and both hot-path classifiers
+(`tools/classifier.py`, `bridge/job_router.py`) fall back to their conservative
+defaults fleet-wide, even though the local leg never touches `anthropic`.
+**Why accepted:** this is not a regression. Today `anthropic` is imported at
+`agent/llm/wrapper.py` module scope, so an ImportError already fells the whole
+module including `run_typed_local`; the lane leaves that behavior exactly where
+it found it while fixing the *signature* axis, which is the failure the pinned
+pair actually exhibits. Splitting `_load_stack()` into `_load_anthropic_stack()`
+and `_load_local_stack()` legs is the correct upgrade and is deliberately
+deferred — it adds a second memo, a conjunction rule on `CompatResult.loader_ok`,
+and a separate `_resolve_degraded_flag` memoization path to a plan already
+re-labelled Large.
+**Mitigation:** the behavior is pinned by an explicit test rather than left
+implicit — `test_anthropic_import_error_local_path` stubs only `anthropic` to
+raise on import and asserts `run_typed_local` raises. If #3073 makes the
+fleet-wide classifier fallback bite in practice, the loader split is a small,
+well-scoped follow-up against a contract the test already states.
 
 ## Race Conditions
 
@@ -1341,13 +1459,23 @@ This work **is** an update-system change.
   so `agent/llm/__init__.py`'s re-export (lines 14 and 26, including its
   `__all__` entry) is deleted and
   `docs/features/nonharness-llm-wrapper.md:56` is corrected.
-- **No new config files.** One new `TIMEOUTS__` field (above) and one
-  break-glass env read, `LLM_STACK_COMPAT_OVERRIDE`, consumed lazily inside
-  `_resolve_degraded_flag()`. Neither is a credential and neither is required:
-  `LLM_STACK_COMPAT_OVERRIDE` is deliberately **not** added to `.env.example` —
-  it is an operator-set, break-glass-only variable, and declaring it would make
-  `check_env_completeness` require it on every machine forever.
-  `ANTHROPIC_API_KEY` and `SENTRY_DSN` are already declared.
+- **No new config files.** One new `TIMEOUTS__` field (above) and **two**
+  lazily-read env reads inside `agent/llm/compat.py` —
+  `LLM_STACK_COMPAT_OVERRIDE` (operator break-glass, read inside
+  `_resolve_degraded_flag()`) and `LLM_STACK_MARKER_DIR` (test-only marker
+  redirect for the subprocess CLI case, read inside `_marker_path()`). Both stay
+  inside function bodies; `validate_no_module_scope_env.py` blocks the
+  module-scope form in a new file. Both announce themselves at
+  `logger.warning` with the sentinel token when active, so one sentinel grep
+  finds every break-glass path. Neither is a credential and neither is added to
+  `.env.example` — declaring either would make `check_env_completeness` require
+  an operator-only or test-only variable on every machine forever, and
+  `tests/unit/test_env_declaration_readers.py` has a determinate expectation for
+  each because both are now named. `ANTHROPIC_API_KEY` and `SENTRY_DSN` are
+  already declared. **This bullet is the env inventory** — it has gone stale
+  twice (round 5 on `LOCAL_TYPED_HARD_TIMEOUT`, round 8 on the then-unnamed
+  marker override); any task that adds an env read updates it in the same
+  commit.
 - **No migration.** Followers never auto-bump but now get the verify-time and
   startup checks — which is the point: route 3 was previously unguarded.
 
@@ -1454,11 +1582,23 @@ bridge command. But the runtime's boot and failure presentation change:
   `proc` emits Sentry and the sentinel log but creates no marker file, so no
   one-shot can strand a permanent red. No pid-suffixed markers exist.
 - [ ] **The suite does not pollute the operator's board, by mechanism**: the
-  redirect is an `autouse=True` fixture in `tests/conftest.py`
-  (`monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`),
+  redirect is an `autouse=True` fixture in `tests/unit/conftest.py` using the
+  **guarded module-object** form (`try: from agent.llm import compat` /
+  `except ImportError: return`, then
+  `monkeypatch.setattr(_compat, "_MARKER_DIR", tmp_path_factory.mktemp("llm-marker"), raising=False)`),
   not a convention each file re-implements; no test file carries a
   hand-written `_MARKER_DIR` monkeypatch or a live-glob assertion, and the
-  subprocess CLI case receives the redirect through the child's environment.
+  subprocess CLI case receives the redirect through the child's
+  `LLM_STACK_MARKER_DIR`.
+- [ ] **The fixture is inert when `agent/llm/compat.py` is absent, and free for
+  tests that never touch it**: on a checkout with task 3 not yet applied (or
+  reverted, or mid-`git bisect`) the suite still collects and runs green —
+  no setup errors — and no temp directory is created on the early-return
+  branch. This is a property of the guarded import, not of `raising=False`.
+- [ ] **The marker-dir override announces itself**: with
+  `LLM_STACK_MARKER_DIR` set to a value differing from `_MARKER_DIR`'s default,
+  `_marker_path()` emits one `logger.warning` carrying the sentinel token, so a
+  single sentinel grep surfaces both break-glass paths.
 - [ ] **The predicate fails closed on an ambiguous call site**: `len(sites) != 1`
   (not just zero) returns `compatible=False` naming the count and the found
   paths; covered by a synthetic two-site test.
@@ -1591,10 +1731,16 @@ bridge command. But the runtime's boot and failure presentation change:
 - **Delete the `LOCAL_TYPED_HARD_TIMEOUT` re-export from
   `agent/llm/__init__.py` (lines 14 and 26, `__all__` included)** — it is a
   public attribute, not an internal constant, so the migration is a surface
-  change. Grep the **whole tracked tree** (not just `tests/`) for readers; if
-  there are none outside these files, say so in the build report rather than
-  assuming. `docs/features/nonharness-llm-wrapper.md:56` documents the old env
-  knob by name and is a task-8 correction.
+  change. **The reader set is already resolved and stable** (round-9 nit):
+  `git grep -n LOCAL_TYPED_HARD_TIMEOUT` at the current tip returns five code
+  hits, all inside `agent/llm/` — `__init__.py:14`/`:26`, `wrapper.py:167`
+  (module-scope read being migrated), `:192` (docstring reference in
+  `run_typed_local`; reword to `settings.timeouts.local_typed_hard_s`), `:209`
+  (the sole functional reader) — and zero readers anywhere else in tracked code.
+  Re-run the grep as a confirmation, not a discovery step; treat any hit outside
+  `agent/llm/` as a premise change that stops the task rather than something to
+  narrate in the build report. `docs/features/nonharness-llm-wrapper.md:56`
+  documents the old env knob by name and is a task-8 correction.
 
 ### 3. The compat predicate
 - **Task ID**: `build-compat-predicate`
@@ -1690,18 +1836,32 @@ bridge command. But the runtime's boot and failure presentation change:
   at module scope, with all writes/clears through `_marker_path(proc)`. Never
   cwd-relative. **The redirect is enforced by mechanism, not per-file
   convention** (round-8 concern): add an `autouse=True`, function-scoped fixture
-  to `tests/conftest.py` doing
-  `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`,
-  so no degraded-driving test can write into the live `data/` a running bridge,
-  worker, and dashboard share — including `tests/unit/test_llm_stack_compat.py`,
-  which the per-file convention had missed. Do **not** add per-file
-  `_MARKER_DIR` monkeypatches or per-file live-glob assertions. Keep one case
-  asserting the *default*, resolving
+  to `tests/unit/conftest.py` in the **guarded module-object** form —
+  `try: from agent.llm import compat as _compat` / `except ImportError: return`,
+  then `monkeypatch.setattr(_compat, "_MARKER_DIR", tmp_path_factory.mktemp("llm-marker"), raising=False)`
+  — so no degraded-driving test can write into the live `data/` a running
+  bridge, worker, and dashboard share, including
+  `tests/unit/test_llm_stack_compat.py`, which the per-file convention had
+  missed. **Do not use the string-target form**
+  (`monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`):
+  `raising=False` suppresses only the attribute check, and the string form's
+  `derive_importpath` → `resolve(module)` performs a real import that raises
+  first, erroring every test in the repo whenever `compat.py` is absent
+  (round-9 blocker; reproducible on `main` today). Use `tmp_path_factory`, not
+  `tmp_path`, and put the `mktemp` call on the success branch so the early
+  return allocates nothing; place the fixture in `tests/unit/conftest.py`, not
+  the root `tests/conftest.py`, since all four marker-driving files live under
+  `tests/unit/`. Do **not** add per-file `_MARKER_DIR` monkeypatches or per-file
+  live-glob assertions. Keep one case asserting the *default*, resolving
   `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"` directly (not
   the patched global) and comparing it to `Path(ui.app.__file__).parent.parent / "data"`.
   The subprocess CLI case, which an in-process fixture cannot reach, gets the
-  redirect through the child's environment via a lazily-read override inside
-  `_marker_path()`.
+  redirect through the child's **`LLM_STACK_MARKER_DIR`**, read lazily inside
+  `_marker_path()`. When that variable is set and differs from `_MARKER_DIR`'s
+  default, `_marker_path()` logs once at `logger.warning` with the sentinel
+  token — the same visibility contract as the `LLM_STACK_COMPAT_OVERRIDE`
+  OVERRIDDEN warning, so a single sentinel grep finds both break-glass paths and
+  a stale inherited value cannot silently relocate the only standing signal.
 - The resolver is the **only** alerting path; `check_llm_stack_compat` stays
   pure (task 3).
 - **Break-glass override**: read `LLM_STACK_COMPAT_OVERRIDE` **inside**
@@ -1722,6 +1882,14 @@ bridge command. But the runtime's boot and failure presentation change:
   `not loader_ok` — an Anthropic signature break must not fall the Ollama
   classifiers over. Test: loader OK + signature check failing → `run_typed`
   raises, `run_typed_local` completes against a stubbed `FunctionModel`.
+  **`loader_ok` is stack-wide** (accepted residual, round-9 concern): a single
+  `_load_stack()` imports the whole set, so an `anthropic` **ImportError** still
+  raises from `run_typed_local` — matching today's module-scope behavior, no
+  regression — and only the *signature* axis is separated. Assert it rather than
+  letting it fall out of the shared boolean: `test_anthropic_import_error_local_path`
+  stubs only `anthropic` to raise on import and asserts `run_typed_local` raises
+  `LLMStackIncompatible`. Do **not** split the loader into per-domain legs in
+  this lane.
 - Startup calls in `bridge/telegram_bridge.py::main` and `worker/__main__.py`
   force resolution; neither exits on incompatibility.
 - Exempt the sentinel from `_sentry_before_send`'s hibernation drop.
@@ -1851,7 +2019,10 @@ Rows assert *declarations and executed paths*, not file text.
 | Verify runs the check unconditionally **and loudly** (non-empty `.error`, surfaced by `extract_update_warnings`) | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
 | The `llm` phase and the manual gate invocation share one argv construction | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_phase_argv" -q` | exit code 0 |
 | The `--json` CLI is pure — zero `capture_message` calls **and** the memoized flag left unresolved, asserted in-process | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
-| The marker redirect is a mechanism, not a per-file convention | `.venv/bin/python -c "s=open('tests/conftest.py').read();assert '_MARKER_DIR' in s and 'autouse=True' in s"` | exit code 0 |
+| The marker redirect is a mechanism, not a per-file convention (executes; fails if the fixture is absent, misnamed, non-autouse, or erroring) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_redirect_is_autouse" -q` | exit code 0 |
+| The autouse fixture is inert without `compat.py` (guarded-import form, not `raising=False`) | `./scripts/pytest-clean.sh tests/unit/test_settings.py -q` run on a tree with `agent/llm/compat.py` temporarily renamed away | exit code 0, zero setup errors |
+| The marker-dir override announces itself | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_dir_override_warns" -q` | exit code 0 |
+| `run_typed_local` behavior under an `anthropic`-only ImportError is asserted, not incidental | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "anthropic_import_error_local_path" -q` | exit code 0 |
 | The predicate reports the pinned pair **compatible** (the round-5 blocker's red state) | `.venv/bin/python -c "from agent.llm.compat import check_llm_stack_compat as c;r=c();assert r.compatible and r.loader_ok, r.reason"` | exit code 0 |
 | The derived kwarg set comes from the call site, not the settings TypedDict | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "derived or forwarded" -q` | exit code 0 (asserts `temperature`/`top_p`/`top_k` present, no `anthropic_`-prefixed name) |
 | `run_typed_local` is not gated on the Anthropic signature axis | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "two_axis or loader_ok" -q` | exit code 0 |
@@ -1891,12 +2062,12 @@ inferred from a bundle. Attribution names the lens, not a separate agent.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness (Skeptic) | The round-8 fix errors **every test in the suite**, and the plan's stated reason it is safe is factually wrong. The prescribed root-`tests/conftest.py` fixture does `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`, justified three times over as "`raising=False` keeps it inert until `compat.py` exists and for every test that never imports it". `raising=False` suppresses only the *attribute* existence check: the string-target form first calls `derive_importpath`, whose `resolve(module)` performs a real import and raises **before** `raising` is consulted. Reproduced: `derive_importpath("agent.llm.compat._MARKER_DIR", False)` raises `ImportError: import error in agent.llm.compat: No module named 'agent.llm.compat'`, and a real pytest run of an unrelated no-op test under exactly the prescribed fixture ERRORs at setup. The second half of the claim is wrong too — the string form force-imports `agent.llm.compat` for every test in the repo, so it is never inert for tests that do not use it. Task 4 depends on task 3, so the happy path survives; every intermediate state does not — the task-2 commit, a `git bisect`, a revert of task 3, or a builder who trusts the plan's "inert until `compat.py` exists" and lands the conftest change early all convert a green suite into ~14,216 setup errors. This is the plan's own named defect class landing on the mechanism introduced to replace consumer discipline. | pending | Use a defensive module-object form, which skips `derive_importpath` entirely: `@pytest.fixture(autouse=True)` / `def _redirect_llm_marker_dir(monkeypatch, tmp_path):` / `    try:` / `        from agent.llm import compat as _compat` / `    except ImportError:` / `        return` / `    monkeypatch.setattr(_compat, "_MARKER_DIR", tmp_path, raising=False)`. The guarded import is what delivers the inertness the plan currently attributes to `raising=False`; keep `raising=False` only for the attribute, covering the window where `compat.py` exists but `_MARKER_DIR` has not been added. Then correct the three prose sites repeating the false property — Failure Posture, task 4, and the Test Impact `tests/conftest.py` row. Red-state proof for the build report: `.venv/bin/python -c "from _pytest.monkeypatch import derive_importpath; derive_importpath('agent.llm.compat._MARKER_DIR', False)"` raises `ImportError` on `main` today. |
-| CONCERN | Scope & Value | The same fixture bills the entire repository's suite for an isolation need four files have. It is `autouse=True`, function-scoped, in the **root** `tests/conftest.py`, and it requests `tmp_path`, so pytest materializes a temp directory for every test whether or not it touches `agent.llm.compat`. Measured: 300 parametrized no-op tests under exactly this fixture shape produced **600** directories under the session tmp root; the repo has **14,216** test functions, so a full run manufactures on the order of 28,000 unread temp directories, and pytest's default retention keeps three sessions of them. A full `tests/unit/` run already takes about 20 minutes on a memory-constrained machine several agents share. The mechanism-over-convention goal is right and does not require the unconditional cost. | pending | Two independent reductions, both compatible with the blocker fix. (1) Do not request `tmp_path`; take session-scoped `tmp_path_factory` and call `tmp_path_factory.mktemp("llm-marker")` only on the branch where `compat` imported successfully, so pytest creates nothing for tests that return early. (2) Move the fixture from the root `tests/conftest.py` to `tests/unit/conftest.py` — all four marker-driving files listed in Test Impact live under `tests/unit/`, so this preserves the mechanism property (no file re-implements it) while excluding `tests/integration/`. If the root location is kept deliberately, record why. Put the measured numbers in the plan rather than the qualitative claim. |
-| CONCERN | Risk & Robustness (Adversary), also flagged by History & Consistency | Round 8's subprocess-redirect fix introduces a **second** new env read — an override relocating the marker directory — that the plan never names, never requires to announce itself, and never adds to the inventory that exists to catch exactly this. Update System still reads "One new `TIMEOUTS__` field (above) and one break-glass env read, `LLM_STACK_COMPAT_OVERRIDE`", while Failure Posture, task 3, and task 4 each require `_marker_path()` to read an unnamed override lazily inside the function. The new read is worse-behaved than the one beside it: `LLM_STACK_COMPAT_OVERRIDE` emits a sentinel OVERRIDDEN warning, so its use is visible in logs, whereas the marker-dir override silently relocates the write path of the channel this plan calls its **only standing signal**. Any process inheriting a stale value — a launchd plist, an exported shell var, a cron env — writes `llm-stack-degraded.bridge` somewhere `ui/app.py` never globs, and the board stays green on a degraded bridge with nothing saying why: the plan's own "stuck dashboard equals no dashboard channel" mode in its false-green polarity, introduced by a test-only affordance. This is also the second time in two rounds that this inventory bullet has gone stale (round 5 caught it on `LOCAL_TYPED_HARD_TIMEOUT`), and `tests/unit/test_env_declaration_readers.py` gives an unnamed variable no determinate expectation. | pending | Name it (e.g. `LLM_STACK_MARKER_DIR`) at the three sites that currently say only "the override", and have `_marker_path(proc)` log once at `logger.warning` with the sentinel token when the override is active and differs from `_MARKER_DIR`'s default — the same visibility contract as the OVERRIDDEN warning, so one sentinel grep finds both break-glass paths. Change Update System to: "**No new config files.** One new `TIMEOUTS__` field (above) and **two** lazily-read env reads inside `agent/llm/compat.py` — `LLM_STACK_COMPAT_OVERRIDE` (operator break-glass, read inside `_resolve_degraded_flag()`) and `LLM_STACK_MARKER_DIR` (test-only marker redirect, read inside `_marker_path()`). Neither is a credential and neither is added to `.env.example` — declaring either would make `check_env_completeness` require an operator/test-only variable on every machine forever." Both stay inside function bodies (`validate_no_module_scope_env.py` blocks the module-scope form in a new file). Add the announce-on-override case to `tests/unit/test_llm_stack_degraded_start.py`. |
-| CONCERN | Risk & Robustness (Skeptic) | The two-axis split delivers its stated protection on only one of the two axes, and misses the one the next lane makes likely. Its rationale is that an Anthropic-domain fault "must not fall the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) back to their conservative defaults fleet-wide" — verified: `run_typed_local` genuinely never touches `anthropic` (`wrapper.py:170-209`, its docstring's first deliberate difference being "No Anthropic client and no shared Anthropic semaphore"). But `loader_ok` is a **stack-wide** boolean produced by one memoized `_load_stack()` that the plan requires to import the entire third-party set with "no per-symbol option menu". An `anthropic` **ImportError** therefore sets `loader_ok=False` and `run_typed_local` raises anyway — the exact fleet-wide classifier fallback the bullet says it prevents. Not hypothetical for the lane immediately downstream: the plan's own Research section records that anthropic 1.0.0 moved its HTTP layer to `httpx2`, an ImportError-class hazard on the anthropic axis, and #3073 moves that pin. It is also the precise mirror of spike-5's finding (an `openai`-side ImportError felling the Anthropic path through a shared module scope), relocated from module scope into the loader rather than dissolved. | pending | Cheapest honest option: keep one `_load_stack()` and add a sentence to the two-axis bullet stating `loader_ok` is stack-wide, so an `anthropic` **ImportError** still raises `LLMStackIncompatible` from `run_typed_local` — matching today's module-scope behavior, no regression — and that only the *signature* axis is separated; record it as an accepted residual beside Risk 5. Sound option, if the protection is meant to be real: give the loader two memoized legs sharing one cache, `_load_anthropic_stack()` (`anthropic`, `pydantic_ai.models.anthropic`, `AnthropicProvider`) and `_load_local_stack()` (`pydantic_ai`, `pydantic_ai.models.openai.OpenAIChatModel`, `OllamaProvider`); make `CompatResult.loader_ok` the conjunction while `_resolve_degraded_flag` memoizes the legs separately, and gate `run_typed_local` on the local leg only. Either way, add the discriminating case to the two-axis row in `tests/unit/test_llm_stack_degraded_start.py`: with **only** `anthropic` stubbed to raise on import, assert the chosen `run_typed_local` behavior explicitly rather than letting it fall out of a shared boolean. |
-| NIT | Scope & Value | The Verification row "The marker redirect is a mechanism, not a per-file convention" runs `assert '_MARKER_DIR' in s and 'autouse=True' in s` against `tests/conftest.py`. The second conjunct is already satisfied on `main` — `autouse=True` appears at `tests/conftest.py:138`, `:366`, `:441`, `:469`, `:638`, `:730`, `:737`, `:840`, `:914` and more — so the row reduces to a bare substring check for `_MARKER_DIR` that a comment or docstring would satisfy. Given this round's blocker is that the fixture does not run at all, a row passing on mere string presence is the weakest possible evidence for the criterion it is named after. | pending | Replace the text-grep row with an execution row that can fail: `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_redirect_is_autouse" -q`, backed by a case that imports `agent.llm.compat`, resolves degraded with `proc="bridge"` **without** any per-file monkeypatch, and asserts the marker landed under the test's tmp dir and **not** under `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"`. That fails if the fixture is absent, misnamed, non-autouse, or erroring — none of which the substring check detects. |
-| NIT | History & Consistency (Archaeologist) | Task 2's final bullet defers to build time a question already answered and stable: "Grep the whole tracked tree ... if there are none outside these files, say so in the build report rather than assuming." Executed at the current tip, `git grep -n LOCAL_TYPED_HARD_TIMEOUT` returns exactly five hits, all inside the two files the task already names — `agent/llm/__init__.py:14` and `:26`, and `agent/llm/wrapper.py:167`, `:192` (a docstring reference), `:209` (the only functional reader). There are **zero** readers outside `agent/llm/`, and `agent/llm/` has been untouched by every commit since the reshape, so this cannot drift before the build starts. Leaving it open costs a discovery step and leaves a reviewer chasing a build-report line rather than confirming one. | pending | In task 2's bullet and the Test Impact row, replace the open instruction with the executed result: five hits, all inside `agent/llm/` — `__init__.py:14`/`:26` (the re-export and its `__all__` entry), `wrapper.py:167` (the module-scope read being migrated), `:192` (a docstring reference in `run_typed_local`; update the prose to the new field name), `:209` (the sole functional reader, becomes `settings.timeouts.local_typed_hard_s`). No readers exist outside the package; re-run the grep to confirm nothing arrived and treat a non-empty result as a premise change that stops the task. |
+| BLOCKER | Risk & Robustness (Skeptic) | The round-8 fix errors **every test in the suite**, and the plan's stated reason it is safe is factually wrong. The prescribed root-`tests/conftest.py` fixture does `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", tmp_path, raising=False)`, justified three times over as "`raising=False` keeps it inert until `compat.py` exists and for every test that never imports it". `raising=False` suppresses only the *attribute* existence check: the string-target form first calls `derive_importpath`, whose `resolve(module)` performs a real import and raises **before** `raising` is consulted. Reproduced: `derive_importpath("agent.llm.compat._MARKER_DIR", False)` raises `ImportError: import error in agent.llm.compat: No module named 'agent.llm.compat'`, and a real pytest run of an unrelated no-op test under exactly the prescribed fixture ERRORs at setup. The second half of the claim is wrong too — the string form force-imports `agent.llm.compat` for every test in the repo, so it is never inert for tests that do not use it. Task 4 depends on task 3, so the happy path survives; every intermediate state does not — the task-2 commit, a `git bisect`, a revert of task 3, or a builder who trusts the plan's "inert until `compat.py` exists" and lands the conftest change early all convert a green suite into ~14,216 setup errors. This is the plan's own named defect class landing on the mechanism introduced to replace consumer discipline. | **Fixed (round 9)** — adopted as prescribed. The fixture becomes the guarded module-object form (`try: from agent.llm import compat as _compat` / `except ImportError: return`, then `monkeypatch.setattr(_compat, "_MARKER_DIR", ..., raising=False)`), which skips `derive_importpath` entirely; `raising=False` is retained only for the window where `compat.py` exists but `_MARKER_DIR` does not. The false rationale is corrected at all three prose sites — Failure Posture (which now records the reproduction and the reason the string form is also never inert *after* `compat.py` exists), task 4, and the Test Impact conftest row — each carrying an explicit "do not use the string-target form" instruction. Reproduced independently at the current tip: `derive_importpath('agent.llm.compat._MARKER_DIR', False)` raises `ImportError: import error in agent.llm.compat: No module named 'agent.llm.compat'`. New Success Criterion ("inert when `compat.py` is absent") and a Verification row running an unrelated unit file with `compat.py` renamed away. | Use a defensive module-object form, which skips `derive_importpath` entirely: `@pytest.fixture(autouse=True)` / `def _redirect_llm_marker_dir(monkeypatch, tmp_path):` / `    try:` / `        from agent.llm import compat as _compat` / `    except ImportError:` / `        return` / `    monkeypatch.setattr(_compat, "_MARKER_DIR", tmp_path, raising=False)`. The guarded import is what delivers the inertness the plan currently attributes to `raising=False`; keep `raising=False` only for the attribute, covering the window where `compat.py` exists but `_MARKER_DIR` has not been added. Then correct the three prose sites repeating the false property — Failure Posture, task 4, and the Test Impact `tests/conftest.py` row. Red-state proof for the build report: `.venv/bin/python -c "from _pytest.monkeypatch import derive_importpath; derive_importpath('agent.llm.compat._MARKER_DIR', False)"` raises `ImportError` on `main` today. |
+| CONCERN | Scope & Value | The same fixture bills the entire repository's suite for an isolation need four files have. It is `autouse=True`, function-scoped, in the **root** `tests/conftest.py`, and it requests `tmp_path`, so pytest materializes a temp directory for every test whether or not it touches `agent.llm.compat`. Measured: 300 parametrized no-op tests under exactly this fixture shape produced **600** directories under the session tmp root; the repo has **14,216** test functions, so a full run manufactures on the order of 28,000 unread temp directories, and pytest's default retention keeps three sessions of them. A full `tests/unit/` run already takes about 20 minutes on a memory-constrained machine several agents share. The mechanism-over-convention goal is right and does not require the unconditional cost. | **Fixed (round 9)** — both reductions adopted. The fixture takes session-scoped `tmp_path_factory` and calls `mktemp("llm-marker")` **only on the success branch**, so the early return allocates nothing; and it moves from the root `tests/conftest.py` to `tests/unit/conftest.py` (which already exists), since all four marker-driving files — `test_llm_import_safety.py`, `test_llm_stack_degraded_start.py`, `test_dashboard_llm_degraded.py`, `test_llm_stack_compat.py` — live under `tests/unit/`. The mechanism property is preserved (no file re-implements the redirect) while `tests/integration/` pays nothing. The measured numbers (600 dirs from 300 no-op tests; ~14,216 test functions; ~28,000 dirs per full run, three sessions retained) are recorded in Failure Posture in place of the qualitative claim, and every `tests/conftest.py` reference across Solution, Test Impact, Success Criteria, task 4, and the decision log is retargeted. | Two independent reductions, both compatible with the blocker fix. (1) Do not request `tmp_path`; take session-scoped `tmp_path_factory` and call `tmp_path_factory.mktemp("llm-marker")` only on the branch where `compat` imported successfully, so pytest creates nothing for tests that return early. (2) Move the fixture from the root `tests/conftest.py` to `tests/unit/conftest.py` — all four marker-driving files listed in Test Impact live under `tests/unit/`, so this preserves the mechanism property (no file re-implements it) while excluding `tests/integration/`. If the root location is kept deliberately, record why. Put the measured numbers in the plan rather than the qualitative claim. |
+| CONCERN | Risk & Robustness (Adversary), also flagged by History & Consistency | Round 8's subprocess-redirect fix introduces a **second** new env read — an override relocating the marker directory — that the plan never names, never requires to announce itself, and never adds to the inventory that exists to catch exactly this. Update System still reads "One new `TIMEOUTS__` field (above) and one break-glass env read, `LLM_STACK_COMPAT_OVERRIDE`", while Failure Posture, task 3, and task 4 each require `_marker_path()` to read an unnamed override lazily inside the function. The new read is worse-behaved than the one beside it: `LLM_STACK_COMPAT_OVERRIDE` emits a sentinel OVERRIDDEN warning, so its use is visible in logs, whereas the marker-dir override silently relocates the write path of the channel this plan calls its **only standing signal**. Any process inheriting a stale value — a launchd plist, an exported shell var, a cron env — writes `llm-stack-degraded.bridge` somewhere `ui/app.py` never globs, and the board stays green on a degraded bridge with nothing saying why: the plan's own "stuck dashboard equals no dashboard channel" mode in its false-green polarity, introduced by a test-only affordance. This is also the second time in two rounds that this inventory bullet has gone stale (round 5 caught it on `LOCAL_TYPED_HARD_TIMEOUT`), and `tests/unit/test_env_declaration_readers.py` gives an unnamed variable no determinate expectation. | **Fixed (round 9)** — adopted as prescribed. The override is named **`LLM_STACK_MARKER_DIR`** at all three sites that previously said only "the override" (Failure Posture, task 3's Test Impact bullet, task 4), and `_marker_path()` logs once at `logger.warning` with the sentinel token when it is set and differs from `_MARKER_DIR`'s default — the same visibility contract as the OVERRIDDEN warning, so one sentinel grep finds both break-glass paths. The Update System bullet is rewritten to the prescribed two-read inventory (`LLM_STACK_COMPAT_OVERRIDE`, `LLM_STACK_MARKER_DIR`), both lazily read inside function bodies, neither declared in `.env.example`, with the reason; it also now carries a standing instruction that any task adding an env read updates the inventory in the same commit, since this bullet has gone stale twice. New `test_marker_dir_override_warns` case, a Success Criterion, and a Verification row. | Name it (e.g. `LLM_STACK_MARKER_DIR`) at the three sites that currently say only "the override", and have `_marker_path(proc)` log once at `logger.warning` with the sentinel token when the override is active and differs from `_MARKER_DIR`'s default — the same visibility contract as the OVERRIDDEN warning, so one sentinel grep finds both break-glass paths. Change Update System to: "**No new config files.** One new `TIMEOUTS__` field (above) and **two** lazily-read env reads inside `agent/llm/compat.py` — `LLM_STACK_COMPAT_OVERRIDE` (operator break-glass, read inside `_resolve_degraded_flag()`) and `LLM_STACK_MARKER_DIR` (test-only marker redirect, read inside `_marker_path()`). Neither is a credential and neither is added to `.env.example` — declaring either would make `check_env_completeness` require an operator/test-only variable on every machine forever." Both stay inside function bodies (`validate_no_module_scope_env.py` blocks the module-scope form in a new file). Add the announce-on-override case to `tests/unit/test_llm_stack_degraded_start.py`. |
+| CONCERN | Risk & Robustness (Skeptic) | The two-axis split delivers its stated protection on only one of the two axes, and misses the one the next lane makes likely. Its rationale is that an Anthropic-domain fault "must not fall the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) back to their conservative defaults fleet-wide" — verified: `run_typed_local` genuinely never touches `anthropic` (`wrapper.py:170-209`, its docstring's first deliberate difference being "No Anthropic client and no shared Anthropic semaphore"). But `loader_ok` is a **stack-wide** boolean produced by one memoized `_load_stack()` that the plan requires to import the entire third-party set with "no per-symbol option menu". An `anthropic` **ImportError** therefore sets `loader_ok=False` and `run_typed_local` raises anyway — the exact fleet-wide classifier fallback the bullet says it prevents. Not hypothetical for the lane immediately downstream: the plan's own Research section records that anthropic 1.0.0 moved its HTTP layer to `httpx2`, an ImportError-class hazard on the anthropic axis, and #3073 moves that pin. It is also the precise mirror of spike-5's finding (an `openai`-side ImportError felling the Anthropic path through a shared module scope), relocated from module scope into the loader rather than dissolved. | **Fixed (round 9)** — cheapest honest option adopted, plus the discriminating test. The two-axis Solution bullet now states that `loader_ok` is **stack-wide**, so an `anthropic` ImportError still raises `LLMStackIncompatible` from `run_typed_local`; that this matches today's module-scope behavior and is therefore a no-regression residual; and that only the *signature* axis is separated. Recorded as **Risk 6 (accepted residual)** beside Risk 5, naming the #3073 / httpx2 exposure and why the per-domain loader split is deferred rather than denied. Task 4's restatement carries the same sentence plus an explicit "do not split the loader in this lane". The discriminating case `test_anthropic_import_error_local_path` (stub **only** `anthropic` to raise on import; assert `run_typed_local` raises) is added to Test Impact with its own Verification row, so the behavior is asserted rather than falling out of a shared boolean. | Cheapest honest option: keep one `_load_stack()` and add a sentence to the two-axis bullet stating `loader_ok` is stack-wide, so an `anthropic` **ImportError** still raises `LLMStackIncompatible` from `run_typed_local` — matching today's module-scope behavior, no regression — and that only the *signature* axis is separated; record it as an accepted residual beside Risk 5. Sound option, if the protection is meant to be real: give the loader two memoized legs sharing one cache, `_load_anthropic_stack()` (`anthropic`, `pydantic_ai.models.anthropic`, `AnthropicProvider`) and `_load_local_stack()` (`pydantic_ai`, `pydantic_ai.models.openai.OpenAIChatModel`, `OllamaProvider`); make `CompatResult.loader_ok` the conjunction while `_resolve_degraded_flag` memoizes the legs separately, and gate `run_typed_local` on the local leg only. Either way, add the discriminating case to the two-axis row in `tests/unit/test_llm_stack_degraded_start.py`: with **only** `anthropic` stubbed to raise on import, assert the chosen `run_typed_local` behavior explicitly rather than letting it fall out of a shared boolean. |
+| NIT | Scope & Value | The Verification row "The marker redirect is a mechanism, not a per-file convention" runs `assert '_MARKER_DIR' in s and 'autouse=True' in s` against `tests/conftest.py`. The second conjunct is already satisfied on `main` — `autouse=True` appears at `tests/conftest.py:138`, `:366`, `:441`, `:469`, `:638`, `:730`, `:737`, `:840`, `:914` and more — so the row reduces to a bare substring check for `_MARKER_DIR` that a comment or docstring would satisfy. Given this round's blocker is that the fixture does not run at all, a row passing on mere string presence is the weakest possible evidence for the criterion it is named after. | **Fixed (round 9)** — adopted as prescribed. The text-grep row is replaced with `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_redirect_is_autouse" -q`, backed by a new `test_marker_redirect_is_autouse` case that imports `agent.llm.compat`, resolves degraded with `proc="bridge"` carrying **no** per-file monkeypatch, and asserts the marker landed under the fixture's tmp dir and not under `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"`. That fails if the fixture is absent, misnamed, non-autouse, or erroring. | Replace the text-grep row with an execution row that can fail: `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_redirect_is_autouse" -q`, backed by a case that imports `agent.llm.compat`, resolves degraded with `proc="bridge"` **without** any per-file monkeypatch, and asserts the marker landed under the test's tmp dir and **not** under `Path(agent.llm.compat.__file__).resolve().parents[2] / "data"`. That fails if the fixture is absent, misnamed, non-autouse, or erroring — none of which the substring check detects. |
+| NIT | History & Consistency (Archaeologist) | Task 2's final bullet defers to build time a question already answered and stable: "Grep the whole tracked tree ... if there are none outside these files, say so in the build report rather than assuming." Executed at the current tip, `git grep -n LOCAL_TYPED_HARD_TIMEOUT` returns exactly five hits, all inside the two files the task already names — `agent/llm/__init__.py:14` and `:26`, and `agent/llm/wrapper.py:167`, `:192` (a docstring reference), `:209` (the only functional reader). There are **zero** readers outside `agent/llm/`, and `agent/llm/` has been untouched by every commit since the reshape, so this cannot drift before the build starts. Leaving it open costs a discovery step and leaves a reviewer chasing a build-report line rather than confirming one. | **Fixed (round 9)** — adopted as prescribed, and re-executed at the current tip to confirm nothing drifted: `git grep -n LOCAL_TYPED_HARD_TIMEOUT` returns five code hits — `agent/llm/__init__.py:14`/`:26`, `agent/llm/wrapper.py:167`/`:192`/`:209` — all inside `agent/llm/`, with zero readers elsewhere in tracked code, plus the single prose hit at `docs/features/nonharness-llm-wrapper.md:56` that task 8 already owns. Both the task-2 bullet and the Test Impact row now state the executed result and recast the grep as a confirmation step whose non-empty result outside `agent/llm/` stops the task, rather than an open discovery deferred to the build report. | In task 2's bullet and the Test Impact row, replace the open instruction with the executed result: five hits, all inside `agent/llm/` — `__init__.py:14`/`:26` (the re-export and its `__all__` entry), `wrapper.py:167` (the module-scope read being migrated), `:192` (a docstring reference in `run_typed_local`; update the prose to the new field name), `:209` (the sole functional reader, becomes `settings.timeouts.local_typed_hard_s`). No readers exist outside the package; re-run the grep to confirm nothing arrived and treat a non-empty result as a premise change that stops the task. |
 
 Structural checks all pass. Required sections present and substantive (Documentation carries `docs/features/llm-stack-compat-gate.md` as a checkbox path; Update System addresses `scripts/update/` and records that no Popoto migration applies; Agent Integration addresses the runtime surface and the absence of an MCP entry; Test Impact lists UPDATE/ADD dispositions). Task numbering 1-9 is contiguous, every `Depends On` resolves to a declared Task ID, the graph is acyclic, and every task carries a `Validates`. Every cited file path exists except the six intentionally-new ones. **Freshness baseline re-checked and still valid:** `origin/main` is `b90e99892`, twelve commits past the stated `93fb790ef`, and `git log --name-only 93fb790ef..origin/main` shows every one touching only `docs/plans/*.md`, so no tracked source file has moved and the baseline is not a finding this round. Re-verified by execution at the current tip: `agent/llm/wrapper.py:44-50` still imports the full third-party stack at module scope (`anthropic` at `:44`, `OpenAIChatModel` at `:48`); `scripts.scan_module_scope_env.find_module_scope_env_calls` still returns exactly one `EnvCall` for that file, at `:167`, so the ratchet Verification row is correctly red on `main`; `run.py:2636` is the sole `verify_environment` call and sits inside `if config.do_verify:`; `run.py:2673-2684` is literally the `valor_tools` loop with `if not tool.available and tool.error:` and a non-gated branch that logs `WARN` and calls `_append_warning`, with `human_gated_tools` at `:2672` being `{"google-token", "sms_reader", "env-completeness"}` — so the "do not add `llm-stack-compat` to `human_gated_tools`" instruction lands on the right set; `docs/features/nonharness-llm-wrapper.md:56` still documents the knob as "env-overridable, default 20s"; `.claude/skills/update/SKILL.md:70` is the sole line matching the `! grep -q "import check"` anti-row. The round-8 blocker and concern fixes were re-read and are correctly carried into Solution, tasks 3-4, Test Impact, Success Criteria, and the Verification table; the splat-only gate, the override marker clear, and the split CLI-purity criterion are all present and internally consistent. The one exception is the autouse-fixture mechanism, which is this round's blocker.
 
@@ -2081,6 +2252,10 @@ all stand.
 | **A fifth fail-closed gate: a `create` site forwarding no literal keywords returns `compatible=False`** | The round-8 blocker. With one splat-only site the count gate does not fire, the path resolves, `getsource` works, and the subset test is *vacuously true* — the predicate returns `compatible=True` against the known-bad pair. The only compensating control lived in the test suite, which never runs at `/update` verify or service startup, so Data Flow route 3 — the follower machine this lane exists to protect — was defeated by the lane's own predicate. |
 | The override branch clears the caller's own marker | The break-glass short-circuit runs *before* the predicate, so it can never reach the healthy branch's clear. Setting the override on a falsely-degraded machine stranded a permanent red board recoverable only by a human `rm` — the plan's own "stuck-red equals no dashboard channel" mode, reached through the escape hatch. |
 | The CLI-purity criterion split: in-process memo assertion, subprocess contract-only, marker clause deleted | Round 7's writer restriction (`proc`-gated marker writes) made "the CLI creates no marker" hold whether the CLI is pure or not, and a parent cannot count `capture_message` calls inside a child. The purity property was being asserted by a test that could not fail — the defect class the round-7 blocker named, landed on the property round 4 raised the concern to protect. |
-| The `_MARKER_DIR` redirect becomes an autouse `tests/conftest.py` fixture | A hand-replicated per-file convention is the shape this plan rejects for `agent/llm/`, and the gap was already real: `test_llm_stack_compat.py` drives degraded resolutions and was not one of the files carrying the guard. One fixture covers every present and future test; the per-file glob assertions are deleted as the redundant half. |
+| The `_MARKER_DIR` redirect becomes an autouse `tests/unit/conftest.py` fixture | A hand-replicated per-file convention is the shape this plan rejects for `agent/llm/`, and the gap was already real: `test_llm_stack_compat.py` drives degraded resolutions and was not one of the files carrying the guard. One fixture covers every present and future test; the per-file glob assertions are deleted as the redundant half. |
+| The fixture uses a **guarded module import**, not `monkeypatch.setattr("agent.llm.compat._MARKER_DIR", ...)` | `raising=False` suppresses only the attribute check; the string form's `derive_importpath` imports the module first and raises, which errors every test in the repo while `compat.py` is absent and force-imports `compat` for every test once it exists. Verified by execution on `main` (round-9 blocker). The `try/except ImportError: return` is what delivers inertness. |
+| The fixture takes `tmp_path_factory` and lives under `tests/unit/`, not root `tests/` | An unconditional `tmp_path` bills ~14,216 test functions for an isolation four files need — on the order of 28,000 unread temp dirs per full run, retained three sessions. `mktemp` on the success branch plus `tests/unit/` scoping keeps the mechanism property while charging only the suite that uses it. |
+| The marker-dir override is **named** `LLM_STACK_MARKER_DIR` and announces itself | An unnamed, silent override that relocates the write path of the plan's only *standing* signal turns a stale inherited value into a false-green board. Naming it gives `test_env_declaration_readers.py` a determinate expectation; the sentinel warning gives it the same log visibility as `LLM_STACK_COMPAT_OVERRIDE`. |
+| `loader_ok` stays stack-wide; the loader is **not** split into per-domain legs | Splitting is the honest upgrade but is out of scope for a plan already re-labelled Large. Today's module-scope `anthropic` import already fells `run_typed_local` on ImportError, so keeping one `_load_stack()` is a no-regression residual (Risk 6) — pinned by an explicit test rather than left implicit. |
 | Consumer count corrected to six; the "31 test files" count removed | `scripts/nightly_regression_tests.py:97` imports `agent.llm.wrapper` at module scope — the nightly detector itself, so today an ImportError kills the job that is supposed to notice. The xdist cache-hit argument holds at any count above zero, so the test-file number was decorative and a maintenance liability. |
 | Freshness baseline restated as `93fb790ef`; one stale inline SHA reworded | One baseline per round, applied to the whole document rather than only the header. Both intervening commits touch only `docs/plans/*.md`, so every premise carries forward unchanged — a labelling defect, not a stale-claim defect. |
