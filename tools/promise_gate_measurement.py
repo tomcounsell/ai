@@ -121,9 +121,14 @@ def load_audit_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _percentile(sorted_values: list[float], pct: float) -> float:
+def _percentile(sorted_values: list[float], pct: float) -> float | None:
+    """Return the interpolated percentile, or None when there is no sample.
+
+    None rather than NaN: an empty bucket means "not measured", and NaN
+    serializes to a bare ``NaN`` token that is not valid JSON.
+    """
     if not sorted_values:
-        return float("nan")
+        return None
     if len(sorted_values) == 1:
         return sorted_values[0]
     k = (len(sorted_values) - 1) * pct
@@ -148,7 +153,7 @@ class LatencyBucket:
     def queue_wait_count(self) -> int:
         return len(self.queue_wait_values_ms)
 
-    def percentiles(self) -> dict[str, float]:
+    def percentiles(self) -> dict[str, float | None]:
         s = sorted(self.values_ms)
         return {
             "p50": _percentile(s, 0.50),
@@ -156,7 +161,7 @@ class LatencyBucket:
             "p99": _percentile(s, 0.99),
         }
 
-    def queue_wait_percentiles(self) -> dict[str, float]:
+    def queue_wait_percentiles(self) -> dict[str, float | None]:
         s = sorted(self.queue_wait_values_ms)
         return {
             "p50": _percentile(s, 0.50),
@@ -346,11 +351,14 @@ def _print_human_report(report: dict[str, Any]) -> None:
     if not report["latency_by_source_and_transport"]:
         print("  (no rows with elapsed_ms found)")
     for bucket in report["latency_by_source_and_transport"]:
-        print(
-            f"  {bucket['source']:<32} {bucket['transport']:<12} "
-            f"n={bucket['count']:<5} "
-            f"p50={bucket['p50']:.1f} p95={bucket['p95']:.1f} p99={bucket['p99']:.1f}"
-        )
+        head = f"  {bucket['source']:<32} {bucket['transport']:<12} "
+        if bucket["count"]:
+            print(
+                f"{head}n={bucket['count']:<5} "
+                f"p50={bucket['p50']:.1f} p95={bucket['p95']:.1f} p99={bucket['p99']:.1f}"
+            )
+        else:
+            print(f"{head}n=0     (no elapsed_ms samples)")
         qw = bucket["queue_wait_ms"]
         if bucket["queue_wait_count"]:
             print(

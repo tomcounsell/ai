@@ -6,6 +6,8 @@ corrupt that decision rather than fail loudly. Focused coverage only: the
 pure-function edge cases the review called out, not a rewrite of the tool.
 """
 
+import json
+
 from tools.promise_gate_measurement import (
     _is_promise_gate_row,
     _percentile,
@@ -14,9 +16,10 @@ from tools.promise_gate_measurement import (
 
 
 class TestPercentile:
-    def test_empty_input_returns_nan(self):
-        result = _percentile([], 0.50)
-        assert result != result  # nan != nan
+    def test_empty_input_returns_none_and_stays_json_serializable(self):
+        assert _percentile([], 0.50) is None
+        # NaN would serialize to a bare `NaN` token, which is not valid JSON.
+        assert json.dumps({"p50": _percentile([], 0.50)}) == '{"p50": null}'
 
     def test_single_value_returns_that_value_for_any_percentile(self):
         assert _percentile([42.0], 0.50) == 42.0
