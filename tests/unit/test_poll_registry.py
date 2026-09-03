@@ -215,6 +215,37 @@ class TestProvisionalRow:
     def test_promote_without_a_provisional_row_is_a_no_op(self, redis_test_db):
         assert reg.promote_pending_poll("no-such-hint", "p", msg_id=1) is False
 
+    def test_promote_refuses_to_overwrite_a_poll_registered_under_another_hint(self, hint, poll_id):
+        """A false-positive adoption match must not swallow the question.
+
+        `poll_id` is already registered (promoted) under `other_hint`. A second
+        hint (`hint`) whose provisional row falsely resolves to the same
+        `poll_id` — the shape of a false-positive truncated-prefix match — must
+        fail its own promotion: it must not overwrite `other_hint`'s row, and
+        its own pending row must stay intact so the question remains adoptable.
+        """
+        other_hint = uuid.uuid4().hex
+        try:
+            assert reg.register_pending_poll(
+                other_hint, chat_id=-1, session_id="sess-A", question="QA", options=["A"]
+            )
+            assert reg.promote_pending_poll(other_hint, poll_id, msg_id=1) is True
+            original_row = reg.lookup_poll(poll_id)
+
+            assert reg.register_pending_poll(
+                hint, chat_id=-2, session_id="sess-B", question="QB", options=["B"]
+            )
+            assert reg.promote_pending_poll(hint, poll_id, msg_id=999) is False
+
+            pending_b = reg.lookup_pending_poll(hint)
+            assert pending_b is not None
+            assert pending_b["session_id"] == "sess-B"
+            assert reg._redis().sismember(reg.POLL_PENDING_INDEX, hint)
+
+            assert reg.lookup_poll(poll_id) == original_row
+        finally:
+            reg.delete_pending_poll(other_hint)
+
     def test_delete_removes_key_and_index_member(self, hint):
         reg.register_pending_poll(hint, chat_id=-1, session_id="s", question="Q", options=["A"])
         reg.delete_pending_poll(hint)

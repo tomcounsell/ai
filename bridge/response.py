@@ -558,8 +558,12 @@ async def react_if_worker_down(client, chat_id, message_id, session_id) -> None:
 # form the plan sketched, which cannot fit: 1 byte of option index, then the
 # first 7 bytes of the 32-hex `poll_id_hint`. 56 bits is far more than orphan
 # adoption needs to disambiguate a bounded window of recent outbound polls in one
-# chat, and the adoption rule already bails with a warning on an ambiguous match,
-# so even a collision degrades to the existing safe path.
+# chat. A 2+-candidate collision is caught at scan time: the adoption rule bails
+# with a warning on an ambiguous match and adopts nothing. A single false-positive
+# match (the truncated prefix happens to match a different poll's hint) is caught
+# one step later, at promotion: `promote_pending_poll`'s underlying `SET NX`
+# refuses to overwrite that poll's already-registered row, so the caller treats
+# the adoption as failed rather than silently swallowing the question.
 _OPTION_MAX_BYTES = 8
 _OPTION_HINT_BYTES = _OPTION_MAX_BYTES - 1  # 7 — the index takes the first byte
 

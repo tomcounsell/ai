@@ -215,7 +215,7 @@ def promote_pending_poll(
     if pending is None:
         logger.warning("promote_pending_poll: no provisional row for hint %s", poll_id_hint)
         return False
-    register_poll(
+    written = register_poll(
         poll_id,
         chat_id=pending["chat_id"],
         msg_id=msg_id,
@@ -223,6 +223,17 @@ def promote_pending_poll(
         question=pending["question"],
         options=pending["options"],
     )
+    if not written:
+        # poll_id is already registered under a different hint — the adoption
+        # match that fed us this poll_id was wrong. Leave the pending row
+        # intact so the question stays adoptable; do not clobber the other
+        # hint's row.
+        logger.warning(
+            "promote_pending_poll: poll_id %s already registered, refusing to adopt for hint %s",
+            poll_id,
+            poll_id_hint,
+        )
+        return False
     delete_pending_poll(poll_id_hint)
     return True
 

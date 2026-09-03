@@ -130,10 +130,11 @@ async def adopt_orphaned_polls(client) -> None:
         if found is None:
             continue
         msg_id, server_poll_id = found
-        promote_pending_poll(hint, server_poll_id, msg_id=msg_id)
-        logger.info(
-            "poll_orphan_adopted hint=%s poll_id=%s msg_id=%s", hint, server_poll_id, msg_id
-        )
+        promoted = promote_pending_poll(hint, server_poll_id, msg_id=msg_id)
+        if promoted:
+            logger.info(
+                "poll_orphan_adopted hint=%s poll_id=%s msg_id=%s", hint, server_poll_id, msg_id
+            )
 
 
 async def reconcile_once(client) -> int:

@@ -1167,15 +1167,28 @@ async def _send_queued_poll(telegram_client, message: dict, key: str) -> int | N
         found = await _find_already_sent_poll(telegram_client, chat_id, poll_id_hint)
         if found is not None:
             found_msg_id, found_poll_id = found
-            await asyncio.to_thread(
+            promoted = await asyncio.to_thread(
                 promote_pending_poll, poll_id_hint, found_poll_id, msg_id=found_msg_id
             )
-            logger.info(
-                "Relay: poll for hint %s was already sent (msg_id=%s) — promoting, not resending",
+            if promoted:
+                logger.info(
+                    "Relay: poll for hint %s was already sent (msg_id=%s) — promoting, "
+                    "not resending",
+                    poll_id_hint,
+                    found_msg_id,
+                )
+                return found_msg_id
+            # promote_pending_poll refused: found_poll_id is already registered
+            # under a different hint, so this was a false-positive adoption
+            # match, not our poll. The pending row is still intact — fall
+            # through and actually send rather than claiming a delivery that
+            # never happened for this question.
+            logger.warning(
+                "Relay: poll adoption match for hint %s (poll_id=%s) was a false "
+                "positive — proceeding to send instead of adopting",
                 poll_id_hint,
-                found_msg_id,
+                found_poll_id,
             )
-            return found_msg_id
 
     # ── Eligibility re-check, thread-offloaded ──
     # Defense in depth: the CLI decided at ask time, but the relay is the last
