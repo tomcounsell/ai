@@ -38,14 +38,22 @@ class TestServerResolutionIsSingleSourced:
         url = db_claim.redis_test_url()
         assert url.startswith(f"redis://{db_claim.redis_test_host()}:{db_claim.redis_test_port()}/")
 
-    def test_async_client_matches_the_sync_client(self):
-        """Sync and async clients on different servers make async reads diverge
-        from sync writes."""
+    @pytest.mark.asyncio
+    async def test_async_client_matches_the_sync_client(self):
+        """The async client mirrors the sync one, or async reads diverge from
+        sync writes.
+
+        Awaited rather than read off ``_POPOTO_ASYNC_REDIS_DB``: that global is
+        ``None`` between tests by design (popoto's plugin nulls it at every
+        setup and teardown so the client is built inside the test's own event
+        loop), so reading it directly could only ever skip. ``get_async_redis_db()``
+        constructs it here, in this loop, from the canonical sync client's
+        connection kwargs — which is the contract worth asserting. Divergence
+        must FAIL; there is no skip branch.
+        """
         import popoto.redis_db as rdb
 
-        async_db = getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)
-        if async_db is None:
-            pytest.skip("popoto exposes no async client in this version")
+        async_db = await rdb.get_async_redis_db()
 
         sync_kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
         async_kwargs = async_db.connection_pool.connection_kwargs

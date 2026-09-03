@@ -39,6 +39,16 @@ from tests.db_derivation_guard import (
 
 pytestmark = pytest.mark.unit
 
+# Anti-vacuity floors. These are NOT counts of the tree — they are the point
+# below which "the walker matched something" stops being credible. Set well
+# under the live totals so ordinary cleanups (deleting a raw client, folding
+# two into one) do not fail a test that is not about them; raise them only if
+# the live totals grow enough that the current floor stops discriminating.
+# Grain of salt: provisional, tunable.
+_MIN_DB_KWARG_SITES = 12
+_MIN_FROM_URL_SITES = 8
+_MIN_ATTRIBUTE_QUALIFIED_SITES = 12
+
 
 # ---------------------------------------------------------------------------
 # 1. The tree is clean
@@ -83,8 +93,12 @@ def test_guard_sees_a_non_zero_number_of_candidates(capsys):
             f"\n[db-derivation-guard] candidates: {len(result.candidates)} "
             f"({len(db_kwargs)} db= keyword, {len(from_urls)} from_url)"
         )
-    assert len(db_kwargs) >= 15, "the db= walk matched almost nothing — suspect the walker"
-    assert len(from_urls) >= 8, "the from_url walk matched almost nothing — suspect the walker"
+    assert len(db_kwargs) >= _MIN_DB_KWARG_SITES, (
+        "the db= walk matched almost nothing — suspect the walker"
+    )
+    assert len(from_urls) >= _MIN_FROM_URL_SITES, (
+        "the from_url walk matched almost nothing — suspect the walker"
+    )
 
 
 def test_every_redis_construction_in_the_tree_is_attribute_qualified(capsys):
@@ -100,7 +114,7 @@ def test_every_redis_construction_in_the_tree_is_attribute_qualified(capsys):
                 by_kind[type(node.func).__name__] = by_kind.get(type(node.func).__name__, 0) + 1
     with capsys.disabled():
         print(f"\n[db-derivation-guard] Redis(...) call sites by callee node kind: {by_kind}")
-    assert by_kind.get("Attribute", 0) >= 15, (
+    assert by_kind.get("Attribute", 0) >= _MIN_ATTRIBUTE_QUALIFIED_SITES, (
         "the attribute-qualified Redis constructions vanished — a node.func.id matcher "
         "would now be vacuously green"
     )

@@ -1,9 +1,10 @@
 """Per-process test-Redis-db claim, and the subprocess env derived from it.
 
 This module owns the single definition of "which Redis db does this pytest
-process own". ``tests/conftest.py``'s autouse ``redis_test_db`` fixture points
-Popoto at that db; any test that shells out to a subprocess must point that
-subprocess at the SAME db via :func:`subprocess_env`.
+process own". ``tests/conftest.py``'s session-scoped, autouse
+``_popoto_pool_install`` fixture points Popoto's canonical client at that db
+(and at this module's server); any test that shells out to a subprocess must
+point that subprocess at the SAME db via :func:`subprocess_env`.
 
 Why this is a module and not part of ``conftest.py`` (issue #2605): the claim is
 memoized in a module global and backed by held file locks. A second copy of that
@@ -108,10 +109,11 @@ def redis_test_host() -> str:
 
     Part of the single definition of "which Redis server are tests on"
     (:func:`redis_test_host` / :func:`redis_test_port`). Every test-suite client
-    — popoto's, the raw ``redis.Redis`` in ``conftest``'s ``redis_test_db``
-    fixture, and any subprocess via :func:`subprocess_env` — must resolve its
-    server through these two functions, so the server the claim registry is
-    keyed to and the server actually connected to cannot diverge (#2799).
+    — popoto's canonical client, installed by ``conftest``'s
+    ``_popoto_pool_install`` fixture, and any subprocess via
+    :func:`subprocess_env` — must resolve its server through these two
+    functions, so the server the claim registry is keyed to and the server
+    actually connected to cannot diverge (#2799).
 
     ``or`` rather than a ``.get`` default: an env var set to the empty string
     returns ``""``, which is not the same as unset and must still fall through
