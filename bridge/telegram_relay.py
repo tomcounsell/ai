@@ -1049,10 +1049,19 @@ def _poll_text_payload(message: dict) -> dict:
 async def _reenqueue_poll_as_text(r, key: str, message: dict, *, reason: str) -> bool:
     """Push the question back onto the same outbox key as plain text.
 
-    Returns whether the push landed. A decline branch **must** honor ``False``: it
-    has already dropped the provisional row, so returning ``DELIVERED_NO_ID`` on a
-    failed push would leave the question with no outbox entry, no pending row and
-    no dead letter. Returning ``None`` instead puts it back on the retry path.
+    Returns whether the push landed. A decline branch **must** honor ``False``: by
+    the time it calls this, it has either dropped the provisional row (the
+    ineligible-at-send-time branch, after ``delete_pending_poll``) or never had one
+    to begin with (the missing-``poll_id_hint`` branch, which bails before
+    ``register_pending_poll`` runs). Either way there is no pending row behind it,
+    so returning ``DELIVERED_NO_ID`` on a failed push would leave the question with
+    no outbox entry, no pending row and no dead letter. Returning ``None`` instead
+    puts it back on the retry path — but
+    this only NARROWS the hole, it does not close it. The retry path's own re-queue
+    (``process_outbox``'s bounded-retry ``r.rpush`` of the original poll message)
+    uses the same primitive and the same failure is swallowed there too (logged,
+    not raised). So the question survives a single ``rpush`` failure, not two
+    consecutive ones.
     """
     try:
         await asyncio.to_thread(r.rpush, key, json.dumps(_poll_text_payload(message)))
@@ -1122,8 +1131,12 @@ async def _send_queued_poll(
     Returns the sent message id; ``DELIVERED_NO_ID`` when the poll was declined
     and the prose fallback **landed** on the outbox; ``None`` for a genuine send
     failure the caller should retry, and for a decline whose fallback push itself
-    failed — that branch has already dropped the provisional row, so the retry is
-    the only remaining record of the question.
+    failed — that branch has no pending row behind it (see
+    ``_reenqueue_poll_as_text``), so the retry is the only remaining record of the
+    question. That retry only NARROWS the hole rather than closing it: it re-queues
+    via the same ``r.rpush`` primitive, and ``process_outbox`` swallows that
+    failure too (logs, does not raise). The question is lost only on two
+    consecutive ``rpush`` failures, not one.
 
     The sentinel is load-bearing. Both decline branches push the prose fallback
     before returning, so reporting them as failure makes ``process_outbox``
@@ -1223,6 +1236,11 @@ async def _send_queued_poll(
 
     eligibility = await asyncio.to_thread(poll_eligible, chat_id, session_id)
     if not eligibility.ok:
+        # Returning None on a failed fallback push here sends this back through
+        # process_outbox's bounded retry, which pays `_find_already_sent_poll`'s
+        # `iter_messages` scan (POLL_ADOPTION_SCAN_LIMIT messages) for a poll that
+        # was never sent — bounded by MAX_RELAY_RETRIES and accepted, because the
+        # alternative is losing the question.
         logger.info(
             "Relay: poll ineligible at send time (chat_id=%s session_id=%s reason=%s) — "
             "delivering as text",

@@ -349,11 +349,12 @@ enqueues.
 **A provisional row is closed by marker, not delete.** The hint is still the only evidence a send may
 have landed, so deleting it would strand orphan adoption after a restart, and the payload may still
 be in the relay outbox. `promote_pending_poll` therefore carries the marker onto the real poll id
-when it lands. The row stays in `POLL_PENDING_INDEX` until its TTL and every consumer of that index
-checks `poll_steered` itself: `session_has_open_poll` to stop reporting an answered question,
-`adopt_orphaned_polls` to stop paying for a Telegram history scan per reconcile tick. The pending
-index is also scanned **before** the open index, so a `promote_pending_poll` interleaving between the
-two passes cannot drop the close-out between them.
+when it lands. The row stays in `POLL_PENDING_INDEX` until its TTL, and a consumer of that index
+that cares checks `poll_steered` itself: `session_has_open_poll` does, to stop reporting an answered
+question. **Orphan adoption deliberately does not** — see Race 6 below, where skipping a marked hint
+would let an unrelated inbound message swallow a later tap. The pending index is also scanned
+**before** the open index, so a `promote_pending_poll` interleaving between the two passes cannot
+drop the close-out between them.
 
 ## Failure recovery
 
@@ -410,11 +411,20 @@ Both halves are required:
    no dead letter. The terminal-failure branch deletes the row too: adoption stops being worth its
    per-tick cost once every retry has failed (a cost trade, not proof of non-delivery — the question
    is re-enqueued as text, not dropped).
-2. **Orphan adoption in the reconciliation loop**, skipping hints already closed out by a typed
-   answer, and otherwise matched on the correlation id embedded in the option bytes — **never on question text**, which is not unique (an agent re-asking after an
+2. **Orphan adoption in the reconciliation loop**, matched on the correlation id embedded in the
+   option bytes — **never on question text**, which is not unique (an agent re-asking after an
    expired poll, or two sessions asking the same standard question, produce two candidates with no
    tie-break). **More than one match adopts nothing and warns**: an ambiguous adoption steers a
    session with someone else's answer, which is worse than a dropped question.
+
+   Adoption deliberately does **not** skip a hint already closed out by an inbound message. Skipping
+   would mean the only thing that makes a Race-6 orphan's later tap routable — `translate_poll_vote`
+   bails immediately at `lookup_poll(poll_id) is None` — never runs for it, so an unrelated message
+   would permanently swallow a subsequent tap. That is the same failure class this feature exists to
+   remove, so a closed-out hint is scanned and adopted exactly like an open one; `promote_pending_poll`
+   carries the marker onto the real row, so the promoted row is born steered at no extra cost, and a
+   successful adoption promotes and deletes the pending row, keeping the per-tick scan cost to one hit
+   rather than one per tick.
 
 **Promotion is the second gate, and it can refuse.** Adopting means promoting the provisional row
 to a real one under the server-assigned poll id, and `register_poll` writes that row with `SET NX`.

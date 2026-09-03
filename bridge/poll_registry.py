@@ -363,10 +363,12 @@ def mark_poll_steered(poll_id: int | str) -> None:
     Only ``POLL_OPEN_INDEX`` is de-indexed. Called with a *hint* (the pending-row
     close-out below), the row deliberately stays in ``POLL_PENDING_INDEX`` until
     its TTL: the payload may still be in the relay outbox, and ``promote_pending_poll``
-    needs the row to carry this marker onto the real poll id. Every consumer of
-    that index therefore checks ``poll_steered`` itself — ``session_has_open_poll``
-    to stop reporting an answered question, ``adopt_orphaned_polls`` to stop
-    paying for a Telegram history scan per tick.
+    needs the row to carry this marker onto the real poll id. A consumer of that
+    index that cares therefore checks ``poll_steered`` itself —
+    ``session_has_open_poll`` does, to stop reporting an answered question.
+    ``adopt_orphaned_polls`` deliberately does **not**: adoption is the only thing
+    that makes a Race-6 orphan reachable by a later tap at all, so skipping a
+    marked hint would let an unrelated inbound message swallow that tap.
     """
     _redis().set(f"{POLL_STEERED_PREFIX}{poll_id}", _now_iso(), nx=True, ex=POLL_REGISTRY_TTL_S)
     _redis().srem(POLL_OPEN_INDEX, str(poll_id))

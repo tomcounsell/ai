@@ -225,33 +225,40 @@ class TestResumeCompletedSessionClosesThePoll:
         assert calls == []
 
 
-class TestAdoptionSkipsAClosedProvisionalRow:
-    """A prose-answered hint must stop costing a Telegram history scan per tick.
+class TestAdoptionStillScansAndPromotesASteeredHint:
+    """A steered hint is deliberately still adopted, not skipped.
 
-    The close-out marks a provisional row rather than deleting it, because the
-    payload may still be in the outbox and ``promote_pending_poll`` needs the row
-    to carry the marker forward. The row therefore stays in ``POLL_PENDING_INDEX``,
-    and ``adopt_orphaned_polls`` — which runs every reconcile tick for the full 24h
-    TTL — has to skip it itself.
+    Adoption is the only thing that makes a Race-6 orphan's later tap routable
+    at all: ``translate_poll_vote`` bails immediately at
+    ``lookup_poll(poll_id) is None``, so an un-adopted row can never be reached
+    by a subsequent vote regardless of what closed it out. Because ANY inbound
+    chatter marks the hint (``mark_session_polls_steered``), skipping steered
+    hints here would let an unrelated message permanently swallow a subsequent
+    tap — exactly the failure class #2701 exists to remove. The scan-cost
+    objection does not hold either: a successful adoption promotes and DELETES
+    the pending row, so the normal case costs one scan, not one per tick.
+    ``promote_pending_poll`` carries the steered marker onto the real row, so
+    the promoted row is born steered at no extra cost.
     """
 
     @pytest.mark.asyncio
-    async def test_a_steered_hint_is_not_scanned(self):
+    async def test_steered_hint_is_still_passed_to_the_scan_and_promoted_when_found(self):
         from bridge.poll_reconcile import adopt_orphaned_polls
 
         row = {"chat_id": "-1001", "session_id": "sess-1"}
         with (
             patch(
                 "bridge.poll_reconcile.iter_pending_polls",
-                return_value=iter([("hint-closed", row), ("hint-open", row)]),
+                return_value=iter([("hint-steered", row)]),
             ),
-            patch("bridge.poll_reconcile.poll_steered", side_effect=lambda h: h == "hint-closed"),
             patch(
                 "bridge.telegram_relay._find_already_sent_poll",
                 new_callable=AsyncMock,
-                return_value=None,
+                return_value=(67890, "server-poll-id"),
             ) as find,
+            patch("bridge.poll_reconcile.promote_pending_poll") as promote,
         ):
             await adopt_orphaned_polls(MagicMock())
 
-        assert [c.args[2] for c in find.call_args_list] == ["hint-open"]
+        assert [c.args[2] for c in find.call_args_list] == ["hint-steered"]
+        promote.assert_called_once_with("hint-steered", "server-poll-id", msg_id=67890)

@@ -121,13 +121,25 @@ async def adopt_orphaned_polls(client) -> None:
     from bridge.telegram_relay import _find_already_sent_poll
     from utils.peer import numeric_peer
 
+    # Deliberately does NOT skip a steered hint. Adoption is the only thing that
+    # makes a Race-6 orphan's later tap routable at all — `translate_poll_vote`
+    # bails immediately at `lookup_poll(poll_id) is None`, so an un-adopted row
+    # can never be reached by a subsequent vote no matter what closed it out.
+    # Because ANY inbound chatter marks the hint (see `mark_session_polls_steered`),
+    # skipping steered hints here let an unrelated message permanently swallow a
+    # subsequent tap — exactly the failure class this PR exists to remove, and it
+    # contradicted the "a later tap still routes" claim in both
+    # `bridge/telegram_bridge.py`'s close-out comment and
+    # `docs/features/telegram-poll-questions.md`.
+    #
+    # The scan-cost objection does not survive: a successful adoption promotes
+    # and DELETES the pending row, so the normal case costs one scan, not one per
+    # tick. The unbounded case is a hint whose poll was never sent, and the
+    # decline branches plus the terminal-failure branch already delete those.
+    # `promote_pending_poll` carries the steered marker onto the real row, so
+    # adopting a closed-out hint costs nothing further and the promoted row is
+    # born de-indexed.
     for hint, row in iter_pending_polls():
-        if poll_steered(hint):
-            # Answered in prose while the payload was still provisional. Adopting
-            # it would promote a row that `promote_pending_poll` immediately marks
-            # steered anyway, so the only thing the scan below buys is an
-            # `iter_messages` hit against Telegram on every tick until the 24h TTL.
-            continue
         try:
             found = await _find_already_sent_poll(client, numeric_peer(row["chat_id"]), hint)
         except Exception as e:  # noqa: BLE001
