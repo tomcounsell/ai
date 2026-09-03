@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -683,16 +683,16 @@ made the never-merge guarantee vacuous in round 6.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/nightly-regression-tests.md` — document the new classification stage: the in-process `classify_against_baseline` function and its keyword-only injection seam, the baseline ref as **"the prior run's HEAD SHA"** (`prev["head_commit"]`, never bare `main`) with the per-node soundness sentence beside it — **do not call it "last-green" or "last-known-good"**, since L1092 writes it on every non-fatal run and nothing in the detector records greenness — the **seven classification preconditions** as the single canonical list, the classifier's **own** JSON report path and why it must not share `PYTEST_SERIAL_JSON_TMP`, the **provisioned persistent baseline worktree and why it must have its own `.venv`** (#3033), the three buckets and the fail-toward-escalate rule, the pure decision gate, the `off`/`shadow` modes, the `nightly-fix shadow-verdict:` log contract including its `reason=` token vocabulary, the sibling `nightly-fix shadow-buckets:` line and **the one-sentence statement of what the classifier discriminates that `compute_new_failures` does not** (`compute_new_failures` proves a node was ABSENT from the prior confirmed-failing set; the classifier proves it PASSED at that SHA — they differ exactly when the node was not collected then, was a filtered artifact, or the prior run was untrusted), the `PYTEST_BASELINE_TIMEOUT_SECONDS` bound, and the **two** guardrail constants.
-- [ ] Update the worktree/disk-reclaim doc covering `tools/disk_reclaim.py` — record `PROTECTED_WORKTREE_SLUGS` and why `nightly-baseline` is never reaped. Do **not** reference `scripts/worktree-gc.sh`; it does not exist.
-- [ ] Update `docs/features/nightly-alert-triage.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
-- [ ] Add/confirm entries in `docs/features/README.md` index.
+- [x] Update `docs/features/nightly-regression-tests.md` — document the new classification stage: the in-process `classify_against_baseline` function and its keyword-only injection seam, the baseline ref as **"the prior run's HEAD SHA"** (`prev["head_commit"]`, never bare `main`) with the per-node soundness sentence beside it — **do not call it "last-green" or "last-known-good"**, since L1092 writes it on every non-fatal run and nothing in the detector records greenness — the **seven classification preconditions** as the single canonical list, the classifier's **own** JSON report path and why it must not share `PYTEST_SERIAL_JSON_TMP`, the **provisioned persistent baseline worktree and why it must have its own `.venv`** (#3033), the three buckets and the fail-toward-escalate rule, the pure decision gate, the `off`/`shadow` modes, the `nightly-fix shadow-verdict:` log contract including its `reason=` token vocabulary, the sibling `nightly-fix shadow-buckets:` line and **the one-sentence statement of what the classifier discriminates that `compute_new_failures` does not** (`compute_new_failures` proves a node was ABSENT from the prior confirmed-failing set; the classifier proves it PASSED at that SHA — they differ exactly when the node was not collected then, was a filtered artifact, or the prior run was untrusted), the `PYTEST_BASELINE_TIMEOUT_SECONDS` bound, and the **two** guardrail constants.
+- [x] Update the worktree/disk-reclaim doc covering `tools/disk_reclaim.py` — record `PROTECTED_WORKTREE_SLUGS` and why `nightly-baseline` is never reaped. Do **not** reference `scripts/worktree-gc.sh`; it does not exist.
+- [x] Update `docs/features/nightly-alert-triage.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
+- [x] Add/confirm entries in `docs/features/README.md` index.
 
 ### Inline Documentation
-- [ ] Each guardrail constant carries a grain-of-salt/provisional comment and its env-override name.
-- [ ] Docstring `decide_fix_or_escalate` (the gate's exact conditions and their order, since `reason=` reports the first failure) and `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]` = the prior run's HEAD SHA, never bare `main`) plus its provisioning preconditions and the purpose of each keyword-only injection parameter.
-- [ ] Comment `PYTEST_BASELINE_JSON_TMP` at its declaration with the one-line reason it exists: `main()` re-reads `PYTEST_SERIAL_JSON_TMP` at L1209 to build the alert, so the classifier must not write it.
-- [ ] Docstring the `cwd` parameter added to `_spawn_pytest`, noting that the default preserves both existing callers byte-identically.
+- [x] Each guardrail constant carries a grain-of-salt/provisional comment and its env-override name.
+- [x] Docstring `decide_fix_or_escalate` (the gate's exact conditions and their order, since `reason=` reports the first failure) and `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]` = the prior run's HEAD SHA, never bare `main`) plus its provisioning preconditions and the purpose of each keyword-only injection parameter.
+- [x] Comment `PYTEST_BASELINE_JSON_TMP` at its declaration with the one-line reason it exists: `main()` re-reads `PYTEST_SERIAL_JSON_TMP` at L1209 to build the alert, so the classifier must not write it.
+- [x] Docstring the `cwd` parameter added to `_spawn_pytest`, noting that the default preserves both existing callers byte-identically.
 
 ## Success Criteria
 
