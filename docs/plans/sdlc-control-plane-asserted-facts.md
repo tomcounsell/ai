@@ -868,9 +868,7 @@ paths agree on a lane state that today they disagree about.
        rows. They are not evidence of new work and must not be read as such.
      - Suite rows (`pytest-clean.sh`, `ruff`), whose value is the assertions inside them.
 
-     `tests/unit/test_lane_identity.py` and `tests/unit/test_merge_predicate.py` are named on the
-     assumption they exist; if a path is wrong the row fails loudly rather than silently passing,
-     which is the intended direction. -->
+     Every test path named above was confirmed to exist on main at plan time. -->
 
 | Check | Command | Expected |
 |-------|---------|----------|
