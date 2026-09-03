@@ -7,7 +7,7 @@ created: 2026-09-03
 tracking: https://github.com/tomcounsell/ai/issues/3065
 last_comment_id: 5521519215
 revision_applied: true
-revision_applied_at: 2026-09-03T07:08:44Z
+revision_applied_at: 2026-09-03T15:05:00Z
 ---
 
 # SDLC Control Plane: Route on Read Facts, Not Asserted Facts (Residual)
@@ -196,6 +196,33 @@ row.** This plan does not add one.
   G3 proposal-only hole is already written down, in an archived completed plan, unfixed.
 - **#2871 / `05a444b1b`** — the delegation that removed `validate_build.py`'s private evaluator.
   The two runners still disagree on timeout disposition and bound, which that lane did not cover.
+- **This plan's own critique round 1 — the defect class reproduced inside the critique of the plan
+  that exists to eliminate it.** Round 1's blocker 1 asserted that the raw-Redis anti-criterion's
+  `\|` escapes make the ERE match a literal string, so the row could never fire. The claim was
+  verified "empirically" against the **raw markdown text** and is true of it — but the row is never
+  executed as raw markdown: `parse_verification_table` unescapes `\|` to a bare `|` when it extracts
+  the cell. The critic asserted what the shell receives without reading it through the parser that
+  produces it, which is precisely "a fact routed on that was not read at the moment it was used".
+  Applying the suggested fix would have **regressed** the row into the `MalformedRow` state it had
+  already been repaired out of once. Round 2's History & Consistency critic re-ran the parser over
+  this file, printed the parsed command, and executed it two-pole against synthetic diffs, and
+  accepted the deviation on that executed evidence. Full adjudication under Critique Results.
+  Three things this is prior art *for*, all load-bearing for the build:
+  - **A verification row's meaning is the parsed command, not the cell text.** Any future
+    anti-criterion reasoning must run through `parse_verification_table` before it is believed. This
+    is the authoring hazard task 7's documentation bullet and the `PLAN_TEMPLATE.md` alternation
+    sample exist to teach, and it is an argument *for* that documentation work rather than against
+    the escaping composition.
+  - **Whole-file anti-criteria are the wrong shape when the file is already red.** Chasing the
+    blocker's valid secondary claim surfaced `tools/lane_identity.py:389` calling
+    `POPOTO_REDIS_DB.delete(...)` on a slug-lock key — legitimate (the rule governs Popoto-managed
+    *model* keys, not lock keys), but it means a whole-file row is RED on main for a pre-existing
+    reason and can never go green. The row is now diff-scoped, judging what the commit adds. Same
+    lesson the wave4 lane cites, reached independently here.
+  - **A named deviation is cheaper than a silent one.** The falsification was recorded for the
+    decider to overrule rather than quietly acted on, and the round-2 critic could then adjudicate it
+    on evidence instead of rediscovering it. Deviations from critique findings in this lane's build
+    should be recorded the same way.
 
 ### Why Previous Fixes Failed
 
@@ -879,6 +906,13 @@ paths agree on a lane state that today they disagree about.
       `UNEVALUATED` outcome causes the predicate to refuse and name the row, proven by a regression
       test reconstructing the exact shape (APPROVED verdict, DOCS complete, CI green, one
       `UNEVALUATED` gate row). On main today that state merges.
+- [ ] **A recorded verification outcome is only trusted while it is fresh.** The aggregate carries the
+      PR head SHA it was graded against, stamped via `resolve_pr_head_sha` and never a bare `gh` read.
+      The merge predicate compares it the way it already compares the REVIEW verdict trailer
+      (`tools/merge_predicate.py:591-599`) and refuses on mismatch, absence, or an unresolvable head,
+      naming the reason. Acceptance: an all-`PASS` aggregate merges; the same aggregate with the PR
+      head advanced by one commit refuses. On main today there is no aggregate at all, so a lane that
+      passed verification and then took a new commit merges on state nobody re-read.
 - [ ] **The build-vs-ship split is enforced by consumer, not by row annotation.** The build gate may
       let an `UNEVALUATED` row pause and allow build progression; the merge predicate may not. Test
       asserts the same row with the same outcome permits build progression and refuses merge — with
@@ -927,6 +961,8 @@ paths agree on a lane state that today they disagree about.
 | Tri-state outcome is defined | `grep -c UNEVALUATED agent/verification_parser.py` | output > 0 |
 | Merge predicate reads recorded verification outcomes | `grep -c _verification_outcomes tools/merge_predicate.py` | output > 0 |
 | Verification runner persists the outcome aggregate | `grep -c _verification_outcomes agent/verification_parser.py` | output > 0 |
+| Outcome aggregate is stamped via the sanctioned head resolver | `grep -c resolve_pr_head_sha agent/verification_parser.py` | output > 0 |
+| Merge predicate has a named stale-outcome refusal | `grep -c VERIFICATION_OUTCOMES_STALE_REASON tools/merge_predicate.py` | output > 0 |
 | Ruff is clean | `python -m ruff check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
 | Ruff formatting is clean | `python -m ruff format --check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
 | ANTI: no reader of the verification `passed` boolean survives | `test -z "$(grep -rnE '(\.passed\b\|passed=)' agent/verification_parser.py scripts/validate_build.py tests/unit/test_verification_parser.py tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py)"` | exit code 0 |
@@ -1084,6 +1120,23 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
   narrow expectation vocabulary), all three parts of which reproduce on main.
 - Persist the graded aggregate to the ledger's `_verification_outcomes` key (see task 8 for the
   substrate and the PM ruling that authorizes it). This is task 7's one new output.
+- **Stamp the aggregate with the PR head SHA it was graded against.** The aggregate is written at
+  TEST/DOCS time and read by the merge predicate later, so without a freshness anchor a lane that
+  passes verification and then takes a new commit — a late `/do-patch`, a manual push — merges on a
+  cached PASS. That is this plan's own defect ("a fact readable earlier, not now") reproduced inside
+  the mechanism built to close it, and it is the one concern round 2 raised. Persist `head_sha`
+  alongside the outcomes, sourced from `tools.pr_head_resolver.resolve_pr_head_sha` — **never a bare
+  `gh` read**, per CLAUDE.md, because a stale `gh` head SHA is exactly what flipped the
+  verdict-staleness gate fail-open in #2895. A lane with no PR at write time records no `head_sha`;
+  task 8 defines what the reader does with that.
+- Pin the refusal reason for the stale case as a **named module constant**,
+  `VERIFICATION_OUTCOMES_STALE_REASON`, defined where the predicate consumes it (task 8). A
+  Verification row greps for the constant name rather than the prose, matching how
+  `reconcile_dispatch`, `decision_inputs`, `resolve_branch_truth`, and
+  `G3_REDIRECT_REASON_DOCS_PENDING` are already pinned.
+- Tests: the aggregate written by a graded run carries a `head_sha` matching what
+  `resolve_pr_head_sha` returned; a run on a lane with no PR records the aggregate with no
+  `head_sha` and does not crash.
 - Replace `tests/unit/test_verification_parser.py:210`, which pins the bug as intended behavior.
 
 ### 8. Let the merge predicate see verification outcomes
@@ -1107,6 +1160,24 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
 - A `FAIL` or `UNEVALUATED` row holds the PR, and the refusal names the row. This is the #3080 /
   `ba092a06d` ruling made machine-readable: that owner ruling said "FAIL and UNRESOLVED both hold
   the PR at REVIEW" and lived only in plan prose, so PR #3080 merged past it.
+- **Check the aggregate's freshness against the PR's current head before trusting it, and fail
+  closed.** Compare task 7's stamped `head_sha` the way this module already compares the REVIEW
+  verdict's trailer at `tools/merge_predicate.py:591-599` — read the record's SHA via
+  `head_sha_of_record` (which reads the `head_sha` field first and falls back to the legacy in-token
+  trailer, #2769), resolve the PR's current head through `resolve_pr_head_sha`, and compare
+  case-insensitively. Three dispositions, all fail-closed:
+  - **Match** → the aggregate is fresh; grade it as above.
+  - **Mismatch** → treat the aggregate as stale and equivalent to `UNEVALUATED`; refuse with
+    `VERIFICATION_OUTCOMES_STALE_REASON` ("verification outcome predates PR head commit"). Do **not**
+    read the cached PASS.
+  - **Missing, unparseable, or a PR head that cannot be resolved** → refuse, do not fall open. This
+    is deliberately stricter than the REVIEW-verdict path's timestamp fallback: that fallback exists
+    for records predating #2769 and there are no legacy `_verification_outcomes` records to be
+    compatible with, so the weaker comparison would be a fail-open hole (#2404) added on purpose.
+  - Note the interaction with the bullet below: a lane with **no plan document** is still not
+    blocked. Absence of an aggregate because there is no plan is reported, not enforced; a *present*
+    aggregate that cannot be shown fresh is enforced. The two are distinguishable and must not be
+    collapsed.
 - Keep the build-vs-ship split on the **consumer**, never on the row: the build gate may treat
   `UNEVALUATED` as a pause that allows build progression, the merge predicate may not. No `GATE:`
   row marker and no frontmatter key. A per-row severity annotation is the first step back toward the
@@ -1122,6 +1193,10 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
   the same shape with a `FAIL` row likewise refuses; the same row and outcome still permits build
   progression, proving the split lives on the consumer; a clean lane still merges; a plan-less lane
   is unaffected.
+- Freshness tests, two-pole against the stale case that motivated them: an all-`PASS` aggregate whose
+  `head_sha` matches the PR head merges; the **same** aggregate with the PR head advanced by one
+  commit refuses with `VERIFICATION_OUTCOMES_STALE_REASON`; an aggregate with an absent or
+  unparseable `head_sha` refuses; a lane with no plan document is unaffected by any of it.
 
 ### 9. Documentation cascade
 
@@ -1138,7 +1213,7 @@ critic on executed evidence. The table below carries only what round 2 found.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Task 8's `_verification_outcomes` aggregate is written at TEST/DOCS time and read by the merge predicate with no freshness anchor to the PR's current head commit. Every other verdict that predicate reads is protected against exactly this failure: `tools/merge_predicate.py:586-599` compares a recorded `head_sha` trailer against `resolve_pr_head_sha` and refuses on mismatch (the #2404 fail-open hole). With no analogous check, a lane that passes verification and then takes a new commit — a late `/do-patch`, a manual push — merges on a cached PASS. That is this plan's own defect ("a fact readable earlier, not now") reproduced inside the mechanism built to close it. | pending | Persist a `head_sha` alongside `_verification_outcomes` at task 7's write point, sourced from `tools.pr_head_resolver.resolve_pr_head_sha` — never a bare `gh` read, per CLAUDE.md. In task 8's predicate check, compare it the way `tools/merge_predicate.py:591-599` compares the REVIEW trailer via `head_sha_of_record`, and on a mismatch treat the aggregate as stale/`UNEVALUATED` and refuse with a named reason ("verification outcome predates PR head commit") rather than reading the cached PASS. Fail closed on a missing or unparseable `head_sha`; do not fail open. |
+| CONCERN | Risk & Robustness | Task 8's `_verification_outcomes` aggregate is written at TEST/DOCS time and read by the merge predicate with no freshness anchor to the PR's current head commit. Every other verdict that predicate reads is protected against exactly this failure: `tools/merge_predicate.py:586-599` compares a recorded `head_sha` trailer against `resolve_pr_head_sha` and refuses on mismatch (the #2404 fail-open hole). With no analogous check, a lane that passes verification and then takes a new commit — a late `/do-patch`, a manual push — merges on a cached PASS. That is this plan's own defect ("a fact readable earlier, not now") reproduced inside the mechanism built to close it. | Task 7 (stamp `head_sha` via `resolve_pr_head_sha` at the write point; pin `VERIFICATION_OUTCOMES_STALE_REASON`), task 8 (three fail-closed dispositions on compare; freshness tests), two Verification rows (both confirmed RED on main), one Success Criterion | Persist a `head_sha` alongside `_verification_outcomes` at task 7's write point, sourced from `tools.pr_head_resolver.resolve_pr_head_sha` — never a bare `gh` read, per CLAUDE.md. In task 8's predicate check, compare it the way `tools/merge_predicate.py:591-599` compares the REVIEW trailer via `head_sha_of_record`, and on a mismatch treat the aggregate as stale/`UNEVALUATED` and refuse with a named reason ("verification outcome predates PR head commit") rather than reading the cached PASS. Fail closed on a missing or unparseable `head_sha`; do not fail open. |
 
 ### Named deviation — critique blocker 1's primary claim is falsified
 
