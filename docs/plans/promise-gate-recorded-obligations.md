@@ -26,28 +26,37 @@ The issue's R1–R4 rulings are decided (R3 conditional in execution — see Sol
 
 ## Freshness Check
 
-**Baseline commit:** `d7b7e92cb836bd1616c5a1814f2b8ef4850a9cdc`
+**Baseline commit:** `00a3d93ca` (re-verified 2026-09-03; supersedes the 2026-08-27 baseline `d7b7e92cb`)
 **Issue filed at:** 2026-08-26T10:45:36Z (body rewritten 2026-08-27 with re-verified claims)
-**Disposition:** Unchanged
+**Disposition:** Amended — every load-bearing mechanism holds; one new outbound route appeared and is dispositioned as a No-Go below.
 
-**File:line references re-verified** (all read directly at plan time, same session as the issue rewrite):
-- `bridge/message_drafter.py:623` `_evaluate_drafter_promise` — regex-only, by-design docstring — holds.
-- `bridge/promise_gate.py:402` `promise_override_active` + `:414-422` owner-ruling note — holds.
+**Anchors that hold, re-read at `00a3d93ca`.** Symbol names are the durable anchor; line numbers below are current, not the ones the 2026-08-27 pass recorded.
+
+- `bridge/message_drafter.py:667` `_evaluate_drafter_promise` — regex-only, by-design docstring — holds.
+- `bridge/message_drafter.py:1160` (short path) / `:1211` (main path) — the two `_evaluate_drafter_promise` call sites Task 5 awaits — hold, both still inside `draft_message` (`:1072`).
+- `bridge/promise_gate.py:402` `promise_override_active` + `:422` owner-ruling note — hold.
 - `bridge/promise_gate.py:661` `evaluate_promise` signature carries no ask — holds.
+- `bridge/promise_gate.py:762,830` `_PromiseTimeoutError` raised nowhere, caught at `:762` — the dead-code fix in Task 5 is still needed.
 - `agent/session_runner/router.py:61` `PM_TURN_JSON_SCHEMA` (route/message/file_paths/blocked_reason only) — holds.
-- `.claude/commands/roles/prime-pm-role.md:51-67` phrasebook — holds.
-- `docs/features/promise-gate.md` "discriminator is the forward-looking clause" — holds (§"What the gate actually keys on").
-- `models/agent_session.py:189,1425` `initial_telegram_message.message_text` — holds.
+- `.claude/commands/roles/prime-pm-role.md:50-71` phrasebook — holds, shifted from `:51-67`. Task 3 anchors on text, not line numbers.
+- `docs/features/promise-gate.md:124` "the presence of a forward-looking clause, not the presence of evidence" — holds.
+- `models/agent_session.py:189` `initial_telegram_message` — holds.
 - `agent/session_runner/role_driver.py:418` `run_turn(message)` — holds.
 
-**Cited sibling issues/PRs re-checked:**
+**What moved on main, and what it costs this plan.** Four commits since the prior baseline touched referenced files: #3080 (ask-me Telegram polls), #3084 (persona toolbelts Lane A), `c09775999` (dev subagent model pinning), `f6ba598ce` (Fable 5.1 default).
+
+1. **A new human-facing outbound route now bypasses the drafter entirely.** #3080 added `TelegramRelayOutputHandler.send_poll` (`agent/output_handler.py:1523`), which validates its question through the new public seam `bridge/message_drafter.py::validate_poll_question` and deliberately never calls `draft_message` — composition would staple an emoji prefix and stage line into a poll question. Owner Ruling 4 ("all `draft_message` callers get the main-path LLM gate") therefore no longer means "all human-facing outbound". Dispositioned as **No-Go 5** below, with the residual risk named.
+2. **`prime-pm-role.md` gained two bullets after the phrasebook region** — the `/ask-me` routing bullet and the `[missing-capability]` escalation line, both from #3080. Task 3 deletes the phrasebook only; these two bullets are retained verbatim, and the persona golden fixture regeneration now covers them.
+3. Line drift in `bridge/message_drafter.py` (+44 lines above the gate functions) and `prime-pm-role.md` (+1 line above the phrasebook). Recorded in the anchor list above; no behavioral consequence.
+4. #3084, `c09775999`, and `f6ba598ce` touch persona/model selection, not the gate, the drafter, or the schema. No consequence.
+
+**Cited sibling issues/PRs re-checked (2026-09-03):**
 - #2494 / #2632 / #2708 — closed/merged; expectation machinery shipped (PRs #2631, #2814).
 - #2423 — closed by PR #2621 (terminal flush gated).
-- #3016 — OPEN; failure is `action='block'` with `class_=None` — a label assertion, reconciled by this plan (test rewrite, `Closes #3016` in the implementation PR).
+- #3016 — still OPEN; failure is `action='block'` with `class_=None` — a label assertion, reconciled by this plan (test rewrite, `Closes #3016` in the implementation PR).
+- #3035 — still OPEN, still embargoed until 2026-09-10, which is after this plan lands. Owner Ruling 2 stands: phase 4 and the required-tightening decision remain out of this lane.
 
-**Commits on main since issue was filed (touching referenced files):** none (`git log --since=2026-08-26T10:45:36Z` over all nine referenced files is empty).
-
-**Active plans in `docs/plans/` overlapping this area:** `ask-me-telegram-polls.md` (Ready) also edits `bridge/message_drafter.py`, but only `_validate_for_medium` (adds a `telegram_poll` branch) — function-disjoint from this plan's `_evaluate_drafter_promise`/`draft_message` changes. Coordination note only; merge-order conflicts limited to import blocks. `overclaim-guard-greps-whole-worktree.md` is unrelated despite the name (grep/`__pycache__` hygiene).
+**Active plans in `docs/plans/` overlapping this area:** the prior coordination note on `ask-me-telegram-polls.md` is discharged — it merged as #3080 and its `bridge/message_drafter.py` footprint (`_validate_for_medium`'s `telegram_poll` branch, `validate_telegram_poll`, `validate_poll_question`) is function-disjoint from this plan's `_evaluate_drafter_promise`/`draft_message` changes, as predicted. `overclaim-guard-greps-whole-worktree.md` is unrelated despite the name (grep/`__pycache__` hygiene).
 
 ## Prior Art
 
@@ -235,8 +244,10 @@ From spike-1's inventory. Dispositions: UPDATE / DELETE / REPLACE.
 
 - [SEPARATE-SLUG #3035] **Phase 4 (two-axis `evaluate_delivery`) and phase-B schema tightening (`ask_coverage` → required).** Both decisions are gated on the post-soak measurement and filed as investigation issue #3035, which its title defers to no earlier than 2026-09-10 (owner ruling 2026-08-27: recent update churn means no reliable stability for a sooner soak). The measurement tooling, the recorded entry criterion, and the phase-4 design constraints (spike-2 ask anchor, Race 1 bind-at-creation rule) all ship in THIS plan so #3035 starts unblocked.
 - [SEPARATE-SLUG #3016] The nightly-regression issue itself is *resolved* by this plan's test rewrite (implementation PR carries `Closes #3016`); listed here only to record that no further work on it exists outside this plan.
+- **No-Go 5 — the poll question path (`TelegramRelayOutputHandler.send_poll`) stays ungated.** #3080 landed a human-facing outbound route that reaches Telegram without passing through `draft_message`, so this plan's main-path LLM gate does not cover it. Left ungated deliberately: a poll question is an *interrogative* posed to the human, not a delivery claim, so neither gate axis has anything to grade — there is no completion to over-claim and no ask to under-cover. The escape-hatch followup that accompanies every poll is ordinary prose and does go through the full drafter, so the honesty check still covers the poll interaction's declarative half. Gating the question itself would add an LLM round-trip to an interactive prompt for no catchable failure.
+  **Residual risk, named rather than dismissed:** a poll question *can* embed a completion claim ("Merge is done — proceed to stage?"), which would ship ungated. That is the same structural class as #2423 (a delivery route skipping an honesty check), reached by a different door. It is out of scope here because Owner Ruling 4 scoped this plan to `draft_message` callers and the poll route did not exist when that ruling was made. If the phase-4 audit in #3035 samples any poll question carrying a declarative claim, that is the trigger to widen the gate to `send_poll`.
 
-Anti-criteria for the code-level No-Gos are in `## Verification` (no `evaluate_delivery` symbol ships; `ask_coverage` not in `required` in phase A).
+Anti-criteria for the code-level No-Gos are in `## Verification` (no `evaluate_delivery` symbol ships; `ask_coverage` not in `required` in phase A; `send_poll` gains no gate call).
 
 ## Update System
 
@@ -313,7 +324,8 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Delete `prime-pm-role.md:51-67`; write the replacement: present-fact norm (kept verbatim in spirit), recorded-obligation discriminator, dispatch-you-can-execute rule, `ask_coverage` authoring guidance, `expectation-add` as the one way to commit.
+- Delete the `prime-pm-role.md` phrasebook — **anchor on text, not line numbers** (currently `:50-71`, and it has already drifted once): the block running from `**Say it in facts that are already true.**` through the `expectation-add` sentence, inclusive of the measured verdict table and the `Two ways to stay on the allowed side` list. Write the replacement: present-fact norm (kept verbatim in spirit), recorded-obligation discriminator, dispatch-you-can-execute rule, `ask_coverage` authoring guidance, `expectation-add` as the one way to commit.
+- **Retain the two bullets #3080 added below the phrasebook** — the `/ask-me` routing bullet and the `[missing-capability]` escalation line. They are adjacent to the deletion, not part of it, and the persona golden regeneration will silently absorb their loss if they are clipped.
 - REPLACE `TestPromiseGateFallbackAllowsTaughtPhrasings` and UPDATE the `TestPMRoleGuidance` anchors per Test Impact.
 - Regenerate the persona golden fixture; confirm no other fixture quotes the deleted lines.
 
@@ -334,7 +346,8 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - **Agent Type**: builder — Domain: async/concurrency (paste DOMAIN_FRAMING.md async rules into assignment)
 - **Parallel**: true
 - Extract `evaluate_promise_async` (public) from `_evaluate_promise_async` internals; sync `evaluate_promise` wraps it via `_run_async_safely` — signature and behavior frozen.
-- Make `_evaluate_drafter_promise` async with `use_llm`; await at both call sites (`message_drafter.py:1116` short/`use_llm=False`, `:1167` main/`use_llm=True`); preserve single-chokepoint, kill-switch, and override ordering.
+- Make `_evaluate_drafter_promise` async with `use_llm`; await at both call sites (`message_drafter.py:1160` short/`use_llm=False`, `:1211` main/`use_llm=True` — line numbers current at baseline `00a3d93ca`; both sit inside `draft_message`); preserve single-chokepoint, kill-switch, and override ordering.
+- **Do not touch `validate_poll_question` or `validate_telegram_poll`.** They are #3080's seam for the poll route, which stays ungated per No-Go 5. `_validate_for_medium` gains no gate call.
 - Audit: main-path LLM verdicts → `source="promise_gate_drafter_llm"`; add `elapsed_ms` to all rows from both entry points.
 - Fix the timeout dead code: delete `_PromiseTimeoutError`, catch `APITimeoutError` → heuristic fallback audited as `promise_gate_timeout`; split `test_promise_gate.py:533`.
 - New tests: short-path zero-LLM (spike-1 gap 1); Incident A text blocks on main path; same text + open inbound expectation → `promise_recorded_override`; LLM exception and timeout fall-throughs.
@@ -389,6 +402,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 | Short path zero-LLM test exists | `grep -rc "zero_llm\|no_llm_call" tests/unit/test_message_drafter.py` | output > 0 |
 | No formerly-narration in gate doc | `grep -ci "formerly" docs/features/promise-gate.md` | match count == 0 |
 | No evaluate_delivery ships (anti-criterion, No-Go 1) | `git grep -c "def evaluate_delivery" -- '*.py'` | match count == 0 |
+| Poll path stays ungated (anti-criterion, No-Go 5) | `git grep -c "_evaluate_drafter_promise\|evaluate_promise" -- agent/output_handler.py` | match count == 0 |
 | Timeout source reachable | `grep -c "promise_gate_timeout" bridge/promise_gate.py` | output > 0 |
 | Dead timeout class removed | `grep -c "_PromiseTimeoutError" bridge/promise_gate.py` | match count == 0 |
 | #3016 label assertion gone | `grep -c 'class_ == "forward_deferral"' tests/integration/test_promise_gate_real_api.py` | match count == 0 |
