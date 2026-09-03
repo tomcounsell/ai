@@ -196,11 +196,19 @@ async def resume_completed_session(
     bookkeeping, its ``react_if_worker_down`` (which needs the inbound
     ``message.id``), and its dedup short-circuit.
     """
+    import asyncio
     from pathlib import Path
 
     from bridge.dispatch import dispatch_telegram_session
+    from bridge.poll_registry import mark_session_polls_steered
     from bridge.telegram_bridge import DEFAULTS, _build_completed_resume_text
     from config.enums import SessionType
+
+    # Any answer route closes the question, not only a tap. The vote path marks
+    # the row itself before it gets here, and the marker is idempotent, so this
+    # is the typed-reply case: without it the row survives its full TTL and the
+    # resumed session pauses on an already-answered question every turn.
+    await asyncio.to_thread(mark_session_polls_steered, completed.session_id)
 
     augmented_text = _build_completed_resume_text(
         completed, text, reply_chain_context=reply_chain_context

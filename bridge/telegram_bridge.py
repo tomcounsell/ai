@@ -1034,6 +1034,15 @@ async def _ack_steering_routed(
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     push_steering_message(session_id, text, sender_name, is_abort=is_abort, room_id=room_id)
 
+    # An answer typed into the chat closes the question just as a tap does. The
+    # registry is otherwise written only by the vote path, so a prose answer
+    # would leave the row open for its full TTL and the nudge loop would take
+    # `pause_open_question` every turn — auto-continue silently off for a day.
+    # Offloaded: this is a Redis scan on the bridge's event loop.
+    from bridge.poll_registry import mark_session_polls_steered
+
+    await asyncio.to_thread(mark_session_polls_steered, session_id)
+
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's
     # string EXACTLY (agent/steering.py), so concatenating an advisory onto a
@@ -3388,8 +3397,9 @@ async def main():
     try:
         from bridge.poll_reconcile import poll_reconcile_loop
 
+        # The loop logs its own start line; a second one here made it appear
+        # twice per bridge start.
         _background_tasks.append(asyncio.create_task(poll_reconcile_loop(client)))
-        logger.info("Poll reconciliation loop started")
     except Exception as e:
         logger.error(f"Failed to start poll reconciliation loop: {e}")
 

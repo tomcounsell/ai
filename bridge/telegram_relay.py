@@ -1106,8 +1106,21 @@ async def _find_already_sent_poll(telegram_client, chat_id, poll_id_hint: str):
     return matches[0] if matches else None
 
 
-async def _send_queued_poll(telegram_client, message: dict, key: str) -> int | None:
-    """Send a ``type: "poll"`` payload. Returns the sent message id, or ``None``.
+async def _send_queued_poll(
+    telegram_client, message: dict, key: str
+) -> int | _DeliveredNoId | None:
+    """Send a ``type: "poll"`` payload.
+
+    Returns the sent message id; ``DELIVERED_NO_ID`` when the poll was declined
+    and the question was re-queued as prose instead; ``None`` only for a genuine
+    send failure the caller should retry.
+
+    The sentinel is load-bearing. Both decline branches push the prose fallback
+    before returning, so reporting them as failure makes ``process_outbox``
+    re-queue the *original poll payload*, which declines again for the same
+    reason and enqueues another copy of the question — up to
+    ``MAX_RELAY_RETRIES`` plus the terminal branch, each retry also burning an
+    ``iter_messages`` scan. Same shape as #2179 on the text path.
 
     Ordering inside this function is load-bearing and is asserted by test rather
     than left to reading order.
@@ -1136,7 +1149,7 @@ async def _send_queued_poll(telegram_client, message: dict, key: str) -> int | N
             session_id,
         )
         await _reenqueue_poll_as_text(r, key, message, reason="missing poll_id_hint")
-        return None
+        return DELIVERED_NO_ID
 
     # ── The provisional row is the FIRST statement, ahead of every await ──
     # `process_outbox` already consumed this work item with an atomic LPOP, so
@@ -1209,7 +1222,7 @@ async def _send_queued_poll(telegram_client, message: dict, key: str) -> int | N
         )
         await asyncio.to_thread(delete_pending_poll, poll_id_hint)
         await _reenqueue_poll_as_text(r, key, message, reason=f"ineligible:{eligibility.reason}")
-        return None
+        return DELIVERED_NO_ID
 
     from bridge.response import send_poll
 
@@ -1319,8 +1332,17 @@ async def process_outbox(telegram_client) -> int:
                         msg_id = await _send_custom_emoji_message(telegram_client, message)
                         success = msg_id is not None
                     elif msg_type == "poll":
-                        msg_id = await _send_queued_poll(telegram_client, message, key)
-                        success = msg_id is not None
+                        send_result = await _send_queued_poll(telegram_client, message, key)
+                        # A declined poll has already been re-queued as prose, so
+                        # the payload is consumed, not failed. Re-queuing it would
+                        # decline again and put a second copy of the question in
+                        # front of the human (#2179 shape, poll path).
+                        if send_result is DELIVERED_NO_ID:
+                            success = True
+                            msg_id = None
+                        else:
+                            msg_id = send_result
+                            success = msg_id is not None
                     else:
                         send_result = await _send_queued_message(telegram_client, message)
                         # A send that reached Telegram but returned no message id
@@ -1459,6 +1481,15 @@ async def process_outbox(telegram_client) -> int:
                             await _reenqueue_poll_as_text(
                                 r, key, message, reason="terminal relay failure"
                             )
+                            # Retries are exhausted, so this poll provably never
+                            # landed. Leaving the provisional row alive makes
+                            # every reconcile tick run an `iter_messages` history
+                            # scan hunting for it until the 24h TTL.
+                            hint = message.get("poll_id_hint")
+                            if hint:
+                                from bridge.poll_registry import delete_pending_poll
+
+                                await asyncio.to_thread(delete_pending_poll, hint)
                     else:
                         try:
                             requeue_raw = json.dumps(message)

@@ -35,6 +35,9 @@ def hint(redis_test_db):
     h = uuid.uuid4().hex
     yield h
     reg.delete_pending_poll(h)
+    # A prose answer marks a provisional row steered by hint, so the steered
+    # key is part of this fixture's footprint too.
+    reg._redis().delete(f"{reg.POLL_STEERED_PREFIX}{h}")
 
 
 def _register(pid, session_id="sess-1"):
@@ -287,3 +290,98 @@ class TestSessionHasOpenPoll:
 
         monkeypatch.setattr(reg, "iter_unanswered_polls", _boom)
         assert reg.session_has_open_poll("sess-1") is False
+
+    def test_a_provisional_row_already_counts_as_an_open_question(self, hint):
+        """The relay is a polling loop; the pause check runs at turn end.
+
+        Between `valor-ask-poll` enqueuing the payload and the relay writing the
+        real row, the question exists only as a provisional row. Reading only
+        POLL_OPEN_INDEX reports "no open question" during that window and the
+        session gets nudged straight past it — the exact defect the pause exists
+        to prevent.
+        """
+        reg.register_pending_poll(
+            hint, chat_id=-1, session_id="sess-pending", question="Q?", options=["A", "B"]
+        )
+        assert reg.session_has_open_poll("sess-pending") is True
+
+    def test_a_steered_provisional_row_no_longer_counts(self, hint):
+        reg.register_pending_poll(
+            hint, chat_id=-1, session_id="sess-pending", question="Q?", options=["A", "B"]
+        )
+        reg.mark_poll_steered(hint)
+        assert reg.session_has_open_poll("sess-pending") is False
+
+
+class TestMarkSessionPollsSteered:
+    """A typed answer closes the question exactly as a tap does.
+
+    `mark_poll_steered` is written only by the vote path. Without a route for
+    the prose answer the row survives its full 24h TTL, `session_has_open_poll`
+    keeps returning True, and every turn of that session takes the pause branch
+    instead of nudge-continue — auto-continue silently off for a day, with the
+    session advancing one turn per human message.
+    """
+
+    def test_closes_an_open_poll_for_the_session(self, poll_id):
+        _register(poll_id, session_id="sess-typed")
+        assert reg.session_has_open_poll("sess-typed") is True
+
+        assert reg.mark_session_polls_steered("sess-typed") == 1
+
+        assert reg.poll_steered(poll_id) is True
+        assert reg.session_has_open_poll("sess-typed") is False
+
+    def test_leaves_another_session_alone(self, poll_id):
+        _register(poll_id, session_id="sess-other")
+        assert reg.mark_session_polls_steered("sess-typed") == 0
+        assert reg.session_has_open_poll("sess-other") is True
+
+    def test_closes_a_provisional_row_without_deleting_it(self, hint):
+        """The hint is the only evidence a send may have landed.
+
+        Deleting the row would strand orphan adoption after a restart, so the
+        close-out is a marker, not a delete.
+        """
+        reg.register_pending_poll(
+            hint, chat_id=-1, session_id="sess-typed", question="Q?", options=["A", "B"]
+        )
+        assert reg.mark_session_polls_steered("sess-typed") == 1
+        assert reg.lookup_pending_poll(hint) is not None
+        assert reg.session_has_open_poll("sess-typed") is False
+
+    def test_is_idempotent(self, poll_id):
+        """The vote path marks the row before `resume_completed_session` runs."""
+        _register(poll_id, session_id="sess-typed")
+        reg.mark_poll_steered(poll_id)
+        assert reg.mark_session_polls_steered("sess-typed") == 0
+        assert reg.session_has_open_poll("sess-typed") is False
+
+    def test_missing_session_id_is_a_no_op(self, redis_test_db):
+        assert reg.mark_session_polls_steered(None) == 0
+        assert reg.mark_session_polls_steered("") == 0
+
+    def test_redis_failure_never_raises(self, monkeypatch):
+        """It hangs off an answer route; a bookkeeping failure must not break it."""
+
+        def _boom():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(reg, "iter_unanswered_polls", _boom)
+        assert reg.mark_session_polls_steered("sess-1") == 0
+
+    def test_promotion_carries_the_close_out_onto_the_real_poll_id(self, hint, poll_id):
+        """A prose answer that lands while the payload is still in the outbox.
+
+        Without the carry the promoted row is born unsteered and re-opens the
+        pause on a question the human already answered — the same defect in a
+        narrower window.
+        """
+        reg.register_pending_poll(
+            hint, chat_id=-1, session_id="sess-typed", question="Q?", options=["A", "B"]
+        )
+        reg.mark_session_polls_steered("sess-typed")
+
+        assert reg.promote_pending_poll(hint, poll_id, msg_id=1413) is True
+        assert reg.poll_steered(poll_id) is True
+        assert reg.session_has_open_poll("sess-typed") is False

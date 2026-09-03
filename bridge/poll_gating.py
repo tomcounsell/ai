@@ -78,7 +78,7 @@ def poll_eligible(chat_id: str | int | None, session_id: str | None) -> PollElig
             return PollEligibility(ok=False, reason="unknown_session_type")
         # Newest record wins, matching the relay's own lookup idiom — a stale
         # duplicate row must not decide a live session's eligibility.
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
         session = sessions[0]
 
         session_type = getattr(session, "session_type", None)
