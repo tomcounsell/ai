@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-03
 tracking: https://github.com/tomcounsell/ai/issues/3065
 last_comment_id: 5521519215
+revision_applied: true
+revision_applied_at: 2026-09-03T07:08:44Z
 ---
 
 # SDLC Control Plane: Route on Read Facts, Not Asserted Facts (Residual)
@@ -22,8 +24,11 @@ of those defects on `main` during the run and to leave a precise, first-hand rec
 survived. **This plan scopes only the survivors.** The three landed hotfixes are out of scope
 and are treated as the baseline this work builds on.
 
-What survived is not 51 problems, and it is not six unrelated ones. It is four clusters, each of
-which is the consolidation property pointed at a different substrate.
+What survived is not 51 problems, and it is not six unrelated ones. It is **four clusters plus one
+standalone wedge**, each of which is the consolidation property pointed at a different substrate.
+The standalone is `session-ensure` (Cluster E below): it belongs to none of the four decision-making
+shapes, but it is sequenced first because it is a hard wedge that blocks every other lane on the
+machine, and omitting it from this framing would undercount what ships.
 
 ### Cluster A: the router decides from a subset of the state it can read
 
@@ -87,9 +92,23 @@ ground truth because **a `NO_RULE` payload does not carry the `stage_states` and
 on**. A control plane that consolidates 51 issues about routing on unread facts publishes its own
 most important verdict as an unread fact.
 
+### Cluster E: `session-ensure` destroys the lease it was asked to grant
+
+Not a routing defect, and the reason it leads the task order anyway. `AgentSession.session_id` is a
+plain `Field()`, not the primary key, so a lane whose row was recreated after a crash has two rows
+sharing one id. `tools/sdlc_session_ensure.py:613-620` discards the handle it just saved and
+re-queries by `session_id`, taking `[0]` from what Popoto resolves as an unordered Redis `SMEMBERS`
+read — a coin flip. Four of six consecutive invocations failed on the observed lane. Worse, the
+mismatch cleanup calls `release_issue_lock` with a `candidate` that may have been *adopted* from the
+live lock rather than minted by this call, so the compare-and-delete matches by construction and
+deletes a lease this call never created. The missing distinction is **provenance, not identity**.
+The upstream duplicate-row cause is deferred to #3091; this plan makes the ensure path correct in
+its presence, which is what unwedges lanes today.
+
 **Current behavior:** shipped lanes get routed backward into plan stages and wedge one dispatch
 short of a hard stop; gates report red when they mean "unparseable"; plan-level rulings are
-invisible at merge; and the router's own refusals cannot be diagnosed without reproducing them.
+invisible at merge; the router's own refusals cannot be diagnosed without reproducing them; and a
+read-only-intent probe can revoke a live run's lease.
 
 **Desired outcome:** every one of those decisions reads the state that governs it, at the moment
 it is used, and says so in its output. Where a fact genuinely cannot be read, the decision fails
@@ -821,6 +840,11 @@ paths agree on a lane state that today they disagree about.
 
 ## Success Criteria
 
+> **Merge-lane note:** the implementation PR must use `Refs #3065`, never `Closes #3065`. This lane
+> closes the batch residual, not all 51 consolidated members — #2491's pipeline-graph duplication is
+> the largest survivor. Closing the umbrella is its owner's call once the remainder is dispositioned.
+> Ratified by the PM 2026-09-03.
+
 - [ ] A lane with an open PR, APPROVED review, DOCS pending, and a stale CRITIQUE verdict routes to
       `/do-docs`, from **both** the `next-skill` CLI path and the in-process
       `decide_next_dispatch(stage_states, meta)` path, with and without `--proposed-skill`.
@@ -843,12 +867,31 @@ paths agree on a lane state that today they disagree about.
 - [ ] `scripts/validate_build.py` and `agent/verification_parser.py` agree on the timeout bound and
       on the disposition of a timeout, enforced by the parity fixture.
 - [ ] `tools/merge_predicate.py` refuses to merge a lane whose plan verification carries a `FAIL` or
-      `UNEVALUATED` row, and names the offending row in its refusal. This is the #3080 ruling made
-      machine-readable.
+      `UNEVALUATED` row, and names the offending row in its refusal, reading a **recorded**
+      `_verification_outcomes` aggregate and never re-executing plan-authored commands.
+- [ ] **A hard shipping gate is expressible as a verification row, and the merge predicate honors
+      it.** Motivating case: #3080 / commit `ba092a06d` (owner ruling, 2026-09-02) — "FAIL and
+      UNRESOLVED both hold the PR at REVIEW; the satisfied-by-pause rule is now explicitly scoped to
+      build progression only, never to shipping." That ruling lived only in plan prose
+      (`docs/plans/ask-me-telegram-polls.md:1828`, `:2023`, `:2025`) and PR #3080 merged past it.
+      The gate already reports **PASS / FAIL / UNRESOLVED** (`:1953`), the same tri-state Cluster B
+      introduces, so no new expressive machinery is needed. Acceptance: such a row's `FAIL` **or**
+      `UNEVALUATED` outcome causes the predicate to refuse and name the row, proven by a regression
+      test reconstructing the exact shape (APPROVED verdict, DOCS complete, CI green, one
+      `UNEVALUATED` gate row). On main today that state merges.
+- [ ] **The build-vs-ship split is enforced by consumer, not by row annotation.** The build gate may
+      let an `UNEVALUATED` row pause and allow build progression; the merge predicate may not. Test
+      asserts the same row with the same outcome permits build progression and refuses merge — with
+      no per-row marker, no new frontmatter key, and no addition to any plan grammar.
 - [ ] `session-ensure` returns a stable `run_id` across six consecutive invocations on a lane with
       duplicate `AgentSession` rows, and never releases a lease it did not mint. Demonstrated red:
       four of six fail on `main` today.
-- [ ] No reader of the removed `passed` boolean remains anywhere in the repo.
+- [ ] No reader of **`agent/verification_parser.py`'s** removed `passed` boolean remains, across that
+      module, `scripts/validate_build.py`, and the three verification test modules. Scoped to the
+      type being changed, not to the attribute name: `tools/doctor.py` has its own unrelated
+      `CheckResult.passed` (`:57`) with 83 readers that this plan does not touch, so a repo-wide
+      claim would be false by construction and could never go green. Demonstrated red: the scoped
+      sweep finds 12 real readers on main today, none of them `doctor.py`'s.
 - [ ] The test suites added by `bfa4a6f7d`, `d9cf29dd6`, and `3c689f211` pass unchanged.
 
 ## Verification
@@ -878,18 +921,20 @@ paths agree on a lane state that today they disagree about.
 | Runner parity tests pass | `scripts/pytest-clean.sh tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py -q -n 2` | exit code 0 |
 | Lane identity tests pass | `scripts/pytest-clean.sh tests/unit/test_lane_identity.py -q -n 2` | exit code 0 |
 | Merge predicate tests pass | `scripts/pytest-clean.sh tests/unit/test_merge_predicate.py -q -n 2` | exit code 0 |
-| G3 ladder has a docs arm | `grep -c 'review clean, docs pending' agent/sdlc_router.py` | output > 0 |
+| G3 ladder has a docs arm | `grep -c G3_REDIRECT_REASON_DOCS_PENDING agent/sdlc_router.py` | output > 0 |
 | Reconciliation step exists | `grep -c 'def reconcile_dispatch' agent/sdlc_router.py` | output > 0 |
 | NO_RULE payload carries decision inputs | `grep -c decision_inputs agent/sdlc_router.py` | output > 0 |
 | Tri-state outcome is defined | `grep -c UNEVALUATED agent/verification_parser.py` | output > 0 |
+| Merge predicate reads recorded verification outcomes | `grep -c _verification_outcomes tools/merge_predicate.py` | output > 0 |
+| Verification runner persists the outcome aggregate | `grep -c _verification_outcomes agent/verification_parser.py` | output > 0 |
 | Ruff is clean | `python -m ruff check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
 | Ruff formatting is clean | `python -m ruff format --check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
-| ANTI: no `passed` boolean reader survives | `test -z "$(grep -rn 'result\.passed' agent/ tools/ scripts/ tests/)"` | exit code 0 |
+| ANTI: no reader of the verification `passed` boolean survives | `test -z "$(grep -rnE '(\.passed\b\|passed=)' agent/verification_parser.py scripts/validate_build.py tests/unit/test_verification_parser.py tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py)"` | exit code 0 |
 | ANTI: hooks validators untouched (No-Go #2736) | `test -z "$(git diff --name-only origin/main...HEAD -- .claude/hooks/validators/)"` | exit code 0 |
 | ANTI: pyproject and uv.lock untouched | `test -z "$(git diff --name-only origin/main...HEAD -- pyproject.toml uv.lock)"` | exit code 0 |
 | Branch-truth resolver exists | `grep -c 'def resolve_branch_truth' tools/sdlc_next_skill.py` | output > 0 |
 | Branch truth routes through the sanctioned head resolver | `grep -c resolve_pr_head_sha tools/sdlc_next_skill.py` | output > 0 |
-| ANTI: no raw Redis on Popoto keys added | `test -z "$(grep -rnE '_R\.(delete\|srem\|sadd\|zrem)\(' tools/sdlc_session_ensure.py tools/lane_identity.py)"` | exit code 0 |
+| ANTI: no raw Redis call added on Popoto-managed keys | `test -z "$(git diff origin/main...HEAD -- tools/ agent/ \| grep -E '^\+.*(_R\|POPOTO_REDIS_DB)\.(delete\|srem\|sadd\|zrem)\(')"` | exit code 0 |
 | ANTI: no Claude co-authorship trailer | `test -z "$(git log origin/main..HEAD --format=%B --grep='Co-Authored-By: Claude')"` | exit code 0 |
 
 ## Step by Step Tasks
@@ -928,9 +973,15 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
 ### 3. Complete G3's redirect ladder
 
 - Add the `/do-docs` arm to `agent/sdlc_router.py:501-509` for REVIEW complete + APPROVED + DOCS
-  pending, with the redirect suffix string **`review clean, docs pending`**. (Pinned: a Verification
-  row greps for it. A grep for `SKILL_DO_DOCS` would pass today — row 9 already uses it — and would
-  be a gate incapable of failing, the #2658 defect this plan exists to remove.)
+  pending. Define its reason text as a **named module constant**,
+  `G3_REDIRECT_REASON_DOCS_PENDING = "review clean, docs pending"`, and let the arm reference the
+  constant. The Verification row greps for the **constant name**, not the prose.
+  (Two reasons, both from critique round 1: a grep for `SKILL_DO_DOCS` would pass today — row 9
+  already uses it — and so would be a gate incapable of failing, the #2658 defect this plan exists
+  to remove; and a grep for the literal sentence would break on an innocent copy-edit that leaves
+  the logic identical. Pinning the constant keeps the row RED-today while decoupling it from
+  wording, matching how `reconcile_dispatch`, `decision_inputs`, and `resolve_branch_truth` are
+  already pinned.)
 - Tighten arm 1 to require a recorded APPROVED verdict rather than the REVIEW marker alone, matching
   rows 9 and 10 (`:1956`, `:1970`).
 - Tests: two-pole for each arm, including the state that previously fell to the `else` and produced a
@@ -949,6 +1000,21 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
 - Preserve the existing asymmetry deliberately: rule predicates are try/except-wrapped
   (`:2260-2263`), guards are not (`1083-1086`). Reconciliation must not silently swallow a raising
   guard into a `NO_RULE`.
+- **The guards are not pure, and reconciliation runs them twice — this is a stated invariant, not an
+  accident.** `guard_g5_artifact_hash_cache` (`:603-656`) mutates `record["artifact_hash"]` in place
+  at `:656` and logs a WARNING at `:648` on legacy-hash migration. Double invocation is idempotent
+  today *only* because `stage_states` is passed by reference, so the second pass sees the already-
+  migrated record. Reconciliation MUST therefore pass the **same** `stage_states` and `meta` objects
+  by reference and never a defensive copy. A copy would re-run the migration branch and double the
+  log noise — and copying inputs is exactly the "safe" change a later contributor would make without
+  knowing this. Write the invariant into the function's docstring so the next reader cannot
+  unknowingly break it.
+- Regression test: assert `guard_g5_artifact_hash_cache`'s migration branch executes **exactly once**
+  per `decide_next_dispatch` call, asserting on the WARNING log-record count via `caplog` rather than
+  on the return value — the return value is identical either way, which is why this needs its own
+  test. The alternative (making the side-effecting guards idempotent first) is a larger change and is
+  not taken here; if the builder finds a second impure guard that reconciliation cannot safely
+  re-run, that is a design question to escalate, not to paper over.
 - Tests: the #2771/#2334 lane shape routes to `/do-docs`; a lane needing `/do-plan-critique` with no
   PR still gets it; a double-veto produces `Blocked` with both verdicts and terminates.
 
@@ -979,6 +1045,12 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
   contradicts the recorded slug, write the correction and record the evidence. Re-read immediately
   before writing so a concurrent repair converges to a no-op.
 - Do not reuse `_record_slug_if_empty` (`:396+`) — its no-overwrite behavior is the defect.
+- **Re-read before building, do not trust this plan's summary.** The rung-2 / `e50eba258` narrative
+  (adoption fires only on an empty recorded slug) is load-bearing for this task and for Risk 3, but
+  it rests on spike-3's read at plan time. Re-verify `resolve_lane_slug`, `adopt_lane_slug`,
+  `_record_slug_if_empty`, and `_adopt_from_pr` against the branch at build time and reconcile any
+  drift before writing the repair. A plan that tells a builder to route on its own asserted summary
+  of code it read days earlier is committing this issue's defect in miniature.
 - Rung 1 (`:535-538`) keeps returning the recorded slug for ordinary reads; only the fail-closed
   decision path verifies it.
 - Replace the "could never be corrected" claim in the module docstring (`:37-39`) and the matching
@@ -995,30 +1067,61 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
   reason. `format_results` (`:499`) renders it distinctly and never as `[FAIL]`.
 - Extend `evaluate_expectation` (`:304-384`) to cover the corpus #2836's spike-5 measured:
   `` prints `N` ``, `== N`, `>= N`, `> N`, `empty output`, `exit N`. Re-derive the corpus by the
-  same method to confirm coverage rather than trusting the historical count.
+  same method to confirm coverage rather than trusting the historical count. **Closes the substance
+  of #2791**, which was closed as consolidated with no fix commit and whose symptom reproduces on
+  main today.
 - Classify check tables by column contract, not by `any` of the first three headers being `Command`
   (`_is_check_table_header:178-183`), and emit a `SkippedTable` diagnostic for non-check tables.
-  Leave per-block scoping (`_iter_pipe_blocks:156`) alone; it is correct.
+  Leave per-block scoping (`_iter_pipe_blocks:156`) alone; it is correct. **Closes the substance of
+  #3022**, closed as consolidated and entirely unfixed; reproduced on main with the issue's exact
+  table shape.
 - Extract the command as the first backticked span (`:286-288`), not the whole backtick-stripped
   cell.
 - Converge `scripts/validate_build.py` (`:238`, `:260-263`) onto one bound and one timeout
   disposition, and add timeout and malformed rows to
   `tests/fixtures/verification/runner_agreement.md` so the parity fixture can actually catch a
-  divergence.
+  divergence. **Closes the substance of #2901** (120s bound, BRE alternation lost to cell escaping,
+  narrow expectation vocabulary), all three parts of which reproduce on main.
+- Persist the graded aggregate to the ledger's `_verification_outcomes` key (see task 8 for the
+  substrate and the PM ruling that authorizes it). This is task 7's one new output.
 - Replace `tests/unit/test_verification_parser.py:210`, which pins the bug as intended behavior.
 
 ### 8. Let the merge predicate see verification outcomes
 
-- Add the plan's verification outcome as an input group to `tools/merge_predicate.py`. A `FAIL` or
-  `UNEVALUATED` row holds the PR, and the refusal names the row.
+- **Source of truth: recorded state, never live re-execution. Ruled by the PM, 2026-09-03, in
+  response to critique round 1's concern that the source was unspecified.** The merge predicate MUST
+  NOT shell out to plan-authored commands — re-running `pytest-clean.sh` suites inside a merge gate
+  is a non-starter, and every other check in `merge_predicate.py` already reads recorded state via
+  `gh` / `sdlc-tool` rather than executing anything.
+- The substrate is a new **underscore-prefixed key in the ledger's existing `stage_states` JSON**,
+  named `_verification_outcomes` (pinned; a Verification row greps for it), mirroring the
+  `_verdicts` precedent already in that blob. Written by the verification runner when it grades a
+  plan at TEST/DOCS time; read by the predicate. **The PM ruled explicitly that this does not count
+  as the Popoto schema change Prerequisites forbids** — that prohibition covers model and data
+  migrations, not a new key in an already-flexible JSON blob, so no
+  `scripts/update/migrations.py` entry is required and Prerequisites stands unchanged.
+- Add the write to task 7's outputs: the runner gains a persistence point alongside its existing
+  result rendering. **If the builder finds the runner has no natural write point for this, stop and
+  escalate rather than forcing one** — that is a real design question, and the PM asked to be
+  brought it directly.
+- A `FAIL` or `UNEVALUATED` row holds the PR, and the refusal names the row. This is the #3080 /
+  `ba092a06d` ruling made machine-readable: that owner ruling said "FAIL and UNRESOLVED both hold
+  the PR at REVIEW" and lived only in plan prose, so PR #3080 merged past it.
+- Keep the build-vs-ship split on the **consumer**, never on the row: the build gate may treat
+  `UNEVALUATED` as a pause that allows build progression, the merge predicate may not. No `GATE:`
+  row marker and no frontmatter key. A per-row severity annotation is the first step back toward the
+  gate DSL this plan rejected, and `ba092a06d` shows it is unnecessary.
 - Resolve the plan document through the lane's `tracking:` frontmatter
   (`tools/plan_doc_scope.py`), never by filename match — the lane slug and plan filename are allowed
   to differ.
 - A lane with no plan document is not blocked by its absence; that would be a new fail-closed
   behavior this plan has no evidence for. It is reported, not enforced.
 - No new plan frontmatter key, and no fourth plan grammar (see Technical Approach).
-- Tests: the #3080 shape (APPROVED verdict, failing verification row) refuses to merge and names the
-  row; a clean lane still merges; a plan-less lane is unaffected.
+- Tests: the #3080 shape reconstructed exactly — APPROVED review verdict, DOCS complete, CI green,
+  one `UNEVALUATED` gate row — refuses to merge and names the row (on main today that state merges);
+  the same shape with a `FAIL` row likewise refuses; the same row and outcome still permits build
+  progression, proving the split lives on the consumer; a clean lane still merges; a plan-less lane
+  is unaffected.
 
 ### 9. Documentation cascade
 
@@ -1030,13 +1133,47 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency; structural | Verification row `ANTI: no raw Redis on Popoto keys added` uses `grep -rnE '_R\.(delete\|srem\|sadd\|zrem)\('`. Under `-E` (ERE) the escaped pipes are literal, so the pattern matches only the literal text `_R.(delete\|srem\|sadd\|zrem)(` and can never match a real call. Verified empirically: as-written exits 1 on input `_R.delete(x)`; unescaping the pipes matches. This is the #2658 "gate structurally incapable of firing" defect reproduced inside the gate table of the plan that exists to eliminate it. | pending | Inside `grep -E`, alternation is written with a **bare** pipe; a backslash-escaped pipe is a literal character. Remove the backslashes before each of the three separators in the alternation group so the group reads as four alternatives rather than one literal string. Then prove the row can fire: run it against a scratch file containing `_R.delete(x)` and confirm it now exits 0 where the as-written pattern exits 1. Note the surrounding markdown table still requires `\|` for cell escaping, so the escaping level must be introduced by the table, not baked into the regex. Secondary: `_R` is a function-local alias imported at `tools/sdlc_session_ensure.py:1042` and appears **zero** times in `tools/lane_identity.py`, so the row also depends on the builder reusing that exact alias — also match the imported symbol `POPOTO_REDIS_DB`. | 
-| BLOCKER | structural (executed against main) | Verification row `ANTI: no `passed` boolean reader survives` (`test -z "$(grep -rn 'result\.passed' agent/ tools/ scripts/ tests/)"`) and the matching Success Criterion "No reader of the removed `passed` boolean remains anywhere in the repo" are both unsatisfiable **and** blind. Executed on main: 83 hits across 6 files, every one of them reading `tools/doctor.py`'s unrelated `CheckResult.passed` (`tools/doctor.py:57`) — none of which this plan removes, so the row can never turn green. Simultaneously it detects none of the real readers: `agent/verification_parser.py` spells them `r.passed` (`:473, :499, :501, :511`) and `passed=` kwargs (`:417, :427, :437`), and `grep -rn 'result\.passed'` on the three verification test files returns **0**. It is a gate incapable of passing and incapable of detecting its target. | pending | Scope the sweep to the type being changed, not to the attribute name. Replace with a grep for the `CheckResult`/verification symbol's own readers, e.g. `grep -rn '\.passed' agent/verification_parser.py scripts/validate_build.py tests/unit/test_verification_parser.py tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py` expected empty, and exclude `tools/doctor.py`'s namesake explicitly. Reword the Success Criterion to "no reader of `agent/verification_parser.py`'s removed `passed` boolean remains", since a repo-wide claim is false by construction. Demonstrate red before trusting green (#2658). | 
-| CONCERN | Risk & Robustness | Task 8 says `tools/merge_predicate.py` "gains one input group (verification outcomes)" but never says where that data comes from. A repo-wide grep found no persistence of verification results anywhere, and Prerequisites explicitly rules out a Popoto schema change — leaving live re-execution of the plan's `## Verification` table (including full `pytest-clean.sh` suites) inside a merge gate as the only unaccounted-for path. Every other check in `merge_predicate.py` reads cached/recorded state via `gh`/`sdlc-tool`, never re-executes plan-authored shell commands. | pending | Decide and state the source before build. If it is a recorded artifact, name the substrate (a `sdlc-tool verdict`/meta key carrying the aggregate, written by `/do-build`) and add it to Task 7's outputs. If it is live re-execution, the predicate must not shell out to arbitrary plan-authored commands from a merge gate — bound it to reading the last recorded BUILD verification aggregate. Do not leave this to the builder: the two options have different blast radii and only one needs a write path. | 
-| CONCERN | Risk & Robustness | Task 4's reconciliation re-runs the full guard list a second time per routing decision, but the guards are not pure. `guard_g5_artifact_hash_cache` (`agent/sdlc_router.py:603-656`) mutates `record["artifact_hash"]` in place at `:656` and logs a WARNING at `:648` on legacy-hash migration. Double invocation is currently idempotent only because `stage_states` is passed by reference between passes — an implementation accident the plan does not name as an invariant, so a natural defensive change (copying reconciliation's inputs) would double the log noise and re-run the migration branch. | pending | State the purity requirement explicitly in Task 4: reconciliation MUST pass the *same* `stage_states`/`meta` objects by reference, never a copy, OR the side-effecting guards must be made idempotent first. Add a regression test asserting `guard_g5_artifact_hash_cache` runs its migration branch exactly once per `decide_next_dispatch` call (assert on the WARNING log record count, not just the return value). | 
-| CONCERN | Scope & Value | Task 3 pins a literal prose string (`review clean, docs pending`) as the required redirect-suffix text and greps for it verbatim. That over-specifies wording the builder should own; a later copy-edit to the reason string breaks the check even though the logic is unchanged. | pending | Pin a named constant rather than prose: define `G3_REDIRECT_REASON_DOCS_PENDING = "review clean, docs pending"` in `agent/sdlc_router.py` and change the Verification row to `grep -c 'G3_REDIRECT_REASON_DOCS_PENDING' agent/sdlc_router.py`. This keeps the row RED-today (the constant does not exist on main) while decoupling the gate from wording — the same decoupling the plan already applies to `reconcile_dispatch`, `decision_inputs`, and `resolve_branch_truth`. | 
-| NIT | Scope & Value | The Problem section frames the residual as exactly "four clusters" (A/B/C/D), but Task 1 (`session-ensure` readback + provenance, sequenced first as "a hard wedge") fits none of them and is absent from that summary, so the framing undercounts what ships. | pending | n/a | 
-| NIT | History & Consistency | The slug-repair narrative (rung 2 / `e50eba258` firing only on an empty recorded slug) is load-bearing for Task 6 and Risk 3 but rests on the plan's own spike-3 summary rather than a re-read at build time. | pending | n/a | 
+| BLOCKER | History & Consistency; structural | Verification row `ANTI: no raw Redis on Popoto keys added` uses `grep -rnE '_R\.(delete\|srem\|sadd\|zrem)\('`. Under `-E` (ERE) the escaped pipes are literal, so the pattern matches only the literal text `_R.(delete\|srem\|sadd\|zrem)(` and can never match a real call. Verified empirically: as-written exits 1 on input `_R.delete(x)`; unescaping the pipes matches. This is the #2658 "gate structurally incapable of firing" defect reproduced inside the gate table of the plan that exists to eliminate it. | **addressed** | Inside `grep -E`, alternation is written with a **bare** pipe; a backslash-escaped pipe is a literal character. Remove the backslashes before each of the three separators in the alternation group so the group reads as four alternatives rather than one literal string. Then prove the row can fire: run it against a scratch file containing `_R.delete(x)` and confirm it now exits 0 where the as-written pattern exits 1. Note the surrounding markdown table still requires `\|` for cell escaping, so the escaping level must be introduced by the table, not baked into the regex. Secondary: `_R` is a function-local alias imported at `tools/sdlc_session_ensure.py:1042` and appears **zero** times in `tools/lane_identity.py`, so the row also depends on the builder reusing that exact alias — also match the imported symbol `POPOTO_REDIS_DB`. **PARTIALLY ACCEPTED — primary claim falsified, secondary adopted.** See the Deviation note below the table. |
+| BLOCKER | structural (executed against main) | Verification row `ANTI: no `passed` boolean reader survives` (`test -z "$(grep -rn 'result\.passed' agent/ tools/ scripts/ tests/)"`) and the matching Success Criterion "No reader of the removed `passed` boolean remains anywhere in the repo" are both unsatisfiable **and** blind. Executed on main: 83 hits across 6 files, every one of them reading `tools/doctor.py`'s unrelated `CheckResult.passed` (`tools/doctor.py:57`) — none of which this plan removes, so the row can never turn green. Simultaneously it detects none of the real readers: `agent/verification_parser.py` spells them `r.passed` (`:473, :499, :501, :511`) and `passed=` kwargs (`:417, :427, :437`), and `grep -rn 'result\.passed'` on the three verification test files returns **0**. It is a gate incapable of passing and incapable of detecting its target. | **addressed** | Scope the sweep to the type being changed, not to the attribute name. Replace with a grep for the `CheckResult`/verification symbol's own readers, e.g. `grep -rn '\.passed' agent/verification_parser.py scripts/validate_build.py tests/unit/test_verification_parser.py tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py` expected empty, and exclude `tools/doctor.py`'s namesake explicitly. Reword the Success Criterion to "no reader of `agent/verification_parser.py`'s removed `passed` boolean remains", since a repo-wide claim is false by construction. Demonstrate red before trusting green (#2658). **ACCEPTED — row and criterion both replaced.** Row now sweeps `(\.passed\b\|passed=)` scoped to `verification_parser.py`, `validate_build.py` and the three verification test modules; `tools/doctor.py` is out of scope by path, not by exclusion rule. Verified on main: 12 real readers found, 0 from `doctor.py`, so the row is RED for the right reason and can go green. Success Criterion reworded from a repo-wide claim to a module-scoped one. |
+| CONCERN | Risk & Robustness | Task 8 says `tools/merge_predicate.py` "gains one input group (verification outcomes)" but never says where that data comes from. A repo-wide grep found no persistence of verification results anywhere, and Prerequisites explicitly rules out a Popoto schema change — leaving live re-execution of the plan's `## Verification` table (including full `pytest-clean.sh` suites) inside a merge gate as the only unaccounted-for path. Every other check in `merge_predicate.py` reads cached/recorded state via `gh`/`sdlc-tool`, never re-executes plan-authored shell commands. | **addressed** | Decide and state the source before build. If it is a recorded artifact, name the substrate (a `sdlc-tool verdict`/meta key carrying the aggregate, written by `/do-build`) and add it to Task 7's outputs. If it is live re-execution, the predicate must not shell out to arbitrary plan-authored commands from a merge gate — bound it to reading the last recorded BUILD verification aggregate. Do not leave this to the builder: the two options have different blast radii and only one needs a write path. **ACCEPTED — resolved by PM ruling 2026-09-03, cited in task 8.** Source is recorded state, never live re-execution: a new underscore-prefixed `_verification_outcomes` key in the ledger's existing `stage_states` JSON, mirroring the `_verdicts` precedent, written by the runner (task 7's one new output) and read by the predicate. PM ruled explicitly this is not the Popoto schema change Prerequisites forbids, so Prerequisites stands. Escalation clause added if the runner has no natural write point. |
+| CONCERN | Risk & Robustness | Task 4's reconciliation re-runs the full guard list a second time per routing decision, but the guards are not pure. `guard_g5_artifact_hash_cache` (`agent/sdlc_router.py:603-656`) mutates `record["artifact_hash"]` in place at `:656` and logs a WARNING at `:648` on legacy-hash migration. Double invocation is currently idempotent only because `stage_states` is passed by reference between passes — an implementation accident the plan does not name as an invariant, so a natural defensive change (copying reconciliation's inputs) would double the log noise and re-run the migration branch. | **addressed** | State the purity requirement explicitly in Task 4: reconciliation MUST pass the *same* `stage_states`/`meta` objects by reference, never a copy, OR the side-effecting guards must be made idempotent first. Add a regression test asserting `guard_g5_artifact_hash_cache` runs its migration branch exactly once per `decide_next_dispatch` call (assert on the WARNING log record count, not just the return value). **ACCEPTED — purity stated as an invariant in task 4.** Reconciliation MUST pass the same `stage_states`/`meta` by reference, never a copy, and the invariant goes in the function docstring so a later defensive copy cannot silently break it. Regression test asserts `guard_g5_artifact_hash_cache`'s migration branch runs exactly once per `decide_next_dispatch`, via `caplog` WARNING count rather than return value. |
+| CONCERN | Scope & Value | Task 3 pins a literal prose string (`review clean, docs pending`) as the required redirect-suffix text and greps for it verbatim. That over-specifies wording the builder should own; a later copy-edit to the reason string breaks the check even though the logic is unchanged. | **addressed** | Pin a named constant rather than prose: define `G3_REDIRECT_REASON_DOCS_PENDING = "review clean, docs pending"` in `agent/sdlc_router.py` and change the Verification row to `grep -c 'G3_REDIRECT_REASON_DOCS_PENDING' agent/sdlc_router.py`. This keeps the row RED-today (the constant does not exist on main) while decoupling the gate from wording — the same decoupling the plan already applies to `reconcile_dispatch`, `decision_inputs`, and `resolve_branch_truth`. **ACCEPTED — prose unpinned, constant pinned.** Task 3 now defines `G3_REDIRECT_REASON_DOCS_PENDING` and the row greps the constant name. Stays RED-today (constant absent on main) while surviving a copy-edit. |
+| NIT | Scope & Value | The Problem section frames the residual as exactly "four clusters" (A/B/C/D), but Task 1 (`session-ensure` readback + provenance, sequenced first as "a hard wedge") fits none of them and is absent from that summary, so the framing undercounts what ships. | **addressed** | n/a **ACCEPTED — framing corrected.** Problem section now reads "four clusters plus one standalone wedge" and a new **Cluster E** documents `session-ensure`, naming why it leads the task order. |
+| NIT | History & Consistency | The slug-repair narrative (rung 2 / `e50eba258` firing only on an empty recorded slug) is load-bearing for Task 6 and Risk 3 but rests on the plan's own spike-3 summary rather than a re-read at build time. | **addressed** | n/a **ACCEPTED — build-time re-read mandated.** Task 6 now requires re-verifying `resolve_lane_slug`, `adopt_lane_slug`, `_record_slug_if_empty` and `_adopt_from_pr` against the branch before writing the repair, rather than trusting spike-3's plan-time read. |
+
+### Named deviation — critique blocker 1's primary claim is falsified
+
+Recording this rather than silently doing something different, so the decider can overrule me.
+
+**The claim:** the raw-Redis row's `\|` escapes make the ERE match a literal string, so the row can
+never fire. The critic verified this "empirically" and it is true *of the raw markdown text*.
+
+**Why it does not hold:** the row is never executed as raw markdown. `parse_verification_table`
+unescapes `\|` to a bare `|` when it extracts the cell, so the shell receives
+`grep -rnE '_R\.(delete|srem|sadd|zrem)\('` — correct ERE alternation. Verified by printing the
+parsed command and running it two-pole: it exits 1 against a file containing `_R.delete(x)` and
+exits 0 against a clean file. **Applying the suggested fix would have regressed the row**: bare pipes
+in the markdown source split the cell into six columns, which is exactly the `malformed` state this
+row was already repaired out of once during plan authoring.
+
+The critic asserted what the shell receives without reading it through the parser that produces it.
+That is this issue's own defect class, which is worth recording precisely because it happened inside
+the critique of the plan that exists to eliminate it. The escaping composition is genuinely
+confusing, which is the argument for task 7's documentation bullet rather than against it.
+
+**What was adopted instead** — the secondary claim, which is valid and sharper than the primary one.
+`_R` is a function-local alias (`tools/sdlc_session_ensure.py:1042`) with 2 uses in that file and
+**0** in `tools/lane_identity.py`, so the row was narrow. Investigating that surfaced a harder
+problem the critique did not reach: `tools/lane_identity.py:389` **already** calls
+`POPOTO_REDIS_DB.delete(...)` on a slug-lock key. That call is legitimate — the rule governs
+Popoto-managed *model* keys, not lock keys — but it means any whole-file anti-criterion is RED on
+main for a pre-existing reason and can never go green, which is precisely critique blocker 2's
+defect in a second location.
+
+The row is therefore now **diff-scoped**, judging what the commit adds rather than what its files
+already contain, matching the wave4 lesson this plan cites in Prior Art. Proven two-pole against
+synthetic diffs: exit 1 when a violating `+` line is added, exit 0 when the only violation is on a
+`-` line.
 
 ---
 
@@ -1057,7 +1194,9 @@ need diagnosing, and the two disjoint file sets stay separable into two PRs.
    *about* verification rows and that a fourth plan grammar extends the drift #2491 documents. This
    was the finding flagged as "a candidate, weigh it on its merits", so it is the one scope call I
    most want overruled if the owner reads it differently.
-4. **Should `UNEVALUATED` block a merge, or only a build?** I have it blocking both (task 8), on the
-   principle that an ungraded criterion is not a met criterion. The counter-argument is that it makes
-   an unparseable row in an old plan able to hold a good PR. If that is unacceptable, the narrower
-   option is: `UNEVALUATED` blocks the build gate but only warns at merge.
+4. ~~**Should `UNEVALUATED` block a merge, or only a build?**~~ **Resolved 2026-09-03 by the
+   motivating incident rather than by judgement.** Commit `ba092a06d` scopes satisfied-by-pause "to
+   build progression only, never to shipping", so both dispositions are required and the split is by
+   *consumer*: the build gate may pause on `UNEVALUATED`, the merge predicate holds on it. Encoded in
+   Success Criteria and task 8. No per-row severity marker is needed, which is what keeps the scoped
+   Cluster C from growing into the gate DSL rejected in Technical Approach.
