@@ -565,6 +565,29 @@ def _verify_stage_artifacts_live(
                 "branch_truth": truth.status,
                 "branch_truth_reason": truth.reason,
             }
+        if truth.branch and truth.branch != lane_branch:
+            # #3065 Task 6: branch truth just proved the recorded slug wrong
+            # -- the PR's work lives on `truth.branch`, not the name derived
+            # from the recorded slug. This IS the fail-closed decision point
+            # `repair_lane_slug` exists for: correct the ledger now, rather
+            # than leaving a proven-wrong slug to keep confusing every future
+            # tick and every other consumer of the recorded identity
+            # (worktree, branch, task list). Best-effort and non-fatal: a
+            # failed repair must never turn a successful verification into an
+            # error, and the gate inside repair_lane_slug re-adjudicates
+            # uniqueness independently, so a stale `truth` here cannot force
+            # a bad write.
+            try:
+                from tools.lane_identity import repair_lane_slug
+
+                repair_lane_slug(issue_number, target_repo=repo)
+            except Exception as e:
+                logger.debug(
+                    "stage-artifact-verify: issue #%s slug repair attempt failed (%s: %s)",
+                    issue_number,
+                    type(e).__name__,
+                    e,
+                )
         return {
             "branch_truth": truth.status,
             "branch_truth_branch": truth.branch,
