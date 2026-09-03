@@ -1048,10 +1048,20 @@ async def _ack_steering_routed(
     # routes. Failing to close costs a day of lost auto-continue. Documented in
     # docs/features/telegram-poll-questions.md.
     #
-    # Offloaded: this is a Redis scan on the bridge's event loop.
+    # Offloaded: this is a Redis scan on the bridge's event loop — and guarded
+    # for the same reason as the sibling call in `resume_completed_session`.
+    # `mark_session_polls_steered` never raises, but `asyncio.to_thread` can on a
+    # closing loop, and this site is the hotter of the two: it sits on the
+    # LIVE / PENDING / LIVE_GUARD routes, which set no
+    # `_steering_session_enqueued` sentinel, so a raise here falls through to the
+    # final enqueue and delivers the #997 duplicate. Best-effort bookkeeping must
+    # not break the routing it hangs off.
     from bridge.poll_registry import mark_session_polls_steered
 
-    await asyncio.to_thread(mark_session_polls_steered, session_id)
+    try:
+        await asyncio.to_thread(mark_session_polls_steered, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"mark_session_polls_steered failed for session_id={session_id}: {exc}")
 
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's

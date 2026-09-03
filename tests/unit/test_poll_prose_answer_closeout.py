@@ -242,23 +242,53 @@ class TestAdoptionStillScansAndPromotesASteeredHint:
     """
 
     @pytest.mark.asyncio
-    async def test_steered_hint_is_still_passed_to_the_scan_and_promoted_when_found(self):
+    async def test_steered_hint_is_still_scanned_and_the_promoted_row_is_born_steered(
+        self, redis_test_db
+    ):
+        """Runs against real Redis, and the hint is genuinely marked steered.
+
+        Patching `iter_pending_polls` and asserting the scan saw the hint would
+        pass identically with the skip re-added, since nothing in that setup makes
+        the hint steered. The marker has to be a real registry write, and the
+        promoted row has to be read back, or the test asserts nothing.
+        """
+        import uuid
+
+        from bridge import poll_registry as reg
         from bridge.poll_reconcile import adopt_orphaned_polls
 
-        row = {"chat_id": "-1001", "session_id": "sess-1"}
-        with (
-            patch(
-                "bridge.poll_reconcile.iter_pending_polls",
-                return_value=iter([("hint-steered", row)]),
-            ),
-            patch(
-                "bridge.telegram_relay._find_already_sent_poll",
-                new_callable=AsyncMock,
-                return_value=(67890, "server-poll-id"),
-            ) as find,
-            patch("bridge.poll_reconcile.promote_pending_poll") as promote,
-        ):
-            await adopt_orphaned_polls(MagicMock())
+        hint = uuid.uuid4().hex
+        poll_id = f"test-{uuid.uuid4().hex[:12]}"
+        try:
+            reg.register_pending_poll(
+                hint, chat_id=-1001, session_id="sess-1", question="Q?", options=["A", "B"]
+            )
+            # Unrelated chatter, not an answer — this is the case the skip broke.
+            reg.mark_session_polls_steered("sess-1")
+            assert reg.poll_steered(hint) is True
 
-        assert [c.args[2] for c in find.call_args_list] == ["hint-steered"]
-        promote.assert_called_once_with("hint-steered", "server-poll-id", msg_id=67890)
+            # Scoped to this test's hint: the claimed db is shared with sibling
+            # tests, and a blanket return would try to promote their rows onto
+            # this poll id too.
+            async def _find(_client, _peer, scanned_hint):
+                return (67890, poll_id) if scanned_hint == hint else None
+
+            with patch(
+                "bridge.telegram_relay._find_already_sent_poll",
+                new=_find,
+            ):
+                await adopt_orphaned_polls(MagicMock())
+
+            # Adopted, so a later tap resolves a row instead of dying at
+            # `lookup_poll(poll_id) is None` — and the row is born steered, so it
+            # costs the reconcile loop nothing.
+            assert reg.lookup_poll(poll_id) is not None
+            assert reg.poll_steered(poll_id) is True
+            assert reg.lookup_pending_poll(hint) is None
+        finally:
+            r = reg._redis()
+            reg.delete_pending_poll(hint)
+            r.delete(f"{reg.POLL_STEERED_PREFIX}{hint}")
+            for prefix in (reg.POLL_ROW_PREFIX, reg.POLL_STEERED_PREFIX):
+                r.delete(f"{prefix}{poll_id}")
+            r.srem(reg.POLL_OPEN_INDEX, poll_id)
