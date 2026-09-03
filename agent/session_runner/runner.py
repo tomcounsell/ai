@@ -184,6 +184,41 @@ PM_COMPLIANCE_NUDGE = (
     "on the first line, followed by the content."
 )
 
+# Coverage bounce (issue #3027, plan promise-gate-recorded-obligations Task
+# 1): a turn whose ``ask_coverage`` carries non-``delivered`` clauses is not
+# dispatched to the human — instead the runner pushes an advisory as
+# self-draft steering (same channel/posture as the drafter's promise-gate
+# advisory) and this short placeholder becomes the loop's carry-over
+# ``message`` for the next turn. The advisory itself (the substantive
+# content, with each clause + disposition) lives in the pushed steering
+# message, drained and merged in at the next turn boundary — this
+# placeholder deliberately says nothing about routing prefixes (unlike
+# PM_COMPLIANCE_NUDGE) so the two are never conflated.
+ASK_COVERAGE_BOUNCE_CONTINUE_MESSAGE = "Awaiting your revised reply covering every part of the ask."
+
+
+def _format_ask_coverage_advisory(non_delivered: list[dict[str, str]]) -> str:
+    """Build the coverage-bounce advisory pushed as self-draft steering.
+
+    Enumerates each non-``delivered`` clause and its disposition and
+    instructs the PM to state each in prose on the revised turn. Present-
+    fact / imperative framing only (no "I'll", "stay tuned", or other
+    forward-deferral phrasing) — the advisory must itself clear
+    ``bridge.promise_gate._evaluate_promise_heuristic`` in case a compliant
+    PM echoes it back near-verbatim (precedent:
+    ``test_substitute_message_passes_the_heuristic``).
+    """
+    lines = "\n".join(f"- {c['item']}: {c['disposition']}" for c in non_delivered)
+    return (
+        "Your last reply did not cover every part of the human's ask. "
+        "These item(s) are not marked delivered:\n"
+        f"{lines}\n"
+        "Revise your reply now. State each item's disposition in plain "
+        "prose (delivered, blocked, declined, or not started) and cite "
+        "evidence for anything delivered."
+    )
+
+
 # Wrap-up prompt: one extra PM turn to produce a user-facing message when the
 # run ended without delivering one.
 PM_WRAPUP_PROMPT = (
@@ -430,6 +465,15 @@ class SessionRunner:
         # (plan #3081): dedup set so a re-stated gap rides the open-question
         # channel once, not once per turn.
         self._forwarded_escalations: set[str] = set()
+        # Coverage bounce (issue #3027, Race 2): turn-scoped, NOT
+        # session-global — a runner instance is fresh per ``run()``
+        # invocation (see the completion-refusal-ladder comment above), so
+        # this flag naturally resets per human turn. Set True the moment a
+        # bounce successfully fires; every subsequent ask_coverage check in
+        # THIS run then short-circuits to "dispatch as-is" — the revision is
+        # delivered even if still imperfect (no semantic verification of the
+        # revision; see the plan's Rabbit Holes section).
+        self._coverage_bounce_used_this_run = False
 
         # Test seam for the sidechain scan root (~/.claude/projects).
         self._projects_root = projects_root
@@ -1493,6 +1537,91 @@ class SessionRunner:
             self._persist_refusal_count(issue_number, meta, self._completion_refusal_count)
         return decision
 
+    def _check_ask_coverage_bounce(self, classification: ClassificationResult) -> bool:
+        """Withhold dispatch if the turn's ``ask_coverage`` is incomplete.
+
+        Issue #3027 (Race 2): when the schema-validated turn's
+        ``ask_coverage`` carries one or more clauses whose disposition is
+        not ``delivered``, the runner withholds dispatch and pushes a
+        coverage advisory as self-draft steering — the PM's revised turn
+        (drained at the next turn boundary via the existing steering
+        mechanism) is what ships. Returns ``True`` iff the bounce fired
+        (caller must NOT dispatch this turn's payload); ``False`` when there
+        is nothing to bounce on, or the shared attempt budget is already
+        exhausted.
+
+        Composed ONLY from ``classification`` — the payload actually being
+        routed for THIS turn — never from a live read of ``self._agent_session``
+        (Race 1: the runner may already be composing turn N+1 by the time a
+        fire-and-forget delivery task would read live session state; nothing
+        here is deferred to a task, so this constraint is satisfied by
+        construction).
+
+        Shares the ``self_draft_attempts`` budget
+        (``agent.steering.bump_self_draft_attempts`` /
+        ``SELF_DRAFT_MAX_ATTEMPTS``) with the drafter's promise-gate bounce
+        (``agent/output_handler.py::_inject_self_draft_steering``) so a turn
+        that qualifies for both never ping-pongs past the shared cap.
+
+        Also enforces its OWN turn-scoped once-only rule
+        (``self._coverage_bounce_used_this_run``, reset per ``run()``
+        invocation): exactly one coverage bounce per human turn. Without
+        this, a revision that honestly restates a still-``not_started``/
+        ``blocked``/``declined`` clause (a legitimate terminal disposition,
+        not a rubber stamp) would bounce again every turn until the shared
+        budget hard-stops it — the plan's Rabbit Holes section names
+        semantically re-verifying the revision as the exact arms race R1
+        ends, so after one bounce the revision ships regardless of its
+        ask_coverage content.
+        """
+        if self._coverage_bounce_used_this_run:
+            return False
+
+        non_delivered = [
+            c for c in classification.ask_coverage if c.get("disposition") != "delivered"
+        ]
+        if not non_delivered:
+            return False
+
+        session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        if not session_id:
+            return False
+
+        try:
+            from agent.steering import (  # noqa: PLC0415
+                SELF_DRAFT_MAX_ATTEMPTS,
+                bump_self_draft_attempts,
+                push_steering_message,
+            )
+            from models.room import room_id_for_session  # noqa: PLC0415
+
+            attempt_count = bump_self_draft_attempts(session_id)
+            if attempt_count > SELF_DRAFT_MAX_ATTEMPTS:
+                logger.warning(
+                    "[runner] coverage-bounce budget exhausted for session %s "
+                    "(count=%d > max=%d); dispatching without a bounce",
+                    session_id,
+                    attempt_count,
+                    SELF_DRAFT_MAX_ATTEMPTS,
+                )
+                return False
+
+            push_steering_message(
+                session_id,
+                _format_ask_coverage_advisory(non_delivered),
+                sender="coverage-gate",
+                room_id=room_id_for_session(self._agent_session),
+            )
+            self._coverage_bounce_used_this_run = True
+            return True
+        except Exception as e:  # noqa: BLE001 — a bounce failure must never drop the send
+            logger.warning(
+                "[runner] coverage bounce failed for session %s (dispatching as-is): %s",
+                session_id,
+                e,
+            )
+            return False
+
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
@@ -1510,6 +1639,21 @@ class SessionRunner:
         )
         classification = self._classify_turn(outcome)
         miss = classification.compliance_miss
+
+        # Coverage bounce (issue #3027): a schema-validated turn about to
+        # dispatch to the human, but whose ask_coverage carries non-delivered
+        # clauses, is withheld — one bounce for THIS turn (the turn-scoped
+        # guard is this single _route_turn call itself; each of "user" and
+        # "complete" is dispatched from exactly one of the two branches
+        # below, so this check runs at most once per completed turn).
+        if classification.destination in ("user", "complete") and self._check_ask_coverage_bounce(
+            classification
+        ):
+            return _RouteDecision(
+                should_break=False,
+                next_message=ASK_COVERAGE_BOUNCE_CONTINUE_MESSAGE,
+                compliance_miss=miss,
+            )
 
         if classification.destination == "user" and classification.payload:
             self._adapter.on_user_payload(classification.payload, classification.file_paths)

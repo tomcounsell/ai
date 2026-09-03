@@ -93,3 +93,121 @@ class TestBlockedReasonSchemaField:
         # The prefix-token convention carries no such slot — always None.
         r = classify_pm_prefix("[/complete]\nshipped")
         assert r.blocked_reason is None
+
+
+class TestAskCoverageSchema:
+    """Issue #3027: the ``ask_coverage`` per-clause disposition array.
+
+    Phase A (this plan) is optional-but-prompted: the field is declared in
+    the schema's ``properties`` but deliberately absent from ``required`` —
+    tightening to required is a separate follow-up (#3035).
+    """
+
+    def test_schema_declares_optional_ask_coverage(self):
+        props = PM_TURN_JSON_SCHEMA["properties"]
+        assert "ask_coverage" in props
+        assert props["ask_coverage"]["type"] == "array"
+        assert "ask_coverage" not in PM_TURN_JSON_SCHEMA["required"]
+
+    def test_absent_ask_coverage_is_valid(self):
+        r = validate_structured_route({"route": "user", "message": "hi"})
+        assert r is not None
+        assert r.ask_coverage == []
+
+    def test_empty_list_ask_coverage_is_valid(self):
+        r = validate_structured_route({"route": "user", "message": "hi", "ask_coverage": []})
+        assert r is not None
+        assert r.ask_coverage == []
+
+    def test_continue_route_with_empty_ask_coverage_is_valid(self):
+        """route: "continue" turns address no human — [] must be accepted."""
+        r = validate_structured_route(
+            {"route": "continue", "message": "still working", "ask_coverage": []}
+        )
+        assert r is not None
+        assert r.destination == "continue"
+        assert r.ask_coverage == []
+
+    def test_delivered_with_evidence_is_valid(self):
+        r = validate_structured_route(
+            {
+                "route": "user",
+                "message": "merged it",
+                "ask_coverage": [
+                    {"item": "merge to main", "disposition": "delivered", "evidence": "PR #123"}
+                ],
+            }
+        )
+        assert r is not None
+        assert r.ask_coverage == [
+            {"item": "merge to main", "disposition": "delivered", "evidence": "PR #123"}
+        ]
+
+    def test_delivered_with_empty_evidence_invalidates_whole_turn(self):
+        """A bare completion claim naming no artifact must fall back to the
+        regex classifier — a 'delivered' disposition with no evidence is
+        treated as invalid structured output, same as a bad route enum."""
+        r = validate_structured_route(
+            {
+                "route": "user",
+                "message": "merged it",
+                "ask_coverage": [
+                    {"item": "merge to main", "disposition": "delivered", "evidence": ""}
+                ],
+            }
+        )
+        assert r is None
+
+    def test_delivered_with_whitespace_only_evidence_invalidates_whole_turn(self):
+        r = validate_structured_route(
+            {
+                "route": "user",
+                "message": "merged it",
+                "ask_coverage": [
+                    {"item": "merge to main", "disposition": "delivered", "evidence": "   "}
+                ],
+            }
+        )
+        assert r is None
+
+    def test_whitespace_item_dropped_not_fatal(self):
+        r = validate_structured_route(
+            {
+                "route": "user",
+                "message": "hi",
+                "ask_coverage": [
+                    {"item": "  ", "disposition": "not_started", "evidence": ""},
+                    {
+                        "item": "test on stage",
+                        "disposition": "blocked",
+                        "evidence": "no stage access",
+                    },
+                ],
+            }
+        )
+        assert r is not None
+        assert r.ask_coverage == [
+            {"item": "test on stage", "disposition": "blocked", "evidence": "no stage access"}
+        ]
+
+    def test_invalid_disposition_dropped_not_fatal(self):
+        r = validate_structured_route(
+            {
+                "route": "user",
+                "message": "hi",
+                "ask_coverage": [{"item": "x", "disposition": "banana", "evidence": ""}],
+            }
+        )
+        assert r is not None
+        assert r.ask_coverage == []
+
+    def test_non_list_ask_coverage_treated_as_absent(self):
+        r = validate_structured_route(
+            {"route": "user", "message": "hi", "ask_coverage": "not-a-list"}
+        )
+        assert r is not None
+        assert r.ask_coverage == []
+
+    def test_regex_fallback_result_has_no_ask_coverage(self):
+        r = classify_pm_prefix("[/user]\nhello")
+        assert r.ask_coverage == []
