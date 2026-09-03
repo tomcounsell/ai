@@ -105,7 +105,11 @@ Because the ceiling is 8 bytes, only a **7-byte prefix** travels: `bytes([index]
 bytes of the 32-hex hint. `correlation_matches(decoded_prefix, poll_id_hint)` owns the resulting
 prefix-vs-full-hint comparison in one place, so no call site has to get the asymmetry right by hand.
 56 bits disambiguates a bounded window of recent outbound polls in one chat with room to spare, and
-the adoption rule's "more than one candidate → adopt nothing" bail covers a collision.
+a collision is caught in two places. Two or more candidates are caught at scan time: the adoption
+rule bails with a warning and adopts nothing. A **single** false-positive match — the truncated
+prefix happening to match one unrelated poll — is caught one step later, at promotion, where
+`register_poll`'s `SET NX` refuses to overwrite that poll's existing row and the adoption is
+reported as failed.
 
 `session_type` is deliberately **not** stamped into the payload: a queued payload would outlive a
 session's real type.
@@ -360,6 +364,15 @@ Both halves are required:
    expired poll, or two sessions asking the same standard question, produce two candidates with no
    tie-break). **More than one match adopts nothing and warns**: an ambiguous adoption steers a
    session with someone else's answer, which is worse than a dropped question.
+
+**Promotion is the second gate, and it can refuse.** Adopting means promoting the provisional row
+to a real one under the server-assigned poll id, and `register_poll` writes that row with `SET NX`.
+A refused write means the poll id already belongs to a different hint, so the match was wrong.
+Promotion then fails rather than succeeding quietly: the provisional row is left in place so the
+question stays adoptable, `_send_queued_poll` falls through and actually sends instead of reporting
+the other poll's `msg_id` as a delivery, and the reconciliation loop logs `poll_orphan_adopted` only
+on a real adoption. Without this the single-candidate collision is the dangerous one — it would
+delete the provisional row and claim success, leaving the question routable from nowhere.
 
 The same lookup runs on a relay **retry** before re-sending. Telegram accepting `SendMediaRequest`
 and the client then raising is an ordinary MTProto outcome, and because `poll_id_hint` is minted per

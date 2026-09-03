@@ -269,13 +269,13 @@ The Eng session owns all SDLC intelligence. The bridge just keeps it working.
 
 ### `pause_open_question` -- the nudge loop stops re-enqueuing an asker
 
-`determine_delivery_action()` (`agent/output_router.py`) has one line that predates the poll
-feature and is unconditional: an eng session doing SDLC work always returns `"nudge_continue"`,
-ahead of every `stop_reason` branch. That means an sdlc eng session that poses *any* question --
-poll or plain prose -- was nudged past it and proceeded on a guess, because nothing distinguished
-"stopped because it's blocked on a question" from any other non-completion stop.
+`determine_delivery_action()` (`agent/output_router.py`) returns `"nudge_continue"` unconditionally
+for an eng session doing SDLC work, ahead of every `stop_reason` branch. On its own that line cannot
+distinguish "stopped because it's blocked on a question" from any other non-completion stop, so an
+sdlc eng session posing *any* question -- poll or plain prose -- would be nudged past it and proceed
+on a guess.
 
-A `"pause_open_question"` branch now sits immediately ahead of that `nudge_continue` line, gated by
+A `"pause_open_question"` branch sits immediately ahead of that `nudge_continue` line, gated by
 a `has_open_question: bool = False` keyword threaded through `determine_delivery_action()` and
 `route_session_output()`. The executor (`agent/session_executor.py`) fills it by calling
 `bridge.poll_registry.session_has_open_poll(session_id)` -- a thread-offloaded, fail-quiet read of
