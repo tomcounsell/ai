@@ -742,6 +742,10 @@ def _compute_meta(
         # non-integer value must degrade to 0 (the bound stands down) rather than
         # raise and take the whole stage-query down with it.
         "concern_round_count": _coerce_count(raw_states.get("_concern_round_count")),
+        # Revision-demanding critique rounds (#2885 via #3065), written by
+        # tools/sdlc_verdict.py::record_verdict. Rides `_meta` for the same
+        # reason as `concern_round_count` directly above.
+        "revision_round_count": _coerce_count(raw_states.get("_revision_round_count")),
     }
 
 
@@ -774,6 +778,7 @@ def _default_meta() -> dict:
         "_resolved_target_repo": None,
         "completion_refusal_count": 0,
         "concern_round_count": 0,
+        "revision_round_count": 0,
     }
 
 

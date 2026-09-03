@@ -42,8 +42,18 @@ Picks the least-recently-audited primary doc from a Redis hash, expands its
 neighborhood (≤20 files via outbound links + inbound refs), runs auto-fix
 detectors, applies them, stages exactly `files_touched` (never a whole-tree
 `git add -A`), opens a `docs-audit/{slug}-{ts}` branch, posts a non-draft PR,
-and notifies the `Eng: Valor` Telegram chat that review is required. Errors
-are swallowed; the auditor never crashes the worker.
+and notifies that review is required. The notification destination is
+derived, not hardcoded: it goes to the `Eng:` group of the project whose
+`working_directory` (in `projects.json`) matches the audited repo root,
+addressed by numeric `chat_id` rather than group name. It falls back to the
+`Eng: Valor` literal only when the audited repo is this checkout **and** no
+`Eng:` group could be resolved for it, whether because no project matched, the
+matched project's `Eng:` group is misconfigured, or the lookup itself raised;
+for any other repo whose `Eng:` group does not resolve, the
+Telegram notification is suppressed with a logged warning **and** a
+suppression notice spliced into the run's `summary` (placed before the PR
+URL so the 500-char truncation the reflection scheduler applies cannot drop
+it). Errors are swallowed; the auditor never crashes the worker.
 
 A guard-skipped run (daily PR cap reached, or an open PR already exists for
 the picked doc's slug) performs no working-tree write and no git operation,
@@ -342,10 +352,14 @@ withholds dedup independently rather than sharing one key. Filing is bounded
 by the module's shared per-run cap (`ISSUE_FILING_PER_RUN_CAP`, see
 [Two-tier dedup](#two-tier-dedup)); entries past the cap are logged and
 suppressed, not filed. It also threads the withheld set into its `findings`,
-`summary`, and Telegram message — which states plainly that review is
-required and that the PR is closed unmerged after `STALE_PR_AGE_DAYS` if
-nobody acts — and stamps `WITHHELD_PR_MARKER` plus the rejection list into the
-PR body. The branch sweeper reads that marker from its own `gh pr list` query
+`summary`, and, when a destination resolves, a Telegram message which states
+plainly that review is required and that the PR is closed unmerged after
+`STALE_PR_AGE_DAYS` if nobody acts. When no destination resolves for the
+audited repo, the Telegram notification is suppressed and the same
+`summary` field carries the suppression notice instead — `summary` is the
+only field the reflection scheduler persists, so it is the load-bearing
+carrier of this outcome, not just `findings`. It also stamps
+`WITHHELD_PR_MARKER` plus the rejection list into the PR body. The branch sweeper reads that marker from its own `gh pr list` query
 and never closes or deletes the branch of a PR carrying it — instead it files
 a **separate**, PR-scoped escalation issue (`docs-auditor: withheld PR #{n}
 still unreviewed`), distinct from the per-defect titles above so the two

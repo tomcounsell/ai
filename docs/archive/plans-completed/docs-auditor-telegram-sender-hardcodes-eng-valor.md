@@ -772,30 +772,30 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ## Success Criteria
 
-- [ ] `reflections/docs_auditor.py` contains no `"--chat", "Eng: Valor"` argv adjacency.
-- [ ] `_send_telegram_notification` resolves its destination through `resolve_eng_group`
+- [x] `reflections/docs_auditor.py` contains no `"--chat", "Eng: Valor"` argv adjacency.
+- [x] `_send_telegram_notification` resolves its destination through `resolve_eng_group`
       keyed on the audited repo root, and both call sites pass `repo_root=PROJECT_ROOT`.
-- [ ] **Production path:** auditing this checkout with the real-shaped `projects.json`
+- [x] **Production path:** auditing this checkout with the real-shaped `projects.json`
       sends to `str(chat_id)` (`"-1003449100931"` in the test stub), not to the group name.
-- [ ] A repo registered in `projects.json` with a configured `Eng:` group receives its
+- [x] A repo registered in `projects.json` with a configured `Eng:` group receives its
       notification at that group's numeric `chat_id`.
-- [ ] An audited repo with no resolvable `Eng:` group, other than this checkout, receives
+- [x] An audited repo with no resolvable `Eng:` group, other than this checkout, receives
       no notification, produces a `logger.warning` naming the repo path and both possible
       causes, and returns `False`.
-- [ ] A `False` return from either call site puts a suppression notice in
+- [x] A `False` return from either call site puts a suppression notice in
       `result["summary"]` (the only persisted field), with the step-9 notice placed before
       `PR={pr_url}` so 500-char truncation cannot cut it; a matching `findings` entry is
       appended as well.
-- [ ] A non-zero `valor-telegram` exit code on a resolved destination logs a warning
+- [x] A non-zero `valor-telegram` exit code on a resolved destination logs a warning
       carrying the exit code and still returns `True`.
-- [ ] Auditing this checkout with an unreadable or unmatched `projects.json` still sends
+- [x] Auditing this checkout with an unreadable or unmatched `projects.json` still sends
       to `Eng: Valor` — today's behavior preserved on the degraded path.
-- [ ] `docs/features/docs-auditor.md` no longer claims a fixed destination chat at `:45`
+- [x] `docs/features/docs-auditor.md` no longer claims a fixed destination chat at `:45`
       **and** no longer claims unconditional Telegram delivery at `:344-347`.
-- [ ] This PR touches no file named in #3072's sweep.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions needed — `tests/unit/test_docs_auditor_substrate.py` contains
+- [x] This PR touches no file named in #3072's sweep.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions needed — `tests/unit/test_docs_auditor_substrate.py` contains
       no `xfail` markers related to this bug (verified at plan time).
 
 ## Team Orchestration

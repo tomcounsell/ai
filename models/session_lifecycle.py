@@ -350,6 +350,7 @@ def finalize_session(
     if emit_telemetry:
         try:
             from agent.session_telemetry import record_telemetry_event
+            from agent.tool_cost_attribution import session_tool_cost_summary
 
             _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
             record_telemetry_event(
@@ -360,6 +361,13 @@ def finalize_session(
                     "to": status,
                     "reason": reason or "",
                     "kill": None,
+                    # Issue #3081, Lane A: the session-level per-tool cost
+                    # aggregate at the moment of the transition, so context
+                    # spend can be read per stage without replaying the whole
+                    # timeline. None on pre-belt records and on sessions that
+                    # called no tools — an explicit absence, never a zeroed row
+                    # posing as a measurement. Never raises.
+                    "tool_cost": session_tool_cost_summary(session),
                 },
             )
             # Terminal transition: reap the session's in-memory telemetry state.
@@ -690,6 +698,7 @@ def transition_status(
     if emit_telemetry:
         try:
             from agent.session_telemetry import record_telemetry_event
+            from agent.tool_cost_attribution import session_tool_cost_summary
 
             _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
             record_telemetry_event(
@@ -700,6 +709,8 @@ def transition_status(
                     "to": new_status,
                     "reason": reason or "",
                     "kill": None,
+                    # Issue #3081 — see the finalize_session tap for rationale.
+                    "tool_cost": session_tool_cost_summary(session),
                 },
             )
         except Exception:

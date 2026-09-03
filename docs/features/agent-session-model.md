@@ -208,9 +208,9 @@ at the bottom:
    from `~/Desktop/Valor/.env` (iCloud-synced).
 3. **Codebase default `"fable"`** — hard-coded as the pydantic `Field`
    default in `config/settings.py::ModelSettings`. Every worker-run session
-   (PM, Teammate, and the Dev subagent a PM spawns, which inherits its
-   parent's model) therefore runs on Fable 5.1 unless a session or machine
-   says otherwise.
+   (PM and Teammate) therefore runs on Fable 5.1 unless a session or
+   machine says otherwise. The Dev subagent is deliberately outside this
+   cascade; see [Dev Subagent Model](#dev-subagent-model).
 
 Implemented in `agent.session_executor._resolve_session_model()`:
 
@@ -260,6 +260,18 @@ as `claude-fable-5-1` is rejected with an `api_error`, so pin a full id only
 on a machine whose auth accepts it. `config/models.py::_MODEL_ALIASES` maps
 each alias to a registry entry so the per-turn context-usage warning knows
 the model's window (1M tokens for Fable).
+
+### Dev Subagent Model
+
+The `dev` subagent a PM spawns does **not** inherit the PM's model. Its
+default is `model: opus` in the `.claude/agents/dev.md` frontmatter, which
+the Claude CLI reads directly when the PM calls the Agent tool. The PM may
+override it per spawn by passing `model: "sonnet"` on the Agent call for
+tightly specified mechanical work; `opus` and `sonnet` are the only valid
+dev models. The Agent tool's `model` parameter takes precedence over the
+frontmatter, and the choice is fixed for the agent's lifetime because later
+turns continue the same agent. Subagents the dev fans out to (builder,
+code-reviewer) inherit from the dev unless their own frontmatter pins one.
 
 ### PM Final-Delivery Drafter (2-Pass, Always-Opus)
 

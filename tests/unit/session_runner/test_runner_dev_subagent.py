@@ -47,6 +47,9 @@ def test_dev_agent_definition_exists_and_is_named_dev():
     assert text.startswith("---")
     frontmatter = text.split("---", 2)[1]
     assert "name: dev" in frontmatter
+    # The dev never inherits the PM's (Fable) model: its default is pinned
+    # in frontmatter, and the PM may override per spawn with opus or sonnet.
+    assert "model: opus" in frontmatter
 
 
 def test_dev_agent_bakes_in_continuation_contract():

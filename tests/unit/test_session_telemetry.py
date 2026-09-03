@@ -217,6 +217,60 @@ class TestTUIInteractionEventTypes:
 
 
 # ---------------------------------------------------------------------------
+# PreToolUse denial events (plan #3081, Lane A)
+# ---------------------------------------------------------------------------
+
+
+class TestPreToolUseDenialEvent:
+    def test_denial_event_written_with_cause_and_counters(self, tmp_telemetry):
+        """record_pre_tool_use_denial stamps cause + call/cost readings."""
+        session_id = "test-denial-001"
+        telemetry_mod.record_pre_tool_use_denial(
+            session_id,
+            cause="tool_budget",
+            reason="per-session tool-call budget reached (999/1000)",
+            tool_call_count=999,
+            total_cost_usd=12.5,
+        )
+
+        events = read_session_timeline(session_id)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["type"] == "pre_tool_use_denial"
+        assert ev["cause"] == "tool_budget"
+        assert ev["tool_call_count"] == 999
+        assert ev["total_cost_usd"] == 12.5
+        assert "budget" in ev["reason"]
+
+    def test_denial_event_omits_absent_fields(self, tmp_telemetry):
+        """None fields are dropped from the payload, not written as null."""
+        session_id = "test-denial-002"
+        telemetry_mod.record_pre_tool_use_denial(session_id, cause="foreground_guard")
+        ev = read_session_timeline(session_id)[0]
+        assert ev["cause"] == "foreground_guard"
+        assert "tool_call_count" not in ev
+        assert "total_cost_usd" not in ev
+        assert "reason" not in ev
+
+    def test_denial_never_raises(self, tmp_telemetry):
+        """A broken recorder never propagates out of the denial helper."""
+        with patch.object(telemetry_mod, "record_telemetry_event", side_effect=OSError("boom")):
+            assert telemetry_mod.record_pre_tool_use_denial("s", cause="tool_budget") is None
+
+
+# ---------------------------------------------------------------------------
+# Belt skew event-type contract (plan #3081, Race 3)
+# ---------------------------------------------------------------------------
+
+
+def test_belt_enforce_skew_event_type_pinned():
+    """The Race 3 skew event type string is a shared contract with the belt
+    resolver (task 2) and tools.belt_skew_report — pinned here so a drive-by
+    rename breaks loudly."""
+    assert telemetry_mod.BELT_ENFORCE_SKEW_EVENT == "belt_enforce_skew"
+
+
+# ---------------------------------------------------------------------------
 # Idle gap detection
 # ---------------------------------------------------------------------------
 
@@ -387,6 +441,60 @@ class TestLifecycleIntegration:
         assert event_arg["type"] == "status_transition"
         assert event_arg["to"] == "running"
         assert event_arg["kill"] is None
+
+    def test_status_transition_stamps_tool_cost_summary(self):
+        """A stage transition carries the session-level tool_cost summary when
+        the harness has persisted a cumulative snapshot (plan #3081 Lane A)."""
+        import json as _json
+
+        from models.session_lifecycle import transition_status
+
+        session = _make_session(session_id="test-lc-toolcost-001")
+        session.tool_cost_json = _json.dumps(
+            {
+                "method": "assistant-usage-delta/v1",
+                "per_tool": {
+                    "Bash": {
+                        "calls": 4,
+                        "input_tokens": 280,
+                        "output_tokens": 20,
+                        "total_tokens": 300,
+                    }
+                },
+                "tool_call_count": 4,
+            }
+        )
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch("agent.session_telemetry.record_telemetry_event") as mock_record,
+        ):
+            mock_cas.return_value = None
+            session.save = MagicMock()
+            transition_status(session, "running", reason="test", emit_telemetry=True)
+
+        _, event_arg = mock_record.call_args[0]
+        assert event_arg["tool_cost"]["tool_calls"] == 4
+        assert event_arg["tool_cost"]["top_tools"] == [["Bash", 300]]
+
+    def test_status_transition_tool_cost_none_without_snapshot(self):
+        """Pre-belt records (no tool_cost_json) stamp tool_cost as None — an
+        explicit absence, never a zeroed row posing as a measurement."""
+        from models.session_lifecycle import transition_status
+
+        session = _make_session(session_id="test-lc-toolcost-002")
+        session.tool_cost_json = None
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch("agent.session_telemetry.record_telemetry_event") as mock_record,
+        ):
+            mock_cas.return_value = None
+            session.save = MagicMock()
+            transition_status(session, "running", reason="test", emit_telemetry=True)
+
+        _, event_arg = mock_record.call_args[0]
+        assert event_arg["tool_cost"] is None
 
     def test_emit_telemetry_false_suppresses(self):
         """transition_status with emit_telemetry=False does not call record_telemetry_event."""

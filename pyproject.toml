@@ -102,6 +102,8 @@ valor-cross-vendor-judge = "tools.cross_vendor_judge:main"
 valor-session = "tools.valor_session:main"
 valor-session-archive = "tools.session_archive_cli:main"
 valor-venv-health = "tools.venv_health:main"
+belt-baseline = "tools.belt_baseline:main"
+belt-skew-report = "tools.belt_skew_report:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

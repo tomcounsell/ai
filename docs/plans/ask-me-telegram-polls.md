@@ -454,6 +454,38 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
   never as a substitute for running it. Task 2 (the human-tap gate) was left **UNRESOLVED** by that
   same build and remains genuinely open.
 
+### spike-9: `PollAnswer.option` accepts 8 bytes, not 100 (Task 1 gate, supervised, 2026-09-02)
+- **Assumption**: "`PollAnswer.option` is bounded at 100 bytes, so a 32-hex correlation id fits."
+- **Method**: prototype — live MTProto size sweep into the machine-owned eng group from a temp
+  session copy with `receive_updates=False`, every probe poll deleted immediately.
+- **Finding**: **Invalidated.** 1, 2, 4 and 8 bytes are accepted; 9 and 12 are rejected with
+  `A poll option used invalid data (the data may be too long) (caused by SendMediaRequest)`.
+  The ceiling is **8 bytes**. The TL schema declares `option:bytes` with no visible bound, so the
+  number is only knowable by probing — every reference this plan consulted said 100.
+- **Confidence**: high (reproducible, verbatim MTProto error at the boundary)
+- **Impact on plan**: the Race-6 option layout is re-cut from the `f"{index}:{hex32}"` text form
+  (34 bytes, unsendable) to packed binary — `bytes([index])` plus the first **7 bytes** of the
+  hint, 8 bytes exactly — with a new `correlation_matches(decoded_prefix, poll_id_hint)` owning the
+  prefix-vs-full-hint comparison in one place. `poll_id_hint` is otherwise unchanged: full
+  `uuid.uuid4().hex`, still the registry key, still one producer. No scope, appetite, capability
+  matrix, owner decision or task topology change.
+- **Why this is the gate's whole value.** The plan graded spike-8 medium-confidence and required
+  Task 1 to be re-run under supervision anyway. Had it been skipped on spike-8's strength, this
+  build would have wired nine subsystems onto an encoding that cannot be sent, and the failure
+  would have surfaced at the wire with no local signal.
+
+### spike-10: vote readback in a group, re-established under supervision (Task 1 PASS)
+- **Assumption**: "A user account can read back a vote cast on its own group poll" — Task 1.
+- **Method**: prototype, run 2026-09-02 under supervision with output pasted into the PR
+  description and recorded on #2701; supersedes the unaudited spike-8.
+- **Finding**: **PASS.** With the spike-9 encoding, `GetPollResultsRequest` returns
+  `PollResults(min=False, ..., total_voters=1)` and the chosen option is recoverable from
+  `PollAnswerVoters` with `chosen=True`; the embedded correlation prefix survives the server round
+  trip verbatim; the server-assigned `poll.id` differs from the supplied placeholder; and
+  `close_poll(closed=True)` succeeds.
+- **Confidence**: high — audit-grade, unlike spike-8.
+- **Impact on plan**: the inbound set (Tasks 9, 10, 10a, 13b) is unblocked. Risk 2 is retired.
+
 ## Data Flow
 
 **Outbound (question → poll on screen):**
@@ -1085,7 +1117,9 @@ preference; reaction-based answering is dropped and not revived. See **Scope** a
 - [ ] `_send_queued_poll` passes the payload's `poll_id_hint` to **both** `register_pending_poll` and
   `send_poll(correlation_id=...)` — asserted on the recorded call args, not by inspection.
 - [ ] `encode_option(index, poll_id_hint)` round-trips through `decode_option` and the encoded bytes
-  are `<= 100` bytes for a 32-char hex hint at every option index the CLI permits (2..10).
+  are **exactly 8 bytes** — Telegram's verified ceiling — at every option index the CLI permits
+  (2..10), and that `correlation_matches(decoded_prefix, poll_id_hint)` is True for the minting hint
+  and False for a different one.
 - [ ] A payload arriving at `_send_queued_poll` **without** `poll_id_hint` logs at error and delivers
   the plain-text fallback; it does not send a poll.
 - [ ] `send_poll(correlation_id=None)` emits `poll_sent_without_correlation_id` at warning.
@@ -1680,8 +1714,12 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   `pm_needs_human` exit — so a reader does not mistake `resume_completed_session` for an edge case.
 - [ ] The feature doc must document `poll_id_hint` as the Race-6 correlation key: minted once in
   `build_telegram_poll_outbox_payload`, carried on the outbox payload, embedded in the option bytes
-  by `send_poll`, and matched exactly by orphan adoption — with the 100-byte `PollAnswer.option`
-  ceiling stated as the reason the id is a 32-char hex and not a longer digest.
+  by `send_poll`, and matched by orphan adoption through `correlation_matches` — with the
+  **verified 8-byte `PollAnswer.option` ceiling** stated as the reason only a 7-byte prefix of the
+  hint travels on the wire, and the reason the layout is packed binary rather than text. The doc
+  must record that the ceiling was measured empirically during the Task 1 gate (8 accepted, 9
+  rejected at the wire with no local signal) because the TL schema's `option:bytes` states no
+  bound, so a future reader does not "restore" a longer id from the schema.
 - [ ] The feature doc must document `telegram:poll:reconcile:heartbeat` as the loop's external
   liveness signal, name the health surface that reads it, and state why `poll_expired_unanswered`
   cannot serve that role (it is emitted from inside the loop it would be reporting on).
@@ -1787,6 +1825,10 @@ in the issue body that assume DM delivery are superseded by the Success Criteria
   `_build_completed_resume_text` preamble.** Every other check in this plan is a unit test with a
   stubbed handler or a grep; this is the only assertion that the nine subsystems are actually wired
   together, and it is scheduled after Task 10 because that is the first point where it can pass.
+  **This criterion is a hard shipping gate (owner ruling, 2026-09-02): neither FAIL nor UNRESOLVED
+  may be merged past.** Both halves must be observed live — the outbound poll rendering in Telegram
+  and the inbound vote arriving and reaching the session. Its deploy precondition (the live bridge
+  and relay must be running this lane's code) is stated in Task 10a.
 - [ ] **The Race-6 correlation key has exactly one producer.** `poll_id_hint` is minted in
   `build_telegram_poll_outbox_payload` and nowhere else, carried on the outbox payload, and read by
   `_send_queued_poll` as both the `register_pending_poll` key and `send_poll(correlation_id=...)`.
@@ -1976,6 +2018,12 @@ could be skipped entirely and the graph would still run to completion, with the 
 Task 15's prose. The edge does not weaken the pause property: `gate-poll-e2e` is inside the inbound
 set, and Task 15's *satisfied-by-pause* rule means a paused or UNRESOLVED gate lets Task 15 run and
 report the E2E row UNRESOLVED. Only a Task 10a **FAIL** stops the pipeline, which is the intent.
+
+**Owner ruling 2026-09-02 — Task 10a is a hard shipping gate.** The *satisfied-by-pause* rule above
+governs the **build** only: an UNRESOLVED `gate-poll-e2e` still lets Tasks 13a/13b/14/15 run so the
+work is finished and reviewable. It does **not** govern the **merge**. Task 10a must be PASS before
+this lane merges; FAIL and UNRESOLVED both hold the PR at REVIEW. Read every "UNRESOLVED does not
+block" statement in this plan as scoped to build progression, never to shipping.
 
 That property is why Task 13 is split. Before cycle 6 the single `build-tests` depended on
 `build-vote-observation` and Tasks 14 and 15 chained behind it, so an UNRESOLVED gate blocked tests,
@@ -2174,8 +2222,18 @@ why reversibility depends on it.
   dict unconditionally. It is the correlation key the entire Race-6 mitigation is built on: Task 7
   passes it to both `register_pending_poll(...)` (as the registry key) and
   `send_poll(..., correlation_id=poll_id_hint)` (which embeds it in the option bytes), and Task 10's
-  orphan adoption matches on it. **Size budget:** `f"{index}:{hex32}"` is at most 35 bytes, inside
-  Telegram's 100-byte `PollAnswer.option` ceiling. Do not substitute a longer id (a payload digest,
+  orphan adoption matches on it. **Size budget — the ceiling is 8 bytes, measured, not 100.**
+  `PollAnswer.option` accepts 8 bytes and rejects 9 at the wire with
+  `A poll option used invalid data (the data may be too long)` and no local signal; verified
+  empirically during the Task 1 gate on 2026-09-02, because the TL schema declares `option:bytes`
+  with no visible bound and every consulted reference said 100. The full 32-hex hint therefore
+  **cannot** travel in the option. `send_poll` embeds a packed-binary `bytes([index]) + first 7
+  bytes of the hint` (8 bytes exactly), and `correlation_matches()` owns the resulting
+  prefix-vs-full-hint comparison so no call site has to get the asymmetry right by hand. 56 bits
+  disambiguates a bounded window of recent outbound polls in one chat with room to spare, and the
+  adoption rule's "more than one candidate → adopt nothing, warn" bail already covers a collision.
+  `poll_id_hint` itself is unchanged: still a full `uuid.uuid4().hex`, still the registry key,
+  still minted by exactly one producer. Do not substitute a longer id (a payload digest,
   a composite `session_id:timestamp` string) — those can exceed the ceiling and the send fails at
   the wire with no local signal.
 - Add `TelegramRelayOutputHandler.send_poll(...)` as a sibling of `send`: validate via the
@@ -2663,7 +2721,7 @@ The translator imports `resolve_answer_target` / `resume_completed_session` from
   TTL with no match is dropped with a warning.
 - Every interval, TTL, and warn-age is a named env-overridable constant with a grain-of-salt comment.
 
-### 10a. GATE — end to end through the shipped chain (bounded; UNRESOLVED permitted)
+### 10a. GATE — end to end through the shipped chain (HARD SHIPPING GATE — owner ruling 2026-09-02)
 - **Task ID**: gate-poll-e2e
 - **Depends On**: build-vote-observation
 - **Validates**: manual probe; output pasted verbatim into the PR description
@@ -2725,9 +2783,31 @@ The translator imports `resolve_answer_target` / `resume_completed_session` from
   wiring break the rest of the plan cannot detect: everything else is a unit test with a stubbed
   handler or a grep, so a broken CLI→relay→observer→steering seam ships green across nine
   subsystems without this task.
-- **On timeout → UNRESOLVED**, recorded on #2701 exactly as Task 2's timeout is. Unlike a FAIL,
-  UNRESOLVED does not block Tasks 13a/13b/14/15; it is reported in the PR description as an
-  unexercised end-to-end path so the reviewer decides, rather than the build deciding silently.
+- **On timeout → UNRESOLVED**, recorded on #2701 exactly as Task 2's timeout is. UNRESOLVED does not
+  block Tasks 13a/13b/14/15 — those still run and report the E2E rows UNRESOLVED rather than green.
+  **It does block MERGE.** See the hard-shipping-gate rule below.
+- **HARD SHIPPING GATE (owner ruling, Valor, 2026-09-02).** *Supersedes the earlier "UNRESOLVED
+  permitted" framing of this task, which allowed the feature to merge with its only end-to-end
+  assertion unexercised.* This feature may not merge unless a real vote round trip has been
+  observed live: an outbound poll rendered in Telegram **and** the resulting inbound vote received,
+  translated, and routed back into the asking session. A FAIL blocks merge. An UNRESOLVED (no tap
+  in the window) **also** blocks merge — it does not stop the build, but the PR sits at REVIEW until
+  the tap happens and PASS is recorded. There is no reviewer discretion to merge past this row and
+  no "ship the outbound half now, verify inbound later" split. The two live failures of 2026-09-02
+  (`Relay: unknown message type 'poll', discarding` from a relay that had never seen this code, and
+  an operator tap that produced no inbound trace at all) are exactly what this gate exists to catch,
+  and both would have shipped green under the previous wording.
+- **Deploy precondition — the gate is meaningless without it.** Task 10a runs against the *live*
+  bridge and relay, which execute from the main checkout at `/Users/valorengels/src/ai`, **not**
+  from this lane's worktree. The lane's code must therefore be running in those processes before
+  the probe poll is sent, or the outbound payload is discarded by a relay whose
+  `KNOWN_MESSAGE_TYPES` has no `poll` and the inbound half has no `events.Raw` handler and no
+  reconciliation loop to observe a tap. Confirm all three before originating the poll: (1) the
+  running bridge is executing this lane's code; (2) `logs/bridge.log` shows `Poll reconciliation
+  loop started` after the restart; (3) `telegram:poll:reconcile:heartbeat` is present and fresh.
+  Restart via `./scripts/valor-service.sh restart` only — and because that restart cycles the
+  bridge, watchdog, and worker for **every** session on the machine, coordinate it with the
+  operator rather than taking it unilaterally.
 - Runs against the live bridge — that is the point — so it opens no second Telethon client and the
   `receive_updates=False` / temp-session-copy constraints that bind Tasks 1 and 2 do not apply here.
   Delete the probe poll and its question message when done.
@@ -2972,9 +3052,9 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Provisional row precedes the eligibility re-check (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -k provisional -q` | exit code 0 |
 | Reconciliation loop exists and is not inlined into the bridge | `grep -rn 'def poll_reconcile_loop' bridge/ --include='*.py' \| grep -vc telegram_bridge.py` | output == 1 |
 | Reconciliation heartbeat written | `grep -rn 'poll:reconcile:heartbeat' bridge/ --include='*.py' \| wc -l` | output > 0 |
-| Registry enumeration is index-backed, not a keyspace scan (anti-criterion) | `grep -rn "scan_iter\|SCAN MATCH" bridge/poll_registry.py $(grep -rl 'poll_reconcile_loop' bridge/ --include='*.py') \| wc -l` | output == 0 |
+| Registry enumeration is index-backed, not a keyspace scan (anti-criterion; an AST test, **not** a grep — see the note below) | `scripts/pytest-clean.sh tests/unit/test_poll_registry.py -k keyspace_scan -q` | exit code 0 |
 | Registry index sets exist | `grep -c 'POLL_OPEN_INDEX\|POLL_PENDING_INDEX' bridge/poll_registry.py` | output > 0 |
-| Heartbeat read outside the loop | `grep -rln 'poll:reconcile:heartbeat' --include='*.py' . \| wc -l` | output >= 2 |
+| Heartbeat read outside the loop | `grep -c 'poll_reconcile' ui/app.py` | output > 0 (the key literal lives once, behind the named `RECONCILE_HEARTBEAT_KEY`; the read site imports `heartbeat_age_s` rather than repeating the string, so grep for the *reader*, not the literal) |
 | No expectation authored on the poll path (anti-criterion) | `grep -rn 'expectation' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Poll path never calls `draft_message` (anti-criterion) | `grep -n 'draft_message' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Text fallback re-enqueue exists (not dead-letter-only) | `grep -c '_relay_attempts' bridge/telegram_relay.py` | output > 0 (and the poll terminal branch rpushes a `type: None` payload — assert by test, not grep) |
@@ -2983,7 +3063,7 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 | Prime line is a conditional, not a bare directive | `grep -lc 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
 | Nudge-pause branch exists | `grep -c 'pause_open_question' agent/output_router.py` | output > 0 |
 | Pause branch precedes the eng+sdlc nudge (ordering is behavioral, so it is a test, not a grep) | `scripts/pytest-clean.sh tests/unit/test_output_router.py -q` | exit code 0 |
-| Router stays pure — no Redis read in the decision function (anti-criterion) | `grep -cE 'poll_registry\|redis\|POPOTO' agent/output_router.py` | match count == 0 |
+| Router stays pure — no Redis read in the decision function (purity is about imports and calls, not prose, so it is an AST test rather than a grep) | `scripts/pytest-clean.sh tests/unit/test_output_router.py -k router_performs_no_io -q` | exit code 0 |
 | Open-question read has the grepped home | `grep -c 'def session_has_open_poll' bridge/poll_registry.py` | output == 1 |
 | Executor fills the keyword off the registry | `grep -c 'session_has_open_poll' agent/session_executor.py` | output > 0 |
 | Needs-human matcher untouched (anti-criterion) | `git diff main -- agent/session_runner/hook_edge.py \| wc -l` | match count == 0 |
@@ -2994,6 +3074,26 @@ the cycle-4 gate split was adopted to buy. The split restores it.
 clean `main` — `bridge/message_drafter.py` contains the log string
 `"requesting self-draft via steering: %s"` twice, which is unrelated prose. **Do not "fix" that by
 editing those log lines.** Verified: the narrowed grep returns `0` on the verification baseline with a clean tree.
+
+**Note on the three rows that are tests rather than greps (BUILD, 2026-09-02).** Three
+anti-criteria were written as text greps and each one flags a **correct** implementation, so they
+were converted to assertions rather than left to fail an honest build:
+
+1. *Registry enumeration.* `grep "scan_iter"` matches `sscan_iter` — which is the **approved**
+   index-backed mechanism — and `grep "SCAN MATCH"` matches this plan's own rationale quoted in the
+   module docstring. On a correct build the row returns `3`.
+2. *Router purity.* `grep -E 'poll_registry|redis'` over `agent/output_router.py` matches the
+   docstring that deliberately names `bridge.poll_registry.session_has_open_poll` as **the caller's**
+   job — the very contract the row is trying to enforce. Returns `1` on a correct build.
+3. *Heartbeat read site.* The key literal is defined once as the named constant
+   `RECONCILE_HEARTBEAT_KEY`, and `ui/app.py` imports `heartbeat_age_s` rather than repeating the
+   string — so a two-file literal grep returns `1`, penalising the better factoring.
+
+The general rule this makes explicit, and which the plan already applied to the provisional-row
+ordering row: **a property about imports, calls, or ordering is an AST or behavioral assertion, not
+a substring search.** A grep cannot tell an import from an explanation of why that import is absent,
+and every one of these anti-criteria is *about* code structure. Three separate test assertions hit
+exactly this during BUILD before being rewritten.
 
 **Note on the prime-conditional row (cycle 7).** It uses `grep -lc`, not `grep -rn`, on purpose.
 `.claude/commands/roles/prime-pm-role.md` already contains the phrase *"...when you have a

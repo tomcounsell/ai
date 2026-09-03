@@ -33,7 +33,11 @@ MAX_PATCH_CYCLES = 3
 
 # Maximum number of CRITIQUE -> PLAN cycles before escalating to human.
 # Prevents infinite plan revision loops when critique findings don't converge.
-MAX_CRITIQUE_CYCLES = 2
+# Provisional and tunable: 2 admits one genuine revision after the first
+# NEEDS REVISION verdict before a human rules. Counted by
+# `_revision_round_count` (tools/sdlc_verdict.py) since #2885's fix — the
+# 2026-09-02 batch showed lanes running 9+ rounds with this cap inert.
+MAX_CRITIQUE_CYCLES = int(os.getenv("MAX_CRITIQUE_CYCLES", "2"))
 
 # Maximum number of READY TO BUILD (with concerns) rounds before the concern-closing
 # revision is built on rather than re-critiqued (#2787). Counts *with-concerns rounds

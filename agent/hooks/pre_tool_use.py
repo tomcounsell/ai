@@ -19,6 +19,16 @@ The block message includes the exact ``valor-session create --role eng``
 command the teammate should propose to the human, so the redirect is
 self-contained and actionable.
 
+Denial telemetry
+----------------
+Every deny branch here calls ``_record_denial`` alongside (never instead of)
+its deny, tagging the event ``sensitive_path`` or ``teammate_write`` so
+``tools.belt_baseline`` can size the persona-toolbelt escalation-ceiling
+baseline from the telemetry stream (plan #3081 Risk 1). The tap is
+fail-quiet by construction: it resolves the session id from the environment,
+skips silently when there is none, and swallows every error, so the deny
+decision, message, and exit shape never depend on it.
+
 Skill tool stage tracking
 -------------------------
 When an ENG session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
@@ -402,6 +412,43 @@ def _resolve_sdk_session():
     return resolve_inflight_session()
 
 
+def _record_denial(cause: str, *, tool_name: str, reason: str) -> None:
+    """Mirror an already-decided PreToolUse deny onto the telemetry stream.
+
+    TELEMETRY ONLY (plan #3081 Risk 1). Called *alongside* a deny, never in
+    place of it and never in a position where it can change one: the deny
+    statement that follows every call site runs unconditionally. Without this
+    tap ``sensitive_path`` and ``teammate_write`` are never emitted, and the
+    exclusion filter in ``tools.belt_baseline`` — which sizes task 4's
+    escalation-ceiling denominator — never runs against real data.
+
+    Session id resolution matches ``agent/tool_budget.py``'s denial tap
+    (``session_id`` first, then ``agent_session_id``); ``inflight_cooldown_key``
+    reads exactly that pair of env vars and touches no Redis, so this stays a
+    pure in-process write. No resolvable id means no event — never an invented
+    one, and never a blocked hook.
+
+    Everything is swallowed here: the lazy imports, resolution, and the
+    recorder itself. ``record_pre_tool_use_denial`` already documents "NEVER
+    raises", but the deny path must not depend on that staying true.
+    """
+    try:
+        from agent.hooks.session_resolver import inflight_cooldown_key
+        from agent.session_telemetry import record_pre_tool_use_denial
+
+        session_id = inflight_cooldown_key()
+        if not session_id:
+            return
+        record_pre_tool_use_denial(
+            session_id,
+            cause=cause,
+            tool_name=tool_name,
+            reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("[pre_tool_use] denial telemetry tap failed (non-fatal): %s", exc)
+
+
 def _enforce_tool_budget_sdk() -> dict[str, Any] | None:
     """Synchronous per-tool budget backstop for the SDK/headless surface (#1821).
 
@@ -526,6 +573,7 @@ async def pre_tool_use_hook(
         file_path = tool_input.get("file_path", "")
         if _is_sensitive_path(file_path):
             logger.warning(f"[pre_tool_use] Blocked {tool_name} to sensitive path: {file_path}")
+            _record_denial("sensitive_path", tool_name=tool_name, reason=f"path={file_path}")
             return {
                 "decision": "block",
                 "reason": (
@@ -538,6 +586,7 @@ async def pre_tool_use_hook(
         # code paths require spawning an ENG session.
         if _is_teammate_session() and not _teammate_is_allowed_write(file_path):
             logger.warning(f"[pre_tool_use] Teammate blocked from writing to: {file_path}")
+            _record_denial("teammate_write", tool_name=tool_name, reason=f"path={file_path}")
             return {
                 "decision": "block",
                 "reason": (
@@ -560,6 +609,9 @@ async def pre_tool_use_hook(
             # Redirect operators: > file, >> file, >file, >>file
             if f"> {sensitive}" in command or f">{sensitive}" in command:
                 logger.warning(f"[pre_tool_use] Blocked Bash write to sensitive file: {sensitive}")
+                _record_denial(
+                    "sensitive_path", tool_name=tool_name, reason=f"redirect to {sensitive}"
+                )
                 return {
                     "decision": "block",
                     "reason": (
@@ -574,6 +626,11 @@ async def pre_tool_use_hook(
                 if cmd in command and sensitive in command:
                     logger.warning(
                         f"[pre_tool_use] Blocked Bash {cmd.strip()} to sensitive file: {sensitive}"
+                    )
+                    _record_denial(
+                        "sensitive_path",
+                        tool_name=tool_name,
+                        reason=f"{cmd.strip()} to {sensitive}",
                     )
                     return {
                         "decision": "block",

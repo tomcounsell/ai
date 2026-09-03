@@ -555,6 +555,35 @@ class AgentSession(Model):
     budget_tripped = Field(default=False)
     budget_tripped_reason = Field(null=True, default=None)
 
+    # === Per-tool context-cost attribution (issue #3081, Lane A) ===
+    # JSON-serialised cumulative snapshot from `agent/tool_cost_attribution.py`
+    # — per-tool call counts and approximate attributed tokens, accumulated
+    # turn over turn by `get_response_via_harness` in the SAME narrow
+    # update_fields save that writes turn_count / tool_call_count. Read by
+    # `session_tool_cost_summary()` so a stage transition can stamp a
+    # session-level aggregate without replaying the telemetry JSONL, and by
+    # `tools/belt_baseline.py` for the pre-activation baseline.
+    # Nullable with a None default: Popoto is schema-on-read, so pre-#3081
+    # records need NO data migration and read back as "no attribution
+    # recorded". These numbers are a RANKING aid, not billing — `total_cost_usd`
+    # remains the only authority on spend.
+    tool_cost_json = Field(null=True, default=None)
+
+    # === Persona toolbelt stamps (plan #3081, Lane A — Race 3 observability) ===
+    # belt_version: the config/toolbelts/{persona}.toml belt_version this
+    # session's most recent turn resolved under; None while enforcement is off
+    # or for sessions predating belts (pre-belt legacy read — nullable
+    # additive, Popoto default-fills absent fields, no migration needed).
+    # belt_enforce_state: "on"/"off" — the TOOLBELTS_ENFORCE state the most
+    # recent turn resolved on its host. At turn start
+    # agent/session_runner/belt_resolver.py::check_and_stamp_belt_state
+    # compares this prior-turn stamp against the current host's resolved state
+    # and emits the WARNING-level belt skew telemetry event on mismatch
+    # (fail-quiet), making fleet skew during the activation window observable.
+    # That function is the SOLE writer, via a narrow save(); ORM access only.
+    belt_version = IntField(null=True)
+    belt_enforce_state = Field(null=True, default=None)
+
     # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).
     # Persisted best-effort by `get_response_via_harness` after the stale-UUID
     # fallback completes. Read by `agent/session_health.py` in the recovery

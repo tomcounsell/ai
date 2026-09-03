@@ -409,15 +409,37 @@ def guard_g2_critique_cycle_cap(
 ) -> Dispatch | Blocked | None:
     """G2: escalate when the critique cycle ceiling is reached.
 
-    If ``critique_cycle_count >= MAX_CRITIQUE_CYCLES`` and CRITIQUE is still
-    failing (not completed), the router blocks and surfaces to the human.
+    Two trip conditions, either suffices once ``cycles >= MAX_CRITIQUE_CYCLES``:
+
+    - CRITIQUE is not ``completed`` (the original shape), or
+    - the latest critique verdict still demands revision (#2885 via #3065).
+      The skill-driven loop marks CRITIQUE ``completed`` every round while
+      recording ``NEEDS REVISION`` / ``MAJOR REWORK``, so the marker-status
+      check alone made this guard inert against the exact loop it bounds —
+      lanes ran 9+ rounds on 2026-09-02 with the cap never firing.
+
+    ``cycles`` is the max of ``critique_cycle_count`` (the fail_stage-driven
+    legacy counter) and ``revision_round_count`` (the durable counter
+    ``record_verdict`` now increments on every revision-demanding verdict).
+    max() rather than sum: if both paths ever counted the same round, summing
+    would double-charge it.
+
+    This guard MUST evaluate before G1 in ``GUARDS``: G1 dispatches
+    ``/do-plan`` on every NEEDS REVISION verdict, so with G1 first the router
+    never reaches this cap. Below the cap G2 returns None, so the ordering is
+    behavior-identical until the bound is spent.
     """
-    cycles = meta.get("critique_cycle_count", 0)
+    cycles = max(
+        int(meta.get("critique_cycle_count", 0) or 0),
+        int(meta.get("revision_round_count", 0) or 0),
+    )
     if cycles < MAX_CRITIQUE_CYCLES:
         return None
 
     critique_status = stage_states.get("CRITIQUE")
-    if critique_status == STATUS_COMPLETED:
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
+    still_revising = CRITIQUE_NEEDS_REVISION in verdict or CRITIQUE_MAJOR_REWORK in verdict
+    if critique_status == STATUS_COMPLETED and not still_revising:
         return None
 
     return Blocked(
@@ -1037,8 +1059,12 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | Terminal | None]]
     # T runs first by design: a finished lane has no correct dispatch, so no
     # other guard's verdict is worth computing (#2894, #2817).
     guard_terminal_lane,
-    guard_g1_critique_loop,
+    # G2 before G1 (#2885 via #3065): G1 dispatches /do-plan on every
+    # revision-demanding verdict, so it would shadow the cycle cap forever.
+    # G2 is None below the cap, so this order changes nothing until the
+    # bound is spent.
     guard_g2_critique_cycle_cap,
+    guard_g1_critique_loop,
     guard_g3_pr_lock,
     guard_g4_oscillation,
     guard_g9_blocked_on_conflict,
@@ -1081,6 +1107,20 @@ def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     # can verify) AND the plan file is actually absent.
     if plan_status == "ready" and meta.get("issue_number") and not meta.get("plan_exists"):
         return True
+    # Crashed-stage recovery (#3078): PLAN="in_progress" with no plan doc on
+    # disk means the plan subagent died mid-flight — the marker has no status
+    # for "started, did not finish", so the wedge reads as still-working
+    # forever and previously dead-ended at Blocked('no matching dispatch
+    # rule'). Re-dispatching /do-plan is the recovery; same evidence
+    # discipline as the #1640 bootstrap case above (issue_number so we can
+    # verify, and the file genuinely absent), and loop-bound by G4 the same
+    # way row 2c bounds a crashed critique (#1668).
+    if (
+        plan_status == STATUS_IN_PROGRESS
+        and meta.get("issue_number")
+        and not meta.get("plan_exists")
+    ):
+        return True
     return False
 
 
@@ -1101,6 +1141,13 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
         return True  # completed implies a plan doc exists (#1275 case intact)
     if plan_status == "ready":
         return bool(meta.get("plan_exists"))  # "ready" needs real evidence (#1640)
+    # Crashed-stage recovery (#3078): PLAN="in_progress" but the plan doc IS
+    # on disk — the plan subagent wrote the doc, then died before marking the
+    # stage completed. The doc is the artifact critique reads, so with
+    # evidence it exists the lane can advance; a half-written doc comes back
+    # NEEDS REVISION and the ordinary revision loop (bounded by G2) owns it.
+    if plan_status == STATUS_IN_PROGRESS:
+        return bool(meta.get("plan_exists"))
     return False
 
 
@@ -1696,6 +1743,46 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     return _review_verdict_is_stale(stage_states)
 
 
+def _rule_patch_dispatched_not_completed(stage_states: dict, meta: dict, context: dict) -> bool:
+    """A dispatched ``/do-patch`` died before completing its stage — re-dispatch it.
+
+    Crashed-stage recovery on the PATCH side (same class as row 2c for
+    CRITIQUE, #1668, and the #3078 PLAN fix): ``/do-patch`` writes its
+    dispatch record, then dies before writing any PATCH marker. Observed live
+    on issue #2754 (2026-09-02): the crashed dispatch made the recorded
+    CHANGES REQUESTED verdict *classified stale* (``_review_verdict_is_stale``
+    compares against the latest patch DISPATCH, not a landed patch), at which
+    point no row owned the state — row 8 steps aside on staleness, row 8b
+    requires ``PATCH == completed``, rows 8c/8d/8e require an absent verdict,
+    and 8f/9/10/G6 require APPROVED. Router answered
+    ``Blocked('no matching dispatch rule')``.
+
+    Disjointness: row 8b requires ``PATCH == completed``; this row requires
+    the opposite. Rows 8c/8d/8e require the absence of a recorded REVIEW
+    verdict; this row requires one present. Row 8 fires only on a fresh
+    (non-stale) verdict; with ``last_dispatched_skill == /do-patch`` the
+    verdict necessarily predates that dispatch, so row 8 has already stepped
+    aside on every state this row owns.
+
+    Loop-bounded by G4: a deterministically crashing patch re-dispatches the
+    same skill on an identical stage snapshot (``_patch_cycle_count`` only
+    increments when the stage completes), so ``same_stage_dispatch_count``
+    climbs and G4 escalates.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if (meta.get("last_dispatched_skill") or "") != SKILL_DO_PATCH:
+        return False
+    if stage_states.get("PATCH") == STATUS_COMPLETED:
+        return False
+    # A recorded REVIEW verdict is what distinguishes "patch was warranted and
+    # died" from the no-verdict states rows 8c/8d/8e own.
+    if meta.get("latest_review_verdict"):
+        return True
+    verdicts = stage_states.get("_verdicts") or {}
+    return bool(_verdict_text(verdicts.get("REVIEW")))
+
+
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
     """REVIEW is in_progress but never recorded a verdict — re-dispatch review.
 
@@ -2036,6 +2123,15 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_patch_applied_after_review,
         skill=SKILL_DO_PR_REVIEW,
         reason="Re-review is REQUIRED after every patch",
+    ),
+    # Row 8g: /do-patch was dispatched but died before completing its stage —
+    # crashed-stage recovery on the PATCH side (mirrors 2c/8c; observed on
+    # #2754). Loop-bound by G4.
+    DispatchRule(
+        row_id="8g",
+        state_predicate=_rule_patch_dispatched_not_completed,
+        skill=SKILL_DO_PATCH,
+        reason="Patch dispatched but never completed — re-run patch",
     ),
     # Row 8c: REVIEW is in_progress with no recorded verdict and row 8b does not
     # apply (no patch applied after review). Mirrors row 2c on the CRITIQUE side.
