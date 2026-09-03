@@ -1495,7 +1495,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
         for b in bump.bumps:
             if b.bumped:
-                log(f"  {b.package}: {b.old_version} -> {b.new_version}", v, always=True)
+                # `restore_failed` blocks the commit below regardless of
+                # which set bumped cleanly (deps.py's set loop only stops
+                # AFTER the failing set, so an earlier set's clean bump is
+                # still reported here) -- say so inline, not just in the
+                # adjacent restore-failed warning, so the two lines don't
+                # read in tension.
+                suffix = " (not committed)" if bump.restore_failed else ""
+                log(f"  {b.package}: {b.old_version} -> {b.new_version}{suffix}", v, always=True)
             elif b.error:
                 log(f"  {b.package}: skip ({b.error})", v)
             else:

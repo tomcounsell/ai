@@ -91,6 +91,12 @@ class TestNetworkIsolation:
         alternate path to a real ``OpenAIChatModel``/``OllamaProvider``
         existed, the call would proceed past the severed loader and try to
         reach a live Ollama daemon instead of surfacing this sentinel.
+
+        ``_load_stack``'s own contract is broader than ``ImportError``
+        ("raises whatever the import raises"), so ``run_typed_local``
+        catches ``Exception`` here and re-raises as ``LLMStackIncompatible``
+        -- the original class is still visible via ``__cause__``, which is
+        what proves the severed loader (not some other path) produced it.
         """
 
         class LoaderSeveredError(RuntimeError):
@@ -101,8 +107,9 @@ class TestNetworkIsolation:
 
         monkeypatch.setattr(wrapper_mod, "_load_stack", _sever)
 
-        with pytest.raises(LoaderSeveredError):
+        with pytest.raises(LLMStackIncompatible) as exc_info:
             await run_typed_local("route: hello", Decision)
+        assert isinstance(exc_info.value.__cause__, LoaderSeveredError)
 
     async def test_load_stack_import_error_raises_llm_stack_incompatible(self, monkeypatch):
         """``LLM_STACK_COMPAT_OVERRIDE=healthy`` can pass the guard while

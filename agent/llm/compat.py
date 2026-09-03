@@ -65,7 +65,7 @@ Purity
 :func:`check_llm_stack_compat` returns a :class:`CompatResult` and does
 **nothing else**: it never touches the memoized degraded flag, never calls
 ``capture_message``, never writes or clears a marker file. Only
-``_resolve_degraded_flag()`` alerts. This matters because the CLI's callers
+``resolve_degraded_flag()`` alerts. This matters because the CLI's callers
 are ``scripts/update/verify.py`` and the auto-bump ``llm`` gate phase, and
 the gate deliberately runs the predicate against a stack it is *about to
 roll back* -- an impure CLI would fire a fatal Sentry capture and strand a
@@ -81,7 +81,7 @@ keeps working. Degraded-but-running is precisely the state that hid the
 2026-08-24 incident for six hours, so **the alert is the entire safety
 property**.
 
-:func:`_resolve_degraded_flag` is the flag: lazily self-resolving, memoizing
+:func:`resolve_degraded_flag` is the flag: lazily self-resolving, memoizing
 both axes, and **the first transition to degraded emits the alert from
 inside the resolver**. Binding the alert to resolution rather than to
 startup means no entry path can reach the broken stack without alarming, and
@@ -129,7 +129,7 @@ SENTINEL = "LLM_STACK_COMPAT"
 _MARKER_DIR = Path(__file__).resolve().parents[2] / "data"
 _MARKER_STEM = "llm-stack-degraded"
 
-# Memoized degraded verdict, owned by ``_resolve_degraded_flag()``.
+# Memoized degraded verdict, owned by ``resolve_degraded_flag()``.
 # ``None`` means "not yet resolved" -- the predicate's purity is asserted
 # against exactly that: a ``check_llm_stack_compat`` call must leave this
 # ``None``. The two axes are memoized beside it because they are consumed
@@ -199,7 +199,7 @@ def _marker_path(proc: str) -> Path:
     :data:`SENTINEL`.
 
     Writing and clearing (``unlink(missing_ok=True)``) belong to
-    ``_resolve_degraded_flag()``; this helper only computes the path, and
+    ``resolve_degraded_flag()``; this helper only computes the path, and
     only ``bridge`` and ``worker`` ever pass a ``proc``.
     """
     global _MARKER_DIR_WARNED
@@ -343,7 +343,7 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
     Purity section. ``_check_network`` (the ``allow_network=True`` branch)
     talks to the third-party stack directly rather than through
     ``agent.llm.wrapper.run_typed`` -- going through ``run_typed`` would
-    re-enter ``_guard_stack`` -> ``stack_axes()`` -> ``_resolve_degraded_flag()``,
+    re-enter ``_guard_stack`` -> ``stack_axes()`` -> ``resolve_degraded_flag()``,
     mutating this module's memoized globals and breaking purity on exactly
     the branch the auto-bump ``llm`` gate runs against a stack it is about
     to roll back.
@@ -468,41 +468,48 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
 def _check_network(
     anthropic_version: str | None, pydantic_ai_version: str | None
 ) -> CompatResult | None:
-    """One minimal real ``create`` call; ``None`` when it succeeds.
+    """One minimal real ``run_typed`` call; ``None`` when it succeeds.
 
     Catches transport-class breaks (a moved HTTP layer, a changed auth
     header) that no signature comparison can see. Billed, so only the
     auto-bump ``llm`` gate turns it on, and only on cycles that bumped.
 
-    Deliberately does **not** go through ``agent.llm.wrapper.run_typed``:
-    that call goes through ``_guard_stack`` -> ``stack_axes()`` ->
-    ``_resolve_degraded_flag()``, which memoizes this module's ``_DEGRADED``
-    / ``_LOADER_OK`` / ``_COMPATIBLE`` globals -- mutating exactly the
-    global state ``check_llm_stack_compat``'s Purity contract promises not
-    to touch. This talks to the third-party stack directly instead, so the
-    ``allow_network=True`` branch stays as pure as the default one.
+    Goes through ``agent.llm.wrapper.run_typed`` with its internal
+    ``_skip_guard=True`` -- restoring the shared #1111 ``semaphore_slot()``
+    and both of ``run_typed``'s timeouts (SDK-level + the outer hard cap,
+    well inside the auto-bump gate's 120s subprocess bound) rather than
+    hand-rolling a second, un-semaphored, un-timed client construction.
+    ``_skip_guard=True`` means the call never reaches ``_guard_stack`` ->
+    ``stack_axes()`` -> ``resolve_degraded_flag()``, so this stays as pure
+    as the default ``allow_network=False`` branch: no global state, no
+    marker, no alert channel touched. See ``run_typed``'s docstring for why
+    this internal parameter exists at all.
     """
     import asyncio
 
     from pydantic import BaseModel
 
-    from agent.anthropic_client import _load_stack
-    from config.models import MODEL_FAST
+    from agent.llm.wrapper import run_typed
     from utils.api_keys import get_anthropic_api_key
+
+    if not get_anthropic_api_key():
+        return CompatResult(
+            compatible=False,
+            loader_ok=True,
+            anthropic_version=anthropic_version,
+            pydantic_ai_version=pydantic_ai_version,
+            reason=(
+                "no Anthropic API key resolvable on this machine -- cannot "
+                "run the live network probe"
+            ),
+            exc_type=None,
+        )
 
     class _Probe(BaseModel):
         answer: str
 
-    async def _probe() -> None:
-        stack = _load_stack()
-        async with stack.anthropic.AsyncAnthropic(api_key=get_anthropic_api_key()) as client:
-            provider = stack.AnthropicProvider(anthropic_client=client)
-            pydantic_model = stack.AnthropicModel(MODEL_FAST, provider=provider)
-            agent = stack.Agent(pydantic_model, output_type=_Probe)
-            await agent.run("Reply with answer=hi")
-
     try:
-        asyncio.run(_probe())
+        asyncio.run(run_typed("Reply with answer=hi", _Probe, _skip_guard=True))
     except Exception as exc:
         return CompatResult(
             compatible=False,
@@ -627,13 +634,22 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
     point for ``bridge/telegram_bridge.py::main`` and
     ``worker/__main__.py`` -- exposed under a public name because it is
     exactly what a future reader greps for; ``stack_axes()`` cannot take a
-    ``proc``. **Exception-total by contract**: this function must never let
-    an unexpected exception escape. A launchd ``KeepAlive`` process turns an
-    escaping exception into a crash-loop, which is the exact failure class
-    this lane exists to remove one layer down -- reintroducing it at the
-    boot hook would defeat the whole plan. Anything ``check_llm_stack_compat``
-    itself did not catch is caught here too, and the flag fails closed to
-    degraded (never to a process exit).
+    ``proc``. **Exception-total by contract, enforced by structure**: every
+    branch below the memo check runs inside a ``try/except Exception``. The
+    resolution path falls closed to ``_DEGRADED = True``; the break-glass
+    override branch falls closed to *not* degraded, because that is the
+    branch an operator invokes to escape a crash-loop and it must not be
+    able to deny them the recovery. This is deliberately not "the predicate call is
+    guarded" -- ``_alert_degraded``/``_clear_marker``/``_marker_path`` and
+    the bare ``logger.critical`` inside them are unreachable with this
+    repo's three stdlib log handlers (all trap in ``emit``), but the day
+    anything installs a third-party handler under the root logger the boot
+    hooks inherit, one of those becomes reachable too -- and a launchd
+    ``KeepAlive`` process turns any escaping exception into a crash-loop,
+    the exact failure class this lane exists to remove one layer down. The
+    except clause's own fallback logging is itself guarded for the same
+    reason: a broken handler must not turn the fallback into a second
+    escape.
     """
     global _DEGRADED, _LOADER_OK, _COMPATIBLE
 
@@ -641,40 +657,59 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
         return _DEGRADED
 
     if os.environ.get("LLM_STACK_COMPAT_OVERRIDE") == "healthy":
-        logger.warning("%s OVERRIDDEN: LLM_STACK_COMPAT_OVERRIDE=healthy", SENTINEL)
         _LOADER_OK = True
         _COMPATIBLE = True
         _DEGRADED = False
-        _clear_marker(proc)
+        # Guarded, and falling closed to *not* degraded rather than to
+        # degraded: this is the break-glass path an operator reaches for to
+        # get off a crash-loop, so it is the one branch where an escaping
+        # exception would deny them the recovery they invoked. The globals
+        # above are already committed, so a failure here costs at most a
+        # stale marker on the board.
+        try:
+            logger.warning("%s OVERRIDDEN: LLM_STACK_COMPAT_OVERRIDE=healthy", SENTINEL)
+            _clear_marker(proc)
+        except Exception:  # noqa: S110 -- see the docstring's totality contract
+            pass
         return False
 
     try:
         result = check_llm_stack_compat()
-    except Exception as exc:  # run-boundary total: never propagate, never exit
-        result = CompatResult(
-            compatible=False,
-            loader_ok=False,
-            reason=f"check_llm_stack_compat raised unexpectedly: {exc}",
-            exc_type=type(exc).__name__,
-        )
+        _LOADER_OK = result.loader_ok
+        _COMPATIBLE = result.compatible
+        _DEGRADED = not (result.loader_ok and result.compatible)
 
-    _LOADER_OK = result.loader_ok
-    _COMPATIBLE = result.compatible
-    _DEGRADED = not (result.loader_ok and result.compatible)
-
-    if _DEGRADED:
-        _alert_degraded(result, proc)
-    else:
-        _clear_marker(proc)
+        if _DEGRADED:
+            _alert_degraded(result, proc)
+        else:
+            _clear_marker(proc)
+    except Exception as exc:  # run-boundary total: NOTHING below may propagate
+        _LOADER_OK = False
+        _COMPATIBLE = False
+        _DEGRADED = True
+        try:
+            # Still route through the real three-channel alert -- "the
+            # alert is the entire safety property" applies here too, not
+            # only when the predicate itself behaves. A synthetic result
+            # carries the exception that escaped the predicate (or, in the
+            # rarer case, one of the helpers below it).
+            _alert_degraded(
+                CompatResult(
+                    compatible=False,
+                    loader_ok=False,
+                    reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
+                    exc_type=type(exc).__name__,
+                ),
+                proc,
+            )
+        except Exception:  # noqa: S110 -- deliberate: see docstring's "guarded for the same reason"
+            # Even the fallback alert must not be able to escape -- that
+            # would defeat the entire purpose of this except clause. If the
+            # alert's own first channel (a plain logger.critical call) is
+            # what raised, there is nothing left to try.
+            pass
 
     return _DEGRADED
-
-
-# Internal alias, retained for existing tests and any in-module callers that
-# spell the private name. `resolve_degraded_flag` is the public API (#3001
-# tech debt: a leading underscore on this repo's actual startup entry point
-# told a grepping reader the opposite of the truth).
-_resolve_degraded_flag = resolve_degraded_flag
 
 
 def stack_axes() -> tuple[bool, bool]:

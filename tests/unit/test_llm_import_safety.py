@@ -209,5 +209,5 @@ async def test_run_typed_raises_typed_and_fires_all_channels(broken_loader, capt
 
     # ...while a bridge-shaped resolution does write one.
     compat._DEGRADED = None
-    compat._resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag("bridge")
     assert json.loads(marker.read_text())["axis"] == "loader"

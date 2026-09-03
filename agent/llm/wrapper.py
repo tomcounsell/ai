@@ -143,6 +143,7 @@ async def run_typed(
     model: str = MODEL_FAST,
     sdk_timeout: float = DEFAULT_SDK_TIMEOUT,
     hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,
+    _skip_guard: bool = False,
 ) -> BaseModel:
     """Run a schema-validated LLM call through PydanticAI.
 
@@ -166,6 +167,14 @@ async def run_typed(
             (e.g. half-open TCP sockets with no socket event). Pass
             ``None`` to disable the outer cap and rely on ``sdk_timeout``
             alone.
+        _skip_guard: internal-only (#3001). When ``True``, skips
+            ``_guard_stack`` entirely, so the call never reaches
+            ``stack_axes()`` -> ``resolve_degraded_flag()``. The sole
+            caller is ``agent.llm.compat._check_network``, the auto-bump
+            ``llm`` gate's live probe -- it must stay pure (never touch the
+            memoized degraded flag) while still getting the shared
+            ``semaphore_slot()`` and both timeouts this function already
+            applies. Not for use outside the compat gate.
 
     Returns:
         A validated instance of ``output_type``.
@@ -179,15 +188,18 @@ async def run_typed(
     if not prompt or not prompt.strip():
         raise ValueError("run_typed requires a non-empty, non-whitespace prompt")
 
-    _guard_stack("run_typed", signature_axis=True)
+    if not _skip_guard:
+        _guard_stack("run_typed", signature_axis=True)
 
     try:
         stack = _load_stack()
-    except ImportError as e:
+    except Exception as e:
         # LLM_STACK_COMPAT_OVERRIDE=healthy short-circuits _guard_stack
         # before the predicate runs, so a genuinely broken stack can reach
-        # here past the guard. A raw ImportError would bypass every
-        # existing `except LLMCallError` fail-safe -- the exact property
+        # here past the guard. `_load_stack`'s own contract is broader than
+        # ImportError ("raises whatever the import raises"), and a raw
+        # exception of any class would bypass every existing
+        # `except LLMCallError` fail-safe -- the exact property
         # LLMStackIncompatible exists to preserve.
         raise LLMStackIncompatible(f"run_typed: LLM stack failed to import: {e}") from e
 
@@ -273,7 +285,10 @@ async def run_typed_local(
 
     try:
         stack = _load_stack()
-    except ImportError as e:
+    except Exception as e:
+        # `_load_stack`'s own contract is broader than ImportError ("raises
+        # whatever the import raises"); catch the same breadth run_typed and
+        # check_llm_stack_compat already do on this call.
         raise LLMStackIncompatible(f"run_typed_local: LLM stack failed to import: {e}") from e
 
     base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"

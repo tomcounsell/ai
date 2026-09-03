@@ -26,6 +26,7 @@ proving only what a parent can see: the out-of-process CLI contract.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import os
@@ -35,6 +36,8 @@ from pathlib import Path
 
 import pytest
 import sentry_sdk
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.models.function import FunctionModel
 
 from agent.llm import compat
 
@@ -294,6 +297,87 @@ def test_local_mode_makes_no_network_call(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
+# _check_network -- the real body, network-isolated via the FunctionModel seam
+# --------------------------------------------------------------------------
+
+
+def _install_fake_network_stack(monkeypatch, fn):
+    """Swap ``wrapper_mod``'s loader so ``run_typed`` never leaves this process.
+
+    Mirrors ``tests/unit/test_llm_wrapper.py``'s ``_install_function_model``:
+    ``_check_network`` goes through ``agent.llm.wrapper.run_typed`` with
+    ``_skip_guard=True``, so patching the same seam that file uses drives
+    ``_check_network``'s real body instead of a stand-in.
+    """
+    from agent.llm import wrapper as wrapper_mod
+
+    def fake_anthropic_model(model_name, *, provider):
+        return FunctionModel(fn, model_name=model_name)
+
+    import utils.api_keys as api_keys_mod
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+    monkeypatch.setattr(wrapper_mod, "get_anthropic_api_key", lambda: "fake-test-key")
+    # `_check_network` imports `get_anthropic_api_key` fresh, inside its own
+    # function body, so the source (`utils.api_keys`) is the seam that
+    # actually affects it -- patching `wrapper_mod`'s bound copy alone
+    # would leave `_check_network`'s own no-key check unpatched.
+    monkeypatch.setattr(api_keys_mod, "get_anthropic_api_key", lambda: "fake-test-key")
+
+
+def test_check_network_returns_none_on_a_successful_probe(monkeypatch) -> None:
+    """The real ``_check_network`` body, driven end to end, on success."""
+
+    def _respond(messages, info) -> ModelResponse:
+        tool_name = info.output_tools[0].name if info.output_tools else None
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"answer": "hi"})])
+
+    _install_fake_network_stack(monkeypatch, _respond)
+
+    assert compat._check_network("0.125.0", "2.9.0") is None
+
+
+def test_check_network_reports_the_failure_reason_verbatim(monkeypatch) -> None:
+    """The real ``_check_network`` body, driven end to end, on failure."""
+
+    def _explode(messages, info) -> ModelResponse:
+        raise RuntimeError("transport moved")
+
+    _install_fake_network_stack(monkeypatch, _explode)
+
+    result = compat._check_network("0.125.0", "2.9.0")
+
+    assert result is not None
+    assert result.compatible is False
+    assert result.loader_ok is True
+    assert (result.reason or "").startswith("live network probe call failed:"), result.reason
+    assert "transport moved" in (result.reason or "")
+
+
+def test_check_network_reports_a_missing_api_key_before_probing(monkeypatch) -> None:
+    """A maintainer machine with no key must not read as an incompatible pair."""
+    import utils.api_keys as api_keys_mod
+    from agent.llm import wrapper as wrapper_mod
+
+    def _never_called(model_name, *, provider):
+        raise AssertionError("no probe may run without a resolvable API key")
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(real, AnthropicModel=_never_called)
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+    monkeypatch.setattr(api_keys_mod, "get_anthropic_api_key", lambda: None)
+
+    result = compat._check_network("0.125.0", "2.9.0")
+
+    assert result is not None
+    assert result.compatible is False
+    assert result.loader_ok is True
+    assert "no Anthropic API key" in (result.reason or ""), result.reason
+
+
+# --------------------------------------------------------------------------
 # Purity -- the predicate and the CLI entry, in process
 # --------------------------------------------------------------------------
 
@@ -314,29 +398,25 @@ def test_predicate_is_pure_on_an_incompatible_stack(
 def test_predicate_is_pure_on_the_network_branch(counting_capture, monkeypatch) -> None:
     """``allow_network=True`` must stay as pure as the default branch.
 
-    ``_check_network`` used to go through ``agent.llm.wrapper.run_typed``,
-    which re-enters ``_guard_stack`` -> ``stack_axes()`` ->
-    ``_resolve_degraded_flag()`` and memoizes this module's globals -- an
-    impurity that is benign only while the ``llm`` gate phase is
-    unreachable (the coupled set's ``hold``). It goes live the moment a
-    future lane lifts the hold, exactly when the gate runs against a stack
-    it is about to roll back.
+    Drives the REAL ``_check_network`` body (via the ``_load_stack`` seam,
+    not a stubbed-out replacement) through ``check_llm_stack_compat`` on the
+    real, healthy, pinned stack: ``_check_network`` goes through
+    ``agent.llm.wrapper.run_typed`` with ``_skip_guard=True``, which skips
+    ``_guard_stack`` -> ``stack_axes()`` -> ``resolve_degraded_flag()``
+    entirely, so this stays as pure as the default branch even though it
+    makes a real (network-isolated) ``run_typed`` call.
     """
+
+    def _respond(messages, info) -> ModelResponse:
+        tool_name = info.output_tools[0].name if info.output_tools else None
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"answer": "hi"})])
+
+    _install_fake_network_stack(monkeypatch, _respond)
     monkeypatch.setattr(compat, "_DEGRADED", None, raising=False)
-    monkeypatch.setattr(
-        compat,
-        "_check_network",
-        lambda anthropic_version, pydantic_ai_version: compat.CompatResult(
-            compatible=False,
-            loader_ok=True,
-            reason="live network probe call failed: boom",
-            exc_type="RuntimeError",
-        ),
-    )
 
     result = compat.check_llm_stack_compat(allow_network=True)
 
-    assert result.compatible is False
+    assert result.compatible is True, result.reason
     assert counting_capture == [], "the predicate alerted; alerting belongs to the resolver"
     assert compat._DEGRADED is None, "the network branch resolved the memoized degraded flag"
 

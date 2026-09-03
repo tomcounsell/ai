@@ -121,7 +121,7 @@ def test_degraded_resolution_fires_all_three_channels(predicate, captures, caplo
     predicate(_signature_break())
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag("bridge") is True
+    assert compat.resolve_degraded_flag("bridge") is True
 
     critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     assert critical, "no logger.critical sentinel emitted"
@@ -145,7 +145,7 @@ def test_degraded_resolution_fires_all_three_channels(predicate, captures, caplo
 
 def test_loader_axis_is_named_in_the_marker(predicate, captures):
     predicate(_loader_break())
-    compat._resolve_degraded_flag("worker")
+    compat.resolve_degraded_flag("worker")
 
     payload = json.loads(compat._marker_path("worker").read_text())
     assert payload["axis"] == "loader"
@@ -156,7 +156,7 @@ def test_loader_axis_is_named_in_the_marker(predicate, captures):
 def test_alert_body_is_static_plus_versions_and_exception(predicate, captures):
     """No drafter, no LLM composition — the thing being alarmed is the stack."""
     predicate(_loader_break())
-    compat._resolve_degraded_flag("worker")
+    compat.resolve_degraded_flag("worker")
 
     body = captures[0]["message"]
     assert compat._ALERT_BODY in body
@@ -166,9 +166,9 @@ def test_alert_body_is_static_plus_versions_and_exception(predicate, captures):
 
 def test_alert_fires_once_on_the_first_transition(predicate, captures):
     predicate(_signature_break())
-    compat._resolve_degraded_flag("bridge")
-    compat._resolve_degraded_flag("bridge")
-    compat._resolve_degraded_flag()
+    compat.resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag()
 
     assert len(captures) == 1
 
@@ -181,7 +181,7 @@ def test_sentry_failure_suppresses_neither_log_nor_marker(predicate, monkeypatch
     predicate(_signature_break())
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag("bridge") is True
+    assert compat.resolve_degraded_flag("bridge") is True
 
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
     assert any("Sentry capture_message failed" in r.getMessage() for r in caplog.records)
@@ -204,7 +204,7 @@ def test_no_proc_caller_writes_no_marker_but_still_alerts(predicate, captures, c
     predicate(_signature_break())
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag() is True
+    assert compat.resolve_degraded_flag() is True
 
     assert _markers() == []
     assert len(captures) == 1
@@ -221,15 +221,15 @@ def test_healthy_resolution_clears_only_this_processes_marker(predicate, capture
     with the polarity flipped, and worse, because nobody investigates green.
     """
     predicate(_signature_break())
-    compat._resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag("bridge")
     compat._DEGRADED = None
-    compat._resolve_degraded_flag("worker")
+    compat.resolve_degraded_flag("worker")
     assert len(_markers()) == 2
 
     # The bridge restarts onto fixed pins and re-resolves healthy.
     compat._DEGRADED = None
     predicate(_healthy())
-    assert compat._resolve_degraded_flag("bridge") is False
+    assert compat.resolve_degraded_flag("bridge") is False
 
     assert not compat._marker_path("bridge").exists()
     assert compat._marker_path("worker").exists()
@@ -238,7 +238,7 @@ def test_healthy_resolution_clears_only_this_processes_marker(predicate, capture
 
 def test_healthy_resolution_with_no_marker_is_a_no_op(predicate, captures):
     predicate(_healthy())
-    assert compat._resolve_degraded_flag("bridge") is False
+    assert compat.resolve_degraded_flag("bridge") is False
     assert _markers() == []
     assert captures == []
 
@@ -259,7 +259,7 @@ def test_marker_redirect_is_autouse(predicate, captures):
     assert compat._MARKER_DIR != live_data
 
     predicate(_signature_break())
-    compat._resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag("bridge")
 
     assert (compat._MARKER_DIR / "llm-stack-degraded.bridge").exists()
     assert not (live_data / "llm-stack-degraded.bridge").exists()
@@ -311,7 +311,7 @@ def test_override_short_circuits_the_resolver(monkeypatch, predicate, captures, 
     predicate(_signature_break())
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag("bridge") is False
+    assert compat.resolve_degraded_flag("bridge") is False
     assert compat.stack_axes() == (True, True)
     assert captures == [], "an overridden machine must not alarm"
     assert any("OVERRIDDEN" in r.getMessage() for r in caplog.records)
@@ -343,16 +343,38 @@ def test_override_clears_marker(monkeypatch, predicate, captures, caplog):
     resolution can ever reach the healthy branch's clear.
     """
     predicate(_signature_break())
-    compat._resolve_degraded_flag("bridge")
+    compat.resolve_degraded_flag("bridge")
     assert compat._marker_path("bridge").exists()
 
     compat._DEGRADED = None
     monkeypatch.setenv("LLM_STACK_COMPAT_OVERRIDE", "healthy")
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag("bridge") is False
+    assert compat.resolve_degraded_flag("bridge") is False
     assert not compat._marker_path("bridge").exists()
     assert any("OVERRIDDEN" in r.getMessage() for r in caplog.records)
+
+
+def test_override_branch_is_exception_total(monkeypatch, predicate, captures):
+    """The break-glass path must not be able to deny the recovery it grants.
+
+    An operator sets the override precisely to get a launchd service off a
+    crash-loop. If the branch's own marker clear or its sentinel log could
+    raise, the override would reintroduce the crash-loop on the one path
+    that exists to escape it -- so this branch is guarded too, and unlike
+    the resolution path it falls closed to *not* degraded.
+    """
+    monkeypatch.setenv("LLM_STACK_COMPAT_OVERRIDE", "healthy")
+    predicate(_signature_break())
+
+    def _boom(_proc):
+        raise NotADirectoryError("marker dir is a file")
+
+    monkeypatch.setattr(compat, "_clear_marker", _boom)
+
+    assert compat.resolve_degraded_flag("bridge") is False
+    assert compat.stack_axes() == (True, True)
+    assert captures == [], "an overridden machine must not alarm"
 
 
 # --------------------------------------------------------------------------
@@ -493,7 +515,7 @@ def test_unexpected_exception_class_resolves_degraded_not_raises(monkeypatch, ca
     monkeypatch.setattr(compat, "_find_create_sites", _boom)
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
-    assert compat._resolve_degraded_flag("bridge") is True
+    assert compat.resolve_degraded_flag("bridge") is True
 
     assert compat._LOADER_OK is True
     assert compat._COMPATIBLE is False
@@ -560,7 +582,7 @@ def test_startup_forces_resolution_with_its_own_proc(module_path, func_name, pro
 def test_degraded_startup_does_not_exit(predicate, captures):
     """The process comes up. Exiting would be the worse trade."""
     predicate(_loader_break())
-    assert compat._resolve_degraded_flag("bridge") is True  # no SystemExit
+    assert compat.resolve_degraded_flag("bridge") is True  # no SystemExit
 
 
 async def test_intake_survives_a_degraded_stack(predicate, captures):

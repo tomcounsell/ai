@@ -70,7 +70,7 @@ def cross_lane_repo():
 def _redirect_llm_marker_dir(monkeypatch, tmp_path_factory):
     """Keep degraded-LLM-stack markers out of the live ``data/`` (#3001).
 
-    ``agent.llm.compat._resolve_degraded_flag`` writes
+    ``agent.llm.compat.resolve_degraded_flag`` writes
     ``data/llm-stack-degraded.{proc}`` — the same directory a running
     bridge, worker, and dashboard share on this machine. Left unredirected,
     the degraded-driving test files write real markers there, xdist workers
@@ -106,7 +106,7 @@ def _redirect_llm_marker_dir(monkeypatch, tmp_path_factory):
 def _reset_llm_degraded_memo(monkeypatch):
     """Give every test an already-resolved, healthy LLM-stack flag (#3001).
 
-    ``_resolve_degraded_flag`` memoizes process-wide and by design: it is a
+    ``resolve_degraded_flag`` memoizes process-wide and by design: it is a
     boot-time verdict, not a per-call one. In a pytest worker that turns
     into cross-test coupling in both directions. A test that fakes
     ``anthropic.AsyncAnthropic`` (several do, for network isolation) makes

@@ -926,8 +926,8 @@ def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
     for index, coupled_set in enumerate(AUTO_BUMP_SETS):
         _bump_coupled_set(project_dir, coupled_set, result)
         if result.restore_failed:
-            skipped: dict[str, str | None] = {}
             for remaining in AUTO_BUMP_SETS[index + 1 :]:
+                skipped: dict[str, str | None] = {}
                 for member in remaining.members:
                     skipped[member] = _safe_pinned(project_dir, member)
                 _record_set(
