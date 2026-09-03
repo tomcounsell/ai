@@ -253,6 +253,65 @@ def test_cleanup_declining_is_reported_not_swallowed(repo, all_clear, monkeypatc
     assert _reasons(sweep)["lane"] == "cleanup_declined:sess-9"
 
 
+def test_protected_worktree_nightly_baseline_skip_survives_every_other_guard(repo, all_clear):
+    """The nightly classifier's baseline lane is never reapable (issue #2334).
+
+    `all_clear` neutralizes every other guard, and the lane is backdated past
+    the age threshold, so this asserts the *protected* skip specifically — not
+    the guard-order accident it used to survive by (`too_young` while the
+    nightly kept touching it, then `merged_via_tree` returning False for a
+    branch that never existed). That accident inverts the moment a branchless
+    lane is treated as reapable.
+    """
+    lane = repo / ".worktrees" / "nightly-baseline"
+    lane.mkdir(parents=True)
+    (lane / "file.txt").write_text("content")
+    _age(lane)
+
+    sweep = sweep_worktrees(repo, apply=True)
+
+    assert _reasons(sweep)["nightly-baseline"] == "protected"
+    assert "nightly-baseline" not in sweep.removed
+    assert [slug for _, slug, _, _ in all_clear] == ["lane"], (
+        "the ordinary lane must still be reaped — a blanket refusal would pass "
+        "this test while breaking the sweeper"
+    )
+
+
+def test_protected_worktree_slugs_names_the_baseline_lane():
+    """The constant, not a literal, is what the sweeper and the nightly share."""
+    assert "nightly-baseline" in disk_reclaim.PROTECTED_WORKTREE_SLUGS
+
+
+def test_protected_worktree_skip_precedes_the_age_guard(repo, all_clear):
+    """A freshly-touched protected lane reports `protected`, never `too_young`.
+
+    Reason-order matters: `too_young` reads as "come back later", which is
+    exactly the wrong thing to record about a lane that must never be reaped.
+    """
+    lane = repo / ".worktrees" / "nightly-baseline"
+    lane.mkdir(parents=True)
+    (lane / "file.txt").write_text("content")
+    _age(lane, time.time())
+
+    sweep = sweep_worktrees(repo, min_age_days=14, apply=True)
+    assert _reasons(sweep)["nightly-baseline"] == "protected"
+
+
+def test_protected_worktree_is_skipped_even_when_pr_state_is_unavailable(repo, monkeypatch):
+    """The fail-closed whole-category skip must not mislabel a protected lane.
+
+    `pr_state_unavailable` is a transient reason; recording it for a protected
+    lane would say the lane is reapable once `gh` answers again.
+    """
+    lane = repo / ".worktrees" / "nightly-baseline"
+    lane.mkdir(parents=True)
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: None)
+    sweep = sweep_worktrees(repo, apply=True)
+    assert sweep.removed == []
+    assert "nightly-baseline" in _reasons(sweep)
+
+
 def test_missing_worktrees_dir_is_not_an_error(tmp_path, all_clear):
     sweep = sweep_worktrees(tmp_path / "empty", apply=True)
     assert sweep.removed == [] and sweep.skipped == [] and sweep.errors == []
