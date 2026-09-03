@@ -1581,3 +1581,15 @@ class TestPollQuestionHeuristicGate:
         question = "Should we deploy to staging now or wait for review?"
         violations = validate_poll_question(question)
         assert not any(v.rule == "poll_question_promise" for v in violations)
+
+    def test_kill_switch_disables_poll_check(self, monkeypatch):
+        """PROMISE_GATE_ENABLED=false must disable the poll-question honesty
+        check too, not just the drafter's main/short paths — the doc's
+        'process-wide' kill-switch claim otherwise has a silent exception."""
+        from bridge.message_drafter import validate_poll_question
+
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        question = "I'll come back with the results — proceed to stage?"
+        violations = validate_poll_question(question)
+        assert not any(v.rule == "poll_question_promise" for v in violations)

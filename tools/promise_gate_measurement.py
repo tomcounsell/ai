@@ -202,6 +202,16 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
     for a human to review, not a mechanical verdict. False negatives are
     expected and fine; the goal is surfacing candidates worth a look, not
     exhaustive detection.
+
+    NOTE: this classification is plain substring matching against
+    ``_NEGATIVE_EVIDENCE_KEYWORDS`` / ``_POSITIVE_EVIDENCE_KEYWORDS`` -- the
+    kind of keyword matching CLAUDE.md principle 3 (intelligent systems over
+    rigid patterns) discourages for anything decision-bearing. It is
+    acceptable *only* because the output is an offline flag a human reads
+    before acting, never a gate verdict. Do not promote this function (or
+    its keyword lists) into a blocking/gating decision path -- if that need
+    arises, replace it with an LLM judgment call the way the drafter's main
+    path does, not a bigger keyword list.
     """
     flags: list[ContradictionFlag] = []
     for entry in entries:

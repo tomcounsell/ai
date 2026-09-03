@@ -1,0 +1,104 @@
+"""Unit coverage for tools/promise_gate_measurement.py (issue #3093 review, #3027).
+
+This tool is the recorded entry criterion for the deferred #3035 phase-4
+decision, so a silent bug in its percentile math or legacy-row filter would
+corrupt that decision rather than fail loudly. Focused coverage only: the
+pure-function edge cases the review called out, not a rewrite of the tool.
+"""
+
+from tools.promise_gate_measurement import (
+    _is_promise_gate_row,
+    _percentile,
+    latency_by_source_and_transport,
+)
+
+
+class TestPercentile:
+    def test_empty_input_returns_nan(self):
+        result = _percentile([], 0.50)
+        assert result != result  # nan != nan
+
+    def test_single_value_returns_that_value_for_any_percentile(self):
+        assert _percentile([42.0], 0.50) == 42.0
+        assert _percentile([42.0], 0.99) == 42.0
+        assert _percentile([42.0], 0.0) == 42.0
+
+    def test_many_values_interpolates(self):
+        values = [float(v) for v in range(1, 101)]  # 1..100, already sorted
+        assert _percentile(values, 0.50) == 50.5
+        assert _percentile(values, 0.0) == 1.0
+        assert _percentile(values, 1.0) == 100.0
+
+
+class TestIsPromiseGateRow:
+    def test_legacy_row_with_no_kind_field_matched_by_source_prefix(self):
+        row = {"source": "promise_gate_drafter_llm", "elapsed_ms": 100}
+        assert _is_promise_gate_row(row) is True
+
+    def test_legacy_row_with_no_kind_field_matched_by_exact_source(self):
+        row = {"source": "terminal_flush", "elapsed_ms": 5}
+        assert _is_promise_gate_row(row) is True
+
+    def test_legacy_row_with_no_kind_field_and_unrelated_source_excluded(self):
+        row = {"source": "read_the_room", "elapsed_ms": 5}
+        assert _is_promise_gate_row(row) is False
+
+    def test_explicit_kind_promise_gate_included_regardless_of_source(self):
+        row = {"kind": "promise_gate", "source": "anything"}
+        assert _is_promise_gate_row(row) is True
+
+    def test_explicit_other_kind_excluded_regardless_of_source(self):
+        row = {"kind": "read_the_room", "source": "promise_gate_drafter"}
+        assert _is_promise_gate_row(row) is False
+
+
+class TestLatencyBySourceAndTransport:
+    def test_rows_missing_elapsed_ms_are_excluded_not_zeroed(self):
+        rows = [
+            {"source": "promise_gate_drafter_llm", "transport": "telegram", "elapsed_ms": 100},
+            # No elapsed_ms at all -- must be excluded, not treated as 0.
+            {"source": "promise_gate_drafter_llm", "transport": "telegram"},
+            # Non-numeric elapsed_ms -- also excluded.
+            {
+                "source": "promise_gate_drafter_llm",
+                "transport": "telegram",
+                "elapsed_ms": "not-a-number",
+            },
+            {"source": "promise_gate_drafter_llm", "transport": "telegram", "elapsed_ms": 300},
+        ]
+
+        buckets = latency_by_source_and_transport(rows)
+
+        assert len(buckets) == 1
+        bucket = buckets[0]
+        assert bucket.count == 2
+        assert bucket.values_ms == [100.0, 300.0]
+        # If the excluded rows were counted as zero, p50 would drop toward 0
+        # instead of landing between the two real samples.
+        percentiles = bucket.percentiles()
+        assert percentiles["p50"] == 200.0
+
+    def test_groups_by_source_and_transport_pair(self):
+        rows = [
+            {"source": "promise_gate_drafter_llm", "transport": "telegram", "elapsed_ms": 100},
+            {"source": "promise_gate_drafter_llm", "transport": "email", "elapsed_ms": 50},
+            {"source": "promise_gate_drafter", "transport": "telegram", "elapsed_ms": 1},
+        ]
+
+        buckets = latency_by_source_and_transport(rows)
+
+        keys = {(b.source, b.transport) for b in buckets}
+        assert keys == {
+            ("promise_gate_drafter_llm", "telegram"),
+            ("promise_gate_drafter_llm", "email"),
+            ("promise_gate_drafter", "telegram"),
+        }
+
+    def test_missing_source_and_transport_fall_back_to_unknown(self):
+        rows = [{"elapsed_ms": 10}]
+
+        buckets = latency_by_source_and_transport(rows)
+
+        assert len(buckets) == 1
+        assert buckets[0].source == "unknown"
+        assert buckets[0].transport == "unknown"
