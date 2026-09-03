@@ -640,12 +640,23 @@ when the command prints nothing.
 
 ## Critique Results
 
+**Round 3 (2026-09-03) — No findings from the war room.** Full roster (Risk & Robustness,
+Scope & Value, History & Consistency), 3/3 reported, zero BLOCKERs, zero CONCERNs, zero NITs.
+Round 3 critiques the plan against the code that already landed on PR #3083 (head `f3804ec9b`):
+all three critics independently confirmed the landed `_popoto_pool_install` / `redis_test_db`
+split is a faithful implementation of Technical Approach 1a/1b, that every Verification `ANTI:`
+row returns no output against the landed tree, that the No-Gos (#2770, #3003, #2628, #2535) hold,
+and that #2680's flush-ownership guard and #2655's db-derivation guard are untouched. The plan's
+factual claims about popoto's bundled plugin (`_swap_db` strips the `BlockingConnectionPool` cap;
+`_popoto_flush_db` re-swaps only on db-number drift; `_popoto_test_db` is session-scoped autouse)
+were re-verified against the installed popoto source.
+
 Round 1 (2026-09-02) raised 1 BLOCKER, 3 CONCERNs, and 3 NITs; all were addressed by the
-revision recorded in `revision_applied_at`. Round 2 (final round, cap reached) confirms the
+revision recorded in `revision_applied_at`. Round 2 confirms the
 BLOCKER fix — session-scoped `_popoto_pool_install` plus a `redis_test_db` reduced to per-test
 hygiene — is genuinely resolved and internally consistent across Technical Approach 1/1a/1b,
 Data Flow items 4/7/9/10, Flow, Race 1, Risk 3, task 3, and Test Impact assertion (d). The rows
-below are round 2's residual findings. No BLOCKERs.
+below are round 2's residual findings, all folded into commit `f413b5461`. No BLOCKERs.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
