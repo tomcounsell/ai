@@ -57,6 +57,9 @@ SINGLE_ISSUE = 990042
 SIMPLE_PR = 990001
 OTHER_REPO_ISSUE = 990999
 NO_LEDGER_PR = 990999999
+# Group (e), the #3080 gate-row shape.
+GATE_PR = 990077
+GATE_ISSUE = 990078
 
 _SYNTHETIC_LEDGER_KEYS: list[tuple[str, int]] = [
     (TARGET_REPO, UMBRELLA_ISSUE),
@@ -66,6 +69,7 @@ _SYNTHETIC_LEDGER_KEYS: list[tuple[str, int]] = [
     (TARGET_REPO, SINGLE_ISSUE),
     (OTHER_REPO, UMBRELLA_ISSUE),
     (OTHER_REPO, OTHER_REPO_ISSUE),
+    (TARGET_REPO, GATE_ISSUE),
 ]
 
 
@@ -679,3 +683,267 @@ def test_docs_stage_slash_bearing_head_ref_emits_honest_no_slug_refusal(monkeypa
     assert "no usable slug for the docs/features fallback" in failed[0]
     assert "docs/features/fix/router-blocked-on-conflict.md absent" not in failed[0]
     assert notes == []
+
+
+# ---------------------------------------------------------------------------
+# Group (e): recorded plan-verification outcomes (#3065, task 8)
+#
+# The motivating incident is #3080 / commit ba092a06d. A plan carried a hard
+# shipping gate in prose -- "FAIL and UNRESOLVED both hold the PR at REVIEW" --
+# and the PR merged straight past it, because nothing machine-readable stood
+# between an APPROVED verdict and the merge. These tests reconstruct that exact
+# state (APPROVED verdict, DOCS complete, CI green, one UNEVALUATED gate row)
+# and require a refusal that NAMES the row.
+#
+# Every fixture below writes a REAL PipelineLedger aggregate through the
+# production writer (``record_verification_outcomes``) and lets the predicate
+# read it back through the production reader. Nothing here re-executes a
+# plan-authored command: recorded state is the source of truth (PM ruling,
+# 2026-09-03), and a predicate that shelled out to a test suite inside a merge
+# gate would be a different -- and rejected -- design.
+# ---------------------------------------------------------------------------
+
+HEAD_SHA = "a" * 40
+ADVANCED_SHA = "b" * 40
+
+
+def _plan_repo(tmp_path: Path, *, with_plan: bool = True) -> Path:
+    """A repo root whose plan doc is discoverable ONLY by `tracking:` frontmatter.
+
+    The filename deliberately does not match the lane slug used in the PR head
+    ref: lane slug and plan filename are allowed to differ, so a resolver that
+    matched on filename would find nothing here and the enforcement tests would
+    silently pass for the wrong reason.
+    """
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    if with_plan:
+        (plans / "a-name-that-is-not-the-lane-slug.md").write_text(
+            f"---\ntracking: https://github.com/{TARGET_REPO}/issues/{GATE_ISSUE}\n---\n\n# Plan\n",
+            encoding="utf-8",
+        )
+    return tmp_path
+
+
+def _row(name: str, outcome, reason: str = ""):
+    """One graded CheckResult, built through the production dataclasses."""
+    from agent.verification_parser import CheckResult, VerificationCheck
+
+    return CheckResult(
+        check=VerificationCheck(name=name, command="grep -c foo bar.py", expected="output > 0"),
+        outcome=outcome,
+        exit_code=0,
+        output="",
+        reason=reason,
+    )
+
+
+@pytest.fixture
+def gate_lane(monkeypatch, ledger_factory):
+    """Wire the #3080 state: APPROVED verdict, DOCS complete, CI green.
+
+    Returns a callable that records a real ``_verification_outcomes`` aggregate
+    for the given graded rows and returns the ``PredicateResult``.
+    """
+
+    def _run(results, *, repo_root, recorded_sha=HEAD_SHA, pr_head=HEAD_SHA, strip_head=False):
+        from agent.verification_parser import record_verification_outcomes
+
+        ledger_factory(TARGET_REPO, GATE_ISSUE, pr_number=GATE_PR)
+
+        monkeypatch.setattr(mp, "_substrate_present", lambda root: True)
+        monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: TARGET_REPO)
+        monkeypatch.setattr(
+            mp,
+            "_gh_pr_view",
+            lambda pr, root: {
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
+                "body": f"Closes #{GATE_ISSUE}",
+                "headRefName": "session/gate-lane",
+            },
+        )
+        monkeypatch.setattr(
+            mp, "_run_stage_query", lambda issue, root: {"stages": {"DOCS": "completed"}}
+        )
+        monkeypatch.setattr(
+            mp,
+            "_run_verdict_get",
+            lambda issue, root: {"verdict": "APPROVED", "head_sha": pr_head},
+        )
+        monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": pr_head, "date": ""})
+
+        # Both the writer's stamp and the predicate's current-head read go
+        # through the sanctioned git-first resolver, so the two poles of the
+        # freshness test are the same seam observed at two moments: the
+        # aggregate is stamped, and only THEN does the PR head advance.
+        import tools.pr_head_resolver as phr
+
+        resolver_sha = {"sha": recorded_sha}
+        monkeypatch.setattr(phr, "resolve_pr_head_sha", lambda pr, **kw: resolver_sha["sha"])
+        assert record_verification_outcomes(TARGET_REPO, GATE_ISSUE, results, pr_number=GATE_PR), (
+            "the graded aggregate must actually persist for this test to mean anything"
+        )
+
+        if strip_head:
+            _corrupt_head_sha(strip_head)
+
+        # The PR head as the predicate will now see it.
+        resolver_sha["sha"] = pr_head
+        return mp.evaluate_merge_predicate(GATE_PR, repo_root=repo_root)
+
+    return _run
+
+
+def _corrupt_head_sha(mode: str) -> None:
+    """Rewrite the persisted aggregate's ``head_sha`` to an absent/unparseable value."""
+    import json as _json
+
+    from agent.verification_parser import VERIFICATION_OUTCOMES_KEY
+    from tools.stage_states_helpers import update_stage_states
+
+    ledger = PipelineLedger.get(TARGET_REPO, GATE_ISSUE)
+
+    def _mutate(states: dict) -> dict:
+        aggregate = states[VERIFICATION_OUTCOMES_KEY]
+        if mode == "absent":
+            aggregate.pop("head_sha", None)
+        else:
+            aggregate["head_sha"] = "not-a-sha"
+        states[VERIFICATION_OUTCOMES_KEY] = aggregate
+        return states
+
+    assert update_stage_states(ledger, _mutate, field="stage_states_json")
+    assert _json.loads(PipelineLedger.get(TARGET_REPO, GATE_ISSUE).stage_states_json)
+
+
+def test_unevaluated_gate_row_refuses_and_names_it(gate_lane, tmp_path):
+    """The #3080 shape exactly: APPROVED, DOCS complete, CI green, one
+    UNEVALUATED gate row. On main today this state merges."""
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [
+            _row("Tests pass", CheckOutcome.PASS),
+            _row(
+                "GATE: poll obligation recorded",
+                CheckOutcome.UNEVALUATED,
+                reason="expectation 'recorded' is not machine-readable",
+            ),
+        ],
+        repo_root=_plan_repo(tmp_path),
+    )
+
+    assert not result.allowed
+    named = [f for f in result.failed_checks if "GATE: poll obligation recorded" in f]
+    assert len(named) == 1, result.failed_checks
+    assert "UNEVALUATED" in named[0]
+    # The refusal carries the grader's own reason, not a bare false.
+    assert "not machine-readable" in named[0]
+
+
+def test_failed_gate_row_refuses_and_names_it(gate_lane, tmp_path):
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [_row("GATE: poll obligation recorded", CheckOutcome.FAIL)],
+        repo_root=_plan_repo(tmp_path),
+    )
+
+    assert not result.allowed
+    named = [f for f in result.failed_checks if "GATE: poll obligation recorded" in f]
+    assert len(named) == 1, result.failed_checks
+    assert "FAIL" in named[0]
+
+
+def test_all_pass_fresh_aggregate_merges(gate_lane, tmp_path):
+    """A clean lane still merges -- group (e) is a gate, not a blanket refusal."""
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [_row("Tests pass", CheckOutcome.PASS), _row("Ruff clean", CheckOutcome.PASS)],
+        repo_root=_plan_repo(tmp_path),
+    )
+
+    assert result.allowed, result.failed_checks
+    assert any("all PASS" in n for n in result.notes)
+
+
+def test_stale_aggregate_refuses_with_named_reason(gate_lane, tmp_path):
+    """Two-pole freshness: the SAME all-PASS aggregate, PR head advanced by one
+    commit. The cached PASS must NOT be read (#2404-shaped fail-open hole)."""
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [_row("Tests pass", CheckOutcome.PASS)],
+        repo_root=_plan_repo(tmp_path),
+        recorded_sha=HEAD_SHA,
+        pr_head=ADVANCED_SHA,
+    )
+
+    assert not result.allowed
+    stale = [f for f in result.failed_checks if mp.VERIFICATION_OUTCOMES_STALE_REASON in f]
+    assert len(stale) == 1, result.failed_checks
+    assert "all PASS" not in " ".join(result.notes)
+
+
+@pytest.mark.parametrize("mode", ["absent", "unparseable"])
+def test_unanchored_aggregate_refuses(gate_lane, tmp_path, mode):
+    """Missing or unparseable head_sha refuses. Deliberately stricter than the
+    REVIEW-verdict path's recorded_at fallback: that fallback exists for records
+    predating #2769, and there are no legacy aggregates to be compatible with."""
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [_row("Tests pass", CheckOutcome.PASS)],
+        repo_root=_plan_repo(tmp_path),
+        strip_head=mode,
+    )
+
+    assert not result.allowed
+    assert any("no usable head_sha" in f for f in result.failed_checks), result.failed_checks
+
+
+def test_plan_less_lane_is_unaffected(gate_lane, tmp_path):
+    """No plan document tracks this issue -> REPORTED, never enforced. This must
+    stay a distinguishable branch from "present aggregate, not fresh"."""
+    from agent.verification_parser import CheckOutcome
+
+    result = gate_lane(
+        [_row("GATE: poll obligation recorded", CheckOutcome.UNEVALUATED)],
+        repo_root=_plan_repo(tmp_path, with_plan=False),
+    )
+
+    assert result.allowed, result.failed_checks
+    assert any("no plan document" in n for n in result.notes)
+
+
+def test_build_vs_ship_split_lives_on_the_consumer(gate_lane, tmp_path):
+    """The identical row and outcome that the merge predicate refuses does NOT
+    block the build-side write, and carries no severity/gate annotation of its
+    own. The split is a property of the consumer, not of the row -- a per-row
+    severity marker would be the first step back toward the gate DSL this plan
+    rejected."""
+    from agent.verification_parser import (
+        VERIFICATION_OUTCOMES_KEY,
+        CheckOutcome,
+        read_verification_outcomes,
+    )
+
+    result = gate_lane(
+        [_row("GATE: poll obligation recorded", CheckOutcome.UNEVALUATED)],
+        repo_root=_plan_repo(tmp_path),
+    )
+    assert not result.allowed  # ship side refuses
+
+    # Build side: the grading run persisted, the lane's record is intact, and
+    # the row itself says only PASS/FAIL/UNEVALUATED -- no severity, no gate
+    # marker, nothing a consumer could read as "blocking for shipping only".
+    record = read_verification_outcomes(TARGET_REPO, GATE_ISSUE)
+    assert record is not None
+    assert VERIFICATION_OUTCOMES_KEY == "_verification_outcomes"
+    (row,) = record["rows"]
+    assert row["outcome"] == CheckOutcome.UNEVALUATED.value
+    assert set(row) == {"name", "outcome", "reason"}

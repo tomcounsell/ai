@@ -117,15 +117,6 @@ DEFAULT_TIMEOUT_S = 120
 # key in an already-flexible JSON blob: no schema field, no migration.
 VERIFICATION_OUTCOMES_KEY = "_verification_outcomes"
 
-# Named refusal reason for a `_verification_outcomes` aggregate whose stamped
-# `head_sha` does not match the PR's current head (task 8, #3065). Defined
-# here -- where the aggregate is written and stamped -- rather than in
-# `tools/merge_predicate.py`, which reads it: a Verification row greps for
-# the constant *name*, matching how `reconcile_dispatch`, `decision_inputs`,
-# `resolve_branch_truth`, and `G3_REDIRECT_REASON_DOCS_PENDING` are already
-# pinned. Never read the prose; grep the symbol.
-VERIFICATION_OUTCOMES_STALE_REASON = "verification outcome predates PR head commit"
-
 
 class CheckOutcome(StrEnum):
     """The three things a verification check can say.
