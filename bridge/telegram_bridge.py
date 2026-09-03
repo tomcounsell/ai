@@ -1034,6 +1034,42 @@ async def _ack_steering_routed(
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     push_steering_message(session_id, text, sender_name, is_abort=is_abort, room_id=room_id)
 
+    # An answer typed into the chat closes the question just as a tap does. The
+    # registry is otherwise written only by the vote path, so a prose answer
+    # would leave the row open for its full TTL and the nudge loop would take
+    # `pause_open_question` every turn — auto-continue silently off for a day.
+    #
+    # The semantics are ANY inbound steering message, not "a message that looks
+    # like an answer": there is no reliable classifier for that, and the failure
+    # directions are asymmetric. Closing on unrelated chatter costs the pause
+    # branch (`agent/session_executor.py`) for a question still on screen — the
+    # session is nudged onward, and a later tap still routes, because
+    # `translate_poll_vote` keys on `lookup_poll` and never on `poll_steered`.
+    # That routing is via the `events.Raw` fast path specifically: closing the row
+    # `SREM`s it from POLL_OPEN_INDEX, so the reconcile loop no longer re-yields it
+    # and is not a fallback here. Failing to close costs a day of lost
+    # auto-continue. Documented in docs/features/telegram-poll-questions.md.
+    #
+    # Offloaded: this is a Redis scan on the bridge's event loop — and guarded
+    # for the same reason as the sibling call in `resume_completed_session`.
+    # `mark_session_polls_steered` never raises, but `asyncio.to_thread` can on a
+    # closing loop, and this site is the hotter of the two: it sits on the
+    # LIVE / PENDING / LIVE_GUARD routes, which set no
+    # `_steering_session_enqueued` sentinel, so a raise here falls through to the
+    # final enqueue and delivers the #997 duplicate. Best-effort bookkeeping must
+    # not break the routing it hangs off.
+    from bridge.poll_registry import mark_session_polls_steered
+
+    try:
+        await asyncio.to_thread(mark_session_polls_steered, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "mark_session_polls_steered failed for session_id=%s: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
+
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's
     # string EXACTLY (agent/steering.py), so concatenating an advisory onto a
@@ -3388,8 +3424,9 @@ async def main():
     try:
         from bridge.poll_reconcile import poll_reconcile_loop
 
+        # The loop logs its own start line; a second one here made it appear
+        # twice per bridge start.
         _background_tasks.append(asyncio.create_task(poll_reconcile_loop(client)))
-        logger.info("Poll reconciliation loop started")
     except Exception as e:
         logger.error(f"Failed to start poll reconciliation loop: {e}")
 

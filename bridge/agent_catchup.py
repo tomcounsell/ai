@@ -400,7 +400,7 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
     for m in raw:
         if m.date < cutoff:
             break  # get_messages returns newest-first; older than cutoff → stop.
-        text = m.text or "" or _poll_transcript_text(m)
+        text = m.text or _poll_transcript_text(m)
         is_valor = bool(m.out)
         sender_name = _SENDER_VALOR
         sender_id = None

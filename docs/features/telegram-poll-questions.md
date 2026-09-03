@@ -194,6 +194,13 @@ eng+sdlc line, which is the only thing it overrides.
 fail-quiet) and passes the result in. `determine_delivery_action` stays a **pure function**, exactly
 as it performs no `AgentSession` read for `last_compaction_ts`.
 
+**Both indexes count as open.** The predicate consults `POLL_PENDING_INDEX` as well as
+`POLL_OPEN_INDEX`, because a question enqueued by `valor-ask-poll` but not yet picked up by the relay
+exists only as a provisional row. The relay is a polling loop and this predicate runs at turn end, so
+that window is real, and reading only the open index nudged a session straight past an outstanding
+question. A pending row that has already been closed out (see below) is skipped, so answering while
+the payload is still in the outbox does not re-open the pause.
+
 **Blast radius is bounded by the default.** `has_open_question` defaults to `False`, so every
 session with no outstanding poll keeps today's behavior — asserted by the pre-existing
 `tests/unit/test_output_router.py` cases passing unmodified.
@@ -222,7 +229,7 @@ entry**. Rows are created on demand and expire on their own.
 | `telegram:poll:{id}` | `chat_id`, `msg_id`, `session_id`, `question`, `options`, `created_at` | Written once with `SET NX`, never rewritten |
 | `telegram:poll:answered:{id}` | **the ISO-8601 claim timestamp** | The one-shot lock. A timestamp, never the constant `1`, so staleness is readable |
 | `telegram:poll:dispatched:{id}` | ISO timestamp | The steer/re-enqueue happened and must never repeat. Bounds the claim release |
-| `telegram:poll:steered_at:{id}` | ISO timestamp | The translation completed cleanly. What `iter_unanswered_polls` and the operator signal key on |
+| `telegram:poll:steered_at:{id}` | ISO timestamp | The answer was routed and the question is closed. What `iter_unanswered_polls` and the operator signal key on. Written by **every** answer route — the tap and the typed reply alike — and on each of them only after the route's own side effect returned |
 | `telegram:poll:warned:{id}` | `1` | Deduplicates `poll_expired_unanswered` |
 
 Storing these as fields inside one JSON value would make every marker write a read-modify-write on a
@@ -311,6 +318,47 @@ load-bearing: `dispatch_telegram_session` claims `(chat_id, telegram_message_id)
 `claim_message`, which is **inbound-only** — an outbound send never claims it — so a poll's message
 id is an unused, unique, stable dedup key for exactly this re-enqueue.
 
+### A typed reply closes the question too
+
+Nothing forces a human to tap. They can type the answer into the chat, and that steers the session
+correctly — but the registry row is what the nudge pause reads, so leaving it open costs the session
+auto-continue for the row's full `POLL_REGISTRY_TTL_S` (default 86400s), advancing one turn per human
+message with only an INFO log as signal.
+
+`mark_session_polls_steered(session_id)` closes every outstanding row for a session — idempotent,
+never raises — and hangs off both inbound seams: `_ack_steering_routed` in `bridge/telegram_bridge.py`
+(which every `LIVE` / `PENDING` / `LIVE_GUARD` route reaches, including both intake-classifier
+interjection sites) and `resume_completed_session` (the `COMPLETED` mainline shared with the vote
+path).
+
+**The semantics are any inbound steering message, not "a message that plausibly answers".** There is
+no reliable classifier for the latter and the failure directions are asymmetric: closing on unrelated
+chatter costs the pause branch for a question still on screen — the session is nudged onward, and a
+later tap still routes, because `translate_poll_vote` keys on `lookup_poll` and never on
+`poll_steered`. That routing is **via the `events.Raw` fast path specifically**: closing the row
+`SREM`s it from `POLL_OPEN_INDEX`, so the reconcile loop no longer re-yields it and is not a fallback
+for this case, which is the one place the "reconciliation is primary" framing above does not hold.
+Failing to close costs a day of lost auto-continue.
+
+**Ordering is the same invariant the vote path states**: the marker is written only *after* the
+route's side effect returns — the steering push in `_ack_steering_routed`, the
+`dispatch_telegram_session` enqueue in `resume_completed_session`. Writing it first would be
+actively unsafe on the vote mainline rather than merely early: `mark_poll_steered` `SREM`s the row
+from `POLL_OPEN_INDEX` and `iter_unanswered_polls` additionally skips marked rows, so a raising
+dispatch would leave `translate_poll_vote`'s release-and-retry handler with nothing to re-yield and
+the human's tap permanently swallowed. Closing afterwards costs nothing, because the dispatch only
+enqueues.
+
+**A provisional row is closed by marker, not delete.** The hint is still the only evidence a send may
+have landed, so deleting it would strand orphan adoption after a restart, and the payload may still
+be in the relay outbox. `promote_pending_poll` therefore carries the marker onto the real poll id
+when it lands. The row stays in `POLL_PENDING_INDEX` until its TTL, and a consumer of that index
+that cares checks `poll_steered` itself: `session_has_open_poll` does, to stop reporting an answered
+question. **Orphan adoption deliberately does not** — see Race 6 below, where skipping a marked hint
+would let an unrelated inbound message swallow a later tap. The pending index is also scanned
+**before** the open index, so a `promote_pending_poll` interleaving between the two passes cannot
+drop the close-out between them.
+
 ## Failure recovery
 
 ### The claim must not permanently swallow a question
@@ -322,8 +370,10 @@ permanently blocked agent. Four mechanisms:
 1. Everything after the claim runs in `try/except`, and the handler **deletes the claim** so the
    next reconciliation tick retries.
 2. Completion is recorded **separately from the claim** as `steered_at`, written only after the
-   steer returns. `poll_expired_unanswered` keys on the **absent steered marker, never on a missing
-   claim** — otherwise the operator signal would be blind to precisely this state.
+   steer returns — on the vote path and on the typed-reply path alike (see above; it is what makes
+   the retry in item 1 reachable at all). `poll_expired_unanswered` keys on the **absent steered
+   marker, never on a missing claim** — otherwise the operator signal would be blind to precisely
+   this state.
 3. `mark_poll_dispatched` runs immediately after the steer and **before anything else that can
    throw**, and the exception handler releases the claim **only when it is absent**. A blanket
    release re-opens the mirror failure: one vote, two enqueues on the `COMPLETED` mainline. The
@@ -358,12 +408,32 @@ Both halves are required:
    not merely "before `send_poll`". `process_outbox` already consumed the work item with an atomic
    LPOP, so the window between that LPOP and the provisional write is a silent *total* loss with
    nothing to adopt and no row to warn on. Every branch that then declines to send deletes the
-   provisional row on its way to prose.
+   provisional row on its way to prose, and reports the decline as delivered **only if the prose
+   fallback actually reached the outbox** — the row is already gone by then, so a swallowed `rpush`
+   failure reported as a delivery would leave the question with no outbox entry, no pending row and
+   no dead letter. The terminal-failure branch deletes the row too: adoption stops being worth its
+   per-tick cost once every retry has failed (a cost trade, not proof of non-delivery — the question
+   is re-enqueued as text, not dropped).
 2. **Orphan adoption in the reconciliation loop**, matched on the correlation id embedded in the
    option bytes — **never on question text**, which is not unique (an agent re-asking after an
    expired poll, or two sessions asking the same standard question, produce two candidates with no
    tie-break). **More than one match adopts nothing and warns**: an ambiguous adoption steers a
    session with someone else's answer, which is worse than a dropped question.
+
+   Adoption deliberately does **not** skip a hint already closed out by an inbound message. Skipping
+   would mean the only thing that makes a Race-6 orphan's later tap routable — `translate_poll_vote`
+   bails immediately at `lookup_poll(poll_id) is None` — never runs for it, so an unrelated message
+   would permanently swallow a subsequent tap. That is the same failure class this feature exists to
+   remove, so a closed-out hint is scanned and adopted exactly like an open one; `promote_pending_poll`
+   carries the marker onto the real row, so the promoted row is de-indexed again in the same call that
+   indexed it, and a successful adoption deletes the pending row, keeping the ordinary case to one scan
+   rather than one per tick.
+
+   The delete branches cover every case the relay itself can observe. **Two survive to the TTL at one
+   scan per tick regardless**: a crash between `register_pending_poll` and the send resolving, where
+   the atomic `LPOP` has already consumed the work item so nothing retries; and a permanently ambiguous
+   match, which both the scan and promotion deliberately refuse to resolve. Neither is closed out, so
+   skipping steered hints would never have addressed them.
 
 **Promotion is the second gate, and it can refuse.** Adopting means promoting the provisional row
 to a real one under the server-assigned poll id, and `register_poll` writes that row with `SET NX`.

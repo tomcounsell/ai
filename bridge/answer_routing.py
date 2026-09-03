@@ -196,9 +196,11 @@ async def resume_completed_session(
     bookkeeping, its ``react_if_worker_down`` (which needs the inbound
     ``message.id``), and its dedup short-circuit.
     """
+    import asyncio
     from pathlib import Path
 
     from bridge.dispatch import dispatch_telegram_session
+    from bridge.poll_registry import mark_session_polls_steered
     from bridge.telegram_bridge import DEFAULTS, _build_completed_resume_text
     from config.enums import SessionType
 
@@ -238,3 +240,36 @@ async def resume_completed_session(
         session_type=getattr(completed, "session_type", None) or SessionType.ENG,
         message_ts=message_ts,
     )
+
+    # Written LAST, and only after the dispatch returned — the same invariant the
+    # vote path states at bridge/poll_vote.py:219. `mark_poll_steered` srem's the
+    # row from POLL_OPEN_INDEX, and both `iter_unanswered_polls` and
+    # `poll_expired_unanswered` key on the marker's absence; closing before the
+    # dispatch would mean a raising `dispatch_telegram_session` leaves
+    # `translate_poll_vote`'s release-and-retry handler with nothing left to
+    # re-yield, permanently swallowing the human's tap.
+    #
+    # Any answer route closes the question, not only a tap. The marker is
+    # idempotent, so the vote path's own `mark_poll_steered` after this returns is
+    # a no-op; the case this exists for is the typed reply, which without it
+    # leaves the row open for its full TTL and pauses the resumed session on an
+    # already-answered question every turn.
+    #
+    # Guarded: this call sits directly ahead of both callers' anti-duplicate
+    # sentinels — `_steering_session_enqueued = True` in telegram_bridge.py
+    # (set right after this function returns) and `mark_poll_dispatched(poll_id)`
+    # in poll_vote.py. `mark_session_polls_steered` itself never raises, but
+    # `asyncio.to_thread` can (e.g. a closed or shutting-down event loop), and an
+    # unhandled raise here would unwind past both sentinels — a duplicate enqueue
+    # on the prose path, or a released claim and re-dispatch on the vote path.
+    # The close-out is best-effort bookkeeping; it must never be the thing that
+    # breaks the sentinels it precedes.
+    try:
+        await asyncio.to_thread(mark_session_polls_steered, completed.session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "mark_session_polls_steered failed for session_id=%s: %s",
+            completed.session_id,
+            exc,
+            exc_info=True,
+        )

@@ -1598,7 +1598,12 @@ class TestPollDispatch:
         ):
             result = await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
 
-        assert result is None
+        # DELIVERED_NO_ID, not None: the prose fallback is already queued, so
+        # the payload is consumed. A None here makes `process_outbox` re-queue
+        # the original poll, which declines again and delivers a second copy.
+        from bridge.telegram_relay import DELIVERED_NO_ID
+
+        assert result is DELIVERED_NO_ID
         send_poll.assert_not_called()
         # The provisional row is removed so a declined send never ages into a
         # spurious orphan-adoption candidate.
@@ -1631,7 +1636,9 @@ class TestPollDispatch:
                 "telegram:outbox:sess-1",
             )
 
-        assert result is None
+        from bridge.telegram_relay import DELIVERED_NO_ID
+
+        assert result is DELIVERED_NO_ID
         send_poll.assert_not_called()
         requeued = json.loads(mock_redis.rpush.call_args[0][1])
         assert requeued["type"] is None
@@ -1751,6 +1758,132 @@ class TestPollDispatch:
             await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
 
         assert recorded["thread"] is not loop_thread
+
+
+class TestDeclinedPollIsDeliveredOnce:
+    """A declined poll must reach the human exactly once.
+
+    The unit tests above exercise `_send_queued_poll` in isolation and so cannot
+    see this: the defect lives in the *interaction* with `process_outbox`, where
+    a `None` return means "retry" and re-queues the original poll payload. Both
+    decline branches push the prose fallback before returning, so a retry
+    declines again for the same reason and enqueues another copy — up to
+    MAX_RELAY_RETRIES, plus one more from the terminal branch. Asserted at the
+    `process_outbox` seam on purpose.
+    """
+
+    @staticmethod
+    def _run(payload):
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:sess-1"]
+        # One poll payload, then the queue drains. Anything the relay re-queues
+        # lands in `rpush`, which is what the assertions read.
+        mock_redis.lpop.side_effect = [json.dumps(payload), None]
+        return mock_redis
+
+    @staticmethod
+    def _requeued(mock_redis):
+        return [json.loads(call[0][1]) for call in mock_redis.rpush.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_ineligible_poll_is_not_requeued_as_a_poll(self):
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll"),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == [None], requeued
+        assert requeued[0]["text"].startswith("Which approach?")
+
+    @pytest.mark.asyncio
+    async def test_hintless_poll_is_not_requeued_as_a_poll(self):
+        mock_redis = self._run(TestPollDispatch._payload(poll_id_hint=None))
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == [None], requeued
+
+    @pytest.mark.asyncio
+    async def test_genuine_send_failure_still_retries(self):
+        """The sentinel must not swallow a real failure.
+
+        `send_poll` returning None is a distinguishable failure whose provisional
+        row deliberately survives; that payload still belongs in the retry path.
+        """
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=None),
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == ["poll"], requeued
+        assert requeued[0]["_relay_attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_decline_whose_fallback_push_fails_still_retries(self):
+        """The sentinel must not report a delivery that never reached the outbox.
+
+        The ineligible branch deletes the provisional row before pushing the prose
+        fallback, so on a swallowed `rpush` failure the question would have no
+        outbox entry, no pending row and no dead letter. The branch reports the
+        decline as delivered only when the push landed.
+        """
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+        # First rpush is the prose fallback and fails; the second is the retry
+        # re-queue this test exists to prove still happens.
+        mock_redis.rpush.side_effect = [RuntimeError("redis blip"), 1]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll"),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = [json.loads(c[0][1]) for c in mock_redis.rpush.call_args_list[1:]]
+        assert [p["type"] for p in requeued] == ["poll"], requeued
+        assert requeued[0]["_relay_attempts"] == 1
 
 
 class TestPollDeadLetterAndFallback:

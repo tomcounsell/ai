@@ -234,6 +234,12 @@ def promote_pending_poll(
             poll_id_hint,
         )
         return False
+    # Carry a prose-answer close-out forward. The hint may have been marked
+    # steered by `mark_session_polls_steered` while this payload was still in
+    # the outbox; without this the promoted row is born unsteered and re-opens
+    # the pause on a question the human already answered.
+    if poll_steered(poll_id_hint):
+        mark_poll_steered(poll_id)
     delete_pending_poll(poll_id_hint)
     return True
 
@@ -353,9 +359,64 @@ def mark_poll_steered(poll_id: int | str) -> None:
     the ``poll_expired_unanswered`` operator signal key on this marker's absence
     — deliberately, rather than on a missing claim, or the signal would be blind
     to a claim that survived a failure.
+
+    Only ``POLL_OPEN_INDEX`` is de-indexed. Called with a *hint* (the pending-row
+    close-out below), the row deliberately stays in ``POLL_PENDING_INDEX`` until
+    its TTL: the payload may still be in the relay outbox, and ``promote_pending_poll``
+    needs the row to carry this marker onto the real poll id. A consumer of that
+    index that cares therefore checks ``poll_steered`` itself —
+    ``session_has_open_poll`` does, to stop reporting an answered question.
+    ``adopt_orphaned_polls`` deliberately does **not**: adoption is the only thing
+    that makes a Race-6 orphan reachable by a later tap at all, so skipping a
+    marked hint would let an unrelated inbound message swallow that tap.
     """
     _redis().set(f"{POLL_STEERED_PREFIX}{poll_id}", _now_iso(), nx=True, ex=POLL_REGISTRY_TTL_S)
     _redis().srem(POLL_OPEN_INDEX, str(poll_id))
+
+
+def mark_session_polls_steered(session_id: str | None) -> int:
+    """Close out every outstanding poll for ``session_id``. Returns how many.
+
+    ``mark_poll_steered`` was written only by the vote path, so a human who
+    *types* their answer instead of tapping leaves the row open for the full
+    ``POLL_REGISTRY_TTL_S``. ``session_has_open_poll`` then keeps reporting a
+    question that has already been answered, the nudge loop takes the pause
+    branch every turn, and the session loses auto-continue for a day. Every
+    inbound answer route calls this, not just the tap.
+
+    A provisional row is marked by **hint** rather than deleted: the hint is
+    still the only evidence that a send may have landed, so orphan adoption
+    needs the row. ``promote_pending_poll`` carries the marker onto the real
+    poll id.
+
+    **Never raises** — a bookkeeping failure must not break the answer route it
+    hangs off.
+    """
+    if not session_id:
+        return 0
+    closed = 0
+    try:
+        # Pending FIRST, open second — the order is load-bearing against a
+        # concurrent `promote_pending_poll`. Promoting reads `poll_steered(hint)`
+        # to carry the close-out onto the real poll id, then deletes the hint. Scan
+        # the open index first and a promotion landing between the two loops adds
+        # its row after loop 1 has passed and deletes the hint before loop 2
+        # reaches it, so neither loop sees it and the close-out is lost. This way
+        # round, either the hint is marked before the promotion reads it, or the
+        # promotion already ran and the real row is in the open index for loop 2.
+        for hint, row in iter_pending_polls():
+            if row.get("session_id") == session_id and not poll_steered(hint):
+                mark_poll_steered(hint)
+                closed += 1
+        for poll_id, row in iter_unanswered_polls():
+            if row.get("session_id") == session_id:
+                mark_poll_steered(poll_id)
+                closed += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mark_session_polls_steered failed for %s: %s", session_id, exc)
+    if closed:
+        logger.info("poll_closed_by_prose_answer session_id=%s polls=%d", session_id, closed)
+    return closed
 
 
 def poll_steered(poll_id: int | str) -> bool:
@@ -419,6 +480,12 @@ def session_has_open_poll(session_id: str | None) -> bool:
     The open-question read the nudge-loop pause branch is conditioned on. It
     introduces no new state — it reads exactly what the registry already writes.
 
+    Both indexes are consulted. A poll enqueued by ``valor-ask-poll`` but not yet
+    picked up by the relay exists only as a provisional row, and the relay is a
+    polling loop while this predicate runs at turn end — so the window is real,
+    and during it a session with an outstanding question would otherwise be
+    nudged straight past it.
+
     **Never raises.** Any failure logs at warning and returns ``False``, so a
     Redis hiccup degrades to today's nudge behavior rather than wedging a
     session that has no outstanding question.
@@ -428,6 +495,9 @@ def session_has_open_poll(session_id: str | None) -> bool:
     try:
         for _poll_id, row in iter_unanswered_polls():
             if row.get("session_id") == session_id:
+                return True
+        for hint, row in iter_pending_polls():
+            if row.get("session_id") == session_id and not poll_steered(hint):
                 return True
         return False
     except Exception as exc:  # noqa: BLE001 — a routing read must never wedge the nudge loop

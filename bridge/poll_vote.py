@@ -40,11 +40,16 @@ from bridge.poll_registry import (
     takeover_poll_claim,
 )
 
-logger = logging.getLogger(__name__)
+#: The literal final option, re-exported from its single definition in
+#: ``tools.ask_poll`` (the producer that writes the label onto the poll).
+#: ``build_steer_text`` compares the tapped label against it by **equality**, so
+#: two independent literals drifting apart would silently stop the followup
+#: instruction from being emitted, with no error anywhere. Import rather than
+#: redeclare. Safe at module scope: ``tools.ask_poll`` imports only stdlib at
+#: import time and defers every ``bridge`` import into a function body.
+from tools.ask_poll import ESCAPE_HATCH_OPTION
 
-#: The literal final option. Tapping it is not an answer — it is a request for a
-#: better question, answered by a plain-text followup the human replies to.
-ESCAPE_HATCH_OPTION = "Other: wait for followup message"
+logger = logging.getLogger(__name__)
 
 
 def select_option(results, options: list[str]) -> int | None:
