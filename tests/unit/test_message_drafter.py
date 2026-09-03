@@ -167,37 +167,46 @@ class TestDeriveContextSummary:
 
 
 class TestDraftMessage:
-    """Tests for the main draft_message function (pass-through + validation)."""
+    """Tests for the main draft_message function (pass-through + validation).
+
+    Every case pins ``use_llm=False``. These assert composition, file
+    attachment and pass-through, never gate judgment, and ``draft_message``
+    now defaults to ``use_llm=True`` — so without the pin each case makes a
+    live Haiku call and the class goes red on any input the regex cannot
+    match (a 4000-char run of ``x`` flaked exactly this way). Real-API
+    coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
+    """
 
     @pytest.mark.asyncio
     async def test_short_response_passes_through_verbatim(self):
         """Non-SDLC responses under 200 chars pass through verbatim."""
         short_text = "Done. Committed abc1234."
-        result = await draft_message(short_text)
+        result = await draft_message(short_text, use_llm=False)
         assert result.text == short_text
 
     @pytest.mark.asyncio
     async def test_short_response_has_no_was_drafted(self):
         """MessageDraft no longer has was_drafted field."""
         short_text = "Done."
-        result = await draft_message(short_text)
+        result = await draft_message(short_text, use_llm=False)
         assert not hasattr(result, "was_drafted")
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
-        result = await draft_message("")
+        result = await draft_message("", use_llm=False)
         assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_none_response(self):
-        result = await draft_message(None)
+        result = await draft_message(None, use_llm=False)
         assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_long_response_composed_deterministically(self):
         """Responses >=200 chars go through deterministic composition."""
         long_text = "Done and committed. " * 30  # 600 chars
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # text is non-empty (composition succeeded)
         assert result.text
 
@@ -206,7 +215,7 @@ class TestDraftMessage:
         """Responses over FILE_ATTACH_THRESHOLD get a full output file."""
         long_text = "Output line.\n" * 500
 
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
 
         assert result.full_output_file is not None
         assert result.full_output_file.exists()
@@ -220,7 +229,7 @@ class TestDraftMessage:
     async def test_overlength_still_delivers(self):
         """Over-length responses still deliver (no needs_self_draft) — just attach file."""
         long_text = "x" * 4000  # Over 3000 threshold
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # needs_self_draft is NOT set for over-length (file is attached instead)
         assert result.needs_self_draft is False
         assert result.full_output_file is not None
@@ -230,14 +239,14 @@ class TestDraftMessage:
     async def test_mid_length_response_no_file(self):
         """Responses between 200 and FILE_ATTACH_THRESHOLD: no file."""
         text = "x" * 2000  # Over 200, under 3000
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.full_output_file is None
 
     @pytest.mark.asyncio
     async def test_context_summary_populated_for_long_response(self):
         """context_summary is set for responses that go through composition."""
         long_text = "Fixed the drafter refactoring to remove LLM calls. " * 10
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # context_summary should be derived deterministically
         assert result.context_summary is not None
         assert isinstance(result.context_summary, str)
@@ -246,7 +255,7 @@ class TestDraftMessage:
     async def test_open_questions_none_for_no_questions(self):
         """open_questions is None when no ## Open Questions section exists."""
         text = "Fixed the bug and committed abc1234. All tests passing. " * 10
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.open_questions is None
 
     @pytest.mark.asyncio
@@ -258,7 +267,7 @@ class TestDraftMessage:
             "- Should we merge to main or wait for design review?\n"
             "- Is the confidence threshold of 0.80 acceptable?\n"
         )
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.open_questions is not None
         assert "merge" in result.open_questions.lower() or "design" in result.open_questions.lower()
 
@@ -292,7 +301,7 @@ class TestDraftMessage:
         assert "?" not in text
         assert "```" not in text
 
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
 
         assert result.needs_self_draft is True
         assert result.text == ""
@@ -304,7 +313,7 @@ class TestDraftMessage:
         """A short-output message with NO violation still returns verbatim
         pass-through with needs_self_draft=False (control case for the above)."""
         text = "Done."
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
 
         assert result.needs_self_draft is False
         assert result.text == text
@@ -321,7 +330,7 @@ class TestDraftMessage:
         )
         assert len(long_text) >= 200  # force the main composition path
 
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
 
         assert result.needs_self_draft is True
         assert result.text == ""
