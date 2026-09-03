@@ -173,24 +173,63 @@ class TestZeroWrites:
 
 
 class TestPromiseOverride:
-    def test_recorded_open_inbound_expectation_overrides_the_gate(self, scratch_session_with_job):
+    @pytest.mark.asyncio
+    async def test_recorded_open_inbound_expectation_overrides_the_gate(
+        self, scratch_session_with_job
+    ):
         """The PM stood by the obligation: an open inbound expectation on
         the bound Job turns the drafter gate's block into an allow on
         resend. The override is JOB-scoped by design — any open inbound
-        expectation on the bound Job clears the gate until discharge."""
+        expectation on the bound Job clears the gate until discharge.
+
+        Runs with the default ``use_llm=False`` (heuristic-only) — the
+        override logic itself is judgment-layer-agnostic (Task 5, #3027):
+        it acts on whatever verdict the judgment layer produced, so the
+        heuristic-only case is sufficient to prove the override ordering."""
         from bridge.message_drafter import _evaluate_drafter_promise
 
         session, job = scratch_session_with_job
         deferral = "I'll report back once the deploy finishes."
         # Without a recorded expectation: blocked.
-        assert _evaluate_drafter_promise(deferral, medium="telegram", session=session).action == (
-            "block"
-        )
+        verdict = await _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        assert verdict.action == "block"
 
         job.add_expectation("Report back once the deploy finishes")
         assert promise_override_active(session)
         # With the expectation recorded: allowed through, with the audit reason.
-        verdict = _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        verdict = await _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        assert verdict.action == "allow"
+        assert verdict.reason == "promise_recorded_override"
+
+    @pytest.mark.asyncio
+    async def test_incident_a_blocks_on_main_path_then_clears_via_override(
+        self, scratch_session_with_job
+    ):
+        """R1 discriminator, asserted directly (plan checklist line 294):
+        the exact Incident A text ("Say the word and I'll re-run that same
+        dispatch.") blocks 8/8 on the LLM layer per the plan's own measured
+        history, so this exercises the REAL LLM call (main path, use_llm=True
+        — CLAUDE.md testing philosophy: real integration, no mocks) rather
+        than a mocked verdict. Then the identical text, with an open inbound
+        expectation recorded on the bound Job, passes as
+        ``promise_recorded_override`` — proving the override clears an
+        LLM-sourced block exactly as it clears a heuristic-sourced one."""
+        from bridge.message_drafter import _evaluate_drafter_promise
+
+        session, job = scratch_session_with_job
+        incident_a_text = "Say the word and I'll re-run that same dispatch."
+
+        verdict = await _evaluate_drafter_promise(
+            incident_a_text, medium="telegram", session=session, use_llm=True
+        )
+        assert verdict.action == "block"
+        assert verdict.class_ == "forward_deferral"
+
+        job.add_expectation("re-run that same dispatch")
+        assert promise_override_active(session)
+        verdict = await _evaluate_drafter_promise(
+            incident_a_text, medium="telegram", session=session, use_llm=True
+        )
         assert verdict.action == "allow"
         assert verdict.reason == "promise_recorded_override"
 

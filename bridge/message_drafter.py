@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -612,8 +613,34 @@ def validate_poll_question(question: str) -> list[Violation]:
     return it with the emoji prefix, stage line and link footer attached.
     "Validate via the drafter" and "bypass composition" are only compatible
     through a dedicated entry point. This is it.
+
+    **Honesty check (No-Go 5, #3027).** ``TelegramRelayOutputHandler.send_poll``
+    reaches Telegram without ever calling ``draft_message``, so it would
+    otherwise ship poll questions with zero honesty checking — a question
+    can carry a completion claim just as easily as a prose message can. This
+    runs the existing zero-cost regex heuristic
+    (``bridge.promise_gate._evaluate_promise_heuristic``) over the question
+    text and, on a BLOCK verdict, appends a ``poll_question_promise``
+    violation — surfaced the same non-blocking way ``send_poll`` already
+    surfaces every other validation failure (a warning log; the poll still
+    sends). Deliberately NOT the LLM-primary path: a poll question is a
+    low-volume, interactive affordance, and a ~500ms round-trip here would be
+    real latency cost for no delivery-honesty gain since the two-state
+    outcome (ship or don't) is unchanged from before this plan — see No-Go 5.
     """
-    return _validate_for_medium(question, "telegram_poll")
+    violations = _validate_for_medium(question, "telegram_poll")
+
+    from bridge.promise_gate import _evaluate_promise_heuristic
+
+    verdict = _evaluate_promise_heuristic(question)
+    if verdict.action == "block":
+        violations.append(
+            Violation(
+                rule="poll_question_promise",
+                snippet=verdict.reason,
+            )
+        )
+    return violations
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:
@@ -664,21 +691,36 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
+async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use_llm: bool = False):
     """Shared drafter promise gate: evaluate + audit the exact text about to ship.
 
     Single chokepoint for BOTH ``draft_message`` return paths (issue #2421):
     the short-output early return gates the verbatim ``raw_response`` bytes it
-    would deliver, and the full path gates the narration-stripped text. Runs the
-    regex-only heuristic (``_evaluate_promise_heuristic`` — no LLM call, so the
-    short path's latency guarantee holds) and writes a best-effort audit record
-    to ``logs/classification_audit.jsonl`` with ``source="promise_gate_drafter"``
-    so drafter-path decisions are observable.
+    would deliver, and the full path gates the narration-stripped text.
 
-    Honors the ``PROMISE_GATE_ENABLED`` kill switch: when disabled, an
-    ``action="allow" / reason="gate_disabled"`` audit entry is still written
-    (matching ``evaluate_promise``'s disabled-path observability) and the text
-    is never blocked.
+    ``use_llm`` (Task 5, #3027) selects the judgment layer:
+
+    * ``False`` (short-output path, and the Stop-hook's ``use_llm=False``
+      ``draft_message`` call) — the regex-only heuristic
+      (``_evaluate_promise_heuristic``, zero LLM calls, so the short path's
+      latency guarantee holds). Audited as ``source="promise_gate_drafter"``.
+    * ``True`` (the composed/main path for the three real delivery callers —
+      ``agent/output_handler.py``, ``bridge/email_bridge.py``, and
+      ``draft_message``'s own main return when NOT called with
+      ``use_llm=False``) — the LLM-primary path via
+      ``bridge.promise_gate._evaluate_promise_llm_or_heuristic`` (same
+      SDK-timeout / semaphore-bound / heuristic-fallthrough contract as the
+      CLI's ``evaluate_promise_async``). Audited as
+      ``source="promise_gate_drafter_llm"``, ``"...drafter_heuristic"``, or
+      ``"...drafter_timeout"`` depending on which layer actually produced
+      the verdict.
+
+    Honors the ``PROMISE_GATE_ENABLED`` kill switch, read fresh on every
+    call: when disabled, an ``action="allow" / reason="gate_disabled"``
+    audit entry is still written (matching ``evaluate_promise``'s
+    disabled-path observability) and the text is never blocked — checked
+    BEFORE the LLM branch, so a disabled gate never pays the LLM call
+    either.
 
     Task 14 (#2494, carried into #2708) override leg: a BLOCK verdict is
     downgraded to ALLOW (``promise_recorded_override``) when the PM has
@@ -686,15 +728,19 @@ def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
     session's bound Job (``bridge.promise_gate.promise_override_active``,
     read-only, Job-scoped by design). That is the "override" half of
     revise-or-override: record the expectation via
-    ``tools/job_tool expectation-add``, resend, and the gate clears.
+    ``tools/job_tool expectation-add``, resend, and the gate clears. The
+    override check runs identically regardless of ``use_llm`` — it acts on
+    whatever verdict the judgment layer produced.
 
     Returns the :class:`bridge.promise_gate.PromiseVerdict`; callers promote
     ``action == "block"`` to ``needs_self_draft=True``. Never raises: the
-    audit writer swallows its own exceptions and the heuristic is pure regex.
+    audit writer swallows its own exceptions, the heuristic is pure regex,
+    and the LLM path already falls open to the heuristic on any failure.
     """
     from bridge.promise_gate import (
         PromiseVerdict,
         _evaluate_promise_heuristic,
+        _evaluate_promise_llm_or_heuristic,
         _gate_enabled,
         _write_promise_audit,
         promise_override_active,
@@ -713,7 +759,15 @@ def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
         )
         return verdict
 
-    verdict = _evaluate_promise_heuristic(text)
+    if use_llm:
+        verdict, suffix, elapsed_ms, queue_wait_ms = await _evaluate_promise_llm_or_heuristic(text)
+        source = f"promise_gate_drafter_{suffix}"
+    else:
+        _start = time.monotonic()
+        verdict = _evaluate_promise_heuristic(text)
+        elapsed_ms = (time.monotonic() - _start) * 1000
+        queue_wait_ms = None
+        source = "promise_gate_drafter"
 
     if verdict.action == "block" and session is not None and promise_override_active(session):
         verdict = PromiseVerdict(
@@ -731,7 +785,9 @@ def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
         verdict,
         transport=medium,
         session_id=session_id,
-        source="promise_gate_drafter",
+        source=source,
+        elapsed_ms=elapsed_ms,
+        queue_wait_ms=queue_wait_ms,
     )
     return verdict
 
@@ -1075,13 +1131,16 @@ async def draft_message(
     *,
     medium: str = "telegram",
     persona: str | None = None,
+    use_llm: bool = True,
 ) -> MessageDraft:
     """Draft an agent response for user-visible delivery.
 
     Verbatim pass-through with validation and deterministic structural
     composition. No LLM rewriting — the agent's own text is used after
     narration stripping and composition. Haiku, OpenRouter, and all
-    LLM-rewrite paths have been removed.
+    LLM-rewrite paths have been removed. The only LLM call this function can
+    make is the promise-gate honesty check on the main (composed) path, and
+    only when ``use_llm`` allows it — see the ``use_llm`` arg below.
 
     Flow:
     1. Strip process narration from raw text (_strip_process_narration)
@@ -1121,6 +1180,20 @@ async def draft_message(
             Per-medium validator rules enforce wire-format constraints.
         persona: Optional persona name (pm/dev/teammate/customer-service) for
             tone hints. Not used today — medium and persona stay orthogonal.
+        use_llm: Whether the main (composed) path's promise gate may use its
+            LLM-primary judgment layer. Default ``True`` for the three real
+            delivery callers (``agent/output_handler.py``,
+            ``bridge/email_bridge.py``, and any other caller that doesn't
+            override it). The short-output early-return path NEVER uses the
+            LLM regardless of this flag — it always evaluates via the
+            zero-cost heuristic, preserving its latency guarantee.
+            **MANDATORY** ``use_llm=False`` for ``agent/hooks/stop.py``
+            (Risk 1a): that call runs inline on the Stop hook's 10-second
+            harness-wall critical path, and this repo has already had the
+            126/131-SIGKILL incident (docs/features/memory-hook-performance.md)
+            from adding an inline LLM round-trip to that exact path. The
+            documented fix was "detach, don't bound" — do NOT try to
+            reintroduce an LLM call there behind a timeout.
 
     Returns:
         MessageDraft with verbatim composed text, routing fields, and any
@@ -1157,7 +1230,12 @@ async def draft_message(
         # Gate the exact verbatim bytes the short path would ship (issue #2421
         # — this branch previously returned before the promise check, making
         # the gate structurally unreachable for replies under the threshold).
-        short_verdict = _evaluate_drafter_promise(raw_response, medium=medium, session=session)
+        # Short path: always heuristic-only (use_llm=False), regardless of the
+        # caller's use_llm — this is the latency guarantee the short-output
+        # branch exists to preserve.
+        short_verdict = await _evaluate_drafter_promise(
+            raw_response, medium=medium, session=session, use_llm=False
+        )
         short_is_empty_promise = short_verdict.action == "block"
         if short_is_empty_promise or short_violations:
             if short_is_empty_promise:
@@ -1208,7 +1286,11 @@ async def draft_message(
     # etc.) was flagged by the validator. Either condition promotes to
     # needs_self_draft=True so the agent rewrites via the self-draft
     # steering path instead of a violation shipping verbatim.
-    promise_verdict = _evaluate_drafter_promise(stripped_text, medium=medium, session=session)
+    # Main path: honors the caller's use_llm (default True; agent/hooks/stop.py
+    # passes False per Risk 1a).
+    promise_verdict = await _evaluate_drafter_promise(
+        stripped_text, medium=medium, session=session, use_llm=use_llm
+    )
     is_empty_promise = promise_verdict.action == "block"
     if is_empty_promise or violations:
         if is_empty_promise:

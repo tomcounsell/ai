@@ -92,13 +92,31 @@ class _SemaphoreOnlyGuard:
     anthropic.AsyncAnthropic(timeout=...) as client:`` for hotfix #1055
     httpx cleanup). The caller constructs the client; this guard just
     gates concurrency.
+
+    ``timeout`` (optional, default ``None``) bounds how long ``__aenter__``
+    will wait for a slot. ``None`` preserves the original unbounded
+    ``await _semaphore.acquire()`` behavior for existing callers (RTR,
+    memory extraction) that never opted into a bound. A caller that passes
+    ``timeout=`` gets ``asyncio.wait_for(_semaphore.acquire(), timeout=...)``
+    instead, raising ``TimeoutError`` (``asyncio.TimeoutError``, an alias
+    since 3.11) on expiry — ``bridge.promise_gate`` does this (Risk 1b: the
+    process-wide semaphore, default 5 slots, is shared with RTR, router
+    classification, and memory extraction, so an unbounded wait would make
+    the gate's "worst case is the SDK's 3s timeout" claim false under
+    contention). ``asyncio.Semaphore.acquire()`` does not consume a slot
+    when cancelled while waiting, so a ``wait_for`` timeout here leaves the
+    semaphore's internal count untouched — no leaked slot.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, timeout: float | None = None) -> None:
         self._acquired = False
+        self._timeout = timeout
 
     async def __aenter__(self) -> None:
-        await _semaphore.acquire()
+        if self._timeout is not None:
+            await asyncio.wait_for(_semaphore.acquire(), timeout=self._timeout)
+        else:
+            await _semaphore.acquire()
         self._acquired = True
         return None
 
@@ -120,7 +138,7 @@ def anthropic_slot() -> _AnthropicGuard:
     return _AnthropicGuard()
 
 
-def semaphore_slot() -> _SemaphoreOnlyGuard:
+def semaphore_slot(timeout: float | None = None) -> _SemaphoreOnlyGuard:
     """Return a fresh context manager that acquires the slot without a client.
 
     Use when a call site needs its own ``AsyncAnthropic`` construction
@@ -131,5 +149,10 @@ def semaphore_slot() -> _SemaphoreOnlyGuard:
         async with semaphore_slot():
             async with anthropic.AsyncAnthropic(timeout=30.0) as client:
                 msg = await client.messages.create(...)
+
+    ``timeout``, if given, bounds the acquisition itself (not the API
+    call) via ``asyncio.wait_for``; on expiry ``__aenter__`` raises
+    ``TimeoutError``. Default ``None`` preserves the unbounded wait for
+    existing callers. See ``_SemaphoreOnlyGuard`` for the rationale.
     """
-    return _SemaphoreOnlyGuard()
+    return _SemaphoreOnlyGuard(timeout=timeout)

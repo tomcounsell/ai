@@ -1451,3 +1451,133 @@ class TestShortOutputPromiseGate:
 
         assert result.needs_self_draft is True
         assert result.text == ""
+
+
+class TestMainPathLLMWiring:
+    """Task 5 (#3027): the main (composed) path's promise gate defaults to
+    use_llm=True; the short-output path and any use_llm=False caller (the
+    Stop hook, Risk 1a) must never reach the LLM helper regardless."""
+
+    @pytest.mark.asyncio
+    async def test_short_path_issues_zero_llm_calls(self, monkeypatch):
+        """The short-output path is heuristic-only unconditionally — proven
+        by making the raw LLM call explode if it is ever invoked."""
+        import bridge.promise_gate as promise_gate
+
+        async def _explode(text):
+            raise AssertionError("short path must not call the promise-gate LLM")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
+
+        text = "Done. The newsletter card is live on the Newsletters tab."
+        assert len(text) < 200
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is False
+        assert result.text == text
+
+    @pytest.mark.asyncio
+    async def test_stop_hook_call_shape_issues_zero_llm_calls(self, monkeypatch):
+        """Regression guard for Risk 1a / the 126-of-131 SIGKILL incident
+        (docs/features/memory-hook-performance.md): the exact call shape
+        agent/hooks/stop.py:147 uses — ``draft_message(text, medium=medium,
+        use_llm=False)`` — on text long/SDLC-shaped enough to take the main
+        (composed) path must still never reach the LLM helper."""
+        import bridge.promise_gate as promise_gate
+
+        async def _explode(text):
+            raise AssertionError("use_llm=False caller must not call the promise-gate LLM")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text, medium="telegram", use_llm=False)
+
+        # Heuristic still catches the forward-deferral — use_llm=False only
+        # disables the LLM layer, not the gate itself.
+        assert result.needs_self_draft is True
+
+    @pytest.mark.asyncio
+    async def test_main_path_llm_exception_falls_through_to_heuristic(self, monkeypatch):
+        """A non-timeout SDK exception on the main path (network error,
+        malformed response, etc.) must fall open to the heuristic — never
+        raise out of draft_message and never silently ship an unvetted
+        draft."""
+        import bridge.promise_gate as promise_gate
+
+        async def _raise(text):
+            raise RuntimeError("simulated SDK failure")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _raise)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text)
+
+        # Heuristic fallthrough still catches the forward-deferral.
+        assert result.needs_self_draft is True
+
+    @pytest.mark.asyncio
+    async def test_main_path_llm_timeout_falls_through_to_heuristic(self, monkeypatch):
+        """An ``anthropic.APITimeoutError`` on the main path falls through
+        to the heuristic exactly like any other LLM failure — the drafter
+        never blocks delivery on an infrastructure timeout."""
+        import httpx
+
+        import bridge.promise_gate as promise_gate
+
+        async def _timeout(text):
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            raise promise_gate.anthropic.APITimeoutError(request=request)
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _timeout)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text)
+
+        assert result.needs_self_draft is True
+
+
+class TestPollQuestionHeuristicGate:
+    """No-Go 5 (#3027): send_poll bypasses draft_message entirely, so
+    validate_poll_question is the only honesty check a poll question gets.
+    Heuristic only — no LLM call, no latency cost."""
+
+    def test_completion_claim_poll_question_flagged(self):
+        """The heuristic is pure regex (no new patterns added — mechanical
+        broadening is explicitly rejected elsewhere in promise_gate.py), so
+        this uses phrasing that actually matches an existing forward-deferral
+        pattern rather than a semantically-completion-shaped sentence a
+        regex can't see."""
+        from bridge.message_drafter import validate_poll_question
+
+        question = "I'll come back with the results — proceed to stage?"
+        violations = validate_poll_question(question)
+        assert any(v.rule == "poll_question_promise" for v in violations)
+
+    def test_ordinary_interrogative_not_flagged(self):
+        from bridge.message_drafter import validate_poll_question
+
+        question = "Should we deploy to staging now or wait for review?"
+        violations = validate_poll_question(question)
+        assert not any(v.rule == "poll_question_promise" for v in violations)
