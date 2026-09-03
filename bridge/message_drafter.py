@@ -627,19 +627,26 @@ def validate_poll_question(question: str) -> list[Violation]:
     low-volume, interactive affordance, and a ~500ms round-trip here would be
     real latency cost for no delivery-honesty gain since the two-state
     outcome (ship or don't) is unchanged from before this plan — see No-Go 5.
+
+    Honors the ``PROMISE_GATE_ENABLED`` kill switch via
+    ``bridge.promise_gate._gate_enabled()``: when the switch is off, this
+    check is skipped entirely (no violation appended), matching the
+    process-wide "gate disabled" contract documented in
+    ``docs/features/promise-gate.md``.
     """
     violations = _validate_for_medium(question, "telegram_poll")
 
-    from bridge.promise_gate import _evaluate_promise_heuristic
+    from bridge.promise_gate import _evaluate_promise_heuristic, _gate_enabled
 
-    verdict = _evaluate_promise_heuristic(question)
-    if verdict.action == "block":
-        violations.append(
-            Violation(
-                rule="poll_question_promise",
-                snippet=verdict.reason,
+    if _gate_enabled():
+        verdict = _evaluate_promise_heuristic(question)
+        if verdict.action == "block":
+            violations.append(
+                Violation(
+                    rule="poll_question_promise",
+                    snippet=verdict.reason,
+                )
             )
-        )
     return violations
 
 
