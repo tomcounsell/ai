@@ -61,9 +61,12 @@ Two rungs are deliberately **absent**:
   filename stem. It was removed because a plan document is not an identity —
   it is a document that *mentions* an issue. Reading its filename to name a
   lane is derivation wearing adoption's clothes, which is the precise defect
-  this feature closes. Recording the result would have made it *worse* than
-  the prior guessing, not better, because the write is no-overwrite and a
-  wrong adoption could never be corrected.
+  this feature closes. Recording the result would have been worse than the
+  prior guessing, because the ladder's write is no-overwrite: a wrong
+  adoption from a plan filename would have been indistinguishable from a
+  correct one, and — before `repair_lane_slug` (see "A wrong recorded slug
+  is repairable" below) — recorded, permanent guesses had no path back to
+  the truth.
 - **No machine-local `git worktree list` rung.** A rung that reads local
   filesystem state would make two hosts reach different answers for the same
   lane. A per-host identity is not an identity.
@@ -88,13 +91,16 @@ With `allow_heal=False` (the default), the function stops after rung 1: no
 git subprocess, no write, and — critically — **no ledger creation**. A read
 path can never bring a `PipelineLedger` into existence for a non-lane issue.
 
-Exactly three callers write lane identity, and only two of them heal:
+Exactly four callers write lane identity: two heal an empty slug, one adopts a
+known one, and one repairs a wrong one (see "A wrong recorded slug is
+repairable" below).
 
 | Caller | Mechanism | Why |
 |---|---|---|
 | `tools/sdlc_session_ensure.py::ensure_session` | `resolve_lane_slug(N, allow_heal=True)` | The minter. Runs at lane start with no identity in hand. |
 | `reflections/sdlc_upvote_lanes.py` lane pickup | `resolve_lane_slug(N, allow_heal=True, target_repo=repo)` | Lane start on the reflection path, past every gate, about to create a real branch. It also has no identity in hand — it scanned an issue, not a branch. |
 | `reflections/sdlc_progress.py` stalled-lane respawn | `adopt_lane_slug(N, slug, target_repo=target_repo)` | See "Adopt vs. resolve" below — this caller already knows the identity, so it does not heal. |
+| `tools/sdlc_next_skill.py::_verify_stage_artifacts_live` (PATCH's G8 check) | `repair_lane_slug(N, target_repo=repo)` | The fail-closed decision point: branch truth just proved the recorded slug wrong (`resolve_branch_truth` returned *found* on a branch that disagrees with it), so the ledger is corrected here rather than left wrong forever. |
 
 ## Adopt vs. resolve: the three-way rule
 
@@ -135,6 +141,44 @@ described above is tested by calling `_attempt_action` directly.
 `None`-repo guard, and the same `PipelineLedger.get_or_create` as the healing
 arm of `resolve_lane_slug`. It walks no ladder because the caller is not
 asking a question.
+
+## A wrong recorded slug is repairable
+
+`resolve_lane_slug` rung 1 and `adopt_lane_slug` are both no-overwrite by
+design — neither can fix a slug that was already recorded wrong. That used to
+mean a wrong recorded slug was permanent (#3065): `_check_branch_pushed`
+probed a branch name derived from the recorded slug, found nothing, and
+reported a healthy, pushed lane as unverified forever, because nothing in this
+module could ever correct the record it was reading from.
+
+`repair_lane_slug(issue_number, *, target_repo=None)` closes that gap with a
+**fourth write path**, deliberately separate from the conditional-on-empty
+ones above. It fires only at the moment a fail-closed decision is about to act
+on the recorded name — today that is the G8 artifact-verification check in
+`tools/sdlc_next_skill.py::_verify_stage_artifacts_live`, via
+`resolve_branch_truth` — and only under a gate as narrow as the adoption
+ladder's rung 2:
+
+- The lane's PR head SHA (via `tools.pr_head_resolver.resolve_pr_head_sha`,
+  git-first, never a bare `gh` read) must resolve to **exactly one** branch in
+  a `git ls-remote --heads origin` listing.
+- That branch's slug must differ from the recorded one — no contradiction, no
+  write.
+- Zero matches or two-or-more matches both leave the record untouched,
+  matching rung 2's existing ambiguity discipline. A wrong repair is worse
+  than a wrong original, because it moves a lane that was merely mislabelled
+  (the worktree, the branch, and the task list all key off the slug).
+
+Every correction is written under the same slug lock as the other write paths,
+re-reading the recorded value immediately before writing so a repair another
+caller already applied converges to a no-op instead of a second write, and its
+justification (`from`, `to`, `pr_number`, `head_sha`, `at`) is appended to the
+ledger's `stage_states_json` under `_slug_repairs` — a wrong repair is
+auditable, not silent.
+
+Ordinary reads are unaffected: rung 1 of `resolve_lane_slug` still returns the
+recorded value directly and never triggers a repair or any live call. Only the
+fail-closed decision path pays for the check.
 
 ## Discovery reads identity
 
