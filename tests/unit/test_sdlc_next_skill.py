@@ -2223,6 +2223,45 @@ class TestG8ConsumesBranchTruth:
         assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_FOUND
         assert guard_g8_artifact_verification({"PATCH": "completed"}, {}, context) is None
 
+    def test_wrong_recorded_slug_triggers_a_repair_attempt(self, monkeypatch):
+        """#3065 Task 6: a FOUND branch that disagrees with the recorded slug
+        is exactly the fail-closed decision point ``repair_lane_slug`` exists
+        for -- this asserts the call actually happens, with the issue number
+        and resolved repo, not just that G8 tolerates the mismatch."""
+        calls = []
+        monkeypatch.setattr(
+            "tools.lane_identity.repair_lane_slug",
+            lambda issue_number, target_repo=None: calls.append((issue_number, target_repo)),
+        )
+        self._setup(
+            monkeypatch,
+            heads={"refs/heads/session/renamed-lane": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
+        assert calls == [(3065, "o/r")]
+
+    def test_matching_slug_triggers_no_repair_attempt(self, monkeypatch):
+        """FOUND and the branch agrees with the recorded slug -- nothing to
+        repair, so ``repair_lane_slug`` must not even be called."""
+
+        def _poison(issue_number, target_repo=None):
+            raise AssertionError("repair_lane_slug must not run when the slug is already right")
+
+        monkeypatch.setattr("tools.lane_identity.repair_lane_slug", _poison)
+        self._setup(
+            monkeypatch,
+            slug="sdlc-3065",
+            heads={"refs/heads/session/sdlc-3065": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
     def test_genuinely_unpushed_branch_still_dispatches_patch(self, monkeypatch):
         from agent.sdlc_router import guard_g8_artifact_verification
 
