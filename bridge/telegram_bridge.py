@@ -1063,7 +1063,12 @@ async def _ack_steering_routed(
     try:
         await asyncio.to_thread(mark_session_polls_steered, session_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"mark_session_polls_steered failed for session_id={session_id}: {exc}")
+        logger.warning(
+            "mark_session_polls_steered failed for session_id=%s: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
 
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's

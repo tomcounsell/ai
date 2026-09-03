@@ -225,6 +225,93 @@ class TestResumeCompletedSessionClosesThePoll:
         assert calls == []
 
 
+class TestACloseOutFailureNeverBreaksTheSentinelItPrecedes:
+    """The close-out is best-effort bookkeeping, and both sites must survive it.
+
+    Each call sits directly ahead of its caller's anti-duplicate sentinel —
+    ``_steering_session_enqueued`` on the prose path, ``mark_poll_dispatched`` on
+    the vote path — neither of which is reached if the close-out raises. The
+    consequence is a duplicate: a second enqueue of the human's message (#997),
+    or a released claim that re-dispatches the same vote. Without these two tests
+    both ``try/except`` blocks could be deleted and nothing in the tree would
+    fail.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resume_completed_session_returns_normally(self):
+        """The COMPLETED route: returning is what lets the caller stamp its flag."""
+        from bridge.answer_routing import resume_completed_session
+
+        completed = MagicMock()
+        completed.session_id = "sess-1"
+        completed.project_key = "valor"
+        completed.working_dir = "/tmp/wd"
+        completed.project_config = None
+        completed.session_type = None
+
+        with (
+            patch(
+                "bridge.poll_registry.mark_session_polls_steered",
+                side_effect=RuntimeError("event loop is closed"),
+            ),
+            patch(
+                "bridge.telegram_bridge._build_completed_resume_text",
+                return_value="augmented",
+            ),
+            patch(
+                "bridge.dispatch.dispatch_telegram_session",
+                new_callable=AsyncMock,
+            ) as dispatch,
+        ):
+            await resume_completed_session(
+                completed=completed,
+                text="option B",
+                sender_name="Alice",
+                telegram_chat_id="12345",
+                telegram_message_id=67890,
+            )
+
+        # The dispatch still happened, and the failure did not propagate.
+        dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ack_steering_routed_returns_normally(self):
+        """The LIVE / PENDING / LIVE_GUARD routes, which set no sentinel at all.
+
+        A raise here does not merely skip a flag — it unwinds into the caller's
+        fall-through and delivers the #997 duplicate, which is why this is the
+        hotter of the two sites.
+        """
+        from bridge.telegram_bridge import _ack_steering_routed
+
+        event, message = _make_event_message()
+        with (
+            patch("bridge.telegram_bridge.push_steering_message") as push,
+            patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
+            patch(
+                "bridge.telegram_bridge.record_telegram_message_handled",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "bridge.poll_registry.mark_session_polls_steered",
+                side_effect=RuntimeError("event loop is closed"),
+            ),
+        ):
+            await _ack_steering_routed(
+                MagicMock(),
+                event,
+                message,
+                session_id="sess-1",
+                sender_name="Alice",
+                text="option B",
+                log_context="[test] steer log",
+                room_id="test|system",
+            )
+
+        # The human's message reached the inbox and the failure did not propagate.
+        push.assert_called_once()
+
+
 class TestAdoptionStillScansAndPromotesASteeredHint:
     """A steered hint is deliberately still adopted, not skipped.
 
@@ -235,10 +322,9 @@ class TestAdoptionStillScansAndPromotesASteeredHint:
     chatter marks the hint (``mark_session_polls_steered``), skipping steered
     hints here would let an unrelated message permanently swallow a subsequent
     tap — exactly the failure class #2701 exists to remove. The scan-cost
-    objection does not hold either: a successful adoption promotes and DELETES
-    the pending row, so the normal case costs one scan, not one per tick.
-    ``promote_pending_poll`` carries the steered marker onto the real row, so
-    the promoted row is born steered at no extra cost.
+    objection that motivated the skip is answered at
+    ``bridge/poll_reconcile.py``'s loop comment, which is the authoritative
+    statement of it; do not restate it here, where it drifted once already.
     """
 
     @pytest.mark.asyncio
@@ -259,36 +345,28 @@ class TestAdoptionStillScansAndPromotesASteeredHint:
 
         hint = uuid.uuid4().hex
         poll_id = f"test-{uuid.uuid4().hex[:12]}"
-        try:
-            reg.register_pending_poll(
-                hint, chat_id=-1001, session_id="sess-1", question="Q?", options=["A", "B"]
-            )
-            # Unrelated chatter, not an answer — this is the case the skip broke.
-            reg.mark_session_polls_steered("sess-1")
-            assert reg.poll_steered(hint) is True
+        reg.register_pending_poll(
+            hint, chat_id=-1001, session_id="sess-1", question="Q?", options=["A", "B"]
+        )
+        # Unrelated chatter, not an answer — this is the case the skip broke.
+        reg.mark_session_polls_steered("sess-1")
+        assert reg.poll_steered(hint) is True
 
-            # Scoped to this test's hint: the claimed db is shared with sibling
-            # tests, and a blanket return would try to promote their rows onto
-            # this poll id too.
-            async def _find(_client, _peer, scanned_hint):
-                return (67890, poll_id) if scanned_hint == hint else None
+        # Keyed on this test's own hint rather than returning a blanket match:
+        # `adopt_orphaned_polls` walks the whole pending index, so a blanket
+        # match would promote every row it finds onto this one poll id the
+        # moment this class grows a second fixture.
+        async def _find(_client, _peer, scanned_hint):
+            return (67890, poll_id) if scanned_hint == hint else None
 
-            with patch(
-                "bridge.telegram_relay._find_already_sent_poll",
-                new=_find,
-            ):
-                await adopt_orphaned_polls(MagicMock())
+        with patch("bridge.telegram_relay._find_already_sent_poll", new=_find):
+            await adopt_orphaned_polls(MagicMock())
 
-            # Adopted, so a later tap resolves a row instead of dying at
-            # `lookup_poll(poll_id) is None` — and the row is born steered, so it
-            # costs the reconcile loop nothing.
-            assert reg.lookup_poll(poll_id) is not None
-            assert reg.poll_steered(poll_id) is True
-            assert reg.lookup_pending_poll(hint) is None
-        finally:
-            r = reg._redis()
-            reg.delete_pending_poll(hint)
-            r.delete(f"{reg.POLL_STEERED_PREFIX}{hint}")
-            for prefix in (reg.POLL_ROW_PREFIX, reg.POLL_STEERED_PREFIX):
-                r.delete(f"{prefix}{poll_id}")
-            r.srem(reg.POLL_OPEN_INDEX, poll_id)
+        # Adopted, so a later tap resolves a row instead of dying at
+        # `lookup_poll(poll_id) is None` — and the marker is carried over, so the
+        # promoted row costs the reconcile loop nothing.
+        assert reg.lookup_poll(poll_id) is not None
+        assert reg.poll_steered(poll_id) is True
+        assert reg.lookup_pending_poll(hint) is None
+        # No cleanup block: `redis_test_db` is autouse and flushes the claimed db
+        # both before and after every test (tests/conftest.py).
