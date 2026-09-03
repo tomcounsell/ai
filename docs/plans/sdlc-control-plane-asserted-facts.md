@@ -766,32 +766,286 @@ Questions.
 
 ## Update System
 
-[skeleton]
+No `/update` script changes required. This work adds no dependency, config file, secret, or
+migration, and every change is to Python modules already deployed by the existing sync.
+
+Two propagation notes that are the *existing* update path doing its job, not new work:
+
+- `.claude/skills-global/do-sdlc/SKILL.md` is hardlinked to `~/.claude/skills/` by
+  `scripts/update/hardlinks.py`. Editing it means every machine picks the change up on its next
+  `/update`. Use `Edit`, not whole-file `Write` — a replace-and-rename breaks the hardlink and
+  leaves the live skill on pre-edit text.
+- Per the standing rule, `/update` runs after the PR merges so running services move off the old
+  SHA. That is the `/do-deploy` / `/update` step, deliberately not this lane's (see No-Gos).
 
 ## Agent Integration
 
-[skeleton]
+No new CLI entry point in `pyproject.toml [project.scripts]`, and no new bridge import. Every
+surface this plan changes is already reachable:
+
+- `sdlc-tool next-skill`, `stage-marker`, `verdict`, and `dispatch record` are existing subcommands.
+  The `Blocked(NO_RULE)` evidence payload and the unrecorded-dispatch signal ride out through
+  `next-skill`'s existing JSON output, which is what a supervisor already parses — that is the whole
+  point of putting the evidence there rather than in a log.
+- `agent/verification_parser.py` is consumed by `/do-build` and `scripts/validate_build.py`, both
+  already wired.
+- `tools/merge_predicate.py` is consumed by `/do-merge`, already wired.
+
+The integration risk here is not reachability, it is **contract drift between the two router
+callers**: `tools/sdlc_next_skill.py` supplies context and `agent/session_runner/runner.py:1408`
+supplies none, so the same lane state can produce two different decisions depending on who asked.
+The branch-truth resolver is placed so both callers use it, and an integration test asserts the two
+paths agree on a lane state that today they disagree about.
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-lane-identity.md` — the recorded-slug repair path changes.
-- [ ] Update `docs/features/machine-readable-dod.md` — the expectation grammar and malformed-row handling change.
-- [ ] Create `docs/features/sdlc-router-ground-truth-reads.md` describing the read-facts property and where each router decision now sources its facts.
+- [ ] Create `docs/features/sdlc-router-decision-reconciliation.md` — the reconciliation step: why a
+      guard must see the selected dispatch and not only a proposal, the single-pass bound, and what
+      a `Blocked` carrying two verdicts means for a supervisor reading it.
+- [ ] Update `docs/features/sdlc-lane-identity.md` — the adoption ladder gains a read-time
+      verification and an evidence-gated repair path. Its lines 118-124 already name this failure
+      mode as unfixable; that text must be replaced with the new status quo, not annotated.
+- [ ] Update `docs/features/machine-readable-dod.md` — the expectation grammar's new forms, the
+      `UNEVALUATED` outcome and what it means for a build gate, and the check-table column contract.
+      Fold the BRE/ERE escape rule from `:118-139` into the authoring surface rather than leaving it
+      referenced by a link.
+- [ ] Update `.claude/skills-global/do-plan/PLAN_TEMPLATE.md` §Verification (`:444-484`) — document
+      the expanded vocabulary and add a sample anti-criterion row that actually demonstrates the
+      alternation escape. The current sample (`:483`) has no alternation, so it never shows the rule
+      it exists to teach.
+- [ ] Update `docs/features/README.md` index table with the new feature doc.
+- [ ] Update `CLAUDE.md`'s SDLC principle only if the reconciliation step changes the documented
+      router contract for callers. If it does not, make no edit — `## Work Completion Criteria` is
+      regex-parsed into worker system prompts and asserted byte-for-byte by fixtures, so incidental
+      edits to that file are not free.
 
 ## Success Criteria
 
-[skeleton]
+- [ ] A lane with an open PR, APPROVED review, DOCS pending, and a stale CRITIQUE verdict routes to
+      `/do-docs`, from **both** the `next-skill` CLI path and the in-process
+      `decide_next_dispatch(stage_states, meta)` path, with and without `--proposed-skill`.
+- [ ] G3 vetoes a plan-family skill selected by the routing table, not only one supplied by a
+      caller. Demonstrated red: the pre-change code dispatches `/do-plan-critique` for that state.
+- [ ] A recorded lane slug that contradicts branch truth does not produce a `/do-patch` dispatch on
+      an open approved PR. A slug whose branch genuinely does not exist still does.
+- [ ] An artifact probe that cannot determine branch truth (remote unreachable, ambiguous match)
+      causes G8 to step aside rather than dispatch.
+- [ ] A wrong recorded slug is repairable: given a PR head resolving uniquely to one origin branch,
+      the ledger records the corrected slug together with the evidence that justified it.
+- [ ] `Blocked(NO_RULE)` carries the `stage_states` and `meta` it decided on, readable in
+      `next-skill`'s JSON output. Finding 4 would have been diagnosable from one call.
+- [ ] A timed-out check, an unparseable expectation, a command cell with no backticked span, and a
+      non-check table each produce a distinct non-`FAIL`, non-`PASS` outcome carrying a reason.
+- [ ] `` prints `0` ``, `>= 1`, `== 0`, `> 0`, `empty output`, and `exit 0` all evaluate correctly
+      against their observed output. Demonstrated red: all six return `False` on `main` today.
+- [ ] A table shaped `| Command | Observed stdout | Observed exit |` is **not** executed, and emits a
+      `SkippedTable` diagnostic. Demonstrated red: today its second column is run as a shell command.
+- [ ] `scripts/validate_build.py` and `agent/verification_parser.py` agree on the timeout bound and
+      on the disposition of a timeout, enforced by the parity fixture.
+- [ ] `tools/merge_predicate.py` refuses to merge a lane whose plan verification carries a `FAIL` or
+      `UNEVALUATED` row, and names the offending row in its refusal. This is the #3080 ruling made
+      machine-readable.
+- [ ] `session-ensure` returns a stable `run_id` across six consecutive invocations on a lane with
+      duplicate `AgentSession` rows, and never releases a lease it did not mint. Demonstrated red:
+      four of six fail on `main` today.
+- [ ] No reader of the removed `passed` boolean remains anywhere in the repo.
+- [ ] The test suites added by `bfa4a6f7d`, `d9cf29dd6`, and `3c689f211` pass unchanged.
 
 ## Verification
+
+<!-- These rows are graded by the runner this plan modifies (Risk 7), so every row below is a
+     direct grep or pytest assertion whose truth does not depend on the modified evaluator, and
+     every Expected cell uses only the six forms the CURRENT parser supports — this table must be
+     runnable before the fix lands.
+
+     Row classes, stated so a critic can tell them apart (#2658):
+     - Two-pole rows, RED on main today and GREEN when the task lands: the G3 docs arm,
+       reconciliation, `decision_inputs`, `UNEVALUATED`, `resolve_branch_truth`, and the
+       `passed`-reader sweep. These were each executed against main while writing this plan and
+       confirmed red.
+     - Regression-guard rows, GREEN today and GREEN after, which exist to fail if the builder
+       removes or violates something: the `resolve_pr_head_sha` row and the four `ANTI:` scope
+       rows. They are not evidence of new work and must not be read as such.
+     - Suite rows (`pytest-clean.sh`, `ruff`), whose value is the assertions inside them.
+
+     `tests/unit/test_lane_identity.py` and `tests/unit/test_merge_predicate.py` are named on the
+     assumption they exist; if a path is wrong the row fails loudly rather than silently passing,
+     which is the intended direction. -->
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Router unit tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_router.py -q -n 2` | exit code 0 |
+| Verdict unit tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_verdict.py -q -n 2` | exit code 0 |
+| Verification parser tests pass | `scripts/pytest-clean.sh tests/unit/test_verification_parser.py -q -n 2` | exit code 0 |
+| Runner parity tests pass | `scripts/pytest-clean.sh tests/unit/test_validate_build.py tests/unit/test_validate_verification_section.py -q -n 2` | exit code 0 |
+| Lane identity tests pass | `scripts/pytest-clean.sh tests/unit/test_lane_identity.py -q -n 2` | exit code 0 |
+| Merge predicate tests pass | `scripts/pytest-clean.sh tests/unit/test_merge_predicate.py -q -n 2` | exit code 0 |
+| G3 ladder has a docs arm | `grep -c 'review clean, docs pending' agent/sdlc_router.py` | output > 0 |
+| Reconciliation step exists | `grep -c 'def reconcile_dispatch' agent/sdlc_router.py` | output > 0 |
+| NO_RULE payload carries decision inputs | `grep -c decision_inputs agent/sdlc_router.py` | output > 0 |
+| Tri-state outcome is defined | `grep -c UNEVALUATED agent/verification_parser.py` | output > 0 |
+| Ruff is clean | `python -m ruff check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
+| Ruff formatting is clean | `python -m ruff format --check agent/sdlc_router.py agent/verification_parser.py tools/lane_identity.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py tools/merge_predicate.py scripts/validate_build.py` | exit code 0 |
+| ANTI: no `passed` boolean reader survives | `test -z "$(grep -rn 'result\.passed' agent/ tools/ scripts/ tests/)"` | exit code 0 |
+| ANTI: hooks validators untouched (No-Go #2736) | `test -z "$(git diff --name-only origin/main...HEAD -- .claude/hooks/validators/)"` | exit code 0 |
+| ANTI: pyproject and uv.lock untouched | `test -z "$(git diff --name-only origin/main...HEAD -- pyproject.toml uv.lock)"` | exit code 0 |
+| Branch-truth resolver exists | `grep -c 'def resolve_branch_truth' tools/sdlc_next_skill.py` | output > 0 |
+| Branch truth routes through the sanctioned head resolver | `grep -c resolve_pr_head_sha tools/sdlc_next_skill.py` | output > 0 |
+| ANTI: no raw Redis on Popoto keys added | `test -z "$(grep -rnE '_R\.(delete\|srem\|sadd\|zrem)\(' tools/sdlc_session_ensure.py tools/lane_identity.py)"` | exit code 0 |
+| ANTI: no Claude co-authorship trailer | `test -z "$(git log origin/main..HEAD --format=%B --grep='Co-Authored-By: Claude')"` | exit code 0 |
 
 ## Step by Step Tasks
 
-[skeleton]
+Ordered so that the acute wedge clears first, evidence lands before the decision logic that will
+need diagnosing, and the two disjoint file sets stay separable into two PRs.
+
+### 1. Fix `session-ensure`'s readback and candidate provenance
+
+- Read back the row this call saved **by primary key** (`agent/session_id` pair / `id`), not by
+  re-querying `AgentSession.query.filter(session_id=...)` and taking `[0]`
+  (`tools/sdlc_session_ensure.py:613-620`).
+- Track `candidate`'s provenance at `:538-540` as an explicit value — minted, adopted-from-supervised
+  (`:526`), or adopted-from-live-lock (`:353-355`). `reuse_run_id` cannot serve as this flag; it is
+  overwritten at `:526` and its use at `:674-675` already conflates the two adopt shapes.
+- Gate all three release sites (`:597`, `:618`, `:638`) on `provenance == minted`. Leave
+  `release_issue_lock` (`models/session_lifecycle.py:1484-1520`) unchanged — it is correct; the bug
+  is what it was handed.
+- Correct the module docstring at `:424-428`, which currently asserts the release is unconditionally
+  safe. Replace the claim; do not annotate it.
+- Tests: duplicate-row readback stability across repeated ensures; an adopted candidate surviving a
+  readback mismatch; a minted candidate still being released on genuine save failure.
+
+### 2. Give blocked and dispatch decisions their evidence
+
+- `Blocked(NO_RULE)` (`agent/sdlc_router.py:2281-2284`) carries the `stage_states` and `meta` it
+  decided on under an evidence key named **`decision_inputs`**, surfaced through
+  `tools/sdlc_next_skill.py`'s JSON output. (The name is pinned because a Verification row greps for
+  it; a grep for `stage_states` would pass today and prove nothing.)
+- The decision payload reports when the previous decision was never recorded — the caller skipped
+  `sdlc-tool dispatch record`, which today surfaces only much later as a G4 oscillation block
+  attributed to the wrong cause. `next-skill` still persists nothing; this is a read, not a write.
+- Tests: a `NO_RULE` block round-trips its inputs through the CLI JSON; the unrecorded-dispatch
+  signal appears exactly when the last dispatch has no confirming record.
+
+### 3. Complete G3's redirect ladder
+
+- Add the `/do-docs` arm to `agent/sdlc_router.py:501-509` for REVIEW complete + APPROVED + DOCS
+  pending, with the redirect suffix string **`review clean, docs pending`**. (Pinned: a Verification
+  row greps for it. A grep for `SKILL_DO_DOCS` would pass today — row 9 already uses it — and would
+  be a gate incapable of failing, the #2658 defect this plan exists to remove.)
+- Tighten arm 1 to require a recorded APPROVED verdict rather than the REVIEW marker alone, matching
+  rows 9 and 10 (`:1956`, `:1970`).
+- Tests: two-pole for each arm, including the state that previously fell to the `else` and produced a
+  redundant `/do-pr-review`.
+
+### 4. Reconcile guards against the selected dispatch
+
+- After the routing table selects `primary` (`agent/sdlc_router.py:2250-2255`), re-evaluate the
+  guards with the selection as the proposed skill, in a function named **`reconcile_dispatch`**
+  (pinned for a Verification row). Exactly one reconciliation pass on the selection, and at most one
+  on the resulting redirect.
+- A second veto returns `Blocked` carrying the selected row **and** the vetoing guard. Do not
+  iterate.
+- Do not edit row 2b's predicate (#1639 made it marker-agnostic deliberately); it is constrained
+  from outside by this step.
+- Preserve the existing asymmetry deliberately: rule predicates are try/except-wrapped
+  (`:2260-2263`), guards are not (`1083-1086`). Reconciliation must not silently swallow a raising
+  guard into a `NO_RULE`.
+- Tests: the #2771/#2334 lane shape routes to `/do-docs`; a lane needing `/do-plan-critique` with no
+  PR still gets it; a double-veto produces `Blocked` with both verdicts and terminates.
+
+### 5. Resolve branch truth once, for both router callers
+
+- Add a resolver named **`resolve_branch_truth`** (pinned for a Verification row) answering "which
+  pushed branch holds this lane's work?" from the PR head SHA — via
+  `tools/pr_head_resolver.py::resolve_pr_head_sha`, never a bare `gh` read — matched against
+  `git ls-remote --heads origin`. Return **found / absent / indeterminate**; zero matches on a lane
+  with no PR is *absent*, ambiguity or an unreachable remote is *indeterminate*.
+- Note for the builder, learned while writing this plan's own verification rows: an anti-criterion
+  grepping for `headRefOid` to prove the bare-`gh` rule was tried and **rejected**, because it
+  matches the docstring at `tools/sdlc_next_skill.py:169` that *describes* the sanctioned fallback.
+  A guard that cannot tell a call from prose about a call is the wave4 defect class. The rule is
+  asserted structurally instead, by the two rows above.
+- Replace `_check_branch_pushed`'s two-valued answer at `tools/sdlc_next_skill.py:181-198` and its
+  consumers at `:323-361` and `:476-493`.
+- `guard_g8_artifact_verification` may dispatch only on *absent*; on *indeterminate* it steps aside.
+- Wire the same resolver into the in-process path so `agent/session_runner/runner.py:1408` stops
+  deciding from an empty context.
+- Tests: wrong-slug lane with a live branch does not dispatch `/do-patch`; genuinely unpushed branch
+  still does; ambiguous and unreachable cases defer; an integration test asserts the CLI and
+  in-process paths agree on a state where they currently differ.
+
+### 6. Make a wrong recorded lane slug repairable
+
+- Add an evidence-gated repair to `tools/lane_identity.py`: on a **unique** branch-truth match that
+  contradicts the recorded slug, write the correction and record the evidence. Re-read immediately
+  before writing so a concurrent repair converges to a no-op.
+- Do not reuse `_record_slug_if_empty` (`:396+`) — its no-overwrite behavior is the defect.
+- Rung 1 (`:535-538`) keeps returning the recorded slug for ordinary reads; only the fail-closed
+  decision path verifies it.
+- Replace the "could never be corrected" claim in the module docstring (`:37-39`) and the matching
+  passage in `docs/features/sdlc-lane-identity.md:118-124`.
+- Tests: unique contradiction repairs and records evidence; zero and multiple matches do not write;
+  repeated repair is idempotent.
+
+### 7. Make the verification runner able to say "I could not evaluate this"
+
+- Replace `passed: bool` with a three-valued outcome (`PASS` / `FAIL` / `UNEVALUATED`) across
+  `agent/verification_parser.py` and every reader. Removal, not addition — no lingering boolean.
+- `UNEVALUATED` for: timeout (`:423-432`), any runner exception (`:433-442`), an expectation form the
+  grammar does not recognize (`:384`), and a command cell with no backticked span. Each carries a
+  reason. `format_results` (`:499`) renders it distinctly and never as `[FAIL]`.
+- Extend `evaluate_expectation` (`:304-384`) to cover the corpus #2836's spike-5 measured:
+  `` prints `N` ``, `== N`, `>= N`, `> N`, `empty output`, `exit N`. Re-derive the corpus by the
+  same method to confirm coverage rather than trusting the historical count.
+- Classify check tables by column contract, not by `any` of the first three headers being `Command`
+  (`_is_check_table_header:178-183`), and emit a `SkippedTable` diagnostic for non-check tables.
+  Leave per-block scoping (`_iter_pipe_blocks:156`) alone; it is correct.
+- Extract the command as the first backticked span (`:286-288`), not the whole backtick-stripped
+  cell.
+- Converge `scripts/validate_build.py` (`:238`, `:260-263`) onto one bound and one timeout
+  disposition, and add timeout and malformed rows to
+  `tests/fixtures/verification/runner_agreement.md` so the parity fixture can actually catch a
+  divergence.
+- Replace `tests/unit/test_verification_parser.py:210`, which pins the bug as intended behavior.
+
+### 8. Let the merge predicate see verification outcomes
+
+- Add the plan's verification outcome as an input group to `tools/merge_predicate.py`. A `FAIL` or
+  `UNEVALUATED` row holds the PR, and the refusal names the row.
+- Resolve the plan document through the lane's `tracking:` frontmatter
+  (`tools/plan_doc_scope.py`), never by filename match — the lane slug and plan filename are allowed
+  to differ.
+- A lane with no plan document is not blocked by its absence; that would be a new fail-closed
+  behavior this plan has no evidence for. It is reported, not enforced.
+- No new plan frontmatter key, and no fourth plan grammar (see Technical Approach).
+- Tests: the #3080 shape (APPROVED verdict, failing verification row) refuses to merge and names the
+  row; a clean lane still merges; a plan-less lane is unaffected.
+
+### 9. Documentation cascade
+
+- Work the `## Documentation` checklist above. Describe only the new status quo — replace the
+  "could never be corrected" and "unconditionally safe release" claims rather than appending
+  corrections to them.
 
 ## Open Questions
 
-[skeleton]
+1. **Split the lane into two PRs?** Clusters A/D (`agent/sdlc_router.py`, `tools/sdlc_next_skill.py`,
+   `tools/lane_identity.py`, `tools/sdlc_session_ensure.py`) and Cluster B/C
+   (`agent/verification_parser.py`, `scripts/validate_build.py`, `tools/merge_predicate.py`) have
+   disjoint file sets, and tasks 1-6 are independent of 7-8. My recommendation is **two sequential
+   PRs from this one lane**: the router half is the higher-risk change and deserves undiluted review
+   attention, and a bundled PR large enough to review badly is Risk 6. Confirm or overrule.
+2. **Does this plan's PR close #3065?** It closes the residual it was scoped to, but not every member
+   of the 51-issue consolidated set — #2491's pipeline-graph duplication is the largest survivor. My
+   recommendation is `Refs #3065`, leaving the umbrella open for its owner to close deliberately once
+   the remaining members are dispositioned. Confirm.
+3. **Is the Cluster C ruling right?** I rejected a general plan-declared merge-gate DSL in favor of
+   wiring the merge predicate to verification outcomes, on the grounds that the #3080 incident was
+   *about* verification rows and that a fourth plan grammar extends the drift #2491 documents. This
+   was the finding flagged as "a candidate, weigh it on its merits", so it is the one scope call I
+   most want overruled if the owner reads it differently.
+4. **Should `UNEVALUATED` block a merge, or only a build?** I have it blocking both (task 8), on the
+   principle that an ungraded criterion is not a met criterion. The counter-argument is that it makes
+   an unparseable row in an old plan able to hold a good PR. If that is unacceptable, the narrower
+   option is: `UNEVALUATED` blocks the build gate but only warns at merge.
