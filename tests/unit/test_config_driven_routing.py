@@ -428,18 +428,34 @@ class TestSteeringCheckSentinel:
         )
 
     def test_sentinel_set_to_true_after_dispatch(self):
-        """After dispatch_telegram_session, sentinel must be set True before return."""
+        """After the completed-branch enqueue, sentinel must be set True before return.
+
+        The enqueue moved (#2701): the completed branch now calls
+        ``resume_completed_session()`` from ``bridge/answer_routing.py`` instead
+        of inlining ``dispatch_telegram_session()``, so a poll vote can reach a
+        completed session the same way a typed reply does. The #997 invariant is
+        unchanged and still lives in this handler — the sentinel must follow the
+        enqueue so the outer exception handlers cannot fall through and
+        double-enqueue — only the call it follows is different.
+        """
         from pathlib import Path
 
         bridge_src = Path("bridge/telegram_bridge.py").read_text()
-        # _steering_session_enqueued = True must appear after dispatch_telegram_session
-        dispatch_pos = bridge_src.find(
-            "dispatch_telegram_session(", bridge_src.find("completed_sessions")
+        branch_pos = bridge_src.find("AnswerTargetKind.COMPLETED")
+        assert branch_pos != -1, (
+            "completed-session branch not found in bridge/telegram_bridge.py — "
+            "did the answer_routing seam get renamed?"
+        )
+        dispatch_pos = bridge_src.find("resume_completed_session(", branch_pos)
+        assert dispatch_pos != -1, (
+            "the completed branch must enqueue via resume_completed_session() "
+            "(bridge/answer_routing.py)"
         )
         sentinel_pos = bridge_src.find("_steering_session_enqueued = True", dispatch_pos)
         assert sentinel_pos != -1, (
-            "_steering_session_enqueued must be set to True after dispatch_telegram_session "
-            "in the completed-session resume branch (#997)."
+            "_steering_session_enqueued must be set to True after the completed-session "
+            "enqueue (#997). It stays caller-side deliberately: resume_completed_session "
+            "returns None and does not own this handler's fall-through guard."
         )
 
     def test_exception_handlers_guard_against_fallthrough(self):

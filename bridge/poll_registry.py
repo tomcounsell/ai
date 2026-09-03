@@ -102,6 +102,11 @@ POLL_EXPIRY_WARN_AGE_S = _int_env("POLL_EXPIRY_WARN_AGE_S", 3600)
 #: How long the gate probes wait for a human tap.
 POLL_PROBE_TAP_WAIT_S = _int_env("POLL_PROBE_TAP_WAIT_S", 1800)
 
+#: How far back the orphan-adoption / already-sent scan looks in a chat's own
+#: outbound history. Bounded on purpose — it runs per relay retry and per
+#: reconcile tick with a surviving provisional row. Provisional and tunable.
+POLL_ADOPTION_SCAN_LIMIT = _int_env("POLL_ADOPTION_SCAN_LIMIT", 50)
+
 
 def _redis():
     from popoto.redis_db import POPOTO_REDIS_DB

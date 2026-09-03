@@ -405,7 +405,7 @@ All tunables are named, env-overridable constants in `bridge/poll_registry.py`, 
 adjustable: `POLL_REGISTRY_TTL_S`, `POLL_ANSWER_CLAIM_TTL_S`, `POLL_RECONCILE_FAST_INTERVAL_S`,
 `POLL_RECONCILE_SLOW_INTERVAL_S`, `POLL_RECONCILE_FAST_WINDOW_S`,
 `POLL_RECONCILE_HEARTBEAT_TTL_S` (2× the slow interval), `POLL_EXPIRY_WARN_AGE_S`,
-`POLL_PROBE_TAP_WAIT_S`, plus `POLL_ADOPTION_SCAN_LIMIT` in `bridge/telegram_relay.py`.
+`POLL_PROBE_TAP_WAIT_S`, `POLL_ADOPTION_SCAN_LIMIT`.
 
 No new secrets, no `.env` edit, no migration.
 

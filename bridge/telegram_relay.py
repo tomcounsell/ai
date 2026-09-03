@@ -57,11 +57,6 @@ RELAY_FLOOD_WAIT_MAX = int(os.environ.get("RELAY_FLOOD_WAIT_MAX", "10"))
 # Known message types accepted by the relay dispatcher
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message", "poll"}
 
-# How far back the poll adoption / already-sent scan looks in a chat's own
-# outbound history. Bounded on purpose — this runs per retry and per
-# reconcile tick with a surviving provisional row. Provisional and tunable.
-POLL_ADOPTION_SCAN_LIMIT = int(os.environ.get("POLL_ADOPTION_SCAN_LIMIT", 50))
-
 
 class _DeliveredNoId:
     """Sentinel: a send reached Telegram but no ``message_id`` was captured.
@@ -1079,6 +1074,7 @@ async def _find_already_sent_poll(telegram_client, chat_id, poll_id_hint: str):
     """
     from telethon.tl.types import MessageMediaPoll
 
+    from bridge.poll_registry import POLL_ADOPTION_SCAN_LIMIT
     from bridge.response import correlation_matches, decode_option
 
     matches = []
