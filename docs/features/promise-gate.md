@@ -241,8 +241,10 @@ The anti-leak is enforced by tests in
 `PROMISE_GATE_ENABLED=false` disables the gate process-wide. Set it
 in `~/Desktop/Valor/.env` or in your shell startup, then restart the
 relevant service (bridge, worker). Subsequent gate calls return
-ALLOW unconditionally and log `source="promise_gate_disabled"` to
-the audit JSONL so the disabled state remains observable.
+ALLOW unconditionally and log the disabled state to the audit JSONL
+so it remains observable: `source="promise_gate_disabled"` on the CLI
+path, `source="promise_gate_drafter_disabled"` on the drafter path.
+Grep for `_disabled` to catch both.
 
 This is the **only** escape hatch. It is not advertised in the
 recovery template, not exposed as a per-call flag, and is intended
@@ -508,8 +510,9 @@ echo 'PROMISE_GATE_ENABLED=false' >> ~/Desktop/Valor/.env
 ./scripts/valor-service.sh restart
 ```
 
-Watch the audit JSONL to confirm gate calls are now logging
-`source="promise_gate_disabled"`:
+Watch the audit JSONL to confirm gate calls are now logging the disabled
+state — `source="promise_gate_disabled"` on the CLI path,
+`source="promise_gate_drafter_disabled"` on the drafter path:
 
 ```bash
 tail -f logs/classification_audit.jsonl | grep promise_gate
