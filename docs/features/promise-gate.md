@@ -312,7 +312,8 @@ The `source` discriminator takes one of:
 | `promise_gate_timeout` | CLI path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
 | `promise_gate_disabled` | CLI path: kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter does not populate this) |
-| `promise_gate_drafter` | Drafter short path (`use_llm=False`, both the <200-char early return and the Stop hook's forced-heuristic call) and the drafter's kill-switch short-circuit (any length) — records `action="allow" / reason="gate_disabled"` when disabled |
+| `promise_gate_drafter` | Drafter short path (`use_llm=False`, both the <200-char early return and the Stop hook's forced-heuristic call) |
+| `promise_gate_drafter_disabled` | Drafter path: kill switch was on (any length) — records `action="allow" / reason="gate_disabled"`. Distinct from `promise_gate_drafter` so the disabled state is greppable by source on this route, mirroring `promise_gate_disabled` on the CLI path |
 | `promise_gate_drafter_llm` | Drafter main path (`use_llm=True`): LLM Haiku call returned a parseable verdict |
 | `promise_gate_drafter_heuristic` | Drafter main path: LLM unavailable / parse failure → fell through to regex |
 | `promise_gate_drafter_timeout` | Drafter main path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |

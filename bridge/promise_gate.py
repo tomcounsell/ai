@@ -643,7 +643,9 @@ async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
 
     SDK pattern follows ``bridge.read_the_room`` verbatim:
     ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
-    anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:``.
+    anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
+    client:``. See the module docstring for why ``max_retries=0`` is
+    load-bearing for the stated 3-second worst case.
     Honors PR #1055 httpx-cleanup invariant. Coroutine-level timeouts
     around the API call are forbidden — they leak httpx connections under
     cancellation. The ``semaphore_slot`` timeout is NOT a coroutine-level
