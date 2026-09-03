@@ -81,6 +81,7 @@ import logging
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -178,24 +179,198 @@ def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
     return resolve_pr_head_sha(pr_number, repo=repo, repo_root=_target_repo_cwd())
 
 
-def _check_branch_pushed(branch_name: str) -> bool:
-    """Live-check (``git ls-remote``) that ``branch_name`` exists on origin.
+def _ls_remote_heads() -> dict[str, str] | None:
+    """Return ``{refname: sha}`` for every head on ``origin``, ``None`` on failure.
 
-    Takes a FULL branch name, not a slug: the ``session/`` prefix is applied
-    by ``tools.lane_identity.lane_branch_name`` and nowhere else, so a caller
-    that has no lane slug gets ``None`` and no-ops instead of probing a name
-    it guessed.
+    ``None`` is deliberately distinct from ``{}``: an unreachable remote is not
+    an empty remote. Collapsing the two is what let a network blip read as
+    "this lane has no branch" (#3065 Cluster A). Callers turn ``None`` into
+    *indeterminate*.
 
-    Unlike the local ``git branch -a`` check elsewhere in this module (which
-    can be satisfied by a stale remote-tracking ref), this queries the
-    remote directly so a claimed "branch pushed" artifact is verified
-    against the live world, not local ref cache staleness.
+    Unlike a local ``git branch -a`` read (which a stale remote-tracking ref
+    can satisfy), this queries the remote directly, so branch truth is checked
+    against the live world rather than local ref-cache staleness.
     """
-    cmd = ["git", "ls-remote", "--heads", "origin", branch_name]
+    cmd = ["git", "ls-remote", "--heads", "origin"]
     proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
-        return False
-    return bool(proc.stdout.strip())
+        logger.debug("branch-truth: git ls-remote --heads origin returned %s", proc.returncode)
+        return None
+    heads: dict[str, str] = {}
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            heads[parts[1].strip()] = parts[0].strip()
+    return heads
+
+
+# Branch-truth verdicts (#3065 Cluster A). Three values, because the two-valued
+# answer ``_check_branch_pushed`` used to give could not tell "this lane has no
+# pushed branch" from "the name I asked about is the wrong name" or "I could not
+# read the remote" -- and all three got the same fail-closed consequence.
+BRANCH_TRUTH_FOUND = "found"
+BRANCH_TRUTH_ABSENT = "absent"
+BRANCH_TRUTH_INDETERMINATE = "indeterminate"
+
+
+@dataclass(frozen=True)
+class BranchTruth:
+    """The answer to "which pushed branch holds this lane's work?".
+
+    ``status`` is one of :data:`BRANCH_TRUTH_FOUND`, :data:`BRANCH_TRUTH_ABSENT`,
+    :data:`BRANCH_TRUTH_INDETERMINATE`. ``branch`` names the branch that holds
+    the work on *found* (which may differ from the branch the caller asked
+    about — that difference IS a wrong recorded slug, and is what
+    ``tools.lane_identity.repair_lane_slug`` acts on). ``reason`` is always
+    populated so an indeterminate answer is reportable rather than silent.
+    """
+
+    status: str
+    branch: str | None = None
+    reason: str = ""
+    matches: tuple[str, ...] = ()
+
+    @property
+    def is_found(self) -> bool:
+        return self.status == BRANCH_TRUTH_FOUND
+
+    @property
+    def is_absent(self) -> bool:
+        return self.status == BRANCH_TRUTH_ABSENT
+
+    @property
+    def is_indeterminate(self) -> bool:
+        return self.status == BRANCH_TRUTH_INDETERMINATE
+
+
+_UNSET = object()
+
+
+def resolve_branch_truth(
+    lane_branch: str | None,
+    pr_number: object = None,
+    repo: str | None = None,
+    heads: object = _UNSET,
+) -> BranchTruth:
+    """Resolve which pushed branch holds this lane's work. Three-valued.
+
+    Ground truth is the PR's head commit SHA — resolved through
+    ``tools.pr_head_resolver.resolve_pr_head_sha`` (git-first via ``git
+    ls-remote refs/pull/N/head``), **never a bare ``gh`` read**, per CLAUDE.md:
+    a stale ``gh`` head SHA is what flipped the verdict-staleness gate
+    fail-open in #2895 — matched against the ``git ls-remote --heads origin``
+    listing. The branch name is an output of that match, not an input to it,
+    which is why a wrong recorded slug can no longer produce a wrong answer.
+
+    Verdicts:
+
+    - **found** — exactly one head carries the PR's head SHA (or, on a lane
+      with no PR, ``lane_branch`` is in the listing). ``branch`` names it.
+    - **absent** — the lane has **no PR** and its recorded branch is not in a
+      successfully-read listing. This is the only verdict a fail-closed
+      decision may act on.
+    - **indeterminate** — the remote could not be read, the PR head could not
+      be resolved, the head matches two or more heads, or the head matches
+      none of them. The last case is Race 1: a listing taken mid-push does not
+      yet contain the head, and a stale *negative* is the dangerous direction,
+      so it defers rather than claiming absence. ``lane_branch`` being
+      ``None`` is also indeterminate — there is no name to ask about, and
+      guessing one is #2718.
+
+    This function makes no decision and writes nothing; it only reports what
+    the world says.
+
+    Makes ZERO live calls when there is nothing to check at all -- no PR and
+    no recorded branch name. That case is answered (*indeterminate*) before
+    any subprocess runs, so a lane with no claimable artifact never pays for
+    a live probe (mirrors the #2757 "unverifiable costs no call" contract).
+
+    ``heads`` lets a caller that already fetched the listing this tick (e.g.
+    ``_build_context``, which shares one resolution across ``branch_exists``
+    and the G8 artifact check) inject it instead of paying for a second
+    ``git ls-remote --heads origin`` round trip. Omitted (the default), this
+    function fetches its own listing.
+    """
+    lane_branch = (lane_branch or "").strip() or None
+    has_pr = isinstance(pr_number, int) and pr_number >= 1
+
+    if not has_pr and lane_branch is None:
+        return BranchTruth(
+            status=BRANCH_TRUTH_INDETERMINATE,
+            reason="no lane branch recorded and no PR to resolve a head from",
+        )
+
+    if heads is _UNSET:
+        try:
+            heads = _ls_remote_heads()
+        except Exception as e:
+            return BranchTruth(
+                status=BRANCH_TRUTH_INDETERMINATE,
+                reason=f"git ls-remote --heads origin failed ({type(e).__name__}: {e})",
+            )
+    if heads is None:
+        return BranchTruth(
+            status=BRANCH_TRUTH_INDETERMINATE,
+            reason="git ls-remote --heads origin was unreadable (remote unreachable)",
+        )
+
+    if has_pr:
+        try:
+            head_sha = _fetch_pr_head_sha(int(pr_number), repo=repo)
+        except Exception as e:
+            return BranchTruth(
+                status=BRANCH_TRUTH_INDETERMINATE,
+                reason=f"PR #{pr_number} head SHA resolution failed ({type(e).__name__}: {e})",
+            )
+        if not head_sha:
+            return BranchTruth(
+                status=BRANCH_TRUTH_INDETERMINATE,
+                reason=f"PR #{pr_number} head SHA did not resolve",
+            )
+        matches = tuple(
+            sorted(ref.removeprefix("refs/heads/") for ref, sha in heads.items() if sha == head_sha)
+        )
+        if len(matches) == 1:
+            return BranchTruth(
+                status=BRANCH_TRUTH_FOUND,
+                branch=matches[0],
+                reason=f"PR #{pr_number} head {head_sha} uniquely matches {matches[0]}",
+                matches=matches,
+            )
+        if matches:
+            return BranchTruth(
+                status=BRANCH_TRUTH_INDETERMINATE,
+                reason=(
+                    f"PR #{pr_number} head {head_sha} matches {len(matches)} heads "
+                    f"({', '.join(matches)}) -- ambiguous"
+                ),
+                matches=matches,
+            )
+        # Race 1: a listing that does not contain the head is a possibly-stale
+        # negative (mid-push, or merged-and-deleted). Never *absent* while a PR
+        # exists.
+        return BranchTruth(
+            status=BRANCH_TRUTH_INDETERMINATE,
+            reason=(
+                f"PR #{pr_number} head {head_sha} matches no head in the listing "
+                f"(mid-push or merged-and-deleted)"
+            ),
+        )
+
+    # has_pr is False here, and the (not has_pr and lane_branch is None) case
+    # already returned above without a live call -- lane_branch is guaranteed
+    # non-None below.
+    if f"refs/heads/{lane_branch}" in heads:
+        return BranchTruth(
+            status=BRANCH_TRUTH_FOUND,
+            branch=lane_branch,
+            reason=f"{lane_branch} is present on origin",
+            matches=(lane_branch,),
+        )
+    return BranchTruth(
+        status=BRANCH_TRUTH_ABSENT,
+        reason=f"{lane_branch} is not on origin and this lane has no PR",
+    )
 
 
 def _check_plan_committed_on_main(rel_plan_path: str) -> bool:
@@ -215,7 +390,12 @@ def _check_plan_committed_on_main(rel_plan_path: str) -> bool:
     return proc.returncode == 0
 
 
-def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: int) -> dict:
+def _verify_stage_artifacts_live(
+    stage_states: dict,
+    meta: dict,
+    issue_number: int,
+    heads: object = _UNSET,
+) -> dict:
     """Check the top-3 claimed stage artifacts against the live world.
 
     Only checks a stage whose marker actually claims completion -- a stage
@@ -316,32 +496,40 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     # No recorded lane slug -> no branch to probe -> the PATCH check no-ops.
     # Probing a guessed name is what force-dispatches `/do-patch` against a
     # clean worktree until the G4 oscillation cap hard-blocks the lane (#2718).
-    # No recorded PR number is a second, independent reason to no-op (#2757):
-    # `pr_state` then stays None, the merged-skip below cannot engage, and the
-    # whole verdict falls to `git ls-remote` -- where "branch gone" is
-    # indistinguishable from "deleted on merge" with no PR state left to consult.
-    patch_claimed = patch_marked and bool(lane_branch) and pr_identifiable
+    #
+    # A lane whose MERGE is recorded completed is skipped outright (#2757): a
+    # missing remote branch is then the expected side effect of a
+    # delete-branch-on-merge policy, not evidence of a fabricated PATCH claim.
+    # This replaces the old "no recorded PR number -> no-op" proxy. That proxy
+    # existed only because the two-valued probe could not tell
+    # deletion-on-merge from a genuinely unpushed branch;
+    # :func:`resolve_branch_truth` now can -- a lane WITH a PR whose head
+    # matches nothing in the listing is *indeterminate*, never *absent* -- so
+    # the only lane that can still fail closed here is one with no PR and no
+    # merge, which is exactly the lane `/do-patch` exists for.
+    merge_recorded = stage_states.get("MERGE") == "completed"
+    patch_claimed = patch_marked and bool(lane_branch) and not merge_recorded
     if patch_marked and not lane_branch:
         logger.debug(
             "stage-artifact-verify: issue #%s PATCH claims completed but no lane slug is "
             "recorded; skipping the branch probe rather than guessing a branch name",
             issue_number,
         )
-    elif patch_marked and not pr_identifiable:
+    elif patch_marked and merge_recorded:
         logger.debug(
-            "stage-artifact-verify: issue #%s PATCH claims completed but no PR number is "
-            "recorded; skipping the branch probe because a missing branch is "
-            "indistinguishable from deletion-on-merge with no PR state to consult",
+            "stage-artifact-verify: issue #%s PATCH claims completed on a lane whose MERGE "
+            "is recorded completed; skipping the branch probe because a deleted branch is "
+            "the expected side effect of merging",
             issue_number,
         )
 
     # Resolve the live PR state at most once (used by both checks below) --
     # only when a claim that needs it is actually present, so an unclaimed
     # BUILD/PATCH stage still makes zero live calls (test_no_claimed_artifact_is_a_noop).
-    # Both claims already require `pr_identifiable`, so a claim being present is
-    # itself proof that `pr_number` is truthy -- no separate check needed.
+    # `patch_claimed` no longer implies a recorded PR number, so the truthiness
+    # of `pr_number` is checked explicitly rather than inferred.
     pr_state: str | None = None
-    if build_claimed or patch_claimed:
+    if (build_claimed or patch_claimed) and pr_identifiable:
         pr_state = _fetch_pr_state(pr_number, repo=repo)
 
     if build_claimed:
@@ -352,18 +540,45 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "BUILD"}
 
-    if patch_claimed:
-        if pr_state != "MERGED" and not _check_branch_pushed(lane_branch):
+    if patch_claimed and pr_state != "MERGED":
+        truth = resolve_branch_truth(lane_branch, pr_number=pr_number, repo=repo, heads=heads)
+        if truth.is_absent:
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
-                f"but branch {lane_branch} is not pushed"
+                f"but no pushed branch holds its work ({truth.reason})"
             )
-            return {"stage_artifacts_verified": False, "unverified_stage": "PATCH"}
+            return {
+                "stage_artifacts_verified": False,
+                "unverified_stage": "PATCH",
+                "branch_truth": truth.status,
+                "branch_truth_reason": truth.reason,
+            }
+        if truth.is_indeterminate:
+            # Report it AS indeterminate rather than as a silent clean pass:
+            # G8 must step aside here, but a supervisor reading the context has
+            # to be able to tell "verified" from "unreadable" (#3065).
+            logger.info(
+                f"stage-artifact-verify: issue #{issue_number} PATCH branch truth is "
+                f"indeterminate ({truth.reason}) — deferring rather than dispatching /do-patch"
+            )
+            return {
+                "branch_truth": truth.status,
+                "branch_truth_reason": truth.reason,
+            }
+        return {
+            "branch_truth": truth.status,
+            "branch_truth_branch": truth.branch,
+        }
 
     return {}
 
 
-def _verify_stage_artifacts(stage_states: dict, meta: dict, issue_number: int | None) -> dict:
+def _verify_stage_artifacts(
+    stage_states: dict,
+    meta: dict,
+    issue_number: int | None,
+    heads: object = _UNSET,
+) -> dict:
     """Verify claimed stage-completion artifacts against the live world (#1267).
 
     Sets ``stage_artifacts_verified`` / ``unverified_stage`` in the returned
@@ -389,13 +604,20 @@ def _verify_stage_artifacts(stage_states: dict, meta: dict, issue_number: int | 
     if not issue_number:
         return {}
     try:
-        return _verify_stage_artifacts_live(stage_states, meta, issue_number)
+        return _verify_stage_artifacts_live(stage_states, meta, issue_number, heads)
     except _INFRA_ERRORS as e:
         logger.warning(
             f"stage-artifact-verify: infra error verifying issue #{issue_number} "
             f"artifacts ({type(e).__name__}: {e}) — failing open (advancing)"
         )
-        return {}
+        # The direction is right (advance), but silence is not: an infra
+        # failure used to be indistinguishable in the output from a genuine
+        # clean verification. Report it AS indeterminate (#3065) — the flags
+        # G8 reads are still unset, so nothing dispatches on it.
+        return {
+            "artifact_verification_indeterminate": True,
+            "artifact_verification_reason": f"{type(e).__name__}: {e}",
+        }
     except Exception:
         logger.error(
             f"stage-artifact-verify: unexpected (non-infra) error verifying issue "
@@ -467,12 +689,17 @@ def _build_context(
                 e,
             )
 
-    # Check whether the lane's branch already exists (informs Row 5).
-    # The branch is named by the lane's RECORDED slug, which the lane minted
-    # once at lane start -- both the issue-derived shape and human-named
-    # shapes occur on this remote, so the name is read, never derived. Without
-    # a recorded slug we cannot affirm existence, so branch_exists stays False
-    # (#2003) and no git call is made at all.
+    # Branch truth, resolved ONCE per tick and shared by both consumers
+    # (#3065). ``branch_exists`` (Row 5) and the G8 PATCH artifact check used
+    # to ask two different questions of two different sources -- a local
+    # ``git branch -a`` read that a stale remote-tracking ref satisfies, and a
+    # live single-ref probe of a name derived from the recorded slug. One
+    # resolver, one live listing, one answer.
+    #
+    # ``branch_exists`` is True only on *found*: an unreadable remote must not
+    # assert existence. That matches the pre-#3065 behavior for the failure
+    # case while removing the stale-local-ref false positive.
+    heads: object = _UNSET
     if issue_number:
         context["branch_exists"] = False
         try:
@@ -480,24 +707,24 @@ def _build_context(
 
             lane_branch = lane_branch_name(resolve_lane_slug(issue_number))
             if lane_branch is not None:
-                proc2 = subprocess.run(
-                    ["git", "branch", "-a"],
-                    cwd=_target_repo_cwd(),
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                heads = _ls_remote_heads()
+                context["branch_exists"] = (
+                    heads is not None and f"refs/heads/{lane_branch}" in heads
                 )
-                branch_names = proc2.stdout if proc2.returncode == 0 else ""
-                context["branch_exists"] = lane_branch in branch_names
-        except Exception:
+        except Exception as e:
+            logger.debug("next-skill: branch-truth resolution failed (%s: %s)", type(e).__name__, e)
             context["branch_exists"] = False
+            heads = _UNSET
 
     # Stage-advance outcome verification gate (#1267): verify claimed
     # stage-completion artifacts against the live world. No-op when
     # stage_states/meta were not supplied (see the docstring above) or when
-    # no stage claims a checkable artifact this tick.
+    # no stage claims a checkable artifact this tick. The listing above is
+    # handed down so the whole tick costs one `git ls-remote --heads origin`;
+    # the PR-head resolve inside `resolve_branch_truth` stays lazy and runs
+    # only when a PATCH claim actually needs adjudicating.
     if issue_number and stage_states is not None and meta is not None:
-        context.update(_verify_stage_artifacts(stage_states, meta, issue_number))
+        context.update(_verify_stage_artifacts(stage_states, meta, issue_number, heads))
 
     # Head_sha verdict-staleness signal (WS3d, issue #2062): when a PR exists
     # AND a REVIEW verdict is recorded, fetch the live PR head so the router
@@ -531,6 +758,39 @@ def _build_context(
                 context["pr_head_sha_lookup_failed"] = True
 
     return context
+
+
+def build_decision_context(
+    issue_number: int | None,
+    stage_states: dict | None = None,
+    meta: dict | None = None,
+    proposed_skill: str | None = None,
+) -> dict:
+    """Public router-context builder, shared by BOTH ``decide_next_dispatch`` callers.
+
+    The CLI path (:func:`decide`) and the in-process path
+    (``agent/session_runner/runner.py::_load_ledger``) used to disagree by
+    construction: the runner passed no context at all, so every context-fed
+    guard — G3's proposed-skill arm, G5's plan-hash cache, G8's artifact
+    verification — saw permanently empty inputs there and could reach a
+    different answer than the CLI on the same lane. This function is the one
+    place that assembles those facts, so "the two paths agree" is a property of
+    the code rather than something a test has to keep chasing.
+
+    Never raises: every fact-gathering step inside is individually guarded, and
+    a total failure yields a partial (or empty) context, which is the same
+    fail-open shape both callers already had.
+    """
+    try:
+        return _build_context(proposed_skill, issue_number, stage_states, meta)
+    except Exception as e:
+        logger.debug(
+            "build_decision_context failed for issue #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return {}
 
 
 def _recover_stage_states_from_durable_signals(issue_number: int) -> dict:

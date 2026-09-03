@@ -1405,7 +1405,15 @@ class SessionRunner:
 
             next_skill: str | None = None
             try:
-                decision = decide_next_dispatch(stage_states, meta)
+                # Same context builder the CLI path uses (#3065). Without it
+                # this call decided from a permanently empty context, so every
+                # context-fed guard (G3's proposed-skill arm, G5's plan-hash
+                # cache, G8's branch-truth artifact check) was inert here and
+                # the two paths could disagree on the same lane.
+                from tools.sdlc_next_skill import build_decision_context  # noqa: PLC0415
+
+                context = build_decision_context(issue_number, stage_states, meta)
+                decision = decide_next_dispatch(stage_states, meta, context)
                 next_skill = getattr(decision, "skill", None)
             except Exception as e:  # noqa: BLE001 — nudge text only, never fatal
                 logger.debug("[runner] next-skill for nudge failed: %s", e)

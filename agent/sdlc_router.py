@@ -762,6 +762,16 @@ def guard_g8_artifact_verification(
     explicit, verified mismatch). Absent/unset/``True`` is a no-op — this
     mirrors the context-assembly contract that a stage with no claimed
     artifact (or one that verified clean) never sets the flag to ``False``.
+
+    **Branch truth is three-valued (#3065).** The PATCH arm's flag is set only
+    on ``resolve_branch_truth``'s *absent* verdict — no pushed branch holds
+    this lane's work and there is no PR to explain the gap. *Indeterminate*
+    (an unreadable remote, an unresolvable PR head, an ambiguous or mid-push
+    listing) sets ``context["branch_truth"]`` for reporting but never
+    ``stage_artifacts_verified``, so this guard steps aside. That asymmetry is
+    the whole point: dispatching a stage on an unreadable fact is what wedged
+    #2771 and #2334, and a wrong-but-present recorded slug used to be
+    indistinguishable here from a genuinely unpushed branch.
     """
     if context.get("stage_artifacts_verified") is not False:
         return None

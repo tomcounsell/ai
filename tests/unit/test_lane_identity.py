@@ -329,14 +329,12 @@ class TestG8LaneBranchDivergence:
         ledger.slug = mint_lane_slug(_ISSUE_LANE)
         ledger.save(update_fields=["slug"])
 
-        probed: list[str] = []
-
-        def fake_branch_pushed(name: str) -> bool:
-            # The world contains exactly one pushed branch for this lane.
-            probed.append(name)
-            return name.removeprefix("session/") == f"sdlc-{_ISSUE_LANE}"
-
-        monkeypatch.setattr(sdlc_next_skill, "_check_branch_pushed", fake_branch_pushed)
+        # The world contains exactly one pushed branch for this lane.
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_ls_remote_heads",
+            lambda: {f"refs/heads/session/sdlc-{_ISSUE_LANE}": "a" * 40},
+        )
         monkeypatch.setattr(sdlc_next_skill, "_check_plan_committed_on_main", lambda _: True)
 
         result = sdlc_next_skill._verify_stage_artifacts_live(
@@ -345,10 +343,12 @@ class TestG8LaneBranchDivergence:
             _ISSUE_LANE,
         )
 
-        assert result == {}, (
-            f"G8 fired against a lane whose branch is pushed; probed {probed!r} "
-            f"instead of the recorded lane branch session/sdlc-{_ISSUE_LANE}"
+        assert result.get("stage_artifacts_verified") is not False, (
+            "G8 fired against a lane whose branch is pushed: "
+            f"{result!r} (expected branch truth 'found' for session/sdlc-{_ISSUE_LANE})"
         )
+        assert result["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_FOUND
+        assert result["branch_truth_branch"] == f"session/sdlc-{_ISSUE_LANE}"
 
     def test_g8_patch_check_noops_when_slug_unresolvable(self, tmp_path, monkeypatch):
         """With no recorded slug the PATCH check skips rather than guessing."""
@@ -361,13 +361,13 @@ class TestG8LaneBranchDivergence:
         monkeypatch.setenv("SDLC_TARGET_REPO", str(repo_root))
         monkeypatch.setenv("GH_REPO", _TEST_REPO)
 
-        probed: list[str] = []
+        listed: list[bool] = []
 
-        def fake_branch_pushed(name: str) -> bool:
-            probed.append(name)
-            return False
+        def fake_heads() -> dict[str, str]:
+            listed.append(True)
+            return {}
 
-        monkeypatch.setattr(sdlc_next_skill, "_check_branch_pushed", fake_branch_pushed)
+        monkeypatch.setattr(sdlc_next_skill, "_ls_remote_heads", fake_heads)
         monkeypatch.setattr(sdlc_next_skill, "_check_plan_committed_on_main", lambda _: True)
 
         result = sdlc_next_skill._verify_stage_artifacts_live(
@@ -377,7 +377,7 @@ class TestG8LaneBranchDivergence:
         )
 
         assert result == {}
-        assert probed == [], f"probed a guessed branch name: {probed!r}"
+        assert listed == [], "probed the remote for a lane with no recorded slug"
 
 
 # ---------------------------------------------------------------------------
