@@ -38,6 +38,7 @@ _ISSUE_MENTIONED = 927352  # an issue merely *mentioned* by that plan
 _ISSUE_RESOLVER = 927353  # scratch issue for resolver-contract tests
 _ISSUE_ADOPT = 927354  # scratch issue for adopt_lane_slug tests
 _ISSUE_META = 927355  # scratch issue for the stage-query `_meta` slug read
+_ISSUE_REPAIR = 927356  # scratch issue for the evidence-gated slug repair
 
 
 def _cleanup(*issue_numbers: int, target_repo: str = _TEST_REPO) -> None:
@@ -56,6 +57,7 @@ def clean_ledgers():
         _ISSUE_RESOLVER,
         _ISSUE_ADOPT,
         _ISSUE_META,
+        _ISSUE_REPAIR,
     )
     _cleanup(*issues)
     yield
@@ -729,3 +731,198 @@ class TestSingleMinter:
         assert _issue_number_from_message("Start the pipeline for issue 735") == 735
         assert _issue_number_from_message("do something generic") is None
         assert _issue_number_from_message("") is None
+
+
+# ---------------------------------------------------------------------------
+# #3065 Task 6 -- a wrong recorded lane slug is repairable
+# ---------------------------------------------------------------------------
+
+
+class TestRepairLaneSlug:
+    """``repair_lane_slug`` corrects a contradicted slug, on unique evidence only.
+
+    Demonstrated red (#2658): on main no code path can correct a wrong recorded
+    slug. Rung 1 returns it unconditionally, ``allow_heal`` only fills an
+    *empty* field, and both write paths are no-overwrite — the module docstring
+    conceded it. A lane mislabelled once stayed mislabelled forever, and G8
+    force-dispatched ``/do-patch`` on the wrong branch name until the G4
+    oscillation cap hard-blocked it.
+    """
+
+    _HEAD = "c" * 40
+    _OTHER = "d" * 40
+
+    @pytest.fixture
+    def ledger(self, clean_ledgers):
+        record = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_REPAIR)
+        record.slug = "wrong-recorded-slug"
+        record.pr_number = 4242
+        record.save(update_fields=["slug", "pr_number"])
+        return record
+
+    def _world(self, monkeypatch, heads, head_sha="c" * 40):
+        from tools import lane_identity
+
+        monkeypatch.setattr(lane_identity, "_ls_remote_heads", lambda: heads)
+        monkeypatch.setattr("tools.pr_head_resolver.resolve_pr_head_sha", lambda *a, **k: head_sha)
+
+    @staticmethod
+    def _recorded():
+        return PipelineLedger.load(ledger_key=f"{_TEST_REPO}:{_ISSUE_REPAIR}").slug
+
+    @staticmethod
+    def _evidence():
+        import json
+
+        from tools.lane_identity import _SLUG_REPAIR_KEY
+
+        record = PipelineLedger.load(ledger_key=f"{_TEST_REPO}:{_ISSUE_REPAIR}")
+        raw = getattr(record, "stage_states_json", None) or "{}"
+        states = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return states.get(_SLUG_REPAIR_KEY, [])
+
+    def test_unique_contradiction_repairs_and_records_evidence(self, ledger, monkeypatch):
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) == "real-lane-name"
+        assert self._recorded() == "real-lane-name"
+
+        evidence = self._evidence()
+        assert len(evidence) == 1
+        assert evidence[0]["from"] == "wrong-recorded-slug"
+        assert evidence[0]["to"] == "real-lane-name"
+        assert evidence[0]["head_sha"] == self._HEAD
+        assert evidence[0]["pr_number"] == 4242
+
+    def test_zero_matches_leave_the_record_alone(self, ledger, monkeypatch):
+        """Merged-and-deleted is the common zero case and is not a contradiction."""
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/main": self._OTHER})
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) is None
+        assert self._recorded() == "wrong-recorded-slug"
+        assert self._evidence() == []
+
+    def test_multiple_matches_leave_the_record_alone(self, ledger, monkeypatch):
+        """Ambiguity is not evidence — same discipline as ``_adopt_from_pr``."""
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(
+            monkeypatch,
+            {
+                "refs/heads/session/candidate-a": self._HEAD,
+                "refs/heads/session/candidate-b": self._HEAD,
+            },
+        )
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) is None
+        assert self._recorded() == "wrong-recorded-slug"
+        assert self._evidence() == []
+
+    def test_unresolvable_pr_head_leaves_the_record_alone(self, ledger, monkeypatch):
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(
+            monkeypatch,
+            {"refs/heads/session/real-lane-name": self._HEAD},
+            head_sha=None,
+        )
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) is None
+        assert self._recorded() == "wrong-recorded-slug"
+
+    def test_repeated_repair_is_idempotent(self, ledger, monkeypatch):
+        """Race 2: both callers compute the same value, so the second is a no-op."""
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        first = repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO)
+        second = repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO)
+
+        assert first == second == "real-lane-name"
+        assert self._recorded() == "real-lane-name"
+        # One correction happened, so exactly one justification is on file.
+        assert len(self._evidence()) == 1
+
+    def test_an_already_correct_slug_is_not_rewritten(self, clean_ledgers, monkeypatch):
+        from tools.lane_identity import repair_lane_slug
+
+        record = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_REPAIR)
+        record.slug = "real-lane-name"
+        record.pr_number = 4242
+        record.save(update_fields=["slug", "pr_number"])
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) == "real-lane-name"
+        assert self._evidence() == []
+
+    def test_an_empty_slug_is_the_healing_arms_job_not_the_repairs(
+        self, clean_ledgers, monkeypatch
+    ):
+        from tools.lane_identity import repair_lane_slug
+
+        record = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_REPAIR)
+        record.pr_number = 4242
+        record.save(update_fields=["pr_number"])
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) is None
+        assert not _nonempty_slug(_ISSUE_REPAIR)
+
+    def test_repair_creates_no_ledger_for_a_non_lane_issue(self, clean_ledgers, monkeypatch):
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) is None
+        assert PipelineLedger.load(ledger_key=f"{_TEST_REPO}:{_ISSUE_REPAIR}") is None
+
+    def test_ordinary_reads_still_return_the_recorded_slug(self, ledger, monkeypatch):
+        """Rung 1 is untouched: only the fail-closed decision path verifies."""
+        from tools.lane_identity import resolve_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        assert resolve_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) == "wrong-recorded-slug"
+        assert (
+            resolve_lane_slug(_ISSUE_REPAIR, allow_heal=True, target_repo=_TEST_REPO)
+            == "wrong-recorded-slug"
+        )
+
+    def test_a_concurrent_repair_converges_rather_than_writing_twice(self, ledger, monkeypatch):
+        """The re-read immediately before the write is what makes this a no-op."""
+        from tools import lane_identity
+        from tools.lane_identity import repair_lane_slug
+
+        self._world(monkeypatch, {"refs/heads/session/real-lane-name": self._HEAD})
+
+        real_load = lane_identity.PipelineLedger.load
+        applied: list[str] = []
+
+        def _load_with_rival(*args, **kwargs):
+            record = real_load(*args, **kwargs)
+            # A rival repairer lands the same correction inside our window,
+            # exactly once, between our adjudication and our write.
+            if record is not None and not applied and record.slug == "wrong-recorded-slug":
+                applied.append("rival")
+                record.slug = "real-lane-name"
+                record.save(update_fields=["slug"])
+                return real_load(*args, **kwargs)
+            return record
+
+        monkeypatch.setattr(lane_identity.PipelineLedger, "load", _load_with_rival)
+
+        assert repair_lane_slug(_ISSUE_REPAIR, target_repo=_TEST_REPO) == "real-lane-name"
+        assert self._recorded() == "real-lane-name"
+        # Converged, so our own repair filed no justification of its own.
+        assert self._evidence() == []
+
+
+def _nonempty_slug(issue_number: int) -> str | None:
+    record = PipelineLedger.load(ledger_key=f"{_TEST_REPO}:{issue_number}")
+    value = getattr(record, "slug", None) if record is not None else None
+    return value.strip() if isinstance(value, str) and value.strip() else None

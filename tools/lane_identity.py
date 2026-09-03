@@ -35,8 +35,17 @@ Rungs 2 and 3 **adopt an identity that already exists in the world** -- a pushed
 branch, a PR's head ref. A plan document is not an identity; it is a document
 that mentions an issue, so a ``docs/plans/`` filename-stem rung is deliberately
 absent. Reading a plan filename to name a lane is derivation wearing adoption's
-clothes, it is the precise defect this module closes, and because the write is
-no-overwrite a wrong adoption could never be corrected.
+clothes, and it is the precise defect this module closes.
+
+**A wrong recorded slug is repairable**, by :func:`repair_lane_slug` and by
+nothing else. The adoption ladder above is conditional-on-empty by design, so
+it prevents the bad state but cannot exit it; the repair is the separate,
+evidence-gated path out. It fires only where a *fail-closed decision* is about
+to be taken on the recorded name, and only on a **unique** ``git ls-remote
+--heads origin`` match against the lane's PR head SHA -- zero and two-or-more
+matches leave the record alone. Every correction files its justification on the
+ledger, so a wrong repair is auditable rather than silent. Ordinary reads are
+unaffected: rung 1 still returns the recorded value and never re-derives.
 
 A machine-local ``git worktree list`` rung is deliberately absent for a different
 reason: it would make two hosts reach different answers for the same lane, and a
@@ -50,6 +59,7 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.pipeline_ledger import PipelineLedger
@@ -295,17 +305,39 @@ def _slug_from_ref(ref: str) -> str | None:
     return _nonempty(ref[len(prefix) :])
 
 
-def _adopt_from_pr(pr_number: object, target_repo: str) -> str | None:
-    """Rung 2: recover the lane branch name via the PR's head SHA.
+@dataclass(frozen=True)
+class PrBranchTruth:
+    """Which lane branch a PR's head SHA points at, per ``git ls-remote``.
 
-    Shape-agnostic, which is why it precedes the fixed-shape probe: it is the
-    rung that recovers a lane whose branch a supervisor named something else
-    entirely. The match must be **unique** -- a re-created branch, a fork, or a
-    stale dev branch left at the same tip all produce duplicates, and a
-    listing-order-dependent answer would be a per-invocation identity.
+    ``sha`` is the resolved head (``None`` when it did not resolve) and
+    ``matches`` holds the lane slugs whose ``session/`` head sits at that SHA,
+    sorted. ``unique_slug`` is the ONLY answer any caller may act on: a
+    re-created branch, a fork, or a stale dev branch left at the same tip all
+    produce duplicates, and a listing-order-dependent answer would be a
+    per-invocation identity. Zero matches is the merged-and-deleted case.
+    """
+
+    sha: str | None = None
+    matches: tuple[str, ...] = ()
+
+    @property
+    def unique_slug(self) -> str | None:
+        return self.matches[0] if len(self.matches) == 1 else None
+
+
+def _match_pr_head_to_lane_branches(pr_number: object, target_repo: str) -> PrBranchTruth:
+    """Resolve the PR's head SHA and find the lane branches sitting at it.
+
+    The head SHA comes from ``tools.pr_head_resolver.resolve_pr_head_sha``
+    (git-first via ``git ls-remote origin refs/pull/N/head``) and **never** a
+    bare ``gh`` read: a stale ``gh`` head SHA is what flipped the
+    verdict-staleness gate fail-open in #2895.
+
+    One matcher serves both the adoption rung and the repair path, so the
+    ambiguity discipline cannot drift between them.
     """
     if not isinstance(pr_number, int) or pr_number < 1:
-        return None
+        return PrBranchTruth()
 
     from tools.pr_head_resolver import resolve_pr_head_sha
 
@@ -318,25 +350,37 @@ def _adopt_from_pr(pr_number: object, target_repo: str) -> str | None:
         )
     except Exception as e:
         logger.debug(f"lane_identity: PR head resolution failed for PR {pr_number}: {e}")
-        return None
+        return PrBranchTruth()
     if not sha:
-        return None
+        return PrBranchTruth()
 
-    matches = [
+    matches = sorted(
         slug
         for ref, ref_sha in _ls_remote_heads().items()
         if ref_sha == sha and (slug := _slug_from_ref(ref))
-    ]
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
+    )
+    return PrBranchTruth(sha=sha, matches=tuple(matches))
+
+
+def _adopt_from_pr(pr_number: object, target_repo: str) -> str | None:
+    """Rung 2: recover the lane branch name via the PR's head SHA.
+
+    Shape-agnostic, which is why it precedes the fixed-shape probe: it is the
+    rung that recovers a lane whose branch a supervisor named something else
+    entirely. The match must be **unique** (see :class:`PrBranchTruth`).
+    """
+    truth = _match_pr_head_to_lane_branches(pr_number, target_repo)
+    unique = truth.unique_slug
+    if unique:
+        return unique
+    if truth.matches:
         logger.warning(
             "lane_identity: PR %s head %s matches %d lane branches (%s) -- "
             "ambiguous, falling through to the next rung",
             pr_number,
-            sha,
-            len(matches),
-            ", ".join(sorted(matches)),
+            truth.sha,
+            len(truth.matches),
+            ", ".join(truth.matches),
         )
     # Zero matches is the merged-and-deleted case: a clean fall-through.
     return None
@@ -431,6 +475,208 @@ def _record_slug_if_empty(ledger_key: str, candidate: str) -> str:
     finally:
         if lock_acquired:
             _release_slug_lock(ledger_key)
+
+
+# ---------------------------------------------------------------------------
+# Evidence-gated repair of a wrong recorded slug
+# ---------------------------------------------------------------------------
+
+# Where a repair's justification is filed on the ledger. A correction to a
+# lane's identity must be auditable after the fact -- a wrong repair moves a
+# lane's branch, worktree, and task list, so "it changed and nobody can say
+# why" is not an acceptable end state (#3065 Risk 3).
+_SLUG_REPAIR_KEY = "_slug_repairs"
+
+
+def _record_repair_evidence(
+    ledger_key: str,
+    previous: str,
+    corrected: str,
+    pr_number: object,
+    head_sha: str | None,
+) -> None:
+    """Append this repair's justification to the ledger. Best-effort.
+
+    Written through ``update_stage_states``' optimistic retry rather than the
+    slug lock, because it touches ``stage_states_json`` — a blob with other
+    concurrent writers — while the slug write touches only ``slug``. A failure
+    here is logged and never raised: the correction itself already landed, and
+    losing the audit trail must not turn a good repair into an exception.
+    """
+    try:
+        from tools.stage_states_helpers import update_stage_states
+
+        ledger = PipelineLedger.load(ledger_key=ledger_key)
+        if ledger is None:
+            return
+
+        def _append(states: dict) -> dict:
+            entries = states.setdefault(_SLUG_REPAIR_KEY, [])
+            if isinstance(entries, list):
+                entries.append(
+                    {
+                        "from": previous,
+                        "to": corrected,
+                        "pr_number": pr_number,
+                        "head_sha": head_sha,
+                        "at": int(time.time()),
+                    }
+                )
+            return states
+
+        update_stage_states(ledger, _append, field="stage_states_json")
+    except Exception as e:
+        logger.warning(
+            "lane_identity: could not record slug-repair evidence for %r (%s -> %s): %s",
+            ledger_key,
+            previous,
+            corrected,
+            e,
+        )
+
+
+def _write_slug_repair(
+    ledger_key: str,
+    expected: str,
+    corrected: str,
+    pr_number: object,
+    head_sha: str | None,
+) -> str | None:
+    """Overwrite a contradicted slug with ``corrected``. Returns what is recorded.
+
+    Deliberately NOT :func:`_record_slug_if_empty`: that function's refusal to
+    overwrite is the whole defect this closes. What replaces it is not "write
+    unconditionally" but "write only against the value we adjudicated" — the
+    recorded slug is re-read under the slug lock immediately before the write
+    and compared to ``expected``:
+
+    - already ``corrected`` — a concurrent repairer got there first. Both
+      callers computed the same value from the same ground truth, so this
+      converges to a **no-op** rather than a second write (Race 2).
+    - neither ``expected`` nor ``corrected`` — the record moved under us and
+      our evidence is about a value nobody has any more. Leave it alone.
+
+    Returns the corrected slug on a write or a converged no-op, ``None`` when
+    the record was left untouched.
+    """
+    lock_acquired = _acquire_slug_lock(ledger_key)
+    try:
+        if not lock_acquired:
+            # Another writer holds the lock. Wait for it and adopt its result
+            # if it is the same correction; never fight it.
+            for attempt in range(_SLUG_RACE_RETRY_ATTEMPTS):
+                fresh = PipelineLedger.load(ledger_key=ledger_key)
+                current = _nonempty(getattr(fresh, "slug", None)) if fresh is not None else None
+                if current == corrected:
+                    return corrected
+                if attempt < _SLUG_RACE_RETRY_ATTEMPTS - 1:
+                    time.sleep(_SLUG_RACE_RETRY_BACKOFF_S)
+            return None
+
+        fresh = PipelineLedger.load(ledger_key=ledger_key)
+        if fresh is None:
+            logger.debug("lane_identity: ledger %r disappeared before the slug repair", ledger_key)
+            return None
+        current = _nonempty(getattr(fresh, "slug", None))
+        if current == corrected:
+            return corrected
+        if current != expected:
+            logger.warning(
+                "lane_identity: recorded slug for %r changed from %r to %r under the repair "
+                "-- leaving it alone rather than writing evidence about a stale value",
+                ledger_key,
+                expected,
+                current,
+            )
+            return None
+        fresh.slug = corrected
+        fresh.save(update_fields=["slug"])
+    finally:
+        if lock_acquired:
+            _release_slug_lock(ledger_key)
+
+    logger.warning(
+        "lane_identity: repaired the recorded lane slug for %r: %r -> %r "
+        "(PR %s head %s uniquely matches session/%s)",
+        ledger_key,
+        expected,
+        corrected,
+        pr_number,
+        head_sha,
+        corrected,
+    )
+    _record_repair_evidence(ledger_key, expected, corrected, pr_number, head_sha)
+    return corrected
+
+
+def repair_lane_slug(
+    issue_number: int,
+    *,
+    target_repo: str | None = None,
+) -> str | None:
+    """Correct a recorded lane slug that branch truth contradicts.
+
+    Ordinary reads keep going through :func:`resolve_lane_slug` rung 1, which
+    returns the recorded value and never re-derives over it. This function is
+    for the narrow case that made a wrong slug permanent: a **fail-closed
+    decision** about to be taken on the recorded name. Before failing a lane
+    closed on "the branch is not pushed", the decision must first establish
+    that it is asking about the right branch.
+
+    The gate is deliberately narrow. A repair fires only when the lane's PR
+    head SHA resolves (through ``tools.pr_head_resolver.resolve_pr_head_sha``,
+    never a bare ``gh`` read) to **exactly one** branch in the ``git ls-remote
+    --heads origin`` listing and that branch's slug differs from the recorded
+    one. Zero matches and two-or-more matches both leave the record untouched,
+    matching :func:`_adopt_from_pr`'s existing ambiguity discipline — a wrong
+    repair is worse than a wrong original, because it moves a lane that was
+    merely mislabelled.
+
+    Creates nothing: a lane with no ledger, no recorded slug, or no PR is not
+    a lane this function has anything to say about.
+
+    Returns the slug branch truth confirms for this lane (the corrected value
+    after a repair, or the recorded value when it was already right), or
+    ``None`` when branch truth could not adjudicate.
+    """
+    if not issue_number or issue_number < 1:
+        return None
+
+    if target_repo is None:
+        target_repo = _sdlc_utils.resolve_target_repo_for_read(issue_number)
+    if not target_repo:
+        logger.debug(
+            "lane_identity: target repo unresolvable for issue #%s -- no repair", issue_number
+        )
+        return None
+
+    ledger = PipelineLedger.get(target_repo, issue_number)
+    if ledger is None:
+        return None
+    recorded = _nonempty(getattr(ledger, "slug", None))
+    if not recorded:
+        # An empty slug is the healing arm's job (conditional-on-empty), not
+        # the repair's. There is no contradiction to adjudicate.
+        return None
+
+    pr_number = getattr(ledger, "pr_number", None)
+    truth = _match_pr_head_to_lane_branches(pr_number, target_repo)
+    corrected = truth.unique_slug
+    if corrected is None:
+        if truth.matches:
+            logger.debug(
+                "lane_identity: issue #%s PR %s head matches %d lane branches -- "
+                "ambiguous, leaving the recorded slug %r alone",
+                issue_number,
+                pr_number,
+                len(truth.matches),
+                recorded,
+            )
+        return None
+    if corrected == recorded:
+        return recorded
+
+    return _write_slug_repair(ledger.ledger_key, recorded, corrected, pr_number, truth.sha)
 
 
 def adopt_lane_slug(
