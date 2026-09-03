@@ -947,3 +947,46 @@ def test_build_vs_ship_split_lives_on_the_consumer(gate_lane, tmp_path):
     (row,) = record["rows"]
     assert row["outcome"] == CheckOutcome.UNEVALUATED.value
     assert set(row) == {"name", "outcome", "reason"}
+
+
+def test_plan_present_but_no_recorded_aggregate_is_reported_not_enforced(
+    monkeypatch, ledger_factory, tmp_path
+):
+    """A plan exists, nothing was ever graded onto the ledger. Reported.
+
+    This is the third branch, and it must stay distinguishable from the two
+    around it: "no plan" and "aggregate present but not provably fresh". Only
+    the last of those three is enforced -- blocking a lane because nothing was
+    graded would be a new fail-closed behavior with no incident behind it.
+    """
+    ledger_factory(TARGET_REPO, GATE_ISSUE, pr_number=GATE_PR)
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: TARGET_REPO)
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verification_outcomes(GATE_ISSUE, GATE_PR, _plan_repo(tmp_path), failed, notes)
+
+    assert failed == []
+    assert any("no recorded aggregate" in n for n in notes), notes
+
+
+def test_unresolvable_pr_head_refuses(monkeypatch, ledger_factory, tmp_path):
+    """A present aggregate whose freshness cannot be established at all --
+    the PR head does not resolve -- refuses. Fail-closed, like every other
+    indeterminate branch in this group."""
+    import tools.pr_head_resolver as phr
+    from agent.verification_parser import CheckOutcome, record_verification_outcomes
+
+    ledger_factory(TARGET_REPO, GATE_ISSUE, pr_number=GATE_PR)
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: TARGET_REPO)
+    monkeypatch.setattr(phr, "resolve_pr_head_sha", lambda pr, **kw: HEAD_SHA)
+    assert record_verification_outcomes(
+        TARGET_REPO, GATE_ISSUE, [_row("Tests pass", CheckOutcome.PASS)], pr_number=GATE_PR
+    )
+
+    monkeypatch.setattr(phr, "resolve_pr_head_sha", lambda pr, **kw: "")
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verification_outcomes(GATE_ISSUE, GATE_PR, _plan_repo(tmp_path), failed, notes)
+
+    assert any("PR head unresolvable" in f for f in failed), failed
