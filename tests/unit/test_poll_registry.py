@@ -351,7 +351,12 @@ class TestMarkSessionPollsSteered:
         assert reg.session_has_open_poll("sess-typed") is False
 
     def test_is_idempotent(self, poll_id):
-        """The vote path marks the row before `resume_completed_session` runs."""
+        """Both close-outs run on the vote path, in either order.
+
+        `resume_completed_session` closes the row after its dispatch returns, and
+        `translate_poll_vote` then calls `mark_poll_steered` as its own last
+        statement. The second write must be a no-op, not a double count.
+        """
         _register(poll_id, session_id="sess-typed")
         reg.mark_poll_steered(poll_id)
         assert reg.mark_session_polls_steered("sess-typed") == 0

@@ -144,10 +144,17 @@ class TestResumeCompletedSessionClosesThePoll:
         return completed
 
     @pytest.mark.asyncio
-    async def test_close_out_precedes_the_re_enqueue(self):
-        """Ordering matters: the resumed turn reads the registry at its end.
+    async def test_close_out_follows_the_re_enqueue(self):
+        """The marker certifies a dispatch that already happened.
 
-        Closing after the dispatch would race the very turn this resume starts.
+        `translate_poll_vote` reaches this on the COMPLETED mainline, and its own
+        `mark_poll_steered` is written last for exactly this reason: the marker
+        de-indexes the poll from POLL_OPEN_INDEX, and both `iter_unanswered_polls`
+        and `poll_expired_unanswered` key on its absence. Closing first would make
+        the release-and-retry handler inert against a raising dispatch.
+
+        Closing after costs nothing: the dispatch only enqueues, so the resumed
+        turn's registry read is orders of magnitude later.
         """
         from bridge.answer_routing import resume_completed_session
 
@@ -176,4 +183,75 @@ class TestResumeCompletedSessionClosesThePoll:
                 telegram_message_id=67890,
             )
 
-        assert calls == [("close_out", "sess-1"), ("dispatch", "sess-1")]
+        assert calls == [("dispatch", "sess-1"), ("close_out", "sess-1")]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_dispatch_leaves_the_poll_open(self):
+        """The tap survives a dispatch failure and the retry can still find it.
+
+        `translate_poll_vote` releases its claim on an exception so the next
+        reconcile tick retries. That retry reads POLL_OPEN_INDEX and skips steered
+        rows, so a close-out written before the dispatch would permanently swallow
+        the human's answer.
+        """
+        from bridge.answer_routing import resume_completed_session
+
+        calls = []
+
+        with (
+            patch(
+                "bridge.poll_registry.mark_session_polls_steered",
+                side_effect=lambda sid: calls.append(("close_out", sid)),
+            ),
+            patch(
+                "bridge.telegram_bridge._build_completed_resume_text",
+                return_value="augmented",
+            ),
+            patch(
+                "bridge.dispatch.dispatch_telegram_session",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("queue down"),
+            ),
+            pytest.raises(RuntimeError, match="queue down"),
+        ):
+            await resume_completed_session(
+                completed=self._completed(),
+                text="option B",
+                sender_name="Alice",
+                telegram_chat_id="12345",
+                telegram_message_id=67890,
+            )
+
+        assert calls == []
+
+
+class TestAdoptionSkipsAClosedProvisionalRow:
+    """A prose-answered hint must stop costing a Telegram history scan per tick.
+
+    The close-out marks a provisional row rather than deleting it, because the
+    payload may still be in the outbox and ``promote_pending_poll`` needs the row
+    to carry the marker forward. The row therefore stays in ``POLL_PENDING_INDEX``,
+    and ``adopt_orphaned_polls`` — which runs every reconcile tick for the full 24h
+    TTL — has to skip it itself.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_steered_hint_is_not_scanned(self):
+        from bridge.poll_reconcile import adopt_orphaned_polls
+
+        row = {"chat_id": "-1001", "session_id": "sess-1"}
+        with (
+            patch(
+                "bridge.poll_reconcile.iter_pending_polls",
+                return_value=iter([("hint-closed", row), ("hint-open", row)]),
+            ),
+            patch("bridge.poll_reconcile.poll_steered", side_effect=lambda h: h == "hint-closed"),
+            patch(
+                "bridge.telegram_relay._find_already_sent_poll",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as find,
+        ):
+            await adopt_orphaned_polls(MagicMock())
+
+        assert [c.args[2] for c in find.call_args_list] == ["hint-open"]

@@ -359,6 +359,14 @@ def mark_poll_steered(poll_id: int | str) -> None:
     the ``poll_expired_unanswered`` operator signal key on this marker's absence
     — deliberately, rather than on a missing claim, or the signal would be blind
     to a claim that survived a failure.
+
+    Only ``POLL_OPEN_INDEX`` is de-indexed. Called with a *hint* (the pending-row
+    close-out below), the row deliberately stays in ``POLL_PENDING_INDEX`` until
+    its TTL: the payload may still be in the relay outbox, and ``promote_pending_poll``
+    needs the row to carry this marker onto the real poll id. Every consumer of
+    that index therefore checks ``poll_steered`` itself — ``session_has_open_poll``
+    to stop reporting an answered question, ``adopt_orphaned_polls`` to stop
+    paying for a Telegram history scan per tick.
     """
     _redis().set(f"{POLL_STEERED_PREFIX}{poll_id}", _now_iso(), nx=True, ex=POLL_REGISTRY_TTL_S)
     _redis().srem(POLL_OPEN_INDEX, str(poll_id))
@@ -386,13 +394,21 @@ def mark_session_polls_steered(session_id: str | None) -> int:
         return 0
     closed = 0
     try:
-        for poll_id, row in iter_unanswered_polls():
-            if row.get("session_id") == session_id:
-                mark_poll_steered(poll_id)
-                closed += 1
+        # Pending FIRST, open second — the order is load-bearing against a
+        # concurrent `promote_pending_poll`. Promoting reads `poll_steered(hint)`
+        # to carry the close-out onto the real poll id, then deletes the hint. Scan
+        # the open index first and a promotion landing between the two loops adds
+        # its row after loop 1 has passed and deletes the hint before loop 2
+        # reaches it, so neither loop sees it and the close-out is lost. This way
+        # round, either the hint is marked before the promotion reads it, or the
+        # promotion already ran and the real row is in the open index for loop 2.
         for hint, row in iter_pending_polls():
             if row.get("session_id") == session_id and not poll_steered(hint):
                 mark_poll_steered(hint)
+                closed += 1
+        for poll_id, row in iter_unanswered_polls():
+            if row.get("session_id") == session_id:
+                mark_poll_steered(poll_id)
                 closed += 1
     except Exception as exc:  # noqa: BLE001
         logger.warning("mark_session_polls_steered failed for %s: %s", session_id, exc)

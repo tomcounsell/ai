@@ -1038,6 +1038,16 @@ async def _ack_steering_routed(
     # registry is otherwise written only by the vote path, so a prose answer
     # would leave the row open for its full TTL and the nudge loop would take
     # `pause_open_question` every turn — auto-continue silently off for a day.
+    #
+    # The semantics are ANY inbound steering message, not "a message that looks
+    # like an answer": there is no reliable classifier for that, and the failure
+    # directions are asymmetric. Closing on unrelated chatter costs the pause
+    # branch (`agent/session_executor.py`) for a question still on screen — the
+    # session is nudged onward, and nothing is lost, because `translate_poll_vote`
+    # keys on `lookup_poll` and never on `poll_steered`, so a later tap still
+    # routes. Failing to close costs a day of lost auto-continue. Documented in
+    # docs/features/telegram-poll-questions.md.
+    #
     # Offloaded: this is a Redis scan on the bridge's event loop.
     from bridge.poll_registry import mark_session_polls_steered
 

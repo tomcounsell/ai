@@ -122,6 +122,12 @@ async def adopt_orphaned_polls(client) -> None:
     from utils.peer import numeric_peer
 
     for hint, row in iter_pending_polls():
+        if poll_steered(hint):
+            # Answered in prose while the payload was still provisional. Adopting
+            # it would promote a row that `promote_pending_poll` immediately marks
+            # steered anyway, so the only thing the scan below buys is an
+            # `iter_messages` hit against Telegram on every tick until the 24h TTL.
+            continue
         try:
             found = await _find_already_sent_poll(client, numeric_peer(row["chat_id"]), hint)
         except Exception as e:  # noqa: BLE001

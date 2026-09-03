@@ -1046,8 +1046,14 @@ def _poll_text_payload(message: dict) -> dict:
     }
 
 
-async def _reenqueue_poll_as_text(r, key: str, message: dict, *, reason: str) -> None:
-    """Push the question back onto the same outbox key as plain text."""
+async def _reenqueue_poll_as_text(r, key: str, message: dict, *, reason: str) -> bool:
+    """Push the question back onto the same outbox key as plain text.
+
+    Returns whether the push landed. A decline branch **must** honor ``False``: it
+    has already dropped the provisional row, so returning ``DELIVERED_NO_ID`` on a
+    failed push would leave the question with no outbox entry, no pending row and
+    no dead letter. Returning ``None`` instead puts it back on the retry path.
+    """
     try:
         await asyncio.to_thread(r.rpush, key, json.dumps(_poll_text_payload(message)))
         logger.info(
@@ -1056,8 +1062,10 @@ async def _reenqueue_poll_as_text(r, key: str, message: dict, *, reason: str) ->
             reason,
             message.get("chat_id"),
         )
+        return True
     except Exception as e:  # noqa: BLE001
         logger.error("Relay: failed to re-enqueue poll as text on %s: %s", key, e)
+        return False
 
 
 async def _find_already_sent_poll(telegram_client, chat_id, poll_id_hint: str):
@@ -1112,8 +1120,10 @@ async def _send_queued_poll(
     """Send a ``type: "poll"`` payload.
 
     Returns the sent message id; ``DELIVERED_NO_ID`` when the poll was declined
-    and the question was re-queued as prose instead; ``None`` only for a genuine
-    send failure the caller should retry.
+    and the prose fallback **landed** on the outbox; ``None`` for a genuine send
+    failure the caller should retry, and for a decline whose fallback push itself
+    failed — that branch has already dropped the provisional row, so the retry is
+    the only remaining record of the question.
 
     The sentinel is load-bearing. Both decline branches push the prose fallback
     before returning, so reporting them as failure makes ``process_outbox``
@@ -1148,8 +1158,8 @@ async def _send_queued_poll(
             chat_id,
             session_id,
         )
-        await _reenqueue_poll_as_text(r, key, message, reason="missing poll_id_hint")
-        return DELIVERED_NO_ID
+        pushed = await _reenqueue_poll_as_text(r, key, message, reason="missing poll_id_hint")
+        return DELIVERED_NO_ID if pushed else None
 
     # ── The provisional row is the FIRST statement, ahead of every await ──
     # `process_outbox` already consumed this work item with an atomic LPOP, so
@@ -1221,8 +1231,10 @@ async def _send_queued_poll(
             eligibility.reason,
         )
         await asyncio.to_thread(delete_pending_poll, poll_id_hint)
-        await _reenqueue_poll_as_text(r, key, message, reason=f"ineligible:{eligibility.reason}")
-        return DELIVERED_NO_ID
+        pushed = await _reenqueue_poll_as_text(
+            r, key, message, reason=f"ineligible:{eligibility.reason}"
+        )
+        return DELIVERED_NO_ID if pushed else None
 
     from bridge.response import send_poll
 
@@ -1481,10 +1493,15 @@ async def process_outbox(telegram_client) -> int:
                             await _reenqueue_poll_as_text(
                                 r, key, message, reason="terminal relay failure"
                             )
-                            # Retries are exhausted, so this poll provably never
-                            # landed. Leaving the provisional row alive makes
-                            # every reconcile tick run an `iter_messages` history
-                            # scan hunting for it until the 24h TTL.
+                            # All retries failed, so adoption is no longer worth
+                            # its per-tick cost: leaving the provisional row alive
+                            # makes every reconcile tick run an `iter_messages`
+                            # history scan hunting for it until the 24h TTL. Note
+                            # this is a cost trade, not proof of non-delivery —
+                            # a `None` from `send_poll` may still follow a send
+                            # that reached Telegram (see the note at the send
+                            # site), which is why the question is re-enqueued as
+                            # text above rather than simply dropped.
                             hint = message.get("poll_id_hint")
                             if hint:
                                 from bridge.poll_registry import delete_pending_poll

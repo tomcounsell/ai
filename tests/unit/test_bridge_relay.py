@@ -1851,6 +1851,40 @@ class TestDeclinedPollIsDeliveredOnce:
         assert [p["type"] for p in requeued] == ["poll"], requeued
         assert requeued[0]["_relay_attempts"] == 1
 
+    @pytest.mark.asyncio
+    async def test_a_decline_whose_fallback_push_fails_still_retries(self):
+        """The sentinel must not report a delivery that never reached the outbox.
+
+        The ineligible branch deletes the provisional row before pushing the prose
+        fallback, so on a swallowed `rpush` failure the question would have no
+        outbox entry, no pending row and no dead letter. The branch reports the
+        decline as delivered only when the push landed.
+        """
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+        # First rpush is the prose fallback and fails; the second is the retry
+        # re-queue this test exists to prove still happens.
+        mock_redis.rpush.side_effect = [RuntimeError("redis blip"), 1]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll"),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = [json.loads(c[0][1]) for c in mock_redis.rpush.call_args_list[1:]]
+        assert [p["type"] for p in requeued] == ["poll"], requeued
+        assert requeued[0]["_relay_attempts"] == 1
+
 
 class TestPollDeadLetterAndFallback:
     """#2701 Risk 5: a dropped question is a stuck agent."""
