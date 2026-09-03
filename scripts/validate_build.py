@@ -11,8 +11,8 @@ Usage:
     python scripts/validate_build.py --help
 
 Exit codes:
-    0 - All checks pass or skip (no failures)
-    1 - One or more checks failed
+    0 - All checks pass (or are non-blocking skips)
+    1 - One or more checks failed, or could not be evaluated
 """
 
 import re
@@ -23,9 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.verification_parser import (  # noqa: E402
+    DEFAULT_TIMEOUT_S,
+    CheckOutcome,
     ParsedTable,
     evaluate_expectation,
     parse_verification_table,
+    timeout_reason,
+    unevaluated_reason,
 )
 
 
@@ -193,13 +197,18 @@ def check_file_assertions(assertions: list[dict[str, str]]) -> list[dict]:
     return results
 
 
-def check_verification_table(table: ParsedTable) -> list[dict]:
+def check_verification_table(table: ParsedTable, *, timeout: int = DEFAULT_TIMEOUT_S) -> list[dict]:
     """Run verification table commands and compare output.
 
-    Delegates table definition and expectation grammar to
-    ``agent.verification_parser`` (#2843) rather than carrying its own,
-    weaker evaluator. This runner keeps only what is genuinely its own: a
-    30s-timeout, SKIP-on-timeout execution loop and its report shape.
+    Delegates table definition, expectation grammar, execution bound, and
+    timeout disposition to ``agent.verification_parser`` (#2843/#3065) rather
+    than carrying its own. This runner keeps only its report shape.
+
+    The bound is ``DEFAULT_TIMEOUT_S`` and a timeout is ``UNEVALUATED``, both
+    shared with ``run_checks``. This module previously carried a private 30s
+    ceiling and called a timeout ``SKIP``, so the two runners graded the same
+    event two different ways -- and ``SKIP`` did not even block the exit code
+    (#2901). ``UNEVALUATED`` blocks: it is not a pass.
     """
     results = []
 
@@ -234,18 +243,38 @@ def check_verification_table(table: ParsedTable) -> list[dict]:
         expected = check.expected
         name = check.name
 
+        if check.unevaluated_reason:
+            # Read but unrunnable as written (no backticked span): never
+            # executed on a guess, never reported as FAIL.
+            results.append(
+                {
+                    "status": "UNEVALUATED",
+                    "message": f"{name} -- {check.unevaluated_reason}",
+                }
+            )
+            continue
+
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=timeout
+            )
             # `output` must be unstripped stdout -- run_checks passes proc.stdout
             # unmodified, and a stripped copy here would re-create divergence at
             # the exact seam this convergence closes. The stripped value is used
             # only in the FAIL message.
             actual_output = result.stdout
             actual_exit = result.returncode
-            passed = evaluate_expectation(expected, exit_code=actual_exit, output=actual_output)
+            outcome = evaluate_expectation(expected, exit_code=actual_exit, output=actual_output)
 
-            if passed:
+            if outcome is CheckOutcome.PASS:
                 results.append({"status": "PASS", "message": name})
+            elif outcome is CheckOutcome.UNEVALUATED:
+                results.append(
+                    {
+                        "status": "UNEVALUATED",
+                        "message": f"{name} -- {unevaluated_reason(expected)}",
+                    }
+                )
             else:
                 results.append(
                     {
@@ -258,9 +287,18 @@ def check_verification_table(table: ParsedTable) -> list[dict]:
                     }
                 )
         except subprocess.TimeoutExpired:
-            results.append({"status": "SKIP", "message": f"{name} -- timed out after 30s"})
+            results.append(
+                {"status": "UNEVALUATED", "message": f"{name} -- {timeout_reason(timeout)}"}
+            )
         except Exception as e:
-            results.append({"status": "SKIP", "message": f"{name} -- error: {e}"})
+            results.append(
+                {
+                    "status": "UNEVALUATED",
+                    "message": (
+                        f"{name} -- runner error, the check never ran: {type(e).__name__}: {e}"
+                    ),
+                }
+            )
 
     return results
 
@@ -353,10 +391,16 @@ def main() -> int:
     pass_count = sum(1 for r in all_results if r["status"] == "PASS")
     fail_count = sum(1 for r in all_results if r["status"] == "FAIL")
     skip_count = sum(1 for r in all_results if r["status"] == "SKIP")
+    unevaluated_count = sum(1 for r in all_results if r["status"] == "UNEVALUATED")
 
-    print(f"\nResult: {pass_count} PASS, {fail_count} FAIL, {skip_count} SKIP")
+    print(
+        f"\nResult: {pass_count} PASS, {fail_count} FAIL, "
+        f"{unevaluated_count} UNEVALUATED, {skip_count} SKIP"
+    )
 
-    return 1 if fail_count > 0 else 0
+    # UNEVALUATED blocks. It is not a pass, and it is not a FAIL either: the
+    # exit code says "stop", the report says the grader could not answer.
+    return 1 if (fail_count or unevaluated_count) else 0
 
 
 if __name__ == "__main__":
