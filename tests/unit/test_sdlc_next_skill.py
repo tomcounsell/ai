@@ -1874,3 +1874,107 @@ class TestTerminalDecisionShape:
 
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["decision"] == "terminal"
+
+
+class TestDecisionEvidenceReachesTheCliJson:
+    """#3065 Cluster D: a decision's evidence is worthless if it dies inside
+    the router. These drive the actual CLI surface (``decide()``), following
+    ``test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan``'s pattern
+    of injecting stage_states/meta rather than resolving live session state.
+    """
+
+    def _inject(self, monkeypatch, states, meta):
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+    def _no_rule_fixture(self, unconfirmed=False):
+        states = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": STATUS_COMPLETED,
+            "BUILD": STATUS_COMPLETED,
+            "TEST": STATUS_COMPLETED,
+            "REVIEW": STATUS_COMPLETED,
+            "DOCS": STATUS_COMPLETED,
+            "MERGE": "pending",
+            "_verdicts": {
+                "REVIEW": {"verdict": "LGTM", "recorded_at": "2026-09-01T00:00:00+00:00"}
+            },
+            "_sdlc_dispatches": [
+                {
+                    "skill": "/do-test",
+                    "at": "2026-09-03T00:00:00+00:00",
+                    "stage_snapshot": {},
+                    "confirmed": not unconfirmed,
+                }
+            ],
+        }
+        meta = {
+            "pr_number": 4242,
+            "pr_merge_state": "CLEAN",
+            "pr_state": "OPEN",
+            "latest_review_verdict": "LGTM",
+            "last_dispatched_skill": "/do-test",
+            "ci_all_passing": True,
+        }
+        return states, meta
+
+    def test_no_rule_block_round_trips_its_inputs_through_the_cli_json(self, monkeypatch):
+        states, meta = self._no_rule_fixture()
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "blocked"
+        assert result["guard_id"] == "NO_RULE"
+        # Serialized exactly as the CLI would print it -- the whole point is
+        # that a supervisor can read the inputs out of the JSON.
+        payload = json.loads(json.dumps(result))
+        assert payload["decision_inputs"]["meta"]["pr_number"] == 4242
+        assert payload["decision_inputs"]["stage_states"]["REVIEW"] == STATUS_COMPLETED
+
+    def test_a_routed_decision_carries_no_decision_inputs_key(self, monkeypatch):
+        """Negative pole: the key is not sprayed onto every payload."""
+        states, meta = self._no_rule_fixture()
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert "decision_inputs" not in result
+
+    def test_dispatch_payload_reports_an_unrecorded_previous_dispatch(self, monkeypatch):
+        states, meta = self._no_rule_fixture(unconfirmed=True)
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert result["unrecorded_dispatch"]["confirmed"] is False
+        # Distinct from ``recorded``, which is about THIS decision and is
+        # always False because decide() never writes (#2897).
+        assert result["recorded"] is False
+
+    def test_dispatch_payload_omits_the_signal_when_the_record_confirms(self, monkeypatch):
+        """Negative pole, one boolean apart from the test above."""
+        states, meta = self._no_rule_fixture(unconfirmed=False)
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert "unrecorded_dispatch" not in result

@@ -10,6 +10,7 @@ This file focuses exclusively on the G7 guard added for issue #1302.
 from __future__ import annotations
 
 from agent.sdlc_router import (
+    G3_REDIRECT_REASON_DOCS_PENDING,
     GUARDS,
     MAX_PLAN_REVISING_DISPATCHES,
     MAX_SAME_STAGE_DISPATCHES,
@@ -25,6 +26,7 @@ from agent.sdlc_router import (
     STATUS_FAILED,
     Blocked,
     Dispatch,
+    Terminal,
     _rule_pr_exists_no_review,
     _rule_review_approved_docs_not_done,
     build_stage_snapshot,
@@ -32,8 +34,10 @@ from agent.sdlc_router import (
     decide_next_dispatch,
     evaluate_guards,
     guard_g2_critique_cycle_cap,
+    guard_g3_pr_lock,
     guard_g5_artifact_hash_cache,
     guard_g7_plan_revising,
+    reconcile_dispatch,
     record_dispatch,
 )
 
@@ -1565,3 +1569,383 @@ class TestHeadShaStaleness:
         result = guard_g6_terminal_merge_ready(states, meta, {"pr_head_sha": _SHA_A})
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_MERGE
+
+
+# ---------------------------------------------------------------------------
+# #3065 task 3: G3's docs-pending redirect arm
+#
+# G3's ladder previously had exactly three arms and no ``/do-docs`` arm, so a
+# lane with REVIEW complete, APPROVED, and DOCS pending fell to the ``else``
+# and was sent back to ``/do-pr-review`` it had already passed.
+# ---------------------------------------------------------------------------
+
+
+class TestG3DocsArm:
+    def _meta(self, **overrides):
+        return _base_meta(
+            pr_number=3065,
+            last_dispatched_skill=SKILL_DO_PLAN,
+            **overrides,
+        )
+
+    def test_docs_pending_after_approved_review_redirects_to_docs(self):
+        """The state that previously fell to the ``else`` and produced a
+        redundant /do-pr-review dispatch."""
+        states = {"REVIEW": STATUS_COMPLETED, "DOCS": "pending"}
+        meta = self._meta(latest_review_verdict="APPROVED")
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_DOCS
+        assert G3_REDIRECT_REASON_DOCS_PENDING in result.reason
+
+    def test_docs_complete_after_approved_review_redirects_to_merge(self):
+        states = {"REVIEW": STATUS_COMPLETED, "DOCS": STATUS_COMPLETED}
+        meta = self._meta(latest_review_verdict="APPROVED")
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+
+    def test_review_completed_without_recorded_verdict_does_not_merge(self):
+        """Arm 1 now requires a recorded APPROVED verdict, matching rows 9/10
+        (#1932 gap c) -- REVIEW==completed with no verdict is an unearned
+        marker, not evidence of approval."""
+        states = {"REVIEW": STATUS_COMPLETED, "DOCS": STATUS_COMPLETED}
+        meta = self._meta(latest_review_verdict=None)
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_review_completed_without_recorded_verdict_does_not_route_to_docs_either(self):
+        """Same unearned-marker state, docs pending: still no dispatch to
+        /do-docs without a recorded APPROVED verdict."""
+        states = {"REVIEW": STATUS_COMPLETED, "DOCS": "pending"}
+        meta = self._meta(latest_review_verdict=None)
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_changes_requested_still_routes_to_patch(self):
+        """Regression guard: the changes-requested arm is untouched by the
+        new docs arm."""
+        states = {"REVIEW": STATUS_COMPLETED, "DOCS": "pending"}
+        meta = self._meta(latest_review_verdict="CHANGES REQUESTED")
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_review_not_yet_complete_still_routes_to_pr_review(self):
+        """Regression guard: the default arm is untouched."""
+        states = {"REVIEW": "pending", "DOCS": "pending"}
+        meta = self._meta(latest_review_verdict=None)
+        result = guard_g3_pr_lock(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_through_decide_next_dispatch_docs_pending_state(self):
+        """End-to-end: the docs arm actually reaches the caller via
+        decide_next_dispatch, not just the guard in isolation."""
+        states = dict(_ALL_COMPLETED, DOCS="pending", MERGE="pending")
+        meta = _base_meta(
+            pr_number=3065,
+            last_dispatched_skill=SKILL_DO_PLAN,
+            latest_review_verdict="APPROVED",
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_DOCS
+
+
+# ---------------------------------------------------------------------------
+# #3065 task 2: NO_RULE decision_inputs evidence
+#
+# A NO_RULE block previously carried no evidence of what the router actually
+# read, so a field report claiming a NO_RULE on a state a rule demonstrably
+# owns could not be checked. decision_inputs closes that gap.
+# ---------------------------------------------------------------------------
+
+
+def _unowned_state() -> tuple[dict, dict]:
+    """A genuine hole in the dispatch table (mirrors
+    sdlc_router_decision/test_sdlc_router_decision_post_patch.py's
+    TestNoRuleBlockIsDistinguishable._unowned_state): REVIEW pending while an
+    APPROVED verdict is already recorded -- row 8e needs REVIEW completed,
+    row 10 needs it settled, row 7 needs no verdict, so nothing owns it.
+    """
+    states = {
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "REVIEW": "pending",
+        "DOCS": "completed",
+        "MERGE": "pending",
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED", "recorded_at": "2026-05-06T00:00:00Z"}},
+    }
+    meta = _base_meta(
+        pr_number=4242,
+        last_dispatched_skill=SKILL_DO_MERGE,
+        pr_merge_state="BLOCKED",
+    )
+    return states, meta
+
+
+class TestNoRuleDecisionInputs:
+    def test_no_rule_block_carries_decision_inputs(self):
+        states, meta = _unowned_state()
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "NO_RULE"
+        assert result.decision_inputs is not None
+        # build_decision_inputs shallow-copies (a snapshot, not a live alias
+        # of the caller's dicts) -- compare by value, not identity.
+        assert result.decision_inputs["stage_states"] == states
+        assert result.decision_inputs["meta"] == meta
+
+    def test_decision_inputs_round_trips_through_cli_json(self, monkeypatch):
+        """Drives the fallthrough through the actual sdlc-tool next-skill
+        JSON surface (tools.sdlc_next_skill.decide), not just
+        decide_next_dispatch directly, so the CLI wiring a supervisor
+        actually reads is verified too."""
+        import tools.sdlc_next_skill as sdlc_next_skill
+
+        states, meta = _unowned_state()
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        result = sdlc_next_skill.decide(issue_number=4242)
+
+        assert result["decision"] == "blocked"
+        assert result["guard_id"] == "NO_RULE"
+        assert "decision_inputs" in result
+        assert result["decision_inputs"]["meta"]["pr_number"] == 4242
+        assert result["decision_inputs"]["stage_states"]["REVIEW"] == "pending"
+
+    def test_unrecorded_dispatch_present_when_last_slot_unconfirmed(self):
+        """The caller ran dispatch record but the stage never started --
+        surfaced so this no longer has to be reverse-engineered from a later
+        G4 oscillation block attributed to the wrong cause."""
+        states, meta = _unowned_state()
+        states["_sdlc_dispatches"] = [
+            {"skill": SKILL_DO_MERGE, "stage": "MERGE", "confirmed": False}
+        ]
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        signal = result.decision_inputs["unrecorded_dispatch"]
+        assert signal is not None
+        assert signal["confirmed"] is False
+        assert signal["last_dispatched_skill"] == SKILL_DO_MERGE
+
+    def test_unrecorded_dispatch_absent_when_last_slot_confirmed(self):
+        states, meta = _unowned_state()
+        states["_sdlc_dispatches"] = [
+            {"skill": SKILL_DO_MERGE, "stage": "MERGE", "confirmed": True}
+        ]
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert result.decision_inputs["unrecorded_dispatch"] is None
+
+    def test_unrecorded_dispatch_present_when_caller_skipped_dispatch_record(self):
+        """No _sdlc_dispatches entry at all for a meta that names a
+        last_dispatched_skill -- the caller skipped `sdlc-tool dispatch
+        record` entirely, not merely left a slot unconfirmed."""
+        states, meta = _unowned_state()
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        signal = result.decision_inputs["unrecorded_dispatch"]
+        assert signal is not None
+        assert signal["recorded_skill"] is None
+
+    def test_unrecorded_dispatch_absent_when_nothing_dispatched_yet(self):
+        states, meta = _unowned_state()
+        meta["last_dispatched_skill"] = None
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert result.decision_inputs["unrecorded_dispatch"] is None
+
+
+# ---------------------------------------------------------------------------
+# #3065 task 4: reconcile_dispatch — the keystone reconciliation step
+#
+# Guards previously validated only whatever the caller PROPOSED via
+# context["proposed_skill"], never the skill the dispatch table actually
+# SELECTED (:2246-2248 runs before the table at :2250-2255, and nothing
+# re-validated in between). reconcile_dispatch re-runs the guard list
+# against the table's selection, terminating after at most one redirect.
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileDispatch:
+    def test_accepts_selection_untouched_when_no_guard_objects(self):
+        primary = Dispatch(skill=SKILL_DO_BUILD, reason="test", row_id="X")
+        result = reconcile_dispatch({}, _base_meta(), {}, primary)
+        assert result is primary
+
+    def test_2771_2334_lane_shape_routes_to_docs_not_plan_critique(self):
+        """The #2771/#2334 lane shape: open PR, REVIEW APPROVED, DOCS
+        pending, and a CRITIQUE verdict stale enough that row 2b (which sits
+        fifteen positions before row 9 in table order) would otherwise
+        preempt DOCS unconditionally. Reconciliation lets G3 veto row 2b's
+        redirect target (/do-plan-critique) on this shipped lane, without
+        editing row 2b's predicate (#1639)."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": STATUS_COMPLETED,
+            "DOCS": "pending",
+            "MERGE": "pending",
+            "_verdicts": {
+                "CRITIQUE": {"verdict": "READY TO BUILD", "recorded_at": "2026-01-01T00:00:00Z"},
+                "REVIEW": {"verdict": "APPROVED", "recorded_at": "2026-05-01T00:00:00Z"},
+            },
+            "_sdlc_dispatches": [
+                {"skill": SKILL_DO_PLAN, "at": "2026-06-01T00:00:00Z", "stage_snapshot": {}},
+            ],
+        }
+        meta = _base_meta(
+            pr_number=2771,
+            last_dispatched_skill=SKILL_DO_MERGE,
+            latest_review_verdict="APPROVED",
+        )
+
+        result = decide_next_dispatch(states, meta, {})
+
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_DOCS
+        assert result.skill != SKILL_DO_PLAN_CRITIQUE
+
+    def test_plan_critique_needed_with_no_pr_still_dispatched(self):
+        """A lane genuinely needing /do-plan-critique, with no PR open, must
+        still get it -- reconciliation must not withhold a dispatch G3 has
+        no jurisdiction over (G3 steps aside unconditionally when
+        meta['pr_number'] is falsy)."""
+        states = {"PLAN": "completed", "CRITIQUE": "pending"}
+        meta = _base_meta(pr_number=None, last_dispatched_skill=None)
+
+        result = decide_next_dispatch(states, meta, {})
+
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+    def test_double_veto_produces_blocked_with_both_verdicts_and_terminates(self):
+        """A contrived guard pair that vetoes both the selection and its own
+        redirect must terminate as a single Blocked carrying both verdicts,
+        never a third pass."""
+        primary = Dispatch(skill=SKILL_DO_BUILD, reason="table selected build", row_id="4a")
+        call_count = {"n": 0}
+
+        def _always_redirect(stage_states, meta, context):
+            call_count["n"] += 1
+            proposed = context.get("proposed_skill")
+            # Redirect every proposal to a DIFFERENT skill, so a naive loop
+            # would never converge -- proves this function bounds itself
+            # rather than relying on the guard to stop redirecting.
+            target = SKILL_DO_PATCH if proposed != SKILL_DO_PATCH else SKILL_DO_PR_REVIEW
+            return Dispatch(skill=target, reason=f"vetoing {proposed}", row_id="TESTGUARD")
+
+        original_guards = list(GUARDS)
+        GUARDS.clear()
+        GUARDS.append(_always_redirect)
+        try:
+            result = reconcile_dispatch({}, _base_meta(), {}, primary)
+        finally:
+            GUARDS[:] = original_guards
+
+        assert call_count["n"] == 2, "reconciliation must run the guard list at most twice"
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "RECONCILE_DEADLOCK"
+        assert result.decision_inputs["selected_row"] == "4a"
+        assert result.decision_inputs["selected_skill"] == SKILL_DO_BUILD
+        assert result.decision_inputs["first_redirect"]["skill"] == SKILL_DO_PATCH
+        assert result.decision_inputs["vetoing_guard"]["skill"] == SKILL_DO_PR_REVIEW
+
+    def test_raising_guard_during_reconciliation_is_not_swallowed(self):
+        """Preserves the existing asymmetry: rule predicates are
+        try/except-wrapped, guards are not. A raising guard must propagate
+        out of reconciliation rather than being folded into a NO_RULE."""
+
+        def _raises(stage_states, meta, context):
+            raise RuntimeError("boom")
+
+        original_guards = list(GUARDS)
+        GUARDS.clear()
+        GUARDS.append(_raises)
+        try:
+            import pytest
+
+            with pytest.raises(RuntimeError, match="boom"):
+                reconcile_dispatch({}, _base_meta(), {}, Dispatch(SKILL_DO_BUILD, "x", "4a"))
+        finally:
+            GUARDS[:] = original_guards
+
+    def test_terminal_veto_on_reconciliation_returns_terminal_unmodified(self):
+        primary = Dispatch(skill=SKILL_DO_BUILD, reason="table selected build", row_id="4a")
+        terminal = Terminal(reason="pipeline complete", evidence="merge_marker", row_id="T")
+
+        def _terminal_guard(stage_states, meta, context):
+            return terminal
+
+        original_guards = list(GUARDS)
+        GUARDS.clear()
+        GUARDS.append(_terminal_guard)
+        try:
+            result = reconcile_dispatch({}, _base_meta(), {}, primary)
+        finally:
+            GUARDS[:] = original_guards
+
+        assert result is terminal
+
+
+class TestG5DoubleInvocationDuringReconciliation:
+    """Regression test (#3065 task 4): guard_g5_artifact_hash_cache's
+    legacy-hash migration branch must execute EXACTLY ONCE per
+    decide_next_dispatch call, even though reconciliation runs the guard
+    list a second time on the SAME stage_states/meta objects. Asserted via
+    the WARNING log-record count, not the return value -- the return value
+    is identical whether the migration ran once or twice, which is why this
+    needs its own test."""
+
+    def test_migration_warning_logged_exactly_once(self, caplog):
+        legacy_hash = "sha256:legacy-full-bytes"
+        current_hash = "sha256:body-only"
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": STATUS_COMPLETED if False else "in_progress",
+            "_verdicts": {
+                "CRITIQUE": {
+                    # Neither NEEDS REVISION/MAJOR REWORK nor READY TO BUILD --
+                    # G5 must migrate the hash and then still step aside (return
+                    # None), so the table (not G5) selects the primary dispatch
+                    # and reconciliation genuinely re-runs G5 a second time.
+                    "verdict": "SOME OTHER VERDICT TEXT",
+                    "artifact_hash": legacy_hash,
+                }
+            },
+        }
+        meta = _base_meta(pr_number=None, last_dispatched_skill=None)
+        context = {"current_plan_hash": current_hash, "legacy_plan_hash": legacy_hash}
+
+        with caplog.at_level("WARNING", logger="agent.sdlc_router"):
+            result = decide_next_dispatch(states, meta, context)
+
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_BUILD
+        assert result.row_id == "5"
+
+        migration_warnings = [r for r in caplog.records if "G5 migration" in r.message]
+        assert len(migration_warnings) == 1, (
+            f"expected exactly one G5 migration WARNING, got {len(migration_warnings)}: "
+            f"{[r.message for r in migration_warnings]}"
+        )
+        # The mutation itself is by-reference and idempotent: the second
+        # (reconciliation) pass must see the already-migrated hash.
+        assert states["_verdicts"]["CRITIQUE"]["artifact_hash"] == current_hash

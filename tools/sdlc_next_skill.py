@@ -601,7 +601,11 @@ def decide(
         is finished. No ``blocked`` key and no ``recorded`` claim: there is
         nothing to escalate and nothing to record.
         On ``Blocked``: ``{"blocked": True, "decision": "blocked",
-        "reason": "...", "guard_id": "..."}``
+        "reason": "...", "guard_id": "..."}``, plus a ``"decision_inputs"``
+        key (the ``stage_states``/``meta`` the router decided from, and on a
+        reconciliation double-veto the selected row and vetoing guard) when
+        the router populated one (#3065 Cluster D) -- notably on the
+        ``NO_RULE`` fallthrough and on a reconciliation double-veto.
         On issue-lock contention: ``{"blocked": True, "reason": "ISSUE_LOCKED",
         "guard_id": "ISSUE_LOCK", "owner_session_id": "...", "peek_identity":
         "caller" | "session_mirror" | "unresolved"}`` (and, only on the
@@ -741,7 +745,7 @@ def decide(
             # this function has no write path, so a decision is never a
             # ledger advance. The caller records it via
             # ``sdlc-tool dispatch record`` before invoking the skill.
-            return {
+            dispatch_payload: dict = {
                 "skill": result.skill,
                 "reason": result.reason,
                 "row_id": result.row_id,
@@ -749,6 +753,14 @@ def decide(
                 "recorded": False,
                 "recorded_reason": NOT_RECORDED_REASON,
             }
+            # #3065 Cluster D: report a PREVIOUS dispatch that carries no
+            # confirming record. Distinct from ``recorded`` above, which is
+            # about THIS decision (always False -- ``decide`` never writes).
+            # Absent when the last dispatch is accounted for, so its mere
+            # presence is the signal.
+            if result.unrecorded_dispatch is not None:
+                dispatch_payload["unrecorded_dispatch"] = result.unrecorded_dispatch
+            return dispatch_payload
         elif isinstance(result, Terminal):
             # A finished lane is a SUCCESS, not an escalation (#2894, #2817).
             # Deliberately NOT folded into the blocked shape and carrying no
@@ -763,12 +775,21 @@ def decide(
                 "row_id": result.row_id,
             }
         elif isinstance(result, Blocked):
-            return {
+            payload = {
                 "blocked": True,
                 "decision": "blocked",
                 "reason": result.reason,
                 "guard_id": result.guard_id,
             }
+            # decision_inputs (#3065 Cluster D): the stage_states/meta (and,
+            # on a reconciliation double-veto, the selected row + vetoing
+            # guard) the router actually decided from. Optional — most
+            # Blocked instances (the numbered guards) already state their
+            # reason in prose and carry no decision_inputs — so this key is
+            # only added when the router populated it.
+            if result.decision_inputs is not None:
+                payload["decision_inputs"] = result.decision_inputs
+            return payload
         else:
             # Unexpected return type — treat as blocking error
             return {
