@@ -440,3 +440,26 @@ class TestDegradedStack:
 
         with pytest.raises(LLMStackIncompatible):
             await run_typed("classify: hello there", Classification)
+
+    async def test_load_stack_import_error_raises_llm_stack_incompatible(self, monkeypatch):
+        """``_guard_stack`` can pass while ``_load_stack()`` still fails.
+
+        ``LLM_STACK_COMPAT_OVERRIDE=healthy`` short-circuits the guard
+        before the predicate ever runs, so a genuinely broken stack can
+        still reach ``_load_stack()``. A raw ``ImportError`` there would
+        bypass every existing ``except LLMCallError`` fail-safe -- exactly
+        the property ``LLMStackIncompatible`` exists to preserve.
+        """
+        from agent.llm import compat
+
+        monkeypatch.setattr(compat, "_DEGRADED", False)
+        monkeypatch.setattr(compat, "_LOADER_OK", True)
+        monkeypatch.setattr(compat, "_COMPATIBLE", True)
+
+        def _boom():
+            raise ImportError("no module named anthropic")
+
+        monkeypatch.setattr(wrapper_mod, "_load_stack", _boom)
+
+        with pytest.raises(LLMStackIncompatible):
+            await run_typed("classify: hello there", Classification)

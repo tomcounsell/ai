@@ -318,6 +318,7 @@ class _Declaration:
     """One parsed dependency declaration and where its text lives."""
 
     package: str  # normalized name
+    name_text: str  # the declaration's own spelling, e.g. "Claude_Agent.SDK"
     requirement: str  # the full quoted body, e.g. pydantic-ai-slim[anthropic]==2.9.0
     extras: str  # "[anthropic]" or ""
     specifier: str  # "==2.9.0", ">=1.0.0", ""
@@ -343,6 +344,7 @@ def _find_declarations(content: str, package: str) -> list[_Declaration]:
             found.append(
                 _Declaration(
                     package=wanted,
+                    name_text=match.group("name"),
                     requirement=requirement,
                     extras=match.group("extras") or "",
                     specifier=match.group("spec"),
@@ -521,7 +523,6 @@ class AutoBumpResult:
     bumps: list[BumpResult] = field(default_factory=list)
     synced: bool = False
     sync_error: str | None = None
-    smoke_passed: bool = False
     smoke_output: str = ""
     rolled_back: bool = False
     # The gate phase (or "sync") that failed and triggered the rollback, so
@@ -604,7 +605,12 @@ def bump_pin_in_pyproject(project_dir: Path, package: str, new_version: str) -> 
 
     lines = content.split("\n")
     old_text = f'"{declaration.requirement}"'
-    new_text = f'"{package}{declaration.extras}=={new_version}"'
+    # Rebuild from the declaration's own spelling, not the caller's `package`
+    # argument: matching is normalized (PEP 503) and comment-blind, so a
+    # caller spelling that differs from what's actually written
+    # (`"claude-agent-sdk"` called with `"Claude_Agent.SDK"`) would otherwise
+    # silently rename the pin on rewrite.
+    new_text = f'"{declaration.name_text}{declaration.extras}=={new_version}"'
     line = lines[declaration.line_index]
     if line.count(old_text) != 1:
         raise PinDeclarationError(
@@ -897,7 +903,6 @@ def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBu
         )
         return
 
-    result.smoke_passed = True
     _record_set(result, coupled_set, current, latest, bumped=set(changed))
 
 
@@ -909,8 +914,29 @@ def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
     A member is reported `bumped=True` only once its whole set has survived
     every gate, so `run.py`'s commit list never names a pin that was rolled
     back underneath it.
+
+    Stops after the first set whose own rollback fails to re-sync
+    (`result.restore_failed`): at that point the venv no longer matches the
+    restored `pyproject.toml` / `uv.lock`, so gating a later set against
+    that inconsistent environment would rewrite both files again, run an
+    unfrozen sync, and record a verdict against a stack that isn't the one
+    on disk after `run.py` (which never commits on `restore_failed`) exits.
     """
     result = AutoBumpResult()
-    for coupled_set in AUTO_BUMP_SETS:
+    for index, coupled_set in enumerate(AUTO_BUMP_SETS):
         _bump_coupled_set(project_dir, coupled_set, result)
+        if result.restore_failed:
+            skipped: dict[str, str | None] = {}
+            for remaining in AUTO_BUMP_SETS[index + 1 :]:
+                for member in remaining.members:
+                    skipped[member] = _safe_pinned(project_dir, member)
+                _record_set(
+                    result,
+                    remaining,
+                    skipped,
+                    skipped,
+                    error="set skipped: an earlier set's rollback failed to "
+                    "re-sync, leaving the venv inconsistent with pyproject.toml",
+                )
+            break
     return result

@@ -77,7 +77,7 @@ Case 5 is not covered by the count gate and is the one worth stating out loud: o
 
 ### Purity
 
-`check_llm_stack_compat` returns a `CompatResult` and does **nothing else**. It never touches the memoized degraded flag, never calls `capture_message`, never writes or clears a marker file. Only `_resolve_degraded_flag()` alerts.
+`check_llm_stack_compat` returns a `CompatResult` and does **nothing else**. It never touches the memoized degraded flag, never calls `capture_message`, never writes or clears a marker file. Only `resolve_degraded_flag()` alerts.
 
 This matters because the auto-bump `llm` gate deliberately runs the predicate against a stack it is *about to roll back*. An impure predicate would fire a fatal Sentry capture and strand a red dashboard marker on every **successful** rollback.
 
@@ -85,21 +85,21 @@ This matters because the auto-bump `llm` gate deliberately runs the predicate ag
 
 ```bash
 python -m agent.llm.compat --json                  # verdict as JSON, exit 0/1
-python -m agent.llm.compat --json --allow-network  # + one minimal billed run_typed call
+python -m agent.llm.compat --json --allow-network  # + one minimal billed create call
 python -m agent.llm.compat                         # human-readable one-liner
 ```
 
 A tooling entry point for subprocess callers, not an agent surface. It calls only the pure predicate.
 
-`--allow-network` makes one real `run_typed` call against a single-field probe model, catching transport-class breaks (a moved HTTP layer, a changed auth header) that no signature comparison can see. It is billed, so only the auto-bump `llm` gate turns it on, and only on cycles where something actually bumped.
+`--allow-network` makes one real `create` call against a single-field probe model, going through `agent.anthropic_client._load_stack` directly rather than `agent.llm.wrapper.run_typed` -- routing through `run_typed` would re-enter `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()` and mutate this module's memoized globals, breaking the predicate's Purity contract on this branch. It catches transport-class breaks (a moved HTTP layer, a changed auth header) that no signature comparison can see. It is billed, so only the auto-bump `llm` gate turns it on, and only on cycles where something actually bumped.
 
 ### The four call sites
 
 | Site | How | When |
 |---|---|---|
 | `scripts/update/verify.py::check_llm_stack_compat` | subprocess `{venv}/bin/python -m agent.llm.compat --json`, mapped to a `ToolCheck` appended to `result.valor_tools` | every `/update` and `/update --cron`, unconditionally |
-| `bridge/telegram_bridge.py::main` | in-process `_resolve_degraded_flag("bridge")` | bridge startup |
-| `worker/__main__.py` | in-process `_resolve_degraded_flag("worker")` | worker startup |
+| `bridge/telegram_bridge.py::main` | in-process `resolve_degraded_flag("bridge")` | bridge startup |
+| `worker/__main__.py` | in-process `resolve_degraded_flag("worker")` | worker startup |
 | `scripts/update/deps.py` `llm` gate phase | subprocess via `llm_gate_argv(venv_python)`, with `--allow-network` | after a coupled set's pins are rewritten and synced |
 
 The `ToolCheck`'s failure reason goes in `.error`, not `.detail`. `run.py`'s generic `valor_tools` loop is `if not tool.available and tool.error:` — with `error` unset, an incompatible stack would produce no log line, no `result.warnings` entry, and nothing for `bridge/update.py::extract_update_warnings` to surface. `detail` is not read by that loop at all. `run.py` separately prints the check's `detail` on pass, by name lookup in `result.verification.valor_tools`.
@@ -130,7 +130,7 @@ A subclass of `LLMCallError` on purpose: every existing `except LLMCallError` fa
 
 ### The alert is bound to flag resolution, not to startup
 
-`_resolve_degraded_flag(proc=None)` is lazily self-resolving and memoized. The first read — from a startup hook, or from a `run_typed` call in a process that never ran one — evaluates the predicate, and the first transition to degraded emits the alert from inside the resolver. Subsequent reads are memo hits and alert nothing.
+`resolve_degraded_flag(proc=None)` is lazily self-resolving and memoized. The first read — from a startup hook, or from a `run_typed` call in a process that never ran one — evaluates the predicate, and the first transition to degraded emits the alert from inside the resolver. Subsequent reads are memo hits and alert nothing.
 
 The startup hooks in `bridge/telegram_bridge.py::main` and `worker/__main__.py` do nothing but force resolution early, so the alert fires at boot rather than at first call. No entry path can reach the broken stack without alarming, and there is no ordering race between boot and first call to lose.
 
@@ -158,9 +158,11 @@ Fired unconditionally on the first transition to degraded, in `agent/llm/compat.
 
 **A direct Telegram push was rejected.** No raw Bot-API send path exists in tracked code, and Telethon's send lives only in the bridge, so it could not alarm a degraded worker at all.
 
+**The dashboard channel is a JSON-endpoint channel by design, not a rendered page.** `llm_stack` and its sibling `llm_stack_degraded*` fields land in `/dashboard.json` (`ui/app.py::dashboard_json`) only; no HTML template consumes them, so a human reads the channel by querying that endpoint directly, the same way every other filesystem-derived health field on this dashboard is currently read. This matches the plan's own Success Criteria and Update System sections, both scoped to `dashboard_json()` returning the field — there is no missing UI template here, just an endpoint without a page.
+
 ### The marker is per-process, and both directions of stuck are fatal
 
-`_resolve_degraded_flag` writes a marker **only when `proc` is given**. `bridge/telegram_bridge.py::main` passes `"bridge"`, `worker/__main__.py` passes `"worker"`, and every other caller — one-shot scripts, cron helpers, pytest processes that touch `run_typed` — passes nothing and writes no marker, while still getting the Sentry capture and the sentinel log.
+`resolve_degraded_flag` writes a marker **only when `proc` is given**. `bridge/telegram_bridge.py::main` passes `"bridge"`, `worker/__main__.py` passes `"worker"`, and every other caller — one-shot scripts, cron helpers, pytest processes that touch `run_typed` — passes nothing and writes no marker, while still getting the Sentry capture and the sentinel log.
 
 The rule is: **only a process that can clear its marker may write one.**
 
@@ -181,7 +183,7 @@ Two, both read lazily inside function bodies (a module-scope `os.environ` read i
 
 | Variable | Read in | Effect |
 |---|---|---|
-| `LLM_STACK_COMPAT_OVERRIDE=healthy` | `_resolve_degraded_flag()` | Short-circuits this process's flag to not-degraded and clears this process's marker. Operator break-glass. |
+| `LLM_STACK_COMPAT_OVERRIDE=healthy` | `resolve_degraded_flag()` | Short-circuits this process's flag to not-degraded and clears this process's marker. Operator break-glass. |
 | `LLM_STACK_MARKER_DIR` | `_marker_path()` | Relocates the marker directory. Exists so the subprocess CLI test can reach its child through the environment. |
 
 **Neither is honoured by the pure predicate, by the `--json` CLI, or by the auto-bump gate.** An override must never let a bad pin ship. `check_llm_stack_compat` does not read either one, and `agent/llm/compat.py::main` calls only the predicate.

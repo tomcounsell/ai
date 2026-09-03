@@ -154,6 +154,35 @@ def test_resolved_target_is_the_call_sites_own_path() -> None:
     assert set(result.forwarded) <= set(signature.parameters)
 
 
+def test_predicate_is_callable_from_inside_a_running_event_loop() -> None:
+    """The predicate must not go false-degraded just because a loop is running.
+
+    ``run_typed`` (a coroutine) reaches ``check_llm_stack_compat`` via
+    ``_guard_stack`` -> ``stack_axes()`` -> ``resolve_degraded_flag()``. Any
+    caller that reaches ``run_typed`` without a boot hook resolving the flag
+    first (a one-shot script, a pytest process, a nightly job) is running
+    that whole chain inside an event loop. A version of
+    ``_resolve_create_target`` that called ``asyncio.run()`` to clean up its
+    introspection client raised ``RuntimeError: asyncio.run() cannot be
+    called from a running event loop`` here, and because the verdict is
+    memoized, that turned a permanently-healthy stack into a permanently
+    false-degraded one -- alerting on all three channels for nothing.
+    """
+    import asyncio
+
+    outside = compat.check_llm_stack_compat()
+
+    async def _inside() -> compat.CompatResult:
+        return compat.check_llm_stack_compat()
+
+    inside = asyncio.run(_inside())
+
+    assert inside.compatible is True, inside.reason
+    assert inside.loader_ok == outside.loader_ok
+    assert inside.compatible == outside.compatible
+    assert inside.reason == outside.reason
+
+
 # --------------------------------------------------------------------------
 # Fail-closed paths -- one per introspection failure mode
 # --------------------------------------------------------------------------
@@ -280,6 +309,36 @@ def test_predicate_is_pure_on_an_incompatible_stack(
     assert result.compatible is False
     assert counting_capture == [], "the predicate alerted; alerting belongs to the resolver"
     assert compat._DEGRADED is None, "the predicate resolved the memoized degraded flag"
+
+
+def test_predicate_is_pure_on_the_network_branch(counting_capture, monkeypatch) -> None:
+    """``allow_network=True`` must stay as pure as the default branch.
+
+    ``_check_network`` used to go through ``agent.llm.wrapper.run_typed``,
+    which re-enters ``_guard_stack`` -> ``stack_axes()`` ->
+    ``_resolve_degraded_flag()`` and memoizes this module's globals -- an
+    impurity that is benign only while the ``llm`` gate phase is
+    unreachable (the coupled set's ``hold``). It goes live the moment a
+    future lane lifts the hold, exactly when the gate runs against a stack
+    it is about to roll back.
+    """
+    monkeypatch.setattr(compat, "_DEGRADED", None, raising=False)
+    monkeypatch.setattr(
+        compat,
+        "_check_network",
+        lambda anthropic_version, pydantic_ai_version: compat.CompatResult(
+            compatible=False,
+            loader_ok=True,
+            reason="live network probe call failed: boom",
+            exc_type="RuntimeError",
+        ),
+    )
+
+    result = compat.check_llm_stack_compat(allow_network=True)
+
+    assert result.compatible is False
+    assert counting_capture == [], "the predicate alerted; alerting belongs to the resolver"
+    assert compat._DEGRADED is None, "the network branch resolved the memoized degraded flag"
 
 
 def test_cli_json_entry_is_pure_on_an_incompatible_stack(

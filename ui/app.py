@@ -425,8 +425,11 @@ def create_app() -> FastAPI:
             processes.append(proc)
             entry = {"process": proc}
             try:
-                entry.update(json.loads(marker.read_text()))
-            except (OSError, ValueError):
+                payload = json.loads(marker.read_text())
+                if not isinstance(payload, dict):
+                    raise TypeError(f"marker payload is a {type(payload).__name__}, not an object")
+                entry.update(payload)
+            except (OSError, ValueError, TypeError):
                 entry["unreadable"] = True
             detail.append(entry)
 

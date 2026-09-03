@@ -1256,9 +1256,9 @@ async def main():
     # enqueueing; only non-harness LLM calls fail fast with the typed
     # LLMStackIncompatible. Exiting here would trade a silent LLM outage for
     # a total outage plus a launchd crash-loop.
-    from agent.llm.compat import _resolve_degraded_flag
+    from agent.llm.compat import resolve_degraded_flag
 
-    _resolve_degraded_flag("bridge")
+    resolve_degraded_flag("bridge")
 
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")

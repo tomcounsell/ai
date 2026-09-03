@@ -286,23 +286,72 @@ def _resolve_create_target(stack: Any, path: list[str]) -> Any:
     ``path`` is ``["self", "client", ..., "create"]``; the intermediate
     segments are walked and the final ``create`` attribute returned. See the
     module docstring for why ``AsyncAnthropic`` is the right class.
+
+    Construction and the walk are **synchronous**, deliberately: this
+    predicate must stay callable from *inside* a running event loop.
+    ``run_typed`` (a coroutine) reaches ``check_llm_stack_compat`` via
+    ``_guard_stack`` -> ``stack_axes()`` -> ``resolve_degraded_flag()``, and
+    any caller that reaches ``run_typed`` without a boot hook resolving the
+    flag first (a one-shot script, a pytest process, a nightly job) is
+    running that whole chain inside ``asyncio.run(...)``'s loop. An earlier
+    version of this function called ``asyncio.run()`` here to close the
+    client's transport, which raises ``RuntimeError: asyncio.run() cannot
+    be called from a running event loop`` in exactly that situation --
+    turning a healthy stack into a *permanently* memoized false-degraded
+    verdict (the resolver alerts and never re-checks). That is strictly
+    worse than the leak this function's cleanup exists to fix.
+
+    So: construct and walk synchronously, exactly as PydanticAI's own
+    ``AsyncAnthropic(...)`` construction-only usage allows, then attempt a
+    **best-effort** close in ``finally`` -- only when no loop is already
+    running (``asyncio.get_running_loop()`` raising ``RuntimeError`` is the
+    signal it's safe). Inside a running loop the close is skipped and the
+    ``httpx.AsyncClient`` pool is left for GC; any exception from the close
+    itself is swallowed, because a failed cleanup must never change the
+    verdict this function computes.
     """
-    target = stack.anthropic.AsyncAnthropic(api_key="x")
-    for attr in path[2:]:
-        target = getattr(target, attr)
-    return target
+    import asyncio
+
+    client = stack.anthropic.AsyncAnthropic(api_key="x")
+    try:
+        target: Any = client
+        for attr in path[2:]:
+            target = getattr(target, attr)
+        return target
+    finally:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop running -- safe to synchronously close the transport.
+            try:
+                asyncio.run(client.close())
+            except Exception:
+                # Best-effort only; a close failure must never affect the
+                # resolved target already returned above.
+                logger.debug("%s could not close introspection client", SENTINEL, exc_info=True)
+        # else: a loop is already running (e.g. inside run_typed's
+        # asyncio.run). Skip the close -- calling asyncio.run() here would
+        # raise and, worse, would make an unrelated caller's healthy stack
+        # look permanently degraded. The pool is released by GC.
 
 
 def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
     """Is the installed ``anthropic`` + ``pydantic_ai`` pair usable?
 
     Pure: returns a verdict and touches no global state, no marker file, and
-    no alert channel. See the module docstring's Purity section.
+    no alert channel, on **both** branches. See the module docstring's
+    Purity section. ``_check_network`` (the ``allow_network=True`` branch)
+    talks to the third-party stack directly rather than through
+    ``agent.llm.wrapper.run_typed`` -- going through ``run_typed`` would
+    re-enter ``_guard_stack`` -> ``stack_axes()`` -> ``_resolve_degraded_flag()``,
+    mutating this module's memoized globals and breaking purity on exactly
+    the branch the auto-bump ``llm`` gate runs against a stack it is about
+    to roll back.
 
     ``allow_network=False`` (the default, and what runs at every service
     start and every ``/update``) is loader + AST introspection: sub-second,
     no sockets, no tokens. ``allow_network=True`` additionally makes one
-    minimal real ``run_typed`` call, catching transport-class breaks the
+    minimal real ``create`` call, catching transport-class breaks the
     signature check cannot see; only the auto-bump ``llm`` gate uses it.
     """
     anthropic_version = _installed_version("anthropic")
@@ -320,9 +369,9 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
         )
 
     # --- Axis 1: does the third-party stack import at all? --------------
-    from agent.anthropic_client import _load_stack
-
     try:
+        from agent.anthropic_client import _load_stack
+
         stack = _load_stack()
     except Exception as exc:  # ImportError class, but report anything
         return fail(
@@ -342,7 +391,7 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
 
     try:
         sites = _find_create_sites(source)
-    except SyntaxError as exc:
+    except Exception as exc:  # SyntaxError is the expected case, but not the only one
         return fail(
             f"could not parse pydantic_ai.models.anthropic: {exc}",
             exc=exc,
@@ -419,30 +468,48 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
 def _check_network(
     anthropic_version: str | None, pydantic_ai_version: str | None
 ) -> CompatResult | None:
-    """One minimal real ``run_typed`` call; ``None`` when it succeeds.
+    """One minimal real ``create`` call; ``None`` when it succeeds.
 
     Catches transport-class breaks (a moved HTTP layer, a changed auth
     header) that no signature comparison can see. Billed, so only the
     auto-bump ``llm`` gate turns it on, and only on cycles that bumped.
+
+    Deliberately does **not** go through ``agent.llm.wrapper.run_typed``:
+    that call goes through ``_guard_stack`` -> ``stack_axes()`` ->
+    ``_resolve_degraded_flag()``, which memoizes this module's ``_DEGRADED``
+    / ``_LOADER_OK`` / ``_COMPATIBLE`` globals -- mutating exactly the
+    global state ``check_llm_stack_compat``'s Purity contract promises not
+    to touch. This talks to the third-party stack directly instead, so the
+    ``allow_network=True`` branch stays as pure as the default one.
     """
     import asyncio
 
     from pydantic import BaseModel
 
-    from agent.llm.wrapper import run_typed
+    from agent.anthropic_client import _load_stack
+    from config.models import MODEL_FAST
+    from utils.api_keys import get_anthropic_api_key
 
     class _Probe(BaseModel):
         answer: str
 
+    async def _probe() -> None:
+        stack = _load_stack()
+        async with stack.anthropic.AsyncAnthropic(api_key=get_anthropic_api_key()) as client:
+            provider = stack.AnthropicProvider(anthropic_client=client)
+            pydantic_model = stack.AnthropicModel(MODEL_FAST, provider=provider)
+            agent = stack.Agent(pydantic_model, output_type=_Probe)
+            await agent.run("Reply with answer=hi")
+
     try:
-        asyncio.run(run_typed("Reply with answer=hi", _Probe))
+        asyncio.run(_probe())
     except Exception as exc:
         return CompatResult(
             compatible=False,
             loader_ok=True,
             anthropic_version=anthropic_version,
             pydantic_ai_version=pydantic_ai_version,
-            reason=f"live run_typed call failed: {exc}",
+            reason=f"live network probe call failed: {exc}",
             exc_type=type(exc).__name__,
         )
     return None
@@ -533,7 +600,7 @@ def _clear_marker(proc: str | None) -> None:
         logger.warning("%s could not clear degraded marker", SENTINEL, exc_info=True)
 
 
-def _resolve_degraded_flag(proc: str | None = None) -> bool:
+def resolve_degraded_flag(proc: str | None = None) -> bool:
     """Is this process's LLM stack degraded? Lazily resolved, memoized.
 
     The first read -- from a startup hook, or from a ``run_typed`` call in a
@@ -555,6 +622,18 @@ def _resolve_degraded_flag(proc: str | None = None) -> bool:
     machine the operator declared healthy. The override is deliberately not
     honoured by :func:`check_llm_stack_compat`, by the ``--json`` CLI, or by
     the auto-bump gate -- it must never let a bad pin ship.
+
+    This is the run-boundary's actual startup API and the sole public entry
+    point for ``bridge/telegram_bridge.py::main`` and
+    ``worker/__main__.py`` -- exposed under a public name because it is
+    exactly what a future reader greps for; ``stack_axes()`` cannot take a
+    ``proc``. **Exception-total by contract**: this function must never let
+    an unexpected exception escape. A launchd ``KeepAlive`` process turns an
+    escaping exception into a crash-loop, which is the exact failure class
+    this lane exists to remove one layer down -- reintroducing it at the
+    boot hook would defeat the whole plan. Anything ``check_llm_stack_compat``
+    itself did not catch is caught here too, and the flag fails closed to
+    degraded (never to a process exit).
     """
     global _DEGRADED, _LOADER_OK, _COMPATIBLE
 
@@ -569,7 +648,16 @@ def _resolve_degraded_flag(proc: str | None = None) -> bool:
         _clear_marker(proc)
         return False
 
-    result = check_llm_stack_compat()
+    try:
+        result = check_llm_stack_compat()
+    except Exception as exc:  # run-boundary total: never propagate, never exit
+        result = CompatResult(
+            compatible=False,
+            loader_ok=False,
+            reason=f"check_llm_stack_compat raised unexpectedly: {exc}",
+            exc_type=type(exc).__name__,
+        )
+
     _LOADER_OK = result.loader_ok
     _COMPATIBLE = result.compatible
     _DEGRADED = not (result.loader_ok and result.compatible)
@@ -582,6 +670,13 @@ def _resolve_degraded_flag(proc: str | None = None) -> bool:
     return _DEGRADED
 
 
+# Internal alias, retained for existing tests and any in-module callers that
+# spell the private name. `resolve_degraded_flag` is the public API (#3001
+# tech debt: a leading underscore on this repo's actual startup entry point
+# told a grepping reader the opposite of the truth).
+_resolve_degraded_flag = resolve_degraded_flag
+
+
 def stack_axes() -> tuple[bool, bool]:
     """``(loader_ok, compatible)`` for this process, forcing resolution.
 
@@ -591,7 +686,7 @@ def stack_axes() -> tuple[bool, bool]:
     ``anthropic`` and an Anthropic *signature* break must not fall the two
     hot-path classifiers back to their conservative defaults fleet-wide.
     """
-    _resolve_degraded_flag()
+    resolve_degraded_flag()
     return _LOADER_OK, _COMPATIBLE
 
 

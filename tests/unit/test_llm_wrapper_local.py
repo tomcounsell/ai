@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from agent.llm import LLMCallError, run_typed_local
+from agent.llm import LLMCallError, LLMStackIncompatible, run_typed_local
 from agent.llm import wrapper as wrapper_mod
 
 
@@ -102,6 +102,25 @@ class TestNetworkIsolation:
         monkeypatch.setattr(wrapper_mod, "_load_stack", _sever)
 
         with pytest.raises(LoaderSeveredError):
+            await run_typed_local("route: hello", Decision)
+
+    async def test_load_stack_import_error_raises_llm_stack_incompatible(self, monkeypatch):
+        """``LLM_STACK_COMPAT_OVERRIDE=healthy`` can pass the guard while
+        ``_load_stack()`` still fails; the raw ``ImportError`` must not
+        bypass every existing ``except LLMCallError`` fail-safe (#3001).
+        """
+        from agent.llm import compat
+
+        monkeypatch.setattr(compat, "_DEGRADED", False)
+        monkeypatch.setattr(compat, "_LOADER_OK", True)
+        monkeypatch.setattr(compat, "_COMPATIBLE", True)
+
+        def _boom():
+            raise ImportError("no module named anthropic")
+
+        monkeypatch.setattr(wrapper_mod, "_load_stack", _boom)
+
+        with pytest.raises(LLMStackIncompatible):
             await run_typed_local("route: hello", Decision)
 
 

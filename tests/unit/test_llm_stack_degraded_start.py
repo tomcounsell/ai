@@ -471,6 +471,58 @@ async def test_anthropic_import_error_local_path(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Exception-total run boundary
+# --------------------------------------------------------------------------
+
+
+def test_unexpected_exception_class_resolves_degraded_not_raises(monkeypatch, captures, caplog):
+    """The blocker this suite exists to close.
+
+    An exception class neither ``check_llm_stack_compat`` nor
+    ``resolve_degraded_flag`` anticipated (here: ``_find_create_sites``
+    raising ``ValueError`` instead of the expected ``SyntaxError``) must
+    still resolve to degraded, never propagate. An unguarded boot hook that
+    lets this escape ``main()`` never starts the process at all — under
+    launchd ``KeepAlive`` that is a crash-loop, exactly the failure class
+    this lane exists to remove.
+    """
+
+    def _boom(source: str):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(compat, "_find_create_sites", _boom)
+    caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
+
+    assert compat._resolve_degraded_flag("bridge") is True
+
+    assert compat._LOADER_OK is True
+    assert compat._COMPATIBLE is False
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    assert len(captures) == 1
+    assert compat._marker_path("bridge").exists()
+
+
+def test_resolver_itself_never_propagates_an_unexpected_exception(monkeypatch, captures, caplog):
+    """Defense in depth: even if ``check_llm_stack_compat`` itself raises.
+
+    ``resolve_degraded_flag`` wraps the call to the predicate too, so a
+    future defect inside ``check_llm_stack_compat`` that reintroduces an
+    unguarded raise still cannot reach a boot hook unguarded.
+    """
+
+    def _boom(allow_network: bool = False):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(compat, "check_llm_stack_compat", _boom)
+    caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
+
+    assert compat.resolve_degraded_flag("worker") is True
+    assert compat._DEGRADED is True
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    assert len(captures) == 1
+
+
+# --------------------------------------------------------------------------
 # Startup hooks: degraded is not down
 # --------------------------------------------------------------------------
 
@@ -489,7 +541,7 @@ def _startup_hook_args(module_path: str, func_name: str) -> list[str]:
                 continue
             func = call.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name == "_resolve_degraded_flag":
+            if name == "resolve_degraded_flag":
                 args.extend(a.value for a in call.args if isinstance(a, ast.Constant))
     return args
 

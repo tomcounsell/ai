@@ -98,7 +98,7 @@ class LLMStackIncompatible(LLMCallError):  # noqa: N818
     degraded stack degrades each call site to its own conservative default
     instead of surfacing a raw provider ``TypeError`` from deep inside
     ``pydantic_ai``. The alert has already fired from
-    ``agent.llm.compat._resolve_degraded_flag`` by the time this is raised.
+    ``agent.llm.compat.resolve_degraded_flag`` by the time this is raised.
     """
 
 
@@ -181,7 +181,15 @@ async def run_typed(
 
     _guard_stack("run_typed", signature_axis=True)
 
-    stack = _load_stack()
+    try:
+        stack = _load_stack()
+    except ImportError as e:
+        # LLM_STACK_COMPAT_OVERRIDE=healthy short-circuits _guard_stack
+        # before the predicate runs, so a genuinely broken stack can reach
+        # here past the guard. A raw ImportError would bypass every
+        # existing `except LLMCallError` fail-safe -- the exact property
+        # LLMStackIncompatible exists to preserve.
+        raise LLMStackIncompatible(f"run_typed: LLM stack failed to import: {e}") from e
 
     async with semaphore_slot():
         async with stack.anthropic.AsyncAnthropic(
@@ -263,7 +271,10 @@ async def run_typed_local(
     if hard_timeout is None:
         hard_timeout = settings.timeouts.local_typed_hard_s
 
-    stack = _load_stack()
+    try:
+        stack = _load_stack()
+    except ImportError as e:
+        raise LLMStackIncompatible(f"run_typed_local: LLM stack failed to import: {e}") from e
 
     base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"
     provider = stack.OllamaProvider(base_url=base_url)

@@ -127,6 +127,23 @@ def test_unreadable_marker_does_not_break_the_payload(marker_dir, client):
     assert health["llm_stack_degraded_detail"][0]["unreadable"] is True
 
 
+def test_non_object_marker_json_does_not_break_the_payload(marker_dir, client):
+    """Valid JSON that isn't an object (`5`, `[1, 2]`) must not 500 either.
+
+    ``dict.update`` raises ``TypeError`` on a non-mapping argument, which is
+    a different exception class than the malformed-JSON ``ValueError`` leg
+    this shares an except clause with.
+    """
+    marker = marker_dir / "llm-stack-degraded.bridge"
+    marker.write_text("5")
+
+    health = _health(client)
+
+    assert health["llm_stack_degraded"] is True
+    assert health["llm_stack_degraded_processes"] == ["bridge"]
+    assert health["llm_stack_degraded_detail"][0]["unreadable"] is True
+
+
 def test_missing_marker_directory_is_quiet(monkeypatch, tmp_path, client):
     monkeypatch.setattr(ui.app, "LLM_MARKER_DIR", tmp_path / "does-not-exist")
     health = _health(client)

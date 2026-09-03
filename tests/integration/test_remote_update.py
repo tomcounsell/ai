@@ -811,7 +811,6 @@ class TestAutoBumpDeps:
 
         assert result.rolled_back
         assert result.failed_phase == "pytest"
-        assert not result.smoke_passed
         # Nothing is reported bumped, so run.py's commit list stays honest.
         assert not result.any_bumped
         assert pyproject.read_text() == TWO_SET_PYPROJECT
@@ -953,8 +952,11 @@ class TestAutoBumpDeps:
     def test_restore_failure_blocks_commit(self, tmp_path: Path):
         """A rollback whose re-sync failed must stop the run committing.
 
-        `run.py` gates its commit on `any_bumped and not restore_failed`;
-        without the flag a later good bump pushes a poisoned lockfile.
+        `run.py` gates its commit on `any_bumped and not restore_failed`,
+        AND `auto_bump_deps` itself stops the loop right after the failed
+        restore: gating a later set against a venv that no longer matches
+        the restored `pyproject.toml` / `uv.lock` would record a verdict
+        against an environment that isn't the one on disk.
         """
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(TWO_SET_PYPROJECT)
@@ -964,9 +966,8 @@ class TestAutoBumpDeps:
         results = [
             MagicMock(success=True, error=None),  # SET_A post-bump sync
             MagicMock(success=False, error="resolver exploded"),  # SET_A restore sync
-            MagicMock(success=True, error=None),  # SET_B post-bump sync
         ]
-        resolved = [DRIFTED_LOCK, POST_BUMP_LOCK]  # what each unfrozen sync resolves to
+        resolved = [DRIFTED_LOCK]  # what the unfrozen bump sync resolves to
         observed: list[tuple[bool, str]] = []
 
         def _sync(project_dir, reinstall=False, frozen=True):
@@ -1001,8 +1002,10 @@ class TestAutoBumpDeps:
         # The poisoned lockfile is discarded BEFORE the restore re-sync, and
         # that re-sync is frozen so it cannot resolve a new one.
         assert observed[1] == (True, PRE_BUMP_LOCK)
-        # A good set still bumped, which is exactly why the flag must gate.
-        assert result.any_bumped
+        # The loop stopped: SET_B was never gated against the inconsistent
+        # venv, so nothing is reported bumped.
+        assert not result.any_bumped
+        assert any("an earlier set's rollback failed" in (b.error or "") for b in result.bumps)
 
     def test_worktree_clean_after_every_rollback_path(self, tmp_path: Path):
         """Sync failure, gate failure, and rewrite refusal all leave the tree pristine.

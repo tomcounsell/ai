@@ -1513,8 +1513,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("WARN: Auto-bump rollback could not restore dependencies", v, always=True)
             _append_warning(
                 result,
-                "Auto-bump rollback failed to re-sync; pyproject.toml restored and "
-                "uv.lock checked out from git — nothing committed this run",
+                "pyproject.toml and uv.lock restored from the pre-bump snapshot; "
+                "the venv re-sync failed, so nothing was committed this run",
             )
 
         # A member is `bumped` only once its whole coupled set survived every
