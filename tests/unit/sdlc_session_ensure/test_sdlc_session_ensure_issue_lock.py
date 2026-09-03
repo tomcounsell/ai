@@ -30,6 +30,7 @@ class TestIssueLockWiring:
         """Mock AgentSession whose readback query returns the bound session."""
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        mock_as.query.get.return_value = session  # post-save readback (primary-key lookup)
         return mock_as
 
     def test_mint_on_env_owns_issue_return(self, monkeypatch):
@@ -134,6 +135,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [existing]
+        mock_as.query.get.return_value = existing  # post-save readback (primary-key lookup)
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2004"))
 
@@ -159,7 +161,8 @@ class TestIssueLockWiring:
         mock_new_session.session_id = "sdlc-local-2005"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2005"))
@@ -192,7 +195,8 @@ class TestIssueLockWiring:
         mock_new_session.session_id = "sdlc-local-2006"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2006"))
@@ -220,7 +224,8 @@ class TestIssueLockWiring:
         mock_new_session.session_id = "sdlc-local-2007"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2007"))
@@ -274,6 +279,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -401,6 +407,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [stale]  # readback sees a stale value
+        mock_as.query.get.return_value = stale  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
@@ -409,6 +416,169 @@ class TestIssueLockWiring:
             result = ensure_session(issue_number=issue_number)
 
         assert result.get("error") == "RUN_BIND_FAILED"
+        assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is None
+
+    def test_readback_uses_primary_key_not_unordered_filter(self):
+        """Issue #3065 Cluster E: a lane whose session row was recreated after
+        a crash has TWO rows sharing one ``session_id``. The old readback
+        re-queried ``AgentSession.query.filter(session_id=...)`` and took
+        ``[0]`` from what Popoto resolves via an unordered Redis ``SMEMBERS``
+        read -- a coin flip. The fix reads back by PRIMARY KEY
+        (``AgentSession.query.get(redis_key=...)``), so a ``query.filter``
+        mock that puts the WRONG (stale-twin) row first must never affect the
+        result, across repeated invocations."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2061
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.db_key.redis_key = f"AgentSession:sdlc-local-{issue_number}:real-row"
+
+        stale_twin = MagicMock()
+        stale_twin.session_id = session.session_id
+        stale_twin.active_run_id = "stale-twin-run-id"
+
+        mock_as = MagicMock()
+        # Simulate the unordered SMEMBERS coin flip: the stale duplicate
+        # sorts FIRST. The old `[0]`-taking readback would pick this row up
+        # and always report a mismatch; the new primary-key readback must
+        # never even consult this list.
+        mock_as.query.filter.return_value = [stale_twin, session]
+
+        def _get(*, redis_key):
+            assert redis_key == session.db_key.redis_key
+            return session
+
+        mock_as.query.get.side_effect = _get
+
+        from models.session_lifecycle import release_issue_lock
+
+        for _ in range(3):
+            with (
+                patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+                patch("models.agent_session.AgentSession", mock_as),
+            ):
+                result = ensure_session(issue_number=issue_number)
+
+            assert result.get("error") is None, result
+            assert result["run_id"] == session.active_run_id
+            # Release so the next iteration starts from a free lock, isolating
+            # each iteration's mint/bind/readback rather than testing renewal.
+            release_issue_lock(issue_number, result["run_id"])
+
+    def test_adopted_candidate_survives_readback_mismatch(self):
+        """An ADOPTED candidate (verified reuse against a live lock it
+        already owns) must NOT be released on a post-save readback mismatch
+        -- releasing it would compare-and-delete a lease this call never
+        minted, and the compare-and-delete would match by construction
+        because the adopted id already equals the live owner (#3065 Cluster
+        E). Real Redis lock."""
+        import popoto.redis_db as rdb
+
+        from models.session_lifecycle import touch_issue_lock
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2062
+        session_id = f"sdlc-local-{issue_number}"
+        adopted_run_id = "adopted-run-id-2062"
+
+        # Pre-acquire the real lock under the id this call will adopt, so
+        # `_validated_reuse_candidate`'s live-lock-owner-match proof fires.
+        pre_acquire = touch_issue_lock(issue_number, adopted_run_id, session_id=session_id)
+        assert pre_acquire.acquired is True
+
+        session = MagicMock()
+        session.session_id = session_id
+
+        stale = MagicMock()
+        stale.session_id = session_id
+        stale.active_run_id = "some-other-run-entirely"  # mismatch on readback
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [stale]
+        mock_as.query.get.return_value = stale  # readback mismatch
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id=adopted_run_id)
+
+        assert result.get("error") == "RUN_BIND_FAILED"
+        # The lock this call adopted (but never minted) must survive.
+        assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is not None
+        peek = touch_issue_lock(issue_number, None, session_id=session_id, peek=True)
+        assert peek.acquired is False
+        assert peek.owner_run_id == adopted_run_id
+
+    def test_adopted_candidate_survives_readback_exception(self):
+        """Same invariant as the mismatch case, but for the readback
+        `except` branch (:func:`_acquire_run_lock_and_bind`'s post-save
+        readback try/except): an adopted candidate must not be released when
+        the readback itself raises. Real Redis lock."""
+        import popoto.redis_db as rdb
+
+        from models.session_lifecycle import touch_issue_lock
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2063
+        session_id = f"sdlc-local-{issue_number}"
+        adopted_run_id = "adopted-run-id-2063"
+
+        pre_acquire = touch_issue_lock(issue_number, adopted_run_id, session_id=session_id)
+        assert pre_acquire.acquired is True
+
+        session = MagicMock()
+        session.session_id = session_id
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        mock_as.query.get.side_effect = RuntimeError("redis hiccup during readback")
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id=adopted_run_id)
+
+        assert result.get("error") == "RUN_BIND_FAILED"
+        assert "readback failed" in result.get("reason", "")
+        # The lock this call adopted (but never minted) must survive.
+        assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is not None
+        peek = touch_issue_lock(issue_number, None, session_id=session_id, peek=True)
+        assert peek.acquired is False
+        assert peek.owner_run_id == adopted_run_id
+
+    def test_minted_candidate_released_on_save_failure(self):
+        """A MINTED candidate (no reuse_run_id -- the ordinary create-and-claim
+        mint) IS released via compare-and-delete when the ``session.save()``
+        bind itself raises, so the next caller does not wait out the TTL.
+        Real Redis lock."""
+        import popoto.redis_db as rdb
+
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2064
+        session_id = f"sdlc-local-{issue_number}"
+
+        session = MagicMock()
+        session.session_id = session_id
+        session.save.side_effect = RuntimeError("redis write failure")
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        mock_as.query.get.return_value = session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=issue_number)
+
+        assert result.get("error") == "RUN_BIND_FAILED"
+        assert "active_run_id save failed" in result.get("reason", "")
+        # MINTED candidate: the lock this call itself acquired must be freed
+        # immediately rather than waiting out the 1800s TTL.
         assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is None
 
     def test_orphaned_lock_flagged_on_peek(self):

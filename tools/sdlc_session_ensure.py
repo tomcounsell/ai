@@ -29,7 +29,9 @@ Output:
         signal to inherit (orphaned_lock=true means the owning run died before
         its next renewal; frees within the TTL)
     {"error": "RUN_BIND_FAILED", ...} -- lock acquired but the run_id could not be
-        persisted to the session record (lock released via compare-and-delete)
+        persisted to the session record. The lock is released via
+        compare-and-delete ONLY when this call minted the candidate; an adopted
+        candidate leaves the lease alone (see _acquire_run_lock_and_bind)
     {} on error
     {"orphans": [...], "count": N, "killed": false} -- --kill-orphans --dry-run
     {"results": [...], "count": N, "failures": M, "killed": true} -- --kill-orphans
@@ -99,6 +101,23 @@ OWNED_RUN_IDS_CAP = int(os.environ.get("OWNED_RUN_IDS_CAP", "32"))
 # (it is read on every router poll). Override via the
 # SDLC_RUN_IDENTITY_HISTORY_MAX env var.
 SDLC_RUN_IDENTITY_HISTORY_MAX = int(os.environ.get("SDLC_RUN_IDENTITY_HISTORY_MAX", "20"))
+
+
+class _CandidateProvenance:
+    """How a lock candidate came to hold the value it has (issue #3065 Cluster E).
+
+    ``release_issue_lock`` performs a correct compare-and-delete: it deletes
+    the lock iff the candidate it is handed still matches the live owner.
+    That correctness is exactly why passing it an ADOPTED candidate is unsafe
+    -- an adopted candidate matches the live owner *by construction*, so the
+    compare-and-delete "succeeds" by destroying a lease this call never
+    minted. Provenance is the caller-side fact ``release_issue_lock`` has no
+    way to see: only a MINTED candidate is safe to hand to it for release.
+    """
+
+    MINTED = "minted"
+    ADOPTED_SUPERVISED = "adopted_supervised"
+    ADOPTED_LIVE_LOCK = "adopted_live_lock"
 
 
 def _read_owned_run_ids(session) -> list[str]:
@@ -422,10 +441,25 @@ def _acquire_run_lock_and_bind(
     to the fresh candidate, preserving no-adopt for foreign/stale callers.
 
     On acquisition, the candidate is saved to ``session.active_run_id`` and
-    read back from Redis (post-save readback, Race 3). On save failure or
-    readback mismatch, the lock is released via COMPARE-AND-DELETE
-    (``release_issue_lock`` -- never a raw DEL, cycle-2 CONCERN 2) so the
-    next caller acquires immediately instead of waiting out the 1800s TTL.
+    read back from Redis **by primary key** (``AgentSession.query.get(redis_key=...)``,
+    Race 3) -- never by re-querying the non-unique ``session_id`` index and
+    taking ``[0]`` from Popoto's unordered ``SMEMBERS`` result, which is a
+    coin flip on any lane whose row was duplicated (#3065 Cluster E).
+
+    Release is gated on **provenance**, not on identity: ``candidate`` carries
+    an explicit ``_CandidateProvenance`` tag set where it is produced --
+    ``MINTED`` (fresh ``uuid4().hex``), ``ADOPTED_SUPERVISED`` (inherited from
+    a live supervised-run signal), or ``ADOPTED_LIVE_LOCK`` (verified reuse via
+    :func:`_validated_reuse_candidate`). On save failure or readback mismatch,
+    the lock is released via COMPARE-AND-DELETE (``release_issue_lock`` --
+    never a raw DEL, cycle-2 CONCERN 2) **only when the candidate is
+    ``MINTED``** -- releasing an adopted candidate would delete a lease this
+    call never created, using a compare-and-delete that matches by
+    construction because the adopted id equals the live owner. An adopted
+    candidate that fails to bind is returned as an error without touching the
+    lock; the next caller acquires immediately after a minted failure instead
+    of waiting out the 1800s TTL, and an adopted failure leaves the still-live
+    lease exactly as it was.
 
     Target-repo pinning (issue #2012): this is the ONE place ``target_repo``
     is resolved for the issue-keyed ``PipelineLedger`` -- the process env
@@ -457,6 +491,16 @@ def _acquire_run_lock_and_bind(
     from tools._sdlc_utils import _resolve_target_repo
 
     session_id = getattr(session, "session_id", None) or ""
+
+    # Provenance of `reuse_run_id`, tracked separately from its value because
+    # the value alone is ambiguous (issue #3065 Cluster E): a bare ensure
+    # under a live supervised-run signal overwrites `reuse_run_id` below with
+    # the supervisor's id, and `_validated_reuse_candidate` further down
+    # validates it against the live-lock/self-remint/mirror/anchor proofs.
+    # Neither shape means "minted here" -- both are adoptions of an identity
+    # this call did not create, and only a MINTED candidate may ever be
+    # handed to `release_issue_lock`.
+    reuse_from_supervised_signal = False
 
     # Supervised-run signal check (issue #2026, WS1). A BARE ensure (no
     # reuse_run_id) invoked while a LIVE supervised-run signal exists for this
@@ -515,6 +559,7 @@ def _acquire_run_lock_and_bind(
             # (verified reuse renews/re-acquires), returning a NORMAL success
             # payload carrying it -- never the refusal.
             reuse_run_id = supervised.run_id
+            reuse_from_supervised_signal = True
         elif supervised is not None and supervised.live:
             logger.debug(
                 "sdlc_session_ensure: issue #%s has a LIVE supervised run (run_id=%s) -- "
@@ -530,9 +575,20 @@ def _acquire_run_lock_and_bind(
                 "owner_session_id": supervised.session_id,
             }
 
-    candidate = uuid.uuid4().hex
+    minted_candidate = uuid.uuid4().hex
+    candidate = minted_candidate
+    provenance = _CandidateProvenance.MINTED
     if reuse_run_id:
-        candidate = _validated_reuse_candidate(issue_number, session, reuse_run_id) or candidate
+        validated = _validated_reuse_candidate(issue_number, session, reuse_run_id)
+        if validated:
+            candidate = validated
+            provenance = (
+                _CandidateProvenance.ADOPTED_SUPERVISED
+                if reuse_from_supervised_signal
+                else _CandidateProvenance.ADOPTED_LIVE_LOCK
+            )
+        # else: validation failed -- fall back to the fresh mint above,
+        # candidate/provenance are already MINTED.
 
     target_repo = _resolve_target_repo()
 
@@ -578,6 +634,26 @@ def _acquire_run_lock_and_bind(
             "orphaned_lock": orphaned,
         }
 
+    def _release_candidate_if_minted(reason: str) -> None:
+        """Compare-and-delete the lock, but ONLY for a MINTED candidate.
+
+        An adopted candidate (ADOPTED_SUPERVISED / ADOPTED_LIVE_LOCK) equals
+        the live lock's owner by construction -- that is what "adopted" means
+        -- so handing it to `release_issue_lock`'s compare-and-delete would
+        "succeed" by deleting a lease this call never minted (#3065 Cluster
+        E). Only a call that minted the candidate itself may release it.
+        """
+        if provenance == _CandidateProvenance.MINTED:
+            release_issue_lock(issue_number, candidate)
+        else:
+            logger.debug(
+                "sdlc_session_ensure: issue #%s candidate provenance=%s (not minted) -- "
+                "skipping release on %s; the lock's live owner is not this call's to delete",
+                issue_number,
+                provenance,
+                reason,
+            )
+
     # Acquired: bind the run_id to the session record (inspection mirror +
     # the identity source for the in-process renewal paths).
     try:
@@ -596,13 +672,14 @@ def _acquire_run_lock_and_bind(
         # still refreshes updated_at via its own stage-state write (see #1676).
         session.save(update_fields=["active_run_id", "owned_run_ids"])
     except Exception as e:
-        release_issue_lock(issue_number, candidate)
+        _release_candidate_if_minted("active_run_id save failure")
         logger.debug(
             "sdlc_session_ensure: active_run_id save failed for %s (%s: %s) -- "
-            "lock released via compare-and-delete",
+            "lock release gated on candidate provenance (%s)",
             session_id,
             type(e).__name__,
             e,
+            provenance,
         )
         return None, {
             "error": "RUN_BIND_FAILED",
@@ -611,20 +688,27 @@ def _acquire_run_lock_and_bind(
         }
 
     # Post-save readback: assert the record really carries the lock's run_id.
+    # Read back BY PRIMARY KEY (issue #3065 Cluster E) -- `session.db_key` is
+    # this row's actual identity (backed by the AutoKeyField `id`). Re-querying
+    # `AgentSession.query.filter(session_id=session_id)` and taking `[0]` reads
+    # an ordinary (non-unique) secondary index: any lane whose row was
+    # duplicated after a crash has two rows sharing one `session_id`, and
+    # Popoto resolves that filter via an unordered Redis `SMEMBERS`, making
+    # `[0]` a coin flip between the row this call just wrote and a stale twin.
     try:
         from models.agent_session import AgentSession
 
-        fresh_rows = list(AgentSession.query.filter(session_id=session_id))
-        fresh = fresh_rows[0] if fresh_rows else None
+        fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
         readback_run_id = getattr(fresh, "active_run_id", None) if fresh is not None else None
     except Exception as e:
-        release_issue_lock(issue_number, candidate)
+        _release_candidate_if_minted("post-save readback failure")
         logger.debug(
             "sdlc_session_ensure: post-save readback failed for %s (%s: %s) -- "
-            "lock released via compare-and-delete",
+            "lock release gated on candidate provenance (%s)",
             session_id,
             type(e).__name__,
             e,
+            provenance,
         )
         return None, {
             "error": "RUN_BIND_FAILED",
@@ -633,13 +717,14 @@ def _acquire_run_lock_and_bind(
         }
 
     if readback_run_id != candidate:
-        release_issue_lock(issue_number, candidate)
+        _release_candidate_if_minted("post-save readback mismatch")
         logger.debug(
             "sdlc_session_ensure: post-save readback mismatch for %s "
-            "(expected %s, read %s) -- lock released via compare-and-delete",
+            "(expected %s, read %s) -- lock release gated on candidate provenance (%s)",
             session_id,
             candidate,
             readback_run_id,
+            provenance,
         )
         return None, {
             "error": "RUN_BIND_FAILED",

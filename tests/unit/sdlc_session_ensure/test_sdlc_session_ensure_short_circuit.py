@@ -35,6 +35,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge_session]  # post-save readback
+        mock_as.query.get.return_value = bridge_session  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=bridge_session),
@@ -70,6 +71,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()  # create_local must NOT be called (no duplicate).
         mock_as.query.filter.return_value = [issue_session]  # post-save readback
+        mock_as.query.get.return_value = issue_session  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=env_session),
@@ -103,7 +105,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1172"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -132,7 +135,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1141"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -160,7 +164,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-11411"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -186,7 +191,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1142"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         find_session_mock = MagicMock()
@@ -225,7 +231,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1143"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -273,7 +280,8 @@ class TestBridgeShortCircuit:
             mock_new_session.session_id = local_id
 
             mock_as = MagicMock()
-            mock_as.query.filter.side_effect = [[], [mock_new_session]]
+            mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+            mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
             mock_as.create_local.return_value = mock_new_session
 
             with (
@@ -303,7 +311,8 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1145"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (

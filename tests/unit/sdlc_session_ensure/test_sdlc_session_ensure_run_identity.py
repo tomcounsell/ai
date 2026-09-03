@@ -19,6 +19,7 @@ class TestVerifiedRunIdReuse:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        mock_as.query.get.return_value = session  # post-save readback (primary-key lookup)
         return mock_as
 
     def test_consecutive_stage_reuse_survives_own_live_lock(self):
@@ -140,6 +141,7 @@ class TestSupervisedRunSignal:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        mock_as.query.get.return_value = session  # post-save readback (primary-key lookup)
         return mock_as
 
     def test_bare_ensure_under_live_signal_refuses_and_mints_nothing(self):
@@ -383,6 +385,7 @@ class TestOwnedRunIdsSelfRecognition:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        mock_as.query.get.return_value = session  # post-save readback (primary-key lookup)
         return mock_as
 
     def test_read_owned_run_ids_tolerant(self):
