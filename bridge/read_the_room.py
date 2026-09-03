@@ -123,7 +123,7 @@ def _read_enabled() -> bool:
     )
 
 
-def _is_group_chat(chat_id: str | int | None) -> bool:
+def is_group_chat(chat_id: str | int | None) -> bool:
     """Return True when ``chat_id`` is a Telegram group/supergroup/channel.
 
     RTR only ever room-reads GROUP chats (issue #2199): a DM always deserves a
@@ -523,7 +523,7 @@ async def read_the_room(
     if chat_id is None:
         return RoomVerdict(action="send", reason="no_chat_id")
 
-    if not _is_group_chat(chat_id):
+    if not is_group_chat(chat_id):
         # DMs (and unclassifiable ids) always get a reply — never room-read.
         return RoomVerdict(action="send", reason="dm_excluded")
 

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -310,6 +311,56 @@ def build_telegram_outbox_payload(
     if file_paths:
         payload["file_paths"] = file_paths
     return payload
+
+
+def build_telegram_poll_outbox_payload(
+    chat_id: str,
+    question: str,
+    options: list[str],
+    reply_to: int | None,
+    session_id: str,
+) -> dict[str, Any]:
+    """Build the ``type: "poll"`` outbox payload for ``telegram:outbox:{session_id}``.
+
+    Sibling of :func:`build_telegram_outbox_payload`, and additive: existing
+    producers are unaffected because the relay dispatches on ``type``.
+
+    **This function is the sole producer of ``poll_id_hint``.** That id is the
+    correlation key the entire Race-6 mitigation is built on — the relay passes
+    it to both ``register_pending_poll`` (as the provisional registry key) and
+    ``send_poll(correlation_id=...)`` (which embeds a 7-byte prefix of it in the
+    poll's option bytes), and the reconciliation loop's orphan adoption matches
+    on it. Minting it anywhere else, or per send attempt rather than per payload,
+    breaks the exact match against the provisional row.
+
+    ``session_type`` is deliberately **not** stamped into the payload: a queued
+    payload would outlive a session's real type. The relay re-reads eligibility
+    at send time instead.
+    """
+    return {
+        "type": "poll",
+        "chat_id": chat_id,
+        "reply_to": reply_to,
+        "question": question,
+        "options": list(options),
+        "session_id": session_id,
+        "timestamp": time.time(),
+        "poll_id_hint": uuid.uuid4().hex,
+    }
+
+
+def render_poll_as_text(question: str, options: list[str]) -> str:
+    """Render a poll question as the numbered-list prose fallback.
+
+    **One rendering of a question as text, not several.** Every degradation path
+    goes through this: the CLI's ineligible-surface branch, the relay's
+    eligibility re-check branch, and the relay's terminal-failure re-enqueue. A
+    second copy would let the fallback drift from the poll a reader was expecting
+    to see.
+    """
+    lines = [question, ""]
+    lines += [f"{i + 1}. {opt}" for i, opt in enumerate(options)]
+    return "\n".join(lines)
 
 
 async def deliver_system_notice(
@@ -1468,6 +1519,76 @@ class TelegramRelayOutputHandler:
             return int(val) if val else None
         except (TypeError, ValueError):
             return None
+
+    async def send_poll(
+        self,
+        chat_id: str,
+        question: str,
+        options: list[str],
+        reply_to_msg_id: int | None = None,
+        session: Any = None,
+    ) -> DeliveryOutcome:
+        """Queue a ``type: "poll"`` payload onto ``telegram:outbox:{session_id}``.
+
+        Sibling of :meth:`send`, discovered by capability probe
+        (``hasattr(handler, "send_poll")``) rather than added to the
+        ``OutputHandler`` Protocol as a required method — ``FileOutputHandler``
+        and ``EmailOutputHandler`` must stay valid without it. Email, local and
+        system surfaces degrade to prose at the CLI, before this is ever reached.
+
+        **Validate, do not compose.** The question goes through
+        ``validate_poll_question`` — the public drafter seam — and never through
+        ``draft_message``, which runs ``_compose_structured_draft`` *before*
+        validating and would return the question with the emoji prefix, stage
+        line and link footer attached. A stage line inside a poll question is not
+        a message with a header; it is a broken question. The escape-hatch
+        followup, which is ordinary prose, still goes through the full drafter,
+        so the comms layer is not bypassed overall.
+
+        Option-count and option-length validation lives in ``tools/ask_poll.py``:
+        the drafter's ``_validate_for_medium`` signature takes text only and
+        physically cannot see the options.
+
+        **Records no expectation.** Its sibling :meth:`send` records none, and an
+        expectation with no resolution path in any of the vote translator's
+        branches would be authored and never closed.
+        """
+        session_id = getattr(session, "session_id", None) or chat_id
+        reply_to = int(reply_to_msg_id) if reply_to_msg_id else None
+
+        try:
+            from bridge.message_drafter import validate_poll_question
+
+            violations = validate_poll_question(question)
+            if violations:
+                logger.warning(
+                    "poll question failed %s validation: %s", "telegram_poll", violations
+                )
+        except Exception as e:  # noqa: BLE001 — drafter is a guard, never a blocker
+            logger.debug("poll question validation unavailable (non-fatal): %s", e)
+
+        payload = build_telegram_poll_outbox_payload(
+            chat_id=chat_id,
+            question=question,
+            options=options,
+            reply_to=reply_to,
+            session_id=session_id,
+        )
+        queue_key = f"telegram:outbox:{session_id}"
+        try:
+            r = self._get_redis()
+            r.rpush(queue_key, json.dumps(payload))
+            r.expire(queue_key, self.OUTBOX_TTL)
+            logger.info(
+                "Queued poll to %s (%d options, poll_id_hint=%s)",
+                queue_key,
+                len(options),
+                payload["poll_id_hint"],
+            )
+            return DeliveryOutcome.sent
+        except Exception as e:
+            logger.error("Failed to write poll to Redis outbox %s: %s", queue_key, e)
+            raise
 
     def _rtr_queue_reaction(
         self,

@@ -203,3 +203,143 @@ class TestExistingRouting:
             max_nudge_count=MAX_NUDGE_COUNT,
         )
         assert action == "deliver"
+
+
+class TestOpenQuestionPause:
+    """Issue #2701: a session that has already asked the human must wait.
+
+    Guards a defect wider than the poll feature. The eng+sdlc ``nudge_continue``
+    line is unconditional and sits ahead of every ``stop_reason`` branch, so an
+    sdlc eng session that poses a question — as a Telegram poll *or* as plain
+    prose — is auto-nudged past it and proceeds on a guess. Owner decision 7b
+    (see ``docs/plans/ask-me-telegram-polls.md``).
+    """
+
+    @staticmethod
+    def _sdlc(**overrides):
+        kwargs = {
+            "msg": "Which approach should I take?",
+            "stop_reason": "end_turn",
+            "auto_continue_count": 0,
+            "max_nudge_count": MAX_NUDGE_COUNT,
+            "session_type": "eng",
+            "classification_type": "sdlc",
+        }
+        kwargs.update(overrides)
+        return determine_delivery_action(**kwargs)
+
+    def test_open_question_pauses_instead_of_nudging(self):
+        assert self._sdlc(has_open_question=True) == "pause_open_question"
+
+    def test_no_open_question_still_nudges_continue(self):
+        """The blast-radius assertion: the default leaves the nudge loop alone."""
+        assert self._sdlc(has_open_question=False) == "nudge_continue"
+
+    def test_default_is_false(self):
+        """Omitting the keyword entirely must behave exactly as before."""
+        assert self._sdlc() == "nudge_continue"
+
+    def test_non_sdlc_session_unaffected_by_default(self):
+        action = determine_delivery_action(
+            msg="Here is the answer.",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert action == "deliver"
+
+    # --- Placement: every earlier guard still wins over the new branch -------
+    # The pause branch sits after the terminal / completion-sent / compaction /
+    # watchdog / rate-limit / empty-output / cap guards and before the eng+sdlc
+    # line. A session that is dying, wedged, rate-limited or capped must take
+    # its own path even while holding an open question.
+
+    @pytest.mark.parametrize(
+        "overrides,expected",
+        [
+            ({"session_status": "completed"}, "deliver_already_completed"),
+            ({"completion_sent": True}, "drop"),
+            ({"watchdog_unhealthy": "stuck"}, "deliver"),
+            ({"stop_reason": "rate_limited"}, "nudge_rate_limited"),
+            ({"msg": ""}, "nudge_empty"),
+            ({"auto_continue_count": MAX_NUDGE_COUNT}, "deliver"),
+        ],
+    )
+    def test_earlier_guards_win_over_pause(self, overrides, expected):
+        assert self._sdlc(has_open_question=True, **overrides) == expected
+
+    def test_post_compaction_guard_wins_over_pause(self):
+        import time
+
+        action = self._sdlc(has_open_question=True, last_compaction_ts=time.time())
+        assert action == "defer_post_compact"
+
+    def test_waiting_for_children_wins_over_pause(self):
+        """#1004's semaphore release must not be blocked by an open question."""
+        action = self._sdlc(has_open_question=True, session_status="waiting_for_children")
+        assert action == "deliver"
+
+    def test_router_performs_no_io(self):
+        """The decision function stays pure — the caller does the registry read.
+
+        Checked over the AST rather than the raw text: the module's docstrings
+        legitimately *name* the registry read as the caller's job, and a
+        substring grep cannot tell prose from an import.
+        """
+        import ast
+        import inspect
+
+        import agent.output_router as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        imported: set[str] = set()
+        called: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Call):
+                func = node.func
+                name = getattr(func, "id", None) or getattr(func, "attr", None)
+                if name:
+                    called.add(name)
+
+        forbidden_modules = {"bridge.poll_registry", "popoto.redis_db", "redis"}
+        assert not (imported & forbidden_modules), (
+            f"output_router imports {imported & forbidden_modules} — the decision "
+            "function must stay pure; the executor performs the read and passes "
+            "has_open_question in"
+        )
+        assert "session_has_open_poll" not in called, (
+            "output_router calls session_has_open_poll — that read belongs to the "
+            "executor, not the decision function"
+        )
+
+
+class TestRouteSessionOutputThreadsOpenQuestion:
+    def test_keyword_reaches_the_decision_function(self):
+        from agent.output_router import route_session_output
+
+        action, _cap = route_session_output(
+            msg="Which approach?",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            session_type="eng",
+            classification_type="sdlc",
+            has_open_question=True,
+        )
+        assert action == "pause_open_question"
+
+    def test_default_preserves_nudge_continue(self):
+        from agent.output_router import route_session_output
+
+        action, _cap = route_session_output(
+            msg="Which approach?",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            session_type="eng",
+            classification_type="sdlc",
+        )
+        assert action == "nudge_continue"

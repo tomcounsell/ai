@@ -348,6 +348,39 @@ def _valor_reacted(message) -> bool:
         return False
 
 
+def _poll_transcript_text(message) -> str:
+    """Render an outbound poll as its question and options for the transcript.
+
+    An outbound poll carries no ``text``, so without this the transcript shows a
+    bare ``"Valor: "`` line and the catchup judge sees a blank utterance where
+    the question should be — then re-asks a question already on screen.
+    ``sweep_chat``'s empty-text skip would drop it entirely.
+
+    Deliberately narrow (#2701 spike-4): ``_has_valor_reply_after`` is position
+    and ``is_valor`` based and never inspects text, so it ALREADY suppresses the
+    recovery enqueue correctly for a text-less poll. Only rendering changes.
+    """
+    try:
+        from telethon.tl.types import MessageMediaPoll
+
+        media = getattr(message, "media", None)
+        if not isinstance(media, MessageMediaPoll):
+            return ""
+        poll = getattr(media, "poll", None)
+        if poll is None:
+            return ""
+        question = getattr(getattr(poll, "question", None), "text", "") or ""
+        options = [
+            getattr(getattr(a, "text", None), "text", "") or ""
+            for a in (getattr(poll, "answers", None) or [])
+        ]
+        from agent.output_handler import render_poll_as_text
+
+        return render_poll_as_text(question, options)
+    except Exception:  # noqa: BLE001 — transcript rendering is best-effort
+        return ""
+
+
 async def read_thread(client, entity, lookback: timedelta | None = None) -> list[ThreadMessage]:
     """Read the recent thread for a chat INCLUDING Valor's own ``out`` replies.
 
@@ -367,7 +400,7 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
     for m in raw:
         if m.date < cutoff:
             break  # get_messages returns newest-first; older than cutoff → stop.
-        text = m.text or ""
+        text = m.text or "" or _poll_transcript_text(m)
         is_valor = bool(m.out)
         sender_name = _SENDER_VALOR
         sender_id = None

@@ -622,6 +622,33 @@ def create_app() -> FastAPI:
         except Exception:
             return {"status": "error", "logged_in": False, "auth_method": None}
 
+    def _get_poll_reconcile_health() -> dict:
+        """Liveness of the poll vote reconciliation loop (#2701).
+
+        The loop is the PRIMARY inbound mechanism for poll answers, and its
+        failure mode is invisible in the chat: a tap produces no Telegram
+        message, so if the loop dies every question simply goes unanswered and
+        every asking agent stays blocked with nothing to notice.
+
+        Its own ``poll_expired_unanswered`` warning cannot cover this — that is
+        emitted from *inside* the loop's scan, so if the loop is what died the
+        signal cannot fire. A detector that lives inside the thing it detects is
+        not a detector. Hence this external read of the heartbeat the loop
+        stamps every tick, mirroring the email-bridge heartbeat check above.
+
+        An absent heartbeat is "degraded", not "error": the loop is only
+        expected to be running where the bridge is.
+        """
+        try:
+            from bridge.poll_reconcile import heartbeat_age_s
+
+            age = heartbeat_age_s()
+        except Exception:
+            return {"status": "unknown", "age_s": None}
+        if age is None:
+            return {"status": "degraded", "age_s": None}
+        return {"status": "ok", "age_s": int(age)}
+
     def _get_email_health() -> dict:
         """Check email bridge health: process liveness first, then Redis heartbeat age.
 
@@ -924,6 +951,7 @@ def create_app() -> FastAPI:
         worker = _get_worker_health()
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
+        poll_reconcile = _get_poll_reconcile_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
         catchup = _get_catchup_health()
@@ -977,6 +1005,8 @@ def create_app() -> FastAPI:
                     "email_last_seen_s": email["age_s"],
                     "email_alert": email.get("alert"),
                     "email_alert_detail": email.get("alert_detail"),
+                    "poll_reconcile": poll_reconcile["status"],
+                    "poll_reconcile_last_seen_s": poll_reconcile["age_s"],
                     "claude_auth": claude_auth["status"],
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
@@ -1021,6 +1051,7 @@ def create_app() -> FastAPI:
         worker = _get_worker_health()
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
+        poll_reconcile = _get_poll_reconcile_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
         catchup = _get_catchup_health()
@@ -1053,6 +1084,8 @@ def create_app() -> FastAPI:
                 "email_last_seen_s": email["age_s"],
                 "email_alert": email.get("alert"),
                 "email_alert_detail": email.get("alert_detail"),
+                "poll_reconcile": poll_reconcile["status"],
+                "poll_reconcile_last_seen_s": poll_reconcile["age_s"],
                 "claude_auth": claude_auth["status"],
                 "claude_auth_logged_in": claude_auth["logged_in"],
                 "claude_auth_method": claude_auth["auth_method"],

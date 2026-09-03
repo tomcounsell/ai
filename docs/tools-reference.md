@@ -211,6 +211,35 @@ valor-telegram send --chat "Dev: Valor" "Reading the docs now, will come back wi
 
 See `docs/features/promise-gate.md` for the full architecture (LLM-first with regex fail-closed-only fallback, two-channel telemetry, mixed `session_id` provenance per CLI, latency budget, failure modes).
 
+### Ask as a Poll (`valor-ask-poll`)
+
+Ask a blocked agent's question as a **native Telegram poll**, so the human unblocks it with one tap
+instead of composing prose. Invoked by `/ask-me` on the headless bridge branch; see
+[Telegram Poll Questions](features/telegram-poll-questions.md).
+
+```bash
+valor-ask-poll \
+  --question "Which approach should the retry path take?" \
+  --option "Exponential backoff with a cap (Recommended)" \
+  --option "Fixed 5s interval, fail after 3"
+```
+
+- **Put the recommended option first.** The literal final option
+  `Other: wait for followup message` is appended automatically (and de-duplicated and moved last if
+  you supply it yourself).
+- Limits: 2–10 options, each ≤ 100 chars; question ≤ 300 chars.
+- Reads `TELEGRAM_CHAT_ID`, `VALOR_SESSION_ID` and `TELEGRAM_REPLY_TO` from the environment. There
+  is no chat-id or message-id flag — a flag would let an agent pass a stale id. A missing
+  `TELEGRAM_CHAT_ID` or `VALOR_SESSION_ID` exits non-zero rather than degrading under a misleading
+  reason.
+- **Degrades to numbered prose** on every surface that cannot take a poll: a 1:1 DM, a `teammate`
+  session, email, local, system. You never branch on the surface yourself — always call this, and it
+  degrades and logs the reason.
+
+**It does not end the turn.** `/ask-me` must invoke `AskUserQuestion` as its final act afterwards;
+the `needs_human` edge only fires on a `PreToolUse` match against that tool name, and this CLI's
+invocation has tool name `Bash`.
+
 ### TTS (`tools.tts`)
 
 Dual-backend text-to-speech producing OGG/Opus audio. Kokoro ONNX is the

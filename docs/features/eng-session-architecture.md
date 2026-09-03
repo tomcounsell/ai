@@ -267,6 +267,31 @@ The Eng session owns all SDLC intelligence. The bridge just keeps it working.
 4. **Safety cap** -> deliver regardless (50 nudges for work sessions, 10 for Teammate sessions)
 5. **Already-completed session** -> deliver without nudge
 
+### `pause_open_question` -- the nudge loop stops re-enqueuing an asker
+
+`determine_delivery_action()` (`agent/output_router.py`) returns `"nudge_continue"` unconditionally
+for an eng session doing SDLC work, ahead of every `stop_reason` branch. On its own that line cannot
+distinguish "stopped because it's blocked on a question" from any other non-completion stop, so an
+sdlc eng session posing *any* question -- poll or plain prose -- would be nudged past it and proceed
+on a guess.
+
+A `"pause_open_question"` branch sits immediately ahead of that `nudge_continue` line, gated by
+a `has_open_question: bool = False` keyword threaded through `determine_delivery_action()` and
+`route_session_output()`. The executor (`agent/session_executor.py`) fills it by calling
+`bridge.poll_registry.session_has_open_poll(session_id)` -- a thread-offloaded, fail-quiet read of
+the poll registry's existing unanswered-row index. **No new state**: the branch reads what the poll
+registry already writes for [Telegram Poll Questions](telegram-poll-questions.md); it introduces no
+tracking of its own.
+
+Placement is load-bearing: it sits *after* the terminal-status, `completion_sent`, post-compaction,
+watchdog, rate-limit, empty-output and nudge-cap guards (a session that is dying, wedged,
+rate-limited or capped must still take those paths) and *before* the eng+sdlc `nudge_continue` line,
+which is the only thing it overrides.
+
+The default (`False`) bounds the blast radius: every session with no outstanding poll -- which is
+every session today, and every eng session outside a machine-owned group tomorrow -- keeps today's
+behavior unchanged.
+
 ### Key Constants
 - `MAX_NUDGE_COUNT = 50` -- safety cap
 - `NUDGE_MESSAGE` -- the single nudge text

@@ -162,6 +162,12 @@ relay drops reaction payloads with a falsy `emoji`; both writes are fail-silent.
 5. Deliver replies via Telegram when callbacks fire
 6. Run `KnowledgeWatcher` for work-vault file change monitoring
 7. Run message catchup scan and reconciler on startup
+7a. Run the poll vote path for [Telegram Poll Questions](telegram-poll-questions.md): an
+   `@client.on(events.Raw)` handler (the repo's first) filtering `UpdateMessagePoll` for a
+   low-latency fast path, and `bridge.poll_reconcile.poll_reconcile_loop(client)` — started
+   alongside `relay_loop` — as the primary, restart-surviving inbound mechanism. Both call the same
+   idempotent `bridge.poll_vote.translate_poll_vote`. The loop also writes the
+   `telegram:poll:reconcile:heartbeat` liveness key.
 8. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector)):
    - `bridge:last_update_received` — written by the `NewMessage` handler before dedup. This is a *traffic* signal: its silence is equally consistent with a wedged update loop and with nobody having sent anything, so on its own it is never a verdict
    - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect

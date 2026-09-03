@@ -6,6 +6,8 @@ allowed-tools: Read, Grep, Glob, Bash, AskUserQuestion
 
 # Skill: /ask-me
 
+If `.claude/skill-context/ask-me.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
 ## Purpose
 You have just done deep work — research, investigation, a planning pass — and surfaced a pile of context and open questions. The user was NOT there for that work and does not share your context. This skill interviews them to get you unblocked: **one open question at a time, carrying only the context that actually matters into each question.**
 
@@ -44,10 +46,10 @@ Your job is to correctly judge, per question, which case you're in.
 
    **State your key assumption inside the question.** Whatever model you built the question on — an architecture, a cost, a constraint — name it in one clause so a wrong assumption gets corrected instead of silently answered. You did deep work the user didn't; your framing can be off, and a compact "under X, ..." lets them catch it in one reply rather than answering the wrong question. Cheap insurance; never skip it.
 
-5. **Ask one question at a time via `AskUserQuestion`.** One question per call. Wait for the answer before composing the next — later questions should adapt to what you just learned.
+5. **Prefer one question at a time via `AskUserQuestion`.** One question per call is the default and the right shape almost always: wait for the answer before composing the next, because later questions should adapt to what you just learned.
    - Frame it as an **open** question. Offer 2–4 options only as concrete illustrations of the space, put your recommendation first labeled `(Recommended)` when you have one, and rely on the user's "Other" to capture the answer you didn't anticipate. You are seeking their direction, not railroading them into your menu.
    - Keep the question text tight: the minimum context needed to answer well, and no dump of everything you know. If a fact isn't needed to choose, leave it out.
-   - Never batch your whole blocker list into one multi-question call. The point is a conversation that adapts, not a form.
+   - Asking separately is acceptable only when the questions are **genuinely independent** — neither answer can change the other's framing or make it moot. If answering one could reshape the next, you do not have independent questions, you have a sequence: ask the first and wait. The point is a conversation that adapts, not a form.
 
 6. **Adapt as you go.** After each answer, re-check your remaining list. A north-star answer often makes two downstream detail-questions moot — drop them. If an answer opens a new fork, add it.
 
@@ -62,6 +64,6 @@ A short synthesis of the direction you extracted (the north-star + any load-bear
 - **False precision.** Dragging the user into an implementation choice when a one-line steer would do. Prefer the north-star.
 - **Unstated assumption.** Building the question on your own model (an architecture, a cost, a constraint) without naming it — so a wrong premise gets answered instead of corrected. State the "under X, ..." in the question.
 - **Asking for a rule an intelligent actor should form itself.** Requesting a hard classification/tie-break heuristic when the executor is a capable agent. Ask for the guiding principle and trust its discernment.
-- **Questionnaire mode.** Firing all questions at once, or not adapting later questions to earlier answers.
+- **Questionnaire mode.** Firing your whole blocker list at once, or not adapting later questions to earlier answers. The one-at-a-time rule is a preference rather than a hard prohibition, but the reason behind it has not changed: a batch cannot adapt, so a batch of questions that were not genuinely independent wastes the user's time answering ones your own earlier answer would have deleted.
 - **Asking what you could find.** Any question answerable by reading the repo, docs, or history is a bug in your prep, not a question for the user.
 - **Interviewing for reversible trivia.** If it's low-stakes and undoable, decide it yourself and note it.

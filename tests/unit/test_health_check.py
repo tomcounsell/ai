@@ -462,3 +462,61 @@ class TestJudgePromptEnrichment:
             session_context="",
         )
         assert "Recent activity" in formatted
+
+
+class TestPollReconcileHeartbeat:
+    """#2701: external liveness for the poll vote reconciliation loop.
+
+    The loop is the PRIMARY inbound mechanism for poll answers, and its failure
+    mode is invisible in the chat — a tap produces no Telegram message, so a dead
+    loop presents only as agents silently staying blocked. Its own
+    `poll_expired_unanswered` warning cannot cover this: that is emitted from
+    inside the loop's own scan, so if the loop is what died the signal cannot
+    fire. Hence a read from OUTSIDE the loop.
+    """
+
+    def test_absent_heartbeat_reads_as_degraded(self, redis_test_db):
+        from bridge.poll_reconcile import heartbeat_age_s
+        from bridge.poll_registry import RECONCILE_HEARTBEAT_KEY, _redis
+
+        _redis().delete(RECONCILE_HEARTBEAT_KEY)
+        assert heartbeat_age_s() is None
+
+    def test_present_heartbeat_reads_back_a_fresh_age(self, redis_test_db):
+        from bridge.poll_reconcile import heartbeat_age_s, write_heartbeat
+        from bridge.poll_registry import RECONCILE_HEARTBEAT_KEY, _redis
+
+        try:
+            write_heartbeat()
+            age = heartbeat_age_s()
+            assert age is not None
+            assert 0 <= age < 60
+        finally:
+            _redis().delete(RECONCILE_HEARTBEAT_KEY)
+
+    def test_heartbeat_carries_a_ttl_so_a_dead_loop_goes_stale(self, redis_test_db):
+        """Without a TTL the last heartbeat would look fresh forever."""
+        from bridge.poll_reconcile import write_heartbeat
+        from bridge.poll_registry import RECONCILE_HEARTBEAT_KEY, _redis
+
+        try:
+            write_heartbeat()
+            assert _redis().ttl(RECONCILE_HEARTBEAT_KEY) > 0
+        finally:
+            _redis().delete(RECONCILE_HEARTBEAT_KEY)
+
+    def test_ttl_is_two_slow_intervals(self, redis_test_db):
+        """One missed tick must not be a false alarm; two must surface."""
+        from bridge.poll_registry import (
+            POLL_RECONCILE_HEARTBEAT_TTL_S,
+            POLL_RECONCILE_SLOW_INTERVAL_S,
+        )
+
+        assert POLL_RECONCILE_HEARTBEAT_TTL_S == POLL_RECONCILE_SLOW_INTERVAL_S * 2
+
+    def test_the_read_site_is_outside_the_loop_module(self):
+        """A detector inside the thing it detects is not a detector."""
+        from pathlib import Path
+
+        app = Path(__file__).resolve().parents[2] / "ui" / "app.py"
+        assert "poll_reconcile" in app.read_text()
