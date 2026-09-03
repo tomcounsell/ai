@@ -986,3 +986,24 @@ class TestRecordVerificationOutcomes:
         assert record_verification_outcomes(None, None, self._results()) is False
         assert read_verification_outcomes(None, None) is None
         assert read_verification_outcomes(self.REPO, 927381) is None
+
+
+class TestExpectationAnchoringRule:
+    """Pre-existing forms keep prefix semantics; the forms added by #3065 are
+    anchored. A sweep of docs/plans/ found eleven live rows writing a trailing
+    gloss on `exit code N` / `output > N`; anchoring those would have turned
+    working rows into blocking UNEVALUATED for a change nobody asked for."""
+
+    def test_trailing_gloss_on_a_preexisting_form_still_grades(self):
+        assert (
+            evaluate_expectation("exit code 0 (verified 2026-09-02)", exit_code=0, output="")
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output > 0 (a bare grep returns 3)", exit_code=0, output="3")
+            is PASS
+        )
+
+    def test_trailing_gloss_on_a_new_bare_form_is_unevaluated(self):
+        for cell in ("== 2 (the two read sites)", ">= 1 nightly", "> 0 or so", "exit 0 maybe"):
+            assert evaluate_expectation(cell, exit_code=0, output="2") is UNEVALUATED

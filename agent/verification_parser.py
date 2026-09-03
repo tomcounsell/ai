@@ -117,6 +117,15 @@ DEFAULT_TIMEOUT_S = 120
 # key in an already-flexible JSON blob: no schema field, no migration.
 VERIFICATION_OUTCOMES_KEY = "_verification_outcomes"
 
+# Named refusal reason for a `_verification_outcomes` aggregate whose stamped
+# `head_sha` does not match the PR's current head (task 8, #3065). Defined
+# here -- where the aggregate is written and stamped -- rather than in
+# `tools/merge_predicate.py`, which reads it: a Verification row greps for
+# the constant *name*, matching how `reconcile_dispatch`, `decision_inputs`,
+# `resolve_branch_truth`, and `G3_REDIRECT_REASON_DOCS_PENDING` are already
+# pinned. Never read the prose; grep the symbol.
+VERIFICATION_OUTCOMES_STALE_REASON = "verification outcome predates PR head commit"
+
 
 class CheckOutcome(StrEnum):
     """The three things a verification check can say.
@@ -491,6 +500,18 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
     The inverse ``exit code != N`` branch is checked BEFORE the positive ``exit code N``
     branch, and ``output does not contain X`` is checked BEFORE ``output contains X``,
     so the inverse forms are always matched first and never captured by positive matchers.
+
+    **Anchoring rule.** The pre-existing forms (``exit code N``, ``output > N``,
+    ``output contains X``) stay prefix-matched, because a trailing gloss on
+    them -- ``exit code 0 (verified 2026-09-02 ...)`` -- is an established
+    authoring idiom in this repo's live plans and anchoring would turn eleven
+    working rows into blocking ``UNEVALUATED`` for a change nobody asked for.
+    The forms added here (``exit N``, ``prints `N```, ``>= N``, ``> N``,
+    ``== N``, ``empty output``) are **anchored**: a bare comparator followed by
+    prose is easy to write by accident, and grading a sentence as if it were a
+    number is exactly the guess this module exists to stop making. An anchored
+    form that does not match reports ``UNEVALUATED`` naming the cell, which
+    tells the author what to fix.
     """
     if expected is None or not expected.strip():
         # An empty cell is not a failed check; it is an ungraded one.
@@ -540,8 +561,17 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
 
     # --- positive forms ---
 
-    # exit code N / exit N  (positive exact-match: passes when exit_code == N)
-    m = re.match(r"exit(?: code)?\s+(\d+)\s*$", expected)
+    # exit code N  (positive exact-match: passes when exit_code == N). Left
+    # prefix-matched: `exit code 0 (verified 2026-09-02 to return exactly one
+    # EnvCall today)` is an established authoring idiom in live plans, and
+    # anchoring it here would turn eleven working rows across docs/plans/ into
+    # blocking UNEVALUATED for a change nobody asked for.
+    m = re.match(r"exit code (\d+)", expected)
+    if m:
+        return verdict(exit_code == int(m.group(1)))
+
+    # exit N  (anchored, see the note below)
+    m = re.match(r"exit\s+(\d+)\s*$", expected)
     if m:
         return verdict(exit_code == int(m.group(1)))
 
@@ -554,19 +584,27 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
     if m:
         return verdict(output.strip() == m.group(1).strip())
 
-    # output >= N / >= N
+    # output >= N / >= N  (anchored, see the note below)
     m = re.match(r"(?:output\s*)?>=\s*(\d+)\s*$", expected)
     if m:
         threshold = int(m.group(1))
         return numeric_verdict(lambda value: value >= threshold)
 
-    # output > N / > N
-    m = re.match(r"(?:output\s*)?>\s*(\d+)\s*$", expected)
+    # output > N -- prefix-matched, preserving the long-standing reading of
+    # `output > 0 (a bare file-wide grep returns 3 today)`, which several live
+    # plans write. The bare `> N` form below is anchored instead.
+    m = re.match(r"output\s*>\s*(\d+)", expected)
     if m:
         threshold = int(m.group(1))
         return numeric_verdict(lambda value: value > threshold)
 
-    # output == N / == N
+    # > N  (anchored, see the note below)
+    m = re.match(r">\s*(\d+)\s*$", expected)
+    if m:
+        threshold = int(m.group(1))
+        return numeric_verdict(lambda value: value > threshold)
+
+    # output == N / == N  (anchored, see the note below)
     m = re.match(r"(?:output\s*)?==\s*(\d+)\s*$", expected)
     if m:
         target = int(m.group(1))
