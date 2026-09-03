@@ -512,29 +512,257 @@ is what unwedges lanes today. Recorded in No-Gos with an issue.
 
 ## Failure Path Test Strategy
 
-[skeleton]
+Every gate this plan touches is a gate that was *already* reporting a confident verdict it had not
+earned, so #2658's demonstrated-red rule is not a formality here: **no gate change in this plan
+counts as done until a test shows it firing red on a case it previously passed.** Spike-5 supplies
+the red starting points from observed behavior rather than constructed ones.
+
+### Exception Handling Coverage
+
+- [ ] `agent/verification_parser.py:433-442` — the bare `except Exception` that turns any runner
+      failure into `passed=False`. After the tri-state lands it must produce `UNEVALUATED` with the
+      exception's reason attached; test asserts the reason is observable, not just the status.
+- [ ] `tools/sdlc_next_skill.py:377-387` — `_verify_stage_artifacts` catches
+      `TimeoutExpired`/`SubprocessError`/`OSError` and falls open (returns verified). That is the
+      correct direction, but it is currently indistinguishable in the output from a genuine
+      verification. Test asserts the *indeterminate* case is reported as indeterminate and that G8
+      steps aside on it rather than dispatching.
+- [ ] `tools/sdlc_session_ensure.py:618` — the readback `except` path releases the lock. Test
+      asserts an adopted candidate is **not** released when the readback itself errors.
+- [ ] `agent/sdlc_router.py:2260-2263` — rule predicates are wrapped in try/except and a raising
+      predicate is silently skipped, while guards at `1083-1086` have no wrapper and propagate.
+      The reconciliation step must not change this asymmetry silently; test asserts a raising guard
+      during reconciliation surfaces rather than being swallowed into a `NO_RULE`.
+
+### Empty/Invalid Input Handling
+
+- [ ] `evaluate_expectation` with an empty expectation cell, a whitespace-only cell, and `None` —
+      each must be `UNEVALUATED`, never `FAIL`, and never `PASS`.
+- [ ] A command cell containing no backticked span at all, and one containing two — the first
+      yields `UNEVALUATED` (nothing to run); the second takes the first span and records that it
+      did.
+- [ ] `resolve_lane_slug` / branch truth with: no recorded slug, no PR number, a PR whose head
+      resolves to zero branches (merged-and-deleted), and to two-or-more branches. The last two must
+      both be *indeterminate*, matching `_adopt_from_pr`'s existing ambiguity discipline, and
+      neither may trigger a repair write.
+- [ ] `decide_next_dispatch` called with `context=None` and with `context={}` — the
+      `agent/session_runner/runner.py:1408` shape. Reconciliation must behave identically to the CLI
+      path for the facts it can read, and must not silently no-op just because the caller passed no
+      context.
+
+### Error State Rendering
+
+- [ ] `format_results` renders `UNEVALUATED` as its own token with its reason, never as `[FAIL]`.
+      Test asserts the string `[FAIL]` does not appear for a timed-out or unparseable row.
+- [ ] `Blocked(NO_RULE)` output carries the `stage_states` and `meta` it decided on, and that
+      payload survives to the CLI's JSON output where a supervisor can read it. This is the
+      finding-4 lesson: the failure to test was a failure to *report*.
+- [ ] The merge predicate's refusal on a `FAIL`/`UNEVALUATED` verification row names which row and
+      why, rather than returning a bare false.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_verification_parser.py::test_unknown_expectation_returns_false` — REPLACE: currently asserts the silent `False` fall-through as *intended* behavior. It must assert a distinct malformed-expectation outcome instead.
-- [ ] `tests/unit/test_sdlc_router.py` — UPDATE: guard and routing-table assertions for G3, G8, and row 2b change shape as those predicates gain ground-truth reads.
-- [ ] `tests/unit/test_validate_build.py` — UPDATE: the `runner_agreement.md` parity fixture gains a timeout row, which the two runners currently disagree on.
+- [ ] `tests/unit/test_verification_parser.py::test_unknown_expectation_returns_false` (`:210`) —
+      **REPLACE**: it currently asserts the silent `False` fall-through as *intended* behavior, so it
+      is a test that pins the bug. It must assert `UNEVALUATED` with a reason instead.
+- [ ] `tests/unit/test_verification_parser.py::TestInverseExpectations` (~`:224-388`) — **UPDATE**:
+      the six existing forms keep their semantics, but assertions written against a boolean return
+      migrate to the tri-state.
+- [ ] `tests/unit/test_verification_parser.py::TestPipesInCommands` (~`:397-490`) — **UPDATE**:
+      command extraction changes from `strip("\`")` to first-backticked-span, which these cases
+      exercise directly.
+- [ ] `tests/unit/test_verification_parser.py::TestPerBlockTableScoping` (~`:519-580`) — **UPDATE**:
+      scoping is correct and stays; classification changes underneath it, so the fixtures need a
+      non-check table added to prove the new `SkippedTable` diagnostic.
+- [ ] `tests/fixtures/verification/runner_agreement.md` — **UPDATE**: gains a timeout row and a
+      malformed-expectation row. This fixture asserts per-check parity between the two runners and
+      currently cannot catch their FAIL-vs-SKIP divergence because it contains neither shape.
+- [ ] `tests/unit/test_validate_build.py` — **UPDATE**: `check_verification_table`'s 30s bound and
+      `SKIP` disposition converge on the canonical runner's; assertions pinning either change.
+- [ ] `tests/unit/test_validate_verification_section.py` — **UPDATE**: section-level assertions that
+      count passes/failures gain the third outcome.
+- [ ] `tests/unit/test_sdlc_router.py` — **UPDATE**: G3's ladder gains an arm and its arm-1
+      condition tightens; the reconciliation step changes which dispatch several existing scenarios
+      produce. Tests added by `bfa4a6f7d`, `d9cf29dd6`, and `3c689f211` must all still pass
+      unchanged — they are the regression floor for the three in-batch hotfixes.
+- [ ] `tests/unit/test_sdlc_verdict.py` — **UPDATE**: verdict-staleness assertions interact with the
+      reconciliation path.
+- [ ] No existing test covers an em-dash/trailing-prose command cell, `run_checks` timeout handling,
+      the #3022 header shape, `session-ensure` readback under duplicate rows, or a `NO_RULE`
+      payload's contents. Those are **new** tests, not updates, and each starts from a
+      demonstrated-red case established in spike-5.
 
 ## Rabbit Holes
 
-[skeleton]
+- **Rewriting the routing table.** Twenty-plus rows with hand-tuned ordering and an ordering comment
+  on each. The reconciliation step exists specifically so that Cluster A is fixed *without*
+  reordering or re-deriving rows, and row 2b is constrained from outside for the same reason.
+  Touching the ordering invites regressions in lane shapes nobody in this lane has evidence about.
+- **Deriving crashed-stage rows once, from the stage model.** Genuinely appealing: rows 2c, 8g and
+  the crashed-PLAN fix are three instances of one pattern discovered three times at production
+  expense. But the stage model is exactly what #2491 found duplicated 7 times with drift, so a
+  general derivation would need the single-source work first. Note it and leave it.
+- **Fixing the pipeline-graph duplication (#2491).** Seven hardcoded duplicates, ~30 prose
+  restatements, 4 disagreeing tables. It is real, it is in the closed set, and it is a lane of its
+  own. This plan imports from `agent/pipeline_graph.py` where it needs the stage model and adds no
+  new restatement, which is the most it can honestly do without becoming that lane.
+- **A general plan-declared merge-gate DSL.** Rejected on the merits in Technical Approach. The
+  tempting version is a small frontmatter key that grows into a fourth plan grammar.
+- **Making `session_id` unique.** Correct instinct, wrong lane — it is a session-lifecycle change
+  with its own blast radius. Deferred to #3091.
+- **Auditing all 51 closed issues for other unfixed members.** Two were found unfixed (#2791,
+  #3022) while checking this plan's own scope, which is a reason to suspect more. It is also an
+  unbounded excavation that would swallow the lane. The four re-checked here are re-checked because
+  the residual findings pointed at them.
 
 ## Risks
 
-[skeleton]
+### Risk 1: Reconciliation changes a routing answer some lane depends on
+
+**Impact:** The router is the component every concurrent lane passes through. A wrong redirect does
+not break one feature, it wedges every in-flight lane at once — and the observed failure mode is a
+*silent* wedge that looks like slow progress until `same_stage_dispatch_count` hits the G4 cap.
+**Mitigation:** reconciliation only ever *withholds* a dispatch the guards would already have
+refused as a proposal; it can never invent a dispatch the current code would not produce, because
+the redirect targets come from G3's existing ladder. The three hotfix test suites
+(`bfa4a6f7d`, `d9cf29dd6`, `3c689f211`) are the regression floor and must pass unchanged. Every new
+routing behavior gets a two-pole test: the state that must dispatch, and the state that must not.
+
+### Risk 2: The bounded reconciliation pass turns a soft wedge into a hard block
+
+**Impact:** Failing closed on a second veto converts lanes that today limp toward a G4 cap into
+lanes that stop immediately with `Blocked`. If the veto logic is wrong, that is a faster, louder
+failure than the status quo.
+**Mitigation:** this is the intended trade and it is why the `Blocked` payload must carry both the
+selected row and the vetoing guard. A loud stop with evidence is recoverable in one read; the
+current silent oscillation cost two lanes a full manual unwedge each. The Cluster D evidence work is
+sequenced **before** reconciliation for exactly this reason.
+
+### Risk 3: Slug repair writes a wrong correction
+
+**Impact:** The recorded slug names the worktree, branch, and task list. A wrong repair is worse
+than a wrong original, because it moves a lane that was merely mislabelled.
+**Mitigation:** the repair fires only on a **unique** `git ls-remote --heads origin` match against a
+PR head resolved through `tools/pr_head_resolver.py::resolve_pr_head_sha` (never a bare `gh` read —
+#2895 is the incident where a stale `gh` head SHA flipped a staleness gate fail-open). Zero matches
+and two-or-more matches both leave the record untouched. The repair records its evidence, so a wrong
+one is auditable rather than silent.
+
+### Risk 4: Removing `passed: bool` breaks a reader outside the searched set
+
+**Impact:** A silent `AttributeError` in a gate is exactly the class of failure this plan exists to
+remove.
+**Mitigation:** removal rather than addition is deliberate (a lingering boolean would preserve the
+ambiguity), so the migration must be exhaustive: a repo-wide sweep for the attribute, with the
+absence of any remaining reader asserted as an anti-criterion in Verification. Per the sweep
+convention, the acceptance is a clean grep, not an enumerated site list.
+
+### Risk 5: `.claude/skills-global/do-sdlc/SKILL.md` is a hot shared file
+
+**Impact:** `wave4-hooks-guards-gates` also edits it, and skills-global files are hardlinked to
+`~/.claude/skills/` — a replace-and-rename write breaks the hardlink and leaves the live skill on
+pre-edit text.
+**Mitigation:** confine edits there to the smallest necessary passage, use `Edit` rather than
+whole-file `Write`, and coordinate ordering with the wave4 lane at merge. The PostToolUse relink
+hook repairs the hardlink, but the merge conflict is the real hazard, not the hardlink.
+
+### Risk 6: Two disjoint change sets reviewed as one PR
+
+**Impact:** Router decision logic and verification grammar want different reviewer attention; bundled,
+both get skimmed.
+**Mitigation:** the file sets are disjoint by construction and the lane is written to split into two
+sequential PRs. Raised in Open Questions rather than decided unilaterally.
+
+### Risk 7: The verification-runner change is graded by the verification runner
+
+**Impact:** This plan's own `## Verification` table is executed by the code it modifies. A change
+that broke the runner could report itself green.
+**Mitigation:** the runner's own correctness is asserted by `pytest`, not by this plan's verification
+table, and the anti-criteria rows are written to fail if the tri-state is absent. Any row whose
+truth depends on the modified evaluator is a row that proves nothing; the Verification section keeps
+those to direct `grep`/`pytest` assertions.
 
 ## Race Conditions
 
-[skeleton]
+### Race 1: Branch truth is a live remote read taken mid-push
+
+**Location:** the branch-truth resolver (new), replacing
+`tools/sdlc_next_skill.py:181-198, 323-361`.
+**Trigger:** a builder pushes the lane branch while `git ls-remote --heads origin` is in flight, or
+between the PR-head resolve and the listing.
+**Data prerequisite:** the PR head SHA and the remote branch listing must describe the same instant
+closely enough that a unique match is meaningful.
+**State prerequisite:** the lane has an open PR whose head is pushed.
+**Mitigation:** a stale *negative* is the dangerous direction, and it is handled by the three-valued
+answer: a listing that does not contain the head yields **indeterminate**, not *absent*, unless the
+lane has no PR at all. G8 may only fail closed on *absent*, so a mid-push read causes a deferral,
+never a spurious `/do-patch`. Slug repair additionally requires uniqueness, which a partial listing
+cannot manufacture.
+
+### Race 2: Two lanes repair the same ledger slug concurrently
+
+**Location:** the slug-repair write in `tools/lane_identity.py`.
+**Trigger:** a supervisor and a dev session both call the router for the same issue within the same
+window.
+**Data prerequisite:** both must have resolved the same unique branch, or the write is not
+attempted.
+**State prerequisite:** the recorded slug contradicts branch truth.
+**Mitigation:** the repair is idempotent by construction — both callers compute the same corrected
+value from the same ground truth, so a concurrent double-write converges. The existing
+`_record_slug_if_empty` no-overwrite path is *not* reused (it cannot overwrite, which is the bug);
+the repair path is separate and evidence-gated, and it must re-read the recorded value immediately
+before writing so a repair that another caller already applied becomes a no-op rather than a second
+write.
+
+### Race 3: `session-ensure` readback races a concurrent row write
+
+**Location:** `tools/sdlc_session_ensure.py:613-620`.
+**Trigger:** a second ensure, or a lifecycle transition, saves the same row between this call's save
+and its readback.
+**Data prerequisite:** the readback must observe the write this call made, not merely *a* write.
+**State prerequisite:** at least one other writer touching the same session.
+**Mitigation:** reading back by primary key removes the row-selection race entirely, which is the
+whole defect. A genuine value race (another writer overwrote `active_run_id` between save and
+readback) remains possible and is correctly a mismatch — but with provenance tracked, the mismatch
+path releases only a lock this call minted, so a losing race no longer destroys the winner's lease.
+
+### Race 4: Plan-document writes in the shared `main` checkout
+
+**Location:** `docs/plans/` in the shared checkout.
+**Trigger:** a concurrent lane runs `git pull --rebase`, autostashing this lane's uncommitted plan
+edits; #2650, reproduced during the 2026-09-02 batch when one lane's unscoped `git add` swept 225
+lines of another lane's in-progress plan into three of its own commits.
+**Data prerequisite:** none — the hazard is uncommitted state existing across an await.
+**State prerequisite:** more than one lane writing plans, which is the normal condition here.
+**Mitigation:** operational, and already in force for this plan: it is authored in a dedicated
+worktree rather than the shared checkout, staged path-scoped (never `git add -A`), and committed
+after every two or three sections so nothing sits dirty across a subagent or critique await.
 
 ## No-Gos (Out of Scope)
 
-[skeleton]
+- [SEPARATE-SLUG #3091] **Making `AgentSession` rows unique per `session_id`, or reconciling
+  duplicates.** This is the upstream cause of the `session-ensure` wedge; this plan makes the ensure
+  path correct *in the presence of* duplicates, which is what unwedges lanes today. Choosing between
+  prevent / reconcile / encode is a session-lifecycle decision with its own blast radius, filed with
+  full recon.
+- [SEPARATE-SLUG #2736] **PreToolUse Bash-hook guards that match text instead of command
+  structure.** Owned by the active `wave4-hooks-guards-gates` plan, including its BUILD
+  Task-capability gate (#2715). This plan touches no file under `.claude/hooks/validators/`.
+- [ORDERED] **Deploying the change to running services.** `./scripts/valor-service.sh restart`
+  cycles the bridge, watchdog, and worker, and `/update` propagates a merged ref to every machine.
+  Both are gated on the merge landing, and both are the `/do-deploy` and `/update` steps rather than
+  this lane's — restarting mid-lane would cycle services other in-flight lanes are using.
+- [EXTERNAL] **Repairing the two lanes (#2771, #2334) whose ledgers were hand-corrected during the
+  batch.** Both were already unwedged manually with head-SHA evidence and need no further action;
+  any remaining ledger archaeology is a judgement call for the operator who performed the repair,
+  not a code change.
+
+**This plan does not fully close #3065.** It closes the residual the 2026-09-02/03 batch left open,
+which is what it was scoped to. Members of the consolidated set that neither the three in-batch
+hotfixes nor this plan address — #2491's pipeline-graph duplication is the largest — remain
+un-actioned under the umbrella issue. The implementation PR should therefore use `Refs #3065`, not
+`Closes #3065`, and the decision about what closes the umbrella belongs to its owner. Raised in Open
+Questions.
 
 ## Update System
 
