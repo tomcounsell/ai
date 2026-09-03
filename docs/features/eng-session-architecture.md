@@ -292,6 +292,12 @@ The default (`False`) bounds the blast radius: every session with no outstanding
 every session today, and every eng session outside a machine-owned group tomorrow -- keeps today's
 behavior unchanged.
 
+The pause is released by an **answer**, and any inbound steering message counts as one: the registry
+row is closed on both the tap and the typed reply, so a session cannot be left paused on a question
+the human has already answered. The reverse -- unrelated chatter releasing the pause on a question
+still on screen -- is the deliberate trade, and the tap still routes afterwards. Mechanism and
+rationale: [Telegram Poll Questions](telegram-poll-questions.md).
+
 ### Key Constants
 - `MAX_NUDGE_COUNT = 50` -- safety cap
 - `NUDGE_MESSAGE` -- the single nudge text
