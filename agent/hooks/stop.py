@@ -144,7 +144,15 @@ async def _generate_draft(output_tail: str, session_id: str, medium: str) -> str
     try:
         from bridge.message_drafter import draft_message, format_violations
 
-        result = await draft_message(output_tail, medium=medium)
+        # use_llm=False is MANDATORY here (Risk 1a, #3027): this coroutine
+        # runs inline on the Stop hook's 10-second harness-wall critical
+        # path. An inline LLM round-trip on this exact path caused 126/131
+        # runs to be SIGKILLed (docs/features/memory-hook-performance.md);
+        # the documented fix was "detach, don't bound" — a timeout here
+        # would reproduce that incident, not fix it. This is also a
+        # review-gate draft presented back to the agent, not a delivered
+        # message, so the honesty gate has no delivery to guard on this path.
+        result = await draft_message(output_tail, medium=medium, use_llm=False)
         text = result.text if hasattr(result, "text") else str(result)
         # Surface validator violations in the draft presentation (plan §Part B).
         if getattr(result, "violations", None):

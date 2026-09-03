@@ -508,16 +508,24 @@ class TestCliCheckOrExit:
 
 class TestSDKTimeout:
     def test_timeout_falls_through_to_heuristic_with_timeout_source(self, tmp_path, monkeypatch):
+        """A real ``anthropic.APITimeoutError`` from the SDK call is its own
+        discriminator: the caller must fall through to the heuristic AND
+        audit it as ``source="promise_gate_timeout"`` — distinct from the
+        generic ``"promise_gate_heuristic"`` fallthrough (previous test in
+        this class), which fires when the LLM call fails for any OTHER
+        reason. Before the dead-code fix (bridge/promise_gate.py), this
+        distinction was unreachable: ``_PromiseTimeoutError`` was caught but
+        never raised, so every fallthrough — timeout or otherwise — audited
+        as ``"promise_gate_heuristic"``.
+        """
+        import httpx
+
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
 
         async def _timeout(text):
-            # Simulate the LLM helper returning None *because* of a timeout —
-            # this matches the behaviour of _evaluate_promise_async on
-            # APITimeoutError (returns None). The timeout discriminator is
-            # surfaced by the caller's _PromiseTimeout exception path; here
-            # we exercise the simpler "LLM returned None → heuristic" route.
-            return None
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            raise promise_gate.anthropic.APITimeoutError(request=request)
 
         with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_timeout):
             v = evaluate_promise(
@@ -525,12 +533,35 @@ class TestSDKTimeout:
                 transport="telegram",
                 session_id=None,
             )
-        # Heuristic catches the forward-deferral, and the audit log records
-        # one of the heuristic-source discriminators.
         assert v.action == "block"
         assert log_path.exists()
         contents = log_path.read_text()
-        assert "promise_gate_heuristic" in contents or "promise_gate_timeout" in contents
+        assert "promise_gate_timeout" in contents
+        assert "promise_gate_heuristic" not in contents
+
+    def test_llm_none_falls_through_to_heuristic_with_heuristic_source(self, tmp_path, monkeypatch):
+        """The generic "LLM returned None" fallthrough (no API key, parse
+        failure, non-timeout SDK exception already swallowed inside
+        ``_evaluate_promise_async``) audits as ``source="promise_gate_heuristic"``
+        — never ``"promise_gate_timeout"``, which is reserved for the actual
+        timeout discriminator (previous test)."""
+        log_path = tmp_path / "audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        async def _unavailable(text):
+            return None
+
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_unavailable):
+            v = evaluate_promise(
+                "I'll come back with thoughts",
+                transport="telegram",
+                session_id=None,
+            )
+        assert v.action == "block"
+        assert log_path.exists()
+        contents = log_path.read_text()
+        assert "promise_gate_heuristic" in contents
+        assert "promise_gate_timeout" not in contents
 
 
 # === Audit JSONL ordering / kill-switch first-write ===
