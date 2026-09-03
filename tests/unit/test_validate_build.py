@@ -10,6 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from agent.verification_parser import (
+    DEFAULT_TIMEOUT_S,
+    CheckOutcome,
     MalformedRow,
     ParsedTable,
     SkippedTable,
@@ -248,17 +250,70 @@ class TestCheckVerificationTable:
         assert len(results) == 1
         assert results[0]["status"] == "PASS"
 
-    def test_timeout_skips(self):
+    def test_timeout_is_unevaluated_not_skip(self):
+        """This module called a timeout `SKIP` at a 30s bound while the
+        canonical runner called it `FAIL` at 120s -- two runners, two verdicts
+        on the same event, and `SKIP` did not even block the exit code. Both
+        now say UNEVALUATED at the shared bound (#2901/#3065)."""
         check = VerificationCheck(name="slow cmd", command="sleep 60", expected="exit code 0")
         table = ParsedTable(checks=[check], malformed=[], skipped=[])
         with patch.object(
             subprocess,
             "run",
-            side_effect=subprocess.TimeoutExpired("sleep", 30),
+            side_effect=subprocess.TimeoutExpired("sleep", DEFAULT_TIMEOUT_S),
         ):
             results = validate_build.check_verification_table(table)
         assert len(results) == 1
-        assert results[0]["status"] == "SKIP"
+        assert results[0]["status"] == "UNEVALUATED"
+        assert "timed out" in results[0]["message"]
+
+    def test_the_execution_bound_is_the_shared_one(self):
+        """One bound, named once. A private ceiling here is how the two
+        runners drifted apart in the first place."""
+        recorded = {}
+
+        def capture(*args, **kwargs):
+            recorded["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired("cmd", kwargs.get("timeout", 0))
+
+        check = VerificationCheck(name="any", command="true", expected="exit code 0")
+        table = ParsedTable(checks=[check], malformed=[], skipped=[])
+        with patch.object(subprocess, "run", side_effect=capture):
+            validate_build.check_verification_table(table)
+        assert recorded["timeout"] == DEFAULT_TIMEOUT_S
+
+    def test_unrecognized_expectation_is_unevaluated_not_fail(self):
+        check = VerificationCheck(name="odd", command="echo ok", expected="ok")
+        table = ParsedTable(checks=[check], malformed=[], skipped=[])
+        results = validate_build.check_verification_table(table)
+        assert results[0]["status"] == "UNEVALUATED"
+        assert "unrecognized expectation form" in results[0]["message"]
+
+    def test_command_cell_with_no_backticked_span_is_never_executed(self):
+        table = parse_verification_table(
+            "## Verification\n\n| Check | Command | Expected |\n|--|--|--|\n"
+            "| Bare | echo hi | exit code 0 |\n"
+        )
+        with patch.object(subprocess, "run", side_effect=AssertionError("must not run")):
+            results = validate_build.check_verification_table(table)
+        assert results[0]["status"] == "UNEVALUATED"
+
+    def test_unevaluated_blocks_the_exit_code(self, tmp_path, capsys):
+        """SKIP was non-blocking, which is how an ungraded row reached green.
+        UNEVALUATED blocks."""
+        f = tmp_path / "unevaluated.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Verification
+
+            | Check | Command | Expected |
+            |-------|---------|----------|
+            | Odd expectation | `echo ok` | banana |
+        """)
+        )
+        with patch("sys.argv", ["validate_build.py", str(f)]):
+            assert validate_build.main() == 1
+        assert "UNEVALUATED" in capsys.readouterr().out
 
     def test_malformed_row_fails(self):
         table = ParsedTable(
@@ -426,7 +481,7 @@ class TestMainEdgeCases:
         vb_results = validate_build.check_verification_table(table)
         rc_results = run_checks([check])
         assert vb_results[0]["status"] == "PASS"
-        assert rc_results[0].passed is True
+        assert rc_results[0].outcome is CheckOutcome.PASS
 
 
 # ---------------------------------------------------------------------------
@@ -457,21 +512,31 @@ EXPECTED_PARSE_ONLY_SHAPES = {
 
 class TestCrossRunnerAgreement:
     def test_both_runners_agree_on_execution_fixture(self):
+        """Per-check parity, now including the two shapes on which the runners
+        genuinely disagreed and which the fixture could not previously express:
+        a timeout (FAIL@120s here, SKIP@30s there) and an expectation neither
+        grammar reads. Both runners are driven at a short bound so the timeout
+        row costs seconds, not minutes."""
         p = FIXTURES_DIR / "runner_agreement.md"
         assert p.read_text().lstrip().startswith("## Verification")
         table = parse_verification_table(p.read_text())
         assert table.malformed == []
-        assert len(table.checks) == 6
+        assert len(table.checks) == 15
 
-        vb_results = validate_build.check_verification_table(table)
-        rc_results = run_checks(table.checks)
+        vb_results = validate_build.check_verification_table(table, timeout=2)
+        rc_results = run_checks(table.checks, timeout=2)
 
         assert len(vb_results) == len(rc_results) == len(table.checks)
         for vb, rc, check in zip(vb_results, rc_results, table.checks, strict=True):
-            vb_passed = vb["status"] == "PASS"
-            assert vb_passed == rc.passed, (
-                f"{check.name}: validate_build={vb['status']!r} run_checks.passed={rc.passed!r}"
+            assert vb["status"] == rc.outcome.value, (
+                f"{check.name}: validate_build={vb['status']!r} run_checks={rc.outcome.value!r}"
             )
+
+        outcomes = [rc.outcome for rc in rc_results]
+        assert CheckOutcome.FAIL in outcomes, "fixture must exercise a real failure"
+        assert outcomes.count(CheckOutcome.UNEVALUATED) == 3, (
+            "fixture must exercise timeout, unparseable expectation, and no-backticked-span"
+        )
 
     @pytest.mark.parametrize("fixture_name", PARSE_ONLY_FIXTURES)
     def test_parse_only_fixtures_parse_identically(self, fixture_name):

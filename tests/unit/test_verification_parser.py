@@ -741,7 +741,7 @@ class TestCommandCellExtraction:
 
 class TestRunChecksUnevaluatedPaths:
     """A timeout and a runner exception are both UNEVALUATED with the reason
-    attached. Both used to be `passed=False`, rendered `[FAIL]` -- a gate
+    attached. Both used to grade false and render `[FAIL]` -- a gate
     asserting the code is wrong when it never got an answer."""
 
     def test_timeout_is_unevaluated_and_never_renders_as_fail(self):
