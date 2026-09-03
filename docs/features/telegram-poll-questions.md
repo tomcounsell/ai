@@ -333,9 +333,12 @@ path).
 
 **The semantics are any inbound steering message, not "a message that plausibly answers".** There is
 no reliable classifier for the latter and the failure directions are asymmetric: closing on unrelated
-chatter costs the pause branch for a question still on screen — the session is nudged onward, and
-nothing is lost, because `translate_poll_vote` keys on `lookup_poll` and never on `poll_steered`, so a
-later tap still routes. Failing to close costs a day of lost auto-continue.
+chatter costs the pause branch for a question still on screen — the session is nudged onward, and a
+later tap still routes, because `translate_poll_vote` keys on `lookup_poll` and never on
+`poll_steered`. That routing is **via the `events.Raw` fast path specifically**: closing the row
+`SREM`s it from `POLL_OPEN_INDEX`, so the reconcile loop no longer re-yields it and is not a fallback
+for this case, which is the one place the "reconciliation is primary" framing above does not hold.
+Failing to close costs a day of lost auto-continue.
 
 **Ordering is the same invariant the vote path states**: the marker is written only *after* the
 route's side effect returns — the steering push in `_ack_steering_routed`, the
@@ -422,9 +425,15 @@ Both halves are required:
    bails immediately at `lookup_poll(poll_id) is None` — never runs for it, so an unrelated message
    would permanently swallow a subsequent tap. That is the same failure class this feature exists to
    remove, so a closed-out hint is scanned and adopted exactly like an open one; `promote_pending_poll`
-   carries the marker onto the real row, so the promoted row is born steered at no extra cost, and a
-   successful adoption promotes and deletes the pending row, keeping the per-tick scan cost to one hit
+   carries the marker onto the real row, so the promoted row is de-indexed again in the same call that
+   indexed it, and a successful adoption deletes the pending row, keeping the ordinary case to one scan
    rather than one per tick.
+
+   The delete branches cover every case the relay itself can observe. **Two survive to the TTL at one
+   scan per tick regardless**: a crash between `register_pending_poll` and the send resolving, where
+   the atomic `LPOP` has already consumed the work item so nothing retries; and a permanently ambiguous
+   match, which both the scan and promotion deliberately refuse to resolve. Neither is closed out, so
+   skipping steered hints would never have addressed them.
 
 **Promotion is the second gate, and it can refuse.** Adopting means promoting the provisional row
 to a real one under the server-assigned poll id, and `register_poll` writes that row with `SET NX`.

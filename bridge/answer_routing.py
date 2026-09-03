@@ -271,4 +271,5 @@ async def resume_completed_session(
             "mark_session_polls_steered failed for session_id=%s: %s",
             completed.session_id,
             exc,
+            exc_info=True,
         )

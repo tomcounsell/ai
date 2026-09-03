@@ -377,7 +377,7 @@ def mark_poll_steered(poll_id: int | str) -> None:
 def mark_session_polls_steered(session_id: str | None) -> int:
     """Close out every outstanding poll for ``session_id``. Returns how many.
 
-    ``mark_poll_steered`` is written only by the vote path, so a human who
+    ``mark_poll_steered`` was written only by the vote path, so a human who
     *types* their answer instead of tapping leaves the row open for the full
     ``POLL_REGISTRY_TTL_S``. ``session_has_open_poll`` then keeps reporting a
     question that has already been answered, the nudge loop takes the pause

@@ -126,19 +126,25 @@ async def adopt_orphaned_polls(client) -> None:
     # bails immediately at `lookup_poll(poll_id) is None`, so an un-adopted row
     # can never be reached by a subsequent vote no matter what closed it out.
     # Because ANY inbound chatter marks the hint (see `mark_session_polls_steered`),
-    # skipping steered hints here let an unrelated message permanently swallow a
-    # subsequent tap — exactly the failure class this PR exists to remove, and it
-    # contradicted the "a later tap still routes" claim in both
+    # skipping steered hints here would let an unrelated message permanently
+    # swallow a subsequent tap — exactly the failure class this PR exists to
+    # remove, and it would contradict the "a later tap still routes" claim in both
     # `bridge/telegram_bridge.py`'s close-out comment and
     # `docs/features/telegram-poll-questions.md`.
     #
-    # The scan-cost objection does not survive: a successful adoption promotes
-    # and DELETES the pending row, so the normal case costs one scan, not one per
-    # tick. The unbounded case is a hint whose poll was never sent, and the
-    # decline branches plus the terminal-failure branch already delete those.
+    # The scan-cost objection does not survive for the ordinary case: a successful
+    # adoption promotes and DELETES the pending row, so that case costs one scan,
+    # not one per tick. The delete branches cover every case the relay itself can
+    # observe. Two do survive to the TTL at one scan per tick — a crash between
+    # `register_pending_poll` and the send resolving (the atomic LPOP already
+    # consumed the work item, so nothing retries), and a permanently ambiguous
+    # match, which `_find_already_sent_poll` and `promote_pending_poll` both
+    # deliberately refuse to resolve. Both are identical to `main`; the skip would
+    # not have been a fix for either, since neither is closed out.
+    #
     # `promote_pending_poll` carries the steered marker onto the real row, so
-    # adopting a closed-out hint costs nothing further and the promoted row is
-    # born de-indexed.
+    # adopting a closed-out hint costs nothing further: `register_poll` indexes it
+    # and the carried marker de-indexes it again in the same call.
     for hint, row in iter_pending_polls():
         try:
             found = await _find_already_sent_poll(client, numeric_peer(row["chat_id"]), hint)

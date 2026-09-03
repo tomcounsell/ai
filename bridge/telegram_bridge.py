@@ -1043,10 +1043,12 @@ async def _ack_steering_routed(
     # like an answer": there is no reliable classifier for that, and the failure
     # directions are asymmetric. Closing on unrelated chatter costs the pause
     # branch (`agent/session_executor.py`) for a question still on screen — the
-    # session is nudged onward, and nothing is lost, because `translate_poll_vote`
-    # keys on `lookup_poll` and never on `poll_steered`, so a later tap still
-    # routes. Failing to close costs a day of lost auto-continue. Documented in
-    # docs/features/telegram-poll-questions.md.
+    # session is nudged onward, and a later tap still routes, because
+    # `translate_poll_vote` keys on `lookup_poll` and never on `poll_steered`.
+    # That routing is via the `events.Raw` fast path specifically: closing the row
+    # `SREM`s it from POLL_OPEN_INDEX, so the reconcile loop no longer re-yields it
+    # and is not a fallback here. Failing to close costs a day of lost
+    # auto-continue. Documented in docs/features/telegram-poll-questions.md.
     #
     # Offloaded: this is a Redis scan on the bridge's event loop — and guarded
     # for the same reason as the sibling call in `resume_completed_session`.
