@@ -9,6 +9,13 @@ array — see ``agent/session_runner/router.py::PM_TURN_JSON_SCHEMA`` and
   ``source`` AND ``transport`` — a single blended number is dominated by
   whichever calling surface sends the most traffic (PM-turn/SDLC scenarios
   in practice) and does not characterize general outbound traffic.
+* Queue-wait percentiles (p50/p95/p99) of ``queue_wait_ms``, grouped the
+  same way, reported alongside the ``elapsed_ms`` bucket for the same
+  (source, transport) pair. This separates semaphore-slot contention
+  (``queue_wait_ms``) from raw API round-trip time (``elapsed_ms``) — the
+  split the #3035 phase-4 decision needs to tell "the gate is slow because
+  too many callers are queued" from "the gate is slow because the API is
+  slow".
 * Contradiction flags: an ``ask_coverage`` disposition contradicted by its
   own ``evidence`` text, or by ground truth (a ``delivered`` entry with
   empty evidence — should already be impossible via
@@ -17,7 +24,7 @@ array — see ``agent/session_runner/router.py::PM_TURN_JSON_SCHEMA`` and
 
 Tolerant of the ~40 legacy audit rows written before the ``kind`` field
 existed. Rows missing ``elapsed_ms``/``queue_wait_ms`` are excluded from
-percentile math, never treated as zero.
+the respective percentile math, never treated as zero.
 
 This tool's report is the **recorded entry criterion** for the deferred
 phase-4 decision tracked in issue #3035 (embargoed until 2026-09-10). See
@@ -131,10 +138,15 @@ class LatencyBucket:
     source: str
     transport: str
     values_ms: list[float] = field(default_factory=list)
+    queue_wait_values_ms: list[float] = field(default_factory=list)
 
     @property
     def count(self) -> int:
         return len(self.values_ms)
+
+    @property
+    def queue_wait_count(self) -> int:
+        return len(self.queue_wait_values_ms)
 
     def percentiles(self) -> dict[str, float]:
         s = sorted(self.values_ms)
@@ -144,19 +156,38 @@ class LatencyBucket:
             "p99": _percentile(s, 0.99),
         }
 
+    def queue_wait_percentiles(self) -> dict[str, float]:
+        s = sorted(self.queue_wait_values_ms)
+        return {
+            "p50": _percentile(s, 0.50),
+            "p95": _percentile(s, 0.95),
+            "p99": _percentile(s, 0.99),
+        }
+
 
 def latency_by_source_and_transport(rows: list[dict[str, Any]]) -> list[LatencyBucket]:
-    """Group elapsed_ms by (source, transport). Rows without elapsed_ms are excluded."""
+    """Group elapsed_ms and queue_wait_ms by (source, transport).
+
+    Each field is excluded independently: a row missing ``elapsed_ms`` but
+    carrying ``queue_wait_ms`` still contributes to the queue-wait bucket
+    (and vice versa). Neither missing field is ever treated as zero.
+    """
     buckets: dict[tuple[str, str], LatencyBucket] = {}
     for row in rows:
-        elapsed = row.get("elapsed_ms")
-        if not isinstance(elapsed, int | float):
-            continue
         source = row.get("source") or "unknown"
         transport = row.get("transport") or "unknown"
         key = (source, transport)
+
+        elapsed = row.get("elapsed_ms")
+        queue_wait = row.get("queue_wait_ms")
+        if not isinstance(elapsed, int | float) and not isinstance(queue_wait, int | float):
+            continue
+
         bucket = buckets.setdefault(key, LatencyBucket(source=source, transport=transport))
-        bucket.values_ms.append(float(elapsed))
+        if isinstance(elapsed, int | float):
+            bucket.values_ms.append(float(elapsed))
+        if isinstance(queue_wait, int | float):
+            bucket.queue_wait_values_ms.append(float(queue_wait))
     return sorted(buckets.values(), key=lambda b: (b.source, b.transport))
 
 
@@ -285,6 +316,8 @@ def build_report(
                 "transport": b.transport,
                 "count": b.count,
                 **b.percentiles(),
+                "queue_wait_count": b.queue_wait_count,
+                "queue_wait_ms": b.queue_wait_percentiles(),
             }
             for b in buckets
         ],
@@ -318,6 +351,13 @@ def _print_human_report(report: dict[str, Any]) -> None:
             f"n={bucket['count']:<5} "
             f"p50={bucket['p50']:.1f} p95={bucket['p95']:.1f} p99={bucket['p99']:.1f}"
         )
+        qw = bucket["queue_wait_ms"]
+        if bucket["queue_wait_count"]:
+            print(
+                f"  {'':<32} {'':<12} "
+                f"queue_wait n={bucket['queue_wait_count']:<5} "
+                f"p50={qw['p50']:.1f} p95={qw['p95']:.1f} p99={qw['p99']:.1f}"
+            )
     print()
     if report["ask_coverage_file"]:
         print(

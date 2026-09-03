@@ -724,10 +724,11 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch, read fresh on every
     call: when disabled, an ``action="allow" / reason="gate_disabled"``
-    audit entry is still written (matching ``evaluate_promise``'s
-    disabled-path observability) and the text is never blocked — checked
-    BEFORE the LLM branch, so a disabled gate never pays the LLM call
-    either.
+    audit entry is still written — ``source="promise_gate_drafter_disabled"``,
+    the drafter-route counterpart to ``evaluate_promise_async``'s
+    ``source="promise_gate_disabled"`` — and the text is never blocked —
+    checked BEFORE the LLM branch, so a disabled gate never pays the LLM
+    call either.
 
     Task 14 (#2494, carried into #2708) override leg: a BLOCK verdict is
     downgraded to ALLOW (``promise_recorded_override``) when the PM has
@@ -762,7 +763,7 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
             verdict,
             transport=medium,
             session_id=session_id,
-            source="promise_gate_drafter",
+            source="promise_gate_drafter_disabled",
         )
         return verdict
 
