@@ -25,9 +25,12 @@ async def run_typed(
     model: str = MODEL_FAST,
     sdk_timeout: float = DEFAULT_SDK_TIMEOUT,      # 30.0s
     hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,  # 35.0s
+    _skip_guard: bool = False,  # internal (#3001), compat gate only
 ) -> BaseModel:
     ...
 ```
+
+`_skip_guard` is internal: it bypasses the `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()` check and exists solely so the LLM-stack compat gate's `_check_network` probe (see [LLM Stack Compat Gate](llm-stack-compat-gate.md)) can make one real `run_typed` call without mutating the resolver's memoized globals. No other caller should pass it.
 
 Call it with a prompt and a `pydantic.BaseModel` subclass describing the desired output shape. PydanticAI validates the model's response against that schema and auto-retries once on mismatch. A validated instance of `output_type` comes back, or the call raises `LLMCallError`.
 

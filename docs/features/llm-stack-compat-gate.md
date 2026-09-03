@@ -91,7 +91,7 @@ python -m agent.llm.compat                         # human-readable one-liner
 
 A tooling entry point for subprocess callers, not an agent surface. It calls only the pure predicate.
 
-`--allow-network` makes one real `create` call against a single-field probe model, going through `agent.anthropic_client._load_stack` directly rather than `agent.llm.wrapper.run_typed` -- routing through `run_typed` would re-enter `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()` and mutate this module's memoized globals, breaking the predicate's Purity contract on this branch. It catches transport-class breaks (a moved HTTP layer, a changed auth header) that no signature comparison can see. It is billed, so only the auto-bump `llm` gate turns it on, and only on cycles where something actually bumped.
+`--allow-network` makes one real `create` call against a single-field probe model, going through `agent.llm.wrapper.run_typed` with the internal `_skip_guard=True` -- this bypasses `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()`, so the predicate's Purity contract holds on this branch while the call still gets `run_typed`'s shared #1111 `semaphore_slot()` and both of its timeouts, rather than hand-rolling a second, un-semaphored, un-timed client construction. It catches transport-class breaks (a moved HTTP layer, a changed auth header) that no signature comparison can see. It is billed, so only the auto-bump `llm` gate turns it on, and only on cycles where something actually bumped.
 
 ### The four call sites
 

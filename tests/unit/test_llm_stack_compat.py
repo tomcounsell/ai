@@ -375,6 +375,24 @@ def test_check_network_reports_a_missing_api_key_before_probing(monkeypatch) -> 
     assert result.compatible is False
     assert result.loader_ok is True
     assert "no Anthropic API key" in (result.reason or ""), result.reason
+    # `probe_skipped=True` is the field that lets a caller (main()'s CLI
+    # output, scripts/update/deps.py::run_gate_phases) tell "this machine
+    # cannot verify" apart from "the pair is actually broken" -- both leave
+    # compatible=False, but only one of them means the pair is bad.
+    assert result.probe_skipped is True
+
+
+def test_probe_skipped_defaults_false_on_every_other_branch() -> None:
+    """``probe_skipped`` must not read as True on a genuinely resolved verdict.
+
+    Otherwise a real incompatibility (or a real success) would misreport
+    through the same field the no-key branch uses to say "unverifiable".
+    """
+    healthy = compat.CompatResult(compatible=True, loader_ok=True)
+    assert healthy.probe_skipped is False
+
+    broken = compat.CompatResult(compatible=False, loader_ok=True, reason="boom")
+    assert broken.probe_skipped is False
 
 
 # --------------------------------------------------------------------------

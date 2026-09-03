@@ -31,9 +31,11 @@ moved every third-party symbol out of the wrapper's module scope.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import logging
+import subprocess
 
 import anthropic
 import pytest
@@ -463,3 +465,67 @@ class TestDegradedStack:
 
         with pytest.raises(LLMStackIncompatible):
             await run_typed("classify: hello there", Classification)
+
+
+class TestSkipGuardSingleCallSite:
+    """``_skip_guard`` (wrapper.py:146) is documented-not-enforced (review nit).
+
+    A future caller passing ``_skip_guard=True`` bypasses ``_guard_stack``: on
+    a genuinely degraded stack no alert fires, no marker is written, and a
+    signature break surfaces as a generic ``LLMCallError`` instead of the
+    diagnostic ``LLMStackIncompatible``. The parameter's docstring says
+    "internal-only (#3001)" but nothing in the code enforces that -- this
+    test is the enforcement, keyed on the real call graph rather than a
+    trusted comment. It scans **tracked** source only (``git ls-files``),
+    matching ``test_hub_alias_references.py``'s convention: a stale
+    ``__pycache__`` embeds string literals verbatim and would produce an
+    unreproducible phantom hit in a fresh checkout (#2807).
+
+    AST-based, not a text grep: ``_skip_guard`` appears in several
+    docstrings (this module's own module-level comment included) that
+    quote the keyword-argument spelling as prose. A text grep for
+    ``_skip_guard=True`` would count those as call sites; only an actual
+    ``ast.Call`` keyword argument node is one.
+    """
+
+    def _skip_guard_call_sites(self) -> list[str]:
+        """``"path.py:lineno"`` for every ``_skip_guard=...`` keyword argument
+        in a ``Call`` node, across every tracked ``*.py`` file."""
+        tracked = subprocess.run(
+            ["git", "ls-files", "*.py"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+
+        sites: list[str] = []
+        for path in tracked:
+            try:
+                source = open(path, encoding="utf-8").read()
+                tree = ast.parse(source, filename=path)
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg == "_skip_guard":
+                        sites.append(f"{path}:{node.lineno}")
+        return sites
+
+    def test_skip_guard_has_exactly_one_call_site_outside_wrapper(self):
+        sites = self._skip_guard_call_sites()
+        outside_wrapper = [s for s in sites if not s.startswith("agent/llm/wrapper.py:")]
+
+        assert len(outside_wrapper) == 1, (
+            f"expected exactly one `_skip_guard=` call site outside wrapper.py, "
+            f"found {len(outside_wrapper)}: {outside_wrapper}. `_skip_guard` is "
+            "meant to be reached from exactly one place: the compat gate's "
+            "`_check_network` probe. A new hit here means a caller outside the "
+            "compat gate now bypasses `_guard_stack` -- confirm that is "
+            "intentional before letting this test move."
+        )
+        assert outside_wrapper[0].startswith("agent/llm/compat.py:"), (
+            f"the one call site outside wrapper.py should be the compat gate's "
+            f"_check_network probe, found {outside_wrapper[0]!r} instead"
+        )

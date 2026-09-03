@@ -534,6 +534,13 @@ class AutoBumpResult:
     # a later successful bump would otherwise push a poisoned lockfile
     # fleet-wide.
     restore_failed: bool = False
+    # A rollback triggered by a gate that could not be evaluated on this
+    # machine (today: the `llm` gate with no resolvable Anthropic API key)
+    # rather than by a gate that evaluated and failed. Both roll back --
+    # the posture is fail-closed either way -- but "this host cannot verify
+    # the pair" must not reach the operator reading as "the pair is broken".
+    # See `agent/llm/compat.py::CompatResult.probe_skipped`.
+    gate_unverifiable: bool = False
 
     @property
     def any_bumped(self) -> bool:
@@ -667,6 +674,29 @@ def _gate_argv(project_dir: Path, phase: str, coupled_set: CoupledSet) -> list[s
     raise ValueError(f"unknown gate phase {phase!r}")
 
 
+# The phrase `run_gate_phases` puts in its detail text when a gate could not
+# be evaluated at all, as opposed to evaluating and failing. Named because
+# `_bump_coupled_set` reads it back out to set `AutoBumpResult.gate_unverifiable`
+# -- `run_gate_phases`' 3-tuple is patched by name in several tests, so the
+# flag travels through the detail string here and reaches `run.py` as a typed
+# field rather than as a literal duplicated across two modules.
+GATE_UNVERIFIABLE_MARKER = "unverifiable on this machine"
+
+
+def _llm_probe_was_skipped(stdout: str) -> bool:
+    """Did the ``llm`` gate's ``--json`` output carry ``probe_skipped: true``?
+
+    Best-effort only: the gate argv always passes ``--json``, but a crash
+    before ``main()`` prints anything (or non-JSON stderr noise mixed into
+    stdout) must not raise here -- it just means we fall back to the
+    generic "gate failed" message, which is still correct.
+    """
+    try:
+        return bool(json.loads(stdout).get("probe_skipped"))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
 def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, str | None, str]:
     """Run every gate phase `coupled_set` declares, in order.
 
@@ -700,6 +730,18 @@ def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, s
 
         if proc.returncode != 0:
             detail = (proc.stdout + proc.stderr).strip()
+            if phase == "llm" and _llm_probe_was_skipped(proc.stdout):
+                # `probe_skipped=True` means this machine could not verify
+                # the pair (no Anthropic API key), not that the pair is
+                # broken. The rollback still happens -- exit status stays
+                # fail-closed -- but the operator-facing message must not
+                # read as "incompatible pair" when it is really "unverifiable
+                # host". See agent/llm/compat.py::CompatResult.probe_skipped.
+                return (
+                    False,
+                    phase,
+                    f"{phase} gate {GATE_UNVERIFIABLE_MARKER} (no API key):\n{detail}",
+                )
             return False, phase, f"{phase} gate failed:\n{detail}"
         passed_phases.append(phase)
 
@@ -893,6 +935,7 @@ def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBu
     if not passed:
         result.rolled_back = True
         result.failed_phase = result.failed_phase or failed_phase
+        result.gate_unverifiable = result.gate_unverifiable or (GATE_UNVERIFIABLE_MARKER in output)
         _restore_set(project_dir, snapshot, result, resync=True)
         _record_set(
             result,

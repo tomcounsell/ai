@@ -1510,9 +1510,26 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
         if bump.rolled_back:
             phase = bump.failed_phase or "gate"
-            log(f"WARN: Auto-bump rolled back ({phase} phase failed)", v, always=True)
+            # A gate that could not be evaluated on this machine (the llm
+            # phase's CompatResult.probe_skipped case: no Anthropic API key)
+            # is not an incompatible pair, and must not read like one to the
+            # operator -- even though both roll back.
+            unverifiable = bump.gate_unverifiable
+            if unverifiable:
+                log(
+                    f"WARN: Auto-bump rolled back ({phase} gate unverifiable, not incompatible)",
+                    v,
+                    always=True,
+                )
+            else:
+                log(f"WARN: Auto-bump rolled back ({phase} phase failed)", v, always=True)
             log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
-            _append_warning(result, f"Auto-bump rolled back after {phase} phase failure")
+            _append_warning(
+                result,
+                f"Auto-bump rolled back after {phase} phase was unverifiable (no API key)"
+                if unverifiable
+                else f"Auto-bump rolled back after {phase} phase failure",
+            )
 
         if bump.restore_failed:
             # The rollback's own re-sync failed, so the venv does NOT match

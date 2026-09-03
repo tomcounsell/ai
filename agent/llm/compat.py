@@ -166,6 +166,14 @@ class CompatResult:
     They are separate because ``run_typed_local`` (granite on Ollama) never
     touches ``anthropic``: an Anthropic *signature* break must not fall the
     two hot-path classifiers back to their conservative defaults fleet-wide.
+
+    ``probe_skipped`` -- ``True`` only on the ``allow_network=True`` /
+    no-API-key branch of ``_check_network``: the pair was never actually
+    exercised, so ``compatible=False`` here means "this machine cannot
+    verify", not "the pair is broken". The exit status stays fail-closed
+    (``main()`` still returns 1, ``run_gate_phases`` still rolls the set
+    back) -- only the *reporting* is meant to distinguish the two cases;
+    see ``scripts/update/deps.py::run_gate_phases``.
     """
 
     compatible: bool
@@ -176,6 +184,7 @@ class CompatResult:
     exc_type: str | None = None
     forwarded: tuple[str, ...] = ()
     call_site_path: str | None = None
+    probe_skipped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable form, the ``--json`` CLI's payload."""
@@ -341,12 +350,13 @@ def check_llm_stack_compat(allow_network: bool = False) -> CompatResult:
     Pure: returns a verdict and touches no global state, no marker file, and
     no alert channel, on **both** branches. See the module docstring's
     Purity section. ``_check_network`` (the ``allow_network=True`` branch)
-    talks to the third-party stack directly rather than through
-    ``agent.llm.wrapper.run_typed`` -- going through ``run_typed`` would
-    re-enter ``_guard_stack`` -> ``stack_axes()`` -> ``resolve_degraded_flag()``,
-    mutating this module's memoized globals and breaking purity on exactly
-    the branch the auto-bump ``llm`` gate runs against a stack it is about
-    to roll back.
+    goes through ``agent.llm.wrapper.run_typed`` with its internal
+    ``_skip_guard=True``, which bypasses ``_guard_stack`` -> ``stack_axes()``
+    -> ``resolve_degraded_flag()`` so purity holds on exactly the branch the
+    auto-bump ``llm`` gate runs against a stack it is about to roll back,
+    while the call still gets ``run_typed``'s shared #1111
+    ``semaphore_slot()`` and both of its timeouts. See ``_check_network``'s
+    docstring for the full rationale.
 
     ``allow_network=False`` (the default, and what runs at every service
     start and every ``/update``) is loader + AST introspection: sub-second,
@@ -503,6 +513,7 @@ def _check_network(
                 "run the live network probe"
             ),
             exc_type=None,
+            probe_skipped=True,
         )
 
     class _Probe(BaseModel):
@@ -532,10 +543,14 @@ def _degraded_axis(result: CompatResult) -> str:
 def _alert_degraded(result: CompatResult, proc: str | None) -> None:
     """Fire all three channels for a first transition to degraded.
 
-    Order is deliberate: the stdlib log first (it is the signal of record
-    and cannot fail), then Sentry, then the marker. Each later channel is
-    independently guarded, so a Sentry outage suppresses neither the
-    sentinel log nor the standing marker.
+    Order is deliberate: the stdlib log goes first, as the signal of
+    record, but it is guarded exactly like the other two channels rather
+    than assumed infallible -- under the fault this module's outer guard
+    exists for (a raising root log handler), ``logger.critical`` itself is
+    the raiser, and if it were unguarded here that would lose Sentry and
+    the marker too, not just the log. Each channel is independently
+    guarded, so a broken handler or a Sentry outage suppresses only its own
+    channel, never the others.
     """
     body = (
         f"{SENTINEL} DEGRADED: {_ALERT_BODY} "
@@ -545,7 +560,10 @@ def _alert_degraded(result: CompatResult, proc: str | None) -> None:
         f"exc_type={result.exc_type}] {result.reason}"
     )
 
-    logger.critical(body)
+    try:
+        logger.critical(body)
+    except Exception:  # noqa: S110 -- see the docstring: must cost one channel, not all three
+        pass
 
     try:
         import sentry_sdk
@@ -673,6 +691,15 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
             pass
         return False
 
+    # Bound before the try so the except clause can tell "the predicate
+    # itself raised" (result is still None, axis genuinely unknown) apart
+    # from "the predicate succeeded but a downstream helper -- _alert_degraded
+    # or _clear_marker -- raised" (result is the real, already-computed
+    # verdict). Re-alerting with a hardcoded loader_ok=False in the second
+    # case would double-fire Sentry at level="fatal" and misreport a
+    # signature break as a loader break; see _alert_degraded's non-idempotent
+    # nit and _degraded_axis.
+    result: CompatResult | None = None
     try:
         result = check_llm_stack_compat()
         _LOADER_OK = result.loader_ok
@@ -682,7 +709,16 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
         if _DEGRADED:
             _alert_degraded(result, proc)
         else:
-            _clear_marker(proc)
+            # Guarded independently of the fall-closed except below: this
+            # branch has already committed healthy globals above, so a
+            # raising `_clear_marker` (its own `try/except OSError` catches
+            # only OSError) must cost a stale marker on the board, never a
+            # false degradation of a stack that is demonstrably fine. See
+            # the override branch's identical guard at :669-673.
+            try:
+                _clear_marker(proc)
+            except Exception:  # noqa: S110 -- see the comment above
+                pass
     except Exception as exc:  # run-boundary total: NOTHING below may propagate
         _LOADER_OK = False
         _COMPATIBLE = False
@@ -690,11 +726,23 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
         try:
             # Still route through the real three-channel alert -- "the
             # alert is the entire safety property" applies here too, not
-            # only when the predicate itself behaves. A synthetic result
-            # carries the exception that escaped the predicate (or, in the
-            # rarer case, one of the helpers below it).
+            # only when the predicate itself behaves. When `result` is
+            # already bound, the predicate succeeded and a downstream
+            # helper raised (e.g. _write_marker's json.dumps escaping past
+            # its OSError-only guard) -- carry the REAL axis through rather
+            # than hardcoding loader_ok=False, so the (possibly repeated)
+            # alert still names the axis that actually broke. Only a
+            # genuinely unresolved axis (the predicate itself raised) falls
+            # back to loader_ok=False.
             _alert_degraded(
-                CompatResult(
+                dataclasses.replace(
+                    result,
+                    compatible=False,
+                    reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
+                    exc_type=type(exc).__name__,
+                )
+                if result is not None
+                else CompatResult(
                     compatible=False,
                     loader_ok=False,
                     reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
@@ -755,6 +803,11 @@ def main(argv: list[str] | None = None) -> int:
             f"compatible: anthropic {result.anthropic_version} "
             f"/ pydantic-ai {result.pydantic_ai_version}"
         )
+    elif result.probe_skipped:
+        # Distinct from an actually-incompatible pair -- this machine simply
+        # could not run the network probe. Exit status stays 1 (fail-closed)
+        # either way; only the human-readable label differs.
+        print(f"UNVERIFIABLE: {result.reason}")
     else:
         print(f"INCOMPATIBLE: {result.reason}")
 
