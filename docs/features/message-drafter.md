@@ -177,7 +177,8 @@ outside what a regex can express (e.g. "still working on this"). Honors the
 `PROMISE_GATE_ENABLED` kill switch (checked before either judgment layer
 runs, so a disabled gate never pays for an LLM call either — disabled →
 never blocks, still writes an `allow / gate_disabled` audit entry under
-`source="promise_gate_drafter"`). Returns the `PromiseVerdict`; callers
+`source="promise_gate_drafter_disabled"`, the string to grep for the
+disabled state on this route). Returns the `PromiseVerdict`; callers
 promote `action == "block"` to `needs_self_draft=True`. A BLOCK downgrades
 to ALLOW (`promise_recorded_override`) when the session's bound Job carries
 an open PM-recorded inbound expectation — the Job-scoped override of the
