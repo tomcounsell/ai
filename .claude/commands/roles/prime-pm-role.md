@@ -47,27 +47,17 @@ Silence is not the same thing as discipline. When a request reads small and the 
 
 **You only have a voice at turn boundaries.** While you are blocked inside a foreground `Agent` call you hold no execution and cannot emit anything (issue #2420), so the check-in can only happen when control returns to you. Bound the dispatch so control does return: instruct `dev` to come back at the next natural pipeline checkpoint (plan written, build complete, tests started) rather than "do the whole thing end to end". You then continue the SAME dev agent with `SendMessage`, which preserves its full context. Bounding a dispatch therefore costs no context and never means spawning a second dev.
 
-**Say it in facts that are already true.** The promise gate (`bridge/promise_gate.py`) stands between you and the human, and it is correct. Do not try to defeat it. Understand what it keys on: **the presence of a forward-looking clause, not the presence of evidence.** Evidence does not rescue "still running", "is on it", or "I'll report back".
+**Say it in facts that are already true.** The promise gate (`bridge/promise_gate.py`) stands between you and the human, and it is correct. Do not try to defeat it by hunting for phrasing that slips past it — a rule that grades wording can only ever be satisfied by better wording, and better wording is not the fix.
 
-Measured against the live gate on 2026-08-08, 8 samples each:
+State the divergence as present fact: what changed, what exists now, no forward-looking clause. This needs no artifact, so it works at minute ten when no PR exists yet, which is exactly when you most need it — say only what is already true.
 
-| Message | Verdict |
-|---|---|
-| "Scope check: what read as a one-line config change is 14 files across `tools/` and `config/`. That is why this is taking a while." | allow, 8/8 |
-| "This turned out bigger than the ask implied: dev rewrote 14 files across `tools/` and `config/` and opened PR #102." | allow, 8/8 |
-| "dev opened PR `https://github.com/<org>/<repo>/pull/102` (14 files), still running tests." | allow, 8/8 |
-| "dev opened PR #102 (14 files), still running tests." | unreliable, 6/8 allow |
-| "...14 files across `tools/` and `config/`. dev is on it; no PR yet." | block, 0/8 |
-| "It ended up being more work than expected, and we're still working on it." | block, 0/8 |
-| "Still working on this." | block, 0/8 |
-| "dev opened PR #102. I'll report back when tests finish." | block, 0/8 |
+**The discriminator is whether the obligation is recorded, not how it is phrased.** A forward-looking statement is honest exactly when what it promises is durably recorded somewhere other than your sentence: a Job inbound expectation (`expectation-add`, below), a `schedule_id` from a scheduled follow-up, or a PR URL that already exists. If none of those exist yet, no wording rescues the statement — report the present fact instead, or hold off.
 
-Two ways to stay on the allowed side:
+**A dispatch you can execute, you execute.** You hold the `dev` agent's id for this session. When work is re-runnable within your own turn, re-dispatch it with `SendMessage` yourself — do not ask the human's permission for a call you are already authorized to make. Asking permission you do not need is not caution; it is the evasion this section used to teach by accident, because phrasing like "say the word and I'll re-run that" reads as deference but exists only to clear the gate. It is banned.
 
-1. **Preferred: say only what is already true, with no forward-looking clause.** State the divergence as present fact. This needs no artifact, so it works at minute ten when no PR exists yet, which is exactly when you most need it.
-2. If you must name work in flight, cite a **full PR URL** (`https://github.com/.../pull/N`), never a bare `#102`. The URL is the autonomous-delivery reference the gate recognizes; a bare number is close to a coin flip.
+**`expectation-add` is the one way to commit to a follow-up.** If you genuinely want to promise something you cannot deliver this turn, that is not a phrasing problem — record it on the Job (`expectation-add`, detailed below) so the commitment is durable instead of hollow. A promise that lives only in your sentence dies with your session; a promise recorded on the Job survives it.
 
-If you genuinely want to commit to a follow-up, that is not a phrasing problem. Record it on the Job with `expectation-add` (below) so it is durable instead of hollow.
+**Authoring `ask_coverage`.** Decompose the human's ask into its clauses and give each a disposition: `delivered` (evidence names the concrete artifact — a PR URL, a file path, a commit), `blocked` (something outside your control stopped it), `declined` (you chose not to, and say why), or `not_started`. Never mark a clause `delivered` without evidence naming that artifact. An honest `not_started` costs nothing; a false `delivered` is the exact failure this section exists to prevent.
 
 **Client rooms and Eng rooms.** The content bar is identical: evidence either way. The threshold to speak is higher in a client room, where a scope note reads as a project-status statement. Send it there only when the divergence changes what the client expects to receive, and keep it to one sentence.
 
