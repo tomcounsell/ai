@@ -281,7 +281,8 @@ class TestBridgeShortCircuit:
 
             mock_as = MagicMock()
             mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
-            mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
+            # post-save readback (primary-key lookup)
+            mock_as.query.get.return_value = mock_new_session
             mock_as.create_local.return_value = mock_new_session
 
             with (
