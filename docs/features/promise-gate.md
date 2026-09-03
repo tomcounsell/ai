@@ -466,6 +466,12 @@ samples `logs/classification_audit.jsonl` and an optional file of sampled
   practice) and does not characterize general outbound traffic — the
   per-(source, transport) breakdown is required to see whether, say, the
   terminal-flush route or email transport has a distinct latency profile.
+* **Queue-wait percentiles (p50/p95/p99)**, grouped the same way and reported
+  alongside the latency bucket for each (source, transport) pair. This is
+  `queue_wait_ms` — time spent waiting on the `semaphore_slot` — split out
+  from `elapsed_ms` (API round-trip time), which is the number the #3035
+  phase-4 decision needs to distinguish "too many callers queued on the
+  semaphore" from "the API itself is slow".
 * **Contradiction flags** — an `ask_coverage` disposition (`delivered` /
   `blocked` / `declined` / `not_started`) contradicted by its own `evidence`
   text (e.g. `delivered` paired with evidence that reads as a failure/negative
@@ -474,8 +480,8 @@ samples `logs/classification_audit.jsonl` and an optional file of sampled
 
 It tolerates the ~40 legacy audit rows written before the `kind` field
 existed (treated as `kind="promise_gate"` for grouping purposes) and rows
-missing `elapsed_ms`/`queue_wait_ms` (excluded from percentile math, not
-treated as zero).
+missing `elapsed_ms`/`queue_wait_ms` (each field excluded from its own
+percentile math independently, never treated as zero).
 
 ```bash
 python -m tools.promise_gate_measurement \

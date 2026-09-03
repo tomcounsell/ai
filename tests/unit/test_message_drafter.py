@@ -10,6 +10,7 @@ from bridge.message_drafter import (
     MessageDraft,
     _compose_structured_draft,
     _derive_context_summary,
+    _evaluate_drafter_promise,
     _get_status_emoji,
     _parse_draft_and_questions,
     convert_local_paths_to_attachments,
@@ -1434,6 +1435,29 @@ class TestShortOutputPromiseGate:
 
         assert result.needs_self_draft is False
         assert result.text == INCIDENT_FORWARD_DEFERRAL
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_disabled_path_writes_distinct_audit_source(self, monkeypatch):
+        """The disabled-path audit entry must be greppable by source on the
+        drafter route the same way ``evaluate_promise_async`` is on the CLI
+        route (``source="promise_gate_disabled"``) -- not share the string the
+        enabled heuristic path writes, or an incident grep for the disabled
+        state silently misses this entire route."""
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        captured = {}
+
+        def _capture_audit(text, verdict, *, transport, session_id, source):
+            captured["source"] = source
+
+        monkeypatch.setattr(
+            "bridge.promise_gate._write_promise_audit",
+            _capture_audit,
+        )
+
+        await _evaluate_drafter_promise(INCIDENT_FORWARD_DEFERRAL, medium="telegram", use_llm=True)
+
+        assert captured["source"] == "promise_gate_drafter_disabled"
 
     @pytest.mark.asyncio
     async def test_full_path_promise_block_still_promotes(self):

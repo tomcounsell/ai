@@ -79,7 +79,11 @@ Latency
 -------
 Budget: p50 < 500ms, p99 < 3s. SDK-level 3-second timeout via the
 RTR-correct pattern: ``async with semaphore_slot(): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:``.
+anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
+client:``. ``max_retries=0`` is load-bearing for the stated bound: the
+SDK default (``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts,
+which would silently turn the 3s worst case into ~3 attempts plus
+backoff (~10s) on this call's now-inline delivery path.
 The other anthropic-client helper (the convenience one that
 constructs the client for you) is **not** used here — it does not
 accept a ``timeout`` argument and would silently violate the 3-second
@@ -657,6 +661,7 @@ async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
             async with anthropic.AsyncAnthropic(
                 api_key=api_key,
                 timeout=RTR_SDK_TIMEOUT,
+                max_retries=0,
             ) as client:
                 message = await client.messages.create(
                     model=MODEL_FAST,

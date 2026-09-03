@@ -102,3 +102,53 @@ class TestLatencyBySourceAndTransport:
         assert len(buckets) == 1
         assert buckets[0].source == "unknown"
         assert buckets[0].transport == "unknown"
+
+    def test_rows_missing_queue_wait_ms_are_excluded_not_zeroed(self):
+        rows = [
+            {
+                "source": "promise_gate_drafter_llm",
+                "transport": "telegram",
+                "elapsed_ms": 100,
+                "queue_wait_ms": 10,
+            },
+            # No queue_wait_ms at all -- must be excluded, not treated as 0.
+            {"source": "promise_gate_drafter_llm", "transport": "telegram", "elapsed_ms": 200},
+            # Non-numeric queue_wait_ms -- also excluded.
+            {
+                "source": "promise_gate_drafter_llm",
+                "transport": "telegram",
+                "elapsed_ms": 300,
+                "queue_wait_ms": "not-a-number",
+            },
+            {
+                "source": "promise_gate_drafter_llm",
+                "transport": "telegram",
+                "elapsed_ms": 400,
+                "queue_wait_ms": 30,
+            },
+        ]
+
+        buckets = latency_by_source_and_transport(rows)
+
+        assert len(buckets) == 1
+        bucket = buckets[0]
+        # elapsed_ms bucket keeps all 4 rows -- exclusion is per-field.
+        assert bucket.count == 4
+        # queue_wait_ms bucket only keeps the 2 rows carrying a numeric value.
+        assert bucket.queue_wait_count == 2
+        assert bucket.queue_wait_values_ms == [10.0, 30.0]
+        percentiles = bucket.queue_wait_percentiles()
+        assert percentiles["p50"] == 20.0
+
+    def test_row_missing_elapsed_ms_but_carrying_queue_wait_ms_still_counted(self):
+        rows = [
+            {"source": "promise_gate_drafter_timeout", "transport": "telegram", "queue_wait_ms": 5},
+        ]
+
+        buckets = latency_by_source_and_transport(rows)
+
+        assert len(buckets) == 1
+        bucket = buckets[0]
+        assert bucket.count == 0
+        assert bucket.queue_wait_count == 1
+        assert bucket.queue_wait_values_ms == [5.0]
