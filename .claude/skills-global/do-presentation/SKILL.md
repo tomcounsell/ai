@@ -8,7 +8,7 @@ context: fork
 
 # Make a Presentation
 
-Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational, client-facing, or informational), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
 
 ## Repo Context Probe
 
@@ -62,8 +62,11 @@ Read `CONTENT_GUIDE.md` for educational best practices.
 |---|---|---|
 | **Educational / internal** | Technical teammates, general audience | What → How → Why it matters |
 | **Client-facing / working session** | Client decision-makers, executives | Why (their problem) → How (the approach) → What (the specifics) |
+| **Informational / descriptive** | Anyone receiving a factual report or overview | Subject first — a one-line scope/method note, then straight into the content |
 
-For client-facing decks, the first 3–4 slides must establish: (1) who the client is and what their operating reality looks like, (2) the problem they are experiencing in their own terms, (3) the governing principle or goal — before any solution, scope, or technical content appears. Opening with a solution before the client sees their problem reflected back is the single most common failure mode.
+The Why-first opening belongs to **persuasion and decision decks** — proposals, working sessions, decision briefs. For those, the first 3–4 slides must establish: (1) who the client is and what their operating reality looks like, (2) the problem they are experiencing in their own terms, (3) the governing principle or goal — before any solution, scope, or technical content appears. Opening with a solution before the client sees their problem reflected back is the single most common failure mode of a persuasion deck.
+
+An **informational / descriptive** deck — an architecture overview, a vendor inventory, audit findings, a status report — skips the problem-reflection opening entirely. Its job is to describe accurately, not to persuade or drive a decision, and it has no problem to reflect back. Lead with the subject: one line stating scope and method, then the content itself. Grafting a problem opening onto a descriptive deck manufactures a crisis the audience never raised.
 
 **Default slide structure (educational):**
 ```
@@ -90,6 +93,14 @@ For client-facing decks, the first 3–4 slides must establish: (1) who the clie
 7+. Decision / agenda items (one per slide)
 N-1. Summary / next steps
 N.  Appendix
+```
+
+**Informational / descriptive structure:**
+```
+1. Title + one-line scope/method note (what this covers, how it was gathered)
+2-N. The subject itself, one idea per slide — grouped by component, area, or finding
+N-1. Summary (3 bullet takeaway)
+N.  Appendix / further reading
 ```
 
 Adjust count based on topic complexity. Aim for **one idea per slide**.
@@ -278,9 +289,12 @@ generic catalog does not cover them:
 ```
 Additional checks for this deck, alongside the standard pass:
 
-STRUCTURE — does it open with Why (the audience's problem and context), then How (the approach),
-then What (the specifics)? For a client-facing deck, flag it if the first three slides do not
-establish who the audience is and what problem they are experiencing before any solution appears.
+STRUCTURE — match the check to the deck's job. A persuasion / decision deck opens with Why (the
+audience's problem and context), then How (the approach), then What (the specifics); flag it if
+the first three slides do not establish who the audience is and what problem they are experiencing
+before any solution appears. An informational / descriptive deck leads with its subject after a
+one-line scope note; flag any manufactured problem opening or framing built around what the
+audience lacks.
 
 ACTION TITLES — every content slide's title should be a full sentence stating that slide's
 conclusion, under 15 words. Flag topic-label titles ("Market overview", "Architecture") outside
