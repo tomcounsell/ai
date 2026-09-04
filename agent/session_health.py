@@ -2525,11 +2525,15 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
 # Honest substitution delivered in place of a promise-flagged deferred draft on
 # terminal paths (issue #2423). At terminal-flush time there is no live agent to
 # self-draft a rewrite, so the flush substitutes rather than suppresses (suppression
-# would reintroduce the #1796 swallowed-reply class). This text must itself pass
-# the promise heuristic — it states a fact and asks, promising nothing.
+# would reintroduce the #1796 swallowed-reply class). Two constraints on this text
+# (#3135): it must itself pass the promise heuristic, and every clause must be true
+# given only "the filter withheld the final message" — a block verdict carries no
+# information about whether any work completed, so the text may not claim failure
+# or invent a pending request.
 TERMINAL_PROMISE_FALLBACK_MESSAGE = (
-    "I couldn't complete that follow-up before this session ended — "
-    "please send the request again if you still need it."
+    "An outbound safety filter held back this session's final message. "
+    "The work may have finished normally; if something you expected is "
+    "missing, ask again in a new message."
 )
 
 
