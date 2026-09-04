@@ -28,11 +28,32 @@ class TestReplyThreadContextHeader:
     def test_format_reply_chain_uses_the_constant(self):
         from bridge.context import format_reply_chain
 
-        chain = [{"sender": "Tom", "content": "hello", "message_id": 1, "date": None}]
-        formatted = format_reply_chain(chain)
-        # Idempotency guard in agent_session_queue relies on this substring.
-        assert REPLY_THREAD_CONTEXT_HEADER in formatted
-        assert formatted.count(REPLY_THREAD_CONTEXT_HEADER) == 1
+        # #2732: chain dicts now carry a `media` key. The header contract must
+        # hold with the key absent (legacy dict shape), None, and populated.
+        chains = [
+            [{"sender": "Tom", "content": "hello", "message_id": 1, "date": None}],
+            [{"sender": "Tom", "content": "hello", "message_id": 1, "date": None, "media": None}],
+            [
+                {
+                    "sender": "Tom",
+                    "content": "hello",
+                    "message_id": 1,
+                    "date": None,
+                    "media": {
+                        "kind": "resolved",
+                        "filename": "a.pdf",
+                        "media_type": "document",
+                        "local_path": "/tmp/a.pdf",
+                        "reason": None,
+                    },
+                }
+            ],
+        ]
+        for chain in chains:
+            formatted = format_reply_chain(chain)
+            # Idempotency guard in agent_session_queue relies on this substring.
+            assert REPLY_THREAD_CONTEXT_HEADER in formatted
+            assert formatted.count(REPLY_THREAD_CONTEXT_HEADER) == 1
 
 
 class TestReferencesPriorContextNegativeGuards:
@@ -272,6 +293,24 @@ class TestFilterToolLogsParity:
         assert "Here is the analysis you asked for." in formatted
         assert "The duplicate definition is at line 104." in formatted
 
+        # #2732: sanitisation must still apply on a composed caption-plus-
+        # descriptor line. The descriptor is appended AFTER filter_tool_logs
+        # runs, so the traces stay filtered and the descriptor stays intact.
+        chain[1]["media"] = {
+            "kind": "resolved",
+            "filename": "trace.log",
+            "media_type": "document",
+            "local_path": "/data/media/doc_1_2.log",
+            "reason": None,
+        }
+        composed = format_reply_chain(chain)
+        assert "\U0001f6e0" not in composed, "wrench emoji tool trace leaked past descriptor"
+        assert "`cd bridge && ls -la`" not in composed, "backtick echo leaked past descriptor"
+        assert "Here is the analysis you asked for." in composed
+        assert "[attachment: trace.log (document) at machine path /data/media/doc_1_2.log]" in (
+            composed
+        )
+
     def test_format_reply_chain_omits_messages_below_length_floor(self):
         """Through-pipeline assertion: when `filter_tool_logs` returns `""`
         because the post-filter remainder is below the `<5` char floor,
@@ -304,3 +343,546 @@ class TestFilterToolLogsParity:
         # The surrounding messages must still be present.
         assert "Tom: run ls" in formatted
         assert "Tom: thanks" in formatted
+
+
+# =============================================================================
+# #2732: reply-chain media descriptor — rendering states, resolver, walk
+# =============================================================================
+
+
+def _descriptor(
+    kind="resolved",
+    filename="report.pdf",
+    media_type="document",
+    local_path="/data/media/doc_1_10.pdf",
+    reason=None,
+):
+    from bridge.context import _media_descriptor
+
+    return _media_descriptor(kind, filename, media_type, local_path, reason)
+
+
+class TestMediaDescriptorRendering:
+    """The three rendering states of format_reply_chain (#2732).
+
+    All chain dicts here are built by hand — the renderer is pure, so these
+    need neither Redis nor a Telegram client.
+    """
+
+    def test_resolved_with_caption_composes_both(self):
+        from bridge.context import format_reply_chain
+
+        chain = [
+            {
+                "sender": "Hazem",
+                "content": "here is the recommendation",
+                "message_id": 10,
+                "date": None,
+                "media": _descriptor(),
+            }
+        ]
+        formatted = format_reply_chain(chain)
+        line = next(ln for ln in formatted.splitlines() if ln.startswith("Hazem:"))
+        assert "here is the recommendation" in line
+        assert "[attachment: report.pdf (document) at machine path /data/media/doc_1_10.pdf]" in (
+            line
+        ), "caption and descriptor must compose on ONE line"
+
+    def test_resolved_without_caption_renders_descriptor_alone(self):
+        from bridge.context import format_reply_chain
+
+        chain = [
+            {
+                "sender": "Hazem",
+                "content": "",
+                "message_id": 10,
+                "date": None,
+                "media": _descriptor(),
+            }
+        ]
+        formatted = format_reply_chain(chain)
+        assert (
+            "Hazem: [attachment: report.pdf (document) at machine path /data/media/doc_1_10.pdf]"
+            in formatted
+        ), "caption-less hop must render the descriptor alone, with no leading space"
+
+    def test_text_only_chain_is_byte_identical_with_and_without_media_key(self):
+        """Regression fence: a text-only chain renders exactly as before #2732,
+        whether the entry omits the media key (legacy shape) or carries
+        media=None (new shape)."""
+        from bridge.context import format_reply_chain
+
+        legacy = [
+            {"sender": "Tom", "content": "hello", "message_id": 1, "date": None},
+            {
+                "sender": "Valor",
+                "content": "hi there, what do you need?",
+                "message_id": 2,
+                "date": None,
+            },
+        ]
+        new_shape = [dict(entry, media=None) for entry in legacy]
+        expected = (
+            f"{REPLY_THREAD_CONTEXT_HEADER} (oldest to newest):\n"
+            + "-" * 40
+            + "\nTom: hello\n\nValor: hi there, what do you need?\n\n"
+            + "-" * 40
+        )
+        assert format_reply_chain(legacy) == expected
+        assert format_reply_chain(new_shape) == expected
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "no_record",
+            "no_path_recorded",
+            "download_error: timeout",
+            "file_missing",
+            "invalid_path",
+            "resolution_error",
+        ],
+    )
+    def test_unreadable_rendering_names_file_and_reason(self, reason):
+        from bridge.context import format_reply_chain
+
+        chain = [
+            {
+                "sender": "Hazem",
+                "content": "",
+                "message_id": 10,
+                "date": None,
+                "media": _descriptor(kind="unreadable", local_path=None, reason=reason),
+            }
+        ]
+        formatted = format_reply_chain(chain)
+        assert f"[unreadable attachment: report.pdf (document) reason: {reason}]" in formatted
+
+    def test_resolved_and_unreadable_renderings_are_distinguishable(self):
+        from bridge.context import _format_media_descriptor
+
+        resolved = _format_media_descriptor(_descriptor())
+        unreadable = _format_media_descriptor(
+            _descriptor(kind="unreadable", local_path=None, reason="no_record")
+        )
+        assert resolved != unreadable
+        # Each state carries a marker the other never does, so an agent (and a
+        # test) can tell them apart without heuristics.
+        assert "at machine path" in resolved and "at machine path" not in unreadable
+        assert "unreadable attachment:" in unreadable and "unreadable attachment:" not in resolved
+
+    def test_media_literal_appears_in_no_rendering_state(self):
+        """The literal `[media]` must appear in no output under any state."""
+        from bridge.context import format_reply_chain
+
+        chains = [
+            [{"sender": "Tom", "content": "text only", "message_id": 1, "date": None}],
+            [
+                {
+                    "sender": "Tom",
+                    "content": "cap",
+                    "message_id": 1,
+                    "date": None,
+                    "media": _descriptor(),
+                }
+            ],
+            [
+                {
+                    "sender": "Tom",
+                    "content": "",
+                    "message_id": 1,
+                    "date": None,
+                    "media": _descriptor(),
+                }
+            ],
+            [
+                {
+                    "sender": "Tom",
+                    "content": "",
+                    "message_id": 1,
+                    "date": None,
+                    "media": _descriptor(kind="unreadable", local_path=None, reason="no_record"),
+                }
+            ],
+            [
+                {
+                    "sender": "Valor",
+                    "content": "",
+                    "message_id": 1,
+                    "date": None,
+                    "media": _descriptor(
+                        kind="unreadable",
+                        filename=None,
+                        media_type=None,
+                        local_path=None,
+                        reason="resolution_error",
+                    ),
+                }
+            ],
+        ]
+        for chain in chains:
+            assert "[media]" not in format_reply_chain(chain)
+
+    def test_filename_none_renders_unnamed_not_dangling(self):
+        from bridge.context import _format_media_descriptor
+
+        rendered = _format_media_descriptor(
+            _descriptor(kind="unreadable", filename=None, local_path=None, reason="no_record")
+        )
+        assert rendered == "[unreadable attachment: unnamed (document) reason: no_record]"
+
+    def test_media_type_none_renders_generic_label(self):
+        from bridge.context import _format_media_descriptor
+
+        rendered = _format_media_descriptor(_descriptor(media_type=None))
+        assert rendered == (
+            "[attachment: report.pdf (file) at machine path /data/media/doc_1_10.pdf]"
+        )
+
+    def test_empty_chain_still_returns_empty_string(self):
+        from bridge.context import format_reply_chain
+
+        assert format_reply_chain([]) == ""
+
+    def test_below_floor_valor_hop_with_media_is_retained(self):
+        """Sibling of test_format_reply_chain_omits_messages_below_length_floor:
+        a Valor hop whose text filters below the <5 floor is RETAINED when it
+        carries media — its descriptor is the whole line. This is the case the
+        old 7-char "[media]" string was accidentally protecting."""
+        from bridge.context import format_reply_chain
+
+        valor_short = "\U0001f6e0️ exec: ls\nok"
+        chain = [
+            {"sender": "Tom", "content": "run ls", "message_id": 1, "date": None},
+            {
+                "sender": "Valor",
+                "content": valor_short,
+                "message_id": 2,
+                "date": None,
+                "media": _descriptor(
+                    kind="unreadable",
+                    filename="shot.png",
+                    media_type="photo",
+                    local_path=None,
+                    reason="no_path_recorded",
+                ),
+            },
+            {"sender": "Tom", "content": "thanks", "message_id": 3, "date": None},
+        ]
+        formatted = format_reply_chain(chain)
+        assert "Valor: [unreadable attachment: shot.png (photo) reason: no_path_recorded]" in (
+            formatted
+        ), "below-floor Valor hop with media must be retained as its descriptor"
+        assert "ok" not in formatted, "below-floor text remainder must still be dropped"
+
+    def test_truncation_never_bisects_descriptor_path(self):
+        """Truncation measures the human-authored text only; the descriptor
+        (and its path) is appended afterwards, intact."""
+        from bridge.context import format_reply_chain
+
+        long_caption = "x" * 600  # over the 500-char non-Valor cap
+        path = "/data/media/doc_1_10.pdf"
+        chain = [
+            {
+                "sender": "Tom",
+                "content": long_caption,
+                "message_id": 10,
+                "date": None,
+                "media": _descriptor(local_path=path),
+            },
+        ]
+        formatted = format_reply_chain(chain)
+        assert "x" * 500 + "..." in formatted, "caption must still truncate at 500"
+        assert "x" * 501 not in formatted
+        assert f"at machine path {path}]" in formatted, "path must survive truncation intact"
+
+
+class _FakeFile:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeSender:
+    first_name = "Hazem"
+
+
+class _FakeChainMsg:
+    """Minimal Telethon Message stand-in for the resolver and the chain walk."""
+
+    def __init__(self, id, text="", reply_to=None, media=None, file=None, out=False):
+        self.id = id
+        self.text = text
+        self.reply_to_msg_id = reply_to
+        self.media = media
+        self.file = file
+        self.out = out
+        self.date = None
+
+    async def get_sender(self):
+        return _FakeSender()
+
+
+class _FakeChainClient:
+    def __init__(self, msgs):
+        self._msgs = {m.id: m for m in msgs}
+
+    async def get_messages(self, chat_id, ids=None):
+        return self._msgs.get(ids)
+
+
+def _save_telegram_record(chat_id: int, message_id: int, **fields):
+    import time as _time
+
+    from models.telegram import TelegramMessage
+
+    record = TelegramMessage(
+        chat_id=str(chat_id),
+        message_id=message_id,
+        direction="in",
+        sender="Hazem",
+        content="",
+        timestamp=_time.time(),
+        has_media=True,
+        **fields,
+    )
+    record.save()
+    return record
+
+
+@pytest.fixture
+def chain_chat_id():
+    """Unique chat id per test; deletes that chat's records on teardown."""
+    import uuid
+
+    from models.telegram import TelegramMessage
+
+    chat_id = int(uuid.uuid4().int % 10**9) + 10**9
+    yield chat_id
+    for record in TelegramMessage.query.filter(chat_id=str(chat_id)):
+        record.delete()
+
+
+class TestResolveMediaDescriptor:
+    """_resolve_media_descriptor against real TelegramMessage records in the
+    claimed test Redis db. Each unreadable reason is a distinct, asserted
+    state (#2732 Failure Path Test Strategy)."""
+
+    async def test_no_media_returns_none(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        msg = _FakeChainMsg(10, text="plain text")
+        assert await _resolve_media_descriptor(msg, chain_chat_id) is None
+
+    async def test_missing_record_is_unreadable_no_record(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "no_record"
+        assert descriptor["filename"] == "report.pdf", (
+            "a Redis miss must still yield a NAMED attachment — the two sources degrade separately"
+        )
+        assert descriptor["local_path"] is None
+
+    async def test_download_error_is_unreadable_with_specific_reason(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        _save_telegram_record(chain_chat_id, 10, media_download_error="timeout after 120s")
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "download_error: timeout after 120s"
+
+    async def test_missing_path_is_unreadable_no_path_recorded(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        _save_telegram_record(chain_chat_id, 10, media_local_path=None)
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "no_path_recorded"
+
+    async def test_whitespace_path_is_unreadable_no_path_recorded(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        _save_telegram_record(chain_chat_id, 10, media_local_path="   ")
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "no_path_recorded"
+
+    async def test_path_outside_media_dir_is_unreadable_invalid_path(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        # /etc/hosts exists and is readable — outside data/media it must
+        # still never be rendered as a resolved path.
+        _save_telegram_record(chain_chat_id, 10, media_local_path="/etc/hosts")
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "invalid_path"
+        assert descriptor["local_path"] is None
+
+    async def test_recorded_path_absent_from_disk_is_unreadable_file_missing(self, chain_chat_id):
+        import uuid
+
+        from bridge.context import _resolve_media_descriptor
+        from bridge.media import MEDIA_DIR
+
+        ghost = MEDIA_DIR / f"test2732_ghost_{uuid.uuid4().hex}.pdf"
+        _save_telegram_record(chain_chat_id, 10, media_local_path=str(ghost))
+        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "file_missing"
+
+    async def test_resolved_when_record_and_file_exist(self, chain_chat_id, tmp_path):
+        import uuid
+
+        from bridge.context import _resolve_media_descriptor
+        from bridge.media import MEDIA_DIR
+
+        real = MEDIA_DIR / f"test2732_{uuid.uuid4().hex}.pdf"
+        real.write_bytes(b"%PDF test")
+        try:
+            _save_telegram_record(chain_chat_id, 10, media_local_path=str(real))
+            msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+            descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+            assert descriptor["kind"] == "resolved"
+            assert descriptor["filename"] == "report.pdf"
+            assert descriptor["local_path"] == str(real)
+            assert descriptor["reason"] is None
+        finally:
+            real.unlink(missing_ok=True)
+
+    async def test_photo_without_filename_gets_synthetic_label(self, chain_chat_id):
+        from telethon.tl.types import MessageMediaPhoto
+
+        from bridge.context import _resolve_media_descriptor
+
+        photo_media = MessageMediaPhoto.__new__(MessageMediaPhoto)
+        msg = _FakeChainMsg(42, media=photo_media, file=_FakeFile(None))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["media_type"] == "photo"
+        assert descriptor["filename"] == "photo-42", (
+            "photos have no filename — the synthetic {media_type}-{message_id} label must apply"
+        )
+
+    async def test_unknown_media_type_still_yields_descriptor(self, chain_chat_id):
+        from bridge.context import _resolve_media_descriptor
+
+        # get_media_type returns None for a non-Telethon media object; the
+        # descriptor must degrade to a generic label rather than crash.
+        msg = _FakeChainMsg(7, media=object(), file=_FakeFile(None))
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor["media_type"] is None
+        assert descriptor["filename"] == "media-7"
+
+    async def test_chat_id_scoped_lookup_ignores_other_chats_record(self, chain_chat_id):
+        """Risk 3: a record with a matching message_id in a DIFFERENT chat
+        must never resolve — message ids are per-chat sequences and the
+        media dir is shared across every chat on the machine."""
+        import uuid
+
+        from bridge.context import _resolve_media_descriptor
+        from bridge.media import MEDIA_DIR
+        from models.telegram import TelegramMessage
+
+        other_chat = chain_chat_id + 1
+        other_file = MEDIA_DIR / f"test2732_other_{uuid.uuid4().hex}.pdf"
+        other_file.write_bytes(b"%PDF other tenant")
+        try:
+            _save_telegram_record(other_chat, 10, media_local_path=str(other_file))
+            msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+            descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+            assert descriptor["kind"] == "unreadable"
+            assert descriptor["reason"] == "no_record"
+            assert descriptor["local_path"] is None, (
+                "another chat's file must be unnameable through this resolver"
+            )
+        finally:
+            other_file.unlink(missing_ok=True)
+            for record in TelegramMessage.query.filter(chat_id=str(other_chat)):
+                record.delete()
+
+    async def test_resolver_failure_logs_warning_and_returns_unreadable(
+        self, chain_chat_id, caplog
+    ):
+        """The resolver's own except path: log at warning, return an
+        unreadable descriptor — never None, never a re-raise."""
+        import logging
+        from unittest.mock import patch
+
+        from bridge.context import _resolve_media_descriptor
+
+        msg = _FakeChainMsg(99, media=object(), file=_FakeFile("report.pdf"))
+        with (
+            patch("bridge.context.get_media_type", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.WARNING, logger="bridge.context"),
+        ):
+            descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor is not None
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "resolution_error"
+        assert any("Could not resolve media descriptor" in rec.message for rec in caplog.records), (
+            "resolver failure must be observable at WARNING"
+        )
+
+
+class TestFetchReplyChainMediaFailurePath:
+    """A per-hop descriptor-resolution failure must degrade that hop and let
+    the walk continue — it must never reach fetch_reply_chain's loop-tail
+    `except Exception: break` (#2732 Failure Path Test Strategy)."""
+
+    async def test_hop_resolution_failure_degrades_and_walk_continues(self, chain_chat_id):
+        from unittest.mock import patch
+
+        from bridge.context import fetch_reply_chain
+
+        msgs = [
+            _FakeChainMsg(1, text="", media=object(), file=_FakeFile("doc.pdf")),
+            _FakeChainMsg(2, text="middle reply", reply_to=1),
+            _FakeChainMsg(3, text="latest reply", reply_to=2),
+        ]
+        client = _FakeChainClient(msgs)
+
+        def _exploding_get_media_type(m):
+            raise RuntimeError("classifier exploded")
+
+        with patch("bridge.context.get_media_type", _exploding_get_media_type):
+            chain = await fetch_reply_chain(client, chain_chat_id, 3)
+
+        assert len(chain) == 3, "one bad hop must not lose the rest of the walk"
+        # Chronological order: the media hop is oldest (first).
+        assert chain[0]["media"] is not None
+        assert chain[0]["media"]["kind"] == "unreadable"
+        assert chain[0]["media"]["reason"] == "resolution_error"
+        assert chain[1]["media"] is None
+        assert chain[2]["media"] is None
+        assert [entry["content"] for entry in chain] == ["", "middle reply", "latest reply"]
+
+    async def test_media_hop_end_to_end_renders_resolved_path(self, chain_chat_id):
+        """The reported exchange shape (attachment, then two text replies)
+        through fetch_reply_chain + format_reply_chain: the rendered block
+        carries the readable absolute path and no `[media]` literal."""
+        import uuid
+
+        from bridge.context import fetch_reply_chain, format_reply_chain
+        from bridge.media import MEDIA_DIR
+
+        real = MEDIA_DIR / f"test2732_e2e_{uuid.uuid4().hex}.pdf"
+        real.write_bytes(b"%PDF chain")
+        try:
+            _save_telegram_record(chain_chat_id, 1, media_local_path=str(real))
+            msgs = [
+                _FakeChainMsg(1, text="", media=object(), file=_FakeFile("recommendation.pdf")),
+                _FakeChainMsg(2, text="brushes over many details", reply_to=1),
+                _FakeChainMsg(3, text="valor can help flesh this out", reply_to=2),
+            ]
+            chain = await fetch_reply_chain(_FakeChainClient(msgs), chain_chat_id, 3)
+            formatted = format_reply_chain(chain)
+            assert str(real) in formatted, "agent must receive the readable absolute path"
+            assert "recommendation.pdf" in formatted
+            assert "[media]" not in formatted
+        finally:
+            real.unlink(missing_ok=True)
