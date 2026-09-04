@@ -48,7 +48,7 @@ of asking the human to repeat themselves.
 
 ## Freshness Check
 
-**Baseline commit:** `b3f43656d` (main at plan time)
+**Baseline commit:** `dcdb0c58b` (main at revision time; the original plan-time baseline was `b3f43656d`). `bridge/context.py` remains untouched since `e1ec8695c`, and every load-bearing file:line reference below was re-verified at the revision baseline.
 **Issue filed at:** 2026-08-12T12:06:04Z (23 days before planning)
 **Disposition:** Minor drift
 
@@ -124,8 +124,9 @@ repo or the installed dependency, which is stronger evidence than a prototype.
 
 - **Assumption**: "Resolving `media_local_path` for a chain ancestor requires network work and will not fit the pre-hydration budget."
 - **Method**: code-read
-- **Finding**: **False — it needs no network at all.** `TelegramMessage.chat_id` and `TelegramMessage.message_id` are both Popoto `KeyField`s (`models/telegram.py:24-25`), giving an O(1) Redis filter. The exact lookup already exists in the same file: `bridge/context.py:651` runs `TelegramMessage.query.filter(chat_id=str(chat_id), message_id=current_id)` inside `_cache_walk_root`, and two other call sites use the identical shape (`tools/telegram_history/__init__.py:447`, `bridge/read_the_room.py:180`). The 3s budget is dominated by the two Telethon RPCs already in the loop (`client.get_messages` plus `msg.get_sender()`), not by a sub-millisecond Redis read.
+- **Finding**: **False — it needs no network at all.** `TelegramMessage.chat_id` and `TelegramMessage.message_id` are both Popoto `KeyField`s (`models/telegram.py:25-26`), giving an O(1) Redis filter. The exact lookup already exists in the same file: `bridge/context.py:651` runs `TelegramMessage.query.filter(chat_id=str(chat_id), message_id=current_id)` inside `_cache_walk_root`, and two other call sites use the identical shape (`tools/telegram_history/__init__.py:447`, `bridge/read_the_room.py:180`). The 3s budget is dominated by the two Telethon RPCs already in the loop (`client.get_messages` plus `msg.get_sender()`), not by a sub-millisecond Redis read.
 - **Confidence**: high
+- **Caveat added at revision**: "cheap" is about latency, not about concurrency. The `filter` call is synchronous redis-py and blocks whatever thread runs it, so a *fast* lookup is still a loop-blocking one. The spike settles where resolution happens; it does not license an inline call. See Risk 4 and the `asyncio.to_thread` rule in Technical Approach.
 - **Impact on plan**: Settles issue open question 1. Resolution happens at hydration time in `fetch_reply_chain`; no deferral to the worker, no bounding to the nearest N ancestors.
 
 ### spike-2: Does a captioned attachment lose its caption today?
@@ -254,6 +255,8 @@ file with the tools it already has, or reports precisely what it cannot open.
   3. *Text only* — no media. Unchanged from today.
 - **Caption composes with the descriptor.** Per spike-2, a caption already survives. The change is that a captioned attachment now renders as caption *plus* descriptor, where today it renders as caption alone with the file invisible.
 - **Stat the path, do not trust the record.** Spike-3 shows files are never swept but records expire at 90 days; the inverse (record present, file gone) is possible after a manual clean or a failed write, so existence is checked, mirroring `bridge/enrichment.py`'s `path.exists() and os.access(path, os.R_OK)` check.
+- **Decided — the descriptor carries the full absolute path, with the basename as the human-readable name.** The absolute path is the thing that makes the attachment actionable in one `Read` call; a filename-plus-retrieval-instruction is one indirection slower and invites the agent to guess. The leak risk is that the agent quotes a path into a group chat, which is disclosure of directory *shape*, not of another tenant's data — Risk 3's `chat_id` scoping is what prevents cross-chat exposure, and it holds independently. Risk 2's mitigation carries the presentation rule: name the file by basename so the natural thing to quote is the filename, and record the disclosure in the feature doc.
+- **Decided — the guard hard-fails.** A warning-only lint is noise that accumulates until someone filters it out, and the defect this plan fixes survived three PRs precisely because nothing failed. The friction is bounded by matching on AST shape rather than line numbers, so a legitimate future placeholder is the only thing that can trip it, and the fix in that case is a deliberate, reviewed exemption.
 - **Scope every lookup by `chat_id`.** The resolver filters on `chat_id=str(chat_id)` exactly as `_cache_walk_root` does, so a filename or path can only ever come from the chat being walked. This is the answer to issue open question 4: `data/media/` is one flat directory shared across projects, but the resolution key makes a cross-chat file unnameable.
 - **Preserve the existing renderer contracts.** `filter_tool_logs` on Valor's lines, the 2000/500-char truncation, and the `strip_private` pass at both call sites all continue to apply. Truncation must never bisect a path, and it must measure the human-authored text so a long descriptor cannot push a real message under the truncation limit.
 - **Filter first, then compose — the descriptor is never fed to `filter_tool_logs`.** `bridge/context.py:486-487` runs `content = filter_tool_logs(content)` and then `if not content: continue` for `sender == "Valor"`, and `filter_tool_logs` returns `""` whenever its result is under 5 characters (`bridge/response.py:353`). Today a caption-less Valor media hop carries the 7-character `"[media]"` and survives that gate; once the placeholder is deleted, `content` is empty and the entire entry — descriptor included — is dropped. So the drop condition must become:
@@ -443,9 +446,12 @@ wording should not promise more certainty than a stat can give.
 - [SEPARATE-SLUG #3136] Delivering email attachment paths and the unrecoverable signal to the agent. Spike-4 established that email's `extra_context` attachment keys have no reader at all; that is a missing delivery seam in `agent/session_executor.py`, not a renderer defect, and fixing it here would double this plan's blast radius. Filed as #3136 with its own recon.
 - [SEPARATE-SLUG #3136] Unifying the Telegram and email context-rendering paths behind one renderer. Scoped into #3136's follow-on discussion rather than attempted here.
 
+- **Fixing `_cache_walk_root`'s inline blocking `filter`.** `bridge/context.py:629-651` calls `TelegramMessage.query.filter` directly on the event loop — the same defect this plan avoids in new code. It is pre-existing, it is on a different code path, and moving it off-loop changes the behavior of the root-resolution cache under load. Worth its own issue; not worth widening this diff.
+- **Downloading Valor's outbound media so ancestor hops resolve.** Outbound stores never set `media_local_path`, so a Valor media hop is always *unreadable*. Adding an outbound download path means new writes to `data/media/`, new retention pressure, and a new failure mode on every message the agent sends — a real feature, not a rendering fix.
+
 Everything else the issue asks for is in scope: the chain renderer, the caption
 composition, the explicit unreadable state, the worst-case budget regression
-test, the cross-medium guard, and both doc updates.
+test, the cross-medium scans, and both doc updates.
 
 ## Update System
 
@@ -594,6 +600,7 @@ email side, and this plan should not reproduce it.
 - **Agent Type**: test-engineer
 - **Parallel**: true
 - Drive a 20-deep chain with media at every hop and assert completion inside `_REPLY_CHAIN_FETCH_TIMEOUT_S`.
+- **Add the stalled-lookup case, which is the one that actually discriminates.** Patch the resolver's Redis lookup to sleep well past the 3-second budget, then assert `asyncio.wait_for` raises `TimeoutError` and the bridge coroutine yields control. With the lookup off-loop via `asyncio.to_thread` this passes; with an inline blocking `filter` the loop cannot be preempted and the test hangs past the budget. A healthy-Redis-only test cannot tell the two implementations apart (Risk 4).
 - Assert a ceiling on the rendered block size so a verbose descriptor cannot silently crowd the prompt (Risk 1).
 - Leave the two existing timeout-guard assertions (`test_steering.py` ~lines 45-80 and ~1290-1310) passing: both call sites keep the same 3.0s constant.
 
@@ -693,8 +700,13 @@ recorded in Spike Results rather than left for a human:
 - **Q3, are ancestor files still on disk** — settled by spike-3. Files are never swept. Records expire at 90 days, so the miss is a missing record, and the resolver stats the path anyway.
 - **Q4, cross-chat safety** — settled by Risk 3. Every lookup filters on `chat_id`, so a file from another chat is unnameable. The residual concern is disclosure of path *shape* into a group chat, handled as Risk 2.
 
-What remains genuinely needs a human:
+The three questions this section previously carried are all decided, and the
+decisions live where a builder will actually read them rather than being restated
+here as though the plan were blocked:
 
-1. **Is the email split at the right seam?** Spike-4 found email's attachment context is written and never read — a different defect from this one, filed as #3136. This plan therefore ships a guard that would *catch* an email regression without *fixing* email's existing gap. That is an honest boundary, but it does leave email attachments stranded until #3136 lands. Ship as split, or fold #3136 in and accept a much larger blast radius?
-2. **How much path should the descriptor expose?** A full absolute path is the most actionable thing for the agent and the most leakable thing if the agent quotes it into a group chat (Risk 2). The alternative — filename plus a retrieval instruction the agent resolves itself — is safer and one indirection slower. Preference?
-3. **Should the guard fail the build or warn?** A failing test is the only thing that reliably stops a regression, and it will also fire on a legitimate future placeholder someone has a good reason for. Hard fail with a narrow allow-list is the proposal; confirm that is the appetite for friction.
+- **How much path the descriptor exposes** — decided in *Technical Approach*: full absolute path, basename as the display name, with Risk 2 carrying the presentation rule.
+- **Whether the guard hard-fails or warns** — decided in *Technical Approach*: hard fail, with AST-shape matching keeping the friction bounded.
+- **Where the email seam splits** — decided in *No-Gos*: split, against #3136, which is filed and open. This plan ships the scans that make an email regression visible without taking on email's delivery seam.
+
+Nothing is blocking. Raise an objection to any of the three above if the calls
+read wrong; otherwise this is ready to build.
