@@ -20,6 +20,7 @@ Reflection callables return ``{"status": ..., "findings": [...], "summary": str}
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -326,6 +327,11 @@ def _resolve_neighborhood(
         except ValueError:
             continue
         rel_str = str(rel)
+        # Same exclusion the inbound branch makes: a plan is a point-in-time
+        # record, and a feature doc linking one must not readmit it to the
+        # audited neighborhood (#3133).
+        if rel_str.startswith(NON_AUDITED_DOC_PREFIXES):
+            continue
         if rel_str not in seen:
             seen.add(rel_str)
             neighborhood.append(rel)
@@ -638,6 +644,48 @@ def _suffix_owners(ref: str, repo_root: Path) -> list[str]:
         for path in _repo_paths_by_basename(repo_root).get(basename, [])
         if path == ref or path.endswith("/" + ref)
     ]
+
+
+def _installed_package_target_exists(ref: str) -> bool:
+    """Whether ``ref`` names a real file inside an installed (site-packages) package.
+
+    Prose legitimately cites upstream dependency source while explaining upstream
+    behavior — ``popoto/redis_db.py`` names a real module even though no repo path
+    owns it (#3133). This is a **second resolution root** for the deleted-target
+    detector, consulted only after the repo root and the suffix index both come up
+    empty; it never widens ``git ls-files``.
+
+    The first path component must be an importable top-level package whose
+    location resolves under ``site-packages`` (or ``dist-packages``). The
+    location requirement is what keeps this fail-closed: an editable install of a
+    first-party package resolves *outside* site-packages, so a branch-deleted
+    first-party module can never be vouched for by the primary checkout's
+    editable path entry. Any resolution error keeps the current behavior
+    (report).
+    """
+    first, _, rest = ref.partition("/")
+    if not rest or not first.isidentifier():
+        return False
+    try:
+        spec = importlib.util.find_spec(first)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    roots: list[Path] = []
+    if spec.submodule_search_locations:
+        roots.extend(Path(p) for p in spec.submodule_search_locations)
+    elif spec.origin:
+        roots.append(Path(spec.origin).parent)
+    for root in roots:
+        try:
+            if "site-packages" not in root.parts and "dist-packages" not in root.parts:
+                continue
+            if (root / rest).is_file():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _absent_new_path_refs(
@@ -1111,8 +1159,10 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
 
     * Backticked ``.py`` paths, e.g. `` `agent/gone.py` `` — repo-wide, no
       scope restriction beyond what the caller's neighborhood resolved.
-      Suppresses a fourth class beyond the two shared below: package-relative
-      paths that resolve by component-anchored suffix (#2936).
+      Suppresses two further classes beyond the two shared below:
+      package-relative paths that resolve by component-anchored suffix (#2936),
+      and citations of installed-dependency source that resolve under
+      site-packages via ``_installed_package_target_exists`` (#3133).
     * Markdown-link ``.md`` targets, e.g. ``[label](gone.md)`` — scoped to
       ``docs/`` minus ``docs/plans/completed/`` and ``docs/plans/done/`` (see
       ``_in_md_link_scope``). Resolved **doc-relative**, not repo-root-relative
@@ -1178,6 +1228,17 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
                 path,
                 doc_path,
                 ", ".join(owners),
+            )
+            continue
+        # Third and last resolution root: an installed dependency. A citation of
+        # upstream source (`popoto/redis_db.py`) has no repo owner but names a
+        # real module (#3133).
+        if _installed_package_target_exists(path):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(resolves inside an installed package)",
+                path,
+                doc_path,
             )
             continue
         findings.append(

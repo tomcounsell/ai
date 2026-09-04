@@ -197,6 +197,61 @@ class TestAuditSubstrate:
 # ---------------------------------------------------------------------------
 
 
+class TestNeighborhoodPlanExclusion:
+    """#3133 Gap 2: outbound links must honor NON_AUDITED_DOC_PREFIXES."""
+
+    def test_outbound_plan_link_excluded(self, repo: Path):
+        (repo / "docs" / "plans" / "old-plan.md").write_text("# plan")
+        (repo / "docs" / "features" / "other.md").write_text("# other")
+        (repo / "docs" / "features" / "primary.md").write_text(
+            "# P\n[plan](../plans/old-plan.md)\n[other](other.md)\n"
+        )
+        hood = docs_auditor._resolve_neighborhood(Path("docs/features/primary.md"), repo)
+        hood_strs = {str(p) for p in hood}
+        assert "docs/plans/old-plan.md" not in hood_strs
+        # The non-plan sibling still joins, so the exclusion is targeted,
+        # not a broken outbound branch.
+        assert "docs/features/other.md" in hood_strs
+
+    def test_outbound_archived_plan_link_excluded(self, repo: Path):
+        archived = repo / "docs" / "archive" / "plans-completed"
+        archived.mkdir(parents=True)
+        (archived / "done-plan.md").write_text("# done")
+        (repo / "docs" / "features" / "primary.md").write_text(
+            "# P\n[done](../archive/plans-completed/done-plan.md)\n"
+        )
+        hood = docs_auditor._resolve_neighborhood(Path("docs/features/primary.md"), repo)
+        assert {str(p) for p in hood} == {"docs/features/primary.md"}
+
+
+class TestInstalledPackageResolution:
+    """#3133 Gap 1: citations of installed-dependency source are not deleted targets."""
+
+    def test_installed_citation_not_reported_and_fake_is(self, repo: Path):
+        # Real upstream citation: zero findings. Mutating the cited path to a
+        # nonexistent module produces one, so the test reaches the resolver
+        # rather than passing vacuously.
+        real = "Upstream pool setup lives in `popoto/models/base.py`.\n"
+        assert _mk_finding(real, repo) == []
+        fake = "Upstream pool setup lives in `popoto/models/nope.py`.\n"
+        findings = _mk_finding(fake, repo)
+        assert len(findings) == 1
+        assert "popoto/models/nope.py" in findings[0]["title"]
+
+    def test_helper_resolves_only_under_site_packages(self):
+        assert docs_auditor._installed_package_target_exists("popoto/redis_db.py") is True
+        assert docs_auditor._installed_package_target_exists("popoto/does_not_exist.py") is False
+        # First-party packages resolve through an editable path entry outside
+        # site-packages; the helper must never vouch for them, or a
+        # branch-deleted module would be suppressed by the primary checkout.
+        assert docs_auditor._installed_package_target_exists("tools/doctor.py") is False
+
+    def test_helper_rejects_non_package_first_components(self):
+        assert docs_auditor._installed_package_target_exists("docs/features/x.py") is False
+        assert docs_auditor._installed_package_target_exists(".claude/hooks/x.py") is False
+        assert docs_auditor._installed_package_target_exists("bare.py") is False
+
+
 class TestNeighborhoodCap:
     def test_neighborhood_capped_at_20(self, repo: Path):
         primary = repo / "docs" / "features" / "primary.md"
