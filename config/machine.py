@@ -39,13 +39,14 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
 import sys
 from pathlib import Path
 
-from config.paths import VALOR_DIR
+from config.paths import CONFIG_DIR, VALOR_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +188,29 @@ def get_machine_id() -> str:
     return ""
 
 
+def _resolve_projects_json_path() -> Path:
+    """Launchd-safe ``projects.json`` path (mirrors ``bridge.routing``).
+
+    Under ``VALOR_LAUNCHD=1`` this never touches the iCloud-synced
+    ``VALOR_DIR`` path: macOS TCC / iCloud eviction can block ``open()``/
+    ``stat()`` on it indefinitely from a launchd agent, wedging the caller
+    at "alive but never finishes starting" (see
+    ``bridge/routing.py::_resolve_config_path`` and the outage it
+    documents). ``install_worker.sh`` copies ``projects.json`` to
+    ``CONFIG_DIR`` at install time for exactly this fallback.
+    """
+    local_path = CONFIG_DIR / "projects.json"
+    if os.environ.get("VALOR_LAUNCHD"):
+        return local_path
+    desktop_path = VALOR_DIR / "projects.json"
+    return desktop_path if desktop_path.exists() else local_path
+
+
 def get_machine_project_keys(machine: str | None = None) -> list[str]:
     """Return the ``project_key``s this machine owns in ``projects.json``.
 
-    Reads ``VALOR_DIR / "projects.json"`` and returns every key whose
+    Reads ``VALOR_DIR / "projects.json"`` (or the launchd-safe local copy,
+    see :func:`_resolve_projects_json_path`) and returns every key whose
     ``projects.<key>.machine`` field matches ``machine`` under
     :func:`normalize_machine_name` (case-insensitive, apostrophe-insensitive).
     When ``machine`` is ``None`` it resolves via :func:`get_machine_name`; a
@@ -207,7 +227,7 @@ def get_machine_project_keys(machine: str | None = None) -> list[str]:
     if not machine:
         return []
     try:
-        config = json.loads((VALOR_DIR / "projects.json").read_text())
+        config = json.loads(_resolve_projects_json_path().read_text())
     except Exception:
         return []
     target = normalize_machine_name(machine)
