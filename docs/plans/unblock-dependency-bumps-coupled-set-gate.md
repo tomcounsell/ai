@@ -2038,15 +2038,25 @@ Rows assert *declarations and executed paths*, not file text.
 | Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
 | Pin comment keeps the constraint and adds the pointer | `grep -c "AUTO_BUMP_SETS" pyproject.toml` | output > 0 |
-| Update-system tests pass | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -q` | exit code 0 |
+| Update-system tests pass | `./scripts/pytest-clean.sh "tests/integration/test_remote_update.py::TestAutoBumpDeps" -n 2 -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Anti-criterion: no dependency upgrade smuggled in | `grep -cE '"pydantic-ai-slim\[anthropic\]==2\.9\.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `anthropic` pin unchanged by this lane | `grep -c '"anthropic==0.125.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `openai` floor unchanged | `grep -c '"openai>=1.0.0"' pyproject.toml` | output > 0 |
-| Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | output = 0 |
+| Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | match count == 0 |
 | Update skill doc corrected | `! grep -q "import check" .claude/skills/update/SKILL.md` | exit code 0 |
 | Feature doc exists | `test -f docs/features/llm-stack-compat-gate.md` | exit code 0 |
+
+The update-system row is scoped to `TestAutoBumpDeps` deliberately, and widening it
+back to the whole file is a mistake twice over. `TestRemoteUpdateScript` invokes the
+real `scripts/remote-update.sh` against whatever checkout it runs in, so collecting it
+performs a live dependency auto-bump that rewrites `pyproject.toml` and `uv.lock` and
+discards uncommitted work — it is how commit `fa480c31f` landed a `claude-agent-sdk`
+pin bump on this branch that no one authored. Its five timeouts and
+`TestRestartFlag::test_check_restart_flag_defers_when_jobs_running` also fail
+identically on `main`, so the unscoped row could never go green regardless of this
+lane's code. `TestAutoBumpDeps` is the class this lane's diff actually touches.
 
 ## Critique Results
 
