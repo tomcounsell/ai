@@ -217,18 +217,18 @@ class CoupledSet:
 
 | Set | Members | Gates | State |
 |---|---|---|---|
-| LLM stack | `anthropic`, `pydantic-ai-slim` | `llm`, `import`, `pytest` | **Held on `#3001 Step 2`** |
+| LLM stack | `anthropic`, `pydantic-ai-slim` | `llm`, `import`, `pytest` | Active |
 | Harness transport | `claude-agent-sdk` | `import`, `pytest` | Active |
 
 The LLM set carries the `llm` phase because an import check cannot see its failure mode: `import anthropic` succeeds fine on a version whose call signature we cannot satisfy.
 
-The version boundary is `anthropic>=1.0.0` requires `pydantic-ai-slim>=2.33.0`, recorded in the two-line comment above the `anthropic` pin in `pyproject.toml`. Current pins are `anthropic==0.125.0` and `pydantic-ai-slim[anthropic]==2.9.0`.
+The version boundary is `anthropic>=1.0.0` requires `pydantic-ai-slim>=2.33.0`, recorded in the two-line comment above the `anthropic` pin in `pyproject.toml`. Current pins are `anthropic==1.3.0` and `pydantic-ai-slim[anthropic]==2.39.0`, landed by #3073 (PR #3140) together with the `openai>=3.0.0` floor and the hold removal, in one operation.
 
-**Who removes the hold:** a human. `hold` exists so the coupled-set structure can land inert while the pin decision stays with a person. Removing it means editing `AUTO_BUMP_SETS` in `scripts/update/deps.py` and letting the next maintainer-machine `/update --cron` resolve, sync, and gate the pair — which today would roll back. See the open finding below.
+**Who removes a hold:** a human. `hold` exists so a coupled-set structure can land inert while the pin decision stays with a person. The LLM set ran held on `#3001 Step 2` until the #3073 upgrade cleared its gate (offline predicate plus a live probe through the upgraded stack); its hold was removed in the same commit that moved the pins, so no unheld window existed on the old versions. Future sets follow the same shape: declare held, upgrade deliberately, remove the hold with the pins.
 
 ### `openai` is in no set, and an assertion enforces that
 
-There is no packaging coupling: `pydantic-ai-slim`'s locked dependencies contain no `openai` (it appears only under the `[openai]` extra, which this repo does not install). `openai` is also declared as a floor, `openai>=1.0.0`, not an exact pin, so `bump_pin_in_pyproject` would refuse to rewrite it rather than invent a pin the maintainer never chose. A module-scope assertion in `deps.py` fails the import if `openai` ever appears as a set member.
+There is no packaging coupling: `pydantic-ai-slim`'s locked dependencies contain no `openai` (it appears only under the `[openai]` extra, which this repo does not install). `openai` is also declared as a floor, `openai>=3.0.0` as of #3073, not an exact pin, so `bump_pin_in_pyproject` would refuse to rewrite it rather than invent a pin the maintainer never chose. A module-scope assertion in `deps.py` fails the import if `openai` ever appears as a set member. The floor sits at 3.x because the whole-stack loader makes `openai` a runtime prerequisite of `pydantic_ai` at the versions the LLM set reaches — see the loader-coupling section below.
 
 ### The gate phases
 
@@ -280,32 +280,17 @@ Measured on the development machine.
 
 **Per-set syncing** is where the structural delta lives: each moving set gets its own unfrozen `uv sync`, so N moving sets cost N resolve-and-install passes instead of one batched pass. A rolled-back set costs a second sync for its restore.
 
-**Today the delta is zero.** The LLM set is held, so it never rewrites and never syncs, and at most one set (`claude-agent-sdk`) can move on any given cycle — exactly one sync, as before.
-
-**With the hold lifted and both sets moving on the same cycle**, the added cost is one extra `uv sync` pass plus the LLM set's own gates. Gate time is bounded by the subprocess timeouts at 120 + 30 + 60 = 210s worst case; typical is ~35s (`llm` a few seconds plus one billed Haiku call, `import` about a second, `pytest` ~26s measured for the 196-test gate file). The sync term is network- and wheel-install-dominated and is the variable part. Worst case with a rollback: two syncs plus the gates for that set.
+**With both sets active and moving on the same cycle**, the added cost over a single-set cycle is one extra `uv sync` pass plus the LLM set's own gates. Gate time is bounded by the subprocess timeouts at 120 + 30 + 60 = 210s worst case; typical is ~35s (`llm` a few seconds plus one billed Haiku call, `import` about a second, `pytest` ~26s measured for the 196-test gate file). The sync term is network- and wheel-install-dominated and is the variable part. Worst case with a rollback: two syncs plus the gates for that set.
 
 This is bounded work on the maintainer machine only, on cycles where a pin actually moved. Followers never auto-bump and pay only the ~4s verify check.
 
-## Open: the Held LLM Set Cannot Currently Pass Its Own Gate
+## The Whole-Stack Loader Couples `openai` to the LLM Set's Reachable Versions
 
-**This is issue #3073's problem, not this feature's.** Recorded here because anyone who lifts the hold will hit it immediately.
+`pydantic-ai-slim` ≥2.34 requires `openai` ≥3.x for `pydantic_ai.models.openai`, and `_load_stack` is deliberately whole-stack: it imports `from pydantic_ai.models.openai import OpenAIChatModel` unconditionally, because `run_typed_local` needs `OpenAIChatModel` for the Ollama leg. So any operation that moves the LLM set past that boundary must move the `openai` floor in the same operation, even though no packaging metadata declares the coupling.
 
-With `openai` floored at `>=1.0.0` in `pyproject.toml` and pinned by `uv.lock` at **2.30.0**, a real bump of the LLM set to `anthropic` 1.3.0 + `pydantic-ai-slim` 2.37.0 **rolls back**. Verified live during this lane's rollback verification.
+The #3073 upgrade proved both halves live. Its first gate run, with `openai` still at 2.x, returned `loader_ok=false` (``"Please install `openai` to use the OpenAI model"``) and correctly rolled the set back; moving the floor to `>=3.0.0` in the same operation as the pins made the gate pass. That is the gate catching a real, un-runnable stack before it shipped, exactly as designed.
 
-The chain:
-
-1. `pydantic-ai-slim` ≥2.34 requires `openai` ≥3.x for `pydantic_ai.models.openai`.
-2. `_load_stack` is deliberately whole-stack and imports `from pydantic_ai.models.openai import OpenAIChatModel` unconditionally, because `run_typed_local` needs `OpenAIChatModel` for the Ollama leg.
-3. `uv sync` leaves `openai` at 2.30.0 (its floor permits it and no set moves it).
-4. The `llm` gate phase returns `loader_ok=false`, reason ``"Please install `openai` to use the OpenAI model"``, and the set is correctly rolled back.
-
-The gate is behaving exactly as designed: it caught a real, un-runnable stack before it shipped.
-
-**Step 2 therefore requires moving `openai` in the same operation.** Do not read this as an argument for relaxing the whole-stack loader or for a per-symbol import menu; the whole-stack loader is what makes the failure loud instead of latent in `run_typed_local`.
-
-For the record on the spike that scoped this: spike-5's finding that there is **no packaging coupling** between `openai` and the anthropic stack remains correct — `pydantic-ai-slim`'s locked dependencies still do not list `openai`. Its conclusion that "the fix is at the import, not by widening the set" does **not** survive contact with the whole-stack loader: the loader makes `openai` a runtime prerequisite of `pydantic_ai` at the version the LLM set is trying to reach, regardless of what the metadata declares. Widening the operation, not the packaging claim, is what Step 2 needs.
-
-Do not change the `openai` guard in `deps.py` on the basis of this note. Removing the assertion would let an auto-bump try to rewrite a floor declaration, which `bump_pin_in_pyproject` refuses by design.
+Do not read this coupling as an argument for relaxing the whole-stack loader or for a per-symbol import menu; the whole-stack loader is what makes the failure loud instead of latent in `run_typed_local`. And do not change the `openai` guard in `deps.py` on its account: removing the assertion would let an auto-bump try to rewrite a floor declaration, which `bump_pin_in_pyproject` refuses by design.
 
 ## Files
 
