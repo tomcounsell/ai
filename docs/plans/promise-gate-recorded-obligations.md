@@ -432,13 +432,13 @@ Run every row from the lane worktree (`.worktrees/promise-gate-recorded-obligati
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Schema carries ask_coverage | `grep -c "ask_coverage" agent/session_runner/router.py` | output > 0 |
-| Phase A: present but not required | `python -c "from agent.session_runner.router import PM_TURN_JSON_SCHEMA as s; print(int('ask_coverage' in s['properties']), int('ask_coverage' in s['required']))"` | `1 0` |
-| Phrasebook gone | `grep -ci "two ways to stay on the allowed side" .claude/commands/roles/prime-pm-role.md \|\| true` | `0` |
+| Phase A: present but not required | `python -c "from agent.session_runner.router import PM_TURN_JSON_SCHEMA as s; print(int('ask_coverage' in s['properties']), int('ask_coverage' in s['required']))"` | output contains `1 0` |
+| Phrasebook gone | `grep -ci "two ways to stay on the allowed side" .claude/commands/roles/prime-pm-role.md \|\| true` | match count == 0 |
 | Present-fact norm retained | `grep -c "say only what is already true" .claude/commands/roles/prime-pm-role.md` | output > 0 |
 | Short path zero-LLM test exists | `grep -cE "zero_llm\|no_llm_call" tests/unit/test_message_drafter.py` | output > 0 |
-| No formerly-narration in gate doc | `grep -ci "formerly" docs/features/promise-gate.md \|\| true` | `0` |
-| No evaluate_delivery ships (anti-criterion, No-Go 1) | `grep -rl "def evaluate_delivery" --include='*.py' . \| wc -l \| tr -d ' '` | `0` |
-| No LLM gate on the poll route (anti-criterion, No-Go 5) | `grep -c "evaluate_promise_async" agent/output_handler.py \|\| true` | `0` |
+| No formerly-narration in gate doc | `grep -ci "formerly" docs/features/promise-gate.md \|\| true` | match count == 0 |
+| No evaluate_delivery ships (anti-criterion, No-Go 1) | `grep -rl "def evaluate_delivery" --include='*.py' . \| wc -l \| tr -d ' '` | match count == 0 |
+| No LLM gate on the poll route (anti-criterion, No-Go 5) | `grep -c "evaluate_promise_async" agent/output_handler.py \|\| true` | match count == 0 |
 | Timeout source reachable | `scripts/pytest-clean.sh tests/unit/test_promise_gate.py -k timeout_falls_through -q` | exit code 0 |
 | Stop hook takes no LLM call (Risk 1a) | `grep -c "use_llm=False" agent/hooks/stop.py` | output > 0 |
 | Poll question runs the heuristic (No-Go 5) | `sed -n '/^def validate_poll_question/,/^def /p' bridge/message_drafter.py \| grep -c _evaluate_promise_heuristic` | output > 0 (a bare file-wide grep returns 3 today from the unrelated short path, so it must be anchored inside the function) |
