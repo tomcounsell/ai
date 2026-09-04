@@ -137,10 +137,11 @@ async def translate_poll_vote(client, poll_id) -> None:
     """Translate one vote into a steer or a completed-session re-enqueue.
 
     Idempotent and safe to call from both observers concurrently. Raises only
-    ``FloodWaitError`` (#3095), which both callers handle — the reconcile loop
-    backs off, and the ``events.Raw`` fast path's blanket handler logs and
-    drops the latency win. Nothing else escapes into a Telethon update loop or
-    a background task.
+    ``FloodWaitError`` (#3095), and only from the Telegram RPCs — both callers
+    handle it (the reconcile loop backs off; the ``events.Raw`` fast path's
+    blanket handler logs and drops the latency win). Registry I/O errors
+    propagate as before and are contained by the callers' own handlers;
+    nothing escapes into a Telethon update loop or a background task.
     """
     row = lookup_poll(poll_id)
     if row is None:
