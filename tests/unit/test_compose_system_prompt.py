@@ -168,14 +168,25 @@ def test_compose_cell_returns_nonempty_string(persona, access_level):
 
 
 def test_worker_cell_under_cache_budget():
-    """WORKER cell prompt (with work_dir) must stay under 80K chars (Anthropic
-    prompt cache budget -- see #1227)."""
-    prompt = compose_system_prompt(
-        PersonaType.ENGINEER,
-        AccessLevel.WORKER,
-        working_directory=_local_work_vault(),
-    )
-    assert len(prompt) < 80_000, f"WORKER prompt over budget: {len(prompt)} chars"
+    """The repo-controlled WORKER cell prompt must stay under 50K chars.
+
+    The bound is deliberately tighter than Anthropic's prompt-cache budget
+    (#1227's original 80K): #3069's owner ruling set 50K so headroom pressure
+    points toward trimming the feeds, never raising the line. Raise this
+    constant only with an owner decision recorded on an issue.
+
+    Measures the deterministic repo-only composition (private persona layers
+    pinned out, principal from the checked-in fixture -- same inputs as the
+    byte-stability baseline, #2555) plus this repo's own ``CLAUDE.md`` as the
+    appended working-directory instructions. The previous form composed against
+    the live host layout (private overlay, ``~/work-vault`` fallback), so its
+    verdict varied by machine -- the host-dependence flaw named in #3069's
+    second finding.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    claude_md = (repo_root / "CLAUDE.md").read_text()
+    prompt = f"{compose_repo_only_eng_worker_prompt()}\n\n---\n\n{claude_md}"
+    assert len(prompt) < 50_000, f"WORKER prompt over budget: {len(prompt)} chars"
 
 
 def test_no_unsubstituted_identity_markers():
