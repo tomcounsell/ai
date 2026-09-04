@@ -688,6 +688,13 @@ class TestQuestionFabricationPrevention:
 
     The drafter must NEVER fabricate questions from declarative statements.
     Only explicit questions (from ## Open Questions sections) populate open_questions.
+
+    Every case pins ``use_llm=False``. These assert open-question extraction
+    from raw text, never gate judgment, and ``draft_message`` now defaults to
+    ``use_llm=True`` — so without the pin, any input at or above 200 chars
+    makes a live Haiku call and the class goes red or flaky on whatever verdict
+    the model returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     @pytest.mark.asyncio
@@ -700,7 +707,7 @@ class TestQuestionFabricationPrevention:
             "Both changes are straightforward — modifying the classifier prompt "
             "and the auto-continue handler. No questions at this time. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # No ## Open Questions section → open_questions must be None
         assert result.open_questions is None
@@ -716,7 +723,7 @@ class TestQuestionFabricationPrevention:
             "## Open Questions\n"
             "- Should we use exponential backoff or fixed intervals?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         assert "exponential backoff" in result.open_questions
@@ -729,7 +736,7 @@ class TestQuestionFabricationPrevention:
             "will add index to users table, will run load test. "
             "No explicit questions for the human at this point. " * 5
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is None
         assert "\n---\n" not in result.text
@@ -876,6 +883,13 @@ class TestExpectationsRecallParity:
     The drafter must NEVER fabricate questions from declarative statements.
     open_questions must be None (not "", not any other falsy value) when no
     ## Open Questions section is present.
+
+    Every case pins ``use_llm=False``. These assert open-question extraction,
+    never gate judgment, and ``draft_message`` now defaults to ``use_llm=True``
+    — so without the pin, any input at or above 200 chars makes a live Haiku
+    call and the class goes red or flaky on whatever verdict the model
+    returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     @pytest.mark.asyncio
@@ -887,7 +901,7 @@ class TestExpectationsRecallParity:
             "- Should we use exponential backoff or fixed 5s intervals?\n"
             "- Is the 0.80 confidence threshold acceptable for prod?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         assert (
@@ -903,7 +917,7 @@ class TestExpectationsRecallParity:
             "The session lock cleanup now runs on startup. "
             "All 135 tests pass. Committed def5678 and pushed to session/auth-fix. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # No ## Open Questions section → no open_questions
         assert result.open_questions is None
@@ -919,7 +933,7 @@ class TestExpectationsRecallParity:
             "Updated the session scheduler. Cleaned up 3 orphaned sessions. "
             "No pending questions at this time. " * 5
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # Must be exactly None, not an empty string or empty list
         assert result.open_questions is None
@@ -935,7 +949,7 @@ class TestExpectationsRecallParity:
             "The current implementation uses Redis anyway. "
             "Completed the analysis. Will proceed with Redis. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # Questions embedded in declarative prose must not be extracted
         assert result.open_questions is None
@@ -950,7 +964,7 @@ class TestExpectationsRecallParity:
             "- Do we need a migration script for existing records?\n"
             "- Is the 48h TTL on steering keys acceptable?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         # All three questions should appear in some form
@@ -1469,9 +1483,26 @@ class TestShortOutputPromiseGate:
         assert captured["source"] == "promise_gate_drafter_disabled"
 
     @pytest.mark.asyncio
-    async def test_full_path_promise_block_still_promotes(self):
+    async def test_full_path_promise_block_still_promotes(self, monkeypatch):
         """The full (composed) path's empty-promise promotion survives the
-        shared-helper refactor: a long promise-bearing reply is still promoted."""
+        shared-helper refactor: a long promise-bearing reply is still
+        promoted. This genuinely needs a ``block`` verdict, so pinning
+        ``use_llm=False`` would change what it tests — instead the LLM
+        layer is monkeypatched deterministic (same target/idiom as
+        TestMainPathLLMWiring below), keeping the assertion about
+        promotion rather than about live-model judgment."""
+        import bridge.promise_gate as promise_gate
+        from bridge.promise_gate import PromiseVerdict
+
+        async def _fake_block(text):
+            return PromiseVerdict(
+                action="block",
+                reason="Forward-deferral without verifiable scheduled-delivery reference",
+                class_="forward_deferral",
+            )
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _fake_block)
+
         long_text = (
             "Thanks for flagging that — good catch on the newsletter section. "
             "The tab layout needs a fair bit of rework before the card reads cleanly "

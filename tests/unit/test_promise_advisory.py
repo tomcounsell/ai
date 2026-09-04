@@ -219,6 +219,14 @@ class TestPromiseOverride:
         session, job = scratch_session_with_job
         incident_a_text = "Say the word and I'll re-run that same dispatch."
 
+        # NOTE: left as-is because this is a deliberate live-API assertion --
+        # it is the R1-discriminator success criterion's evidence (plan
+        # checklist line 294: "a forward-looking message with a recorded
+        # open inbound expectation passes; the identical message without
+        # one blocks -- asserted directly on the drafter path"). The
+        # Incident A fixture below is the text the PR body measures as
+        # blocking 8/8 on the LLM layer -- pinning or mocking use_llm here
+        # would hollow out the criterion this test exists to prove.
         verdict = await _evaluate_drafter_promise(
             incident_a_text, medium="telegram", session=session, use_llm=True
         )

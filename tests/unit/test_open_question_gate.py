@@ -210,6 +210,14 @@ class TestSummarizeResponseOpenQuestions:
 
     With the pass-through drafter, open_questions comes directly from
     _extract_open_questions() — no LLM mock needed.
+
+    Every case pins ``use_llm=False``. These assert open-question extraction,
+    never gate judgment, and ``draft_message`` now defaults to ``use_llm=True``
+    — several of these fixtures contain a "?" (disqualifying the short-output
+    path regardless of length) or are >= 200 chars, so without the pin they
+    make a live Haiku call and the class goes red or flaky on whatever verdict
+    the model returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     @pytest.mark.asyncio
@@ -222,7 +230,7 @@ class TestSummarizeResponseOpenQuestions:
             "2. What is the acceptable latency?\n\n"
             "## Solution\n\nBuild it.\n"
         )
-        result = await draft_message(raw_output)
+        result = await draft_message(raw_output, use_llm=False)
 
         assert result.open_questions is not None
         assert "Should we use approach A or B?" in result.open_questions
@@ -233,7 +241,7 @@ class TestSummarizeResponseOpenQuestions:
         """When raw output has no open questions, open_questions stays None."""
         # Long enough to bypass short-output path, no ## Open Questions
         raw_output = "Built the feature. All tests passing. No open questions. " * 5
-        result = await draft_message(raw_output)
+        result = await draft_message(raw_output, use_llm=False)
 
         assert result.open_questions is None
 
@@ -241,7 +249,7 @@ class TestSummarizeResponseOpenQuestions:
     async def test_empty_open_questions_section_stays_none(self):
         """Empty ## Open Questions section does not populate open_questions."""
         raw_output = "Plan created.\n\n## Open Questions\n\n## Solution\n\nBuild it.\n"
-        result = await draft_message(raw_output)
+        result = await draft_message(raw_output, use_llm=False)
 
         assert result.open_questions is None
 
@@ -255,7 +263,7 @@ class TestSummarizeResponseOpenQuestions:
             "1. Should we use Redis or PostgreSQL?\n\n"
             "## Solution\n\nImplement with Redis.\n"
         )
-        result = await draft_message(raw_output)
+        result = await draft_message(raw_output, use_llm=False)
 
         # open_questions contains the real open question
         assert result.open_questions is not None
@@ -363,6 +371,13 @@ class TestWorkflowAnnouncementExtraction:
     plus a `## Open Questions` section asking the human to choose between
     `plan` and `skip`. These tests verify the extraction → open_questions
     pipeline works for that exact response shape.
+
+    The two async cases pin ``use_llm=False``. They assert open-question
+    extraction, never gate judgment, and ``draft_message`` now defaults to
+    ``use_llm=True`` — this fixture is >= 200 chars, so without the pin it
+    makes a live Haiku call and the class goes red or flaky on whatever
+    verdict the model returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     def test_workflow_question_extracted_from_announcement_response(self):
@@ -408,7 +423,7 @@ class TestWorkflowAnnouncementExtraction:
             "## Open Questions\n\n"
             "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
         )
-        result = await draft_message(pm_response)
+        result = await draft_message(pm_response, use_llm=False)
 
         assert result.open_questions is not None, (
             "open_questions should be populated from the verbatim ## Open Questions section "
@@ -429,7 +444,7 @@ class TestWorkflowAnnouncementExtraction:
             "## Open Questions\n\n"
             "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
         )
-        result = await draft_message(pm_response)
+        result = await draft_message(pm_response, use_llm=False)
 
         assert result.open_questions is not None
         # Verbatim question text must appear in open_questions
