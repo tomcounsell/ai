@@ -1,5 +1,6 @@
 """Context building, conversation history, reply chains, and link summaries."""
 
+import asyncio
 import logging
 import os
 import re
@@ -10,6 +11,7 @@ from telethon import TelegramClient
 
 # Reuse the canonical tool-log filter from bridge.response (single source of truth).
 # See docs/features/bridge-response-improvements.md and issue #1359.
+from bridge.media import MEDIA_DIR, get_media_type
 from bridge.response import filter_tool_logs
 from config.settings import settings
 from tools.link_analysis import (
@@ -376,6 +378,103 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 # =============================================================================
 
 
+def _media_descriptor(
+    kind: str,
+    filename: str | None,
+    media_type: str | None,
+    local_path: str | None,
+    reason: str | None,
+) -> dict:
+    """Build the media descriptor attached to a reply-chain entry.
+
+    `kind` is "resolved" (file readable at `local_path`) or "unreadable"
+    (`reason` names why). The descriptor is data, not text: the renderer owns
+    presentation and tests assert on this structure.
+    """
+    return {
+        "kind": kind,
+        "filename": filename,
+        "media_type": media_type,
+        "local_path": local_path,
+        "reason": reason,
+    }
+
+
+async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
+    """Resolve the media descriptor for one reply-chain hop.
+
+    Returns None when the message carries no media. Otherwise returns a
+    descriptor (see `_media_descriptor`): media type and filename come from
+    the Telethon message already in hand, the on-disk path from the
+    `TelegramMessage` record the bridge wrote at intake. The two sources
+    degrade separately — a Redis miss still yields a named attachment,
+    downgraded to "unreadable" with a specific reason.
+
+    Never raises: any failure logs at warning and degrades to an
+    "unreadable" descriptor so the chain walk continues past this hop.
+    """
+    if not (getattr(msg, "file", None) or getattr(msg, "media", None)):
+        return None
+
+    try:
+        media_type = get_media_type(msg)
+        filename = getattr(getattr(msg, "file", None), "name", None)
+        if not filename:
+            # Photos genuinely have no filename — synthesize a stable label.
+            filename = f"{media_type or 'media'}-{msg.id}"
+
+        # Lazy import: models.telegram pulls in Popoto/Redis, which this
+        # module must not require at import time (same shape as _cache_walk_root).
+        from models.telegram import TelegramMessage
+
+        # Popoto is synchronous redis-py; an inline call here would block the
+        # bridge event loop and make the callers' asyncio.wait_for guard
+        # unenforceable. chat_id scoping is a hard requirement: message ids
+        # are per-chat sequences, so an unscoped lookup could resolve another
+        # chat's file.
+        records = await asyncio.to_thread(
+            lambda: list(TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id))
+        )
+        if not records:
+            return _media_descriptor("unreadable", filename, media_type, None, "no_record")
+
+        record = records[0]
+        download_error = getattr(record, "media_download_error", None)
+        if download_error:
+            return _media_descriptor(
+                "unreadable", filename, media_type, None, f"download_error: {download_error}"
+            )
+
+        local_path = getattr(record, "media_local_path", None)
+        if not local_path or not str(local_path).strip():
+            return _media_descriptor("unreadable", filename, media_type, None, "no_path_recorded")
+
+        path = Path(str(local_path).strip())
+        try:
+            inside_media_dir = path.resolve().is_relative_to(MEDIA_DIR.resolve())
+        except (OSError, ValueError):
+            inside_media_dir = False
+        if not inside_media_dir:
+            return _media_descriptor("unreadable", filename, media_type, None, "invalid_path")
+
+        if not (path.exists() and os.access(path, os.R_OK)):
+            return _media_descriptor("unreadable", filename, media_type, None, "file_missing")
+
+        return _media_descriptor("resolved", filename, media_type, str(path), None)
+    except Exception as e:
+        logger.warning(
+            f"Could not resolve media descriptor for message "
+            f"{getattr(msg, 'id', 'unknown')} in chat {chat_id}: {e}"
+        )
+        return _media_descriptor(
+            "unreadable",
+            f"media-{getattr(msg, 'id', 'unknown')}",
+            None,
+            None,
+            "resolution_error",
+        )
+
+
 async def fetch_reply_chain(
     client: TelegramClient,
     chat_id: int,
@@ -395,7 +494,8 @@ async def fetch_reply_chain(
         max_depth: Maximum number of messages to fetch in the chain
 
     Returns:
-        List of message dicts with 'sender', 'content', 'message_id', 'date'
+        List of message dicts with 'sender', 'content', 'message_id', 'date',
+        and 'media' (a descriptor dict for hops carrying media, else None)
     """
     chain = []
     current_id = message_id
@@ -419,12 +519,17 @@ async def fetch_reply_chain(
             if msg.out:
                 sender_name = "Valor"
 
+            # Never raises — a resolution failure degrades this hop to an
+            # "unreadable" descriptor instead of reaching the loop-tail break.
+            media = await _resolve_media_descriptor(msg, chat_id)
+
             chain.append(
                 {
                     "sender": sender_name,
                     "content": msg.text or "[media]",
                     "message_id": msg.id,
                     "date": msg.date,
+                    "media": media,
                 }
             )
 
