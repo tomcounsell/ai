@@ -171,7 +171,9 @@ as a comment if not) and capture `{review_url}` — both per `post-review.md`.
 ### 5. Record the Verdict (only if the context file declares a substrate)
 
 In the generic case (no substrate declared) the posted GitHub review IS the
-verdict — skip this step.
+verdict — skip this step. `/do-sdlc`'s REVIEW self-check gate (its Step 5d.4)
+states this same rule and skips itself in the same case, so a supervised run
+never demands a recorded verdict this skill correctly did not write (#2777).
 
 If the context file declares a verdict-recording substrate (so a pipeline router
 can consume the verdict programmatically), the finalize call is **mandatory and

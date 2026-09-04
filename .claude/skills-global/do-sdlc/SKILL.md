@@ -36,6 +36,13 @@ The defaults drive the pipeline through `sdlc-tool` (a stage-state CLI on `PATH`
 router's internal guard implementation and its source references, the router-shim relationship,
 and `sdlc-tool` command discipline — live in that context file, not in this global body.
 
+The probe also determines the run's **verdict authority**: a repo that declares no verdict
+substrate (no `docs/sdlc/` context) uses posted GitHub reviews as its authoritative REVIEW
+verdicts, and Step 5d.4 skips itself accordingly. State the mode in your first status line when
+supervising such a repo ("no verdict substrate declared: GitHub reviews are authoritative
+verdicts") so the run names its verdict authority up front. This is a mode, never a refusal —
+supervised runs in substrate-less repos are valid work.
+
 ## Hard Rules
 
 1. **NEVER write code, run tests, or create plans directly** — every stage executes inside a stage
@@ -195,7 +202,9 @@ gh pr view {pr_number} --repo <resolved> --json number,headRefName,reviewDecisio
 3e. Read `reviewDecision` from that output. `APPROVED` / `CHANGES_REQUESTED` are formal GitHub
 outcomes. An empty value is **ambiguous**: on a non-self-authored PR no review is posted yet, but
 on a self-authored PR it is expected even after a full review. Always cross-check the recorded
-REVIEW verdict from Step 3.0 before concluding no review exists.
+REVIEW verdict from Step 3.0 before concluding no review exists; in a repo with no verdict
+substrate, check the PR's posted reviews and comments instead — there, the posted GitHub review
+IS the verdict (see Step 5d.4).
 
 ### Step 3.4: Check Documentation Status
 
@@ -269,7 +278,8 @@ evaluating G1–G9 and short-circuits on it. See [Run Identity & Lock Ownership]
 **Known gap — stale REVIEW verdict after PATCH.** G3 and G6 key off the recorded REVIEW verdict
 containing `APPROVED`, not off whether it postdates the most recent PATCH commit. Before trusting
 a router-proposed `/do-merge`, confirm with `sdlc-tool verdict get --stage REVIEW --issue-number
-{N}`; if the verdict predates the patch, dispatch `/do-pr-review` first.
+{N}`; if the verdict predates the patch, dispatch `/do-pr-review` first. In a repo with no
+verdict substrate, apply the same freshness judgment to the posted GitHub review instead.
 
 **Merge gate:** `/do-merge` fires only when REVIEW and DOCS are complete, the PR merge state is
 CLEAN, CI is all-passing, and the recorded REVIEW verdict is APPROVED at the current head.
@@ -425,12 +435,19 @@ says. Read the stderr diagnostic and route it:
 - Anything else (a broker error, a timeout) → transient. Retry once; report-and-continue only if
   it persists. A transient error is never an unconditional pipeline abort.
 
-### 5d.4. REVIEW self-check gate
+### 5d.4. REVIEW self-check gate (only when a verdict substrate is declared)
 
-If the stage just dispatched in 5c was `/do-pr-review`, do not treat its return as sufficient to
-advance. It should have already finalized its verdict internally (an atomic verdict+trailer+marker
-write), but the supervisor is the loud backstop for that contract. Call the read-only self-check
-yourself:
+This gate applies ONLY when the repo declares a verdict-recording substrate (its review context
+file, `docs/sdlc/do-pr-review.md` per the Repo Context Probe, declares one). When no substrate is
+declared, **the posted GitHub review IS the verdict** — the same rule `/do-pr-review` Step 5
+states for its generic case — so there is no recorded verdict to self-check. Skip this gate and
+advance on the stage report's verdict plus the posted review it cites. Halting a substrate-less
+repo here for a missing recorded verdict is the defect this rule exists to prevent (#2777).
+
+When a substrate IS declared and the stage just dispatched in 5c was `/do-pr-review`, do not treat
+its return as sufficient to advance. It should have already finalized its verdict internally (an
+atomic verdict+trailer+marker write), but the supervisor is the loud backstop for that contract.
+Call the read-only self-check yourself:
 
 ```bash
 sdlc-tool verdict selfcheck --pr {pr_number} --issue-number {issue_number}
