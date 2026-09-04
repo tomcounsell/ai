@@ -476,7 +476,6 @@ AUTO_BUMP_SETS: list[CoupledSet] = [
             "version whose call signature we cannot satisfy), which is why "
             "this set carries the `llm` phase."
         ),
-        hold="#3001 Step 2",
     ),
     CoupledSet(
         members=["claude-agent-sdk"],

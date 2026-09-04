@@ -148,10 +148,12 @@ _ALERT_BODY = "LLM stack incompatible — non-harness LLM calls fail fast until 
 # exactly once per process instead of once per marker touch.
 _MARKER_DIR_WARNED = False
 
-# The three knobs the 2026-08-24 incident removed from the client. Kept as
-# the *assertion* target for ``tests/unit/test_llm_stack_compat.py`` -- the
-# derived set must contain all three -- never as a fallback the predicate
-# silently degrades to.
+# The three knobs the 2026-08-24 incident removed from the client. On
+# pydantic-ai < 2.33 the call site forwarded all three (the incident); from
+# 2.33 it forwards none of them (the fix this repo upgraded onto in #3073).
+# Kept as documentation of the incident and as the *negative* assertion
+# target for ``tests/unit/test_llm_stack_compat.py`` -- never as a fallback
+# the predicate silently degrades to.
 INCIDENT_KWARGS = ("temperature", "top_p", "top_k")
 
 

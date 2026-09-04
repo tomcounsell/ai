@@ -8,8 +8,8 @@ dependencies = [
     # CRITICAL — coupled set: anthropic + pydantic-ai-slim move together.
     # anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. Gated by AUTO_BUMP_SETS in
     # scripts/update/deps.py; see docs/features/llm-stack-compat-gate.md.
-    "anthropic==0.125.0",
-    "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
+    "anthropic==1.3.0",
+    "pydantic-ai-slim[anthropic]==2.39.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
     "claude-agent-sdk==0.2.152", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
@@ -26,7 +26,7 @@ dependencies = [
     "pypdf>=6.15.0",  # floor tracks upstream SEC/ROB fixes; 6.10.0 patched the XMP metadata RAM-exhaustion CVE
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
-    "openai>=1.0.0", # Embedding API for semantic doc impact finder
+    "openai>=3.0.0", # Embedding API for semantic doc impact finder; floor (not exact pin, per #3001 round-2). 3.x floor required: pydantic-ai-slim 2.39's OpenAI model rejects 2.x with a misleading "Please install `openai`" ImportError, which _load_stack would surface on every call
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
