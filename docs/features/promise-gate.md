@@ -70,10 +70,14 @@ validation flow — no Haiku call, no double-charge.
 session ends before self-draft steering was consumed. At that moment there is
 no live agent to self-draft a rewrite, so `needs_self_draft=True` is not an
 option. `agent/session_health._gate_terminal_promise` therefore evaluates the
-exact text about to ship and, on a block, **substitutes** the honest fallback
-`TERMINAL_PROMISE_FALLBACK_MESSAGE` ("I couldn't complete that follow-up
-before this session ended — please send the request again if you still need
-it."). Suppression is not used, because it reintroduces the swallowed-reply
+exact text about to ship and, on a block, **substitutes** the fallback
+`TERMINAL_PROMISE_FALLBACK_MESSAGE` ("An outbound safety filter held back this
+session's final message. The work may have finished normally; if something you
+expected is missing, ask again in a new message."). The wording asserts only
+what the gate can actually know: a filter withheld the message. It claims
+nothing about whether the session's work finished, because a block verdict
+carries no such information (#3135; the substitution design itself is still
+open there). Suppression is not used, because it reintroduces the swallowed-reply
 class. The gate is fail-open for delivery: an evaluation error delivers the
 original text rather than swallowing the reply.
 

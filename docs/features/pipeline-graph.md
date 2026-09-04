@@ -61,7 +61,7 @@ A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops.
 | `DISPLAY_STAGES` | `list[str]` | PM-facing linear stage list (excludes PATCH) |
 | `get_next_stage()` | function | Graph traversal with cycle counter |
 | `MAX_PATCH_CYCLES` | `int` | Max PATCH cycles before escalation (default 3) |
-| `MAX_CRITIQUE_CYCLES` | `int` | Max CRITIQUE cycles before escalation (default 2) |
+| `MAX_CRITIQUE_CYCLES` | `int` | Max CRITIQUE cycles before escalation (default 2; reads `settings.features.max_critique_cycles`, overridable via `FEATURES__MAX_CRITIQUE_CYCLES`) |
 
 ## Design Decisions
 

@@ -39,7 +39,9 @@ Step 4 review of the diff before it commits.
 ### Caller A — `docs-auditor` daily rotation reflection
 
 Picks the least-recently-audited primary doc from a Redis hash, expands its
-neighborhood (≤20 files via outbound links + inbound refs), runs auto-fix
+neighborhood (≤20 files via outbound links + inbound refs;
+`NON_AUDITED_DOC_PREFIXES` such as `docs/plans/` is applied on both branches,
+so a feature doc linking to a plan cannot readmit it — #3133), runs auto-fix
 detectors, applies them, stages exactly `files_touched` (never a whole-tree
 `git add -A`), opens a `docs-audit/{slug}-{ts}` branch, posts a non-draft PR,
 and notifies that review is required. The notification destination is
@@ -422,6 +424,17 @@ differently: the `.py` branch runs over whatever neighborhood the caller
 already resolved, repo-wide; the `.md` branch is scoped to `docs/` minus
 `docs/plans/completed/` and `docs/plans/done/` (archived plans deliberately
 record history and are not a live surface a human reviews for broken links).
+
+**Installed-package citations are a second resolution root (#3133).** A `.py`
+ref whose first path component is an importable top-level package that is not
+a repo directory (`popoto/redis_db.py` cited while explaining upstream
+behavior) resolves against that package's own tree via
+`_installed_package_target_exists()`, consulted only after the repo root and
+suffix index both come up empty. Only locations under
+`site-packages`/`dist-packages` count, which keeps the check fail-closed:
+first-party packages resolve through the editable path entry outside
+site-packages, so a branch-deleted `tools/*.py` can never be vouched for by
+the primary checkout. Resolution errors keep the report behavior.
 
 **The frame rule (#2725 / #2741).** `.md` link targets resolve **relative to
 the containing document's directory** — the frame markdown renderers actually
