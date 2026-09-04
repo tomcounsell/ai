@@ -114,18 +114,29 @@ class TestEnqueueNudgeTerminalGuard:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
     async def test_nudge_main_path_skips_terminal(self, terminal_status):
-        """_enqueue_nudge() entry guard blocks terminal sessions from being nudged."""
+        """_enqueue_nudge() entry guard blocks terminal sessions from being nudged.
+
+        The entry guard's specific value is bailing out BEFORE the Redis
+        re-read, so the observable consequence of it failing is the re-read
+        happening at all (#3066). The authoritative re-read returns a LIVE
+        session here, so the downstream re-read guard cannot mask a
+        neutralized entry guard the way a None re-read routes everything
+        into the fallback branch's own check.
+        """
         from agent.session_executor import _enqueue_nudge
 
         session = _mock_agent_session(status=terminal_status)
+        live_session = _mock_agent_session(status="running")
 
-        # If the guard works, _enqueue_nudge returns before reaching the recreate
-        # path. Assert on async_create, as the fallback-path sibling does: with the
-        # query returning empty, a session that got past the guard would fall
-        # through to recreating the record, so this call is the observable
-        # consequence of the guard failing.
-        with patch("agent.session_executor.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = []
+        with (
+            patch("agent.session_executor.AgentSession") as mock_as,
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=live_session,
+            ) as mock_get_auth,
+            patch("models.session_lifecycle.transition_status") as mock_transition,
+            patch("agent.session_executor._call_ensure_worker") as mock_ensure,
+        ):
             mock_as.async_create = MagicMock()
             await _enqueue_nudge(
                 session=session,
@@ -135,6 +146,9 @@ class TestEnqueueNudgeTerminalGuard:
                 output_msg="agent output",
                 nudge_feedback="continue",
             )
+            mock_get_auth.assert_not_called()
+            mock_transition.assert_not_called()
+            mock_ensure.assert_not_called()
             mock_as.async_create.assert_not_called()
 
     @pytest.mark.asyncio
