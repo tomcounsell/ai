@@ -148,6 +148,11 @@ async def adopt_orphaned_polls(client) -> None:
     for hint, row in iter_pending_polls():
         try:
             found = await _find_already_sent_poll(client, numeric_peer(row["chat_id"]), hint)
+        except FloodWaitError:
+            # #3095: a rate-limited scan must slow the whole loop via
+            # poll_reconcile_loop's backoff branch, not continue to the next
+            # hint at full cadence.
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("poll adoption scan failed for hint %s: %s", hint, e)
             continue

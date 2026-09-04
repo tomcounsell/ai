@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 
+from telethon.errors import FloodWaitError
+
 from bridge.answer_routing import (
     AnswerTargetKind,
     resolve_answer_target,
@@ -134,8 +136,11 @@ def _resolve_sender_name(target) -> str:
 async def translate_poll_vote(client, poll_id) -> None:
     """Translate one vote into a steer or a completed-session re-enqueue.
 
-    Idempotent and safe to call from both observers concurrently. Never raises
-    into a Telethon update loop or a background task.
+    Idempotent and safe to call from both observers concurrently. Raises only
+    ``FloodWaitError`` (#3095), which both callers handle — the reconcile loop
+    backs off, and the ``events.Raw`` fast path's blanket handler logs and
+    drops the latency win. Nothing else escapes into a Telethon update loop or
+    a background task.
     """
     row = lookup_poll(poll_id)
     if row is None:
@@ -158,6 +163,10 @@ async def translate_poll_vote(client, poll_id) -> None:
 
         response = await client(GetPollResultsRequest(peer=numeric_peer(chat_id), msg_id=msg_id))
         results = response.updates[0].results
+    except FloodWaitError:
+        # #3095: reach the reconcile loop's backoff branch. The events.Raw fast
+        # path catches this in its own blanket handler and drops the latency win.
+        raise
     except Exception as e:  # noqa: BLE001 — a read failure is retried next tick
         logger.warning("translate_poll_vote: GetPollResultsRequest failed for %s: %s", poll_id, e)
         return
@@ -201,6 +210,13 @@ async def translate_poll_vote(client, poll_id) -> None:
             row=row,
             chosen=options[chosen_index],
         )
+    except FloodWaitError:
+        # #3095: same claim bookkeeping as the generic failure path below, then
+        # propagate so the reconcile loop backs off instead of retrying the
+        # whole scan at full cadence.
+        if not poll_dispatched(poll_id):
+            release_poll_claim(poll_id)
+        raise
     except Exception as e:  # noqa: BLE001
         # Release the claim so the next reconciliation tick retries — but ONLY
         # when the side effect has not already happened. A blanket release would
@@ -238,6 +254,10 @@ async def _dispatch_answer(client, *, poll_id, row: dict, chosen: str) -> None:
     try:
         fetched = await client.get_messages(numeric_peer(chat_id), ids=msg_id)
         await close_poll(client, numeric_peer(chat_id), msg_id, getattr(fetched, "media", None))
+    except FloodWaitError:
+        # #3095: never swallow a backoff request. translate_poll_vote's own
+        # FloodWaitError handler releases the claim, then propagates.
+        raise
     except Exception as e:  # noqa: BLE001 — a failure to close never blocks the answer
         logger.debug("translate_poll_vote: could not close poll %s: %s", poll_id, e)
 
