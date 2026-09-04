@@ -1158,6 +1158,7 @@ class TestDispatchFindings:
     def _dispatch(self, monkeypatch, tmp_path, *, nodes, open_map, prev=None, report=None, **kw):
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         commented: list[int] = []
         monkeypatch.setattr(
             nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
@@ -1217,6 +1218,7 @@ class TestDispatchFindings:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
         monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         monkeypatch.setattr(nrt, "comment_on_issue", lambda *a, **k: False)
         monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
         outcome = nrt.dispatch_findings(
@@ -1270,6 +1272,7 @@ class TestDispatchFindings:
         )
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         filed: list[list[str]] = []
         monkeypatch.setattr(
             nrt,
@@ -1291,6 +1294,9 @@ class TestDispatchFindings:
     def test_a_clean_night_never_shells_out_to_gh(self, monkeypatch, tmp_path: Path) -> None:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh on a clean night"))
+        monkeypatch.setattr(
+            nrt, "closed_issue_dispositions", lambda: pytest.fail("read gh closed set")
+        )
         monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
         outcome = nrt.dispatch_findings({"tests": []}, [], {}, run_at="RUN", head_commit="HEAD")
         assert outcome.recorded == []
@@ -1318,6 +1324,7 @@ class TestHandleIntegrityTrip:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
         monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
         filed: list[list[str]] = []
         monkeypatch.setattr(
@@ -1341,6 +1348,7 @@ class TestHandleIntegrityTrip:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
         monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
         monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
         _, report = self._storm()
@@ -1357,6 +1365,9 @@ class TestHandleIntegrityTrip:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
         monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh with no report"))
+        monkeypatch.setattr(
+            nrt, "closed_issue_dispositions", lambda: pytest.fail("read gh closed set")
+        )
         assert nrt._handle_integrity_trip("no report", None, None, self._prev()) == 1
         assert not nrt.LAST_RUN_FILE.exists()
 
@@ -1366,6 +1377,7 @@ class TestHandleIntegrityTrip:
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
         monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
         monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         commented: list[int] = []
         monkeypatch.setattr(
             nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
@@ -1384,6 +1396,7 @@ class TestHandleIntegrityTrip:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
         monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
         monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
         _, report = self._storm()
@@ -1550,6 +1563,8 @@ class TestMainDispatchPersistence:
             patch.object(
                 nrt, "maybe_dispatch_triage_session", return_value=dispatch_return
             ) as mock_dispatch,
+            patch.object(nrt, "open_issues", return_value={}),
+            patch.object(nrt, "closed_issue_dispositions", return_value={}),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -1651,6 +1666,8 @@ class TestMainDispatchPersistence:
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel") as disp,
+            patch.object(nrt, "open_issues", return_value={}),
+            patch.object(nrt, "closed_issue_dispositions", return_value={}),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -1709,6 +1726,8 @@ class TestMainDispatchPersistence:
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel"),
+            patch.object(nrt, "open_issues", return_value={}),
+            patch.object(nrt, "closed_issue_dispositions", return_value={}),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -2142,6 +2161,8 @@ class TestPersistedStateKeyInvariance:
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
+            patch.object(nrt, "open_issues", return_value={}),
+            patch.object(nrt, "closed_issue_dispositions", return_value={}),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="headsha"),
             patch.object(nrt, "classify_against_baseline", return_value=classification),
@@ -2155,3 +2176,306 @@ class TestPersistedStateKeyInvariance:
         assert set(shadow_state) == set(off_state)
         assert "classify_attempts" not in shadow_state
         assert "fix_sessions" not in shadow_state
+
+
+def _body_failed(nodeid: str, worker: str, line: str) -> dict:
+    """A pytest-json-report entry shaped like a real test-BODY failure."""
+    return {
+        "nodeid": nodeid,
+        "outcome": "failed",
+        "setup": {"outcome": "passed"},
+        "call": {
+            "outcome": "failed",
+            "longrepr": f"[{worker}] darwin -- Python 3.14.3\n{line}",
+        },
+    }
+
+
+class TestBodyFailureGrouping:
+    """Same normalized first error line across test bodies = one root cause (#3075).
+
+    The 2026-08-24 incident: 39 issues filed over two causes, both body
+    failures the setup-cascade path could not see.
+    """
+
+    LINE = "E   TypeError: AsyncAnthropic.__init__() got an unexpected keyword argument"
+    OTHER = "E   AssertionError: worker_key must route to the lane slug"
+
+    def test_same_line_across_workers_collapses_to_one_group(self) -> None:
+        nodes = [f"tests/unit/test_llm_{i}.py::test_{i}" for i in range(6)]
+        report = {"tests": [_body_failed(n, f"gw{i % 3}", self.LINE) for i, n in enumerate(nodes)]}
+        groups, singles = nrt.group_body_failure_cascades(report, nodes)
+        assert singles == []
+        assert len(groups) == 1
+        assert groups[0]["nodes"] == sorted(nodes)
+        assert groups[0]["kind"] == "body"
+        assert groups[0]["workers"] == ["gw0", "gw1", "gw2"]
+
+    def test_second_cause_with_different_line_stays_separate(self) -> None:
+        """The worker-key nodes inside the TypeError batch must NOT merge."""
+        typeerror = [f"tests/unit/test_llm_{i}.py::test_{i}" for i in range(6)]
+        workerkey = [f"tests/unit/test_wk_{i}.py::test_{i}" for i in range(3)]
+        report = {
+            "tests": [_body_failed(n, "gw0", self.LINE) for n in typeerror]
+            + [_body_failed(n, "gw0", self.OTHER) for n in workerkey]
+        }
+        groups, singles = nrt.group_body_failure_cascades(report, typeerror + workerkey)
+        assert len(groups) == 1
+        assert groups[0]["nodes"] == sorted(typeerror)
+        assert sorted(singles) == sorted(workerkey)
+
+    def test_below_threshold_stays_per_node(self) -> None:
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(3)]
+        report = {"tests": [_body_failed(n, "gw1", self.LINE) for n in nodes]}
+        groups, singles = nrt.group_body_failure_cascades(report, nodes)
+        assert groups == []
+        assert singles == nodes
+
+    def test_setup_errors_are_not_body_grouped(self) -> None:
+        """Setup storms belong to group_setup_error_cascades, not this grouper."""
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(6)]
+        report = {"tests": [_errored(n, "gw1", "RuntimeError: poisoned") for n in nodes]}
+        groups, singles = nrt.group_body_failure_cascades(report, nodes)
+        assert groups == []
+        assert singles == nodes
+
+    def test_title_namespace_is_distinct_from_setup_cascades(self) -> None:
+        msg = "TypeError: same normalized message"
+        assert nrt.body_cascade_title(msg) != nrt.cascade_title(msg)
+        assert nrt.title_for_state_key(msg) == nrt.cascade_title(msg)
+        assert nrt.title_for_state_key("body::" + msg) == nrt.body_cascade_title(msg)
+
+
+class TestEnvironmentalClassification:
+    """Network-layer failure text files nothing (#3075 defect 3, from #2932)."""
+
+    def test_connection_refused_is_environmental(self) -> None:
+        test = _body_failed("t.py::a", "gw0", "E   ConnectionRefusedError: [Errno 61]")
+        assert nrt.is_environmental_failure(test)
+
+    def test_dns_failure_is_environmental(self) -> None:
+        test = _body_failed(
+            "t.py::a", "gw0", "E   socket.gaierror: [Errno 8] nodename nor servname provided"
+        )
+        assert nrt.is_environmental_failure(test)
+
+    def test_tls_failure_is_environmental(self) -> None:
+        test = _body_failed("t.py::a", "gw0", "E   ssl.SSLError: CERTIFICATE_VERIFY_FAILED")
+        assert nrt.is_environmental_failure(test)
+
+    def test_plain_assertion_is_not_environmental(self) -> None:
+        test = _body_failed("t.py::a", "gw0", "E   AssertionError: expected 3 == 4")
+        assert not nrt.is_environmental_failure(test)
+
+    def test_bare_timeout_is_deliberately_not_environmental(self) -> None:
+        """Unit-test timeouts are routinely genuine regressions; do not silence them."""
+        test = _body_failed("t.py::a", "gw0", "E   TimeoutError: took too long")
+        assert not nrt.is_environmental_failure(test)
+
+
+class TestClosedIssueDedup:
+    """A closed exact-title issue must never be silently re-filed (#3075 defect 1)."""
+
+    def _dispatch(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map, prev=None):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
+        commented: list[int] = []
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+        )
+        filed: list[list[str]] = []
+
+        def fake_dispatch(ns, **kw):
+            if not ns:
+                return None
+            filed.append(list(ns))
+            return "sess-1"
+
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
+        outcome = nrt.dispatch_findings(
+            report, nodes, prev or {}, run_at="2026-09-04T03:00:00Z", head_commit="cafe1234"
+        )
+        return outcome, commented, filed
+
+    def test_closed_not_planned_node_gets_a_comment_never_a_refile(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The regression test the acceptance criteria demand: only issue is CLOSED."""
+        node = "tests/unit/test_dead.py::test_watchdog"
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[node],
+            report={"tests": [_body_failed(node, "gw0", "E   AssertionError: dead")]},
+            open_map={},
+            closed_map={f"Nightly regression: {node}": (2971, "NOT_PLANNED")},
+        )
+        assert filed == []
+        assert commented == [2971]
+        assert outcome.recorded == [node]
+        assert outcome.issues_filed == 0
+
+    def test_closed_completed_refiles_because_recurrence_is_new_information(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        node = "tests/unit/test_fixed.py::test_regressed_again"
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[node],
+            report={"tests": [_body_failed(node, "gw0", "E   AssertionError: back")]},
+            open_map={},
+            closed_map={f"Nightly regression: {node}": (2500, "COMPLETED")},
+        )
+        assert commented == []
+        assert filed == [[node]]
+        assert outcome.issues_filed == 1
+
+    def test_unknown_close_reason_comments_rather_than_refiling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        node = "tests/unit/test_x.py::test_y"
+        _, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[node],
+            report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
+            open_map={},
+            closed_map={f"Nightly regression: {node}": (11, "")},
+        )
+        assert filed == []
+        assert commented == [11]
+
+    def test_unreadable_closed_set_fails_open_and_files(self, monkeypatch, tmp_path: Path) -> None:
+        node = "tests/unit/test_x.py::test_y"
+        _, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[node],
+            report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
+            open_map={},
+            closed_map=None,
+        )
+        assert commented == []
+        assert filed == [[node]]
+
+    def test_open_issue_wins_over_closed_record(self, monkeypatch, tmp_path: Path) -> None:
+        """An open issue is the live tracker even when a closed twin also matches."""
+        node = "tests/unit/test_x.py::test_y"
+        title = f"Nightly regression: {node}"
+        _, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[node],
+            report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
+            open_map={title: 99},
+            closed_map={title: (11, "NOT_PLANNED")},
+        )
+        assert filed == []
+        assert commented == [99]
+
+    def test_closed_not_planned_cascade_comments_instead_of_refiling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        msg = "RuntimeError: registry mismatch client=localhost:6379"
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(6)]
+        report = {"tests": [_errored(n, "gw2", msg) for n in nodes]}
+        normalized = nrt.setup_error_signature(report["tests"][0])[1]
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=report,
+            open_map={},
+            closed_map={nrt.cascade_title(normalized): (3131, "NOT_PLANNED")},
+        )
+        assert filed == []
+        assert commented == [3131]
+        assert outcome.recorded == sorted(nodes)
+        assert normalized not in outcome.cascade_issues
+
+    def test_environmental_nodes_are_excluded_and_reported(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        env_node = "tests/integration/test_net.py::test_fetch"
+        code_node = "tests/unit/test_logic.py::test_math"
+        report = {
+            "tests": [
+                _body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused"),
+                _body_failed(code_node, "gw1", "E   AssertionError: 3 != 4"),
+            ]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node, code_node],
+            report=report,
+            open_map={},
+            closed_map={},
+        )
+        assert filed == [[code_node]]
+        assert outcome.environmental == [env_node]
+        assert env_node not in outcome.recorded
+
+    def test_body_group_files_one_umbrella_with_body_namespaced_state(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        line = "E   TypeError: AsyncAnthropic.__init__() got an unexpected keyword"
+        nodes = [f"tests/unit/test_llm_{i}.py::test_{i}" for i in range(6)]
+        report = {"tests": [_body_failed(n, "gw0", line) for n in nodes]}
+        normalized = nrt.body_failure_signature(report["tests"][0])
+        outcome, commented, filed = self._dispatch(
+            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
+        )
+        assert commented == []
+        assert len(filed) == 1
+        assert filed[0] == [f"cascade:{nrt.body_cascade_title(normalized)}"]
+        assert outcome.cascade_issues == {"body::" + normalized: None}
+        assert outcome.recorded == sorted(nodes)
+
+    def test_closed_issue_dispositions_parses_state_reason(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        seen: dict[str, list[str]] = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = (
+                '[{"number": 5, "title": "Nightly regression: a::t1", '
+                '"stateReason": "NOT_PLANNED"},'
+                ' {"number": 6, "title": "Nightly regression: b::t2", "stateReason": null}]'
+            )
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.closed_issue_dispositions() == {
+            "Nightly regression: a::t1": (5, "NOT_PLANNED"),
+            "Nightly regression: b::t2": (6, ""),
+        }
+        assert "--state" in seen["argv"] and "closed" in seen["argv"]
+        assert "--search" not in seen["argv"]
+
+    @pytest.mark.parametrize("failure", ["rc", "raise", "garbage"])
+    def test_closed_issue_dispositions_returns_none_on_any_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        class FakeResult:
+            returncode = 1 if failure == "rc" else 0
+            stdout = "not json" if failure == "garbage" else "[]"
+            stderr = "boom"
+
+        def fake_run(argv, **kwargs):
+            if failure == "raise":
+                raise OSError("gh missing")
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.closed_issue_dispositions() is None
