@@ -231,6 +231,20 @@ class ContradictionFlag:
     reason: str
 
 
+def _positive_leg_negated(evidence_lower: str) -> bool:
+    """True when the positive-outcome reading of ``evidence_lower`` is
+    itself negated -- either by a general negative-evidence keyword
+    (``_NEGATIVE_EVIDENCE_KEYWORDS``) or by a positive keyword that is
+    directly preceded by "not " (e.g. "not delivered"), which need not
+    appear on the negative list verbatim. Checked before the positive leg
+    is allowed to flag, so a negated positive reading never contradicts a
+    non-delivered disposition.
+    """
+    if any(kw in evidence_lower for kw in _NEGATIVE_EVIDENCE_KEYWORDS):
+        return True
+    return any(f"not {kw}" in evidence_lower for kw in _POSITIVE_EVIDENCE_KEYWORDS)
+
+
 def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag]:
     """Flag ask_coverage entries whose disposition contradicts their own evidence.
 
@@ -248,6 +262,16 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
     its keyword lists) into a blocking/gating decision path -- if that need
     arises, replace it with an LLM judgment call the way the drafter's main
     path does, not a bigger keyword list.
+
+    False positives from negation are handled, not just disclaimed: a
+    ``blocked``/``declined``/``not_started`` disposition whose evidence
+    contains a positive keyword (e.g. "done", "delivered") is flagged only
+    when that positive reading is not itself negated -- either by a
+    general negative-evidence keyword also present in the same string
+    (``"blocked on the key, not done yet"`` matches ``"blocked on"``), or
+    by the positive keyword being directly preceded by "not " even when
+    that phrase is not itself on the negative list (``"not delivered"``).
+    See :func:`_positive_leg_negated`.
     """
     flags: list[ContradictionFlag] = []
     for entry in entries:
@@ -284,8 +308,10 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
                 )
             )
 
-        if disposition in ("blocked", "declined", "not_started") and any(
-            kw in evidence_lower for kw in _POSITIVE_EVIDENCE_KEYWORDS
+        if (
+            disposition in ("blocked", "declined", "not_started")
+            and any(kw in evidence_lower for kw in _POSITIVE_EVIDENCE_KEYWORDS)
+            and not _positive_leg_negated(evidence_lower)
         ):
             flags.append(
                 ContradictionFlag(

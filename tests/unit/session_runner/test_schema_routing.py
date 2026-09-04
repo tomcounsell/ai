@@ -707,3 +707,65 @@ class TestCoverageBounce:
             bounced_again = runner2._check_ask_coverage_bounce(classification)
         assert bounced_again is False
         mock_push2.assert_not_called()
+
+    async def test_coverage_bounce_does_not_spend_compliance_nudge_budget(
+        self, _reset_coverage_bounce_budget
+    ):
+        """Tech Debt 3 (#3093 review round 7): the coverage bounce must not
+        also spend the shared compliance-nudge budget
+        (``MAX_COMPLIANCE_NUDGES``, default 1). A prior non-routing turn in
+        the same run already spends the one compliance nudge; the coverage
+        bounce that follows must still let the PM take another turn instead
+        of ``run()`` breaking the loop with ``PM_MAX_TURNS`` before the PM
+        ever consumes the pushed advisory."""
+        session = FakeSession()
+        session.session_id = "sess-coverage-bounce-preserves-nudge-budget"
+        _reset_coverage_bounce_budget.append(session.session_id)
+
+        # Turn 1: non-routing (route "continue") — spends the one shared
+        # compliance nudge via the final `_route_turn` fallthrough branch.
+        non_routing_turn = HeadlessTurnOutcome(
+            reply_text="ignored",
+            turn_ended=True,
+            turn_end_source="result",
+            structured_output={"route": "continue", "message": "still working on it"},
+        )
+        # Turn 2: schema-valid and routable, but ask_coverage carries a
+        # non-delivered clause — this is what the coverage bounce fires on.
+        coverage_turn = HeadlessTurnOutcome(
+            reply_text="ignored",
+            turn_ended=True,
+            turn_end_source="result",
+            structured_output={
+                "route": "user",
+                "message": "partial",
+                "ask_coverage": [
+                    {"item": "test on stage", "disposition": "not_started", "evidence": ""}
+                ],
+            },
+        )
+        # Turn 3: the PM's revision after the bounce, fully delivered.
+        revised_turn = HeadlessTurnOutcome(
+            reply_text="ignored",
+            turn_ended=True,
+            turn_end_source="result",
+            structured_output={
+                "route": "user",
+                "message": "test on stage: not started, no access yet",
+                "ask_coverage": [
+                    {"item": "test on stage", "disposition": "not_started", "evidence": ""}
+                ],
+            },
+        )
+        runner, deliveries, _, driver = make_runner(
+            [non_routing_turn, coverage_turn, revised_turn], session=session
+        )
+
+        with patch("agent.steering.push_steering_message"):
+            summary = await runner.run("go")
+
+        # The PM got a turn to consume the bounce advisory and ship the
+        # revision — the loop did not break on PM_MAX_TURNS.
+        assert summary.exit_reason is ExitReason.PM_USER
+        assert deliveries == [(111, "test on stage: not started, no access yet", 222, None)]
+        assert len(driver.calls) == 3

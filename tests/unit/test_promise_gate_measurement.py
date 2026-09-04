@@ -11,6 +11,7 @@ import json
 from tools.promise_gate_measurement import (
     _is_promise_gate_row,
     _percentile,
+    find_contradictions,
     latency_by_source_and_transport,
 )
 
@@ -155,3 +156,49 @@ class TestLatencyBySourceAndTransport:
         assert bucket.count == 0
         assert bucket.queue_wait_count == 1
         assert bucket.queue_wait_values_ms == [5.0]
+
+
+class TestFindContradictionsNegationGuard:
+    """A negation must not let a positive-reading keyword flag an honest
+    non-delivered disposition -- regression guard for the review finding
+    that "not done" (containing "done") and "not delivered" (containing
+    "delivered") false-positived on the positive leg."""
+
+    def test_not_done_does_not_flag_blocked_disposition(self):
+        entries = [
+            {
+                "item": "test on stage server",
+                "disposition": "blocked",
+                "evidence": "blocked on the key, not done yet",
+            }
+        ]
+
+        assert find_contradictions(entries) == []
+
+    def test_not_delivered_does_not_flag_not_started_disposition(self):
+        entries = [
+            {
+                "item": "ship the package",
+                "disposition": "not_started",
+                "evidence": "not delivered -- waiting on the vendor",
+            }
+        ]
+
+        assert find_contradictions(entries) == []
+
+    def test_unnegated_positive_keyword_still_flags(self):
+        """The guard must not swallow genuine contradictions: an
+        unqualified positive-reading evidence string on a non-delivered
+        disposition still flags."""
+        entries = [
+            {
+                "item": "merge to main",
+                "disposition": "blocked",
+                "evidence": "already merged and shipped",
+            }
+        ]
+
+        flags = find_contradictions(entries)
+
+        assert len(flags) == 1
+        assert flags[0].item == "merge to main"

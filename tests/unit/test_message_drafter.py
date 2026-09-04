@@ -1486,11 +1486,11 @@ class TestShortOutputPromiseGate:
     async def test_full_path_promise_block_still_promotes(self, monkeypatch):
         """The full (composed) path's empty-promise promotion survives the
         shared-helper refactor: a long promise-bearing reply is still
-        promoted. This genuinely needs a ``block`` verdict, so pinning
-        ``use_llm=False`` would change what it tests — instead the LLM
-        layer is monkeypatched deterministic (same target/idiom as
-        TestMainPathLLMWiring below), keeping the assertion about
-        promotion rather than about live-model judgment."""
+        promoted. The LLM layer is monkeypatched deterministic (same
+        target/idiom as TestMainPathLLMWiring below) to keep the verdict
+        deterministic without a live call, rather than pinning
+        ``use_llm=False`` — this test exercises the main (composed) path's
+        LLM-primary wiring, not the heuristic-only short path."""
         import bridge.promise_gate as promise_gate
         from bridge.promise_gate import PromiseVerdict
 
