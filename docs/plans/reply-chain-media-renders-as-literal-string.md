@@ -282,27 +282,148 @@ file with the tools it already has, or reports precisely what it cannot open.
 
 ## Rabbit Holes
 
-<!-- skeleton -->
+- **Enriching ancestors.** Running vision, Whisper, or document extraction over a 20-deep chain is the obvious "complete" fix and it is a trap: it cannot fit the 3-second budget, it burns model spend on files nobody asks about, and it re-solves what a tool call already solves on demand. The issue's own recon dropped it. Keep it dropped.
+- **Unifying the Telegram and email context renderers.** Tempting while both are in view, and a genuinely larger project — email's problem is a missing delivery seam, not a bad renderer. #3136 owns it.
+- **Re-walking `document.attributes` for filenames.** `bridge/media.py::get_media_type` already does this walk, and Telethon's `msg.file.name` covers the rest. Writing a third parser is duplicated logic that will drift.
+- **Redesigning `data/media/` retention.** Spike-3 shows files are never swept while records expire at 90 days. That asymmetry is worth knowing and is not this plan's problem; the unreadable rendering covers the consequence.
+- **Widening the guard into a general "no magic strings in bridge/" lint.** The guard has one job: catch a constant standing in for unreadable content. A broad string-literal lint will drown in false positives and get disabled.
+- **Chasing the dead `enrich_reply_to_msg_id` variable.** `agent/session_executor.py:1888-1893` computes it, uses it only as a gate condition, and never passes it to `enrich_message` — the "deferred reply-chain fetch" it guards no longer exists. Real cruft, unrelated to this defect, and touching it changes the worker's enrichment gate. Leave it.
 
 ## Risks
 
-<!-- skeleton -->
+### Risk 1: Descriptor text inflates the chain block and crowds the prompt
+
+**Impact:** A 20-deep chain where every hop carries media adds twenty descriptor
+lines. If a descriptor is verbose, the reply-chain block grows enough to push out
+the context that matters.
+**Mitigation:** Keep the descriptor to a single compact line per hop — filename,
+type, path. Measure the worst case (20 hops, media at every hop) in the same
+regression test that covers the budget, and assert a ceiling on the rendered
+block size, not just on elapsed time.
+
+### Risk 2: A resolved path leaks into an outbound message
+
+**Impact:** The agent sees absolute filesystem paths and may echo one back into a
+group chat, exposing directory structure to everyone in the room.
+**Mitigation:** Render the basename as the human-readable name and the absolute
+path as an explicitly machine-facing affordance, so the natural thing to quote is
+the filename. Note in the feature doc that chain descriptors carry paths. This is
+a disclosure-of-shape risk, not a cross-tenant one — see Risk 3.
+
+### Risk 3: Cross-chat or cross-project file exposure
+
+**Impact:** `data/media/` is a single flat directory shared by every project on
+the machine. A resolver that keyed only on `message_id` could surface a file from
+another chat.
+**Mitigation:** Every lookup filters `chat_id=str(chat_id)` alongside
+`message_id`, exactly as `bridge/context.py:651` does. A test asserts that a
+record with a matching `message_id` in a *different* chat is not resolved. This
+closes issue open question 4.
+
+### Risk 4: Redis latency turns a cheap lookup into a budget overrun
+
+**Impact:** Twenty extra Redis round-trips inside a 3-second window that already
+spends most of itself on Telethon RPCs. If Redis is slow, the whole chain is lost
+to the timeout and the agent gets no context at all — worse than today.
+**Mitigation:** The failure mode is already bounded by the existing
+`asyncio.wait_for` at both call sites, which falls back cleanly. Beyond that: the
+resolver does one `filter` per hop with no fan-out, the regression test asserts
+the 20-hop worst case completes inside the budget, and the per-hop try/except
+means a slow or failing lookup degrades that hop rather than the walk.
+
+### Risk 5: The guard test is written to pass rather than to bite
+
+**Impact:** A guard that never fails is worse than no guard — it advertises
+coverage that does not exist, which is exactly how the placeholder survived three
+prior PRs.
+**Mitigation:** Demonstrate the guard red before shipping it: introduce a
+deliberate bare placeholder in a scratch edit, capture the failure output, revert,
+and paste that output into the PR description as the red-state proof.
 
 ## Race Conditions
 
-<!-- skeleton -->
+### Race 1: A reply arrives before the ancestor's media download has persisted
+
+**Location:** `bridge/telegram_bridge.py:1549` (`store_message`) through
+`:1645-1715` (download and persist), against `bridge/context.py` chain walk.
+**Trigger:** The `TelegramMessage` row is written before the download starts.
+`_download_media_with_retry` can take up to 120 seconds for a large file. A reply
+sent inside that window walks a chain whose ancestor record exists with
+`media_local_path` unset.
+**Data prerequisite:** `media_local_path` must be persisted before the resolver
+reads it.
+**State prerequisite:** none beyond the record existing.
+**Mitigation:** No synchronisation — this is a legitimate transient, and the
+correct behavior is to render *referenced but unreadable* naming the file that is
+still arriving. As a cheap recovery, the resolver may reuse the self-heal glob
+already proven in `bridge/enrichment.py:79-110`: `data/media/` filenames embed
+the `message_id` (`{prefix}_{timestamp}_{message.id}{ext}`), so a single-match
+glob recovers the path when the persist has not yet landed. Require exactly one
+match, as enrichment does, and fall through to unreadable on zero or multiple.
+
+### Race 2: Popoto stale-index miss on the ancestor lookup
+
+**Location:** `bridge/context.py`, the new resolver.
+**Trigger:** The same transient stale-index condition documented at
+`bridge/telegram_bridge.py:1663-1670`, where `TelegramMessage.query.get` returns
+`None` for a record that exists.
+**Data prerequisite:** the index must reflect the written record.
+**State prerequisite:** none.
+**Mitigation:** Treat a miss as unreadable rather than retrying — the chain walk
+is on a 3-second clock and a bounded re-query per hop would multiply the cost by
+the depth. Do **not** call `keys(clean=True)`; it is heavy and index-mutating, and
+the bridge code already declines it for the same reason.
+
+### Race 3: The file is deleted between the existence check and the agent's read
+
+**Location:** resolver existence check, versus the worker turn that follows.
+**Trigger:** A manual clean or an operator action between hydration and the
+agent's tool call.
+**Data prerequisite:** the file must exist when the agent reads it, which no
+check at hydration time can guarantee.
+**State prerequisite:** none.
+**Mitigation:** Accepted and unmitigated. The check is a best-effort signal, not
+a lock. The agent's own read failure is the backstop, and the descriptor's
+wording should not promise more certainty than a stat can give.
 
 ## No-Gos (Out of Scope)
 
-<!-- skeleton -->
+- [SEPARATE-SLUG #3136] Delivering email attachment paths and the unrecoverable signal to the agent. Spike-4 established that email's `extra_context` attachment keys have no reader at all; that is a missing delivery seam in `agent/session_executor.py`, not a renderer defect, and fixing it here would double this plan's blast radius. Filed as #3136 with its own recon.
+- [SEPARATE-SLUG #3136] Unifying the Telegram and email context-rendering paths behind one renderer. Scoped into #3136's follow-on discussion rather than attempted here.
+
+Everything else the issue asks for is in scope: the chain renderer, the caption
+composition, the explicit unreadable state, the worst-case budget regression
+test, the cross-medium guard, and both doc updates.
 
 ## Update System
 
-<!-- skeleton -->
+No update system changes required. This is a bridge-internal rendering change:
+no new dependencies, no new config files, no new secrets, no `.env` keys, no
+Popoto schema change (the plan only *reads* existing `TelegramMessage` fields, so
+`scripts/update/migrations.py` is untouched), and no changes to
+`scripts/remote-update.sh` or the `update` skill.
+
+One operational note for `/do-deploy` rather than `/update`: the bridge must be
+restarted for the new renderer to take effect
+(`./scripts/valor-service.sh restart`), since `bridge/context.py` is imported by
+the long-lived bridge process.
 
 ## Agent Integration
 
-<!-- skeleton -->
+No new CLI entry point and no new MCP tool. The change is inside a module the
+bridge already imports (`bridge/telegram_bridge.py:116-117` imports both
+`fetch_reply_chain` and `format_reply_chain`), and both call sites pass the chain
+through opaquely — neither needs an edit.
+
+The agent reaches the newly-surfaced media with tools it already has: the path in
+the descriptor is readable by the `Read` tool, and the existing `valor-ingest`
+entry point covers binaries that need extraction. Nothing new is wired.
+
+What does need an integration-level test is the end of the chain, not the
+beginning: an assertion that the rendered block reaching `AgentSession.message_text`
+actually contains a resolvable path for an ancestor attachment. Stamping a
+descriptor that never arrives is precisely the failure mode spike-4 found on the
+email side, and this plan should not reproduce it.
 
 ## Documentation
 
