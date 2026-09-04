@@ -332,7 +332,10 @@ This overlay grants full SDLC ownership and pipeline enforcement. It applies to 
 engineer sessions (`claude -p` or the Claude Code CLI outside the session runner) and
 when the private `~/Desktop/Valor/personas/engineer.md` is absent. Session-runner
 sessions are primed by `.claude/commands/roles/prime-pm-role.md` /
-`prime-dev-role.md` instead; this file is not injected there.
+`prime-dev-role.md` instead; this file is not injected there. The orchestrator
+content here (Mode 3 playbook, Multi-Issue Fan-Out, Stage→Model Dispatch Table,
+SDLC-gate rules) is intentionally retained; do not remove it until the CLI
+harness path is retired (plan #1692 No-Gos).
 
 ## Two-Tier Design
 
@@ -375,10 +378,11 @@ Classify the incoming message:
 5. **Project management task** — handle directly (issues, labels, docs, comms).
 6. **Unclear** — ask for clarification only if genuinely ambiguous.
 
-**Bucket #3 fires for ANY** source code, launchd/cron/systemd units, shell or Python
-scripts anywhere on disk, runtime config files (`.env`, `projects.json`, `.mcp.json`,
-`settings.json`, `.plist`), infrastructure changes, or new dependencies, regardless of
-size. **No-issue tasks** (handle directly): replying to messages, reading state, GitHub
+**Bucket #3 fires for ANY** source code, launchd/cron/systemd units, shell, Python,
+or Node scripts anywhere on disk, runtime config files (`.env`, `projects.json`,
+`.mcp.json`, `settings.json`, `.plist`), infrastructure changes, or new dependencies,
+regardless of size, including anything new under `~/Library/LaunchAgents/`,
+`~/Library/LaunchDaemons/`, `~/.local/bin/`, or `/etc/`. **No-issue tasks** (handle directly): replying to messages, reading state, GitHub
 issue management, memory search, running existing tools to read state, status reports.
 
 ---
@@ -515,32 +519,38 @@ Matches `agent/pipeline_graph.py`. CRITIQUE and REVIEW are mandatory gates.
 
 ## Hard Rules — SDLC Gates
 
-**Rule 1 — CRITIQUE is mandatory after PLAN.** There is NO path from PLAN to BUILD
+**Rule 1 — CRITIQUE is Mandatory After PLAN.** There is NO path from PLAN to BUILD
 without CRITIQUE. Before dispatching BUILD, check `sdlc-tool stage-query --session-id
 $AGENT_SESSION_ID` (empty `{}` means start from ISSUE; if unavailable, `ls
 docs/plans/{slug}.md` with a `tracking:` URL proves PLAN done). CRITIQUE must show
 `completed`; otherwise dispatch CRITIQUE next. No exceptions for triviality or time
 pressure.
 
-**Rule 2 — REVIEW is mandatory after TEST.** There is NO path from TEST to DOCS without
+**Rule 2 — REVIEW is Mandatory After TEST.** There is NO path from TEST to DOCS without
 REVIEW. Before dispatching DOCS: `gh pr view {number} --json reviews`; empty reviews →
 dispatch REVIEW; `CHANGES_REQUESTED` → PATCH, TEST, REVIEW again; proceed only when
 non-empty AND `reviewDecision` is `APPROVED`.
 
-**Rule 3 — Single-issue scoping.** If the message references a specific issue, assess
+**Rule 3 — Single-Issue Scoping.** If the message references a specific issue, assess
 and advance only that issue; do not query or dispatch others.
 
-**Rule 4 — Wait for child sessions.** After any `valor_session create`, call
+**Rule 4 — Wait for Child Session After Dispatch.** After any `valor_session create`, call
 `wait-for-children`, output a one-line status, and WAIT for the steering response; do not
 produce a final answer or summary.
 
-**Rule 5 — MERGE before sign-off.** If an open PR exists for the issue, dispatch
-`/do-merge` before declaring done; the worker composes the final user message after
-MERGE succeeds.
+**Rule 5 — MERGE is Mandatory Before Sign-Off.**
+If an open PR exists for the current issue, you must dispatch `/do-merge` before
+declaring the issue done; your final user message is
+composed automatically by the worker after MERGE succeeds.
+
+## Exit Validation
+
+Before exiting, `sdlc-tool stage-query --session-id $AGENT_SESSION_ID`: all display
+stages must show `completed` or carry an explicit justified skip reason.
 
 ---
 
-## Gate Recovery
+## Gate-Recovery Behavior
 
 When `/do-merge` returns `GATES_FAILED`, classify and remediate, then re-dispatch
 `/do-merge` — do not report and stop:
@@ -571,7 +581,7 @@ resume — see "Re-Verification on Resume" in `.claude/commands/roles/_prime-rai
 | REVIEW | reviews non-empty AND `reviewDecision` APPROVED |
 | DOCS | `gh pr diff {n} --name-only` shows a `docs/` change |
 
-## Stage→Model Dispatch
+## Stage→Model Dispatch Table
 
 Always pass `--model` explicitly when spawning a child session: PLAN/CRITIQUE/REVIEW run
 on `opus` (adversarial reasoning and judgment); BUILD/TEST/PATCH/DOCS run on `sonnet`.
@@ -593,7 +603,8 @@ THIS stage).
 
 Memory search (`python -m tools.memory_search`), work vault (`~/src/work-vault/` or
 `~/Desktop/Valor/`), session management (`python -m tools.valor_session`), Google
-Workspace (`gws` CLI), Office CLI (`officecli`), GitHub CLI (`gh`), Telegram
+Workspace (`gws` CLI at `~/src/node_modules/.bin/gws`), Office CLI (`officecli` at
+`~/.local/bin/officecli`), GitHub CLI (`gh`), Telegram
 (`python tools/send_message.py`).
 
 ## Child Session Monitoring

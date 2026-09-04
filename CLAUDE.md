@@ -112,7 +112,12 @@ Every bridge-contact identifier in `projects.json` is owned by exactly one machi
 
 All secrets go in `~/Desktop/Valor/.env`, never `repo/.env`. To add one: vault `.env`, a commented placeholder in `.env.example`, and a field in `config/settings.py`. Every `.env.example` declaration is required unless its comment block carries a bare `# @optional` line (a traced read site with an in-code default, never a credential); never derive markers from what the check flags on your own machine. A key read only by an external binary needs `# @passthrough <binary>`. See [`docs/features/env-completeness-validation.md`](docs/features/env-completeness-validation.md).
 
-**1Password (`op`) is always non-interactive**: the `valor-local` service account authenticates via `OP_SERVICE_ACCOUNT_TOKEN` from the vault `.env` (vault of record: `m-valor`), with `OP_CACHE=false` globally. Never write automation that depends on a human approving a 1Password prompt, and never use `op signin` in automation; if `op` cannot authenticate non-interactively, fail closed and report. When reconciling a secret between `.env` and the vault, verify the credential against its own API first ("newer wins" has destroyed a working key here), and never echo a secret or any prefix of one to stdout; compare by SHA-256 fingerprint.
+**1Password (`op`) is always non-interactive**: the `valor-local` service account authenticates via `OP_SERVICE_ACCOUNT_TOKEN` from the vault `.env` (vault of record: `m-valor`), with `OP_CACHE=false` globally. Never write automation that depends on a human approving a 1Password prompt, and never use `op signin` in automation; if `op` cannot authenticate non-interactively, fail closed and report. When reconciling a secret between `.env` and the vault, verify the credential against its own API first ("newer wins" has destroyed a working key here), and never echo a secret or any prefix of one to stdout; compare by SHA-256 fingerprint. The sanctioned shapes:
+
+```bash
+OP_CACHE=false op run --env-file=<template> --no-masking -- <command>
+OP_CACHE=false op read "op://m-valor/<item>/credential"
+```
 
 ## GitHub Issue Labels
 

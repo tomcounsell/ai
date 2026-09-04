@@ -995,6 +995,18 @@ def compose_system_prompt(
                     f"No CLAUDE.md found at {project_claude_path}, using worker prompt only"
                 )
 
+        # Budget signal (#3069): the 50k bound is enforced repo-side by
+        # tests/unit/test_compose_system_prompt.py, but a vault machine's
+        # private overlay (~/Desktop/Valor/personas/) replaces the repo
+        # persona and is outside that test's reach. Warn so an over-budget
+        # composed prompt is visible at runtime, not only in a PR body.
+        if len(prompt) > 50_000:
+            logger.warning(
+                f"Composed WORKER prompt is {len(prompt)} chars, over the 50k "
+                "budget — likely an untrimmed private overlay at "
+                "~/Desktop/Valor/personas/; trim it to realize the #3069 diet."
+            )
+
         return prompt
 
     # TEAMMATE / CUSTOMER_SERVICE: no rails, no appendices — return persona as-is.
