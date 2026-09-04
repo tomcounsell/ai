@@ -546,6 +546,91 @@ class TestEnrichedPayload:
 
         assert _critique_verdict_is_stale(result["stages"]) is True
 
+    def test_verification_outcomes_survive_through_the_real_seam_and_route_router(self):
+        """Round-3 review blocker 1 on PR #3123: row 8g
+        (``_rule_verification_outcomes_hold_pr``) reads ``_verification_outcomes``
+        directly off ``stage_states``, but both router callers (the CLI at
+        ``tools/sdlc_next_skill.py`` and the in-process runner) source
+        ``stage_states`` from ``query_enriched()["stages"]`` -- never from the
+        raw blob. Every existing row-8g router test hand-builds a stage_states
+        dict with the key already injected, so 626 tests passed over an
+        aggregate that never actually reached the router in production.
+
+        This test goes THROUGH the real ``query_enriched`` seam instead of
+        around it: a mocked session carries the aggregate in its raw
+        ``stage_states`` JSON, exactly as the ledger writer
+        (``verification_parser``) leaves it, and the test asserts the
+        aggregate survives into the enriched payload's ``stages`` AND that
+        feeding that real payload into ``decide_next_dispatch`` routes to
+        ``/do-pr-review`` (row 8g) rather than ``/do-merge`` (row 10).
+        """
+        from agent.sdlc_router import (
+            SKILL_DO_MERGE,
+            SKILL_DO_PR_REVIEW,
+            Dispatch,
+            decide_next_dispatch,
+        )
+        from agent.verification_parser import VERIFICATION_OUTCOMES_KEY
+        from tools.sdlc_stage_query import query_enriched
+
+        head_sha = "a" * 40
+        aggregate = {"outcome": "FAIL", "head_sha": head_sha}
+        verdicts = {
+            "REVIEW": {
+                "verdict": "APPROVED",
+                "recorded_at": "2026-09-01T00:00:00+00:00",
+                "artifact_hash": "sha256:def",
+                "head_sha": head_sha,
+            }
+        }
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "pending",
+                "_verdicts": verdicts,
+                "_sdlc_dispatches": [{"skill": "/do-pr-review", "at": "2026-09-01T00:00:00+00:00"}],
+                VERIFICATION_OUTCOMES_KEY: aggregate,
+            }
+        )
+        mock_session.pr_number = 3123
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        # The seam: the aggregate (and its siblings) must survive filtering.
+        assert result["stages"][VERIFICATION_OUTCOMES_KEY] == aggregate
+        assert result["stages"]["_verdicts"] == verdicts
+        assert result["stages"]["_sdlc_dispatches"] == [
+            {"skill": "/do-pr-review", "at": "2026-09-01T00:00:00+00:00"}
+        ]
+
+        meta = dict(result["_meta"])
+        meta["pr_number"] = 3123
+        meta["latest_review_verdict"] = "APPROVED"
+        meta["latest_review_head_sha"] = head_sha
+        # Neutralize G6's fast-path merge guard (mergeable + CI green + docs done
+        # + APPROVED short-circuits straight to /do-merge before DISPATCH_RULES
+        # ever runs) so this test isolates row 8g's own seam-threading behavior,
+        # matching agent.sdlc_router's own row-8g test fixtures (_base_meta).
+        meta["pr_merge_state"] = None
+        meta["ci_all_passing"] = None
+
+        decision = decide_next_dispatch(result["stages"], meta, {"pr_head_sha": head_sha})
+
+        assert isinstance(decision, Dispatch)
+        assert decision.skill == SKILL_DO_PR_REVIEW
+        assert decision.skill != SKILL_DO_MERGE
+        assert decision.row_id == "8g"
+
     def test_pr_number_resolved_from_session_field(self):
         """#2003 T1.7: the AgentSession.pr_number FIELD is the first rung —
         when set, the read-only recovery rungs (gh lookup) are never needed."""

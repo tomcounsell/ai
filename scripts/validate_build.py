@@ -311,8 +311,8 @@ _VALUE_FLAGS = ("--repo", "--issue", "--pr", "--timeout")
 _BARE_FLAGS = ("--record-outcomes",)
 
 
-def _parse_argv(argv: list[str]) -> tuple[dict[str, str], list[str], list[str]]:
-    """Split argv into ``(options, positionals, rejected_flags)``.
+def _parse_argv(argv: list[str]) -> tuple[dict[str, str], list[str], list[str], list[str]]:
+    """Split argv into ``(options, positionals, rejected_flags, warnings)``.
 
     A value flag whose next token is missing or is itself a flag is
     **rejected**, not silently satisfied. The documented production invocation
@@ -322,27 +322,38 @@ def _parse_argv(argv: list[str]) -> tuple[dict[str, str], list[str], list[str]]:
     ``ValueError`` that escaped after the report and changed the exit code, a
     ledger row written under a repo literally named ``--issue``, and a plan
     path silently read from a flag so the run exited 0 having checked nothing.
+    A value that merely *looks* like a flag -- any token starting with ``-``,
+    not only ``--`` -- is rejected the same way, so ``--issue -5`` is refused
+    rather than silently accepted as a negative issue number.
 
     Positionals are tokens that are neither a flag nor a flag's value, so
     ``--record-outcomes plan.md`` finds the plan rather than mistaking the flag
-    for it.
+    for it. Only the first positional is used (the plan path); ``warnings``
+    carries a ready-to-print ``ARGS: ...`` line for any positional beyond the
+    first, and for a repeated flag (last occurrence wins), so both conditions
+    are reported instead of being swallowed silently.
     """
     opts: dict[str, str] = {}
     positionals: list[str] = []
     rejected: list[str] = []
+    warnings: list[str] = []
 
     i = 0
     while i < len(argv):
         token = argv[i]
         if token in _BARE_FLAGS:
+            if token in opts:
+                warnings.append(f"ARGS: {token} repeated -- using the last occurrence")
             opts[token] = ""
             i += 1
         elif token in _VALUE_FLAGS:
             value = argv[i + 1] if i + 1 < len(argv) else None
-            if value is None or value.startswith("--"):
+            if value is None or value.startswith("-"):
                 rejected.append(token)
                 i += 1
             else:
+                if token in opts:
+                    warnings.append(f"ARGS: {token} repeated -- using the last occurrence")
                 opts[token] = value
                 i += 2
         elif token.startswith("--"):
@@ -352,37 +363,52 @@ def _parse_argv(argv: list[str]) -> tuple[dict[str, str], list[str], list[str]]:
             positionals.append(token)
             i += 1
 
-    return opts, positionals, rejected
+    if len(positionals) > 1:
+        extras = ", ".join(positionals[1:])
+        warnings.append(f"ARGS: ignoring extra positional argument(s): {extras}")
+
+    return opts, positionals, rejected, warnings
+
+
+def _print_usage() -> None:
+    print("Usage: python scripts/validate_build.py <plan-path> [options]")
+    print()
+    print("Validates a build against the plan specification.")
+    print("Checks file path assertions, verification table commands,")
+    print("and success criteria commands.")
+    print()
+    print("Options:")
+    print("  --record-outcomes   Persist the graded aggregate to the lane's ledger,")
+    print("                      where the merge predicate reads it. Requires")
+    print("                      --repo and --issue; pass --pr so the record is")
+    print("                      stamped with the head SHA it was graded against.")
+    print("                      An unstamped record is refused at merge, so record")
+    print("                      at REVIEW/DOCS time, once the lane has a PR.")
+    print("  --repo OWNER/NAME   Target repo for the ledger key.")
+    print("  --issue N           Issue number for the ledger key.")
+    print("  --pr N              PR whose head SHA anchors the record.")
+    print("  --timeout N         Per-check bound in seconds (env: VERIFICATION_TIMEOUT_S).")
+    print("                      A timeout is UNEVALUATED, which blocks; raise this when a")
+    print("                      legitimate suite brushes the ceiling.")
+    print()
+    print("Exit codes:")
+    print("  0 - All checks pass or skip")
+    print("  1 - One or more checks failed")
 
 
 def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
-        print("Usage: python scripts/validate_build.py <plan-path> [options]")
-        print()
-        print("Validates a build against the plan specification.")
-        print("Checks file path assertions, verification table commands,")
-        print("and success criteria commands.")
-        print()
-        print("Options:")
-        print("  --record-outcomes   Persist the graded aggregate to the lane's ledger,")
-        print("                      where the merge predicate reads it. Requires")
-        print("                      --repo and --issue; pass --pr so the record is")
-        print("                      stamped with the head SHA it was graded against.")
-        print("                      An unstamped record is refused at merge, so record")
-        print("                      at REVIEW/DOCS time, once the lane has a PR.")
-        print("  --repo OWNER/NAME   Target repo for the ledger key.")
-        print("  --issue N           Issue number for the ledger key.")
-        print("  --pr N              PR whose head SHA anchors the record.")
-        print("  --timeout N         Per-check bound in seconds (env: VERIFICATION_TIMEOUT_S).")
-        print("                      A timeout is UNEVALUATED, which blocks; raise this when a")
-        print("                      legitimate suite brushes the ceiling.")
-        print()
-        print("Exit codes:")
-        print("  0 - All checks pass or skip")
-        print("  1 - One or more checks failed")
+    if len(sys.argv) < 2:
+        _print_usage()
         return 0
 
-    opts, positionals, bad_flags = _parse_argv(sys.argv[1:])
+    # --help/-h is honored anywhere in argv, not only as the first token: a
+    # documented invocation like `--record-outcomes --help` must still show
+    # help rather than being parsed as a (rejected) unknown-flag run.
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        _print_usage()
+        return 0
+
+    opts, positionals, bad_flags, arg_warnings = _parse_argv(sys.argv[1:])
     record_outcomes = "--record-outcomes" in opts
     opt_repo = opts.get("--repo")
     opt_issue = opts.get("--issue")
@@ -391,6 +417,8 @@ def main() -> int:
 
     for flag in bad_flags:
         print(f"ARGS: ignoring {flag} -- unknown flag, or its value was missing or another flag")
+    for warning in arg_warnings:
+        print(warning)
 
     if not positionals:
         # Never return 0 having run nothing: a green exit with zero checks is
@@ -402,12 +430,25 @@ def main() -> int:
     timeout = DEFAULT_TIMEOUT_S
     if opt_timeout:
         try:
-            timeout = int(opt_timeout)
+            parsed_timeout = int(opt_timeout)
         except ValueError:
             print(f"ARGS: ignoring --timeout {opt_timeout!r} -- not an integer")
+        else:
+            if parsed_timeout <= 0:
+                # A non-positive bound times out every row immediately, and a
+                # timeout grades UNEVALUATED -- which now blocks merge
+                # permanently once recorded. Fall back rather than let a
+                # misconfigured `--timeout 0` (or a negative value) silently
+                # turn every check into a durable refusal.
+                print(
+                    f"ARGS: ignoring --timeout {opt_timeout!r} -- must be positive, "
+                    f"using default {DEFAULT_TIMEOUT_S}"
+                )
+            else:
+                timeout = parsed_timeout
 
     plan_path = Path(positionals[0])
-    if not plan_path.exists():
+    if not plan_path.is_file():
         print(f"Plan file not found: {plan_path}")
         print("Nothing to validate.")
         return 0
@@ -428,7 +469,17 @@ def main() -> int:
     # 2. Verification table
     verification_table = parse_verification_table(plan_text)
     graded: list[CheckResult] = []
-    if verification_table.checks or verification_table.malformed or verification_table.skipped:
+    # Whether the plan declares a check table at all -- a table with rows, a
+    # malformed row, or a non-check table it named and stood down on. Shared
+    # by the run site below and the record site further down so the two
+    # can never drift apart: a plan with none of these has declared no gate,
+    # and recording a 0-row UNEVALUATED aggregate for it would block the lane
+    # forever on a contract it never made (Risk 8,
+    # docs/plans/sdlc-control-plane-asserted-facts.md).
+    table_declared = bool(
+        verification_table.checks or verification_table.malformed or verification_table.skipped
+    )
+    if table_declared:
         all_results.extend(
             check_verification_table(verification_table, timeout=timeout, check_results=graded)
         )
@@ -460,7 +511,18 @@ def main() -> int:
     # Persist last, and never let a ledger failure change what the human is
     # told: the write reports its own success or failure on its own line and
     # does not touch the exit code, which belongs to the checks.
-    if record_outcomes:
+    if record_outcomes and not table_declared:
+        # Absence of a contract is not a failed contract: a plan that names no
+        # `## Verification` table has declared no gate, so there is nothing
+        # for the merge predicate to enforce. Recording anyway would write a
+        # 0-row aggregate that `aggregate_outcomes([], table)` grades
+        # UNEVALUATED, and UNEVALUATED blocks merge permanently with no
+        # self-heal -- re-reviewing re-records the identical aggregate. This
+        # is the one case the writer must never be called for.
+        print(
+            "RECORD: skipped -- plan declares no verification table, so there is no gate to record"
+        )
+    elif record_outcomes:
         try:
             issue_int = int(opt_issue) if opt_issue else None
             pr_int = int(opt_pr) if opt_pr else None

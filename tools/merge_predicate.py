@@ -862,15 +862,17 @@ def _check_verification_outcomes(
 
     # The tri-state tokens come from the writer's own enum, never re-spelled
     # here: a literal "UNEVALUATED" in this module would be a replicated value
-    # that silently stops matching if the enum is ever renamed.
-    from agent.verification_parser import CheckOutcome
+    # that silently stops matching if the enum is ever renamed. The blocking set
+    # itself is shared with the router's row 8g for the same reason -- see
+    # BLOCKING_OUTCOMES.
+    from agent.verification_parser import BLOCKING_OUTCOMES, CheckOutcome
 
     rows = aggregate.get("rows")
     if not isinstance(rows, list):
         failed.append("verification outcomes: recorded aggregate has no readable rows")
         return
 
-    blocking = {CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value}
+    blocking = BLOCKING_OUTCOMES
     offending = 0
     for row in rows:
         if not isinstance(row, dict):

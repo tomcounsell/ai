@@ -45,7 +45,7 @@ from agent.pipeline_graph import (
     STAGE_TO_SKILL,
 )
 from agent.pipeline_state import SETTLED_STATUSES
-from agent.verification_parser import VERIFICATION_OUTCOMES_KEY, CheckOutcome
+from agent.verification_parser import BLOCKING_OUTCOMES, VERIFICATION_OUTCOMES_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -2192,7 +2192,9 @@ def _rule_verification_outcomes_hold_pr(stage_states: dict, meta: dict, context:
     the router-predicate oscillation loop WS3d/#2062 existed to end,
     reintroduced on the verification axis.
 
-    The dispositions mirror the predicate's, so the two cannot disagree:
+    The dispositions mirror the predicate's on the overall outcome, and the
+    blocking set itself is shared rather than re-spelled (``BLOCKING_OUTCOMES``),
+    so the two cannot drift on *which* outcomes hold a PR:
 
     - no recorded aggregate → **False**. Absence is reported and not enforced
       on the ship side either; a lane that never recorded one is not blocked.
@@ -2204,9 +2206,21 @@ def _rule_verification_outcomes_hold_pr(stage_states: dict, meta: dict, context:
       current head is the defect this whole mechanism exists to close.
     - ``PASS`` anchored to the current head → **False**. Row 10 may merge.
 
+    The mirroring is on the overall outcome, not row-by-row: the predicate also
+    refuses a malformed aggregate (``rows`` not a list, a non-dict row, a
+    non-zero ``malformed`` count), and this rule inspects none of those. Those
+    shapes are unreachable from the sanctioned writer, and a lane in one of them
+    should reach the predicate's refusal rather than be re-routed by a rule that
+    cannot explain why. If a future writer can produce them, they belong here
+    too.
+
     Reads ``stage_states`` only; the aggregate already travels in that blob, so
-    this rule makes no network call. Scoped to APPROVED verdicts because a lane
-    that is not approved is owned by the review/patch rows.
+    this rule makes no network call -- but it does require that
+    ``tools/sdlc_stage_query.query_enriched`` thread the key through to the
+    router, which is why that threading is pinned by a seam test rather than
+    left to the hand-built payloads the rest of these tests use. Scoped to
+    APPROVED verdicts because a lane that is not approved is owned by the
+    review/patch rows.
 
     Termination: ``/do-pr-review`` re-runs the table and re-records an anchored
     aggregate, so a stale or unanchored record converges in one pass. A record
@@ -2224,7 +2238,7 @@ def _rule_verification_outcomes_hold_pr(stage_states: dict, meta: dict, context:
         return False
 
     outcome = str(aggregate.get("outcome") or "").strip().upper()
-    if outcome in (CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value):
+    if outcome in BLOCKING_OUTCOMES:
         return True
 
     if "pr_head_sha" not in context:

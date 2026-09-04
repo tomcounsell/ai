@@ -358,6 +358,20 @@ class TestMainEdgeCases:
         with patch("sys.argv", ["validate_build.py", nonexistent]):
             assert validate_build.main() == 0
 
+    def test_empty_plan_path_reports_cleanly_instead_of_traceback(self):
+        """TD 2 (review of PR #3123): `Path("")` is `Path(".")`, and
+        `Path(".").exists()` is True since it's the cwd -- so the old
+        `.exists()` guard let `read_text()` raise `IsADirectoryError` past
+        `main()`. An empty `$PLAN_PATH` interpolated into the documented
+        shell invocation must report cleanly, not crash."""
+        with patch("sys.argv", ["validate_build.py", ""]):
+            assert validate_build.main() == 0
+
+    def test_directory_plan_path_reports_cleanly(self, tmp_path):
+        """A non-blank path that names a directory hits the same guard."""
+        with patch("sys.argv", ["validate_build.py", str(tmp_path)]):
+            assert validate_build.main() == 0
+
     def test_empty_plan_file(self, tmp_path):
         f = tmp_path / "empty.md"
         f.write_text("")
@@ -725,6 +739,104 @@ class TestRecordOutcomesHasAProductionCaller:
         assert rc.call_count == 1
 
 
+class TestRecordingStandsDownWithNoVerificationTable:
+    """Blocker 2 (review of PR #3123): a plan with no ``## Verification``
+    table has declared no gate. Recording anyway writes a 0-row aggregate
+    that grades UNEVALUATED, and UNEVALUATED blocks merge permanently with
+    no self-heal. The writer must never be called for this shape, and the
+    stand-down must be visible in the output, not silent.
+    """
+
+    def test_no_table_skips_the_writer_and_says_so(self, tmp_path):
+        f = tmp_path / "no_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Success Criteria
+            - [ ] `test -e /dev/null` passes
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            exit_code = validate_build.main()
+
+        writer.assert_not_called()
+        assert exit_code == 0, "the write being skipped must not change the exit code"
+
+    def test_no_table_skip_message_is_distinct(self, tmp_path, capsys):
+        f = tmp_path / "no_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Success Criteria
+            - [ ] `test -e /dev/null` passes
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes"),
+        ):
+            validate_build.main()
+        out = capsys.readouterr().out
+        assert (
+            "RECORD: skipped -- plan declares no verification table, "
+            "so there is no gate to record" in out
+        )
+
+    def test_a_table_still_records_normally(self, tmp_path):
+        """The stand-down is scoped to the no-table case only; a plan that
+        does declare a table must still record exactly as before."""
+        f = tmp_path / "with_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Verification
+            | Check | Command | Expected |
+            |-------|---------|----------|
+            | Echo works | `echo hi` | output contains hi |
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = True
+            exit_code = validate_build.main()
+
+        writer.assert_called_once()
+        assert exit_code == 0, "recording must not change the exit code"
+
+
 class TestRecordingIsWiredIntoTheReviewStage:
     """The flag's only production invocation is one line of markdown.
 
@@ -774,7 +886,7 @@ class TestRecordingIsWiredIntoTheReviewStage:
 
     def test_the_flag_the_doc_passes_is_the_flag_the_script_accepts(self):
         """Pins the doc and the parser together, so renaming one breaks here."""
-        opts, positionals, rejected = validate_build._parse_argv(
+        opts, positionals, rejected, _ = validate_build._parse_argv(
             ["plan.md", "--record-outcomes", "--repo", "o/n", "--issue", "1", "--pr", "2"]
         )
         assert not rejected
@@ -794,28 +906,101 @@ class TestArgvParsingRejectsFlagShapedValues:
     """
 
     def test_missing_value_rejects_the_flag(self):
-        opts, _, rejected = validate_build._parse_argv(["p.md", "--issue", "--pr", "77"])
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--issue", "--pr", "77"])
         assert "--issue" in rejected
         assert "--issue" not in opts
         assert opts["--pr"] == "77"
 
     def test_trailing_flag_with_no_value_is_rejected(self):
-        opts, _, rejected = validate_build._parse_argv(["p.md", "--repo"])
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--repo"])
         assert rejected == ["--repo"]
         assert "--repo" not in opts
 
     def test_positional_is_found_after_a_bare_flag(self):
-        _, positionals, _ = validate_build._parse_argv(["--record-outcomes", "p.md"])
+        _, positionals, _, _ = validate_build._parse_argv(["--record-outcomes", "p.md"])
         assert positionals == ["p.md"]
 
     def test_unknown_flag_is_rejected_not_treated_as_a_positional(self):
-        _, positionals, rejected = validate_build._parse_argv(["p.md", "--bogus"])
+        _, positionals, rejected, _ = validate_build._parse_argv(["p.md", "--bogus"])
         assert positionals == ["p.md"]
         assert rejected == ["--bogus"]
+
+    def test_single_dash_value_is_rejected_like_a_flag(self):
+        """The docstring promises a value that 'is itself a flag' is
+        rejected; a single-dash token (`-x`, or a negative number like `-5`)
+        must be rejected the same way as a double-dash one, not silently
+        accepted as the value."""
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--issue", "-5"])
+        assert "--issue" in rejected
+        assert "--issue" not in opts
+
+    def test_repo_value_that_looks_like_a_flag_is_rejected(self):
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--repo", "-x"])
+        assert "--repo" in rejected
+        assert "--repo" not in opts
+
+    def test_repeated_flag_last_wins_and_is_reported(self):
+        opts, _, _, warnings = validate_build._parse_argv(
+            ["p.md", "--repo", "first/one", "--repo", "second/one"]
+        )
+        assert opts["--repo"] == "second/one"
+        assert any("--repo" in w and "repeated" in w for w in warnings)
+
+    def test_extra_positionals_are_dropped_and_reported(self):
+        _, positionals, _, warnings = validate_build._parse_argv(["a.md", "b.md", "c.md"])
+        assert positionals == ["a.md", "b.md", "c.md"]
+        assert any("b.md" in w and "c.md" in w for w in warnings)
+
+    def test_no_repeats_or_extras_yields_no_warnings(self):
+        _, _, _, warnings = validate_build._parse_argv(["p.md", "--repo", "o/n"])
+        assert warnings == []
+
+    def test_help_anywhere_in_argv_is_honored(self):
+        with patch("sys.argv", ["validate_build.py", "--record-outcomes", "--help"]):
+            assert validate_build.main() == 0
+
+    def test_h_anywhere_in_argv_is_honored(self):
+        with patch("sys.argv", ["validate_build.py", "p.md", "-h"]):
+            assert validate_build.main() == 0
 
     def test_no_positional_exits_nonzero_rather_than_green_on_zero_checks(self):
         with patch("sys.argv", ["validate_build.py", "--record-outcomes", "--repo", "o/n"]):
             assert validate_build.main() == 1
+
+    def test_zero_timeout_falls_back_to_default_not_all_unevaluated(self, tmp_path, capsys):
+        """TD 3 (review of PR #3123): `--timeout 0` (or negative) converted
+        every row to UNEVALUATED, which now blocks merge permanently once
+        recorded. A non-positive bound must be rejected with the established
+        `ARGS: ignoring ...` line and fall back to the default, not silently
+        grade the whole table UNEVALUATED."""
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        with patch("sys.argv", ["validate_build.py", str(f), "--timeout", "0"]):
+            assert validate_build.main() == 0
+        out = capsys.readouterr().out
+        assert "ARGS: ignoring --timeout '0'" in out
+        assert "UNEVALUATED:" not in out
+        assert "Result: 1 PASS, 0 FAIL, 0 UNEVALUATED" in out
+
+    def test_negative_timeout_value_is_rejected_at_the_argv_level(self, tmp_path, capsys):
+        """A value starting with `-` is rejected as flag-shaped before it
+        ever reaches the int-and-sign check, so `--timeout -5` never grades
+        the table UNEVALUATED either -- it falls back to the default via the
+        same `bad_flags` path as any other malformed value flag."""
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        with patch("sys.argv", ["validate_build.py", str(f), "--timeout", "-5"]):
+            assert validate_build.main() == 0
+        out = capsys.readouterr().out
+        assert "ARGS: ignoring --timeout" in out
+        assert "UNEVALUATED:" not in out
+        assert "Result: 1 PASS, 0 FAIL, 0 UNEVALUATED" in out
 
     def test_non_integer_issue_does_not_change_the_exit_code(self, tmp_path):
         f = tmp_path / "plan.md"

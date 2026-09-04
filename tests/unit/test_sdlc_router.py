@@ -9,6 +9,8 @@ This file focuses exclusively on the G7 guard added for issue #1302.
 
 from __future__ import annotations
 
+import inspect
+
 from agent.sdlc_router import (
     G3_REDIRECT_REASON_DOCS_PENDING,
     GUARDS,
@@ -2067,12 +2069,29 @@ class TestRow8gVerificationOutcomesHoldPr:
         meta = _base_meta(pr_number=3123, latest_review_verdict="CHANGES REQUESTED")
         assert _rule_verification_outcomes_hold_pr(states, meta, {}) is False
 
+    def test_predicate_reads_the_shared_blocking_set(self):
+        """Pins the two sides to ONE definition, not to matching spellings.
+
+        Review of PR #3123: the earlier version of this test re-spelled
+        `{FAIL, UNEVALUATED}` locally and compared the router to itself, so a
+        drift in the predicate would not have failed it. Both consumers now
+        read `BLOCKING_OUTCOMES`, and this asserts the predicate really does.
+        """
+        import agent.verification_parser as vp
+        import tools.merge_predicate as mp
+
+        source = inspect.getsource(mp._check_verification_outcomes)
+        assert "BLOCKING_OUTCOMES" in source, (
+            "the merge predicate must read the shared blocking set, not re-spell it"
+        )
+        assert vp.BLOCKING_OUTCOMES == {"FAIL", "UNEVALUATED"}
+
     def test_router_and_predicate_agree_on_the_blocking_set(self):
         """The two sides must not drift on which outcomes hold a PR."""
         from agent.sdlc_router import _rule_verification_outcomes_hold_pr
-        from agent.verification_parser import CheckOutcome
+        from agent.verification_parser import BLOCKING_OUTCOMES, CheckOutcome
 
-        blocking = {CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value}
+        blocking = BLOCKING_OUTCOMES
         for outcome in (o.value for o in CheckOutcome):
             held = _rule_verification_outcomes_hold_pr(
                 self._states({"outcome": outcome, "head_sha": self.HEAD}),

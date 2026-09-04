@@ -122,10 +122,23 @@ _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 # VERIFICATION_TIMEOUT_S (or `--timeout`) when a real suite brushes the ceiling
 # -- but contention is a load problem, not a bound problem, so prefer rerunning
 # on a quiet machine over permanently inflating this.
+# A non-positive bound is rejected rather than honored: it would time out every
+# row, and since the recorder writes regardless of exit code, a stray
+# VERIFICATION_TIMEOUT_S=0 in a launchd environment would persist an
+# all-UNEVALUATED aggregate that holds the lane with no self-evident cause.
+_FALLBACK_TIMEOUT_S = 120
 try:
-    DEFAULT_TIMEOUT_S = int(os.environ.get("VERIFICATION_TIMEOUT_S", "") or 120)
+    _configured_timeout = int(os.environ.get("VERIFICATION_TIMEOUT_S", "") or _FALLBACK_TIMEOUT_S)
 except ValueError:
-    DEFAULT_TIMEOUT_S = 120
+    _configured_timeout = _FALLBACK_TIMEOUT_S
+if _configured_timeout <= 0:
+    logger.warning(
+        "VERIFICATION_TIMEOUT_S=%r is not positive; using %ss",
+        os.environ.get("VERIFICATION_TIMEOUT_S"),
+        _FALLBACK_TIMEOUT_S,
+    )
+    _configured_timeout = _FALLBACK_TIMEOUT_S
+DEFAULT_TIMEOUT_S = _configured_timeout
 
 # Underscore-prefixed metadata key inside the ledger's `stage_states_json`
 # blob, mirroring `_verdicts` / `_sdlc_dispatches` / `_run_identities`. A new
@@ -143,6 +156,20 @@ class CheckOutcome(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
     UNEVALUATED = "UNEVALUATED"
+
+
+# The outcomes that hold a PR (owner ruling on #3080, `ba092a06d`): FAIL says
+# the code is wrong, UNEVALUATED says the grader could not answer, and neither
+# is evidence that the lane is shippable.
+#
+# Defined here rather than on either consumer because it has exactly two, and
+# they sit on opposite sides of an architectural boundary: `tools/merge_predicate`
+# refuses the merge, and `agent/sdlc_router`'s row 8g re-routes rather than
+# dispatching one the predicate would refuse. The router may not import `tools/`
+# (see `guard_g8_artifact_verification`), so a set spelled out on the predicate
+# could not be shared with it -- and a set spelled out twice is one edit away
+# from the two sides silently disagreeing about which outcomes block.
+BLOCKING_OUTCOMES = frozenset({CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value})
 
 
 def split_row_cells(row: str) -> list[str]:
@@ -496,8 +523,30 @@ def unevaluated_reason(expected: str | None) -> str:
         f"unrecognized expectation form: {expected.strip()!r}. "
         "The grammar reads: exit code N, exit N, exit code != N, output contains X, "
         "output does not contain X, match count == 0, output > N, > N, >= N, == N, "
-        "prints `N`, empty output."
+        "output is N, prints `N`, output `N`, empty output, no output."
     )
+
+
+_TRAILING_GLOSS_DELIMITERS = (",", "(", "`")
+
+
+def _match_bare_with_delimited_gloss(pattern: str, expected: str) -> re.Match | None:
+    """Match a bare anchored form, tolerating a trailing gloss set off by a delimiter.
+
+    **Delimited-gloss rule.** A trailing gloss is only recognised as a gloss --
+    and therefore ignored -- when it is set off by a delimiter: a comma, or a
+    parenthesis/backtick span (``exit 0, JSON `"compatible": true``` reads as
+    ``exit 0`` plus a comma-delimited gloss). Bare trailing words with no
+    delimiter are ambiguous (``exit 0 maybe`` could be a typo for a different
+    number) and the form stays unmatched, i.e. UNEVALUATED.
+    """
+    m = re.match(pattern, expected)
+    if not m:
+        return None
+    rest = expected[m.end() :].lstrip()
+    if not rest or rest[0] in _TRAILING_GLOSS_DELIMITERS:
+        return m
+    return None
 
 
 def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -> CheckOutcome:
@@ -510,12 +559,15 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
     :func:`unevaluated_reason` for the accompanying reason text.
 
     Supported expectation formats (positive):
-    - ``exit code N`` / ``exit N`` -- passes when exit_code == N
+    - ``exit code N`` / ``exit N`` -- passes when exit_code == N. ``exit N`` also
+      tolerates a delimited trailing gloss (see the delimited-gloss rule below),
+      e.g. ``exit 0, JSON `"compatible": true```.
     - ``output > N`` / ``> N`` -- passes when output (stripped) is numeric and > N
     - ``>= N`` -- passes when output (stripped) is numeric and >= N
     - ``== N`` / ``output == N`` -- passes when output (stripped) is numeric and == N
-    - ``prints `N``` -- passes when stripped output equals N
-    - ``empty output`` -- passes when stdout is empty or whitespace-only
+    - ``output is N`` -- equality, same semantics as ``output == N``
+    - ``prints `N``` / ```output `N``` -- passes when stripped output equals N
+    - ``empty output`` / ``no output`` -- passes when stdout is empty or whitespace-only
     - ``output contains X`` -- passes when substring X appears in stdout
 
     Supported expectation formats (inverse / anti-criteria):
@@ -608,19 +660,32 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
     if m:
         return verdict(exit_code == int(m.group(1)))
 
-    # exit N  (anchored, see the note below)
-    m = re.match(r"exit\s+(\d+)\s*$", expected)
+    # exit N  (anchored, but tolerates a delimited trailing gloss -- see the
+    # delimited-gloss rule on `_match_bare_with_delimited_gloss` -- e.g.
+    # `exit 0, JSON `"compatible": true``. A bare trailing word with no
+    # delimiter, e.g. `exit 0 maybe`, stays unmatched and UNEVALUATED.)
+    m = _match_bare_with_delimited_gloss(r"exit\s+(\d+)", expected)
     if m:
         return verdict(exit_code == int(m.group(1)))
 
-    # empty output  (passes when stdout is empty or whitespace-only)
-    if expected == "empty output":
+    # empty output / no output  (passes when stdout is empty or whitespace-only).
+    # `no output` is an exact synonym a live plan already writes; accepting it is
+    # an alias, not a widening -- there is no reading of it that differs.
+    if expected in ("empty output", "no output"):
         return verdict(not output.strip())
 
     # prints `N`  (passes when stripped stdout equals N; backticks optional)
     m = re.match(r"prints\s+`?([^`]+?)`?\s*$", expected)
     if m:
         return verdict(output.strip() == m.group(1).strip())
+
+    # output `N`  (backtick-wrapped integer, equality against stripped stdout;
+    # same semantics as `output == N` below, and prefix-matched for the same
+    # reason -- it is the `output`-prefixed idiom's backtick spelling).
+    m = re.match(r"output\s*`(\d+)`", expected)
+    if m:
+        target = int(m.group(1))
+        return numeric_verdict(lambda value: value == target)
 
     # Trailing-gloss rule (applies uniformly to >, >=, ==): the `output`-prefixed
     # spellings (`output > N`, `output >= N`, `output == N`) are the established
@@ -657,6 +722,13 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
 
     # output == N -- prefix-matched (see the trailing-gloss rule above).
     m = re.match(r"output\s*==\s*(\d+)", expected)
+    if m:
+        target = int(m.group(1))
+        return numeric_verdict(lambda value: value == target)
+
+    # output is N -- `is` used as the equality verb; same semantics and
+    # prefix-matching as `output == N` above.
+    m = re.match(r"output\s+is\s+(\d+)", expected)
     if m:
         target = int(m.group(1))
         return numeric_verdict(lambda value: value == target)
@@ -948,6 +1020,11 @@ def record_verification_outcomes(
                 )
                 if head_sha:
                     aggregate["head_sha"] = head_sha
+                else:
+                    # Resolver returned no exception but no usable SHA either --
+                    # stamp this distinctly from "never anchored" so a merge
+                    # refusal can say *why* there is no head_sha.
+                    aggregate["head_sha_anchor_failed"] = True
             except Exception as exc:
                 logger.debug(
                     "record_verification_outcomes: head-SHA resolve failed for "
@@ -958,6 +1035,11 @@ def record_verification_outcomes(
                     type(exc).__name__,
                     exc,
                 )
+                # A transient resolver failure at record time must not read
+                # the same as a lane that was never anchored: stamp the
+                # failed-anchor case distinctly so the refusal message and
+                # troubleshooting can tell the two apart.
+                aggregate["head_sha_anchor_failed"] = True
 
         from agent.pipeline_ledger import PipelineLedger
         from tools.stage_states_helpers import update_stage_states
@@ -1017,8 +1099,6 @@ def read_verification_outcomes(target_repo: str | None, issue_number: int | None
         if raw is None or raw == "":
             return None
         blob = json.loads(raw) if isinstance(raw, str) else raw
-    except VerificationOutcomesUnavailableError:
-        raise
     except Exception as exc:
         logger.debug(
             "read_verification_outcomes: read failed for %s#%s (%s: %s)",

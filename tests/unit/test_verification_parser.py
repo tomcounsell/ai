@@ -1106,6 +1106,70 @@ class TestNumericComparatorTrailingGlossSymmetry:
         )
 
 
+class TestNewlyRecognizedAuthoringForms:
+    """Round 3 of the #3065 review found two in-flight PRs (#3093, #3089)
+    would be refused the moment this gate lands: their plans use three
+    legitimate authoring shapes the grammar did not recognise --
+    backtick-wrapped-integer equality, `is` as the equality verb, and a
+    comma-delimited gloss after a bare `exit N`. Each gets a PASS/FAIL pair
+    plus the verbatim live-plan cell that must grade."""
+
+    # --- output `N` (backtick-wrapped integer equality) ---
+
+    def test_output_backtick_int_passes(self):
+        assert evaluate_expectation("output `0`", exit_code=0, output="0") is PASS
+
+    def test_output_backtick_int_fails(self):
+        assert evaluate_expectation("output `0`", exit_code=0, output="1") is FAIL
+
+    def test_live_plan_row_output_backtick_zero(self):
+        """Verbatim from docs/plans/promise-gate-recorded-obligations.md:433-434."""
+        assert evaluate_expectation("output `0`", exit_code=1, output="0") is PASS
+
+    # --- output is N ---
+
+    def test_output_is_n_passes(self):
+        assert evaluate_expectation("output is 0", exit_code=0, output="0") is PASS
+
+    def test_output_is_n_fails(self):
+        assert evaluate_expectation("output is 0", exit_code=0, output="1") is FAIL
+
+    def test_live_plan_row_output_is_zero(self):
+        """Verbatim from
+        docs/plans/unblock-dependency-bumps-coupled-set-gate.md:2047."""
+        assert evaluate_expectation("output is 0", exit_code=0, output="0") is PASS
+
+    # --- exit N, <comma-delimited gloss> ---
+
+    def test_exit_n_comma_gloss_passes(self):
+        assert evaluate_expectation("exit 0, some gloss text", exit_code=0, output="") is PASS
+
+    def test_exit_n_comma_gloss_fails(self):
+        assert evaluate_expectation("exit 0, some gloss text", exit_code=1, output="") is FAIL
+
+    def test_live_plan_row_exit_0_json_gloss(self):
+        """Verbatim from
+        docs/plans/unblock-dependency-bumps-coupled-set-gate.md:2008."""
+        assert (
+            evaluate_expectation('exit 0, JSON `"compatible": true`', exit_code=0, output="")
+            is PASS
+        )
+
+    def test_exit_n_bare_trailing_word_still_unevaluated(self):
+        """The anchoring counter-example (`exit 0 maybe`, no delimiter) must
+        keep grading UNEVALUATED -- pinned again here alongside the new forms
+        so a regression in the delimiter rule is caught in the same place."""
+        assert evaluate_expectation("exit 0 maybe", exit_code=0, output="") is UNEVALUATED
+
+    def test_bare_comparator_gloss_counter_examples_still_unevaluated(self):
+        """The delimited-gloss rule is scoped to `exit N` only; the
+        pre-existing bare `>`, `>=`, `==` forms stay fully anchored and a
+        parenthesized gloss on them is still UNEVALUATED (see
+        TestExpectationAnchoringRule and TestNumericComparatorTrailingGlossSymmetry)."""
+        for cell in ("== 2 (the two read sites)", ">= 1 nightly", "> 0 or so"):
+            assert evaluate_expectation(cell, exit_code=0, output="2") is UNEVALUATED
+
+
 class TestReadVerificationOutcomesFailsClosed:
     """Absent and unreadable must be distinguishable (review of PR #3123).
 

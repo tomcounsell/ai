@@ -129,6 +129,13 @@ python scripts/validate_build.py "$PLAN_PATH"
   legitimate suite, re-run on a quiet machine first; raise the bound only if it
   is really too low (`--timeout N`, or `VERIFICATION_TIMEOUT_S`). Contention is
   a load problem, not a bound problem.
+
+  Mind where the edit lands. Plan files live on `main` and never travel in a
+  feature-branch PR (`docs/sdlc/do-docs.md`), but `/do-pr-review` grades
+  `"$PLAN_PATH"` **in the lane worktree**. So an `Expected`-cell fix committed
+  to `main` keeps grading the old cell until you bring `main` into the branch.
+  Merge or rebase first, then re-run the table — otherwise the row you just
+  fixed refuses the merge again and reads as though the fix did not work.
 - **A stale, unanchored, or unreadable aggregate** — nothing is wrong with the
   code; the record just cannot be trusted at this head. Re-record it:
 
