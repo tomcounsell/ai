@@ -42,13 +42,22 @@ Each row defines:
 
 ### Supported Expectations
 
+`evaluate_expectation` (`agent/verification_parser.py`) is the sole grader.
+It is three-valued: every row grades `PASS`, `FAIL`, or `UNEVALUATED` (see
+"Three-Valued Grading" below), never a plain boolean.
+
 **Positive expectations** (the command must succeed or produce the expected output):
 
 | Format | Meaning | Example |
 |--------|---------|---------|
-| `exit code N` | Command must exit with code N (positive exact-match) | `exit code 0` |
-| `output > N` | Command output (as integer) must be greater than N | `output > 0` |
+| `exit code N` | Command must exit with code N (positive exact-match, prefix-matched) | `exit code 0` |
+| `exit N` | Same as `exit code N`, shorter spelling (anchored) | `exit 0` |
 | `output contains X` | Command stdout must contain substring X | `output contains ok` |
+| `output > N` / `> N` | Stdout (stripped, parsed as an integer) must be greater than N | `output > 0`, `> 0` |
+| `>= N` / `output >= N` | Stdout must be numeric and `>= N` | `>= 1` |
+| `== N` / `output == N` | Stdout must be numeric and exactly N | `== 3` |
+| `prints \`N\`` | Stripped stdout must equal N exactly (backticks optional) | ``prints `ok` `` |
+| `empty output` | Stdout must be empty or whitespace-only | `empty output` |
 
 **Inverse expectations / anti-criteria** (the command must NOT produce a forbidden result):
 
@@ -60,7 +69,80 @@ Each row defines:
 
 **Important distinction:** `exit code N` is a positive exact-match — it passes when `exit_code == N`. `exit code != N` is the inverse — it passes when `exit_code != N`. The two are syntactically disjoint and unambiguous. The existing `exit code 1` check ("No stale xfails") is a positive exact-match: grep exits 1 when it finds no matches, so `exit code 1` asserts "no stale xfails found". It is NOT an inverse.
 
+The inverse forms are matched before their positive counterparts (`exit code != N` before `exit code N`, `output does not contain X` before `output contains X`), so an inverse row can never be misread as a positive one.
+
+A command containing a `|` needs the escape rule in "Authoring Rule: Pipes Must Be Escaped" below — and the escape composes differently for `grep -E` than for basic-regex `grep -c`, which is the single most common way an otherwise-correct row silently stops asserting what it says. `.claude/skills-global/do-plan/PLAN_TEMPLATE.md` carries the same rule and a worked alternation sample inline, so a plan author meets it while writing the row rather than by following a link.
+
 **Empty-stdout gate:** Both `output does not contain X` and `match count == 0` reject truly-empty stdout. An errored command or one that writes only to stderr produces empty stdout; without the gate, a trivially-absent substring or `all(...)` over an empty list would silently pass. A legitimately-clean `grep -c` returns a literal `0` (one byte of non-empty stdout), so the gate fires only when the command produced no output at all.
+
+**Prefix-matched vs. anchored.** The three pre-existing forms — `exit code N`, `output > N`, `output contains X` — stay prefix-matched: a trailing gloss (`exit code 0 (verified 2026-09-02 to return exactly one EnvCall today)`) is an established authoring idiom in this repo's live plans, and anchoring them would have turned already-working rows into blocking `UNEVALUATED` for a change nobody asked for. Every form added afterward (`exit N`, `` prints `N` ``, `>= N`, `> N`, `== N`, `empty output`) is **anchored**: the cell must match the pattern to its end. A bare comparator followed by prose is easy to write by accident, and grading a sentence as if it were a number is exactly the guess this module exists to stop making — an anchored form that fails to match reports `UNEVALUATED` naming the cell, telling the author what to fix rather than silently misgrading it.
+
+Non-numeric stdout under a numeric comparator (`> N`, `>= N`, `== N`) is a genuine `FAIL`, not `UNEVALUATED`: the expectation was understood, the command just answered with something that is not a number.
+
+### Three-Valued Grading: `UNEVALUATED`
+
+A check never grades a plain pass/fail boolean. `evaluate_expectation` and
+`run_checks` return one of `CheckOutcome.PASS`, `CheckOutcome.FAIL`, or
+`CheckOutcome.UNEVALUATED`. `UNEVALUATED` means *the grader could not answer
+the question* — it is produced by:
+
+- an expectation cell that is empty, whitespace-only, or `None`
+- an expectation form the grammar above does not recognise
+- a command cell carrying no backticked span
+- a command timeout (`DEFAULT_TIMEOUT_S`, currently 120s — provisional and
+  tunable; the one bound shared by both runners of these tables, #2901)
+- any runner exception
+
+`UNEVALUATED` is **blocking** — it never counts as a pass — but it is
+reported as its own token, never folded into `[FAIL]`. The distinction
+matters for whoever reads the report: a `FAIL` says the code under test is
+wrong; an `UNEVALUATED` says the grader itself could not answer, which is a
+claim about the check's authoring (a malformed expectation, a missing
+backtick span, a suite that took too long), not about the code. The 2026-09
+supervisor batch hand-verified every `UNEVALUATED` "failure" it encountered
+as code that was actually correct — the row's expectation was unreadable,
+not the code under test.
+
+The distinction changes what a human does next, but not whether the gate
+stops:
+
+- **Build gate** (`/do-build` Step 5.1, `scripts/validate_build.py`):
+  `UNEVALUATED` blocks exactly like `FAIL` — the script's exit code is `1` if
+  either count is non-zero — but the printed report line reads
+  `UNEVALUATED: <reason>` rather than `FAIL: ...`, so the triaging agent knows
+  to fix the *row* (rewrite the expectation, add the missing backtick span)
+  rather than debug the code.
+- **Merge/review gate** (`/do-pr-review` Step 4.5): the reviewer runs the
+  same table and reports `UNEVALUATED` rows as their own category in the
+  review, never as a code-quality finding — a blocker that reads "grader
+  could not answer" is a different fix than a blocker that reads "code is
+  wrong," and conflating them sends the wrong person down the wrong path.
+
+A run with zero checks at all (an empty `## Verification` table, or a section
+that produced nothing executable) grades `UNEVALUATED` for the run, never a
+vacuous `PASS` — there being nothing to check is not evidence that
+everything checked out.
+
+### Where the graded aggregate is recorded
+
+The merge gate reads a **recorded** aggregate; it never re-executes a plan's
+commands. `record_verification_outcomes` writes it to `_verification_outcomes`
+in the lane ledger's existing `stage_states` JSON, stamped with the PR head SHA
+the run was graded against (resolved through
+`tools.pr_head_resolver.resolve_pr_head_sha`, never a bare `gh` read).
+
+**REVIEW is the recording stage, and BUILD deliberately is not.** The stamp is
+what makes the record trustworthy later, and BUILD grades the table before the
+lane has a PR to stamp against. An unanchored record is refused at merge, so a
+BUILD-time write would block every lane with a reason no lane could clear.
+`scripts/validate_build.py --record-outcomes --repo <r> --issue <n> --pr <p>` is
+the one production writer; `/do-pr-review` § 4.5 invokes it, `/do-build`
+Step 5.1 runs the same script without the flag. Re-run it at DOCS if the head
+moved after review.
+
+The write happens after the report is printed and never changes the exit code:
+a run that cannot reach the ledger must still tell the human what its checks
+found.
 
 ### Table Scoping: One `## Verification` Section, Many Pipe-Blocks (#2836)
 

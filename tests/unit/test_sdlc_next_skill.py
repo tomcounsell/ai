@@ -125,12 +125,15 @@ class TestBranchExistsCanonicalShape:
     """
 
     @staticmethod
-    def _fake_git(stdout: str):
+    def _fake_git(*branches: str):
+        """Fake ``git ls-remote --heads origin`` listing the given branch names."""
+        lines = "\n".join(f"{'a' * 40}\trefs/heads/{b}" for b in branches)
+
         def _run(cmd, **kwargs):
             proc = MagicMock()
-            if cmd[:2] == ["git", "branch"]:
+            if cmd[:3] == ["git", "ls-remote", "--heads"]:
                 proc.returncode = 0
-                proc.stdout = stdout
+                proc.stdout = lines
             else:
                 proc.returncode = 1
                 proc.stdout = ""
@@ -144,7 +147,7 @@ class TestBranchExistsCanonicalShape:
         )
         monkeypatch.setattr(
             "subprocess.run",
-            self._fake_git("  main\n  session/my-feature-slug\n"),
+            self._fake_git("main", "session/my-feature-slug"),
         )
 
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
@@ -161,7 +164,7 @@ class TestBranchExistsCanonicalShape:
         monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "sdlc-2003")
         monkeypatch.setattr(
             "subprocess.run",
-            self._fake_git("  main\n  session/sdlc-2003\n"),
+            self._fake_git("main", "session/sdlc-2003"),
         )
 
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
@@ -169,7 +172,9 @@ class TestBranchExistsCanonicalShape:
         assert context["branch_exists"] is True
 
     def test_false_and_silent_when_no_slug_recorded(self, monkeypatch):
-        """No recorded slug -> cannot affirm existence -> False, and no probe."""
+        """No recorded slug and no PR -> cannot affirm existence -> False, and
+        no live call (#3065: resolve_branch_truth short-circuits before any
+        subprocess when there is nothing to check)."""
         monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: None)
         run_mock = MagicMock()
         monkeypatch.setattr("subprocess.run", run_mock)
@@ -178,14 +183,15 @@ class TestBranchExistsCanonicalShape:
 
         assert context["branch_exists"] is False
         assert not any(
-            call.args and call.args[0][:2] == ["git", "branch"] for call in run_mock.call_args_list
+            call.args and call.args[0][:3] == ["git", "ls-remote", "--heads"]
+            for call in run_mock.call_args_list
         )
 
     def test_false_when_branch_absent(self, monkeypatch):
         monkeypatch.setattr(
             "tools.lane_identity.resolve_lane_slug", lambda *a, **k: "my-feature-slug"
         )
-        monkeypatch.setattr("subprocess.run", self._fake_git("  main\n"))
+        monkeypatch.setattr("subprocess.run", self._fake_git("main"))
 
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
 
@@ -284,15 +290,12 @@ class TestTargetRepoCwd:
         assert sdlc_next_skill._check_plan_committed_on_main("docs/plans/no-such-slug.md") is False
 
     def test_branch_exists_probe_follows_target_repo(self, tmp_path, monkeypatch):
-        """_build_context's branch_exists probe reads the target's branches."""
+        """_build_context's branch_exists probe (via resolve_branch_truth's
+        ``git ls-remote --heads origin``) runs with cwd pinned at the target
+        checkout, not the process cwd (#2078, #3065)."""
         target = tmp_path / "target"
         target.mkdir()
         self._init_fixture_repo(target, "sdlc-2078-fixture")
-        subprocess.run(
-            ["git", "-C", str(target), "branch", "session/sdlc-2078-fixture"],
-            check=True,
-            capture_output=True,
-        )
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
@@ -301,9 +304,26 @@ class TestTargetRepoCwd:
             "tools.lane_identity.resolve_lane_slug", lambda *a, **k: "sdlc-2078-fixture"
         )
 
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:3] == ["git", "ls-remote", "--heads"]:
+                calls.append(kwargs.get("cwd"))
+                proc.returncode = 0
+                sha = "a" * 40
+                proc.stdout = f"{sha}\trefs/heads/session/sdlc-2078-fixture\n"
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2078)
 
         assert context["branch_exists"] is True
+        assert calls == [str(target)], "ls-remote must run with cwd pinned at SDLC_TARGET_REPO"
 
 
 def test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan(monkeypatch):
@@ -957,24 +977,63 @@ class TestStageArtifactVerification:
 
     def test_patch_claim_skips_branch_check_when_pr_merged(self, monkeypatch, tmp_path):
         """#1267 g8 merged-pipeline misfire: PATCH claims completed, the PR
-        is MERGED, and the branch has already been deleted (delete-branch-
-        on-merge policy) -> still a no-op. The branch-pushed check must not
-        even run once the PR's live state proves MERGED."""
+        is MERGED -> still a no-op, and ``resolve_branch_truth`` must not
+        even run (poisoned to explode if called) once the PR's live state
+        proves MERGED -- a deleted branch is the expected side effect of a
+        delete-branch-on-merge policy, not evidence of a fabricated claim.
+
+        Calls ``_verify_stage_artifacts_live`` directly (not through
+        ``_build_context``) so this test is isolated from the UNRELATED
+        Row-5 ``branch_exists`` probe, which always resolves branch truth
+        once per tick regardless of PATCH's MERGED-skip (#3065)."""
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "my-slug")
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("MERGED"))
+
+        def _poison(*a, **k):
+            raise AssertionError("resolve_branch_truth must not run once PR is MERGED")
+
+        monkeypatch.setattr(sdlc_next_skill, "resolve_branch_truth", _poison)
+
+        stage_states = {"PATCH": "completed"}
+        meta = {"pr_number": 555}
+
+        context = sdlc_next_skill._verify_stage_artifacts_live(stage_states, meta, 1267)
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
+    def test_patch_claim_found_via_pr_head_when_recorded_slug_is_wrong(self, monkeypatch, tmp_path):
+        """#3065 acceptance: a WRONG recorded lane slug with a live branch
+        under a DIFFERENT name must NOT dispatch /do-patch. The PR's head SHA
+        (git-first, never a bare `gh` read) uniquely matches a branch that
+        disagrees with the recorded slug -- resolve_branch_truth reports
+        ``found`` on the REAL branch, not a falsified PATCH claim. This is the
+        keystone regression: the old ``_check_branch_pushed`` probed only the
+        wrong-slug-derived name and reported it gone."""
         plan_path = tmp_path / "my-slug.md"
         plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
         monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: plan_path)
+        # The recorded slug names a branch that does not exist on origin --
+        # the wrong-recorded-slug state this task fixes.
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "wrong-slug")
 
-        ls_remote_calls = []
+        sha = "b" * 40
 
         def _fake_run(cmd, **kwargs):
             proc = MagicMock()
             if cmd[:3] == ["gh", "pr", "view"]:
                 proc.returncode = 0
-                proc.stdout = json.dumps({"state": "MERGED"})
-            elif cmd[:2] == ["git", "ls-remote"]:
-                ls_remote_calls.append(cmd)
+                proc.stdout = json.dumps({"state": "OPEN"})
+            elif cmd[:3] == ["git", "ls-remote", "--heads"]:
                 proc.returncode = 0
-                proc.stdout = ""  # branch gone -- would fail if the check ran
+                # The lane's REAL branch is named differently than the
+                # (wrong) recorded slug's derived name.
+                proc.stdout = f"{sha}\trefs/heads/session/dev-actual-branch\n"
+            elif cmd[:2] == ["git", "ls-remote"]:
+                # refs/pull/<N>/head single-ref query inside resolve_pr_head_sha.
+                proc.returncode = 0
+                proc.stdout = f"{sha}\trefs/pull/555/head\n"
             else:
                 proc.returncode = 1
                 proc.stdout = ""
@@ -994,12 +1053,15 @@ class TestStageArtifactVerification:
 
         assert "stage_artifacts_verified" not in context
         assert "unverified_stage" not in context
-        assert ls_remote_calls == [], "branch-pushed check must be skipped once PR is MERGED"
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_FOUND
+        assert context["branch_truth_branch"] == "session/dev-actual-branch"
 
-    def test_patch_claim_still_checks_branch_when_pr_open(self, monkeypatch, tmp_path):
-        """A PATCH claim against a still-OPEN PR (not yet merged) must still
-        run the real branch-pushed live check -- the MERGED skip is scoped
-        strictly to state == "MERGED", not to "PR exists"."""
+    def test_patch_claim_absent_when_pr_open_and_branch_genuinely_gone(self, monkeypatch, tmp_path):
+        """A PATCH claim against a still-OPEN PR whose head resolves to
+        nothing in the listing (ambiguous/mid-push territory) must defer
+        (indeterminate), not falsify -- see
+        test_patch_claim_with_no_pr_and_absent_branch_is_falsified below for
+        the one shape that DOES falsify (no PR at all)."""
         plan_path = tmp_path / "my-slug.md"
         plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
         monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: plan_path)
@@ -1012,7 +1074,7 @@ class TestStageArtifactVerification:
                 proc.stdout = json.dumps({"state": "OPEN"})
             elif cmd[:2] == ["git", "ls-remote"]:
                 proc.returncode = 0
-                proc.stdout = ""  # branch gone -- should fail verification
+                proc.stdout = ""  # nothing matches anywhere -- Race 1
             else:
                 proc.returncode = 1
                 proc.stdout = ""
@@ -1030,8 +1092,13 @@ class TestStageArtifactVerification:
             meta=meta,
         )
 
-        assert context["stage_artifacts_verified"] is False
-        assert context["unverified_stage"] == "PATCH"
+        # Race 1: a listing that does not contain the PR's head is a
+        # possibly-stale negative (mid-push), never an absence, while a PR
+        # is open. G8 must step aside rather than dispatch /do-patch on an
+        # unreadable fact.
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
 
     def test_fails_open_on_infra_error(self, monkeypatch, caplog):
         """subprocess.TimeoutExpired/OSError from the gh/git call → advances
@@ -1167,32 +1234,36 @@ class TestStageArtifactVerification:
         assert "unverified_stage" not in context, label
         run_mock.assert_not_called()
 
-    def test_unverifiable_patch_claim_skips_the_branch_probe(self, monkeypatch, tmp_path):
-        """PATCH claims completed with a resolvable lane branch but no PR
-        number -> the `git ls-remote` branch probe never runs.
+    def test_patch_claim_with_no_pr_and_absent_branch_is_falsified(self, monkeypatch, tmp_path):
+        """#3065: PATCH claims completed, no PR number is recorded, and the
+        recorded branch is genuinely absent from origin -> FALSIFIED (PATCH),
+        not "unverifiable".
 
-        The branch name alone is not enough to adjudicate this claim. With no
-        PR state to consult, `pr_state` stays None, the MERGED skip below it
-        cannot engage, and the entire verdict collapses onto "does the branch
-        still exist on origin" -- where "branch gone" is indistinguishable
-        from "deleted on merge". Probing anyway manufactures a PATCH mismatch
-        out of a successful merge.
+        Before #3065, a missing PR number made this claim unverifiable
+        outright, because the old two-valued branch probe could not tell
+        "branch gone" from "deleted on merge" without a PR's state to
+        consult. ``resolve_branch_truth`` closes that ambiguity a different
+        way: a merge is impossible without a PR, so "no PR, branch absent"
+        can never be a deletion-on-merge false positive -- it can only mean
+        the branch was never pushed. This is the acceptance case for "a
+        genuinely unpushed branch STILL dispatches /do-patch".
         """
         plan_path = tmp_path / "my-slug.md"
         plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
         monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: plan_path)
         monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "my-slug")
 
-        calls = []
-
-        def _record(cmd, **kwargs):
-            calls.append(list(cmd))
+        def _fake_run(cmd, **kwargs):
             proc = MagicMock()
-            proc.returncode = 1
-            proc.stdout = ""
+            if cmd[:3] == ["git", "ls-remote", "--heads"]:
+                proc.returncode = 0
+                proc.stdout = ""  # nothing on origin at all
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
             return proc
 
-        monkeypatch.setattr("subprocess.run", _record)
+        monkeypatch.setattr("subprocess.run", _fake_run)
 
         context = sdlc_next_skill._build_context(
             proposed_skill=None,
@@ -1201,13 +1272,9 @@ class TestStageArtifactVerification:
             meta={"pr_number": None},
         )
 
-        assert "stage_artifacts_verified" not in context
-        assert "unverified_stage" not in context
-        # `git branch -a` is _build_context's unrelated branch_exists signal and
-        # is expected. What must be absent is the verification gate's own live
-        # reads: the branch probe (`git ls-remote`) and any `gh` call.
-        assert [c for c in calls if c[:2] == ["git", "ls-remote"]] == [], calls
-        assert [c for c in calls if c[:1] == ["gh"]] == [], calls
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_ABSENT
 
     def test_unverifiable_build_skip_logs_at_debug_not_warning(self, monkeypatch, caplog):
         """The skip is a normal, expected state and logs at DEBUG.
@@ -1352,10 +1419,25 @@ class TestPrHeadShaContext:
         assert called == []
 
     def test_no_recorded_review_verdict_skips_lookup(self, monkeypatch):
-        """No recorded verdict → no live call, key omitted (the router's
-        no-verdict recovery rows own that state; the signal stays inert)."""
+        """No recorded verdict → the WS3d head_sha verdict-staleness signal's
+        OWN lookup must not run, and the key stays omitted (the router's
+        no-verdict recovery rows own that state; the signal stays inert).
+
+        Branch-truth resolution (#3065) independently calls
+        ``_fetch_pr_head_sha`` whenever a PR is recorded, regardless of
+        REVIEW verdicts -- ``resolve_branch_truth`` is stubbed out here so
+        that unrelated call site cannot pollute the ``called`` list this test
+        uses to prove the WS3d signal itself never fired.
+        """
         called = []
         monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "resolve_branch_truth",
+            lambda *a, **k: sdlc_next_skill.BranchTruth(
+                status=sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE, reason="stubbed"
+            ),
+        )
         monkeypatch.setattr(
             sdlc_next_skill,
             "_fetch_pr_head_sha",
@@ -1874,3 +1956,459 @@ class TestTerminalDecisionShape:
 
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["decision"] == "terminal"
+
+
+class TestDecisionEvidenceReachesTheCliJson:
+    """#3065 Cluster D: a decision's evidence is worthless if it dies inside
+    the router. These drive the actual CLI surface (``decide()``), following
+    ``test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan``'s pattern
+    of injecting stage_states/meta rather than resolving live session state.
+    """
+
+    def _inject(self, monkeypatch, states, meta):
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+    def _no_rule_fixture(self, unconfirmed=False):
+        states = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": STATUS_COMPLETED,
+            "BUILD": STATUS_COMPLETED,
+            "TEST": STATUS_COMPLETED,
+            "REVIEW": STATUS_COMPLETED,
+            "DOCS": STATUS_COMPLETED,
+            "MERGE": "pending",
+            "_verdicts": {
+                "REVIEW": {"verdict": "LGTM", "recorded_at": "2026-09-01T00:00:00+00:00"}
+            },
+            "_sdlc_dispatches": [
+                {
+                    "skill": "/do-test",
+                    "at": "2026-09-03T00:00:00+00:00",
+                    "stage_snapshot": {},
+                    "confirmed": not unconfirmed,
+                }
+            ],
+        }
+        meta = {
+            "pr_number": 4242,
+            "pr_merge_state": "CLEAN",
+            "pr_state": "OPEN",
+            "latest_review_verdict": "LGTM",
+            "last_dispatched_skill": "/do-test",
+            "ci_all_passing": True,
+        }
+        return states, meta
+
+    def test_no_rule_block_round_trips_its_inputs_through_the_cli_json(self, monkeypatch):
+        states, meta = self._no_rule_fixture()
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "blocked"
+        assert result["guard_id"] == "NO_RULE"
+        # Serialized exactly as the CLI would print it -- the whole point is
+        # that a supervisor can read the inputs out of the JSON.
+        payload = json.loads(json.dumps(result))
+        assert payload["decision_inputs"]["meta"]["pr_number"] == 4242
+        assert payload["decision_inputs"]["stage_states"]["REVIEW"] == STATUS_COMPLETED
+
+    def test_a_routed_decision_carries_no_decision_inputs_key(self, monkeypatch):
+        """Negative pole: the key is not sprayed onto every payload."""
+        states, meta = self._no_rule_fixture()
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert "decision_inputs" not in result
+
+    def test_dispatch_payload_reports_an_unrecorded_previous_dispatch(self, monkeypatch):
+        states, meta = self._no_rule_fixture(unconfirmed=True)
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert result["unrecorded_dispatch"]["confirmed"] is False
+        # Distinct from ``recorded``, which is about THIS decision and is
+        # always False because decide() never writes (#2897).
+        assert result["recorded"] is False
+
+    def test_dispatch_payload_omits_the_signal_when_the_record_confirms(self, monkeypatch):
+        """Negative pole, one boolean apart from the test above."""
+        states, meta = self._no_rule_fixture(unconfirmed=False)
+        states["_verdicts"]["REVIEW"]["verdict"] = "CHANGES REQUESTED"
+        meta["latest_review_verdict"] = "CHANGES REQUESTED"
+        self._inject(monkeypatch, states, meta)
+
+        result = sdlc_next_skill.decide(issue_number=28981)
+
+        assert result["decision"] == "dispatch"
+        assert "unrecorded_dispatch" not in result
+
+
+# ---------------------------------------------------------------------------
+# #3065 Task 5 -- branch truth is three-valued and shared by both router callers
+# ---------------------------------------------------------------------------
+
+_SHA_A = "a" * 40
+_SHA_B = "b" * 40
+
+
+class TestResolveBranchTruth:
+    """``resolve_branch_truth`` answers found / absent / indeterminate.
+
+    The two-valued ``_check_branch_pushed`` it replaces gave the same answer —
+    and the same fail-closed ``/do-patch`` dispatch — to a wrong-but-present
+    recorded slug, a genuinely unpushed branch, and an unreachable remote.
+    """
+
+    def _heads(self, monkeypatch, heads):
+        monkeypatch.setattr(sdlc_next_skill, "_ls_remote_heads", lambda: heads)
+
+    def _head_sha(self, monkeypatch, sha):
+        monkeypatch.setattr(sdlc_next_skill, "_fetch_pr_head_sha", lambda pr, repo=None: sha)
+
+    def test_pr_head_uniquely_matching_a_head_is_found(self, monkeypatch):
+        self._heads(
+            monkeypatch,
+            {"refs/heads/session/real-name": _SHA_A, "refs/heads/main": _SHA_B},
+        )
+        self._head_sha(monkeypatch, _SHA_A)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/wrong-slug", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_FOUND
+        # The branch is an OUTPUT of the SHA match, not the name we asked about.
+        assert truth.branch == "session/real-name"
+
+    def test_two_or_more_matches_are_indeterminate(self, monkeypatch):
+        self._heads(
+            monkeypatch,
+            {"refs/heads/session/a": _SHA_A, "refs/heads/session/b": _SHA_A},
+        )
+        self._head_sha(monkeypatch, _SHA_A)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+        assert "ambiguous" in truth.reason
+
+    def test_unreachable_remote_is_indeterminate(self, monkeypatch):
+        self._heads(monkeypatch, None)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+        assert "unreachable" in truth.reason
+
+    def test_ls_remote_raising_is_indeterminate(self, monkeypatch):
+        def _boom():
+            raise subprocess.TimeoutExpired(cmd="git ls-remote", timeout=10)
+
+        monkeypatch.setattr(sdlc_next_skill, "_ls_remote_heads", _boom)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+
+    def test_listing_without_the_pr_head_is_indeterminate_not_absent(self, monkeypatch):
+        """Race 1: a mid-push (or merged-and-deleted) listing is a stale negative."""
+        self._heads(monkeypatch, {"refs/heads/main": _SHA_B})
+        self._head_sha(monkeypatch, _SHA_A)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+
+    def test_unresolvable_pr_head_is_indeterminate(self, monkeypatch):
+        self._heads(monkeypatch, {"refs/heads/session/a": _SHA_A})
+        self._head_sha(monkeypatch, None)
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=7)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+
+    def test_no_pr_and_branch_missing_is_absent(self, monkeypatch):
+        self._heads(monkeypatch, {"refs/heads/main": _SHA_B})
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=None)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_ABSENT
+
+    def test_no_pr_and_branch_present_is_found(self, monkeypatch):
+        self._heads(monkeypatch, {"refs/heads/session/a": _SHA_A})
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=None)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_FOUND
+        assert truth.branch == "session/a"
+
+    def test_no_branch_and_no_pr_is_indeterminate_never_absent(self, monkeypatch):
+        """Nothing to ask about is not evidence of absence, and guessing is #2718."""
+        self._heads(monkeypatch, {"refs/heads/session/a": _SHA_A})
+
+        truth = sdlc_next_skill.resolve_branch_truth(None, pr_number=None)
+
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+
+    def test_the_pr_head_is_resolved_through_the_authoritative_resolver(self, monkeypatch):
+        """Structural: the SHA comes from ``pr_head_resolver``, never a bare ``gh`` read.
+
+        A stale ``gh`` head SHA is what flipped the verdict-staleness gate
+        fail-open in #2895, so this asserts the call actually routes through
+        ``resolve_pr_head_sha``.
+        """
+        seen: list[int] = []
+
+        def _fake(pr_number, repo=None, repo_root=None, **kwargs):
+            seen.append(pr_number)
+            return _SHA_A
+
+        monkeypatch.setattr("tools.pr_head_resolver.resolve_pr_head_sha", _fake)
+        self._heads(monkeypatch, {"refs/heads/session/a": _SHA_A})
+
+        truth = sdlc_next_skill.resolve_branch_truth("session/a", pr_number=99)
+
+        assert seen == [99]
+        assert truth.status == sdlc_next_skill.BRANCH_TRUTH_FOUND
+
+
+class TestG8ConsumesBranchTruth:
+    """G8 may fail closed on *absent* only; *indeterminate* makes it step aside."""
+
+    def _setup(self, monkeypatch, *, slug="sdlc-3065", heads, head_sha=None):
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: slug)
+        monkeypatch.setattr(sdlc_next_skill, "_ls_remote_heads", lambda: heads)
+        monkeypatch.setattr(sdlc_next_skill, "_fetch_pr_head_sha", lambda pr, repo=None: head_sha)
+        monkeypatch.setattr(sdlc_next_skill, "_fetch_pr_state", lambda pr, repo=None: "OPEN")
+
+    def _context(self, monkeypatch, stage_states, meta):
+        return sdlc_next_skill._build_context(None, 3065, stage_states, meta)
+
+    def test_wrong_recorded_slug_with_a_live_branch_does_not_dispatch_patch(self, monkeypatch):
+        """The demonstrated red: pre-#3065 this force-dispatched ``/do-patch``.
+
+        The recorded slug is stale (``sdlc-3065``) but the lane's work really
+        is pushed, on ``session/renamed-lane``, and the PR head proves it.
+        """
+        from agent.sdlc_router import guard_g8_artifact_verification
+
+        self._setup(
+            monkeypatch,
+            heads={"refs/heads/session/renamed-lane": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        context = self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
+        assert context.get("stage_artifacts_verified") is not False
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_FOUND
+        assert guard_g8_artifact_verification({"PATCH": "completed"}, {}, context) is None
+
+    def test_wrong_recorded_slug_triggers_a_repair_attempt(self, monkeypatch):
+        """#3065 Task 6: a FOUND branch that disagrees with the recorded slug
+        is exactly the fail-closed decision point ``repair_lane_slug`` exists
+        for -- this asserts the call actually happens, with the issue number
+        and resolved repo, not just that G8 tolerates the mismatch."""
+        calls = []
+        monkeypatch.setattr(
+            "tools.lane_identity.repair_lane_slug",
+            lambda issue_number, target_repo=None: calls.append((issue_number, target_repo)),
+        )
+        self._setup(
+            monkeypatch,
+            heads={"refs/heads/session/renamed-lane": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
+        assert calls == [(3065, "o/r")]
+
+    def test_matching_slug_triggers_no_repair_attempt(self, monkeypatch):
+        """FOUND and the branch agrees with the recorded slug -- nothing to
+        repair, so ``repair_lane_slug`` must not even be called."""
+
+        def _poison(issue_number, target_repo=None):
+            raise AssertionError("repair_lane_slug must not run when the slug is already right")
+
+        monkeypatch.setattr("tools.lane_identity.repair_lane_slug", _poison)
+        self._setup(
+            monkeypatch,
+            slug="sdlc-3065",
+            heads={"refs/heads/session/sdlc-3065": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
+    def test_genuinely_unpushed_branch_still_dispatches_patch(self, monkeypatch):
+        from agent.sdlc_router import guard_g8_artifact_verification
+
+        self._setup(monkeypatch, heads={"refs/heads/main": _SHA_B})
+        context = self._context(monkeypatch, {"PATCH": "completed"}, {})
+
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_ABSENT
+
+        decision = guard_g8_artifact_verification({"PATCH": "completed"}, {}, context)
+        assert decision is not None
+        assert decision.skill == "/do-patch"
+
+    def test_ambiguous_branch_truth_defers(self, monkeypatch):
+        from agent.sdlc_router import guard_g8_artifact_verification
+
+        self._setup(
+            monkeypatch,
+            heads={"refs/heads/session/a": _SHA_A, "refs/heads/session/b": _SHA_A},
+            head_sha=_SHA_A,
+        )
+        context = self._context(
+            monkeypatch, {"PATCH": "completed"}, {"pr_number": 41, "_resolved_target_repo": "o/r"}
+        )
+
+        assert context.get("stage_artifacts_verified") is not False
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+        assert context["branch_truth_reason"]
+        assert guard_g8_artifact_verification({"PATCH": "completed"}, {}, context) is None
+
+    def test_unreachable_remote_defers(self, monkeypatch):
+        from agent.sdlc_router import guard_g8_artifact_verification
+
+        self._setup(monkeypatch, heads=None)
+        context = self._context(monkeypatch, {"PATCH": "completed"}, {})
+
+        assert context.get("stage_artifacts_verified") is not False
+        assert context["branch_truth"] == sdlc_next_skill.BRANCH_TRUTH_INDETERMINATE
+        assert guard_g8_artifact_verification({"PATCH": "completed"}, {}, context) is None
+
+    def test_infra_error_is_reported_as_indeterminate_not_as_a_clean_pass(self, monkeypatch):
+        """The fail-open direction is right; the silence was not."""
+
+        def _boom(stage_states, meta, issue_number, branch_truth=None):
+            raise subprocess.TimeoutExpired(cmd="gh pr view", timeout=10)
+
+        monkeypatch.setattr(sdlc_next_skill, "_verify_stage_artifacts_live", _boom)
+
+        result = sdlc_next_skill._verify_stage_artifacts({"PATCH": "completed"}, {}, 3065)
+
+        assert result["artifact_verification_indeterminate"] is True
+        assert "TimeoutExpired" in result["artifact_verification_reason"]
+        # Still fail-open for routing: G8 reads neither key.
+        assert "stage_artifacts_verified" not in result
+
+
+class TestCliAndInProcessPathsAgree:
+    """Both ``decide_next_dispatch`` callers assemble context the same way.
+
+    ``agent/session_runner/runner.py`` used to pass no context at all, so every
+    context-fed guard was permanently inert there and the in-process answer
+    could differ from the CLI's on the same lane (#3065 Cluster A).
+    """
+
+    def _lane(self):
+        stage_states = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": STATUS_COMPLETED,
+            "BUILD": STATUS_COMPLETED,
+            "TEST": STATUS_COMPLETED,
+            "PATCH": STATUS_COMPLETED,
+        }
+        return stage_states, {}
+
+    def _patch_world(self, monkeypatch, stage_states, meta):
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "sdlc-30651")
+        # A genuinely unpushed lane branch: readable remote, no matching head,
+        # no PR. Branch truth is *absent*, so G8 must fail closed on BOTH paths.
+        monkeypatch.setattr(
+            sdlc_next_skill, "_ls_remote_heads", lambda: {"refs/heads/main": _SHA_B}
+        )
+        monkeypatch.setattr(
+            "tools.sdlc_stage_query.query_enriched",
+            lambda **kwargs: {"stages": dict(stage_states), "_meta": dict(meta)},
+        )
+
+    def test_both_paths_reach_the_same_dispatch(self, monkeypatch):
+        from agent.sdlc_router import decide_next_dispatch
+
+        stage_states, meta = self._lane()
+        self._patch_world(monkeypatch, stage_states, meta)
+
+        cli_context = sdlc_next_skill.build_decision_context(30651, dict(stage_states), dict(meta))
+        cli_decision = decide_next_dispatch(dict(stage_states), dict(meta), cli_context)
+
+        runner = self._make_runner()
+        _, _, in_process_skill, _, ok = runner._load_ledger(30651)
+
+        assert ok is True
+        assert getattr(cli_decision, "skill", None) == "/do-patch"
+        assert in_process_skill == cli_decision.skill
+
+    def test_in_process_path_without_the_shared_builder_would_disagree(self, monkeypatch):
+        """Pins WHY the two paths agree: the empty context reaches a different answer."""
+        from agent.sdlc_router import decide_next_dispatch
+
+        stage_states, meta = self._lane()
+        self._patch_world(monkeypatch, stage_states, meta)
+
+        with_context = decide_next_dispatch(
+            dict(stage_states),
+            dict(meta),
+            sdlc_next_skill.build_decision_context(30651, dict(stage_states), dict(meta)),
+        )
+        without_context = decide_next_dispatch(dict(stage_states), dict(meta))
+
+        assert getattr(with_context, "skill", None) == "/do-patch"
+        assert getattr(without_context, "skill", None) != "/do-patch"
+
+    @staticmethod
+    def _make_runner():
+        from agent.session_runner.adapter import SessionRunnerAdapter
+        from agent.session_runner.runner import SessionRunner
+
+        class _Session:
+            session_id = "sess-3065-agree"
+            chat_id = 1
+            telegram_message_id = 2
+            session_events = None
+            issue_number = 30651
+            session_type = "eng"
+
+            def save(self, update_fields=None):
+                pass
+
+        session = _Session()
+        adapter = SessionRunnerAdapter(
+            session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (None, None)
+        )
+        return SessionRunner(
+            agent_session=session,
+            adapter=adapter,
+            working_dir="/tmp/wd",
+            session_type="eng",
+            driver=None,
+            steering_pop_fn=lambda: [],
+        )

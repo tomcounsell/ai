@@ -445,7 +445,12 @@ Each row is a named check with an executable command and expected result.
 
 **Positive expectations** (the command must succeed or produce the expected output):
 - `exit code N` — passes when exit_code == N (positive exact-match; e.g. `exit code 0` for success, `exit code 1` for "grep found no matches")
-- `output > N` — passes when stdout (as integer) is greater than N
+- `exit N` — the same assertion, shorter spelling
+- `output > N` / `> N` — passes when stdout (stripped, as an integer) is greater than N
+- `output >= N` / `>= N` — passes when stdout is numeric and >= N
+- `output == N` / `== N` — passes when stdout is numeric and exactly N
+- `` prints `N` `` — passes when stripped stdout equals N exactly (backticks optional)
+- `empty output` — passes when stdout is empty or whitespace-only
 - `output contains X` — passes when substring X appears in stdout
 
 **Inverse expectations / anti-criteria** (the command must NOT produce a forbidden result):
@@ -457,6 +462,33 @@ Each row is a named check with an executable command and expected result.
 `exit code != N` is the inverse (passes when `exit_code != N`). The two are syntactically
 disjoint and unambiguous. The existing `exit code 1` sample row ("No stale xfails") is
 a positive exact-match — it stays as-is.
+
+**Every row grades three-valued: `PASS`, `FAIL`, or `UNEVALUATED`.** There is no
+pass/fail boolean. `UNEVALUATED` means the grader could not answer the question —
+an expectation form not in the list above, an empty `Expected` cell, a `Command`
+cell with no backticked span, a timeout, or a runner exception. It blocks exactly
+like `FAIL` but is reported as its own token, because it is a finding about the
+*row you wrote*, not about the code. If a row comes back `UNEVALUATED`, fix the
+row. Note that the three older forms (`exit code N`, `output > N`,
+`output contains X`) tolerate a trailing gloss, while every newer form is anchored:
+`>= 1 (one call site today)` grades `UNEVALUATED`, not `>= 1`.
+
+**Pipes must be escaped, and the escape composes.** A `|` is the table's own column
+separator, so a command containing one is written `\|`; a bare `|` is rejected as a
+plan-authoring error rather than executed truncated. The parser unescapes once, after
+splitting, which means a cell reaching `grep -E` as alternation and a cell reaching
+basic-regex `grep -c` as alternation are spelled differently:
+
+| In the table cell | Reaches the shell as | Under `grep -E` | Under `grep -c` (BRE) |
+|---|---|---|---|
+| `a\|b` | `a\|b` | alternation | literal `a\|b` |
+| `a\\\|b` | `a\\|b` | literal `a\\|b` | alternation |
+
+Anti-criteria are the rows that most often need alternation and most often use
+`grep -c`, so they usually want the **doubled** backslash. The sample row below is
+written that way on purpose. Prove any anti-criterion two-pole (red against a
+deliberately-violating input, green against clean) before trusting it — a row that
+cannot fail is not a gate.
 
 **Anti-criteria** are inverse rows in this table that assert a forbidden code-level
 outcome from a No-Go cannot be detected in the PR. They are opt-in: only add an
@@ -480,7 +512,7 @@ zero checks -- give at least one table a `Command` column, or drop the rows.]
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
-| [Anti-criterion example] | `grep -c "forbidden_pattern" changed/file.py` | match count == 0 |
+| [Anti-criterion example] | `grep -c "r\.delete\\\|r\.srem" changed/file.py` | match count == 0 |
 | [Feature-specific check] | `[command]` | [expected] |
 
 ## Critique Results

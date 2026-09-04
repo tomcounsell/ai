@@ -184,12 +184,24 @@ prevent.
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_build.py $PLAN_PATH)   # exit 1 → /do-patch, ≤3 iters
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)   # exit 2 → bundle FAILs to /do-patch, ≤2 iters; 3 = no criteria; 1 = non-blocking
 # Verification table runner:
-python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
+python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.outcome == 'PASS' for x in r) else 0)"
+# BUILD grades the table but records nothing: `--record-outcomes` is REVIEW's job,
+# because the record is only trustworthy when stamped with a PR head SHA and there
+# is no PR yet at BUILD time. See docs/features/machine-readable-dod.md.
+# Each result carries a three-valued `outcome` (PASS / FAIL / UNEVALUATED), never a
+# boolean. Only PASS clears the gate: UNEVALUATED means the GRADER could not answer
+# (a timeout, a runner exception, an expectation form the grammar does not recognise,
+# an empty Expected cell, or a Command cell with no backticked span), and it blocks
+# exactly like FAIL while reporting itself as its own token so nobody debugs the code
+# for a grader problem. `CheckOutcome` is a StrEnum, so `x.outcome == 'PASS'` is the
+# comparison; there is deliberately no `.passed` attribute to fall back on.
 # A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it, or a
 # pipe-block with rows but no Command column), not a finding about the code. Write
-# pipes in the table as `\|`. A row in `t.skipped` is a non-check
-# table (a summary, a findings recap) -- named in the report but never counted toward
-# the exit code.
+# pipes in the table as `\|`. Malformed rows are never executed and always fail the
+# gate. A `SkippedTable` in `t.skipped` is a non-check pipe-block (a summary, a
+# findings recap, anything whose columns are not `(<name>, Command, Expected)`) --
+# named in the report as a diagnostic, never executed, and never counted toward the
+# exit code.
 ```
 
 **Documentation gate scripts (Step 6):**

@@ -35,8 +35,15 @@ def _make_session(session_id: str) -> MagicMock:
 
 
 def _readback_as(session: MagicMock) -> MagicMock:
+    """Mock AgentSession that answers the bind path's post-save readback.
+
+    The readback is a PRIMARY-KEY read (``query.get``), not a lookup on the
+    non-unique ``session_id`` index (#3065 Cluster E) -- ``query.filter`` is
+    still stubbed because other ensure_session paths use it.
+    """
     mock_as = MagicMock()
     mock_as.query.filter.return_value = [session]
+    mock_as.query.get.return_value = session
     return mock_as
 
 

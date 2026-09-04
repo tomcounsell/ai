@@ -35,7 +35,7 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -45,6 +45,7 @@ from agent.pipeline_graph import (
     STAGE_TO_SKILL,
 )
 from agent.pipeline_state import SETTLED_STATUSES
+from agent.verification_parser import BLOCKING_OUTCOMES, VERIFICATION_OUTCOMES_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,14 @@ SKILL_DO_PR_REVIEW = "/do-pr-review"
 SKILL_DO_DOCS = "/do-docs"
 SKILL_DO_MERGE = "/do-merge"
 
+# G3's docs-pending redirect reason (#3065 task 3), pinned as a named constant
+# rather than inlined prose. A grep for ``SKILL_DO_DOCS`` would already pass
+# today (row 9 uses it), making a Verification row incapable of failing; a
+# grep for the literal sentence would break on an innocent copy-edit that
+# leaves the logic unchanged. The constant name is what a Verification row
+# greps for.
+G3_REDIRECT_REASON_DOCS_PENDING = "review clean, docs pending"
+
 
 # ---------------------------------------------------------------------------
 # Decision types
@@ -175,6 +184,17 @@ class Dispatch:
     skill: str
     reason: str
     row_id: str | None = None
+    # #3065 Cluster D: the "your previous decision was never confirmed by a
+    # record" signal, or ``None`` when the last dispatch is accounted for.
+    # Purely diagnostic — it never changes which skill is dispatched. Shape is
+    # :func:`detect_unrecorded_dispatch`'s return value.
+    #
+    # ``compare=False`` because evidence is not identity: two dispatches of the
+    # same skill for the same reason ARE the same decision whether or not the
+    # previous one was recorded. Without it, attaching evidence would silently
+    # redefine equality for every existing caller that compares a decision
+    # against an expected ``Dispatch(...)``.
+    unrecorded_dispatch: dict | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -211,16 +231,38 @@ class Blocked:
     the dispatch-table fallthrough — a genuine hole in the table rather than a
     guard verdict. Callers matching on specific guards must compare against the
     codes they care about, never merely test for presence.
+
+    ``decision_inputs`` (#3065 Cluster D) is the evidence the decision was
+    made from — the ``stage_states`` and ``meta`` the router actually read,
+    plus whatever else the specific blocked path wants to surface (e.g. an
+    ``unrecorded_dispatch`` flag on the ``NO_RULE`` fallthrough, or the
+    vetoing guard's verdict on a reconciliation double-veto). It is optional
+    because most ``Blocked`` instances — the numbered guards — already state
+    their own reason in prose; this field exists for the paths where a human
+    reading the ``Blocked`` alone could not otherwise reconstruct what the
+    router saw. A control plane that cannot show its own inputs cannot be
+    checked against a field report (see the #3065 NO_RULE-on-row-5 incident).
     """
 
     reason: str
     guard_id: str | None = None
+    # ``compare=False`` for the same reason as ``Dispatch.unrecorded_dispatch``:
+    # a refusal's identity is its reason and guard_id, not the state dump
+    # attached for a human to read.
+    decision_inputs: dict[str, Any] | None = field(default=None, compare=False)
 
 
 # Sentinel ``guard_id`` for the dispatch-table fallthrough (#2767b). Short-code
 # form matches the ``G2``/``G4``/``G7`` convention so downstream consumers can
 # match it without parsing the reason string.
 NO_RULE_GUARD_ID = "NO_RULE"
+
+# Sentinel ``guard_id`` for a reconciliation deadlock (#3065 Cluster A): the
+# routing table's selection was vetoed by a guard, and the veto's own redirect
+# target was vetoed in turn. Bounded by construction — the router stops here
+# with both verdicts attached rather than iterating toward a G4 cap. See
+# :func:`reconcile_dispatch`.
+RECONCILE_DEADLOCK_GUARD_ID = "RECONCILE_DEADLOCK"
 
 
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
@@ -237,6 +279,131 @@ class DispatchRule:
     state_predicate: StatePredicate
     skill: str
     reason: str
+
+
+# ---------------------------------------------------------------------------
+# Decision evidence (#3065 Cluster D)
+# ---------------------------------------------------------------------------
+
+
+def detect_unrecorded_dispatch(stage_states: dict, meta: dict) -> dict[str, Any] | None:
+    """Report a previous dispatch that has no confirming record, else ``None``.
+
+    ``next-skill`` computes a decision and **persists nothing** (#2897); the
+    caller is expected to call ``sdlc-tool dispatch record`` before invoking
+    the skill, and ``PipelineStateMachine.start_stage`` then upgrades that
+    router slot to ``confirmed`` when the stage actually begins. When either
+    half of that protocol is skipped, the ledger keeps re-deriving the same row
+    from the same unchanged state until G4 caps the lane for "oscillating" —
+    an accurate observation attributed to the wrong cause. That misattribution
+    cost #2771 and #2334 a manual unwedge each.
+
+    This is a **read**. It writes nothing and it never changes which skill is
+    dispatched; it only names the hole so a supervisor reading the decision can
+    see it now instead of inferring it from a G4 block four turns later.
+
+    Three shapes count as "no confirming record", in the order checked:
+
+      1. ``last_dispatched_skill`` names a skill and ``_sdlc_dispatches`` is
+         empty — the dispatch was never recorded at all.
+      2. The most recent history entry names a *different* skill — the record
+         belongs to an earlier turn, so the named dispatch went unrecorded.
+      3. The most recent entry is still ``confirmed: False`` — a router slot
+         was recorded but the stage it reserved never started.
+
+    Args:
+        stage_states: Stage-state dict; reads ``_sdlc_dispatches``.
+        meta: The ``_meta`` dict; reads ``last_dispatched_skill``.
+
+    Returns:
+        A JSON-safe dict with ``last_dispatched_skill``, ``recorded_skill``,
+        ``confirmed`` and a human-readable ``reason``, or ``None`` when the
+        last dispatch is fully accounted for (including the case where nothing
+        has been dispatched yet).
+    """
+    last = (meta or {}).get("last_dispatched_skill") or ""
+    if not last:
+        # Nothing has been dispatched yet — there is no obligation to report.
+        return None
+
+    raw_history = (stage_states or {}).get("_sdlc_dispatches")
+    entries = (
+        [e for e in raw_history if isinstance(e, dict)] if isinstance(raw_history, list) else []
+    )
+
+    if not entries:
+        return {
+            "last_dispatched_skill": last,
+            "recorded_skill": None,
+            "confirmed": None,
+            "reason": (
+                f"{last} was dispatched but no record exists in _sdlc_dispatches — "
+                f"the caller skipped `sdlc-tool dispatch record`"
+            ),
+        }
+
+    tail = entries[-1]
+    recorded_skill = tail.get("skill")
+    if recorded_skill != last:
+        return {
+            "last_dispatched_skill": last,
+            "recorded_skill": recorded_skill,
+            "confirmed": tail.get("confirmed"),
+            "reason": (
+                f"{last} was dispatched but the most recent dispatch record names "
+                f"{recorded_skill!r} — the caller skipped `sdlc-tool dispatch record`"
+            ),
+        }
+
+    if tail.get("confirmed") is False:
+        return {
+            "last_dispatched_skill": last,
+            "recorded_skill": recorded_skill,
+            "confirmed": False,
+            "reason": (
+                f"{last} was recorded as a router slot but never confirmed by a stage "
+                f"entry — the dispatched stage did not start"
+            ),
+        }
+
+    return None
+
+
+def build_decision_inputs(stage_states: dict, meta: dict, **extra: Any) -> dict[str, Any]:
+    """Package the facts a decision was computed from, for the decision to carry.
+
+    Cluster D of #3065: a ``Blocked`` that names no inputs cannot be checked
+    against ground truth. The batch reported a ``NO_RULE`` on "CRITIQUE
+    APPROVED+completed, BUILD in_progress, no PR" — a state row 5 has owned
+    since ``c1e991972`` — and the report could neither be confirmed nor refuted,
+    because the payload carried no ``stage_states`` and no ``meta``.
+
+    The key name ``decision_inputs`` is pinned: ``tools/sdlc_next_skill.py``
+    surfaces it under exactly this name and a plan Verification row greps for
+    it. A grep for ``stage_states`` would pass today and prove nothing.
+
+    Both dicts are shallow-copied so the returned evidence is a snapshot rather
+    than a live alias — the caller's dicts stay the same objects the guards
+    mutate by reference (see :func:`reconcile_dispatch`'s invariant), but this
+    payload will not silently change under a reader after the fact.
+
+    Args:
+        stage_states: The stage-state dict the decision read.
+        meta: The ``_meta`` dict the decision read.
+        **extra: Additional named evidence for a specific blocked path, e.g.
+            ``selected_row`` and ``vetoing_guard`` on a reconciliation deadlock.
+
+    Returns:
+        A JSON-serializable dict carrying ``stage_states``, ``meta``,
+        ``unrecorded_dispatch`` and any ``extra`` keys.
+    """
+    payload: dict[str, Any] = {
+        "stage_states": dict(stage_states or {}),
+        "meta": dict(meta or {}),
+        "unrecorded_dispatch": detect_unrecorded_dispatch(stage_states or {}, meta or {}),
+    }
+    payload.update(extra)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +616,13 @@ def guard_g2_critique_cycle_cap(
             f"Escalating to human."
         ),
         guard_id="G2",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            critique_cycle_count=cycles,
+            max_critique_cycles=MAX_CRITIQUE_CYCLES,
+            critique_status=critique_status,
+        ),
     )
 
 
@@ -472,8 +646,22 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     If an open PR exists for this issue AND the most recent dispatch was
     ``/do-plan`` or ``/do-plan-critique`` (or the LLM is asking the router
     about a plan-stage dispatch), redirect to the PR-stage skill appropriate
-    for the current state: ``/do-merge`` if review is APPROVED and docs are
-    done; ``/do-patch`` if review requested changes; otherwise ``/do-pr-review``.
+    for the current state:
+
+      - ``/do-merge``     — review is APPROVED (recorded verdict) and docs done.
+      - ``/do-docs``       — review is APPROVED (recorded verdict) and docs are
+        NOT done (#3065 Cluster A: this arm was previously missing, so a
+        REVIEW-complete/APPROVED/DOCS-pending lane fell to the ``else`` and
+        was sent back to ``/do-pr-review`` it had already passed).
+      - ``/do-patch``      — review requested changes.
+      - ``/do-pr-review``  — otherwise (no verdict yet, or REVIEW not
+        complete, or a completed-but-unearned REVIEW marker).
+
+    Arm 1 (merge) requires a recorded APPROVED verdict, not just
+    ``REVIEW == completed`` — REVIEW can be marked completed with no verdict
+    ever recorded (crash), which must not silently route to /do-merge.
+    Matches the same #1932 gap-(c) gate rows 9 and 10 already apply
+    (``_rule_review_approved_docs_not_done``, ``_rule_ready_to_merge``).
     """
     pr_number = meta.get("pr_number")
     if not pr_number:
@@ -497,10 +685,14 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
         verdicts = stage_states.get("_verdicts") or {}
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
     review_verdict_norm = normalize_verdict(review_verdict)
+    review_approved = REVIEW_APPROVED in review_verdict_norm
 
-    if review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED:
+    if review_status == STATUS_COMPLETED and review_approved and docs_status == STATUS_COMPLETED:
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
+    elif review_status == STATUS_COMPLETED and review_approved:
+        target = SKILL_DO_DOCS
+        suffix = G3_REDIRECT_REASON_DOCS_PENDING
     elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
         target = SKILL_DO_PATCH
         suffix = "review requested changes"
@@ -544,6 +736,13 @@ def guard_g4_oscillation(
             "`sdlc-tool dispatch reset --issue-number N`."
         ),
         guard_id="G4",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            last_dispatched_skill=skill,
+            same_stage_dispatch_count=count,
+            max_same_stage_dispatches=MAX_SAME_STAGE_DISPATCHES,
+        ),
     )
 
 
@@ -578,6 +777,16 @@ def guard_g8_artifact_verification(
     explicit, verified mismatch). Absent/unset/``True`` is a no-op — this
     mirrors the context-assembly contract that a stage with no claimed
     artifact (or one that verified clean) never sets the flag to ``False``.
+
+    **Branch truth is three-valued (#3065).** The PATCH arm's flag is set only
+    on ``resolve_branch_truth``'s *absent* verdict — no pushed branch holds
+    this lane's work and there is no PR to explain the gap. *Indeterminate*
+    (an unreadable remote, an unresolvable PR head, an ambiguous or mid-push
+    listing) sets ``context["branch_truth"]`` for reporting but never
+    ``stage_artifacts_verified``, so this guard steps aside. That asymmetry is
+    the whole point: dispatching a stage on an unreadable fact is what wedged
+    #2771 and #2334, and a wrong-but-present recorded slug used to be
+    indistinguishable here from a genuinely unpushed branch.
     """
     if context.get("stage_artifacts_verified") is not False:
         return None
@@ -835,6 +1044,12 @@ def guard_g7_plan_revising(
                 f"revision is already complete."
             ),
             guard_id="G7",
+            decision_inputs=build_decision_inputs(
+                stage_states,
+                meta,
+                recent_skills=recent_skills,
+                max_plan_revising_dispatches=MAX_PLAN_REVISING_DISPATCHES,
+            ),
         )
 
     # A plan dispatch is already in the recent history — let dispatch table route.
@@ -1052,6 +1267,12 @@ def guard_g9_blocked_on_conflict(
             f"resolves conflicts — this needs a human."
         ),
         guard_id="G9",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            pr_number=pr_number,
+            pr_merge_state=merge_state,
+        ),
     )
 
 
@@ -1959,6 +2180,78 @@ def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context:
     return docs_status not in (STATUS_COMPLETED,)
 
 
+def _rule_verification_outcomes_hold_pr(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Recorded verification aggregate holds the PR — re-review, do not merge.
+
+    The dispatch-table twin of ``tools/merge_predicate``'s group (e), and the
+    same construction row 8f uses for group (c). Without it, group (e) is a
+    merge-refusal condition no dispatch rule can see: row 10 fires,
+    ``/do-merge`` is dispatched, the predicate refuses on a ``FAIL`` or
+    ``UNEVALUATED`` row, and the router re-dispatches ``/do-merge`` unchanged
+    until ``guard_g4_oscillation`` blocks the lane for a human. That is exactly
+    the router-predicate oscillation loop WS3d/#2062 existed to end,
+    reintroduced on the verification axis.
+
+    The dispositions mirror the predicate's on the overall outcome, and the
+    blocking set itself is shared rather than re-spelled (``BLOCKING_OUTCOMES``),
+    so the two cannot drift on *which* outcomes hold a PR:
+
+    - no recorded aggregate → **False**. Absence is reported and not enforced
+      on the ship side either; a lane that never recorded one is not blocked.
+    - ``FAIL`` or ``UNEVALUATED`` → **True**. The #3080 / ``ba092a06d`` ruling:
+      both hold the PR.
+    - ``PASS`` but not provably fresh — no ``head_sha`` on the record, a live
+      head the CLI could not resolve (the empty-string sentinel), or a head
+      that differs from the record's → **True**. A cached PASS from before the
+      current head is the defect this whole mechanism exists to close.
+    - ``PASS`` anchored to the current head → **False**. Row 10 may merge.
+
+    The mirroring is on the overall outcome, not row-by-row: the predicate also
+    refuses a malformed aggregate (``rows`` not a list, a non-dict row, a
+    non-zero ``malformed`` count), and this rule inspects none of those. Those
+    shapes are unreachable from the sanctioned writer, and a lane in one of them
+    should reach the predicate's refusal rather than be re-routed by a rule that
+    cannot explain why. If a future writer can produce them, they belong here
+    too.
+
+    Reads ``stage_states`` only; the aggregate already travels in that blob, so
+    this rule makes no network call -- but it does require that
+    ``tools/sdlc_stage_query.query_enriched`` thread the key through to the
+    router, which is why that threading is pinned by a seam test rather than
+    left to the hand-built payloads the rest of these tests use. Scoped to
+    APPROVED verdicts because a lane that is not approved is owned by the
+    review/patch rows.
+
+    Termination: ``/do-pr-review`` re-runs the table and re-records an anchored
+    aggregate, so a stale or unanchored record converges in one pass. A record
+    that is genuinely ``FAIL`` converges the other way -- the re-review records
+    findings and flips the verdict, handing the lane to the patch rows -- and
+    is loop-bound by G4 in the interim, exactly as row 8f is.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
+        return False
+
+    aggregate = stage_states.get(VERIFICATION_OUTCOMES_KEY)
+    if not isinstance(aggregate, dict):
+        return False
+
+    outcome = str(aggregate.get("outcome") or "").strip().upper()
+    if outcome in BLOCKING_OUTCOMES:
+        return True
+
+    if "pr_head_sha" not in context:
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return True
+    recorded_head = str(aggregate.get("head_sha") or "")
+    if not recorded_head:
+        return True
+    return recorded_head.lower() != head_sha.lower()
+
+
 def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs done, ready to merge."""
     if not meta.get("pr_number"):
@@ -2018,6 +2311,11 @@ _rule_review_verdict_head_stale.__doc__ = (
 )
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
+)
+_rule_verification_outcomes_hold_pr.__doc__ = (
+    "Recorded verification outcomes carry a FAIL/UNEVALUATED row, or a PASS not anchored "
+    "to the current PR head — re-review re-records them instead of dispatching a merge "
+    "the predicate will refuse"
 )
 _rule_ready_to_merge.__doc__ = (
     "Review APPROVED (recorded verdict, head_sha-fresh) with zero findings, docs done, "
@@ -2184,6 +2482,19 @@ DISPATCH_RULES: list[DispatchRule] = [
         skill=SKILL_DO_DOCS,
         reason="Docs are required before merge",
     ),
+    # Row 8g mirrors merge_predicate group (e) on the routing side. Ordered
+    # immediately before row 10 so it preempts only the merge dispatch: a lane
+    # with docs outstanding still goes to row 9 first, and only a lane that
+    # would otherwise be sent to a gate certain to refuse is re-reviewed.
+    DispatchRule(
+        row_id="8g",
+        state_predicate=_rule_verification_outcomes_hold_pr,
+        skill=SKILL_DO_PR_REVIEW,
+        reason=(
+            "recorded verification outcomes hold the PR (blocking row, or a PASS that "
+            "is not anchored to the current head) — re-review re-records them"
+        ),
+    ),
     DispatchRule(
         row_id="10",
         state_predicate=_rule_ready_to_merge,
@@ -2210,6 +2521,127 @@ def _stage_is_ready(stage_states: dict, stage: str) -> bool:
     return status in ("ready", "pending", "failed")
 
 
+def reconcile_dispatch(
+    stage_states: dict,
+    meta: dict,
+    context: dict,
+    primary: Dispatch,
+) -> Dispatch | Blocked | Terminal:
+    """Re-validate the dispatch table's selection against the guard list (#3065
+    Cluster A/task 4 — "the reconciliation step").
+
+    ``guard_g3_pr_lock`` and friends (:1083-1086, the ``GUARDS`` list) only
+    ever constrained whatever the *caller* proposed via
+    ``context["proposed_skill"]`` — never the skill the dispatch table
+    actually selected. This function closes that gap: it re-runs the SAME
+    guard list with ``primary.skill`` substituted in as the proposed skill,
+    so a guard veto constrains the decision that is actually about to ship,
+    not just whatever the caller happened to ask about.
+
+    Termination is the design constraint, not an afterthought: this function
+    runs the guard list AT MOST TWICE — once against ``primary``, and, only
+    if that pass redirects (returns a ``Dispatch``), once more against the
+    redirect. A second veto of any kind (redirect, block, or terminal) never
+    triggers a third pass; it is folded into a single ``Blocked`` that names
+    both the table's original selection and the vetoing guard's verdict.
+    This is deliberately fail-closed (Risk 2): a lane whose guards cannot
+    agree on a self-consistent answer stops immediately with evidence
+    instead of oscillating toward a G4 hard-cap, which is the failure mode
+    observed on #2771 and #2334.
+
+    Row 2b (``_rule_critique_verdict_stale``) is not edited to make this
+    work, and must never be: #1639 made it marker-agnostic on purpose to
+    escape a CRITIQUE ``in_progress`` dead end (see its docstring). This
+    function is how row 2b's output on a shipped, open-PR lane gets
+    constrained — from outside, by G3 vetoing the redirect — while leaving
+    2b free to fire unmodified on the lane shape it exists for.
+
+    CRITICAL INVARIANT — ``stage_states`` and ``meta`` MUST be passed through
+    to ``evaluate_guards`` BY REFERENCE, never copied, here or in any caller.
+    The guards are not pure: ``guard_g5_artifact_hash_cache`` mutates
+    ``stage_states["_verdicts"]["CRITIQUE"]["artifact_hash"]`` in place on a
+    legacy-hash migration and logs a WARNING once. Because this function
+    calls ``evaluate_guards`` a second time on the SAME objects, that second
+    call sees the already-migrated record and silently steps aside — that is
+    the whole reason double invocation is idempotent today. A defensive copy
+    of ``stage_states``/``meta`` anywhere between the two passes would make
+    the second pass see the pre-migration hash again, re-running the
+    migration branch and doubling the log noise. Do not add one; this is
+    exactly the "safe" change a later contributor would make without
+    knowing this.
+
+    A raising guard is NOT caught here, matching the existing guard/rule
+    asymmetry in this module: rule predicates in ``decide_next_dispatch`` are
+    try/except-wrapped, guards are not. Swallowing a raising guard into a
+    ``NO_RULE`` block here would misreport a bug as a routing hole.
+    """
+    first_context = dict(context or {})
+    first_context["proposed_skill"] = primary.skill
+    first_veto = evaluate_guards(stage_states, meta, first_context)
+    if first_veto is None:
+        return primary
+    if not isinstance(first_veto, Dispatch):
+        # A guard's own Blocked/Terminal is already a terminating decision
+        # with its own reason/guard_id — no need to wrap it further.
+        return first_veto
+    if first_veto.skill == primary.skill:
+        # The guard named the skill the table already chose. That is agreement,
+        # not a veto, so keep the table's own row_id and reason — reconciliation
+        # exists to WITHHOLD dispatches, never to relabel ones it endorses
+        # (Risk 1: it must not change a routing answer no guard objected to).
+        return primary
+
+    second_context = dict(context or {})
+    second_context["proposed_skill"] = first_veto.skill
+    second_veto = evaluate_guards(stage_states, meta, second_context)
+    if second_veto is None:
+        return first_veto
+    if isinstance(second_veto, Dispatch) and second_veto.skill == first_veto.skill:
+        # Same agreement case one level down: a guard re-proposing the redirect
+        # target is confirming it, not vetoing it. Blocking here would turn a
+        # self-consistent decision into a hard stop — the exact over-reach
+        # Risk 2 warns about.
+        return first_veto
+
+    if isinstance(second_veto, Dispatch):
+        second_summary: dict[str, Any] = {
+            "skill": second_veto.skill,
+            "reason": second_veto.reason,
+            "row_id": second_veto.row_id,
+        }
+    elif isinstance(second_veto, Blocked):
+        second_summary = {"reason": second_veto.reason, "guard_id": second_veto.guard_id}
+    else:
+        second_summary = {"reason": second_veto.reason, "evidence": second_veto.evidence}
+
+    # RECONCILE_DEADLOCK is the loop-bound for this bounded reconciliation pass:
+    # it returns both vetoes' verdicts here, on the second guard pass, instead of
+    # letting the caller iterate into G4's oscillation cap several turns later.
+    # Currently reachable only from this guard-reconciliation path, so it has no
+    # production coverage yet — it exists as the fail-closed stop for the two-veto
+    # case Risk 2 (above) describes.
+    return Blocked(
+        reason=(
+            f"reconciliation: guard veto did not converge — table selected row "
+            f"{primary.row_id!r} ({primary.skill!r}), redirect to "
+            f"{first_veto.skill!r} was itself vetoed"
+        ),
+        guard_id=RECONCILE_DEADLOCK_GUARD_ID,
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            selected_row=primary.row_id,
+            selected_skill=primary.skill,
+            first_redirect={
+                "skill": first_veto.skill,
+                "reason": first_veto.reason,
+                "row_id": first_veto.row_id,
+            },
+            vetoing_guard=second_summary,
+        ),
+    )
+
+
 def decide_next_dispatch(
     stage_states: dict,
     meta: dict | None = None,
@@ -2221,8 +2653,13 @@ def decide_next_dispatch(
       1. Evaluate the terminal guard, then G1–G9. If any trips, return its
          decision. A ``Terminal`` here means the lane is finished (#2894, #2817).
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
-         rule whose ``state_predicate`` returns True as the primary dispatch.
-      3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.
+         rule whose ``state_predicate`` returns True as the primary dispatch,
+         then reconcile it against the guard list (``reconcile_dispatch``) —
+         the table's selection is re-validated, not just whatever the caller
+         proposed via ``context["proposed_skill"]``.
+      3. If no rule matches at all, return ``Blocked(reason="no matching rule")``
+         with ``decision_inputs`` carrying the ``stage_states``/``meta`` the
+         decision was made from (#3065 Cluster D).
 
     Args:
         stage_states: The stage-status dict from ``AgentSession.stage_states``.
@@ -2277,13 +2714,33 @@ def decide_next_dispatch(
                     f"(target repo: {resolved_repo}; check GH_REPO / SDLC_TARGET_REPO env)"
                 ),
                 guard_id=None,
+                decision_inputs=build_decision_inputs(
+                    stage_states,
+                    meta,
+                    pr_number=pr_num,
+                    pr_merge_state=pr_state,
+                    resolved_target_repo=resolved_repo,
+                ),
             )
         return Blocked(
             reason="no matching dispatch rule",
             guard_id=NO_RULE_GUARD_ID,
+            decision_inputs=build_decision_inputs(stage_states, meta),
         )
 
-    return primary
+    decision = reconcile_dispatch(stage_states, meta, context, primary)
+
+    # #3065 Cluster D: a dispatch decision reports when the PREVIOUS decision
+    # was never recorded. Attached to the outgoing decision rather than
+    # computed by each caller, so the CLI path and the in-process
+    # ``agent/session_runner/runner.py`` path cannot disagree about it. Purely
+    # diagnostic: the skill is already chosen and this never changes it.
+    if isinstance(decision, Dispatch):
+        signal = detect_unrecorded_dispatch(stage_states, meta)
+        if signal is not None:
+            decision = replace(decision, unrecorded_dispatch=signal)
+
+    return decision
 
 
 def stage_for_skill(skill: str | None) -> str | None:

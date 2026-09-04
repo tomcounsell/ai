@@ -1,20 +1,34 @@
 """Unit tests for agent/verification_parser.py -- machine-readable verification checks."""
 
+import json
 from pathlib import Path
 
+import pytest
+
+from agent.pipeline_ledger import PipelineLedger
 from agent.verification_parser import (
+    CheckOutcome,
     CheckResult,
     MalformedRow,
     ParsedTable,
     SkippedTable,
     VerificationCheck,
+    aggregate_outcomes,
     evaluate_expectation,
     format_results,
     parse_verification_table,
+    read_verification_outcomes,
+    record_verification_outcomes,
+    run_checks,
     split_row_cells,
+    unevaluated_reason,
 )
 
 FIXTURES_DIR = Path(__file__).parents[1] / "fixtures" / "verification"
+
+PASS = CheckOutcome.PASS
+FAIL = CheckOutcome.FAIL
+UNEVALUATED = CheckOutcome.UNEVALUATED
 
 # ---------------------------------------------------------------------------
 # parse_verification_table
@@ -111,7 +125,12 @@ class TestParseVerificationTable:
         checks = parse_verification_table(md).checks
         assert checks[0].command == "echo hello"
 
-    def test_command_without_backticks(self):
+    def test_command_without_backticks_is_unevaluated_not_guessed(self):
+        """A cell with no backticked span has no unambiguous command in it.
+
+        Running the whole cell is how a trailing-prose gloss got executed under
+        `shell=True` (#3065); the row is reported UNEVALUATED instead.
+        """
         md = """\
 ## Verification
 
@@ -120,7 +139,11 @@ class TestParseVerificationTable:
 | Test | echo hello | exit code 0 |
 """
         checks = parse_verification_table(md).checks
-        assert checks[0].command == "echo hello"
+        assert checks[0].unevaluated_reason
+        assert "backticked span" in checks[0].unevaluated_reason
+        results = run_checks(checks)
+        assert results[0].outcome is UNEVALUATED
+        assert results[0].reason == checks[0].unevaluated_reason
 
     def test_table_after_other_content(self):
         """Verification table can appear after other sections."""
@@ -171,44 +194,111 @@ class TestEvaluateExpectation:
     """Tests for checking if a command result meets the expectation."""
 
     def test_exit_code_0_pass(self):
-        assert evaluate_expectation("exit code 0", exit_code=0, output="") is True
+        assert evaluate_expectation("exit code 0", exit_code=0, output="") is PASS
 
     def test_exit_code_0_fail(self):
-        assert evaluate_expectation("exit code 0", exit_code=1, output="") is False
+        assert evaluate_expectation("exit code 0", exit_code=1, output="") is FAIL
 
     def test_exit_code_nonzero(self):
-        assert evaluate_expectation("exit code 1", exit_code=1, output="") is True
-        assert evaluate_expectation("exit code 1", exit_code=0, output="") is False
+        assert evaluate_expectation("exit code 1", exit_code=1, output="") is PASS
+        assert evaluate_expectation("exit code 1", exit_code=0, output="") is FAIL
 
     def test_output_gt_pass(self):
-        assert evaluate_expectation("output > 0", exit_code=0, output="3") is True
+        assert evaluate_expectation("output > 0", exit_code=0, output="3") is PASS
 
     def test_output_gt_fail(self):
-        assert evaluate_expectation("output > 0", exit_code=0, output="0") is False
+        assert evaluate_expectation("output > 0", exit_code=0, output="0") is FAIL
 
     def test_output_gt_non_numeric(self):
-        assert evaluate_expectation("output > 0", exit_code=0, output="abc") is False
+        assert evaluate_expectation("output > 0", exit_code=0, output="abc") is FAIL
 
     def test_output_contains_pass(self):
         assert (
             evaluate_expectation("output contains hello", exit_code=0, output="say hello world")
-            is True
+            is PASS
         )
 
     def test_output_contains_fail(self):
         assert (
-            evaluate_expectation("output contains hello", exit_code=0, output="say goodbye")
-            is False
+            evaluate_expectation("output contains hello", exit_code=0, output="say goodbye") is FAIL
         )
 
     def test_output_contains_case_sensitive(self):
         assert (
-            evaluate_expectation("output contains Hello", exit_code=0, output="hello world")
-            is False
+            evaluate_expectation("output contains Hello", exit_code=0, output="hello world") is FAIL
         )
 
-    def test_unknown_expectation_returns_false(self):
-        assert evaluate_expectation("something weird", exit_code=0, output="ok") is False
+    def test_unknown_expectation_is_unevaluated_with_a_reason(self):
+        """An expectation the grammar cannot read is UNEVALUATED, not FAIL.
+
+        This replaces `test_unknown_expectation_returns_false`, which asserted
+        the silent `False` fall-through as *intended* behavior and so pinned
+        the bug: a gate reporting red when it means "I did not understand the
+        question" asserts a fact it never read (#3065).
+        """
+        assert evaluate_expectation("something weird", exit_code=0, output="ok") is UNEVALUATED
+        reason = unevaluated_reason("something weird")
+        assert "something weird" in reason
+        assert "unrecognized expectation form" in reason
+
+    def test_empty_and_none_expectations_are_unevaluated(self):
+        """Empty, whitespace-only, and None cells: never FAIL, never PASS."""
+        for cell in ("", "   ", "\n\t ", None):
+            assert evaluate_expectation(cell, exit_code=0, output="ok") is UNEVALUATED
+        assert "empty" in unevaluated_reason("")
+        assert "empty" in unevaluated_reason(None)
+
+
+class TestExtendedExpectationGrammar:
+    """The corpus #2836's spike-5 measured and deferred to #2791, which was
+    closed as consolidated without a fix. Re-derived by sweeping `Expected`
+    cells across the active plans in docs/plans/: every form below appears
+    there and every one of them returned a silent False before this change."""
+
+    def test_prints_backticked_value(self):
+        assert evaluate_expectation("prints `0`", exit_code=0, output="0\n") is PASS
+        assert evaluate_expectation("prints `0`", exit_code=0, output="1\n") is FAIL
+        assert evaluate_expectation("prints 0", exit_code=0, output="0") is PASS
+
+    def test_equals_n(self):
+        assert evaluate_expectation("== 0", exit_code=0, output="0") is PASS
+        assert evaluate_expectation("== 2", exit_code=0, output="3") is FAIL
+        assert evaluate_expectation("output == 2", exit_code=0, output="2\n") is PASS
+
+    def test_gte_n(self):
+        assert evaluate_expectation(">= 1", exit_code=0, output="5") is PASS
+        assert evaluate_expectation(">= 1", exit_code=0, output="0") is FAIL
+        assert evaluate_expectation("output >= 3", exit_code=0, output="3") is PASS
+
+    def test_bare_gt_n(self):
+        assert evaluate_expectation("> 0", exit_code=0, output="2") is PASS
+        assert evaluate_expectation("> 0", exit_code=0, output="0") is FAIL
+
+    def test_empty_output(self):
+        assert evaluate_expectation("empty output", exit_code=0, output="") is PASS
+        assert evaluate_expectation("empty output", exit_code=0, output="  \n") is PASS
+        assert evaluate_expectation("empty output", exit_code=0, output="x") is FAIL
+
+    def test_exit_n_without_the_word_code(self):
+        assert evaluate_expectation("exit 0", exit_code=0, output="") is PASS
+        assert evaluate_expectation("exit 0", exit_code=1, output="") is FAIL
+        assert evaluate_expectation("exit 1", exit_code=1, output="") is PASS
+
+    def test_non_numeric_output_for_a_numeric_form_is_a_real_fail(self):
+        """The expectation was understood; the command answered a non-number.
+        That is evidence about the code, so it is FAIL, not UNEVALUATED."""
+        assert evaluate_expectation(">= 1", exit_code=0, output="abc") is FAIL
+        assert evaluate_expectation("== 1", exit_code=0, output="") is FAIL
+
+    def test_trailing_gloss_on_the_output_prefixed_form_still_grades(self):
+        """`output == 2 (the two read sites)` appears verbatim in a live plan.
+        The `output`-prefixed spellings are prefix-matched (see
+        TestNumericComparatorTrailingGlossSymmetry), so this grades rather
+        than going UNEVALUATED."""
+        assert (
+            evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="2")
+            is PASS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,17 +313,17 @@ class TestEvaluateExpectationInverse:
 
     def test_exit_code_ne_pass(self):
         """Passes when exit code differs from N."""
-        assert evaluate_expectation("exit code != 0", exit_code=1, output="") is True
-        assert evaluate_expectation("exit code != 0", exit_code=2, output="") is True
+        assert evaluate_expectation("exit code != 0", exit_code=1, output="") is PASS
+        assert evaluate_expectation("exit code != 0", exit_code=2, output="") is PASS
 
     def test_exit_code_ne_fail(self):
         """Fails when exit code equals N (command should have failed but succeeded)."""
-        assert evaluate_expectation("exit code != 0", exit_code=0, output="") is False
+        assert evaluate_expectation("exit code != 0", exit_code=0, output="") is FAIL
 
     def test_exit_code_ne_nonzero_n(self):
         """Works for N != 0 too."""
-        assert evaluate_expectation("exit code != 2", exit_code=0, output="") is True
-        assert evaluate_expectation("exit code != 2", exit_code=2, output="") is False
+        assert evaluate_expectation("exit code != 2", exit_code=0, output="") is PASS
+        assert evaluate_expectation("exit code != 2", exit_code=2, output="") is FAIL
 
     def test_exit_code_ne_grammar_collision_regression(self):
         """Regression: 'exit code != 0' must be evaluated by the inverse branch,
@@ -245,9 +335,9 @@ class TestEvaluateExpectationInverse:
         and evaluates correctly.
         """
         # exit_code=0 should FAIL (code matches the forbidden value)
-        assert evaluate_expectation("exit code != 0", exit_code=0, output="") is False
+        assert evaluate_expectation("exit code != 0", exit_code=0, output="") is FAIL
         # exit_code=1 should PASS (code differs from forbidden value)
-        assert evaluate_expectation("exit code != 0", exit_code=1, output="") is True
+        assert evaluate_expectation("exit code != 0", exit_code=1, output="") is PASS
 
     # --- output does not contain X ---
 
@@ -259,7 +349,7 @@ class TestEvaluateExpectationInverse:
                 exit_code=0,
                 output="SELECT * FROM users",
             )
-            is True
+            is PASS
         )
 
     def test_output_does_not_contain_fail_present(self):
@@ -270,7 +360,7 @@ class TestEvaluateExpectationInverse:
                 exit_code=0,
                 output="ALTER TABLE; DROP TABLE users;",
             )
-            is False
+            is FAIL
         )
 
     def test_output_does_not_contain_empty_stdout_gate(self):
@@ -285,7 +375,7 @@ class TestEvaluateExpectationInverse:
                 exit_code=1,
                 output="",
             )
-            is False
+            is FAIL
         )
         # Whitespace-only stdout also triggers the gate
         assert (
@@ -294,7 +384,7 @@ class TestEvaluateExpectationInverse:
                 exit_code=0,
                 output="   \n  ",
             )
-            is False
+            is FAIL
         )
 
     def test_output_does_not_contain_ordering_regression(self):
@@ -313,7 +403,7 @@ class TestEvaluateExpectationInverse:
                 exit_code=0,
                 output="all clean, no matches",
             )
-            is True
+            is PASS
         )
         # FOO present → inverse branch → False (not positive branch which would be True)
         assert (
@@ -322,39 +412,39 @@ class TestEvaluateExpectationInverse:
                 exit_code=0,
                 output="found FOO in file",
             )
-            is False
+            is FAIL
         )
 
     # --- match count == 0 ---
 
     def test_match_count_zero_bare_zero(self):
         """grep -c PATTERN file → emits literal '0', exit 1 → passes."""
-        assert evaluate_expectation("match count == 0", exit_code=1, output="0") is True
+        assert evaluate_expectation("match count == 0", exit_code=1, output="0") is PASS
 
     def test_match_count_zero_whitespace_zero(self):
         """grep -r PATTERN dir | wc -l → emits '       0' (leading whitespace) → passes."""
-        assert evaluate_expectation("match count == 0", exit_code=0, output="       0") is True
+        assert evaluate_expectation("match count == 0", exit_code=0, output="       0") is PASS
 
     def test_match_count_zero_single_path_colon_zero(self):
         """grep -rc PATTERN file → emits 'path/to/file:0' → passes."""
         assert (
-            evaluate_expectation("match count == 0", exit_code=1, output="path/to/file:0") is True
+            evaluate_expectation("match count == 0", exit_code=1, output="path/to/file:0") is PASS
         )
 
     def test_match_count_zero_multiline_path_colon_zero(self):
         """grep -rc PATTERN dir → emits multiple 'path:0' lines → passes."""
         output = "a.txt:0\nb.txt:0\nc.py:0"
-        assert evaluate_expectation("match count == 0", exit_code=1, output=output) is True
+        assert evaluate_expectation("match count == 0", exit_code=1, output=output) is PASS
 
     def test_match_count_zero_nonzero_count_fails(self):
         """Any non-zero count fails."""
-        assert evaluate_expectation("match count == 0", exit_code=0, output="3") is False
-        assert evaluate_expectation("match count == 0", exit_code=0, output="path:3") is False
+        assert evaluate_expectation("match count == 0", exit_code=0, output="3") is FAIL
+        assert evaluate_expectation("match count == 0", exit_code=0, output="path:3") is FAIL
 
     def test_match_count_zero_mixed_lines_fails(self):
         """Mixed zero and non-zero lines — one non-zero line must fail the whole check."""
         output = "a.txt:0\nb.txt:2"
-        assert evaluate_expectation("match count == 0", exit_code=1, output=output) is False
+        assert evaluate_expectation("match count == 0", exit_code=1, output=output) is FAIL
 
     def test_match_count_zero_empty_stdout_gate(self):
         """Empty/whitespace-only stdout must NOT vacuously pass (empty-stdout gate).
@@ -362,8 +452,8 @@ class TestEvaluateExpectationInverse:
         all(...) over an empty list is True in Python; without the gate, a command
         that errored or wrote only to stderr would produce empty stdout and pass.
         """
-        assert evaluate_expectation("match count == 0", exit_code=1, output="") is False
-        assert evaluate_expectation("match count == 0", exit_code=0, output="   \n") is False
+        assert evaluate_expectation("match count == 0", exit_code=1, output="") is FAIL
+        assert evaluate_expectation("match count == 0", exit_code=0, output="   \n") is FAIL
 
     def test_match_count_zero_literal_zero_passes_not_gated(self):
         """Literal '0' (non-empty stdout) must NOT be blocked by the empty-stdout gate.
@@ -371,22 +461,22 @@ class TestEvaluateExpectationInverse:
         This confirms the gate fires only on truly-empty output, not on a legitimately-
         clean grep -c result.
         """
-        assert evaluate_expectation("match count == 0", exit_code=1, output="0") is True
+        assert evaluate_expectation("match count == 0", exit_code=1, output="0") is PASS
 
     # --- positive forms unchanged (regression) ---
 
     def test_positive_exit_code_still_works(self):
-        assert evaluate_expectation("exit code 0", exit_code=0, output="") is True
-        assert evaluate_expectation("exit code 0", exit_code=1, output="") is False
-        assert evaluate_expectation("exit code 1", exit_code=1, output="") is True
+        assert evaluate_expectation("exit code 0", exit_code=0, output="") is PASS
+        assert evaluate_expectation("exit code 0", exit_code=1, output="") is FAIL
+        assert evaluate_expectation("exit code 1", exit_code=1, output="") is PASS
 
     def test_positive_output_contains_still_works(self):
-        assert evaluate_expectation("output contains ok", exit_code=0, output="all ok") is True
-        assert evaluate_expectation("output contains ok", exit_code=0, output="bad") is False
+        assert evaluate_expectation("output contains ok", exit_code=0, output="all ok") is PASS
+        assert evaluate_expectation("output contains ok", exit_code=0, output="bad") is FAIL
 
     def test_positive_output_gt_still_works(self):
-        assert evaluate_expectation("output > 0", exit_code=0, output="3") is True
-        assert evaluate_expectation("output > 0", exit_code=0, output="0") is False
+        assert evaluate_expectation("output > 0", exit_code=0, output="3") is PASS
+        assert evaluate_expectation("output > 0", exit_code=0, output="0") is FAIL
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +561,13 @@ class TestPipesInCommands:
         assert len(parsed.malformed) == 1
 
     def test_column_count_comes_from_the_header(self):
-        """One plan in docs/plans/ carries a 4-column Verification table.
-        Hardcoding 3 would reject every one of its rows."""
+        """A trailing extra column (Check, Command, Expected, Notes) is
+        tolerated: the row width comes from the header, not a hardcoded 3.
+        No plan under docs/plans/ actually carries this trailing-column
+        shape today -- the leading-index-column shape
+        (# | Check | Command | Expected) that plans do carry is pinned
+        separately by TestLeadingIndexColumnIsACheckTable in
+        tests/unit/test_validate_build.py."""
         table = (
             "## Verification\n\n"
             "| Check | Command | Expected | Notes |\n|--|--|--|--|\n"
@@ -500,7 +595,7 @@ class TestMalformedRowReporting:
     def test_a_malformed_row_fails_the_run(self):
         """A row nobody can execute is not a passing check."""
         check = VerificationCheck(name="ok", command="true", expected="exit code 0")
-        results = [CheckResult(check=check, passed=True, exit_code=0, output="")]
+        results = [CheckResult(check=check, outcome=PASS, exit_code=0, output="")]
         clean_table = ParsedTable(checks=[check], malformed=[], skipped=[])
         assert "All checks passed." in format_results(results, clean_table)
         malformed_table = ParsedTable(
@@ -581,7 +676,7 @@ class TestPerBlockTableScoping:
         assert len(table.checks) == 2
         assert len(table.skipped) == 1
         results = [
-            CheckResult(check=c, passed=True, exit_code=0, output="ok") for c in table.checks
+            CheckResult(check=c, outcome=PASS, exit_code=0, output="ok") for c in table.checks
         ]
         report = format_results(results, table)
         assert "All checks passed." in report
@@ -602,3 +697,552 @@ class TestPerBlockTableScoping:
 
     def test_parsed_table_carries_skipped_field(self):
         assert "skipped" in ParsedTable.__dataclass_fields__
+
+
+# ---------------------------------------------------------------------------
+# Command-cell extraction: first backticked span (#3065)
+# ---------------------------------------------------------------------------
+
+
+class TestCommandCellExtraction:
+    """The command is the cell's first backticked span, not the whole cell
+    with its outer backticks stripped. Spike-5 executed the old reading on
+    main: the cell ``` `echo hi` -- this checks greeting ``` produced the
+    shell string ``echo hi` -- this checks greeting`` and ran it."""
+
+    def _table(self, row: str) -> str:
+        return f"## Verification\n\n| Check | Command | Expected |\n|--|--|--|\n{row}\n"
+
+    def test_em_dash_trailing_prose_is_not_part_of_the_command(self):
+        parsed = parse_verification_table(
+            self._table("| Greeting | `echo hi` -- this checks greeting | output contains hi |")
+        )
+        assert parsed.malformed == []
+        assert parsed.checks[0].command == "echo hi"
+        assert parsed.checks[0].unevaluated_reason == ""
+        assert run_checks(parsed.checks)[0].outcome is PASS
+
+    def test_parenthetical_gloss_is_not_part_of_the_command(self):
+        parsed = parse_verification_table(
+            self._table("| Count | `echo 3` (three of them) | output > 0 |")
+        )
+        assert parsed.checks[0].command == "echo 3"
+
+    def test_two_spans_take_the_first_and_record_that_they_did(self):
+        parsed = parse_verification_table(
+            self._table("| Two | `echo first` then `echo second` | output contains first |")
+        )
+        check = parsed.checks[0]
+        assert check.command == "echo first"
+        assert "2 backticked spans" in check.extraction_note
+        assert "ran the first" in check.extraction_note
+        results = run_checks(parsed.checks)
+        assert results[0].outcome is PASS
+        assert check.extraction_note in format_results(results, parsed)
+
+
+# ---------------------------------------------------------------------------
+# run_checks: timeout and runner-exception dispositions (#3065)
+# ---------------------------------------------------------------------------
+
+
+class TestRunChecksUnevaluatedPaths:
+    """A timeout and a runner exception are both UNEVALUATED with the reason
+    attached. Both used to grade false and render `[FAIL]` -- a gate
+    asserting the code is wrong when it never got an answer."""
+
+    def test_timeout_is_unevaluated_and_never_renders_as_fail(self):
+        check = VerificationCheck(name="slow", command="sleep 5", expected="exit code 0")
+        results = run_checks([check], timeout=1)
+        assert results[0].outcome is UNEVALUATED
+        assert "timed out after 1s" in results[0].reason
+        report = format_results(results, ParsedTable(checks=[check], malformed=[], skipped=[]))
+        assert "[FAIL]" not in report
+        assert "[UNEVALUATED] slow" in report
+        assert "All checks passed." not in report
+
+    def test_runner_exception_is_unevaluated_with_an_observable_reason(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise OSError("no shell for you")
+
+        monkeypatch.setattr("agent.verification_parser.subprocess.run", boom)
+        check = VerificationCheck(name="explodes", command="true", expected="exit code 0")
+        results = run_checks([check])
+        assert results[0].outcome is UNEVALUATED
+        assert "OSError" in results[0].reason
+        assert "no shell for you" in results[0].reason
+        report = format_results(results, ParsedTable(checks=[check], malformed=[], skipped=[]))
+        assert "[FAIL]" not in report
+        assert "no shell for you" in report
+
+    def test_unrecognized_expectation_row_is_unevaluated_end_to_end(self):
+        check = VerificationCheck(name="odd", command="echo ok", expected="ok")
+        results = run_checks([check])
+        assert results[0].outcome is UNEVALUATED
+        assert "unrecognized expectation form" in results[0].reason
+        report = format_results(results, ParsedTable(checks=[check], malformed=[], skipped=[]))
+        assert "[FAIL]" not in report
+
+
+# ---------------------------------------------------------------------------
+# Check-table classification by column contract (#3022)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTableContract:
+    """A check table is `(<name>, Command, Expected)`. The predicate this
+    replaced asked whether *any* of the first three headers was `Command`."""
+
+    def test_issue_3022_header_shape_is_not_executed(self):
+        """`| Command | Observed stdout | Observed exit |` is a results recap.
+
+        On main it classified as a check table and its "Observed stdout"
+        column was executed as a shell command, with an empty `skipped` list
+        and no diagnostic at all.
+        """
+        md = (
+            "## Verification\n\n"
+            "| Check | Command | Expected |\n|--|--|--|\n"
+            "| Real check | `echo ok` | output contains ok |\n"
+            "\n"
+            "| Command | Observed stdout | Observed exit |\n|--|--|--|\n"
+            "| `grep -c x f` | 0 | 1 |\n"
+        )
+        table = parse_verification_table(md)
+        assert [c.name for c in table.checks] == ["Real check"]
+        assert len(table.skipped) == 1
+        assert table.skipped[0].header.startswith("| Command | Observed stdout")
+        assert "Command, Expected" in table.skipped[0].reason
+        assert table.malformed == []
+
+    def test_criterion_recap_table_is_skipped_not_executed(self):
+        """`| # | Criterion | Check |` -- the one false positive the `any`
+        predicate admits across this repo's plans. Its third column ("Check")
+        was read as the Expected cell and its second as a command."""
+        md = (
+            "## Verification\n\n"
+            "| Check | Command | Expected |\n|--|--|--|\n"
+            "| Real check | `echo ok` | output contains ok |\n"
+            "\n"
+            "| # | Criterion | Check |\n|--|--|--|\n"
+            "| 1 | something | manual |\n"
+        )
+        table = parse_verification_table(md)
+        assert len(table.checks) == 1
+        assert len(table.skipped) == 1
+
+    def test_a_non_command_second_column_is_not_a_check_table(self):
+        md = (
+            "## Verification\n\n"
+            "| Check | Command | Expected |\n|--|--|--|\n"
+            "| Real check | `echo ok` | output contains ok |\n"
+            "\n"
+            "| Row | Pre-change | Meaning |\n|--|--|--|\n"
+            "| a | 1 | red |\n"
+        )
+        assert len(parse_verification_table(md).skipped) == 1
+
+    def test_named_first_column_still_qualifies(self):
+        """`Anti-criterion | Command | Expected` is a real check table."""
+        md = (
+            "## Verification\n\n"
+            "| Anti-criterion | Command | Expected |\n|--|--|--|\n"
+            "| No leftovers | `echo 0` | == 0 |\n"
+        )
+        table = parse_verification_table(md)
+        assert len(table.checks) == 1
+        assert table.skipped == []
+
+
+# ---------------------------------------------------------------------------
+# The graded aggregate (#3065, Cluster B -> Cluster C)
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateOutcomes:
+    def _result(self, outcome, name="c"):
+        return CheckResult(
+            check=VerificationCheck(name=name, command="true", expected="exit code 0"),
+            outcome=outcome,
+            exit_code=0,
+            output="",
+        )
+
+    def test_all_pass(self):
+        agg = aggregate_outcomes([self._result(PASS), self._result(PASS)])
+        assert agg["outcome"] == "PASS"
+        assert agg["counts"]["PASS"] == 2
+
+    def test_any_fail_dominates(self):
+        agg = aggregate_outcomes(
+            [self._result(PASS), self._result(FAIL), self._result(UNEVALUATED)]
+        )
+        assert agg["outcome"] == "FAIL"
+
+    def test_unevaluated_blocks_a_pass(self):
+        agg = aggregate_outcomes([self._result(PASS), self._result(UNEVALUATED)])
+        assert agg["outcome"] == "UNEVALUATED"
+
+    def test_no_checks_is_not_a_vacuous_pass(self):
+        assert aggregate_outcomes([])["outcome"] == "UNEVALUATED"
+
+    def test_malformed_rows_make_the_run_fail(self):
+        table = ParsedTable(
+            checks=[], malformed=[MalformedRow(line="| x |", reason="r")], skipped=[]
+        )
+        agg = aggregate_outcomes([self._result(PASS)], table)
+        assert agg["outcome"] == "FAIL"
+        assert agg["malformed"] == 1
+
+    def test_rows_carry_their_reasons(self):
+        r = self._result(UNEVALUATED, name="odd")
+        r.reason = "unrecognized expectation form: 'ok'"
+        agg = aggregate_outcomes([r])
+        assert agg["rows"] == [
+            {
+                "name": "odd",
+                "outcome": "UNEVALUATED",
+                "reason": "unrecognized expectation form: 'ok'",
+            }
+        ]
+
+
+class TestRecordVerificationOutcomes:
+    """The aggregate is written to the issue-keyed ledger's `stage_states_json`
+    under `_verification_outcomes`, stamped with the PR head SHA it was graded
+    against. Real Redis, per this repo's testing philosophy; every test cleans
+    up the ledger it creates."""
+
+    REPO = "test-owner/test-repo"
+    ISSUE = 927380
+
+    @pytest.fixture(autouse=True)
+    def clean_ledger(self):
+        self._cleanup()
+        yield
+        self._cleanup()
+
+    def _cleanup(self):
+        for record in PipelineLedger.query.filter(ledger_key=f"{self.REPO}:{self.ISSUE}"):
+            record.delete()
+
+    def _results(self):
+        return [
+            CheckResult(
+                check=VerificationCheck(name="ok", command="true", expected="exit code 0"),
+                outcome=PASS,
+                exit_code=0,
+                output="",
+            )
+        ]
+
+    def test_aggregate_carries_the_resolved_head_sha(self, monkeypatch):
+        sha = "a" * 40
+        seen = {}
+
+        def fake_resolver(pr, repo=None, repo_root=None, **kwargs):
+            seen["pr"] = pr
+            seen["repo"] = repo
+            return sha
+
+        monkeypatch.setattr("tools.pr_head_resolver.resolve_pr_head_sha", fake_resolver)
+        assert record_verification_outcomes(self.REPO, self.ISSUE, self._results(), pr_number=4242)
+        record = read_verification_outcomes(self.REPO, self.ISSUE)
+        assert record["head_sha"] == sha
+        assert record["outcome"] == "PASS"
+        assert seen == {"pr": 4242, "repo": self.REPO}
+
+    def test_lane_with_no_pr_records_no_head_sha_and_does_not_crash(self):
+        assert record_verification_outcomes(self.REPO, self.ISSUE, self._results())
+        record = read_verification_outcomes(self.REPO, self.ISSUE)
+        assert "head_sha" not in record
+        assert record["outcome"] == "PASS"
+
+    def test_unresolvable_head_records_without_an_anchor(self, monkeypatch):
+        def unresolvable(pr, repo=None, repo_root=None, **kwargs):
+            return None
+
+        monkeypatch.setattr("tools.pr_head_resolver.resolve_pr_head_sha", unresolvable)
+        assert record_verification_outcomes(self.REPO, self.ISSUE, self._results(), pr_number=4242)
+        assert "head_sha" not in read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_resolver_failure_does_not_lose_the_aggregate(self, monkeypatch):
+        def boom(pr, repo=None, repo_root=None, **kwargs):
+            raise RuntimeError("ls-remote exploded")
+
+        monkeypatch.setattr("tools.pr_head_resolver.resolve_pr_head_sha", boom)
+        assert record_verification_outcomes(self.REPO, self.ISSUE, self._results(), pr_number=4242)
+        record = read_verification_outcomes(self.REPO, self.ISSUE)
+        assert record["outcome"] == "PASS"
+        assert "head_sha" not in record
+
+    def test_the_write_lands_under_the_pinned_key(self):
+        record_verification_outcomes(self.REPO, self.ISSUE, self._results())
+        ledger = PipelineLedger.get(self.REPO, self.ISSUE)
+        blob = json.loads(ledger.stage_states_json)
+        assert "_verification_outcomes" in blob
+
+    def test_a_later_run_replaces_the_earlier_aggregate(self):
+        record_verification_outcomes(self.REPO, self.ISSUE, self._results())
+        failing = self._results()
+        failing[0].outcome = FAIL
+        record_verification_outcomes(self.REPO, self.ISSUE, failing)
+        assert read_verification_outcomes(self.REPO, self.ISSUE)["outcome"] == "FAIL"
+
+    def test_reads_and_writes_without_a_lane_are_inert(self):
+        assert record_verification_outcomes(None, None, self._results()) is False
+        assert read_verification_outcomes(None, None) is None
+        assert read_verification_outcomes(self.REPO, 927381) is None
+
+
+class TestExpectationAnchoringRule:
+    """Pre-existing forms keep prefix semantics; the forms added by #3065 are
+    anchored. A sweep of docs/plans/ found eleven live rows writing a trailing
+    gloss on `exit code N` / `output > N`; anchoring those would have turned
+    working rows into blocking UNEVALUATED for a change nobody asked for."""
+
+    def test_trailing_gloss_on_a_preexisting_form_still_grades(self):
+        assert (
+            evaluate_expectation("exit code 0 (verified 2026-09-02)", exit_code=0, output="")
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output > 0 (a bare grep returns 3)", exit_code=0, output="3")
+            is PASS
+        )
+
+    def test_trailing_gloss_on_a_new_bare_form_is_unevaluated(self):
+        for cell in ("== 2 (the two read sites)", ">= 1 nightly", "> 0 or so", "exit 0 maybe"):
+            assert evaluate_expectation(cell, exit_code=0, output="2") is UNEVALUATED
+
+
+class TestNumericComparatorTrailingGlossSymmetry:
+    """The trailing-gloss rule is now symmetric across >, >=, and ==: the
+    `output`-prefixed spellings are prefix-matched (gloss tolerated) and the
+    bare spellings stay anchored (gloss makes it UNEVALUATED), for all three
+    comparators alike. Previously only `output > N` had this idiom; `output
+    >= N` and `output == N` were anchored, which silently turned three live
+    plan rows UNEVALUATED (durability-m1-fence-canary.md:1012,
+    watch-skill-video-scoping-controls.md:606-607)."""
+
+    def test_gt_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation(
+                "output > 0 (a bare grep returns 3 today)", exit_code=0, output="3"
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output > 5 (a bare grep returns 3 today)", exit_code=0, output="3"
+            )
+            is FAIL
+        )
+
+    def test_gt_bare_with_gloss_is_unevaluated(self):
+        assert evaluate_expectation(
+            "> 0 (a bare grep returns 3 today)", exit_code=0, output="3"
+        ) is (UNEVALUATED)
+
+    def test_gte_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation(
+                "output >= 3 (holds since the last sweep)", exit_code=0, output="3"
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output >= 9 (holds since the last sweep)", exit_code=0, output="3"
+            )
+            is FAIL
+        )
+
+    def test_gte_bare_with_gloss_is_unevaluated(self):
+        assert (
+            evaluate_expectation(">= 3 (holds since the last sweep)", exit_code=0, output="3")
+            is UNEVALUATED
+        )
+
+    def test_eq_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="2")
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="3")
+            is FAIL
+        )
+
+    def test_eq_bare_with_gloss_is_unevaluated(self):
+        assert (
+            evaluate_expectation("== 2 (the two read sites)", exit_code=0, output="2")
+            is UNEVALUATED
+        )
+
+    def test_live_plan_rows_verbatim(self):
+        """Pinned verbatim from real plans so a regression here is caught at
+        the exact string that would otherwise hold a PR's merge."""
+        assert (
+            evaluate_expectation(
+                "output == 2 (the `:3198` reason-string read and the `:3216` "
+                "`logger.warning` read)",
+                exit_code=0,
+                output="2",
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output == 1 (exactly `import os`)", exit_code=0, output="1")
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output == 1 (exactly `from __future__ import annotations`)",
+                exit_code=0,
+                output="1",
+            )
+            is PASS
+        )
+
+
+class TestNewlyRecognizedAuthoringForms:
+    """Round 3 of the #3065 review found two in-flight PRs (#3093, #3089)
+    would be refused the moment this gate lands: their plans use three
+    legitimate authoring shapes the grammar did not recognise --
+    backtick-wrapped-integer equality, `is` as the equality verb, and a
+    comma-delimited gloss after a bare `exit N`. Each gets a PASS/FAIL pair
+    plus the verbatim live-plan cell that must grade."""
+
+    # --- output `N` (backtick-wrapped integer equality) ---
+
+    def test_output_backtick_int_passes(self):
+        assert evaluate_expectation("output `0`", exit_code=0, output="0") is PASS
+
+    def test_output_backtick_int_fails(self):
+        assert evaluate_expectation("output `0`", exit_code=0, output="1") is FAIL
+
+    def test_live_plan_row_output_backtick_zero(self):
+        """Verbatim from docs/plans/promise-gate-recorded-obligations.md:433-434."""
+        assert evaluate_expectation("output `0`", exit_code=1, output="0") is PASS
+
+    # --- output is N ---
+
+    def test_output_is_n_passes(self):
+        assert evaluate_expectation("output is 0", exit_code=0, output="0") is PASS
+
+    def test_output_is_n_fails(self):
+        assert evaluate_expectation("output is 0", exit_code=0, output="1") is FAIL
+
+    def test_live_plan_row_output_is_zero(self):
+        """Verbatim from
+        docs/plans/unblock-dependency-bumps-coupled-set-gate.md:2047."""
+        assert evaluate_expectation("output is 0", exit_code=0, output="0") is PASS
+
+    # --- exit N, <comma-delimited gloss> ---
+
+    def test_exit_n_comma_gloss_passes(self):
+        assert evaluate_expectation("exit 0, some gloss text", exit_code=0, output="") is PASS
+
+    def test_exit_n_comma_gloss_fails(self):
+        assert evaluate_expectation("exit 0, some gloss text", exit_code=1, output="") is FAIL
+
+    def test_live_plan_row_exit_0_json_gloss(self):
+        """Verbatim from
+        docs/plans/unblock-dependency-bumps-coupled-set-gate.md:2008."""
+        assert (
+            evaluate_expectation('exit 0, JSON `"compatible": true`', exit_code=0, output="")
+            is PASS
+        )
+
+    def test_exit_n_bare_trailing_word_still_unevaluated(self):
+        """The anchoring counter-example (`exit 0 maybe`, no delimiter) must
+        keep grading UNEVALUATED -- pinned again here alongside the new forms
+        so a regression in the delimiter rule is caught in the same place."""
+        assert evaluate_expectation("exit 0 maybe", exit_code=0, output="") is UNEVALUATED
+
+    def test_bare_comparator_gloss_counter_examples_still_unevaluated(self):
+        """The delimited-gloss rule is scoped to `exit N` only; the
+        pre-existing bare `>`, `>=`, `==` forms stay fully anchored and a
+        parenthesized gloss on them is still UNEVALUATED (see
+        TestExpectationAnchoringRule and TestNumericComparatorTrailingGlossSymmetry)."""
+        for cell in ("== 2 (the two read sites)", ">= 1 nightly", "> 0 or so"):
+            assert evaluate_expectation(cell, exit_code=0, output="2") is UNEVALUATED
+
+
+class TestReadVerificationOutcomesFailsClosed:
+    """Absent and unreadable must be distinguishable (review of PR #3123).
+
+    The reader previously returned None on any error, and the merge predicate
+    reads None as "no aggregate -- reported, not enforced". A Redis blip or a
+    corrupt blob therefore converted a recorded FAIL into an unenforced pass,
+    inverted against every neighbouring group in merge_predicate, which all
+    fail closed on their own read errors.
+    """
+
+    REPO = "owner/name"
+    ISSUE = 991234
+
+    def test_absent_ledger_reads_as_absence(self):
+        from agent.verification_parser import read_verification_outcomes
+
+        assert read_verification_outcomes(self.REPO, self.ISSUE) is None
+
+    def test_missing_identifiers_read_as_absence(self):
+        from agent.verification_parser import read_verification_outcomes
+
+        assert read_verification_outcomes(None, None) is None
+
+    def test_store_error_raises_rather_than_reporting_absence(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        def boom(*a, **kw):
+            raise ConnectionError("redis is down")
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(boom))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_unparseable_blob_raises(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        class _Row:
+            stage_states_json = "{not json"
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_record_of_the_wrong_shape_raises(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VERIFICATION_OUTCOMES_KEY,
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        class _Row:
+            stage_states_json = json.dumps({VERIFICATION_OUTCOMES_KEY: "PASS"})
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_blob_present_but_key_missing_is_absence_not_an_error(self, monkeypatch):
+        """A lane that simply never recorded one is not blocked."""
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import read_verification_outcomes
+
+        class _Row:
+            stage_states_json = json.dumps({"BUILD": "completed"})
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        assert read_verification_outcomes(self.REPO, self.ISSUE) is None

@@ -23,6 +23,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]  # post-save readback
+        mock_as.query.get.return_value = mock_session  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session),
@@ -46,7 +47,8 @@ class TestEnsureSession:
         mock_as = MagicMock()
         # First filter call: idempotent existing-by-id check (none). Second:
         # the post-save run_id readback (the just-created session).
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -76,7 +78,8 @@ class TestEnsureSession:
         mock_new_session.session_id = "sdlc-local-947"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -102,6 +105,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_existing]
+        mock_as.query.get.return_value = mock_existing  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -138,7 +142,8 @@ class TestEnsureSession:
         mock_new_session.session_id = "sdlc-local-944"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -167,6 +172,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -195,6 +201,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -260,7 +267,8 @@ class TestCreateLocalMessageText:
         mock_new_session.session_id = "sdlc-local-1741"
 
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -286,6 +294,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -309,6 +318,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         issue_url = "https://github.com/tomcounsell/ai/issues/1743"
@@ -335,6 +345,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        mock_as.query.get.return_value = None  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (

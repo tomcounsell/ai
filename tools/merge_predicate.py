@@ -5,7 +5,7 @@ One deterministic predicate evaluated by BOTH the merge-guard hook
 skill (via ``docs/sdlc/do-merge.md``). Consuming a single helper is what keeps
 the hook and the skill from drifting apart (#1944 class).
 
-Four check groups:
+Five check groups:
 
 - **Group (a) — PR state** (always enforced, fail-closed on any ``gh`` error):
   state OPEN, mergeable MERGEABLE, mergeStateStatus CLEAN (or UNSTABLE with a
@@ -33,6 +33,19 @@ Four check groups:
   second layer keeps working; the ``/do-merge`` skill passes ``--run-id`` for
   the primary enforcement. Fails open on Redis errors (lease confirmed),
   closed on a substrate-present import failure.
+- **Group (e) — verification outcomes** (substrate-present, plan-tracked
+  only): the #3080 / ``ba092a06d`` owner ruling -- "FAIL and UNEVALUATED both
+  hold the PR at REVIEW" -- lived only in plan prose, so PR #3080 merged past
+  it. This reads the graded aggregate the verification runner persists to the
+  lane's ``PipelineLedger`` (``_verification_outcomes``, #3065 Cluster B/C)
+  and refuses on a ``FAIL`` or ``UNEVALUATED`` row, naming it. Source of truth
+  is RECORDED state, never live re-execution (PM ruling, 2026-09-03): this
+  never shells out to a plan-authored command. A lane with no plan document,
+  or a plan document with no recorded aggregate, is reported and NOT
+  enforced -- there is no ruling to make machine-readable. A *present*
+  aggregate is checked for freshness against the PR's current head before
+  being trusted, fail-closed on a mismatch or an unresolvable anchor; see
+  ``_check_verification_outcomes``.
 
 Tracked-issue resolution for groups (b)/(c) (#2034, corrected mechanism): the
 two SDLC-substrate checks key on the **SDLC-tracked issue looked up from the
@@ -78,6 +91,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -102,6 +116,13 @@ _ISSUE_REF_CAPTURE_RE = re.compile(
 
 # Head refs that can never yield a usable slug for the docs/features fallback.
 _NO_SLUG_REFS = frozenset({"main", "master", "HEAD", ""})
+
+# Named refusal reason for a recorded `_verification_outcomes` aggregate whose
+# stamped `head_sha` does not match the PR's current head (#3065, task 8).
+# Defined HERE, where the predicate consumes it, rather than beside the writer:
+# this is the ship-side rule, and a Verification row greps this file for the
+# symbol. Never read the prose; grep the name.
+VERIFICATION_OUTCOMES_STALE_REASON = "verification outcome predates PR head commit"
 
 
 @dataclass
@@ -681,6 +702,220 @@ def _check_lease_ownership(
     )
 
 
+def _find_plan_doc(issue_number: int, repo_root: Path) -> Path | None:
+    """Locate the plan document that *tracks* this issue, or ``None``.
+
+    Delegates to ``tools.lane_identity.find_plan_path``, whose single
+    resolution rung is a ``tracking:`` frontmatter line naming the issue. A
+    filename match is deliberately NOT a rung: the lane slug and the plan
+    filename are allowed to differ, and a bare ``#N`` mention in a "Not
+    building" No-Gos line means the opposite of ownership (#2735).
+
+    ``find_plan_path`` scopes its search by ``SDLC_TARGET_REPO``, else the
+    cwd's git toplevel. The merge predicate is handed an explicit
+    ``repo_root`` that need not be the cwd — the merge-guard hook and
+    ``/do-merge`` both pass one — so the override is set for the duration of
+    the call and restored afterwards. Duplicating the resolver's regex here
+    instead would be the replicated-value defect this lane exists to remove.
+    """
+    from tools.lane_identity import find_plan_path
+
+    prior = os.environ.get("SDLC_TARGET_REPO")
+    os.environ["SDLC_TARGET_REPO"] = str(repo_root)
+    try:
+        return find_plan_path(issue_number)
+    finally:
+        if prior is None:
+            os.environ.pop("SDLC_TARGET_REPO", None)
+        else:
+            os.environ["SDLC_TARGET_REPO"] = prior
+
+
+def _check_verification_outcomes(
+    issue_number: int,
+    pr_number: int,
+    repo_root: Path,
+    failed: list[str],
+    notes: list[str],
+) -> None:
+    """Group (e): the plan's graded verification outcomes (#3080, Cluster C).
+
+    Makes the #3080 / ``ba092a06d`` owner ruling -- "FAIL and UNEVALUATED both
+    hold the PR at REVIEW" -- machine-readable. That ruling lived only in plan
+    prose, so PR #3080 merged past it; this reads the aggregate
+    ``agent.verification_parser.record_verification_outcomes`` persists to the
+    lane's ``PipelineLedger`` instead of re-deriving anything.
+
+    Source of truth is RECORDED state, never live re-execution (PM ruling,
+    2026-09-03, #3065): this never shells out to a plan-authored command --
+    re-running a verification suite inside a merge gate is a non-starter, and
+    every other check in this module already reads recorded state via ``gh``
+    / ``sdlc-tool`` rather than executing anything.
+
+    Three outcomes are deliberately kept distinguishable, none collapsing into
+    another:
+
+    - **No plan document** tracks this issue
+      (:func:`tools.lane_identity.find_plan_path`) -> reported, not enforced.
+      This plan has no evidence a plan-less lane should be blocked by a check
+      that exists only because a plan declared a ruling.
+    - **A plan document exists but no aggregate was ever recorded** -> also
+      reported, not enforced. There is no ruling to enforce when nothing was
+      graded; a new fail-closed behavior here has no incident backing it.
+    - **A recorded aggregate exists** -> it is graded, but ONLY after its
+      freshness against the PR's CURRENT head is established, fail-closed on
+      all three dispositions (task 8, round-2 concern):
+        * match -> the aggregate is fresh; grade its outcome.
+        * mismatch -> stale, treated as equivalent to ``UNEVALUATED``, refused
+          with ``VERIFICATION_OUTCOMES_STALE_REASON``. The cached PASS is
+          never read.
+        * missing/unparseable ``head_sha``, or a PR head that cannot be
+          resolved -> refuse. Deliberately stricter than group (c)'s
+          ``recorded_at`` fallback: there are no legacy
+          ``_verification_outcomes`` records to be compatible with, so a
+          weaker comparison would be a #2404-shaped fail-open hole added on
+          purpose.
+
+    A ``FAIL`` or ``UNEVALUATED`` row holds the PR; the refusal names the row
+    rather than returning a bare failure. The build-vs-ship split lives
+    entirely on this consumer -- nothing marks a row with severity, and the
+    build gate (a different consumer) is free to treat ``UNEVALUATED`` as a
+    pause that still allows build progression.
+    """
+    try:
+        plan_path = _find_plan_doc(issue_number, repo_root)
+    except Exception as exc:
+        notes.append(f"verification-outcomes check skipped: plan-doc resolution failed ({exc})")
+        return
+
+    if plan_path is None:
+        notes.append(
+            "verification-outcomes check skipped: no plan document tracks issue"
+            f" #{issue_number} (reported, not enforced)"
+        )
+        return
+
+    try:
+        target_repo = _gh_repo_name_with_owner(repo_root)
+    except Exception as exc:
+        failed.append(f"verification outcomes: target repo unresolvable ({exc})")
+        return
+
+    # Lazy import: keeps this module's stdlib-only load posture for the
+    # merge-guard hook (see module docstring). agent.verification_parser pulls
+    # in agent.pipeline_ledger, same posture as the _check_verdict_freshness
+    # trailer reader below.
+    from agent.verification_parser import (
+        VerificationOutcomesUnavailableError,
+        read_verification_outcomes,
+    )
+
+    try:
+        aggregate = read_verification_outcomes(target_repo, issue_number)
+    except VerificationOutcomesUnavailableError as exc:
+        # An unreadable record is not an absent one. Absence is a lane this
+        # gate deliberately does not block; a failed read is a lane about
+        # which nothing is known, and passing it would turn a recorded FAIL
+        # into an unenforced pass on a transient store error.
+        failed.append(f"verification outcomes: recorded aggregate unreadable ({exc})")
+        return
+
+    if aggregate is None:
+        notes.append(
+            "verification-outcomes check skipped: no recorded aggregate for"
+            f" issue #{issue_number} (reported, not enforced)"
+        )
+        return
+
+    from tools._sdlc_utils import head_sha_of_record
+    from tools.pr_head_resolver import resolve_pr_head_sha
+
+    recorded_sha = head_sha_of_record(aggregate) if isinstance(aggregate, dict) else ""
+
+    try:
+        current_head = resolve_pr_head_sha(pr_number, repo=target_repo, repo_root=str(repo_root))
+    except Exception as exc:
+        failed.append(f"verification outcomes: PR head unresolvable ({exc})")
+        return
+
+    if not current_head:
+        failed.append("verification outcomes: PR head unresolvable")
+        return
+
+    if not recorded_sha:
+        # Kept distinct from the stale case on purpose: "graded against an
+        # older commit" and "we cannot tell what it was graded against" are
+        # different facts, and collapsing them would hide which one occurred.
+        # Both refuse; neither reads the cached outcome.
+        failed.append(
+            "verification outcomes: no usable head_sha on the recorded aggregate;"
+            " freshness is indeterminate and the aggregate cannot be trusted"
+        )
+        return
+
+    if recorded_sha.lower() != current_head.lower():
+        failed.append(
+            f"verification outcomes: {VERIFICATION_OUTCOMES_STALE_REASON}"
+            f" (graded against {recorded_sha[:12]}, PR head is {current_head[:12]})"
+        )
+        return
+
+    # The tri-state tokens come from the writer's own enum, never re-spelled
+    # here: a literal "UNEVALUATED" in this module would be a replicated value
+    # that silently stops matching if the enum is ever renamed. The blocking set
+    # itself is shared with the router's row 8g for the same reason -- see
+    # BLOCKING_OUTCOMES.
+    from agent.verification_parser import BLOCKING_OUTCOMES, CheckOutcome
+
+    rows = aggregate.get("rows")
+    if not isinstance(rows, list):
+        failed.append("verification outcomes: recorded aggregate has no readable rows")
+        return
+
+    blocking = BLOCKING_OUTCOMES
+    offending = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            offending += 1
+            failed.append("verification outcomes: a recorded row is malformed")
+            continue
+        row_outcome = str(row.get("outcome") or "")
+        if row_outcome not in blocking:
+            continue
+        offending += 1
+        reason = str(row.get("reason") or "").strip()
+        failed.append(
+            f"verification row {(row.get('name') or '<unnamed>')!r} is {row_outcome}"
+            + (f": {reason}" if reason else "")
+            + " — FAIL and UNEVALUATED both hold the PR (owner ruling on #3080)"
+        )
+
+    malformed = aggregate.get("malformed") or 0
+    if isinstance(malformed, int) and malformed > 0:
+        offending += 1
+        failed.append(
+            f"verification outcomes: {malformed} malformed row(s) were never executed;"
+            " an unrunnable check is not a passing check"
+        )
+
+    outcome = str(aggregate.get("outcome") or "")
+    if offending:
+        return
+    if outcome != CheckOutcome.PASS.value:
+        # No blocking row and no malformed row, yet the aggregate is not PASS:
+        # a run with no checks at all, which grades UNEVALUATED rather than a
+        # vacuous PASS. Refuse rather than guess what it meant.
+        failed.append(
+            f"verification outcomes: recorded outcome is {(outcome or '<absent>')!r},"
+            f" not {CheckOutcome.PASS.value} ({len(rows)} row(s) recorded)"
+        )
+        return
+    notes.append(
+        f"verification outcomes fresh: {len(rows)} row(s), all {CheckOutcome.PASS.value}"
+        f" for issue #{issue_number}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -760,6 +995,10 @@ def evaluate_merge_predicate(
                 # Keyed on the same SDLC-tracked issue as groups (b)/(c) — the
                 # lease is per-issue.
                 _check_lease_ownership(effective_issue, run_id, failed, notes)
+                # Group (e): verification outcomes (#3080, #3065 Cluster C).
+                # Keyed on the same SDLC-tracked issue — the plan and its
+                # graded aggregate live on the tracking issue, not a sub-issue.
+                _check_verification_outcomes(effective_issue, pr_number, root, failed, notes)
 
     return PredicateResult(
         allowed=not failed,

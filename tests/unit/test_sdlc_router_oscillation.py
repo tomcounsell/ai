@@ -114,8 +114,35 @@ def test_g3_pr_lock_routes_to_patch_on_changes_requested():
     assert result.skill == SKILL_DO_PATCH
 
 
-def test_g3_pr_lock_routes_to_merge_when_review_and_docs_complete():
-    """G3: PR + REVIEW completed + DOCS completed → /do-merge."""
+def test_g3_pr_lock_routes_to_merge_when_review_approved_and_docs_complete():
+    """G3: PR + APPROVED verdict + REVIEW completed + DOCS completed → /do-merge.
+
+    The APPROVED verdict is load-bearing, not decoration (#3065 task 3): G3's
+    merge arm now applies the same #1932 gap-(c) gate rows 9 and 10 already do.
+    See ``test_g3_pr_lock_does_not_merge_a_completed_review_with_no_verdict``
+    for the other pole.
+    """
+    states = {
+        "PLAN": "completed",
+        "REVIEW": "completed",
+        "DOCS": "completed",
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED"}},
+    }
+    meta = {
+        "pr_number": 42,
+        "last_dispatched_skill": SKILL_DO_PLAN,
+        "latest_review_verdict": "APPROVED",
+    }
+    result = decide_next_dispatch(states, meta)
+    assert isinstance(result, Dispatch)
+    assert result.row_id == "G3"
+    assert result.skill == SKILL_DO_MERGE
+
+
+def test_g3_pr_lock_does_not_merge_a_completed_review_with_no_verdict():
+    """A REVIEW marker completed with no verdict ever recorded is the crash
+    state rows 8e/9/10 refuse to fast-path. G3 must refuse it too, and
+    re-review rather than merge."""
     states = {
         "PLAN": "completed",
         "REVIEW": "completed",
@@ -125,7 +152,8 @@ def test_g3_pr_lock_routes_to_merge_when_review_and_docs_complete():
     result = decide_next_dispatch(states, meta)
     assert isinstance(result, Dispatch)
     assert result.row_id == "G3"
-    assert result.skill == SKILL_DO_MERGE
+    assert result.skill == SKILL_DO_PR_REVIEW
+    assert result.skill != SKILL_DO_MERGE
 
 
 def test_g4_oscillation_cap():

@@ -99,6 +99,61 @@ should have `created_at > $LATEST`. Re-dispatch `/do-merge {pr}`.
 
 ---
 
+## Verification Outcomes Hold the PR
+
+**Symptom.** `/do-merge` refuses with one of:
+
+- `verification row '<name>' is UNEVALUATED` (or `is FAIL`)
+- `verification outcomes: verification outcome predates PR head commit`
+- `verification outcomes: no usable head_sha on the recorded aggregate`
+- `verification outcomes: recorded aggregate unreadable (...)`
+
+**Cause.** The merge predicate reads the aggregate the verification runner
+recorded for this lane and refuses on a blocking row or on one it cannot show
+is fresh. `FAIL` and `UNEVALUATED` both hold the PR (owner ruling, `ba092a06d`):
+`FAIL` says the code is wrong, `UNEVALUATED` says the grader could not answer,
+and the second is usually a plan-authoring problem, not a code problem.
+
+**Diagnose.** Run the table and read the report:
+
+```bash
+python scripts/validate_build.py "$PLAN_PATH"
+```
+
+**Fix.** Depends on which line you got:
+
+- **A `FAIL` row** — real finding. Route to `/do-patch`, not around the gate.
+- **An `UNEVALUATED` row** — fix the *row*. It names its own reason: an
+  unrecognised expectation form, an empty `Expected` cell, a `Command` cell
+  with no backticked span, or a timeout. For a timeout on a genuinely slow but
+  legitimate suite, re-run on a quiet machine first; raise the bound only if it
+  is really too low (`--timeout N`, or `VERIFICATION_TIMEOUT_S`). Contention is
+  a load problem, not a bound problem.
+
+  Mind where the edit lands. Plan files live on `main` and never travel in a
+  feature-branch PR (`docs/sdlc/do-docs.md`), but `/do-pr-review` grades
+  `"$PLAN_PATH"` **in the lane worktree**. So an `Expected`-cell fix committed
+  to `main` keeps grading the old cell until you bring `main` into the branch.
+  Merge or rebase first, then re-run the table — otherwise the row you just
+  fixed refuses the merge again and reads as though the fix did not work.
+- **A stale, unanchored, or unreadable aggregate** — nothing is wrong with the
+  code; the record just cannot be trusted at this head. Re-record it:
+
+```bash
+python scripts/validate_build.py "$PLAN_PATH" --record-outcomes \
+  --repo "$TARGET_REPO" --issue "$ISSUE_NUMBER" --pr "$PR_NUMBER"
+```
+
+Quote every variable: an empty unquoted one collapses the argument list and the
+run refuses to record rather than writing under a garbage key.
+
+**Verify.** Re-dispatch `/do-merge {pr}`. Note that the router reaches this
+state on its own too — dispatch row 8g sends a lane with a blocking or unfresh
+aggregate back to `/do-pr-review`, which re-runs § 4.5 and re-records, rather
+than looping on a merge the predicate will refuse.
+
+---
+
 ## Lockfile Drift
 
 **Symptom.** The Lockfile Sync Check reports

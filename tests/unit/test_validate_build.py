@@ -10,6 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from agent.verification_parser import (
+    DEFAULT_TIMEOUT_S,
+    CheckOutcome,
     MalformedRow,
     ParsedTable,
     SkippedTable,
@@ -248,17 +250,70 @@ class TestCheckVerificationTable:
         assert len(results) == 1
         assert results[0]["status"] == "PASS"
 
-    def test_timeout_skips(self):
+    def test_timeout_is_unevaluated_not_skip(self):
+        """This module called a timeout `SKIP` at a 30s bound while the
+        canonical runner called it `FAIL` at 120s -- two runners, two verdicts
+        on the same event, and `SKIP` did not even block the exit code. Both
+        now say UNEVALUATED at the shared bound (#2901/#3065)."""
         check = VerificationCheck(name="slow cmd", command="sleep 60", expected="exit code 0")
         table = ParsedTable(checks=[check], malformed=[], skipped=[])
         with patch.object(
             subprocess,
             "run",
-            side_effect=subprocess.TimeoutExpired("sleep", 30),
+            side_effect=subprocess.TimeoutExpired("sleep", DEFAULT_TIMEOUT_S),
         ):
             results = validate_build.check_verification_table(table)
         assert len(results) == 1
-        assert results[0]["status"] == "SKIP"
+        assert results[0]["status"] == "UNEVALUATED"
+        assert "timed out" in results[0]["message"]
+
+    def test_the_execution_bound_is_the_shared_one(self):
+        """One bound, named once. A private ceiling here is how the two
+        runners drifted apart in the first place."""
+        recorded = {}
+
+        def capture(*args, **kwargs):
+            recorded["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired("cmd", kwargs.get("timeout", 0))
+
+        check = VerificationCheck(name="any", command="true", expected="exit code 0")
+        table = ParsedTable(checks=[check], malformed=[], skipped=[])
+        with patch.object(subprocess, "run", side_effect=capture):
+            validate_build.check_verification_table(table)
+        assert recorded["timeout"] == DEFAULT_TIMEOUT_S
+
+    def test_unrecognized_expectation_is_unevaluated_not_fail(self):
+        check = VerificationCheck(name="odd", command="echo ok", expected="ok")
+        table = ParsedTable(checks=[check], malformed=[], skipped=[])
+        results = validate_build.check_verification_table(table)
+        assert results[0]["status"] == "UNEVALUATED"
+        assert "unrecognized expectation form" in results[0]["message"]
+
+    def test_command_cell_with_no_backticked_span_is_never_executed(self):
+        table = parse_verification_table(
+            "## Verification\n\n| Check | Command | Expected |\n|--|--|--|\n"
+            "| Bare | echo hi | exit code 0 |\n"
+        )
+        with patch.object(subprocess, "run", side_effect=AssertionError("must not run")):
+            results = validate_build.check_verification_table(table)
+        assert results[0]["status"] == "UNEVALUATED"
+
+    def test_unevaluated_blocks_the_exit_code(self, tmp_path, capsys):
+        """SKIP was non-blocking, which is how an ungraded row reached green.
+        UNEVALUATED blocks."""
+        f = tmp_path / "unevaluated.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Verification
+
+            | Check | Command | Expected |
+            |-------|---------|----------|
+            | Odd expectation | `echo ok` | banana |
+        """)
+        )
+        with patch("sys.argv", ["validate_build.py", str(f)]):
+            assert validate_build.main() == 1
+        assert "UNEVALUATED" in capsys.readouterr().out
 
     def test_malformed_row_fails(self):
         table = ParsedTable(
@@ -301,6 +356,20 @@ class TestMainEdgeCases:
     def test_missing_plan_file(self, tmp_path):
         nonexistent = str(tmp_path / "missing.md")
         with patch("sys.argv", ["validate_build.py", nonexistent]):
+            assert validate_build.main() == 0
+
+    def test_empty_plan_path_reports_cleanly_instead_of_traceback(self):
+        """TD 2 (review of PR #3123): `Path("")` is `Path(".")`, and
+        `Path(".").exists()` is True since it's the cwd -- so the old
+        `.exists()` guard let `read_text()` raise `IsADirectoryError` past
+        `main()`. An empty `$PLAN_PATH` interpolated into the documented
+        shell invocation must report cleanly, not crash."""
+        with patch("sys.argv", ["validate_build.py", ""]):
+            assert validate_build.main() == 0
+
+    def test_directory_plan_path_reports_cleanly(self, tmp_path):
+        """A non-blank path that names a directory hits the same guard."""
+        with patch("sys.argv", ["validate_build.py", str(tmp_path)]):
             assert validate_build.main() == 0
 
     def test_empty_plan_file(self, tmp_path):
@@ -426,7 +495,7 @@ class TestMainEdgeCases:
         vb_results = validate_build.check_verification_table(table)
         rc_results = run_checks([check])
         assert vb_results[0]["status"] == "PASS"
-        assert rc_results[0].passed is True
+        assert rc_results[0].outcome is CheckOutcome.PASS
 
 
 # ---------------------------------------------------------------------------
@@ -457,21 +526,31 @@ EXPECTED_PARSE_ONLY_SHAPES = {
 
 class TestCrossRunnerAgreement:
     def test_both_runners_agree_on_execution_fixture(self):
+        """Per-check parity, now including the two shapes on which the runners
+        genuinely disagreed and which the fixture could not previously express:
+        a timeout (FAIL@120s here, SKIP@30s there) and an expectation neither
+        grammar reads. Both runners are driven at a short bound so the timeout
+        row costs seconds, not minutes."""
         p = FIXTURES_DIR / "runner_agreement.md"
         assert p.read_text().lstrip().startswith("## Verification")
         table = parse_verification_table(p.read_text())
         assert table.malformed == []
-        assert len(table.checks) == 6
+        assert len(table.checks) == 15
 
-        vb_results = validate_build.check_verification_table(table)
-        rc_results = run_checks(table.checks)
+        vb_results = validate_build.check_verification_table(table, timeout=2)
+        rc_results = run_checks(table.checks, timeout=2)
 
         assert len(vb_results) == len(rc_results) == len(table.checks)
         for vb, rc, check in zip(vb_results, rc_results, table.checks, strict=True):
-            vb_passed = vb["status"] == "PASS"
-            assert vb_passed == rc.passed, (
-                f"{check.name}: validate_build={vb['status']!r} run_checks.passed={rc.passed!r}"
+            assert vb["status"] == rc.outcome.value, (
+                f"{check.name}: validate_build={vb['status']!r} run_checks={rc.outcome.value!r}"
             )
+
+        outcomes = [rc.outcome for rc in rc_results]
+        assert CheckOutcome.FAIL in outcomes, "fixture must exercise a real failure"
+        assert outcomes.count(CheckOutcome.UNEVALUATED) == 3, (
+            "fixture must exercise timeout, unparseable expectation, and no-backticked-span"
+        )
 
     @pytest.mark.parametrize("fixture_name", PARSE_ONLY_FIXTURES)
     def test_parse_only_fixtures_parse_identically(self, fixture_name):
@@ -487,3 +566,460 @@ class TestCrossRunnerAgreement:
         assert len(table.checks) == expected["checks"]
         assert len(table.malformed) == expected["malformed"]
         assert len(table.skipped) == expected["skipped"]
+
+
+class TestLeadingIndexColumnIsACheckTable:
+    """A check table may carry a leading index column (review of PR #3123).
+
+    Pinning the `(Command, Expected)` pair to indices 1 and 2 rejected the
+    `| # | Check | Command | Expected |` shape that live plans in this repo
+    already use, silently turning one plan's 30 executable checks into 0
+    checks and 2 malformed rows. That is a gate incapable of firing -- the
+    defect class #3065 exists to remove -- so the shape is pinned here.
+    """
+
+    INDEXED = textwrap.dedent("""\
+        ## Verification
+        | # | Check | Command | Expected |
+        |---|-------|---------|----------|
+        | 1 | Echo works | `echo hi` | output contains hi |
+        | 2 | True exits 0 | `true` | exit code 0 |
+        """)
+
+    def test_indexed_header_yields_executable_checks(self):
+        table = parse_verification_table(self.INDEXED)
+        assert len(table.checks) == 2
+        assert not table.malformed
+        assert not table.skipped
+
+    def test_name_comes_from_the_column_before_command(self):
+        """Not from column 0, which is the index."""
+        table = parse_verification_table(self.INDEXED)
+        assert [c.name for c in table.checks] == ["Echo works", "True exits 0"]
+        assert [c.command for c in table.checks] == ["echo hi", "true"]
+
+    def test_indexed_table_actually_grades(self):
+        table = parse_verification_table(self.INDEXED)
+        results = run_checks(table.checks, timeout=10)
+        assert [r.outcome for r in results] == [CheckOutcome.PASS, CheckOutcome.PASS]
+
+    def test_results_recap_shape_is_still_rejected(self):
+        """The #3022 false positive must stay rejected: no column ahead of
+        `Command`, and no `Expected` following it."""
+        recap = textwrap.dedent("""\
+            ## Verification
+            | Command | Observed stdout | Observed exit |
+            |---------|-----------------|---------------|
+            | `echo hi` | hi | 0 |
+            """)
+        table = parse_verification_table(recap)
+        assert not table.checks
+
+    def test_criterion_recap_shape_is_still_rejected(self):
+        recap = textwrap.dedent("""\
+            ## Verification
+            | # | Criterion | Check |
+            |---|-----------|-------|
+            | 1 | Something | Manual |
+            """)
+        table = parse_verification_table(recap)
+        assert not table.checks
+
+
+class TestRecordOutcomesHasAProductionCaller:
+    """`record_verification_outcomes` must be reachable from a real runner.
+
+    Review of PR #3123 found the writer had zero production callers, so the
+    merge predicate's verification group always took its `aggregate is None`
+    branch -- a gate that could never fire. The recording flag on this runner
+    is that caller; these tests fail if it is removed or silently no-ops.
+    """
+
+    PLAN = textwrap.dedent("""\
+        ## Verification
+        | Check | Command | Expected |
+        |-------|---------|----------|
+        | Echo works | `echo hi` | output contains hi |
+        """)
+
+    def _plan_file(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text(self.PLAN)
+        return f
+
+    def test_recording_flag_calls_the_writer_with_graded_results(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = True
+            assert validate_build.main() == 0
+
+        writer.assert_called_once()
+        args, kwargs = writer.call_args
+        assert args[0] == "owner/name"
+        assert args[1] == 4242
+        assert kwargs["pr_number"] == 77
+        graded = args[2]
+        assert [r.outcome for r in graded] == [CheckOutcome.PASS], (
+            "the writer must receive the results this run actually graded"
+        )
+
+    def test_no_flag_records_nothing(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        with (
+            patch("sys.argv", ["validate_build.py", str(f)]),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()
+
+    def test_recording_without_repo_or_issue_is_refused_not_guessed(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        with (
+            patch("sys.argv", ["validate_build.py", str(f), "--record-outcomes"]),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()
+
+    def test_a_failed_write_does_not_change_the_exit_code(self, tmp_path):
+        """The exit code belongs to the checks, not to the ledger."""
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = False
+            assert validate_build.main() == 0
+
+    def test_commands_are_executed_once_not_twice(self, tmp_path):
+        """Recording reuses the graded results; it must not re-run the table."""
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes", return_value=True),
+            patch.object(validate_build, "run_checks", wraps=validate_build.run_checks) as rc,
+        ):
+            validate_build.main()
+        assert rc.call_count == 1
+
+
+class TestRecordingStandsDownWithNoVerificationTable:
+    """Blocker 2 (review of PR #3123): a plan with no ``## Verification``
+    table has declared no gate. Recording anyway writes a 0-row aggregate
+    that grades UNEVALUATED, and UNEVALUATED blocks merge permanently with
+    no self-heal. The writer must never be called for this shape, and the
+    stand-down must be visible in the output, not silent.
+    """
+
+    def test_no_table_skips_the_writer_and_says_so(self, tmp_path):
+        f = tmp_path / "no_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Success Criteria
+            - [ ] `test -e /dev/null` passes
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            exit_code = validate_build.main()
+
+        writer.assert_not_called()
+        assert exit_code == 0, "the write being skipped must not change the exit code"
+
+    def test_no_table_skip_message_is_distinct(self, tmp_path, capsys):
+        f = tmp_path / "no_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Success Criteria
+            - [ ] `test -e /dev/null` passes
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes"),
+        ):
+            validate_build.main()
+        out = capsys.readouterr().out
+        assert (
+            "RECORD: skipped -- plan declares no verification table, "
+            "so there is no gate to record" in out
+        )
+
+    def test_a_table_still_records_normally(self, tmp_path):
+        """The stand-down is scoped to the no-table case only; a plan that
+        does declare a table must still record exactly as before."""
+        f = tmp_path / "with_table.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Verification
+            | Check | Command | Expected |
+            |-------|---------|----------|
+            | Echo works | `echo hi` | output contains hi |
+        """)
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = True
+            exit_code = validate_build.main()
+
+        writer.assert_called_once()
+        assert exit_code == 0, "recording must not change the exit code"
+
+
+class TestRecordingIsWiredIntoTheReviewStage:
+    """The flag's only production invocation is one line of markdown.
+
+    Review of PR #3123 (tech debt 1): every other test in this file patches
+    the writer and asserts on `main()`, which proves the flag path works, not
+    that anything invokes it. Delete the flag from the REVIEW addendum and
+    those stay green while the merge predicate returns to its permanently
+    `aggregate is None` branch. These assertions pin the wiring itself.
+    """
+
+    REPO_ROOT = Path(__file__).parents[2]
+    REVIEW_ADDENDUM = REPO_ROOT / "docs" / "sdlc" / "do-pr-review.md"
+    BUILD_ADDENDUM = REPO_ROOT / "docs" / "sdlc" / "do-build.md"
+
+    def test_review_addendum_invokes_the_recording_flag(self):
+        text = self.REVIEW_ADDENDUM.read_text()
+        assert "--record-outcomes" in text, (
+            "the REVIEW stage is the only production caller of the verification-outcomes "
+            "writer; without it the merge predicate's group (e) can never fire"
+        )
+        assert "validate_build.py" in text
+
+    def test_review_invocation_passes_every_argument_the_writer_needs(self):
+        """A record with no --pr is unanchored, and the predicate refuses it."""
+        line = next(
+            line
+            for line in self.REVIEW_ADDENDUM.read_text().splitlines()
+            if "--record-outcomes" in line
+        )
+        for flag in ("--repo", "--issue", "--pr"):
+            assert flag in line, f"{flag} missing from the recording invocation"
+
+    def test_build_addendum_does_not_record(self):
+        """BUILD has no PR to anchor against, so recording there would write an
+        unanchored aggregate the merge gate refuses -- blocking every lane.
+
+        Scoped to invocation lines: the addendum is free to *explain* why it
+        does not record, and does.
+        """
+        invocations = [
+            line
+            for line in self.BUILD_ADDENDUM.read_text().splitlines()
+            if "validate_build.py" in line and not line.lstrip().startswith("#")
+        ]
+        assert invocations, "the BUILD addendum must still run the validator"
+        assert not any("--record-outcomes" in line for line in invocations)
+
+    def test_the_flag_the_doc_passes_is_the_flag_the_script_accepts(self):
+        """Pins the doc and the parser together, so renaming one breaks here."""
+        opts, positionals, rejected, _ = validate_build._parse_argv(
+            ["plan.md", "--record-outcomes", "--repo", "o/n", "--issue", "1", "--pr", "2"]
+        )
+        assert not rejected
+        assert positionals == ["plan.md"]
+        assert "--record-outcomes" in opts
+        assert opts["--repo"] == "o/n"
+
+
+class TestArgvParsingRejectsFlagShapedValues:
+    """The three failure modes reproduced in review of PR #3123.
+
+    The documented invocation interpolates shell variables, so an empty one
+    collapses the argument list. The naive reading took the next flag as the
+    value, which produced a ValueError that escaped after the report and
+    changed the exit code, a ledger row written under a repo named `--issue`,
+    and a plan path read from a flag so the run exited 0 having checked nothing.
+    """
+
+    def test_missing_value_rejects_the_flag(self):
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--issue", "--pr", "77"])
+        assert "--issue" in rejected
+        assert "--issue" not in opts
+        assert opts["--pr"] == "77"
+
+    def test_trailing_flag_with_no_value_is_rejected(self):
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--repo"])
+        assert rejected == ["--repo"]
+        assert "--repo" not in opts
+
+    def test_positional_is_found_after_a_bare_flag(self):
+        _, positionals, _, _ = validate_build._parse_argv(["--record-outcomes", "p.md"])
+        assert positionals == ["p.md"]
+
+    def test_unknown_flag_is_rejected_not_treated_as_a_positional(self):
+        _, positionals, rejected, _ = validate_build._parse_argv(["p.md", "--bogus"])
+        assert positionals == ["p.md"]
+        assert rejected == ["--bogus"]
+
+    def test_single_dash_value_is_rejected_like_a_flag(self):
+        """The docstring promises a value that 'is itself a flag' is
+        rejected; a single-dash token (`-x`, or a negative number like `-5`)
+        must be rejected the same way as a double-dash one, not silently
+        accepted as the value."""
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--issue", "-5"])
+        assert "--issue" in rejected
+        assert "--issue" not in opts
+
+    def test_repo_value_that_looks_like_a_flag_is_rejected(self):
+        opts, _, rejected, _ = validate_build._parse_argv(["p.md", "--repo", "-x"])
+        assert "--repo" in rejected
+        assert "--repo" not in opts
+
+    def test_repeated_flag_last_wins_and_is_reported(self):
+        opts, _, _, warnings = validate_build._parse_argv(
+            ["p.md", "--repo", "first/one", "--repo", "second/one"]
+        )
+        assert opts["--repo"] == "second/one"
+        assert any("--repo" in w and "repeated" in w for w in warnings)
+
+    def test_extra_positionals_are_dropped_and_reported(self):
+        _, positionals, _, warnings = validate_build._parse_argv(["a.md", "b.md", "c.md"])
+        assert positionals == ["a.md", "b.md", "c.md"]
+        assert any("b.md" in w and "c.md" in w for w in warnings)
+
+    def test_no_repeats_or_extras_yields_no_warnings(self):
+        _, _, _, warnings = validate_build._parse_argv(["p.md", "--repo", "o/n"])
+        assert warnings == []
+
+    def test_help_anywhere_in_argv_is_honored(self):
+        with patch("sys.argv", ["validate_build.py", "--record-outcomes", "--help"]):
+            assert validate_build.main() == 0
+
+    def test_h_anywhere_in_argv_is_honored(self):
+        with patch("sys.argv", ["validate_build.py", "p.md", "-h"]):
+            assert validate_build.main() == 0
+
+    def test_no_positional_exits_nonzero_rather_than_green_on_zero_checks(self):
+        with patch("sys.argv", ["validate_build.py", "--record-outcomes", "--repo", "o/n"]):
+            assert validate_build.main() == 1
+
+    def test_zero_timeout_falls_back_to_default_not_all_unevaluated(self, tmp_path, capsys):
+        """TD 3 (review of PR #3123): `--timeout 0` (or negative) converted
+        every row to UNEVALUATED, which now blocks merge permanently once
+        recorded. A non-positive bound must be rejected with the established
+        `ARGS: ignoring ...` line and fall back to the default, not silently
+        grade the whole table UNEVALUATED."""
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        with patch("sys.argv", ["validate_build.py", str(f), "--timeout", "0"]):
+            assert validate_build.main() == 0
+        out = capsys.readouterr().out
+        assert "ARGS: ignoring --timeout '0'" in out
+        assert "UNEVALUATED:" not in out
+        assert "Result: 1 PASS, 0 FAIL, 0 UNEVALUATED" in out
+
+    def test_negative_timeout_value_is_rejected_at_the_argv_level(self, tmp_path, capsys):
+        """A value starting with `-` is rejected as flag-shaped before it
+        ever reaches the int-and-sign check, so `--timeout -5` never grades
+        the table UNEVALUATED either -- it falls back to the default via the
+        same `bad_flags` path as any other malformed value flag."""
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        with patch("sys.argv", ["validate_build.py", str(f), "--timeout", "-5"]):
+            assert validate_build.main() == 0
+        out = capsys.readouterr().out
+        assert "ARGS: ignoring --timeout" in out
+        assert "UNEVALUATED:" not in out
+        assert "Result: 1 PASS, 0 FAIL, 0 UNEVALUATED" in out
+
+    def test_non_integer_issue_does_not_change_the_exit_code(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "o/n",
+            "--issue",
+            "not-a-number",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()

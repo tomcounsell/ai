@@ -1002,13 +1002,28 @@ def query_enriched(
     except Exception:
         stages = {k: v for k, v in raw_states.items() if not k.startswith("_")}
 
+    try:
+        from agent.verification_parser import VERIFICATION_OUTCOMES_KEY
+    except Exception:  # pragma: no cover - mirrors the ALL_STAGES import above
+        VERIFICATION_OUTCOMES_KEY = "_verification_outcomes"  # noqa: N806
+
     # Thread the router-helper underscore keys into the stages dict. The router's
     # staleness rules (``_critique_verdict_is_stale`` / ``_latest_dispatch_at`` →
     # row 2b/8b) read ``_verdicts`` and ``_sdlc_dispatches`` directly off the
     # ``stage_states`` arg. Without them here, those rules are structurally inert
     # in the CLI path: a revised plan with a stale NEEDS REVISION verdict can never
     # route to re-critique and dead-ends on ``/do-plan`` until G4 oscillation fires.
-    for _router_key in ("_verdicts", "_sdlc_dispatches"):
+    #
+    # ``_verification_outcomes`` is here for exactly the same reason and was
+    # missed once already. Row 8g (``_rule_verification_outcomes_hold_pr``) reads
+    # the recorded aggregate off ``stage_states`` to re-route a lane the merge
+    # predicate would refuse. The predicate reads the ledger directly, so it sees
+    # the aggregate either way — meaning that without this key the two disagree:
+    # the router keeps dispatching ``/do-merge`` and the predicate keeps refusing
+    # it, until G4 blocks the lane for a human. That is the oscillation loop row
+    # 8g exists to prevent, so the whole tuple is pinned by a seam test rather
+    # than by the hand-built payloads the router's own tests use.
+    for _router_key in ("_verdicts", "_sdlc_dispatches", VERIFICATION_OUTCOMES_KEY):
         if _router_key in raw_states:
             stages[_router_key] = raw_states[_router_key]
 

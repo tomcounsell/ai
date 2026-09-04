@@ -304,6 +304,21 @@ blocks at the choke point. A stale-but-safe diff (docs-only re-push after
 approval) needs a fresh review or a matching-trailer re-record — the predicate
 does not re-admit prior approvals by diff shape.
 
+### Verification Outcomes
+
+Group (e) of the same predicate refuses a merge when the lane's recorded
+verification aggregate carries a blocking row or cannot be shown fresh against
+the PR head. A `FAIL` row says the code is wrong; an `UNEVALUATED` row says the
+grader could not answer, and both hold the PR (owner ruling, `ba092a06d`). A
+lane whose plan declares no verification table has declared no gate, and the
+predicate stands down rather than refusing.
+
+Recovery differs by which line you got, and none of it is guesswork —
+**`docs/sdlc/merge-troubleshooting.md`, "Verification Outcomes Hold the PR"**
+names each refusal string and its remedy, including the `--record-outcomes`
+re-run that re-anchors a stale aggregate. Read that section rather than
+re-deriving the fix here.
+
 ### Lockfile Sync Check
 
 ```bash

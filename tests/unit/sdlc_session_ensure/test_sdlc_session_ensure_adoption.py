@@ -234,6 +234,7 @@ class TestOwnerlessAdoption:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [issue_session]  # post-save readback
+        mock_as.query.get.return_value = issue_session  # post-save readback (primary-key lookup)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=env_session),
@@ -284,7 +285,8 @@ class TestLaneSlugMintedAtLaneStart:
         mock_new_session = MagicMock()
         mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -318,7 +320,8 @@ class TestLaneSlugMintedAtLaneStart:
         mock_new_session = MagicMock()
         mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
         mock_as = MagicMock()
-        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.query.filter.side_effect = [[]]  # existing_by_id lookup (none)
+        mock_as.query.get.return_value = mock_new_session  # post-save readback (primary-key lookup)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -384,6 +387,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9991", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        mock_as.query.get.return_value = orphan  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -398,6 +402,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9992", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        mock_as.query.get.return_value = orphan  # post-save readback (primary-key lookup)
 
         finalize_mock = MagicMock()
         with (
@@ -427,6 +432,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9993", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        mock_as.query.get.return_value = orphan  # post-save readback (primary-key lookup)
 
         with (
             patch("models.agent_session.AgentSession", mock_as),
@@ -448,6 +454,7 @@ class TestKillOrphans:
         fresh = _make_orphan_session("sdlc-local-9994", 60)  # 1 minute old
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [fresh]
+        mock_as.query.get.return_value = fresh  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -465,6 +472,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [old_but_alive]
+        mock_as.query.get.return_value = old_but_alive  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -477,6 +485,7 @@ class TestKillOrphans:
         at_boundary = _make_orphan_session("sdlc-local-9996", ORPHAN_AGE_SECONDS)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [at_boundary]
+        mock_as.query.get.return_value = at_boundary  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -490,6 +499,7 @@ class TestKillOrphans:
         under = _make_orphan_session("sdlc-local-9997", ORPHAN_AGE_SECONDS - 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [under]
+        mock_as.query.get.return_value = under  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -502,6 +512,7 @@ class TestKillOrphans:
         over = _make_orphan_session("sdlc-local-9998", ORPHAN_AGE_SECONDS + 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [over]
+        mock_as.query.get.return_value = over  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -515,6 +526,7 @@ class TestKillOrphans:
         bridge = _make_orphan_session("tg_valor_-1003449100931_691", ORPHAN_AGE_SECONDS + 3600)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
+        mock_as.query.get.return_value = bridge  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -541,6 +553,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [live]
+        mock_as.query.get.return_value = live  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -565,6 +578,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [stale]
+        mock_as.query.get.return_value = stale  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -587,6 +601,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        mock_as.query.get.return_value = s  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -608,6 +623,7 @@ class TestKillOrphans:
         s.started_at = datetime.now(UTC) - timedelta(seconds=30)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        mock_as.query.get.return_value = s  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -629,6 +645,7 @@ class TestKillOrphans:
         s.started_at = None
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        mock_as.query.get.return_value = s  # post-save readback (primary-key lookup)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -654,6 +671,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [hollow]
+        mock_as.query.get.return_value = hollow  # post-save readback (primary-key lookup)
 
         dead_payload = {
             "run_id": "dead-run",
@@ -696,6 +714,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [live]
+        mock_as.query.get.return_value = live  # post-save readback (primary-key lookup)
 
         live_payload = {
             "run_id": "live-run",
