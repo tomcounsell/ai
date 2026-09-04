@@ -17,6 +17,66 @@ from __future__ import annotations
 import logging
 from unittest.mock import patch
 
+import pytest
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _restore_popoto_client(redis_test_db):
+    """Undo the global-client rebind these tests deliberately cause (#3130).
+
+    Several tests here delenv PYTEST_CURRENT_TEST so configure_resilient_redis()
+    reaches the real popoto.redis_db.set_REDIS_DB_settings, which REPLACES the
+    module-global POPOTO_REDIS_DB with a fresh client built from
+    config.settings.RedisSettings.url — the ambient host string on db 0, since
+    that seam is REDIS__URL, not the REDIS_URL pytest exports. The session-scoped
+    _popoto_pool_install never re-runs, so without this restore the rebound
+    global survives the test and every later test on the same xdist worker dies
+    in redis_test_db's claim-registry assertion (25 nightly issues from one
+    defect).
+
+    Restoring ``rdb.POPOTO_REDIS_DB`` alone is NOT enough:
+    ``configure_resilient_redis`` follows its ``set_REDIS_DB_settings`` call
+    with a ``sys.modules`` walk that re-points every popoto submodule's
+    import-time ``POPOTO_REDIS_DB`` binding at the new client
+    (``config/redis_bootstrap.py``). Without the mirror walk below,
+    ``popoto.models.base`` keeps the leaked client after the module attribute
+    is restored, and a later test's ``save()`` writes through it while its
+    ``query`` reads the claimed db — a split-brain that surfaces as "Session
+    not found after save" (or a connection error to the URL-parsing tests'
+    fake host).
+
+    Depending on redis_test_db orders this teardown BEFORE that fixture's own,
+    so the next test's setup assertion always sees the restored client.
+    """
+    import sys
+
+    import popoto.redis_db as rdb
+
+    original = rdb.POPOTO_REDIS_DB
+    yield
+    leaked = rdb.POPOTO_REDIS_DB
+    rdb.POPOTO_REDIS_DB = original
+    # Mirror configure_resilient_redis's submodule walk, pointing every cached
+    # binding back at the original client. Idempotent when nothing drifted.
+    for name, mod in list(sys.modules.items()):
+        if (
+            mod is not None
+            and name.startswith("popoto")
+            and hasattr(mod, "POPOTO_REDIS_DB")
+            and mod is not rdb
+        ):
+            mod.POPOTO_REDIS_DB = original
+    if leaked is not original:
+        try:
+            leaked.connection_pool.disconnect()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
