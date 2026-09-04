@@ -690,6 +690,40 @@ class TestEmailOutputHandlerSend:
         assert subject == "Re: Original Subject"
 
     @pytest.mark.asyncio
+    async def test_send_pins_use_llm_false_on_drafter_call(self):
+        """send() calls draft_message with use_llm=False (issue #3124).
+
+        Email has no bounce path: a `block` verdict cannot alter delivery
+        on this transport, so paying for the LLM-primary promise-gate
+        judgment layer is cost without enforcement. This pin is a
+        deliberate, temporary deviation from the drafter's default
+        `use_llm=True` -- lifting it requires wiring the bounce path first
+        (#3124). This test guards the pin itself: a silent removal here
+        would reintroduce a per-email Haiku round-trip with no signal.
+        """
+        handler = EmailOutputHandler(smtp_config=self._make_smtp_config())
+
+        from bridge.message_drafter import MessageDraft
+
+        with (
+            patch("bridge.email_bridge.asyncio.to_thread", new_callable=AsyncMock),
+            patch(
+                "bridge.message_drafter.draft_message",
+                new_callable=AsyncMock,
+            ) as mock_draft,
+        ):
+            mock_draft.return_value = MessageDraft(text="Reply text")
+            await handler.send(
+                chat_id="recipient@example.com",
+                text="Reply text",
+                reply_to_msg_id=0,
+                session=None,
+            )
+
+        mock_draft.assert_called_once()
+        assert mock_draft.call_args.kwargs["use_llm"] is False
+
+    @pytest.mark.asyncio
     async def test_send_no_smtp_config_raises_in_send_smtp(self):
         """_send_smtp raises RuntimeError when no SMTP config present."""
         with patch("bridge.email_bridge._get_smtp_config", return_value=None):

@@ -920,7 +920,7 @@ class EmailOutputHandler:
         # not block the email send.
         # NOTE: pinned use_llm=False (temporary). Email has no bounce path —
         # there is no `needs_self_draft`/self-draft-steering wiring on this
-        # transport (see `_send_email_reply` below) — so a `block` verdict
+        # transport (see `EmailOutputHandler.send` below) — so a `block` verdict
         # cannot alter delivery: `draft.text` is simply empty and this call
         # site falls through to the raw `text` unchanged. Paying an LLM
         # round-trip for a verdict the transport cannot act on is cost

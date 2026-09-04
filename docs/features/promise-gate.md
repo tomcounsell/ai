@@ -48,7 +48,7 @@ the judgment layer used is a deliberate per-route choice, not an oversight:
 |---|---|---|---|---|
 | Drafter short path (raw output < 200 chars, no SDLC session, no artifacts, no `?`, no fenced code) | `draft_message`'s early return → `_evaluate_drafter_promise(..., use_llm=False)` | Heuristic only (regex `_evaluate_promise_heuristic`) — **zero LLM calls, test-enforced** | `promise_gate_drafter` | Bounds per-message latency on brief replies; short replies are the highest-risk population for empty promises (#2421), so the gate has to be free to run on every one of them |
 | Drafter main path (everything else) | `draft_message`'s main return → `_evaluate_drafter_promise(..., use_llm=True)` | LLM-primary (`_evaluate_promise_llm_or_heuristic`), regex fail-closed-only fallback | `promise_gate_drafter_llm` / `promise_gate_drafter_heuristic` / `promise_gate_drafter_timeout` | The composed, longer reply is where forward-deferral prose actually lives (the Incident A class); the real caller is `agent/output_handler.py`, defaulting `use_llm=True` |
-| Email outbound (`bridge/email_bridge.py::_send_email_reply`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | Email has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the call site only reads `draft.text` and there is no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring on this transport, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so the call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
+| Email outbound (`bridge/email_bridge.py::EmailOutputHandler.send`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | Email has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the call site only reads `draft.text` and there is no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring on this transport, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so the call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
 | Stop hook (`agent/hooks/stop.py`) | Explicit `draft_message(..., use_llm=False)` | Heuristic only, forced regardless of message length | `promise_gate_drafter` (same sources as the short path) | Runs inline on the Stop hook's 10-second harness-wall critical path; an inline LLM round-trip there repeats the documented 126/131 SIGKILL incident (`docs/features/memory-hook-performance.md`) — the fix was "detach, don't bound," not "add a timeout around a Haiku call" |
 | Poll questions (`TelegramRelayOutputHandler.send_poll`) | `validate_poll_question` → `_evaluate_promise_heuristic` directly | Heuristic only | none (surfaced as a non-blocking `Violation(rule="poll_question_promise")`, not a full gate call) | Poll questions reach Telegram without ever calling `draft_message`, so they would otherwise ship with zero honesty checking; a poll question is a structured artifact, not a prose reply worth an LLM round-trip. Residual (no LLM backstop) tracked in #3094 |
 | Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | `agent/session_health._gate_terminal_promise` | Heuristic only — **the one known-uncovered route**: it never reaches the LLM layer | `terminal_flush` | No live agent exists at flush time to consume an LLM-derived revise-or-override advisory; there is nobody left to self-draft a rewrite, so the heuristic backstop is what actually ships the substitution. Residual (no LLM backstop) tracked in #3094 |
@@ -315,7 +315,7 @@ The `source` discriminator takes one of:
 | `promise_gate_timeout` | CLI path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
 | `promise_gate_disabled` | CLI path: kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter does not populate this) |
-| `promise_gate_drafter` | Drafter short path (`use_llm=False`, both the <200-char early return and the Stop hook's forced-heuristic call) |
+| `promise_gate_drafter` | Drafter short path (`use_llm=False`, the <200-char early return, the Stop hook's forced-heuristic call, and the email outbound path's pinned `use_llm=False` main-path call, see `EmailOutputHandler.send`) |
 | `promise_gate_drafter_disabled` | Drafter path: kill switch was on (any length) — records `action="allow" / reason="gate_disabled"`. Distinct from `promise_gate_drafter` so the disabled state is greppable by source on this route, mirroring `promise_gate_disabled` on the CLI path |
 | `promise_gate_drafter_llm` | Drafter main path (`use_llm=True`): LLM Haiku call returned a parseable verdict |
 | `promise_gate_drafter_heuristic` | Drafter main path: LLM unavailable / parse failure → fell through to regex |
@@ -365,10 +365,11 @@ documented as a follow-up).
 ## Latency budget
 
 * LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling 2026-09-03, set
-  at roughly 1.5x the measured p50/p99 of 1619ms/2463ms to leave
-  headroom for Anthropic API variance without hiding a genuine
-  regression; provisional/tunable, re-derive from post-merge audit
-  JSONL).
+  at roughly 1.5x the p50/p99 of 1619ms/2463ms that the ruling was
+  computed against, to leave headroom for Anthropic API variance
+  without hiding a genuine regression; provisional/tunable, re-derive
+  from post-merge audit JSONL). The current measurement (n=1088) is
+  p50 ~1635ms / p99 ~2531ms, comfortably inside this budget.
 * Zero-LLM short path (<200 chars, non-SDLC, no artifacts): p50 ~= 0ms,
   unchanged by the ruling above.
 

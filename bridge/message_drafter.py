@@ -624,8 +624,9 @@ def validate_poll_question(question: str) -> list[Violation]:
     violation — surfaced the same non-blocking way ``send_poll`` already
     surfaces every other validation failure (a warning log; the poll still
     sends). Deliberately NOT the LLM-primary path: a poll question is a
-    low-volume, interactive affordance, and a ~1635ms round-trip here would be
-    real latency cost for no delivery-honesty gain since the two-state
+    low-volume, interactive affordance, and a ~1635ms round-trip (the
+    current p50 measurement, n=1088) here would be real latency cost
+    for no delivery-honesty gain since the two-state
     outcome (ship or don't) is unchanged from before this plan — see No-Go 5.
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch via
@@ -1189,19 +1190,25 @@ async def draft_message(
         persona: Optional persona name (pm/dev/teammate/customer-service) for
             tone hints. Not used today — medium and persona stay orthogonal.
         use_llm: Whether the main (composed) path's promise gate may use its
-            LLM-primary judgment layer. Default ``True`` for the three real
-            delivery callers (``agent/output_handler.py``,
-            ``bridge/email_bridge.py``, and any other caller that doesn't
-            override it). The short-output early-return path NEVER uses the
-            LLM regardless of this flag — it always evaluates via the
-            zero-cost heuristic, preserving its latency guarantee.
-            **MANDATORY** ``use_llm=False`` for ``agent/hooks/stop.py``
-            (Risk 1a): that call runs inline on the Stop hook's 10-second
-            harness-wall critical path, and this repo has already had the
-            126/131-SIGKILL incident (docs/features/memory-hook-performance.md)
-            from adding an inline LLM round-trip to that exact path. The
-            documented fix was "detach, don't bound" — do NOT try to
-            reintroduce an LLM call there behind a timeout.
+            LLM-primary judgment layer. Default ``True`` for the real
+            delivery caller (``agent/output_handler.py``) and any other
+            caller that doesn't override it. The short-output early-return
+            path NEVER uses the LLM regardless of this flag — it always
+            evaluates via the zero-cost heuristic, preserving its latency
+            guarantee.
+            Two callers pin ``use_llm=False``, for different reasons:
+            **MANDATORY** for ``agent/hooks/stop.py`` (Risk 1a): that call
+            runs inline on the Stop hook's 10-second harness-wall critical
+            path, and this repo has already had the 126/131-SIGKILL incident
+            (docs/features/memory-hook-performance.md) from adding an inline
+            LLM round-trip to that exact path. The documented fix was
+            "detach, don't bound" — do NOT try to reintroduce an LLM call
+            there behind a timeout; this pin is permanent.
+            **TEMPORARY** for ``bridge/email_bridge.py``
+            (``EmailOutputHandler.send``): email has no bounce path, so a
+            `block` verdict cannot alter delivery and an LLM round-trip
+            there is cost without enforcement. Lift this pin only after
+            wiring the bounce path tracked in #3124.
 
     Returns:
         MessageDraft with verbatim composed text, routing fields, and any
