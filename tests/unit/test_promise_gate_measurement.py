@@ -202,3 +202,37 @@ class TestFindContradictionsNegationGuard:
 
         assert len(flags) == 1
         assert flags[0].item == "merge to main"
+
+    def test_mixed_evidence_with_distant_negative_keyword_still_flags(self):
+        """The negation guard is scoped to a window around the matched
+        positive keyword, not the whole string: an unrelated negative
+        clause earlier in the string ("failed at first") must not
+        suppress a genuine, later contradiction ("now merged and
+        shipped")."""
+        entries = [
+            {
+                "item": "deploy",
+                "disposition": "blocked",
+                "evidence": "the deploy failed at first but it is now merged and shipped",
+            }
+        ]
+
+        flags = find_contradictions(entries)
+
+        assert len(flags) == 1
+        assert flags[0].item == "deploy"
+
+    def test_delivered_leg_negation_guard_symmetric_with_positive_leg(self):
+        """The ``delivered`` leg gets the same scoped-negation treatment as
+        the positive leg: "did not hit any blockers" is good news, not a
+        genuine failure, because the negation's object is the bad outcome
+        rather than the disposition itself."""
+        entries = [
+            {
+                "item": "release",
+                "disposition": "delivered",
+                "evidence": "delivered clean, did not hit any blockers",
+            }
+        ]
+
+        assert find_contradictions(entries) == []

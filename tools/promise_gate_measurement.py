@@ -81,6 +81,72 @@ _POSITIVE_EVIDENCE_KEYWORDS = (
 
 _VALID_DISPOSITIONS = ("delivered", "blocked", "declined", "not_started")
 
+# Chars scanned immediately around a keyword match to detect an adjacent
+# negation, rather than scanning the whole evidence string. Provisional /
+# tunable -- picked to catch adjacent phrases like "not done yet" or "did
+# not hit any blockers" while NOT reaching across an unrelated clause (e.g.
+# "the deploy failed at first but it is now merged and shipped", where
+# "failed" must not suppress the later, unrelated "merged"). Re-derive if
+# false positive/negative rates on real evidence text drift.
+_NEGATION_WINDOW_CHARS = 24
+
+# Nouns that, immediately following a negative-evidence keyword match (e.g.
+# "did not hit any ..."), flip the phrase from a genuine failure claim into
+# a positive one -- the negation's object is the bad outcome, not the
+# claimed disposition itself.
+_NEGATION_CANCELING_OBJECTS = ("blocker", "issue", "problem", "delay", "obstacle")
+
+
+def _iter_keyword_matches(evidence_lower: str, keywords: tuple[str, ...]):
+    """Yield (start_index, keyword) for every non-overlapping occurrence of
+    any keyword in ``keywords`` within ``evidence_lower``."""
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = evidence_lower.find(kw, start)
+            if idx == -1:
+                break
+            yield idx, kw
+            start = idx + 1
+
+
+def _any_positive_keyword_unnegated(evidence_lower: str) -> bool:
+    """True when at least one ``_POSITIVE_EVIDENCE_KEYWORDS`` occurrence in
+    ``evidence_lower`` is NOT preceded, within ``_NEGATION_WINDOW_CHARS``,
+    by "not " or a ``_NEGATIVE_EVIDENCE_KEYWORDS`` phrase.
+
+    Scoped to the window immediately before each match -- an unrelated
+    negative clause elsewhere in the string (outside the window) must not
+    suppress a genuine, unnegated positive claim later in the same string.
+    """
+    for idx, _kw in _iter_keyword_matches(evidence_lower, _POSITIVE_EVIDENCE_KEYWORDS):
+        window = evidence_lower[max(0, idx - _NEGATION_WINDOW_CHARS) : idx]
+        if "not " in window:
+            continue
+        if any(neg_kw in window for neg_kw in _NEGATIVE_EVIDENCE_KEYWORDS):
+            continue
+        return True
+    return False
+
+
+def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
+    """True when at least one ``_NEGATIVE_EVIDENCE_KEYWORDS`` occurrence in
+    ``evidence_lower`` is NOT followed, within ``_NEGATION_WINDOW_CHARS``,
+    by a ``_NEGATION_CANCELING_OBJECTS`` noun (e.g. "did not hit any
+    blockers" -- the negation's object is the bad outcome, so the phrase
+    reads as good news, not a genuine failure).
+
+    Symmetric to :func:`_any_positive_keyword_unnegated`: both scope their
+    negation check to a window around the match instead of the whole
+    string.
+    """
+    for idx, kw in _iter_keyword_matches(evidence_lower, _NEGATIVE_EVIDENCE_KEYWORDS):
+        window = evidence_lower[idx + len(kw) : idx + len(kw) + _NEGATION_WINDOW_CHARS]
+        if any(obj in window for obj in _NEGATION_CANCELING_OBJECTS):
+            continue
+        return True
+    return False
+
 
 def _is_promise_gate_row(row: dict[str, Any]) -> bool:
     kind = row.get("kind")
@@ -231,20 +297,6 @@ class ContradictionFlag:
     reason: str
 
 
-def _positive_leg_negated(evidence_lower: str) -> bool:
-    """True when the positive-outcome reading of ``evidence_lower`` is
-    itself negated -- either by a general negative-evidence keyword
-    (``_NEGATIVE_EVIDENCE_KEYWORDS``) or by a positive keyword that is
-    directly preceded by "not " (e.g. "not delivered"), which need not
-    appear on the negative list verbatim. Checked before the positive leg
-    is allowed to flag, so a negated positive reading never contradicts a
-    non-delivered disposition.
-    """
-    if any(kw in evidence_lower for kw in _NEGATIVE_EVIDENCE_KEYWORDS):
-        return True
-    return any(f"not {kw}" in evidence_lower for kw in _POSITIVE_EVIDENCE_KEYWORDS)
-
-
 def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag]:
     """Flag ask_coverage entries whose disposition contradicts their own evidence.
 
@@ -263,15 +315,29 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
     arises, replace it with an LLM judgment call the way the drafter's main
     path does, not a bigger keyword list.
 
-    False positives from negation are handled, not just disclaimed: a
-    ``blocked``/``declined``/``not_started`` disposition whose evidence
-    contains a positive keyword (e.g. "done", "delivered") is flagged only
-    when that positive reading is not itself negated -- either by a
-    general negative-evidence keyword also present in the same string
-    (``"blocked on the key, not done yet"`` matches ``"blocked on"``), or
-    by the positive keyword being directly preceded by "not " even when
-    that phrase is not itself on the negative list (``"not delivered"``).
-    See :func:`_positive_leg_negated`.
+    False positives from negation are handled, not just disclaimed, and the
+    check is scoped rather than whole-string: a keyword match only counts
+    as negated (or canceled) when the negating text sits within
+    ``_NEGATION_WINDOW_CHARS`` of that specific match, not anywhere else in
+    the string. An unrelated negative clause elsewhere must not suppress a
+    genuine, later contradiction in the same evidence string (e.g. "the
+    deploy failed at first but it is now merged and shipped" on a
+    ``blocked`` disposition still flags on "merged" -- "failed" sits
+    outside the window before "merged").
+
+    * A ``blocked``/``declined``/``not_started`` disposition whose evidence
+      contains a positive keyword (e.g. "done", "delivered") is flagged
+      only when at least one occurrence of that keyword is NOT preceded,
+      within the window, by "not " or a negative-evidence keyword (e.g.
+      ``"blocked on the key, not done yet"`` and ``"not delivered"`` do not
+      flag). See :func:`_any_positive_keyword_unnegated`.
+    * A ``delivered`` disposition whose evidence contains a negative
+      keyword is flagged only when at least one occurrence of that keyword
+      is NOT followed, within the window, by a "negation-canceling" object
+      noun such as "blocker"/"issue"/"problem" -- ``"delivered clean, did
+      not hit any blockers"`` does not flag, because the negation's object
+      is the bad outcome, not the disposition. See
+      :func:`_any_negative_keyword_unnegated`.
     """
     flags: list[ContradictionFlag] = []
     for entry in entries:
@@ -295,9 +361,7 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
             )
             continue
 
-        if disposition == "delivered" and any(
-            kw in evidence_lower for kw in _NEGATIVE_EVIDENCE_KEYWORDS
-        ):
+        if disposition == "delivered" and _any_negative_keyword_unnegated(evidence_lower):
             flags.append(
                 ContradictionFlag(
                     item=item,
@@ -308,11 +372,11 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
                 )
             )
 
-        if (
-            disposition in ("blocked", "declined", "not_started")
-            and any(kw in evidence_lower for kw in _POSITIVE_EVIDENCE_KEYWORDS)
-            and not _positive_leg_negated(evidence_lower)
-        ):
+        if disposition in (
+            "blocked",
+            "declined",
+            "not_started",
+        ) and _any_positive_keyword_unnegated(evidence_lower):
             flags.append(
                 ContradictionFlag(
                     item=item,
