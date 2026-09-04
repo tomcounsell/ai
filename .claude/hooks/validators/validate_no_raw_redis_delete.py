@@ -39,6 +39,11 @@ Two gates run before any pattern matching (#2638):
    rule trips the rule -- filing #2638 was itself blocked because the issue
    body quoted the offending call. A command with no interpreter in it cannot
    execute a Redis call, so there is nothing to block.
+
+Before either text gate runs, single-quoted heredoc bodies are stripped
+(#2736): `<<'EOF'` performs no expansion, so its body is data unless the
+heredoc feeds an interpreter. An unquoted `<<EOF` body stays in scope -- it
+expands `$(...)`, which really can execute.
 """
 
 import json
@@ -77,6 +82,51 @@ _EXECUTABLE_CONTEXT = re.compile(
     r"(?:python[\d.]*|ipython|pytest|redis-cli|uvx|uv\s+run|[\w./~-]+\.py)"
     r"(?:\b|$)"
 )
+
+
+# Only a single-quoted delimiter form. An unquoted `<<EOF` expands `$(...)`
+# and parameters, so its body can execute and must stay in scope; treating
+# both forms alike would turn this false-positive fix into a fail-open hole.
+_QUOTED_HEREDOC = re.compile(r"<<-?\s*'(?P<delim>[^'\n]+)'")
+
+
+def _strip_quoted_heredoc_bodies(command: str) -> str:
+    """Remove the bodies of single-quoted heredocs that do not feed an
+    interpreter (#2736).
+
+    A `<<'EOF'` body undergoes no expansion: it is inert data when the
+    consuming command is `cat > doc.md`, `tee`, or a `gh ... --body` flow,
+    which is exactly how quoted examples of blocked call shapes kept
+    tripping the guard while writing docs and PR comments.
+
+    The body stays in scope whenever the physical line holding the heredoc
+    operator matches `_EXECUTABLE_CONTEXT` -- that line carries the consuming
+    command and its pipes/redirections, so `python3 <<'EOF'` and
+    `cat <<'PY' | python3` both keep their bodies. Unterminated heredocs also
+    stay in scope. Every ambiguity resolves toward keeping text, which can
+    only over-block.
+    """
+    out = command
+    pos = 0
+    while True:
+        m = _QUOTED_HEREDOC.search(out, pos)
+        if not m:
+            return out
+        line_start = out.rfind("\n", 0, m.start()) + 1
+        line_end = out.find("\n", m.end())
+        if line_end == -1:
+            return out  # operator with no body lines at all
+        delim = re.escape(m.group("delim"))
+        body_start = line_end + 1
+        # `\t*` covers the `<<-` form; for plain `<<` it can only end a body
+        # early, which leaves more text in scope -- the safe direction.
+        terminator = re.compile(rf"^\t*{delim}\s*$", re.MULTILINE)
+        tm = terminator.search(out, body_start)
+        if tm is None or _EXECUTABLE_CONTEXT.search(out[line_start:line_end]):
+            pos = m.end()
+            continue
+        out = out[:body_start] + out[tm.start() :]
+        pos = body_start
 
 
 def _guard_applies(cwd: str) -> bool:
@@ -245,6 +295,9 @@ def find_violation(command: str, cwd: str = "") -> str | None:
     # Gate 1: exempt only inside a different git repo -- the popoto case (#2638).
     if not _guard_applies(cwd):
         return None
+
+    # Inert quoted-heredoc bodies are data, not commands (#2736).
+    command = _strip_quoted_heredoc_bodies(command)
 
     # Gate 2: text that cannot execute is prose about the rule, not a
     # violation of it (#2638).
