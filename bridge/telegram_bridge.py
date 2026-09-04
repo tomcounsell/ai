@@ -601,11 +601,14 @@ root_logger = logging.getLogger()
 # module (directly or transitively) was routing every logger's records into
 # logs/bridge.log, including test fixtures' deliberate failure-branch ERRORs,
 # which then read as daily production failures. "pytest" is in sys.modules
-# during collection and test phases alike; a bridge subprocess spawned BY a
-# test imports this module without pytest loaded and still attaches, which is
-# the intended production behavior. PYTEST_CURRENT_TEST covers a spawned
-# child that inherits the env but re-imports lazily mid-test. Constructing
-# the handler is also skipped so a test run never even creates the file.
+# during collection and test phases alike; PYTEST_CURRENT_TEST is exported by
+# pytest into the process environment, so a bridge subprocess spawned BY a
+# test inherits it and also skips the handler (a test-spawned bridge should
+# not write the operator's production log). Only a process started outside
+# any pytest run — neither "pytest" in sys.modules nor PYTEST_CURRENT_TEST in
+# its environment — attaches it, which is the intended production behavior.
+# Constructing the handler is also skipped so a test run never even creates
+# the file.
 _UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 if not _UNDER_PYTEST:
     file_handler = logging.handlers.RotatingFileHandler(
