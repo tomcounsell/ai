@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2732
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-09-04T11:46:03Z
 ---
 
 # Reply-Chain Media Renders As The Literal String `[media]`
