@@ -121,29 +121,51 @@ reap_workers
 # subprocess (and its xdist workers) via export.
 export PYTHONDONTWRITEBYTECODE=1
 
-# Abort when a linked git worktree has no .venv of its own (#3033). Without one,
-# imports resolve through the PRIMARY checkout's editable path entry: the branch's
-# tests silently exercise main's code, always find a real module, and never raise.
-# The run reports green on code it never loaded — biased toward green, which hides
-# exactly the regressions it exists to catch. Observed in PR #3028, where it
-# produced a confidently false "1545 unit tests pass" and the one genuinely
-# failing test surfaced only when a reviewer forced PYTHONPATH.
+# Abort when a linked git worktree has no USABLE .venv of its own (#3033).
+# Without one, imports resolve through the PRIMARY checkout's editable path
+# entry: the branch's tests silently exercise main's code, always find a real
+# module, and never raise. The run reports green on code it never loaded —
+# biased toward green, which hides exactly the regressions it exists to catch.
+# Observed in PR #3028, where it produced a confidently false "1545 unit tests
+# pass" and the one genuinely failing test surfaced only when a reviewer forced
+# PYTHONPATH.
+#
+# Presence of the .venv directory alone proves nothing: a FAILED `uv sync`
+# still creates .venv before dying (so a retry sails past a bare existence
+# check), and `uv sync` without `--extra dev` provisions a .venv with no
+# bin/pytest (so resolution falls through to PATH and the primary checkout
+# again — three phantom FAILs in PR #3123's review). The guard therefore
+# requires .venv/bin/pytest specifically.
 #
 # A linked worktree has `.git` as a FILE (a gitdir pointer); the primary checkout
 # has it as a directory. That distinction is what scopes this to worktrees, so a
 # primary checkout with no .venv still falls through to the PATH pytest below.
-if [ -f "$REPO_ROOT/.git" ] && [ ! -d "$REPO_ROOT/.venv" ]; then
-    echo "pytest-clean: refusing to run — worktree has no .venv of its own." >&2
+if [ -f "$REPO_ROOT/.git" ] && [ ! -x "$REPO_ROOT/.venv/bin/pytest" ]; then
+    echo "pytest-clean: refusing to run — worktree has no usable .venv of its own." >&2
     echo "  worktree: $REPO_ROOT" >&2
-    echo "  missing:  $REPO_ROOT/.venv" >&2
+    if [ ! -d "$REPO_ROOT/.venv" ]; then
+        echo "  missing:  $REPO_ROOT/.venv" >&2
+    else
+        echo "  missing:  $REPO_ROOT/.venv/bin/pytest (the .venv exists but is" >&2
+        echo "            incomplete — a failed uv sync, or one without --extra dev)" >&2
+    fi
     echo "" >&2
-    echo "  Without it, imports resolve from the PRIMARY checkout via its editable" >&2
-    echo "  path entry, so this branch's tests would exercise main's code and a" >&2
-    echo "  branch-local regression would read green (#3033)." >&2
+    echo "  Without a working venv pytest here, the run resolves from the PRIMARY" >&2
+    echo "  checkout (editable path entry / PATH pytest), so this branch's tests" >&2
+    echo "  would exercise main's code and a branch-local regression would read" >&2
+    echo "  green (#3033)." >&2
     echo "" >&2
-    echo "  Remedy:   cd $REPO_ROOT && uv sync" >&2
+    echo "  Remedy:   cd $REPO_ROOT && uv sync --extra dev" >&2
     exit 1
 fi
+
+# Make the invoking checkout win import resolution outright (#3033, third
+# sighting): even WITH a venv, `tools.*` can resolve through the primary
+# checkout's editable-install path entry when the venv is shared or linked.
+# A PYTHONPATH entry precedes site-packages .pth entries in sys.path, so
+# prepending REPO_ROOT pins imports to the code actually under test. In the
+# primary checkout this is a no-op (same path the editable install adds).
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # Resolve the interpreter that owns this repo's dependencies. A bare `pytest`
 # resolves from PATH, which on a machine with a user-site pytest picks an
