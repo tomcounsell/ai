@@ -88,7 +88,7 @@ On `TimeoutError`, the helper retries **once** with a 2x leash (still capped at 
 
 ## Reply-chain note
 
-The reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is therefore **silently skipped in the worker** until a follow-up issue lands. Tracked as a companion to #1297. Reply-context enrichment that the bridge handler hydrates synchronously (the existing `REPLY_THREAD_CONTEXT_HEADER` block) is unaffected — it's already pre-baked into `session.message_text`.
+The reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is therefore **silently skipped in the worker**. Reply-context enrichment that the bridge handler hydrates synchronously (the existing `REPLY_THREAD_CONTEXT_HEADER` block) is unaffected — it's already pre-baked into `session.message_text`. What that block carries for a chain ancestor's media is the settled status quo described in the next section.
 
 ## Chain-Ancestor Media Is Reference-Only
 
