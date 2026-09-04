@@ -593,17 +593,21 @@ def test_alert_survives_a_raising_root_log_handler(predicate, captures, monkeypa
     assert len(captures) >= 1
 
 
-def test_run_boundary_realert_preserves_the_real_axis(predicate, captures, monkeypatch):
-    """The run-boundary re-alert must carry the real axis, never hardcode loader.
+def test_marker_channel_failure_costs_only_the_marker_channel(
+    predicate, captures, caplog, monkeypatch
+):
+    """A raising `_write_marker` must not escape and page a second time.
 
-    Guards `dataclasses.replace(result, ...)` in the run-boundary except
-    clause (compat.py:737-744). On a signature break (`loader_ok=True`), a
-    downstream helper (`_write_marker`) raising a non-OSError escapes
-    `_alert_degraded` and lands in the outer except, which must re-alert
-    using the REAL axis carried through from the already-resolved `result`
-    rather than the `result is None` fallback's hardcoded `loader_ok=False`.
-    Losing that would relabel every helper-raised signature break as a
-    loader break.
+    Guards the try/except around `_write_marker(result, proc)` in
+    `_alert_degraded`. `_write_marker` guards only `OSError` internally and
+    `_marker_path` is unguarded, so a non-OSError (here a `TypeError` from
+    a signature break) would, without this guard, escape the alert into
+    `resolve_degraded_flag`'s outer handler and emit a *second*
+    `level="fatal"` capture for one degradation event — and, worse, the
+    outer handler's fall-closed `_LOADER_OK = False` would knock the
+    Ollama-only `run_typed_local` leg out fleet-wide over a filesystem
+    problem. Contained here, the resolved axes stay exactly what the
+    predicate said.
     """
 
     def _boom(_result, _proc):
@@ -611,12 +615,51 @@ def test_run_boundary_realert_preserves_the_real_axis(predicate, captures, monke
 
     monkeypatch.setattr(compat, "_write_marker", _boom)
     predicate(_signature_break())
+    caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
     assert compat.resolve_degraded_flag("bridge") is True
-    assert captures, "must still alert even when the axis-preserving replace is exercised"
-    for capture in captures:
-        assert "axis=signature" in capture["message"]
-        assert "axis=loader" not in capture["message"]
+    assert len(captures) == 1, "a marker-channel failure must not double-page"
+    assert "axis=signature" in captures[0]["message"]
+    assert "axis=loader" not in captures[0]["message"]
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    assert compat.stack_axes() == (True, False), (
+        "the raise must be contained inside _alert_degraded, not escape into the "
+        "outer handler's fall-closed loader_ok=False"
+    )
+
+
+def test_run_boundary_helper_failure_does_not_re_alert(predicate, captures, caplog, monkeypatch):
+    """A helper raising *after* the primary alert fired is logged, never re-alerted.
+
+    Guards the `result is not None` branch of the run-boundary except
+    clause. Once the predicate has resolved, `_alert_degraded` has already
+    fired its log and Sentry legs for this very degradation; anything that
+    raises afterwards is a bug report about this module, not a second
+    degradation event. Re-entering the three-channel alert there doubled
+    the paging volume for one break. The remaining alert must still name
+    the real axis, and the helper failure must still be recorded on the log
+    channel. The `result is None` half — where no alert has fired yet and
+    the full three-channel alert IS still required — is
+    `test_resolver_itself_never_propagates_an_unexpected_exception`.
+    """
+    real_alert = compat._alert_degraded
+
+    def _alert_then_boom(result, proc):
+        real_alert(result, proc)
+        raise TypeError("a channel guard's own logger raised")
+
+    monkeypatch.setattr(compat, "_alert_degraded", _alert_then_boom)
+    predicate(_signature_break())
+    caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
+
+    assert compat.resolve_degraded_flag("bridge") is True
+    assert len(captures) == 1, "one degradation event must page exactly once"
+    assert "axis=signature" in captures[0]["message"]
+    assert any(
+        r.levelno == logging.ERROR
+        and "helper raised after the degraded alert fired" in r.getMessage()
+        for r in caplog.records
+    ), "the helper failure must still be recorded on the log channel"
 
 
 # --------------------------------------------------------------------------

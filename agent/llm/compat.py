@@ -575,7 +575,17 @@ def _alert_degraded(result: CompatResult, proc: str | None) -> None:
         # already the signal of record. Mirrors agent/index_drift.py.
         logger.warning("%s Sentry capture_message failed", SENTINEL, exc_info=True)
 
-    _write_marker(result, proc)
+    try:
+        _write_marker(result, proc)
+    except Exception:
+        # The marker is the third channel and the last statement here, so
+        # an unguarded raise would not merely lose the dashboard channel:
+        # it would escape into ``resolve_degraded_flag``'s outer handler
+        # and page a second time for one degradation event. `_write_marker`
+        # guards only OSError internally, and `_marker_path` is unguarded,
+        # so this catch is what makes "independently guarded" true of all
+        # three channels rather than only the first two.
+        logger.warning("%s could not write degraded marker", SENTINEL, exc_info=True)
 
 
 def _write_marker(result: CompatResult, proc: str | None) -> None:
@@ -692,13 +702,12 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
         return False
 
     # Bound before the try so the except clause can tell "the predicate
-    # itself raised" (result is still None, axis genuinely unknown) apart
-    # from "the predicate succeeded but a downstream helper -- _alert_degraded
-    # or _clear_marker -- raised" (result is the real, already-computed
-    # verdict). Re-alerting with a hardcoded loader_ok=False in the second
-    # case would double-fire Sentry at level="fatal" and misreport a
-    # signature break as a loader break; see _alert_degraded's non-idempotent
-    # nit and _degraded_axis.
+    # itself raised" (result is still None, no alert has fired and the axis
+    # is genuinely unknown) apart from "the predicate succeeded and the
+    # primary alert already fired" (result is the real, already-computed
+    # verdict). Only the first case still needs the three-channel alert;
+    # re-entering it in the second would double-fire Sentry at
+    # level="fatal" for one degradation event.
     result: CompatResult | None = None
     try:
         result = check_llm_stack_compat()
@@ -724,32 +733,31 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
         _COMPATIBLE = False
         _DEGRADED = True
         try:
-            # Still route through the real three-channel alert -- "the
-            # alert is the entire safety property" applies here too, not
-            # only when the predicate itself behaves. When `result` is
-            # already bound, the predicate succeeded and a downstream
-            # helper raised (e.g. _write_marker's json.dumps escaping past
-            # its OSError-only guard) -- carry the REAL axis through rather
-            # than hardcoding loader_ok=False, so the (possibly repeated)
-            # alert still names the axis that actually broke. Only a
-            # genuinely unresolved axis (the predicate itself raised) falls
-            # back to loader_ok=False.
-            _alert_degraded(
-                dataclasses.replace(
-                    result,
-                    compatible=False,
-                    reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
-                    exc_type=type(exc).__name__,
+            if result is not None:
+                # The predicate succeeded, so `_alert_degraded` already ran
+                # and fired its log and Sentry legs for this very
+                # degradation, carrying the real axis. What raised is one
+                # of its own guards or something after it; that is a bug
+                # report about this module, not a second degradation event,
+                # so it goes out on the log channel alone. Re-entering the
+                # three-channel alert here would page twice for one break.
+                logger.exception(
+                    "%s helper raised after the degraded alert fired: %s", SENTINEL, exc
                 )
-                if result is not None
-                else CompatResult(
-                    compatible=False,
-                    loader_ok=False,
-                    reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
-                    exc_type=type(exc).__name__,
-                ),
-                proc,
-            )
+            else:
+                # No alert has fired at all -- the predicate itself raised,
+                # and "the alert is the entire safety property" applies
+                # here most of all. The axis is genuinely unresolved, so it
+                # falls back to loader_ok=False.
+                _alert_degraded(
+                    CompatResult(
+                        compatible=False,
+                        loader_ok=False,
+                        reason=f"resolve_degraded_flag itself raised unexpectedly: {exc}",
+                        exc_type=type(exc).__name__,
+                    ),
+                    proc,
+                )
         except Exception:  # noqa: S110 -- deliberate: see docstring's "guarded for the same reason"
             # Even the fallback alert must not be able to escape -- that
             # would defeat the entire purpose of this except clause. If the

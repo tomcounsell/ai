@@ -1534,16 +1534,16 @@ bridge command. But the runtime's boot and failure presentation change:
 
 ## Success Criteria
 
-- [ ] **Import-safety contract holds**: with `anthropic`/`pydantic_ai` broken at
+- [x] **Import-safety contract holds**: with `anthropic`/`pydantic_ai` broken at
   import, `import agent.llm` and `import bridge.telegram_bridge` succeed,
   `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire
   — one test proves all four. **The import half executes in a fresh interpreter
   subprocess against a raise-on-import shim dir**, so the assertion is capable
   of failing in a full xdist run; an in-process or `sys.modules`-purge form does
   not satisfy this criterion.
-- [ ] `check_llm_stack_compat()` exists in `agent/llm/compat.py`, importing
+- [x] `check_llm_stack_compat()` exists in `agent/llm/compat.py`, importing
   nothing from `scripts/`, with `python -m agent.llm.compat --json` working.
-- [ ] The predicate is exercised from three sites **in production on this
+- [x] The predicate is exercised from three sites **in production on this
   lane's merge**: `/update` verify (unconditional, subprocess), bridge startup,
   worker startup. The fourth site — the auto-bump `llm` phase — is wired and
   covered by tests plus task 7's transcripts, but is **unreachable in
@@ -1554,12 +1554,12 @@ bridge command. But the runtime's boot and failure presentation change:
   the wiring is real: `test_llm_phase_argv_matches_gate_helper` proves the
   phase invokes exactly the argv the shared helper builds, and task 7 leg (a)
   executes that same helper's argv unmocked.
-- [ ] `/update` verify's compat leg is **loud, not silent**: on an incompatible
+- [x] `/update` verify's compat leg is **loud, not silent**: on an incompatible
   stack the `ToolCheck` has a non-empty `.error`, `run.py`'s `valor_tools` loop
   logs and appends a warning, and `extract_update_warnings` surfaces it. Both
   resolved versions print on every run, pass or fail, from a dedicated
   call-site block (not from `detail` in the generic loop, which never reads it).
-- [ ] The `--json` CLI calls the **pure** predicate, asserted where the assertion
+- [x] The `--json` CLI calls the **pure** predicate, asserted where the assertion
   can fail: **in-process**, calling the CLI's JSON entry function on an
   incompatible stack with a counting `capture_message` stub emits zero calls
   **and** leaves `compat._DEGRADED` unresolved (`None`). The "creates no marker"
@@ -1570,18 +1570,18 @@ bridge command. But the runtime's boot and failure presentation change:
   `_resolve_degraded_flag()` alerts.
 - [ ] On an incompatible stack, bridge and worker **start**, and an inbound
   Telegram message still enqueues an AgentSession.
-- [ ] **The alert fires in a test where `run_typed` raises** (independence
+- [x] **The alert fires in a test where `run_typed` raises** (independence
   proof) and fires on the no-startup-hook path (resolver-bound proof).
-- [ ] A raising `capture_message` suppresses nothing else; the hibernation
+- [x] A raising `capture_message` suppresses nothing else; the hibernation
   `before_send` passes the sentinel event; `data/llm-stack-degraded.{proc}` is
   written on degraded and **cleared on healthy** resolution — only the writing
   process's own path — under the module-level `_MARKER_DIR` seam whose
   **default** equals the directory `ui/app.py` reads. Clearing one process's
   marker leaves another's, and the board stays red.
-- [ ] **Only `bridge` and `worker` write markers**: a resolver called without a
+- [x] **Only `bridge` and `worker` write markers**: a resolver called without a
   `proc` emits Sentry and the sentinel log but creates no marker file, so no
   one-shot can strand a permanent red. No pid-suffixed markers exist.
-- [ ] **The suite does not pollute the operator's board, by mechanism**: the
+- [x] **The suite does not pollute the operator's board, by mechanism**: the
   redirect is an `autouse=True` fixture in `tests/unit/conftest.py` using the
   **guarded module-object** form (`try: from agent.llm import compat` /
   `except ImportError: return`, then
@@ -1590,64 +1590,64 @@ bridge command. But the runtime's boot and failure presentation change:
   hand-written `_MARKER_DIR` monkeypatch or a live-glob assertion, and the
   subprocess CLI case receives the redirect through the child's
   `LLM_STACK_MARKER_DIR`.
-- [ ] **The fixture is inert when `agent/llm/compat.py` is absent, and free for
+- [x] **The fixture is inert when `agent/llm/compat.py` is absent, and free for
   tests that never touch it**: on a checkout with task 3 not yet applied (or
   reverted, or mid-`git bisect`) the suite still collects and runs green —
   no setup errors — and no temp directory is created on the early-return
   branch. This is a property of the guarded import, not of `raising=False`.
-- [ ] **The marker-dir override announces itself**: with
+- [x] **The marker-dir override announces itself**: with
   `LLM_STACK_MARKER_DIR` set to a value differing from `_MARKER_DIR`'s default,
   `_marker_path()` emits one `logger.warning` carrying the sentinel token, so a
   single sentinel grep surfaces both break-glass paths.
-- [ ] **The predicate fails closed on an ambiguous call site**: `len(sites) != 1`
+- [x] **The predicate fails closed on an ambiguous call site**: `len(sites) != 1`
   (not just zero) returns `compatible=False` naming the count and the found
   paths; covered by a synthetic two-site test.
-- [ ] **The predicate fails closed on a splat-only call site**: a single
+- [x] **The predicate fails closed on a splat-only call site**: a single
   `create` site forwarding no literal keywords (e.g.
   `self.client.beta.messages.create(**kwargs)`) returns `compatible=False`
   naming the splat-entry count — never `True` by a vacuous subset test. Covered
   by `test_splat_only_call_site_fails_closed` against a synthetic module source.
-- [ ] **`/dashboard.json` actually renders it**: with a marker present,
+- [x] **`/dashboard.json` actually renders it**: with a marker present,
   `dashboard_json()` returns a truthy degraded field carrying both versions and
   the degraded process; with none, the healthy value; with an unreadable marker,
   a 200 and no raise.
-- [ ] `LLMStackIncompatible` is a `LLMCallError` subclass — asserted.
-- [ ] **`check_llm_stack_compat().compatible is True` on the branch's pinned
+- [x] `LLMStackIncompatible` is a `LLMCallError` subclass — asserted.
+- [x] **`check_llm_stack_compat().compatible is True` on the branch's pinned
   pair** — the positive self-test, run in CI. The derived kwarg set is taken
   from `pydantic_ai.models.anthropic`'s `.create(` call site (not from
   `AnthropicModelSettings.__annotations__`) and the target callable from that
   call's own attribute path; the set contains `temperature`/`top_p`/`top_k` and
   no `anthropic_`-prefixed name.
-- [ ] **Two axes, not one**: with the loader healthy and the signature check
+- [x] **Two axes, not one**: with the loader healthy and the signature check
   failing, `run_typed` raises `LLMStackIncompatible` and `run_typed_local`
   completes. Both raise when the loader fails.
-- [ ] `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits `_resolve_degraded_flag()`
+- [x] `LLM_STACK_COMPAT_OVERRIDE=healthy` short-circuits `_resolve_degraded_flag()`
   with a sentinel OVERRIDDEN warning, and is ignored by the pure predicate, the
   `--json` CLI, and the auto-bump `llm` gate. **The override branch also clears
   the caller's own marker** when a `proc` was passed, so it cannot strand a
   permanent red on a machine the operator has declared healthy — asserted by
   writing a bridge marker, resetting the memo, then resolving under the override.
-- [ ] `LOCAL_TYPED_HARD_TIMEOUT` is gone from `agent/llm/__init__.py`'s
+- [x] `LOCAL_TYPED_HARD_TIMEOUT` is gone from `agent/llm/__init__.py`'s
   `__all__`, replaced by `TIMEOUTS__LOCAL_TYPED_HARD_S`, with
   `docs/features/nonharness-llm-wrapper.md:56` corrected.
-- [ ] `AUTO_BUMP_SETS` declares `{anthropic, pydantic-ai-slim}` as one set with
+- [x] `AUTO_BUMP_SETS` declares `{anthropic, pydantic-ai-slim}` as one set with
   a truthy `hold`; `claude-agent-sdk` as its own unheld set; `openai` in no set
   (asserted in code); `CoupledSet.gates` defaults exclude `llm`.
-- [ ] The three spike-2 defects each have a regression test that fails against
+- [x] The three spike-2 defects each have a regression test that fails against
   the pre-fix helper (red-state proof recorded); `verify_critical_versions`
   returns identical results across the rewrite.
-- [ ] **Rollback verified in two named legs** (task 7), both transcripts in the
+- [x] **Rollback verified in two named legs** (task 7), both transcripts in the
   PR description — leg (a) unmocked on a throwaway checkout, leg (b)
   resolution-stubbed (stated as such: PyPI's real latest pair is compatible and
   would never roll back).
-- [ ] A failed LLM set does not roll back a successful `claude-agent-sdk` bump;
+- [x] A failed LLM set does not roll back a successful `claude-agent-sdk` bump;
   a gate that cannot run rolls back with a distinct warning; after every
   rollback path `git status --porcelain pyproject.toml uv.lock` is empty; a
   failed restore sets `restore_failed` and blocks the commit.
-- [ ] `openai` keeps its `>=1.0.0` floor — no resolution-semantics change ships
+- [x] `openai` keeps its `>=1.0.0` floor — no resolution-semantics change ships
   in this lane.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -2020,7 +2020,7 @@ Rows assert *declarations and executed paths*, not file text.
 | The `llm` phase and the manual gate invocation share one argv construction | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_phase_argv" -q` | exit code 0 |
 | The `--json` CLI is pure — zero `capture_message` calls **and** the memoized flag left unresolved, asserted in-process | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_compat.py -k "pure or cli" -q` | exit code 0 |
 | The marker redirect is a mechanism, not a per-file convention (executes; fails if the fixture is absent, misnamed, non-autouse, or erroring) | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_redirect_is_autouse" -q` | exit code 0 |
-| The autouse fixture is inert without `compat.py` (guarded-import form, not `raising=False`) | `./scripts/pytest-clean.sh tests/unit/test_settings.py -q` run on a tree with `agent/llm/compat.py` temporarily renamed away | exit code 0, zero setup errors |
+| The autouse fixture is inert without `compat.py` (guarded-import form, not `raising=False`) | `mv agent/llm/compat.py /tmp/compat-3001.bak && ./scripts/pytest-clean.sh tests/unit/test_settings.py -q; rc=$?; mv /tmp/compat-3001.bak agent/llm/compat.py 2>/dev/null; exit $rc` | exit code 0, zero setup errors (the restore runs unconditionally, so a failing run still leaves the tree intact) |
 | The marker-dir override announces itself | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "marker_dir_override_warns" -q` | exit code 0 |
 | `run_typed_local` behavior under an `anthropic`-only ImportError is asserted, not incidental | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "anthropic_import_error_local_path" -q` | exit code 0 |
 | The predicate reports the pinned pair **compatible** (the round-5 blocker's red state) | `.venv/bin/python -c "from agent.llm.compat import check_llm_stack_compat as c;r=c();assert r.compatible and r.loader_ok, r.reason"` | exit code 0 |
@@ -2044,7 +2044,7 @@ Rows assert *declarations and executed paths*, not file text.
 | Anti-criterion: no dependency upgrade smuggled in | `grep -cE '"pydantic-ai-slim\[anthropic\]==2\.9\.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `anthropic` pin unchanged by this lane | `grep -c '"anthropic==0.125.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `openai` floor unchanged | `grep -c '"openai>=1.0.0"' pyproject.toml` | output > 0 |
-| Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | output is 0 |
+| Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | output = 0 |
 | Update skill doc corrected | `! grep -q "import check" .claude/skills/update/SKILL.md` | exit code 0 |
 | Feature doc exists | `test -f docs/features/llm-stack-compat-gate.md` | exit code 0 |
 

@@ -91,6 +91,8 @@ python -m agent.llm.compat                         # human-readable one-liner
 
 A tooling entry point for subprocess callers, not an agent surface. It calls only the pure predicate.
 
+The human-readable form has three labels, not two: `compatible:`, `INCOMPATIBLE:`, and `UNVERIFIABLE:` — the last on `CompatResult.probe_skipped`, when `--allow-network` was asked for but no Anthropic API key is resolvable. `probe_skipped` is a public `CompatResult` field and appears in `--json`. **Exit status is 1 for both failure labels**; only the wording differs, and only so an operator reading a rollback message can tell "the pair is broken" from "this host could not tell". See [the gate phases](#the-gate-phases).
+
 `--allow-network` makes one real `create` call against a single-field probe model, going through `agent.llm.wrapper.run_typed` with the internal `_skip_guard=True` -- this bypasses `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()`, so the predicate's Purity contract holds on this branch while the call still gets `run_typed`'s shared #1111 `semaphore_slot()` and both of its timeouts, rather than hand-rolling a second, un-semaphored, un-timed client construction. It catches transport-class breaks (a moved HTTP layer, a changed auth header) that no signature comparison can see. It is billed, so only the auto-bump `llm` gate turns it on, and only on cycles where something actually bumped.
 
 ### The four call sites
@@ -232,11 +234,21 @@ There is no packaging coupling: `pydantic-ai-slim`'s locked dependencies contain
 
 | Phase | Command | Subprocess timeout |
 |---|---|---|
-| `llm` | `{venv}/bin/python -m agent.llm.compat --json --allow-network` | 120s |
+| `llm` | `{venv}/bin/python -m agent.llm.compat --json --allow-network` | 120s (see the no-key branch below) |
 | `import` | `{venv}/bin/python -c "import <each import_name>"` | 30s |
 | `pytest` | `{venv}/bin/python -m pytest tests/unit/test_docs_auditor_substrate.py -x -q` | 60s |
 
-`run_gate_phases` stops at the first failing phase and names it, so `run.py`'s rolled-back warning distinguishes an incompatible LLM pair from a flaky unrelated unit test. Fail-closed throughout: a phase that cannot run at all (no venv, timeout, `OSError`) is a **failed** phase, never a skipped one.
+`run_gate_phases` stops at the first failing phase and names it, so `run.py`'s rolled-back warning distinguishes an incompatible LLM pair from a flaky unrelated unit test. It returns the 4-tuple `(passed, failed_phase, output, gate_unverifiable)`.
+
+Fail-closed throughout, with **three** outcomes rather than two. A phase that cannot run at all (no venv, timeout, `OSError`) is a **failed** phase, never a skipped one. The third outcome is *unverifiable*, and it is still fail-closed: the set rolls back exactly as it would on a failure. Only the operator-facing wording differs.
+
+**The `llm` phase's no-key branch.** The live probe needs a real Anthropic API key, and most machines that are not the bot host have none. Rather than call an un-run probe a passing one, the chain carries the distinction as data:
+
+1. `check_llm_stack_compat(allow_network=True)` finds no resolvable key and returns `CompatResult(compatible=False, probe_skipped=True)`. The CLI prints `UNVERIFIABLE: <reason>` instead of `INCOMPATIBLE: <reason>`, and `probe_skipped` reaches `--json` as its own field. **Exit status is 1 either way** — nothing about this branch is a pass.
+2. `run_gate_phases` recognises that branch and returns `gate_unverifiable=True` as its fourth element. `_bump_coupled_set` reads that field directly and puts it on `AutoBumpResult.gate_unverifiable`; it is never re-derived by grepping `GATE_UNVERIFIABLE_MARKER` back out of the phase output, which only shapes the human-readable text.
+3. `scripts/update/run.py::_format_auto_bump_rollback_message` selects the operator's wording off that flag: *"rolled back (`llm` gate unverifiable, not incompatible)"* rather than *"rolled back (`llm` phase failed)"*. The distinction exists because the two demand different actions — one says the pair is broken, the other says this host could not tell.
+
+The rollback is identical in both cases. A set whose gate could not be evaluated does not ship.
 
 ### Atomicity and rollback
 
@@ -307,6 +319,7 @@ Do not change the `openai` guard in `deps.py` on the basis of this note. Removin
 | `ui/app.py` | `_get_llm_stack_health`, the marker glob into `/dashboard.json` |
 | `scripts/update/deps.py` | `CoupledSet`, `AUTO_BUMP_SETS`, gate phases, per-set rollback |
 | `scripts/update/verify.py` | `check_llm_stack_compat` → `ToolCheck` |
+| `scripts/update/run.py` | `_format_auto_bump_rollback_message`, the unverifiable-vs-incompatible operator wording |
 | `tests/unit/test_llm_import_safety.py` | the import-safety contract's single enforcement test |
 | `tests/unit/test_llm_stack_compat.py` | predicate, fail-closed cases, CLI |
 | `tests/unit/test_llm_stack_degraded_start.py` | degraded start, three channels, clear leg |
