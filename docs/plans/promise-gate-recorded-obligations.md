@@ -293,7 +293,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - [ ] `PM_TURN_JSON_SCHEMA` carries `ask_coverage`; `delivered` with empty `evidence` is rejected into the fallback path; `route:"continue"` accepts `[]`.
 - [ ] A two-clause ask answered on one clause triggers exactly one coverage bounce whose advisory names the dropped clause and its disposition; the revised turn is what ships (asserted end-to-end with a scripted driver whose revision states the disposition, proving the pipeline carries it to delivered text).
 - [ ] Incident A text ("Say the word and I'll…") blocks on the drafter main path; identical text with an open inbound expectation on the bound Job passes as `promise_recorded_override` — the R1 discriminator asserted directly.
-- [ ] Short path makes zero LLM calls (test-enforced); `elapsed_ms` lands on every audit row; measured p50/p99 reported in the PR against the <500ms/<3s budget.
+- [ ] Short path makes zero LLM calls (test-enforced); `elapsed_ms` lands on every audit row; measured p50/p99 reported in the PR against the budget — LLM path p50 ≤ 2500ms / p99 ≤ 5000ms (owner ruling 2026-09-03: the measured p50 is API latency, not contention, and is accepted), short path unchanged.
 - [ ] Phrasebook deleted; replacement teaches no phrasing workaround and retains the present-fact norm (both prompt-content-tested).
 - [ ] `promise_gate_timeout` audit source is reachable and deterministic (dead-code fix verified by the split test).
 - [ ] #3016 test asserts `action`, never `class_` labels; PR carries `Closes #3016`.
@@ -416,7 +416,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 - **Agent Type**: validator
 - **Parallel**: false
 - Execute the full Verification table; verify all Success Criteria.
-- **Latency report must characterize general outbound traffic, not one caller class.** Group `elapsed_ms` percentiles by audit `source` **and by calling surface**, and report each separately against the p50<500ms / p99<3s budget. A single blended number drawn from test-run rows is dominated by PM-turn-shaped drafter scenarios and does not satisfy the issue AC ("measured on general outbound traffic, not only PM turns"). Where a caller class (notably `bridge/email_bridge.py`) has no meaningful test-run sample, say so explicitly and schedule the sample from the post-merge audit JSONL rather than reporting a number that does not cover it.
+- **Latency report must characterize general outbound traffic, not one caller class.** Group `elapsed_ms` percentiles by audit `source` **and by calling surface**, and report each separately against the budget (LLM path p50 ≤ 2500ms / p99 ≤ 5000ms per the 2026-09-03 owner ruling; the zero-LLM short path stays at p50 ≈ 0ms). A single blended number drawn from test-run rows is dominated by PM-turn-shaped drafter scenarios and does not satisfy the issue AC ("measured on general outbound traffic, not only PM turns"). Where a caller class (notably `bridge/email_bridge.py`) has no meaningful test-run sample, say so explicitly and schedule the sample from the post-merge audit JSONL rather than reporting a number that does not cover it.
 
 ## Verification
 
@@ -488,3 +488,24 @@ Open questions were resolved by the owner at plan time; recorded here as the aut
 2. **No timed soak window.** Recent update churn precludes a reliable soak; both post-merge decisions (phase-B required-tightening, phase-4 build) live in investigation issue #3035, deferred to no earlier than 2026-09-10.
 3. **`promise_gate_drafter_llm`** as the additive audit source for main-path LLM verdicts.
 4. **All `draft_message` callers** get the main-path LLM gate — honesty is transport-level; the short path shields brief replies.
+
+## Owner Ruling (2026-09-03) — latency budget for the LLM path
+
+The p50 < 500ms figure predates the decision to put a real Haiku call inline on the
+composed drafter path. Task 9's measurement showed the LLM path at p50 ≈ 1619ms with
+`queue_wait_ms` ≈ 0, i.e. Anthropic API round-trip time, not semaphore contention — a
+floor no tuning reaches. **Ruled by the owner: the measured p50 on the obligation-carrying
+LLM path is accepted, and the budget is relaxed to match reality.**
+
+The budget for the LLM path is therefore **p50 ≤ 2500ms, p99 ≤ 5000ms**. The zero-LLM
+short path keeps its existing guarantee (p50 ≈ 0ms) and is unchanged by this ruling.
+
+<!-- Grain of salt: 2500/5000 are provisional and tunable. They are set roughly 1.5x
+     above the measured p50/p99 (1619ms / 2463ms) to leave headroom for API variance
+     without going so wide that a genuine regression hides inside them. Re-derive from
+     post-merge audit JSONL rather than treating them as settled. -->
+
+This closes the escalation raised in the PR body's "Open owner decision" section: option
+(a) is taken (restate the figure), option (b) (a cheaper heuristic short-circuit ahead of
+the LLM call) is explicitly **not** taken, because it would partly undo the purpose of
+moving LLM judgment onto the main path.
