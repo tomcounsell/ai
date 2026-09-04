@@ -90,7 +90,14 @@ _VALID_DISPOSITIONS = ("delivered", "blocked", "declined", "not_started")
 # false positive/negative rates on real evidence text drift.
 _NEGATION_WINDOW_CHARS = 24
 
-# Nouns that, immediately following a negative-evidence keyword match (e.g.
+# The subset of _NEGATIVE_EVIDENCE_KEYWORDS that DENY an outcome rather than
+# assert a bad one. Only these can be cancelled by a following object noun:
+# "did not hit any blockers" is good news, but "blocked on an issue" and
+# "failed due to an issue" are the ordinary way a person names a real
+# blocker, and cancelling those loses genuine contradictions.
+_NEGATION_SHAPED_KEYWORDS = ("could not", "couldn't", "unable", "did not", "didn't")
+
+# Nouns that, immediately following a NEGATION-SHAPED keyword match (e.g.
 # "did not hit any ..."), flip the phrase from a genuine failure claim into
 # a positive one -- the negation's object is the bad outcome, not the
 # claimed disposition itself.
@@ -131,19 +138,27 @@ def _any_positive_keyword_unnegated(evidence_lower: str) -> bool:
 
 def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
     """True when at least one ``_NEGATIVE_EVIDENCE_KEYWORDS`` occurrence in
-    ``evidence_lower`` is NOT followed, within ``_NEGATION_WINDOW_CHARS``,
-    by a ``_NEGATION_CANCELING_OBJECTS`` noun (e.g. "did not hit any
-    blockers" -- the negation's object is the bad outcome, so the phrase
-    reads as good news, not a genuine failure).
+    ``evidence_lower`` still reads as a genuine bad outcome.
 
-    Symmetric to :func:`_any_positive_keyword_unnegated`: both scope their
-    negation check to a window around the match instead of the whole
-    string.
+    A match is cancelled only when it is **negation-shaped**
+    (``_NEGATION_SHAPED_KEYWORDS`` -- it denies an outcome) AND is followed,
+    within ``_NEGATION_WINDOW_CHARS``, by a ``_NEGATION_CANCELING_OBJECTS``
+    noun: "did not hit any blockers" denies the bad outcome, so it reads as
+    good news. Keywords that ASSERT a bad outcome ("failed", "failure",
+    "blocked on") are never cancelled, because "blocked on an issue with the
+    signing key" and "failed due to an issue in prod" are the ordinary way a
+    person names a real blocker. Cancelling those would drop genuine
+    contradictions, and under-reporting is the worse error for the #3035
+    entry criterion this tool feeds.
+
+    Symmetric to :func:`_any_positive_keyword_unnegated` in that both scope
+    their check to a window around the match instead of the whole string.
     """
     for idx, kw in _iter_keyword_matches(evidence_lower, _NEGATIVE_EVIDENCE_KEYWORDS):
-        window = evidence_lower[idx + len(kw) : idx + len(kw) + _NEGATION_WINDOW_CHARS]
-        if any(obj in window for obj in _NEGATION_CANCELING_OBJECTS):
-            continue
+        if kw in _NEGATION_SHAPED_KEYWORDS:
+            window = evidence_lower[idx + len(kw) : idx + len(kw) + _NEGATION_WINDOW_CHARS]
+            if any(obj in window for obj in _NEGATION_CANCELING_OBJECTS):
+                continue
         return True
     return False
 
@@ -332,12 +347,15 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
       ``"blocked on the key, not done yet"`` and ``"not delivered"`` do not
       flag). See :func:`_any_positive_keyword_unnegated`.
     * A ``delivered`` disposition whose evidence contains a negative
-      keyword is flagged only when at least one occurrence of that keyword
-      is NOT followed, within the window, by a "negation-canceling" object
-      noun such as "blocker"/"issue"/"problem" -- ``"delivered clean, did
-      not hit any blockers"`` does not flag, because the negation's object
-      is the bad outcome, not the disposition. See
-      :func:`_any_negative_keyword_unnegated`.
+      keyword is flagged unless that occurrence is **negation-shaped**
+      (``_NEGATION_SHAPED_KEYWORDS``, which deny an outcome) AND is
+      followed within the window by a "negation-canceling" object noun
+      such as "blocker"/"issue"/"problem": ``"delivered clean, did not hit
+      any blockers"`` does not flag, because the negation's object is the
+      bad outcome rather than the disposition. Keywords that ASSERT a bad
+      outcome ("failed", "blocked on") are never cancelled this way, so
+      ``"delivered; blocked on an issue with the signing key"`` still
+      flags. See :func:`_any_negative_keyword_unnegated`.
     """
     flags: list[ContradictionFlag] = []
     for entry in entries:

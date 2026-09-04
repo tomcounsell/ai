@@ -368,8 +368,10 @@ documented as a follow-up).
   at roughly 1.5x the p50/p99 of 1619ms/2463ms that the ruling was
   computed against, to leave headroom for Anthropic API variance
   without hiding a genuine regression; provisional/tunable, re-derive
-  from post-merge audit JSONL). The current measurement (n=1088) is
-  p50 ~1635ms / p99 ~2531ms, comfortably inside this budget.
+  from post-merge audit JSONL). The current measurement over the
+  `promise_gate_drafter_llm` bucket (n=592 LLM-path rows, out of 1690
+  promise-gate rows total) is p50 ~1637ms / p99 ~2482ms, comfortably
+  inside this budget.
 * Zero-LLM short path (<200 chars, non-SDLC, no artifacts): p50 ~= 0ms,
   unchanged by the ruling above.
 
