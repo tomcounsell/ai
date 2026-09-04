@@ -597,7 +597,7 @@ Small, single-file-class, prose-only work. One builder, one validator.
   without this assertion reverting it leaves the guard green and the mutation proves
   nothing. **Scope it; do not go repo-wide.** A bare repo-wide `nightly` assertion is
   unsatisfiable: measured **134** legitimate tracked hits outside `docs/plans/`, led by
-  `docs/features/nightly-regression-tests.md` (25), `docs/features/nightly-alert-triage.md`
+  `docs/features/nightly-regression-tests.md` (25), `docs/features/nightly-triage-dispatch.md`
   (21), `scripts/nightly_regression_tests.py` (16) and `scripts/update/service.py` (10).
   Baseline across the four scoped files on main is `0;1;2;1`, so the assertion is red
   before the fix and green after — a real signal, not a tautology.

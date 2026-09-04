@@ -601,44 +601,47 @@ class TestReconfirmSerial:
         assert captured["env"]["TEST_DB_CLAIM_WAIT_S"] == "300"
 
 
-class TestSendTelegram:
-    def test_dry_run_does_not_call_subprocess(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture
-    ) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        with patch("subprocess.run") as mock_run:
-            nrt.send_telegram("test message", dry_run=True)
-            mock_run.assert_not_called()
+class TestNothingNotifies:
+    """The tracker is the detector's only output surface (issue #3134).
 
-    def test_missing_binary_logs_warning_and_returns(self, tmp_path: Path) -> None:
-        nrt.TELEGRAM_BIN = tmp_path / "nonexistent-bin"
-        nrt.LOG_FILE = tmp_path / "test.log"
-        with patch("shutil.which", return_value=None):
-            with patch("subprocess.run") as mock_run:
-                nrt.send_telegram("test message", dry_run=False)
-                mock_run.assert_not_called()
+    The owner's requirement was "i don't want alerts either" — so this is not a
+    style preference about where a message goes, it is a contract that no code
+    path in this script notifies anything. A regression that reintroduces a
+    Telegram send (or any other outbound channel) must fail here rather than be
+    discovered by a 03:00 page.
+    """
+
+    def test_module_has_no_telegram_surface_at_all(self) -> None:
+        for attr in ("send_telegram", "TELEGRAM_CHAT", "TELEGRAM_BIN"):
+            assert not hasattr(nrt, attr), f"{attr} is back — the detector must not notify"
+
+    def test_source_spawns_no_notifier_binary(self) -> None:
+        """Belt and braces: the send could come back under any name.
+
+        Docstrings are allowed to mention the removed sender (they explain WHY
+        it is gone), so this looks for the executable shapes: the binary name as
+        a string literal, and a definition of a sender.
+        """
+        source = Path(nrt.__file__).read_text()
+        for token in ('"valor-telegram"', "'valor-telegram'", "def send_telegram"):
+            assert token not in source, f"{token} appears in the nightly detector source"
 
 
 class TestFatal:
-    """_fatal() gives every pre-alert exit one alerting path (issue #2823)."""
+    """_fatal() records a run-level failure in the log and nowhere else."""
 
-    def test_logs_alerts_and_returns_1(self, tmp_path: Path) -> None:
+    def test_logs_and_returns_1(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        with patch.object(nrt, "send_telegram") as mock_send:
-            rc = nrt._fatal("something broke", dry_run=False)
+        rc = nrt._fatal("something broke")
         assert rc == 1
-        mock_send.assert_called_once()
-        assert "something broke" in mock_send.call_args.args[0]
         assert "something broke" in tmp_path.joinpath("test.log").read_text()
 
-    def test_send_telegram_failure_does_not_crash(self, tmp_path: Path) -> None:
+    def test_runs_no_subprocess(self, tmp_path: Path) -> None:
+        """A fatal path must not shell out — there is nothing left for it to call."""
         nrt.LOG_FILE = tmp_path / "test.log"
-        with patch.object(nrt, "send_telegram", side_effect=RuntimeError("telegram down")):
-            with pytest.raises(RuntimeError):
-                # send_telegram itself is documented never-fatal in production
-                # (it swallows its own exceptions); this asserts _fatal does
-                # not add its OWN try/except around it, per the plan.
-                nrt._fatal("boom", dry_run=False)
+        with patch("subprocess.run") as mock_run:
+            nrt._fatal("boom")
+        mock_run.assert_not_called()
 
 
 class TestRunLock:
@@ -673,11 +676,9 @@ class TestRunLock:
                 # to what this test asserts (#2573).
                 patch.object(nrt, "load_env_or_die", return_value=(42, None)),
                 patch.object(nrt, "run_tests") as mock_run_tests,
-                patch.object(nrt, "send_telegram") as mock_send_telegram,
             ):
                 result = nrt.main()
             mock_run_tests.assert_not_called()
-            mock_send_telegram.assert_not_called()
             assert result == 0
         finally:
             holder.close()
@@ -693,54 +694,6 @@ class TestRunLock:
         second = nrt._acquire_run_lock(lock_path)
         assert second is not None
         second.close()
-
-
-class TestSummarizeFailures:
-    """Tests for the LLM-backed failure summarizer with raw-preview fallback."""
-
-    @staticmethod
-    def _closing(value=None, exc=None):
-        """Build an asyncio.run replacement that closes the coroutine arg.
-
-        Avoids "coroutine was never awaited" RuntimeWarnings since the real
-        ``run_typed(...)`` coroutine object is still constructed by the call
-        site even though ``asyncio.run`` itself is mocked out.
-        """
-
-        def _fake_run(coro, *a, **kw):
-            coro.close()
-            if exc is not None:
-                raise exc
-            return value
-
-        return _fake_run
-
-    def test_fallback_on_exception(self, tmp_path: Path) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        confirmed = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        with patch("asyncio.run", side_effect=self._closing(exc=RuntimeError("llm boom"))):
-            result = nrt.summarize_failures(confirmed, {})
-        assert result == nrt._raw_failure_preview(confirmed)
-        log_contents = nrt.LOG_FILE.read_text()
-        assert "summarize_failures" in log_contents or "WARNING" in log_contents
-
-    def test_empty_input_returns_raw_fallback_no_llm_call(self, tmp_path: Path) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        with patch("asyncio.run") as mock_run:
-            result = nrt.summarize_failures([], {})
-            mock_run.assert_not_called()
-        assert result == ""
-
-    def test_success_drives_run_typed_via_asyncio_run(self, tmp_path: Path) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        confirmed = ["tests/unit/test_a.py::test_1"]
-        with patch(
-            "asyncio.run",
-            side_effect=self._closing(value=nrt.FailureSummary(summary="mocked")),
-        ) as mock_run:
-            result = nrt.summarize_failures(confirmed, {})
-            mock_run.assert_called_once()
-        assert result == "mocked"
 
 
 class TestComputeDispatchSet:
@@ -986,21 +939,25 @@ class TestResolveIntKnob:
 
 
 class TestPreFileDedup:
-    """The only dedup that spans machines: read the open issue set first (#3131)."""
+    """The only dedup that spans machines: read the open issue set first (#3131).
 
-    def test_already_open_titles_are_suppressed(self) -> None:
+    Since #3134 the partition also hands back the issue *number*, because the
+    default posture is to comment on the open issue rather than stay silent.
+    """
+
+    def test_already_open_titles_are_paired_with_their_issue_number(self) -> None:
         nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        open_titles = {"Nightly regression: tests/unit/test_a.py::test_1"}
-        to_dispatch, already = nrt.partition_already_open(nodes, open_titles)
+        open_issues = {"Nightly regression: tests/unit/test_a.py::test_1": 77}
+        to_dispatch, already = nrt.partition_already_open(nodes, open_issues)
         assert to_dispatch == ["tests/unit/test_b.py::test_2"]
-        assert already == ["tests/unit/test_a.py::test_1"]
+        assert already == [("tests/unit/test_a.py::test_1", 77)]
 
     def test_unreadable_open_set_fails_open(self) -> None:
         """Suppressing everything on a `gh` hiccup would silence a real regression."""
         nodes = ["tests/unit/test_a.py::test_1"]
         assert nrt.partition_already_open(nodes, None) == (nodes, [])
 
-    def test_open_issue_titles_uses_the_rest_list_not_the_lagging_search(
+    def test_open_issues_uses_the_rest_list_not_the_lagging_search(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
@@ -1008,7 +965,7 @@ class TestPreFileDedup:
 
         class FakeResult:
             returncode = 0
-            stdout = '[{"title": "Nightly regression: a::t1"}]'
+            stdout = '[{"number": 5, "title": "Nightly regression: a::t1"}]'
             stderr = ""
 
         def fake_run(argv, **kwargs):
@@ -1016,12 +973,13 @@ class TestPreFileDedup:
             return FakeResult()
 
         monkeypatch.setattr(nrt.subprocess, "run", fake_run)
-        assert nrt.open_issue_titles() == {"Nightly regression: a::t1"}
+        assert nrt.open_issues() == {"Nightly regression: a::t1": 5}
         assert seen["argv"][:4] == ["gh", "issue", "list", "--state"]
         assert "--search" not in seen["argv"]
+        assert "number" in ",".join(seen["argv"]), "the number is what makes commenting possible"
 
     @pytest.mark.parametrize("failure", ["rc", "raise", "garbage"])
-    def test_open_issue_titles_returns_none_on_any_failure(
+    def test_open_issues_returns_none_on_any_failure(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
     ) -> None:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
@@ -1037,7 +995,400 @@ class TestPreFileDedup:
             return FakeResult()
 
         monkeypatch.setattr(nrt.subprocess, "run", fake_run)
-        assert nrt.open_issue_titles() is None
+        assert nrt.open_issues() is None
+
+
+class TestRecurrenceComments:
+    """A recurrence that is not written down has not been reported (#3134)."""
+
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def _cascade(self, count: int = 6):
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(count)]
+        report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+        return nrt.group_setup_error_cascades(report, nodes)[0][0]
+
+    def test_cascade_comment_carries_run_head_and_blast_radius(self) -> None:
+        body = nrt.cascade_recurrence_comment(
+            self._cascade(), run_at="2026-09-04T03:00:00Z", head_commit="cafe1234"
+        )
+        assert "2026-09-04T03:00:00Z" in body
+        assert "cafe1234" in body
+        assert "6 node(s)" in body
+        assert "gw2" in body
+        assert "tests/unit/test_m.py::test_0" in body
+
+    def test_cascade_comment_truncates_a_whole_suite_poisoning(self) -> None:
+        """GitHub rejects a body over 65536 chars, and a rejected comment reports nothing.
+
+        The motivating incident was 278 nodes (~31KB). A worker that poisons a
+        larger schedule would silently post nothing at all without this cap.
+        """
+        body = nrt.cascade_recurrence_comment(
+            self._cascade(nrt.MAX_COMMENT_NODES_LISTED + 40),
+            run_at="2026-09-04T03:00:00Z",
+            head_commit="cafe1234",
+        )
+        assert "...and 40 more" in body
+        assert len(body) < 65536
+        # The counts survive truncation -- they are the load-bearing part.
+        assert f"{nrt.MAX_COMMENT_NODES_LISTED + 40} node(s)" in body
+
+    def test_node_comment_carries_run_head_and_node(self) -> None:
+        body = nrt.node_recurrence_comment(
+            "tests/unit/test_a.py::test_1", run_at="RUN", head_commit="HEAD"
+        )
+        assert "RUN" in body and "HEAD" in body
+        assert "tests/unit/test_a.py::test_1" in body
+
+    def test_missing_head_commit_is_stated_not_omitted(self) -> None:
+        assert "unknown" in nrt.node_recurrence_comment("a::t1", run_at="RUN", head_commit=None)
+
+    def test_comment_passes_the_body_on_stdin(self, monkeypatch, tmp_path: Path) -> None:
+        """A 278-node body has no business being an argv value."""
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        seen: dict = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            seen["input"] = kwargs.get("input")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.comment_on_issue(42, "the body") is True
+        assert seen["argv"] == ["gh", "issue", "comment", "42", "--body-file", "-"]
+        assert seen["input"] == "the body"
+
+    @pytest.mark.parametrize("failure", ["rc", "raise"])
+    def test_failed_comment_reports_false(self, monkeypatch, tmp_path: Path, failure) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        def fake_run(argv, **kwargs):
+            if failure == "raise":
+                raise OSError("gh missing")
+            return subprocess.CompletedProcess(argv, 1, "", "no such issue")
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.comment_on_issue(42, "body") is False
+
+    def test_dry_run_posts_nothing(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(
+            nrt.subprocess, "run", lambda *a, **k: pytest.fail("dry run shelled out")
+        )
+        assert nrt.comment_on_issue(42, "body", dry_run=True) is True
+
+
+class TestResolveCascadeIssue:
+    """Cascade identity is the normalized signature, not the rendered title."""
+
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def _cascade(self):
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(6)]
+        report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+        return nrt.group_setup_error_cascades(report, nodes)[0][0]
+
+    def test_signature_map_finds_the_issue_after_a_human_retitles_it(self) -> None:
+        """The case exact-title matching gets wrong, and the reason for the map.
+
+        A human renaming the issue to something readable must not cause the same
+        cascade to be filed a second time the following night.
+        """
+        cascade = self._cascade()
+        open_map = {"Redis pool poisoning on gw2 (renamed by hand)": 4242}
+        assert nrt.resolve_cascade_issue(cascade, open_map, {cascade["message"]: 4242}) == 4242
+
+    def test_title_match_bootstraps_the_map(self) -> None:
+        """This script never opens the issue, so night one cannot know its number."""
+        cascade = self._cascade()
+        assert nrt.resolve_cascade_issue(cascade, {cascade["title"]: 99}, {}) == 99
+
+    def test_recorded_number_that_is_no_longer_open_does_not_resolve(self) -> None:
+        cascade = self._cascade()
+        assert nrt.resolve_cascade_issue(cascade, {}, {cascade["message"]: 4242}) is None
+
+    def test_unreadable_open_list_fails_open(self) -> None:
+        cascade = self._cascade()
+        assert nrt.resolve_cascade_issue(cascade, None, {cascade["message"]: 4242}) is None
+
+
+class TestCarryCascadeIssues:
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def test_pending_entry_is_upgraded_once_the_title_appears(self) -> None:
+        title = nrt.cascade_title(self.MSG)
+        assert nrt.carry_cascade_issues({self.MSG: None}, {title: 4242}) == {self.MSG: 4242}
+
+    def test_unresolvable_pending_entry_is_dropped(self) -> None:
+        """No issue exists, so a recurrence deserves a fresh filing, not silence."""
+        assert nrt.carry_cascade_issues({self.MSG: None}, {}) == {}
+
+    def test_closed_issue_drops_out(self) -> None:
+        assert nrt.carry_cascade_issues({self.MSG: 4242}, {"unrelated": 7}) == {}
+
+    def test_unreadable_open_list_keeps_the_map_verbatim(self) -> None:
+        """`None` is "could not tell", never evidence that anything closed."""
+        prev = {self.MSG: 4242, "other": None}
+        assert nrt.carry_cascade_issues(prev, None) == prev
+
+
+class TestDispatchFindings:
+    """Comment-over-create is the default posture, not a fallback (#3134)."""
+
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def _report(self, nodes):
+        return {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+
+    def _body_failures(self, nodes):
+        """Test-body failures never collapse, so each is its own finding."""
+        return {
+            "tests": [
+                {
+                    "nodeid": n,
+                    "outcome": "failed",
+                    "setup": {"outcome": "passed"},
+                    "call": {"outcome": "failed", "longrepr": f"[gw1] AssertionError: {n}"},
+                }
+                for n in nodes
+            ]
+        }
+
+    def _dispatch(self, monkeypatch, tmp_path, *, nodes, open_map, prev=None, report=None, **kw):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
+        commented: list[int] = []
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+        )
+        filed: list[list[str]] = []
+
+        def fake_dispatch(ns, **kw):
+            if not ns:
+                return None
+            filed.append(list(ns))
+            return "sess-1"
+
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
+        outcome = nrt.dispatch_findings(
+            report if report is not None else self._report(nodes),
+            nodes,
+            prev or {},
+            run_at="2026-09-04T03:00:00Z",
+            head_commit="cafe1234",
+            **kw,
+        )
+        return outcome, commented, filed
+
+    def test_night_one_files_one_issue_and_records_the_signature_as_pending(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        outcome, commented, filed = self._dispatch(monkeypatch, tmp_path, nodes=nodes, open_map={})
+        assert (outcome.issues_filed, outcome.comments_posted) == (1, 0)
+        assert commented == []
+        assert len(filed) == 1
+        assert outcome.recorded == sorted(nodes)
+        assert outcome.cascade_issues == {self.MSG: None}
+
+    def test_night_two_comments_instead_of_filing_a_second_issue(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The whole point: a recurring cascade accretes a comment, never a twin."""
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            open_map={nrt.cascade_title(self.MSG): 4242},
+            prev={"cascade_issues": {self.MSG: None}},
+        )
+        assert (outcome.issues_filed, outcome.comments_posted) == (0, 1)
+        assert commented == [4242]
+        assert filed == []
+        assert outcome.recorded == sorted(nodes)
+        assert outcome.cascade_issues == {self.MSG: 4242}
+
+    def test_a_comment_that_failed_to_post_leaves_the_finding_unrecorded(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Recording it as handled would lose the recurrence permanently."""
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
+        monkeypatch.setattr(nrt, "comment_on_issue", lambda *a, **k: False)
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
+        outcome = nrt.dispatch_findings(
+            self._report(nodes), nodes, {}, run_at="RUN", head_commit="HEAD"
+        )
+        assert outcome.recorded == []
+        assert outcome.comments_posted == 0
+
+    def test_per_node_recurrence_is_commented_not_suppressed(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """#3131 dropped the duplicate silently, which lost the recurrence signal."""
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map={"Nightly regression: tests/unit/test_a.py::test_1": 11},
+        )
+        assert commented == [11]
+        assert filed == [["tests/unit/test_b.py::test_2"]]
+        assert sorted(outcome.recorded) == sorted(nodes)
+
+    def test_comments_do_not_spend_the_issue_budget(self, monkeypatch, tmp_path: Path) -> None:
+        """The cap bounds NEW tracker surface, and a comment creates none."""
+        monkeypatch.setenv("NIGHTLY_MAX_ISSUES_PER_RUN", "1")
+        nodes = [f"tests/unit/test_{c}.py::test_1" for c in "abcd"]
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map={f"Nightly regression: {n}": i for i, n in enumerate(nodes[:3], start=1)},
+        )
+        assert sorted(commented) == [1, 2, 3]
+        assert filed == [["tests/unit/test_d.py::test_1"]]
+        assert sorted(outcome.recorded) == sorted(nodes)
+
+    def test_cascades_only_suppresses_per_node_filing(self, monkeypatch, tmp_path: Path) -> None:
+        cascade_nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        report = self._report(cascade_nodes)
+        loner = "tests/unit/test_z.py::test_solo"
+        report["tests"].append(
+            {
+                "nodeid": loner,
+                "outcome": "failed",
+                "setup": {"outcome": "passed"},
+                "call": {"outcome": "failed", "longrepr": "[gw1] AssertionError: nope"},
+            }
+        )
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        filed: list[list[str]] = []
+        monkeypatch.setattr(
+            nrt,
+            "maybe_dispatch_triage_session",
+            lambda ns, **kw: (filed.append(list(ns)), "sess-1")[1] if ns else None,
+        )
+        outcome = nrt.dispatch_findings(
+            report,
+            [*cascade_nodes, loner],
+            {},
+            run_at="RUN",
+            head_commit="HEAD",
+            cascades_only=True,
+        )
+        assert outcome.issues_filed == 1
+        assert loner not in outcome.recorded
+        assert len(filed) == 1 and filed[0][0].startswith("cascade:")
+
+    def test_a_clean_night_never_shells_out_to_gh(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh on a clean night"))
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
+        outcome = nrt.dispatch_findings({"tests": []}, [], {}, run_at="RUN", head_commit="HEAD")
+        assert outcome.recorded == []
+
+
+class TestHandleIntegrityTrip:
+    """A storm must not become invisible now that nothing alerts (#3134)."""
+
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def _storm(self, count=20):
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(count)]
+        return nodes, {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+
+    def _prev(self):
+        return {
+            "collection": nrt.COLLECTION_PATHS,
+            "total": 16000,
+            "failed": 0,
+            "failing_tests": [],
+            "dispatched_nodes": [],
+        }
+
+    def test_trip_still_files_the_cascade(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+        monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
+        filed: list[list[str]] = []
+        monkeypatch.setattr(
+            nrt,
+            "maybe_dispatch_triage_session",
+            lambda ns, **kw: (filed.append(list(ns)), "sess-1")[1] if ns else None,
+        )
+        nodes, report = self._storm()
+        prev = self._prev()
+
+        rc = nrt._handle_integrity_trip("infrastructure, not a red suite", report, None, prev)
+
+        assert rc == 1
+        assert len(filed) == 1, "the storm was filed exactly once"
+        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        assert saved["dispatched_nodes"] == sorted(nodes)
+        assert saved["cascade_issues"] == {self.MSG: None}
+
+    def test_trip_never_overwrites_the_baseline(self, monkeypatch, tmp_path: Path) -> None:
+        """The guard just declared these totals untrustworthy; they must not land."""
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+        monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
+        _, report = self._storm()
+        prev = self._prev()
+
+        nrt._handle_integrity_trip("bad run", report, {"total": 40, "failed": 20}, prev)
+
+        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        assert saved["total"] == 16000
+        assert saved["failed"] == 0
+        assert saved["failing_tests"] == []
+
+    def test_trip_with_no_report_writes_nothing(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+        monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh with no report"))
+        assert nrt._handle_integrity_trip("no report", None, None, self._prev()) == 1
+        assert not nrt.LAST_RUN_FILE.exists()
+
+    def test_already_filed_storm_is_not_filed_again(self, monkeypatch, tmp_path: Path) -> None:
+        """Night after night, the same storm is one issue plus one comment each."""
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
+        monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
+        commented: list[int] = []
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+        )
+        monkeypatch.setattr(
+            nrt, "maybe_dispatch_triage_session", lambda *a, **k: pytest.fail("filed a twin")
+        )
+        nodes, report = self._storm()
+        prev = self._prev() | {"cascade_issues": {self.MSG: 4242}}
+
+        assert nrt._handle_integrity_trip("bad run", report, None, prev) == 1
+        assert commented == [4242]
+        assert json.loads(nrt.LAST_RUN_FILE.read_text())["dispatched_nodes"] == sorted(nodes)
+
+    def test_dry_run_trip_writes_no_state(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+        monkeypatch.setattr(nrt, "open_issues", lambda: {})
+        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
+        _, report = self._storm()
+        assert nrt._handle_integrity_trip("bad run", report, None, self._prev(), dry_run=True) == 1
+        assert not nrt.LAST_RUN_FILE.exists()
 
 
 class TestMaybeDispatchTriage:
@@ -1182,8 +1533,8 @@ class TestMainDispatchPersistence:
         run_result = (raw_report, self._run_result(confirmed), 0)
         with (
             # NOT --dry-run: these cases assert on the state main() persists,
-            # and --dry-run deliberately writes none. Telegram and dispatch are
-            # patched below, so the real path is already side-effect free here.
+            # and --dry-run deliberately writes none. Dispatch is patched
+            # below, so the real path is already side-effect free here.
             patch("sys.argv", ["nightly_regression_tests.py"]),
             # These cases exercise dispatch bookkeeping against a deliberately
             # tiny synthetic run (total=11). The real coverage floor (measured,
@@ -1196,16 +1547,19 @@ class TestMainDispatchPersistence:
             patch.object(
                 nrt, "reconfirm_serial", return_value=(list(confirmed), [], serial_trusted)
             ),
-            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
             patch.object(
                 nrt, "maybe_dispatch_triage_session", return_value=dispatch_return
             ) as mock_dispatch,
-            patch.object(nrt, "send_telegram") as mock_send,
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
             rc = nrt.main()
-        return rc, json.loads(nrt.LAST_RUN_FILE.read_text()), mock_dispatch, mock_send
+        return (
+            rc,
+            json.loads(nrt.LAST_RUN_FILE.read_text()),
+            mock_dispatch,
+            nrt.LOG_FILE.read_text(),
+        )
 
     def _prev(self, **kwargs):
         base = {"collection": nrt.COLLECTION_PATHS}
@@ -1248,12 +1602,13 @@ class TestMainDispatchPersistence:
         prev = self._prev(
             failing_tests=[], dispatched_nodes=[], dispatched_session_id="earlier-session"
         )
-        rc, saved, _, mock_send = self._run_main(tmp_path, prev, [node], "new-session-id")
+        rc, saved, _, log_text = self._run_main(tmp_path, prev, [node], "new-session-id")
         assert rc == 0
         assert saved["dispatched_nodes"] == [node]
         assert saved["dispatched_session_id"] == "new-session-id"
-        mock_send.assert_called_once()
-        assert "new-session-id" in mock_send.call_args.args[0]
+        # The tracker is the only output surface, so the log is where the shape
+        # of the night is recorded (#3134).
+        assert "Tracker:" in log_text
 
     def test_node_that_stopped_failing_drops_out(self, tmp_path: Path) -> None:
         prev = self._prev(failing_tests=["a::t1"], dispatched_nodes=["a::t1"])
@@ -1295,9 +1650,7 @@ class TestMainDispatchPersistence:
                 nrt, "run_tests", return_value=(raw_report, self._run_result(confirmed), 0)
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
-            patch.object(nrt, "summarize_failures", return_value="mocked"),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel") as disp,
-            patch.object(nrt, "send_telegram"),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -1355,9 +1708,7 @@ class TestMainDispatchPersistence:
                 nrt, "run_tests", return_value=(raw_report, self._run_result(confirmed), 0)
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
-            patch.object(nrt, "summarize_failures", return_value="mocked"),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel"),
-            patch.object(nrt, "send_telegram"),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -1386,15 +1737,14 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[], dispatched_nodes=[])
         pre_existing_bytes = json.dumps(prev)
         nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
-        rc, _, mock_dispatch, mock_send = self._run_main(
+        rc, _, mock_dispatch, log_text = self._run_main(
             tmp_path, prev, ["a::t1"], None, serial_trusted=False
         )
         assert rc == 1
         mock_dispatch.assert_not_called()
         # The pre-existing state file is untouched.
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing_bytes
-        mock_send.assert_called_once()
-        assert "did not happen" in mock_send.call_args.args[0]
+        assert "did not happen" in log_text
 
     def test_collection_mismatch_reseeds_with_no_per_node_dispatch(self, tmp_path: Path) -> None:
         prev = {"collection": ["tests/unit/"], "failing_tests": [], "dispatched_nodes": []}
@@ -1423,13 +1773,13 @@ class TestMainDispatchPersistence:
         pre_existing_bytes = json.dumps(prev)
         nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
         confirmed = ["a::t1", "b::t2", "c::t3"]
-        rc, _, _, mock_send = self._run_main(tmp_path, prev, confirmed, None)
+        rc, _, _, log_text = self._run_main(tmp_path, prev, confirmed, None)
 
         assert rc == 1
         # The pre-existing state file is byte-identical -- no baseline written.
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing_bytes
-        # And the operator is told, rather than seeing a success-shaped message.
-        assert "seed triage dispatch failed" in mock_send.call_args.args[0]
+        # And the reason is recorded, rather than a success-shaped log line.
+        assert "seed triage dispatch failed" in log_text
 
     def test_seeded_nodes_are_carried_forward_across_runs(self, tmp_path: Path) -> None:
         """The seed's umbrella coverage must outlive the night it was written.
@@ -1454,13 +1804,13 @@ class TestMainDispatchPersistence:
         # Night 2 dropped it from dispatched_nodes when it passed; the seed set
         # is what remains.
         prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=[node])
-        rc, saved, mock_dispatch, mock_send = self._run_main(tmp_path, prev, [node], None)
+        rc, saved, mock_dispatch, log_text = self._run_main(tmp_path, prev, [node], None)
 
         assert rc == 0
         mock_dispatch.assert_called_once_with([], dry_run=False)
         assert saved["seeded_nodes"] == [node]
-        # The regression is still announced even though no issue is filed.
-        assert "newly-confirmed failure" in mock_send.call_args.args[0]
+        # The regression is still recorded even though no issue is filed.
+        assert "newly-confirmed failure" in log_text
 
     def test_unseeded_node_that_regresses_is_still_dispatchable(self, tmp_path: Path) -> None:
         """The counterpart the seed suppression must not break.
@@ -1513,12 +1863,11 @@ class TestMainDispatchPersistence:
             patch.object(nrt, "load_env_or_die", return_value=(42, None)),
             patch.object(nrt, "run_tests", return_value=(None, None, 0)),
             patch.object(nrt, "reconfirm_serial") as mock_reconfirm,
-            patch.object(nrt, "send_telegram") as mock_send,
         ):
             rc = nrt.main()
         assert rc == 1
         mock_reconfirm.assert_not_called()
-        mock_send.assert_called_once()
+        assert "FATAL" in nrt.LOG_FILE.read_text()
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing_bytes
 
 
@@ -1657,13 +2006,11 @@ class TestFatalPathIntegration:
             patch("sys.argv", ["nightly_regression_tests.py"]),
             patch.object(nrt, "load_env_or_die", return_value=(0, "vault unreadable")),
             patch.object(nrt, "run_tests") as mock_run_tests,
-            patch.object(nrt, "send_telegram") as mock_send,
         ):
             rc = nrt.main()
         assert rc == 1
         mock_run_tests.assert_not_called()
-        mock_send.assert_called_once()
-        assert "vault unreadable" in mock_send.call_args.args[0]
+        assert "vault unreadable" in nrt.LOG_FILE.read_text()
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing
 
     def test_integrity_trip_is_fatal(self, tmp_path: Path) -> None:
@@ -1673,11 +2020,10 @@ class TestFatalPathIntegration:
             patch("sys.argv", ["nightly_regression_tests.py"]),
             patch.object(nrt, "load_env_or_die", return_value=(42, None)),
             patch.object(nrt, "run_tests", return_value=(None, None, 0)),
-            patch.object(nrt, "send_telegram") as mock_send,
         ):
             rc = nrt.main()
         assert rc == 1
-        mock_send.assert_called_once()
+        assert "FATAL" in nrt.LOG_FILE.read_text()
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing
 
     def test_run_tests_timeout_is_fatal(self, tmp_path: Path) -> None:
@@ -1691,42 +2037,11 @@ class TestFatalPathIntegration:
             patch.object(
                 nrt, "run_tests", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)
             ),
-            patch.object(nrt, "send_telegram") as mock_send,
         ):
             rc = nrt.main()
         assert rc == 1
-        mock_send.assert_called_once()
-        assert "timed out" in mock_send.call_args.args[0]
+        assert "timed out" in nrt.LOG_FILE.read_text()
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing
-
-
-class TestSendTelegramReturncode:
-    """A failed or rejected send must be distinguishable from a delivered one.
-
-    Before this check the success line was unconditional, so an unpaged night
-    read exactly like a paged one in the log (issue #2334, step 1).
-    """
-
-    def _send(self, tmp_path: Path, returncode: int, stderr: str = "chat not found"):
-        nrt.LOG_FILE = tmp_path / "test.log"
-        bin_path = tmp_path / "valor-telegram"
-        bin_path.write_text("#!/bin/sh\n")
-        nrt.TELEGRAM_BIN = bin_path
-        completed = subprocess.CompletedProcess(["x"], returncode, "", stderr)
-        with patch("subprocess.run", return_value=completed):
-            nrt.send_telegram("regression alert", dry_run=False)
-        return nrt.LOG_FILE.read_text()
-
-    def test_telegram_returncode_nonzero_warns_and_claims_no_success(self, tmp_path: Path) -> None:
-        log_text = self._send(tmp_path, returncode=3)
-        assert "WARNING: telegram send failed rc=3" in log_text
-        assert "chat not found" in log_text
-        assert "Telegram sent" not in log_text
-
-    def test_telegram_returncode_zero_logs_success(self, tmp_path: Path) -> None:
-        log_text = self._send(tmp_path, returncode=0, stderr="")
-        assert "Telegram sent: regression alert" in log_text
-        assert "WARNING: telegram send failed" not in log_text
 
 
 class TestSpawnPytestCwdSeam:
@@ -1826,12 +2141,10 @@ class TestPersistedStateKeyInvariance:
                 nrt, "run_tests", return_value=({"summary": {"total": 11}}, run_result, 0)
             ),
             patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
-            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="headsha"),
             patch.object(nrt, "classify_against_baseline", return_value=classification),
-            patch.object(nrt, "send_telegram"),
         ):
             assert nrt.main() == 0
         return json.loads(nrt.LAST_RUN_FILE.read_text())

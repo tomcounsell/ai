@@ -685,7 +685,7 @@ made the never-merge guarantee vacuous in round 6.
 ### Feature Documentation
 - [x] Update `docs/features/nightly-regression-tests.md` — document the new classification stage: the in-process `classify_against_baseline` function and its keyword-only injection seam, the baseline ref as **"the prior run's HEAD SHA"** (`prev["head_commit"]`, never bare `main`) with the per-node soundness sentence beside it — **do not call it "last-green" or "last-known-good"**, since L1092 writes it on every non-fatal run and nothing in the detector records greenness — the **seven classification preconditions** as the single canonical list, the classifier's **own** JSON report path and why it must not share `PYTEST_SERIAL_JSON_TMP`, the **provisioned persistent baseline worktree and why it must have its own `.venv`** (#3033), the three buckets and the fail-toward-escalate rule, the pure decision gate, the `off`/`shadow` modes, the `nightly-fix shadow-verdict:` log contract including its `reason=` token vocabulary, the sibling `nightly-fix shadow-buckets:` line and **the one-sentence statement of what the classifier discriminates that `compute_new_failures` does not** (`compute_new_failures` proves a node was ABSENT from the prior confirmed-failing set; the classifier proves it PASSED at that SHA — they differ exactly when the node was not collected then, was a filtered artifact, or the prior run was untrusted), the `PYTEST_BASELINE_TIMEOUT_SECONDS` bound, and the **two** guardrail constants.
 - [x] Update the worktree/disk-reclaim doc covering `tools/disk_reclaim.py` — record `PROTECTED_WORKTREE_SLUGS` and why `nightly-baseline` is never reaped. Do **not** reference `scripts/worktree-gc.sh`; it does not exist.
-- [x] Update `docs/features/nightly-alert-triage.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
+- [x] Update `docs/features/nightly-triage-dispatch.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
 - [x] Add/confirm entries in `docs/features/README.md` index.
 
 ### Inline Documentation
@@ -839,7 +839,7 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: nightly-doc
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/nightly-regression-tests.md` and `docs/features/nightly-alert-triage.md` + the index, per the Documentation section. Neither doc may describe a fixer, a watchdog, a hand-back, or a notify tier — those do not exist; point to #3076.
+- Update `docs/features/nightly-regression-tests.md` and `docs/features/nightly-triage-dispatch.md` + the index, per the Documentation section. Neither doc may describe a fixer, a watchdog, a hand-back, or a notify tier — those do not exist; point to #3076.
 
 ### 7. Final validation
 - **Task ID**: validate-all

@@ -121,10 +121,11 @@ class TestClassificationDisqualifiers:
 
     def test_empty_new_failures_never_reaches_the_gate_from_main(self, tmp_path: Path) -> None:
         """The real guarantee: no verdict line at all when nothing is newly failing."""
-        rc, _state, mock_send, log_text = _run_main(tmp_path, confirmed=[], mode="shadow")
+        rc, _state, classify, log_text = _run_main(tmp_path, confirmed=[], mode="shadow")
         assert rc == 0
         assert "shadow-verdict" not in log_text
-        mock_send.assert_not_called()
+        classify.assert_not_called()
+        assert "Clean run" in log_text
 
 
 # --- run-shape and data disqualifiers ----------------------------------------
@@ -339,9 +340,9 @@ def _run_main(
     classification: dict[str, list[str]] | None = None,
     classify_side_effect: Exception | None = None,
 ):
-    """Drive main() with everything below the alert branch stubbed out.
+    """Drive main() with everything below the reporting branch stubbed out.
 
-    Returns ``(rc, persisted_state_or_None, mock_send, log_text)``.
+    Returns ``(rc, persisted_state_or_None, classify_mock, log_text)``.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
     log_file = tmp_path / "nightly.log"
@@ -373,7 +374,6 @@ def _run_main(
         patch.object(nrt, "load_env_or_die", return_value=(42, None)),
         patch.object(nrt, "run_tests", return_value=(raw_report, _run_result(confirmed), 0)),
         patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
-        patch.object(nrt, "summarize_failures", return_value="mocked summary"),
         patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
         patch.object(nrt, "run_ttft_gate", return_value=None),
         patch.object(nrt, "_get_head_commit", return_value="headsha"),
@@ -383,90 +383,95 @@ def _run_main(
             return_value=classification,
             side_effect=classify_side_effect,
         ) as classify,
-        patch.object(nrt, "send_telegram") as mock_send,
     ):
         rc = nrt.main()
 
     state = json.loads(last_run.read_text())
     log_text = log_file.read_text() if log_file.exists() else ""
-    mock_send.classify = classify
-    return rc, state, mock_send, log_text
+    return rc, state, classify, log_text
+
+
+def _outcome_line(log_text: str) -> str:
+    """The night's summary line, without its timestamp prefix.
+
+    Since #3134 nothing is paged; the log line is the run's outcome statement,
+    so it is what the mode-invariance assertions compare.
+    """
+    for line in log_text.splitlines():
+        if "newly-confirmed failure(s)" in line:
+            return line.split(" UTC ", 1)[-1]
+    raise AssertionError(f"no outcome line in log:\n{log_text}")
 
 
 class TestModeGating:
-    """The up-front page fires in BOTH shipped modes, byte-identically."""
+    """The night's outcome is stated identically in BOTH shipped modes."""
 
     NODES = ["tests/unit/test_a.py::test_one", "tests/unit/test_b.py::test_two"]
 
-    def test_mode_gating_off_pages_and_does_no_classification(self, tmp_path: Path) -> None:
-        rc, _state, mock_send, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="off")
+    def test_mode_gating_off_reports_and_does_no_classification(self, tmp_path: Path) -> None:
+        rc, _state, classify, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="off")
         assert rc == 0
-        mock_send.assert_called_once()
-        mock_send.classify.assert_not_called()
+        assert _outcome_line(log_text)
+        classify.assert_not_called()
         assert "shadow-verdict" not in log_text
         assert "shadow-buckets" not in log_text
 
-    def test_mode_gating_shadow_pages_and_logs_the_verdict(self, tmp_path: Path) -> None:
-        rc, _state, mock_send, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="shadow")
+    def test_mode_gating_shadow_reports_and_logs_the_verdict(self, tmp_path: Path) -> None:
+        rc, _state, classify, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="shadow")
         assert rc == 0
-        mock_send.assert_called_once()
-        mock_send.classify.assert_called_once_with(sorted(self.NODES), "baselinesha")
+        assert _outcome_line(log_text)
+        classify.assert_called_once_with(sorted(self.NODES), "baselinesha")
         assert "nightly-fix shadow-verdict: autonomous-fix reason=none nodes=2" in log_text
 
-    def test_mode_gating_alert_text_is_byte_identical_across_modes(self, tmp_path: Path) -> None:
+    def test_mode_gating_outcome_is_byte_identical_across_modes(self, tmp_path: Path) -> None:
         """The behavioral assertion the report-path blocker would have failed.
 
         If the classifier had reused PYTEST_SERIAL_JSON_TMP, the shadow-mode
-        alert would be summarized from a report in which every newly-broken
-        node passed.
+        run would report on a report in which every newly-broken node passed.
         """
-        _rc, _s, send_off, _l = _run_main(tmp_path / "off", confirmed=self.NODES, mode="off")
-        _rc, _s, send_shadow, _l = _run_main(
+        _rc, _s, _c, off_log = _run_main(tmp_path / "off", confirmed=self.NODES, mode="off")
+        _rc, _s, _c, shadow_log = _run_main(
             tmp_path / "shadow", confirmed=self.NODES, mode="shadow"
         )
-        off_msg = send_off.call_args.args[0]
-        shadow_msg = send_shadow.call_args.args[0]
-        assert off_msg == shadow_msg
-        assert "newly-confirmed failure(s)" in off_msg
+        assert _outcome_line(off_log) == _outcome_line(shadow_log)
+        assert "2 newly-confirmed failure(s)" in _outcome_line(off_log)
 
     def test_mode_gating_unrecognized_mode_behaves_like_off(self, tmp_path: Path) -> None:
         with patch.object(nrt, "_FIX_MODE_WARNED", False):
-            _rc, _s, mock_send, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="active")
-        mock_send.assert_called_once()
-        mock_send.classify.assert_not_called()
+            _rc, _s, classify, log_text = _run_main(tmp_path, confirmed=self.NODES, mode="active")
+        assert _outcome_line(log_text)
+        classify.assert_not_called()
         assert "shadow-verdict" not in log_text
 
-    def test_mode_gating_shadow_tier_exception_never_suppresses_the_page(
+    def test_mode_gating_shadow_tier_exception_never_suppresses_the_outcome(
         self, tmp_path: Path
     ) -> None:
-        """Blocker fix (#3082 review): the shadow tier sits BEFORE send_telegram
-        on the failing-night path, so a classifier crash must be swallowed
-        (non-fatal, like the TTFT gate) with the page fired and the alert text
-        unchanged."""
-        _rc, _s, send_off, _l = _run_main(tmp_path / "off", confirmed=self.NODES, mode="off")
-        rc, _state, mock_send, log_text = _run_main(
+        """Blocker fix (#3082 review): a classifier crash must be swallowed
+        (non-fatal, like the TTFT gate) with the night's outcome still stated
+        and stated identically."""
+        _rc, _s, _c, off_log = _run_main(tmp_path / "off", confirmed=self.NODES, mode="off")
+        rc, _state, _classify, log_text = _run_main(
             tmp_path / "boom",
             confirmed=self.NODES,
             mode="shadow",
             classify_side_effect=RuntimeError("baseline worktree exploded"),
         )
         assert rc == 0
-        mock_send.assert_called_once()
-        assert mock_send.call_args.args[0] == send_off.call_args.args[0]
+        assert _outcome_line(log_text) == _outcome_line(off_log)
         assert "nightly-fix shadow tier error (non-fatal): baseline worktree exploded" in log_text
 
-    def test_mode_gating_shadow_escalate_still_pages(self, tmp_path: Path) -> None:
+    def test_mode_gating_shadow_escalate_still_reports(self, tmp_path: Path) -> None:
         """An escalate verdict changes nothing outbound in this tier."""
         classification = {
             "newly_broken": [],
             "pre_existing": list(self.NODES),
             "inconclusive": [],
         }
-        _rc, _s, mock_send, log_text = _run_main(
+        _rc, _s, _classify, log_text = _run_main(
             tmp_path,
             confirmed=self.NODES,
             mode="shadow",
             classification=classification,
         )
-        mock_send.assert_called_once()
+        assert _outcome_line(log_text)
         assert "nightly-fix shadow-verdict: escalate reason=pre_existing nodes=2" in log_text

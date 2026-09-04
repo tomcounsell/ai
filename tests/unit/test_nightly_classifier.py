@@ -307,7 +307,7 @@ def test_fixture_repo_without_venv_is_inconclusive(
 
     wrapper_abort = _run([str(nrt.PYTEST_CLEAN_SH), NODE, "-n0", "-q"], fixture_repo.bare_worktree)
     assert wrapper_abort.returncode != 0
-    assert "no .venv of its own" in wrapper_abort.stderr
+    assert "no usable .venv of its own" in wrapper_abort.stderr
 
     result = nrt.classify_against_baseline(
         [NODE],

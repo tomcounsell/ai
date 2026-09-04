@@ -248,7 +248,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/nightly-regression-tri
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/nightly-alert-triage.md` documenting the run lock, best-effort summarization, and auto-triage dispatch for both pipelines (dedup semantics, fallback discipline, fire-and-forget contract).
+- [ ] Create `docs/features/nightly-triage-dispatch.md` documenting the run lock, best-effort summarization, and auto-triage dispatch for both pipelines (dedup semantics, fallback discipline, fire-and-forget contract).
 - [ ] Add entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
@@ -297,7 +297,7 @@ The lead agent orchestrates; it does not build directly.
 
 - **Documentarian**
   - Name: `triage-docs`
-  - Role: Create `docs/features/nightly-alert-triage.md` + index entry.
+  - Role: Create `docs/features/nightly-triage-dispatch.md` + index entry.
   - Agent Type: documentarian
   - Resume: true
 
@@ -338,7 +338,7 @@ Tasks are grouped into **two sequential PRs** (see Appetite → Delivery split).
 - **Assigned To**: triage-validator, triage-docs
 - **Agent Type**: validator + documentarian
 - **Parallel**: false
-- Create/extend `docs/features/nightly-alert-triage.md` with the Scope 1 section (run lock, summarizer, issue-filing dispatch, dedup, `--slug`/`--json`/`asyncio.run` contract); add index entry.
+- Create/extend `docs/features/nightly-triage-dispatch.md` with the Scope 1 section (run lock, summarizer, issue-filing dispatch, dedup, `--slug`/`--json`/`asyncio.run` contract); add index entry.
 - Verify Scope 1 success criteria; confirm #2180/#1227 tests still pass; confirm exactly-one dispatch semantics and fallback discipline. **Open PR 1, merge before starting PR 2.**
 
 ### PR 2 — Scope 2 (Sentry triage), lands after PR 1 merges
@@ -361,7 +361,7 @@ Tasks are grouped into **two sequential PRs** (see Appetite → Delivery split).
 - **Assigned To**: triage-validator, triage-docs
 - **Agent Type**: validator + documentarian
 - **Parallel**: false
-- Extend `docs/features/nightly-alert-triage.md` with the Scope 2 section.
+- Extend `docs/features/nightly-triage-dispatch.md` with the Scope 2 section.
 - Verify all remaining success criteria including the non-engineer-readability manual sign-off (see Success Criteria). **Open PR 2 with `Closes #2192`.**
 
 ## Verification

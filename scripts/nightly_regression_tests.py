@@ -3,8 +3,14 @@
 
 Runs the default pytest collection (``COLLECTION_PATHS`` — the same set a bare
 ``scripts/pytest-clean.sh`` collects) with a JSON report, compares against a
-prior run, and sends a Telegram alert only when new failures appear. Clean
-runs are silent.
+prior run, and records what it finds on the **GitHub issue tracker**.
+
+The tracker is the detector's only output surface. It sends no Telegram, no
+mail, and no notification of any kind — not for a regression, not for a
+baseline, not for an infrastructure failure. A night with nothing new to say
+says nothing anywhere except this script's log. Everything it does have to say
+becomes at most one issue per distinct finding, and a finding that already has
+an open issue becomes a **comment on that issue** rather than a second one.
 
 Widened collection and run-integrity guard (issue #2823)
 ----------------------------------------------------------
@@ -22,8 +28,17 @@ unreadable vault) must never be mistaken for a clean night.
 report, a signal-death or usage-error exit code, a fixture-error storm, or
 (the case that matters most) a **coverage floor**: partial test-DB starvation
 produces zero ``error`` outcomes and a legal exit code, so only a floor on
-``total`` catches it. A tripped guard alerts loudly, writes no state, and
-dispatches nothing.
+``total`` catches it.
+
+A tripped guard means the *measurement* is untrustworthy, not that there is
+nothing to report — the 2026-09-03 storm tripped nothing only because the
+ceiling was unreachable, and the thing it was hiding was a real defect. So a
+trip does not swallow the night: it still collapses the failures into cascade
+umbrellas and comments-or-files those (:func:`dispatch_findings` with
+``cascades_only=True``), then stops. It deliberately does **not** overwrite the
+baseline totals or the confirmed-failing set — those numbers are the ones it
+just declared untrustworthy — and persists only what was filed, so a storm that
+recurs for a week accretes comments on one issue instead of re-filing it.
 
 Serial re-confirmation gate (issue #2180)
 -----------------------------------------
@@ -36,10 +51,10 @@ To disambiguate, after the parallel run we re-run **only the failing node IDs**
 serially (`-n0`). Tests that fail in parallel but pass serially are classified as
 xdist-parallelism *artifacts*; tests that fail in both are *confirmed*
 regressions. The state file persists the confirmed failing **set** (not a scalar
-count), so a regression alert fires only for *newly-confirmed* serial failures.
-Artifacts are logged but never alerted, killing the parallel-execution alert
-noise. The serial re-run targets only the already-failing node IDs, so it stays
-fast and never re-runs the whole suite.
+count), so a *newly-confirmed* serial failure is distinguishable from the
+standing population. Artifacts are logged but never filed, killing the
+parallel-execution noise. The serial re-run targets only the already-failing
+node IDs, so it stays fast and never re-runs the whole suite.
 
 The serial pass also reports whether it can be *trusted*: a report that does
 not cover every input node (a starved serial worker, a wedge) must not be read
@@ -48,8 +63,8 @@ as "these all passed" — that is the false green :func:`reconfirm_serial`'s
 
 Triage dispatch is deduped per node (issue #2559)
 -------------------------------------------------
-The Telegram alert and the triage dispatch answer different questions. The alert
-asks "is this a regression since last night" (``compute_new_failures``); the
+Two different questions live in this script and must not be conflated.
+:func:`compute_new_failures` asks "is this a regression since last night"; the
 dispatch asks "does this node already have an issue against it"
 (``compute_dispatch_set``, diffing against the persisted ``dispatched_nodes``
 set). Conflating them re-triaged the entire standing failure set whenever any
@@ -58,22 +73,45 @@ over the same dead watchdog node. A node stays suppressed while it keeps
 failing and drops out of the set once it passes, so a genuine re-regression is
 dispatchable again and a renamed node retires itself.
 
-Cascade collapsing and pre-file dedup (issue #3131)
----------------------------------------------------
+One issue per distinct finding, comments for the rest (issues #3131, #3134)
+---------------------------------------------------------------------------
 Per-node dedup answers "has this node been filed", which says nothing about
 whether two nodes are the same defect. One poisoned xdist worker — a leaked
 global Redis pool that makes the autouse ``redis_test_db`` fixture raise for
 every subsequent test on that worker — produced 278 identical setup errors on
-2026-09-03 and 26 GitHub issues. Three things now stand between that shape and
-the tracker: an absolute ``NIGHTLY_MAX_SETUP_ERRORS`` ceiling that calls the night
-infrastructure rather than a red suite (the old relative ceiling could not fire
-at the widened collection's scale); :func:`group_setup_error_cascades`, which
-turns nodes sharing one normalized setup-error message on one worker into ONE
-umbrella issue; and :func:`open_issue_titles`, a pre-file read of the open
-issue set that suppresses anything already filed — the only check that spans
-machines, since ``dispatched_nodes`` is per-machine state. Both issue shapes
-draw from one ``NIGHTLY_MAX_ISSUES_PER_RUN`` budget, and everything suppressed is
-logged rather than silently dropped.
+2026-09-03 and 26 GitHub issues. Four things now stand between that shape and
+the tracker.
+
+1. An absolute ``NIGHTLY_MAX_SETUP_ERRORS`` ceiling that calls such a night
+   infrastructure rather than a red suite. The old ceiling was
+   ``max(50, 0.02 * total)``, whose relative term *raises* the bar — at the
+   widened collection's ~16k items it stood at 325 and could not fire.
+2. :func:`group_setup_error_cascades`, which turns nodes sharing one normalized
+   setup-error message into ONE umbrella finding.
+3. **Comment-over-create.** A finding whose issue is already open is never
+   filed again: :func:`comment_on_issue` posts the recurrence (run timestamp,
+   HEAD, blast radius, worker ids) on the existing issue instead. Suppressing
+   the duplicate silently — the first cut of this fix — loses the one signal
+   that says a defect is still live, so a recurring cascade should be one issue
+   accreting one comment per night, forever.
+4. A ``NIGHTLY_MAX_ISSUES_PER_RUN`` budget both issue shapes draw from, so a run
+   cannot exceed it by splitting findings across the two. Everything suppressed
+   or deferred is logged rather than silently dropped.
+
+Identity is what makes (3) work, and it is deliberately **not** the rendered
+issue title. A cascade is identified by its normalized setup-error signature —
+the same key :func:`cascade_title` hashes — and the signature is persisted
+alongside the issue number it produced in ``cascade_issues``. A title is a
+rendering that can be edited by a human or changed by a future version of this
+script; matching on one is how the same defect gets filed twice. The recorded
+number is the primary lookup and the title match is the fallback that bootstraps
+it, since the triage session, not this script, is what actually opens the issue,
+so its number is only discoverable on a later run.
+
+``cascade_issues`` is per-machine state, like ``dispatched_nodes``. The open-issue
+read (:func:`open_issues`) is the only check that spans machines, and it is a
+read-then-act check with no lock — two machines dispatching inside the same
+window still both file.
 
 Collection-aware baseline (issue #2823)
 ----------------------------------------
@@ -85,18 +123,20 @@ population and dispatches **one** umbrella triage session, rather than filing
 every one of those nodes individually — reopening the #2429/#2430/#2462 churn
 the dedup set exists to prevent.
 
-A post-run TTFT gate (issue #1227) reports cold-start latency regressions as
-Telegram alerts without changing the exit code.
+A post-run TTFT gate (issue #1227) checks cold-start latency and logs a
+regression without changing the exit code. It used to page; it now only logs,
+because the tracker is this script's only output surface (#3134). The gate
+itself is retained — the measurement and its evidence are still worth having —
+but nothing carries its verdict off this machine.
 
 Usage:
-    python scripts/nightly_regression_tests.py             # Run tests, send Telegram on regression
-    python scripts/nightly_regression_tests.py --dry-run   # Preview without sending Telegram
+    python scripts/nightly_regression_tests.py             # Run tests, file/comment on findings
+    python scripts/nightly_regression_tests.py --dry-run   # Preview; files nothing, writes nothing
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import errno
 import fcntl
 import hashlib
@@ -111,18 +151,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
-
-from agent.llm.wrapper import run_typed
-from config.models import MODEL_FAST
-
 PROJECT_DIR = Path(__file__).parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 LAST_RUN_FILE = DATA_DIR / "nightly_tests_last_run.json"
 LOCK_FILE = DATA_DIR / "nightly_tests.lock"
 LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
-TELEGRAM_CHAT = "Eng: Valor"
-TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
 PYTEST_CLEAN_SH = PROJECT_DIR / "scripts" / "pytest-clean.sh"
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 PYTEST_SERIAL_JSON_TMP = "/tmp/nightly_pytest_serial_report.json"
@@ -280,6 +313,22 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 
+# Posting one recurrence comment. Bounded on the same rule as the list read
+# above; a comment that cannot be posted is logged and the finding is left
+# unrecorded, so the next run retries it rather than losing the recurrence.
+GH_COMMENT_TIMEOUT_SECONDS = 60
+
+# How many node IDs a recurrence comment lists before truncating to a count.
+# GitHub rejects an issue comment body over 65536 characters outright, and the
+# motivating cascade (278 nodes) already renders ~31KB — a whole-suite poisoning
+# would exceed the limit and post NOTHING, losing the recurrence entirely.
+#
+# Provisional/tunable. 200 keeps the worst case near 25KB with generous headroom
+# for long parametrized node IDs. It is deliberately a plain module int and not
+# an env knob: nobody tunes this per machine, and the counts above the list —
+# not the list — are what the comment is actually for.
+MAX_COMMENT_NODES_LISTED = 200
+
 # Autonomous-fix gate mode (issue #2334). Two values ship:
 #   off     — skip classification, the gate, and the verdict log entirely;
 #             the detector behaves exactly as it did before this feature.
@@ -319,7 +368,7 @@ TTFT_THRESHOLD_SECONDS = 120.0
 # job now runs directly as the venv python, which holds the macOS Desktop-folder
 # TCC grant; /bin/bash does NOT, which is why the plist no longer routes the load
 # through a `source` step (issue #2327). We load the vault into os.environ here so
-# the pytest / valor-telegram subprocesses this script spawns inherit API keys,
+# the pytest / gh / triage-session subprocesses this script spawns inherit API keys,
 # feature flags, and DB settings — exactly what `set -a; source .env` used to do.
 ENV_FILE = PROJECT_DIR / ".env"
 # Provisional/tunable floor. A healthy vault load is ~115 keys; a load at or below
@@ -1236,56 +1285,21 @@ def log_shadow_verdict(
     log(f"nightly-fix shadow-verdict: {verdict} reason={reason} nodes={len(new_failures)}")
 
 
-def send_telegram(msg: str, dry_run: bool = False) -> None:
-    """Send msg via valor-telegram. Best-effort — never crashes the script."""
-    if dry_run:
-        log(f"[DRY RUN] Would send Telegram: {msg}")
-        return
+def _fatal(reason: str) -> int:
+    """Record a run-level failure in the log and return the exit code for ``main()``.
 
-    bin_path = TELEGRAM_BIN
-    if not bin_path.exists():
-        # Fallback: try PATH resolution
-        import shutil
-
-        resolved = shutil.which("valor-telegram")
-        if resolved:
-            bin_path = Path(resolved)
-        else:
-            log("WARNING: valor-telegram not found — skipping Telegram notification")
-            return
-
-    try:
-        result = subprocess.run(
-            [str(bin_path), "send", "--chat", TELEGRAM_CHAT, msg],
-            capture_output=True,
-            text=True,
-            timeout=30,  # timeout-guard: allow
-        )
-        if result.returncode != 0:
-            # The success line must stay on the zero branch: an unpaged night is
-            # only visible in the log if a failed send says so.
-            log(
-                f"WARNING: telegram send failed rc={result.returncode} "
-                f"stderr={(result.stderr or '').strip()}"
-            )
-        else:
-            log(f"Telegram sent: {msg}")
-    except Exception as exc:
-        log(f"WARNING: Failed to send Telegram: {exc}")
-
-
-def _fatal(reason: str, dry_run: bool) -> int:
-    """Report a pre-alert failure loudly and return the exit code for ``main()``.
-
-    Every arm that used to exit 1 silently (a timeout, a corrupt report, an
-    env-load refusal, an integrity-guard trip) now routes through here so it
-    pages an operator instead of a nightly job that fails quietly forever.
+    Every arm that cannot produce a trustworthy result (a timeout, a corrupt
+    report, an env-load refusal, an untrusted serial pass) routes through here.
     No arm reaches ``save_last_run()`` — a failed run must never overwrite a
-    good baseline. ``send_telegram`` is documented never-fatal, so no
-    try/except is needed around it.
+    good baseline.
+
+    This used to send a Telegram. It no longer notifies anything: the tracker is
+    this script's only output surface (#3134). That places a real obligation on
+    the callers — an arm that both refuses to report *and* refuses to file has
+    made the night invisible. The integrity-guard arm therefore does not route
+    through here at all; it files its cascades first (see ``main()``).
     """
     log(f"FATAL: {reason}")
-    send_telegram(f"Nightly tests could not run: {reason}", dry_run=dry_run)
     return 1
 
 
@@ -1403,66 +1417,6 @@ def carry_dispatched_nodes(
     """
     still_failing = prior_dispatched(prev) & set(confirmed_failing)
     return sorted(still_failing | set(just_dispatched))
-
-
-class FailureSummary(BaseModel):
-    summary: str
-
-
-def _raw_failure_preview(node_ids: list[str]) -> str:
-    """Build the raw node-ID preview text (first 5 + '+N more')."""
-    preview = ", ".join(node_ids[:5])
-    if len(node_ids) > 5:
-        preview += f", +{len(node_ids) - 5} more"
-    return preview
-
-
-def summarize_failures(node_ids: list[str], report: dict) -> str:
-    """Summarize newly-confirmed failures via a cheap LLM call, best-effort.
-
-    ``node_ids`` is the newly-confirmed set from :func:`compute_new_failures`,
-    which is what makes the "Newly-confirmed" heading below accurate.
-
-    Groups failing node IDs by file and pulls short tracebacks from the
-    pytest ``--json-report`` payload when available. On ANY failure (empty
-    input short-circuits before the LLM call; network error, schema
-    validation failure, timeout, etc. are all caught) falls back to the raw
-    node-ID preview format that ``main()`` used to build inline.
-    """
-    if not node_ids:
-        return _raw_failure_preview(node_ids)
-
-    by_file: dict[str, list[str]] = {}
-    for nodeid in node_ids:
-        file_part = nodeid.split("::", 1)[0]
-        by_file.setdefault(file_part, []).append(nodeid)
-
-    tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
-
-    lines = ["Newly-confirmed nightly test failures, grouped by file:"]
-    for file_part, file_node_ids in sorted(by_file.items()):
-        lines.append(f"\n{file_part}:")
-        for nodeid in file_node_ids:
-            lines.append(f"  - {nodeid}")
-            test_entry = tests_by_id.get(nodeid, {})
-            call = test_entry.get("call", {})
-            traceback_text = call.get("longrepr") or test_entry.get("crash", {}).get("message", "")
-            if traceback_text:
-                snippet = str(traceback_text).strip().splitlines()
-                if snippet:
-                    lines.append(f"    {snippet[-1][:200]}")
-    lines.append(
-        "\nWrite a 1-3 sentence plain-English summary of what's failing and a "
-        "likely root cause area, for a Telegram alert to an engineer."
-    )
-    prompt = "\n".join(lines)
-
-    try:
-        result = asyncio.run(run_typed(prompt, FailureSummary, model=MODEL_FAST))
-        return result.summary
-    except Exception as exc:  # noqa: BLE001
-        log(f"WARNING: summarize_failures LLM call failed ({exc}); using raw preview")
-        return _raw_failure_preview(node_ids)
 
 
 def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
@@ -1654,20 +1608,24 @@ def _build_cascade_prompt(cascade: dict) -> str:
     )
 
 
-def open_issue_titles(
+def open_issues(
     *,
     limit: int = OPEN_ISSUE_LIST_LIMIT,
     timeout: int = OPEN_ISSUE_LIST_TIMEOUT_SECONDS,
-) -> set[str] | None:
-    """Titles of every currently-open GitHub issue, or ``None`` if unreadable.
+) -> dict[str, int] | None:
+    """Map ``title -> number`` for every open GitHub issue, or ``None`` if unreadable.
 
-    This is the pre-file dedup the triage agent's own search-before-file
-    instruction cannot provide. ``dispatched_nodes`` is per-machine state, so a
-    second machine running the same nightly re-dispatches titles this machine
-    already filed; and GitHub's search index lags issue creation by minutes, so
-    even a single machine's retry can miss its own issue. Reading the REST list
+    This is the dedup the triage agent's own search-before-file instruction
+    cannot provide. ``dispatched_nodes`` is per-machine state, so a second
+    machine running the same nightly re-dispatches titles this machine already
+    filed; and GitHub's search index lags issue creation by minutes, so even a
+    single machine's retry can miss its own issue. Reading the REST list
     endpoint (``gh issue list``, not ``--search``) sees an issue the instant it
     exists.
+
+    The **number** is what makes comment-over-create possible: knowing that a
+    title is taken only lets a run stay silent, which is what loses the
+    recurrence signal (#3134).
 
     ``None`` means "could not tell" and the caller **fails open** — dispatching
     a possible duplicate is a smaller harm than silently filing nothing on the
@@ -1684,7 +1642,7 @@ def open_issue_titles(
                 "--limit",
                 str(limit),
                 "--json",
-                "title",
+                "number,title",
             ],
             cwd=PROJECT_DIR,
             capture_output=True,
@@ -1692,42 +1650,173 @@ def open_issue_titles(
             timeout=timeout,  # timeout-guard: allow
         )
     except Exception as exc:  # noqa: BLE001  # TimeoutExpired, FileNotFoundError, ...
-        log(f"WARNING: could not list open issues for pre-file dedup ({exc})")
+        log(f"WARNING: could not list open issues for dedup ({exc})")
         return None
 
     if result.returncode != 0:
         log(
-            f"WARNING: `gh issue list` exited {result.returncode} for pre-file dedup: "
+            f"WARNING: `gh issue list` exited {result.returncode} for dedup: "
             f"{(result.stderr or '').strip()}"
         )
         return None
 
     try:
-        return {row["title"] for row in json.loads(result.stdout) if row.get("title")}
+        return {
+            row["title"]: int(row["number"])
+            for row in json.loads(result.stdout)
+            if row.get("title") and row.get("number") is not None
+        }
     except Exception as exc:  # noqa: BLE001
-        log(f"WARNING: could not parse open issue titles for pre-file dedup ({exc})")
+        log(f"WARNING: could not parse open issues for dedup ({exc})")
         return None
 
 
+def comment_on_issue(number: int, body: str, *, dry_run: bool = False) -> bool:
+    """Post ``body`` as a comment on issue ``number``. Returns success.
+
+    The body goes in on **stdin** (``--body-file -``), never as an argv value: a
+    cascade comment carries a collapsed list of every affected node, which for
+    the motivating incident was 278 of them and well past a comfortable argument
+    length.
+
+    Failure is reported and returns ``False`` rather than raising. The caller
+    must then leave the finding unrecorded so the next run retries it — a
+    recurrence that could not be written down has not been reported, and
+    recording it as filed would lose it permanently.
+    """
+    if dry_run:
+        log(f"[DRY RUN] Would comment on issue #{number} ({len(body)} chars); nothing posted")
+        return True
+
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "comment", str(number), "--body-file", "-"],
+            cwd=PROJECT_DIR,
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=GH_COMMENT_TIMEOUT_SECONDS,  # timeout-guard: allow
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: could not comment on issue #{number} ({exc})")
+        return False
+
+    if result.returncode != 0:
+        log(
+            f"WARNING: `gh issue comment` on #{number} exited {result.returncode}: "
+            f"{(result.stderr or '').strip()}"
+        )
+        return False
+
+    log(f"Commented recurrence on issue #{number}")
+    return True
+
+
+def _recurrence_header(run_at: str, head_commit: str | None) -> list[str]:
+    """The two facts every recurrence comment leads with: when, and against what."""
+    return [
+        "Recurred on the nightly regression run.",
+        "",
+        f"- Run: `{run_at}`",
+        f"- HEAD: `{head_commit or 'unknown'}`",
+    ]
+
+
+def cascade_recurrence_comment(cascade: dict, *, run_at: str, head_commit: str | None) -> str:
+    """The comment body recording one more night of an already-filed cascade.
+
+    Carries the blast radius (node and file counts, worker ids) because that is
+    the part that moves between nights and the part that says whether the defect
+    is getting worse. The node list itself is collapsed — an issue that accretes
+    a comment per night must stay readable — and truncated, because the counts
+    above it are the load-bearing part and a comment that exceeds GitHub's body
+    limit posts nothing at all.
+    """
+    nodes = cascade["nodes"]
+    files = sorted({n.split("::", 1)[0] for n in nodes})
+    workers = ", ".join(cascade["workers"]) or "serial run"
+    listed = nodes[:MAX_COMMENT_NODES_LISTED]
+    lines = [
+        *_recurrence_header(run_at, head_commit),
+        f"- Blast radius: {len(nodes)} node(s) across {len(files)} file(s)",
+        f"- xdist worker(s): {workers}",
+        f"- Shared setup error: `{cascade['message']}`",
+        "",
+        "<details><summary>Affected node IDs</summary>",
+        "",
+        *[f"- `{n}`" for n in listed],
+    ]
+    if len(nodes) > len(listed):
+        lines.append(f"- ...and {len(nodes) - len(listed)} more")
+    lines += ["", "</details>"]
+    return "\n".join(lines)
+
+
+def node_recurrence_comment(node: str, *, run_at: str, head_commit: str | None) -> str:
+    """The comment body recording one more night of an already-filed single node."""
+    return "\n".join([*_recurrence_header(run_at, head_commit), f"- Node: `{node}`"])
+
+
+def resolve_cascade_issue(
+    cascade: dict,
+    open_issue_map: dict[str, int] | None,
+    prev_cascade_issues: dict[str, int | None],
+) -> int | None:
+    """The number of the open issue already representing this cascade, or ``None``.
+
+    Lookup order, and the order matters:
+
+    1. The number recorded against this cascade's **normalized signature** in
+       ``cascade_issues``, if that issue is still open. The signature is stable
+       across nights; the rendered title is not guaranteed to be, because a human
+       can retitle an issue and a future version of this script can change
+       :func:`cascade_title`. Keying recurrence on the title alone is how the
+       same defect gets filed twice.
+    2. The title match, which is the bootstrap. This script does not open issues
+       itself — a triage session does — so the number is undiscoverable on the
+       night of filing and can only be learned by matching the title on a later
+       run. Once learned it is persisted and (1) takes over.
+
+    ``None`` from an unreadable open-issue list means "could not tell", and the
+    caller fails open by filing.
+    """
+    if open_issue_map is None:
+        return None
+    recorded = prev_cascade_issues.get(cascade["message"])
+    if isinstance(recorded, int) and recorded in set(open_issue_map.values()):
+        return recorded
+    return open_issue_map.get(cascade["title"])
+
+
 def partition_already_open(
-    nodes: list[str], open_titles: set[str] | None
-) -> tuple[list[str], list[str]]:
-    """Split per-node dispatch candidates into ``(to_dispatch, already_open)``.
+    nodes: list[str], open_issue_map: dict[str, int] | None
+) -> tuple[list[str], list[tuple[str, int]]]:
+    """Split per-node candidates into ``(to_file, already_open)``.
+
+    ``already_open`` pairs each node with the number of its existing issue, so
+    the caller can comment on it rather than merely stay quiet.
 
     Keyed on the same ``Nightly regression: {node}`` title
     :func:`_build_triage_prompt` emits, so the check and the filing contract
-    cannot drift. ``open_titles`` of ``None`` (unreadable) disables the
-    suppression entirely rather than guessing.
+    cannot drift. A per-node finding has no signature to key on the way a
+    cascade does — the node id *is* its identity, and it is already embedded in
+    the title verbatim, so the title is a faithful key here in a way it is not
+    for a cascade.
 
-    The caller records ``already_open`` as dispatched: an issue for that node
-    demonstrably exists, so retrying it every night would rebuild the churn
-    this suppression exists to end.
+    ``open_issue_map`` of ``None`` (unreadable) disables the suppression
+    entirely rather than guessing.
     """
-    if open_titles is None:
+    if open_issue_map is None:
         return list(nodes), []
-    to_dispatch = [n for n in nodes if f"Nightly regression: {n}" not in open_titles]
-    already_open = [n for n in nodes if f"Nightly regression: {n}" in open_titles]
-    return to_dispatch, already_open
+    to_file: list[str] = []
+    already_open: list[tuple[str, int]] = []
+    for node in nodes:
+        number = open_issue_map.get(f"Nightly regression: {node}")
+        if number is None:
+            to_file.append(node)
+        else:
+            already_open.append((node, number))
+    return to_file, already_open
 
 
 DRY_RUN_SESSION_ID = "dry-run-session"
@@ -1819,6 +1908,194 @@ def maybe_dispatch_triage_session(
     return session_id
 
 
+@dataclass
+class DispatchOutcome:
+    """What one pass of :func:`dispatch_findings` actually did.
+
+    ``recorded`` is the node set the caller may mark as filed — it holds only
+    nodes whose finding reached the tracker, either as a new issue's dispatch or
+    as a comment that posted successfully. A node whose dispatch or comment
+    failed is deliberately absent, so the next run retries it rather than
+    suppressing it forever against a record that was never written.
+    """
+
+    recorded: list[str]
+    cascade_issues: dict[str, int | None]
+    session_id: str | None = None
+    issues_filed: int = 0
+    comments_posted: int = 0
+
+
+def carry_cascade_issues(
+    prev_cascade_issues: dict[str, int | None],
+    open_issue_map: dict[str, int] | None,
+) -> dict[str, int | None]:
+    """The ``cascade_issues`` map to start this run from.
+
+    Prior entries are kept while their issue is demonstrably still open, and a
+    ``None`` (pending — dispatched, number not yet known) entry is upgraded to a
+    real number the moment its title appears in the open set. That upgrade is
+    the whole reason the pending state exists: a triage session, not this
+    script, opens the issue, so the number can only be learned later.
+
+    A pending entry that cannot be resolved is dropped. It means either the
+    dispatch never produced an issue, or the issue was filed and has since been
+    closed — and in both cases the correct response to the cascade recurring is
+    to file it again, not to stay silent against a record of nothing.
+
+    An unreadable open-issue list (``None``) keeps the map verbatim: it is
+    "could not tell", never evidence that anything closed.
+    """
+    if open_issue_map is None:
+        return dict(prev_cascade_issues)
+
+    open_numbers = set(open_issue_map.values())
+    carried: dict[str, int | None] = {}
+    for message, number in prev_cascade_issues.items():
+        if number is None:
+            resolved = open_issue_map.get(cascade_title(message))
+            if resolved is not None:
+                carried[message] = resolved
+            continue
+        if number in open_numbers:
+            carried[message] = number
+    return carried
+
+
+def dispatch_findings(
+    report: dict,
+    dispatch_nodes: list[str],
+    prev: dict,
+    *,
+    run_at: str,
+    head_commit: str | None,
+    dry_run: bool = False,
+    cascades_only: bool = False,
+) -> DispatchOutcome:
+    """Turn this run's unfiled findings into at most a few issues and some comments.
+
+    The single place that decides what reaches the tracker, shared by the
+    ordinary path and the integrity-trip path so the two cannot drift in how
+    they dedup. The order is deliberate:
+
+    1. Collapse the blast radius (:func:`group_setup_error_cascades`) **before**
+       anything is filed. N nodes sharing one setup-error message are one
+       defect, and filing them individually is how 278 errors became 26 issues.
+    2. Read the open issues once, and only when there is something to file — a
+       clean night must not shell out to ``gh`` at all.
+    3. For every finding that already has an open issue, comment. For the rest,
+       spend the issue budget.
+
+    ``cascades_only`` suppresses per-node filing entirely. The integrity-trip
+    path passes it: on a night this script has just declared infrastructural,
+    the individual nodes are collateral by definition and the cascade is the
+    whole finding.
+
+    Cascade umbrellas and per-node issues draw from ONE budget, so a run cannot
+    exceed ``NIGHTLY_MAX_ISSUES_PER_RUN`` by splitting findings across the two
+    shapes. Comments do not spend budget: the cap exists to bound how much
+    *new* tracker surface one night creates, and a comment creates none.
+    """
+    cascades, single_nodes = group_setup_error_cascades(report, dispatch_nodes)
+    for cascade in cascades:
+        log(
+            f"Cascade collapsed: {len(cascade['nodes'])} node(s) on worker(s) "
+            f"{','.join(cascade['workers']) or 'serial'} share one setup error — "
+            f"one finding, not {len(cascade['nodes'])}: {cascade['title']}"
+        )
+
+    open_issue_map = open_issues() if dispatch_nodes else None
+    if dispatch_nodes and open_issue_map is None:
+        log("Dedup disabled for this run (open issues unreadable) — failing open")
+
+    outcome = DispatchOutcome(
+        recorded=[],
+        cascade_issues=carry_cascade_issues(prev.get("cascade_issues") or {}, open_issue_map),
+    )
+
+    max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
+    issue_budget = max_issues
+    deferred_cascades: list[dict] = []
+
+    for cascade in cascades:
+        existing = resolve_cascade_issue(cascade, open_issue_map, outcome.cascade_issues)
+        if existing is not None:
+            posted = comment_on_issue(
+                existing,
+                cascade_recurrence_comment(cascade, run_at=run_at, head_commit=head_commit),
+                dry_run=dry_run,
+            )
+            if posted:
+                outcome.comments_posted += 1
+                outcome.recorded.extend(cascade["nodes"])
+                outcome.cascade_issues[cascade["message"]] = existing
+            continue
+        if issue_budget <= 0:
+            deferred_cascades.append(cascade)
+            continue
+        session_id = maybe_dispatch_triage_session(
+            [f"cascade:{cascade['title']}"],
+            prompt=_build_cascade_prompt(cascade),
+            slug_suffix=hashlib.sha256(cascade["message"].encode()).hexdigest()[:8],
+            dry_run=dry_run,
+        )
+        if session_id is not None:
+            issue_budget -= 1
+            outcome.issues_filed += 1
+            outcome.recorded.extend(cascade["nodes"])
+            outcome.session_id = session_id
+            # Pending: the triage session opens the issue, so its number is not
+            # knowable here. carry_cascade_issues() upgrades this on a later run.
+            outcome.cascade_issues[cascade["message"]] = None
+
+    if deferred_cascades:
+        log(
+            f"Issue budget reached: deferring {len(deferred_cascades)} cascade umbrella(s) "
+            "to a later run: " + ", ".join(c["title"] for c in deferred_cascades)
+        )
+
+    if cascades_only:
+        if single_nodes:
+            log(
+                f"Per-node filing suppressed for {len(single_nodes)} node(s): this run was "
+                "classified as infrastructure, so only the cascade finding is filed"
+            )
+        return outcome
+
+    single_nodes, already_open = partition_already_open(single_nodes, open_issue_map)
+    for node, number in already_open:
+        if comment_on_issue(
+            number,
+            node_recurrence_comment(node, run_at=run_at, head_commit=head_commit),
+            dry_run=dry_run,
+        ):
+            outcome.comments_posted += 1
+            outcome.recorded.append(node)
+    if already_open:
+        log(
+            f"{len(already_open)} node(s) already have an open issue — commented the "
+            "recurrence instead of filing: " + ", ".join(n for n, _ in already_open)
+        )
+
+    if len(single_nodes) > issue_budget:
+        log(
+            f"Issue budget reached: {len(single_nodes)} per-node issue(s) wanted but only "
+            f"{issue_budget} of MAX_ISSUES_PER_RUN={max_issues} left "
+            f"({outcome.issues_filed} spent on cascade umbrella(s)); "
+            f"deferring {len(single_nodes) - issue_budget} node(s) to a later run: "
+            + ", ".join(single_nodes[issue_budget:])
+        )
+        single_nodes = single_nodes[:issue_budget]
+
+    session_id = maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)
+    if session_id is not None:
+        outcome.issues_filed += len(single_nodes)
+        outcome.recorded.extend(single_nodes)
+        outcome.session_id = session_id
+
+    return outcome
+
+
 def load_env_or_die() -> tuple[int, str | None]:
     """Load the .env vault into os.environ, or return a refusal reason (issue #2327).
 
@@ -1867,26 +2144,98 @@ def load_env_or_die() -> tuple[int, str | None]:
     return applied, None
 
 
+def _handle_integrity_trip(
+    reason: str,
+    report: dict | None,
+    current: dict | None,
+    prev: dict,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """File the finding a tripped integrity guard is sitting on, then fail the run.
+
+    A trip says the *measurement* cannot be trusted, not that nothing happened.
+    The 2026-09-03 storm is the proof: 278 setup errors from one poisoned xdist
+    worker, which is both an untrustworthy run and a genuine defect. Before this
+    script had a way to say that in one issue, it said it in 26. Now the guard
+    trips — and the old behavior, alert-and-drop-everything, would say it
+    nowhere at all, since nothing alerts any more (#3134).
+
+    So the trip still reaches the tracker, under three restrictions:
+
+    - **Cascades only.** On a night classified as infrastructure the individual
+      nodes are collateral by definition; the shared defect is the finding.
+    - **Comment-over-create**, exactly as on an ordinary night, so a storm that
+      recurs nightly accretes comments on one issue.
+    - **No baseline write.** Only ``dispatched_nodes`` and ``cascade_issues``
+      are persisted, merged onto the prior state. The totals and the
+      confirmed-failing set are precisely the numbers just declared
+      untrustworthy, and overwriting a good baseline with them is what
+      ``_fatal()``'s no-state-write invariant has always existed to prevent.
+
+    Returns 1: the run did fail, whatever it managed to file.
+    """
+    log(f"FATAL: {reason}")
+
+    failing = extract_failing_node_ids(report or {})
+    dispatch_nodes = compute_dispatch_set(prev, failing)
+    if not (report and dispatch_nodes):
+        log("Integrity trip has no unfiled findings to record — nothing filed, no state written")
+        return 1
+
+    outcome = dispatch_findings(
+        report,
+        dispatch_nodes,
+        prev,
+        run_at=(current or {}).get("run_at") or datetime.now(UTC).isoformat(),
+        head_commit=_get_head_commit(),
+        dry_run=dry_run,
+        cascades_only=True,
+    )
+    log(
+        f"Integrity trip recorded: {outcome.issues_filed} issue(s) filed, "
+        f"{outcome.comments_posted} recurrence comment(s) posted"
+    )
+
+    if dry_run:
+        log(f"[DRY RUN] Would merge dispatch records into {LAST_RUN_FILE} (not written)")
+        return 1
+    if not outcome.recorded and outcome.cascade_issues == (prev.get("cascade_issues") or {}):
+        return 1
+
+    # Merge onto prev rather than replacing it: everything except what was just
+    # filed must survive this run untouched.
+    state = dict(prev)
+    state["dispatched_nodes"] = sorted(prior_dispatched(prev) | set(outcome.recorded))
+    state["cascade_issues"] = outcome.cascade_issues
+    save_last_run(state)
+    log(f"Dispatch records merged into {LAST_RUN_FILE} (baseline left untouched)")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly regression test runner")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without sending Telegram")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview: file nothing, comment nothing, write nothing",
+    )
     args = parser.parse_args()
 
     log("=== Nightly regression test run starting ===")
 
     # Load the .env vault into os.environ before any subprocess spawns, and fail
     # loudly if it cannot be read (issue #2327). This is the FIRST substantive
-    # step: the pytest/valor-telegram children inherit these vars. This runs
-    # BEFORE the run lock: an env refusal must never be confused with a lock
-    # collision (which correctly returns 0 silently), and neither path writes
-    # state.
+    # step: the pytest and `gh` children inherit these vars. This runs BEFORE
+    # the run lock: an env refusal must never be confused with a lock collision
+    # (which correctly returns 0 silently), and neither path writes state.
     _applied, env_err = load_env_or_die()
     if env_err:
-        return _fatal(env_err, args.dry_run)
+        return _fatal(env_err)
 
     # Acquire the run lock first, before any other work -- a concurrent
     # nightly run holding the lock means this invocation is a collision and
-    # must exit cleanly without running tests or sending Telegram.
+    # must exit cleanly without running tests or touching the tracker.
     lock_handle = _acquire_run_lock()
     if lock_handle is None:
         return 0
@@ -1915,18 +2264,14 @@ def main() -> int:
 
     # Run the default collection through the sanctioned wrapper. A wedged run
     # raises TimeoutExpired rather than returning a sentinel — route it
-    # through _fatal() the same way the pre-#2823 timeout arm did, just
-    # alerting instead of dying silently.
+    # through _fatal() the same way the pre-#2823 timeout arm did.
     try:
         raw_report, current, rc = run_tests()
     except subprocess.TimeoutExpired:
-        return _fatal(
-            f"pytest timed out after {PYTEST_TIMEOUT_SECONDS}s (process group killed)",
-            args.dry_run,
-        )
+        return _fatal(f"pytest timed out after {PYTEST_TIMEOUT_SECONDS}s (process group killed)")
     reason, integrity_warnings = validate_run_integrity(raw_report, rc, prev)
     if reason:
-        return _fatal(reason, args.dry_run)
+        return _handle_integrity_trip(reason, raw_report, current, prev, dry_run=args.dry_run)
     for w in integrity_warnings:
         log(f"WARNING: {w}")
 
@@ -1941,8 +2286,7 @@ def main() -> int:
     confirmed_failing, artifacts, serial_trusted = reconfirm_serial(parallel_failing)
     if not serial_trusted:
         return _fatal(
-            "serial re-confirmation returned no result for every node — the run did not happen",
-            args.dry_run,
+            "serial re-confirmation returned no result for every node — the run did not happen"
         )
     if parallel_failing:
         log(
@@ -1950,10 +2294,7 @@ def main() -> int:
             f"{len(artifacts)} xdist artifact(s)"
         )
         if artifacts:
-            log(
-                "xdist-parallelism artifacts (passed serially, not alerted): "
-                + ", ".join(artifacts)
-            )
+            log("xdist-parallelism artifacts (passed serially, not filed): " + ", ".join(artifacts))
         if confirmed_failing:
             log("Confirmed serial failures: " + ", ".join(confirmed_failing))
 
@@ -2017,17 +2358,15 @@ def main() -> int:
             # seed anyway would mark every absorbed node as filed while no
             # umbrella issue exists, so compute_dispatch_set() would suppress
             # all of them forever and the whole night-one population would be
-            # lost silently — behind a Telegram message that reads like
-            # success. Refusing to save state instead means the next run sees
-            # no prior state, re-seeds, and retries the dispatch. This mirrors
-            # _fatal()'s existing invariant that no untrusted run reaches
-            # save_last_run().
+            # lost silently. Refusing to save state instead means the next run
+            # sees no prior state, re-seeds, and retries the dispatch. This
+            # mirrors _fatal()'s existing invariant that no untrusted run
+            # reaches save_last_run().
             if triage_session_id is None:
                 return _fatal(
                     f"seed triage dispatch failed — no umbrella issue exists for "
                     f"{seed_size} absorbed node(s); refusing to write a baseline "
-                    "so the next run retries the seed",
-                    args.dry_run,
+                    "so the next run retries the seed"
                 )
             current["dispatched_session_id"] = triage_session_id
             just_dispatched = list(confirmed_failing)
@@ -2037,92 +2376,29 @@ def main() -> int:
             current["min_expected_collected"] = current["total"]
     else:
         dispatch_nodes = compute_dispatch_set(prev, confirmed_failing)
-        just_dispatched = []
         if dispatch_nodes:
             log(f"Not yet triaged: {len(dispatch_nodes)} node(s): " + ", ".join(dispatch_nodes))
         already_filed = len(confirmed_failing) - len(dispatch_nodes)
         if already_filed > 0:
             log(f"Triage dispatch suppressed for {already_filed} already-filed node(s)")
 
-        # Collapse the blast radius BEFORE anything is filed: N nodes sharing one
-        # setup-error message on one xdist worker are one defect (#3131).
-        cascades, single_nodes = group_setup_error_cascades(raw_report, dispatch_nodes)
-        for cascade in cascades:
-            log(
-                f"Cascade collapsed: {len(cascade['nodes'])} node(s) on worker(s) "
-                f"{','.join(cascade['workers']) or 'serial'} share one setup error — "
-                f"filing one umbrella: {cascade['title']}"
-            )
-
-        # Pre-file dedup. Per-machine `dispatched_nodes` cannot see another
-        # machine's filings, and the triage agent's own search is index-lagged;
-        # this read is the only cross-machine check that exists.
-        # Only pay for the read when there is something to file — a clean night
-        # must not shell out to `gh` at all.
-        open_titles = open_issue_titles() if dispatch_nodes else None
-        if dispatch_nodes and open_titles is None:
-            log("Pre-file dedup disabled for this run (open issues unreadable) — failing open")
-
-        # Cascade umbrellas and per-node issues draw from ONE budget, so the run
-        # cannot exceed the cap by splitting findings across the two shapes.
-        max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
-        issue_budget = max_issues
-        deferred_cascades: list[dict] = []
-        for cascade in cascades:
-            if open_titles is not None and cascade["title"] in open_titles:
-                log(
-                    f"Cascade umbrella already open ({cascade['title']}) — recording its "
-                    f"{len(cascade['nodes'])} node(s) as filed without dispatching"
-                )
-                just_dispatched.extend(cascade["nodes"])
-                continue
-            if issue_budget <= 0:
-                deferred_cascades.append(cascade)
-                continue
-            session_id = maybe_dispatch_triage_session(
-                [f"cascade:{cascade['title']}"],
-                prompt=_build_cascade_prompt(cascade),
-                slug_suffix=hashlib.sha256(cascade["message"].encode()).hexdigest()[:8],
-                dry_run=args.dry_run,
-            )
-            if session_id is not None:
-                issue_budget -= 1
-                just_dispatched.extend(cascade["nodes"])
-                triage_session_id = session_id
-                current["dispatched_session_id"] = session_id
-
-        single_nodes, already_open = partition_already_open(single_nodes, open_titles)
-        if already_open:
-            log(
-                f"Pre-file dedup: {len(already_open)} node(s) already have an open issue — "
-                "recording as filed without dispatching: " + ", ".join(already_open)
-            )
-            # An issue demonstrably exists for these; retrying them nightly is
-            # exactly the churn this suppression exists to end.
-            just_dispatched.extend(already_open)
-
-        if len(single_nodes) > issue_budget:
-            log(
-                f"Issue budget reached: {len(single_nodes)} per-node issue(s) wanted but only "
-                f"{issue_budget} of MAX_ISSUES_PER_RUN={max_issues} left "
-                f"({len(cascades) - len(deferred_cascades)} spent on cascade umbrella(s)); "
-                f"deferring {len(single_nodes) - issue_budget} node(s) to a later run: "
-                + ", ".join(single_nodes[issue_budget:])
-            )
-            single_nodes = single_nodes[:issue_budget]
-        if deferred_cascades:
-            log(
-                f"Issue budget reached: deferring {len(deferred_cascades)} cascade umbrella(s) "
-                "to a later run: " + ", ".join(c["title"] for c in deferred_cascades)
-            )
-
-        session_id = maybe_dispatch_triage_session(single_nodes, dry_run=args.dry_run)
-        if session_id is not None:
-            # Record only what actually went out. A failed dispatch leaves its
-            # nodes unfiled, so the next run picks them up again.
-            just_dispatched.extend(single_nodes)
-            triage_session_id = session_id
-            current["dispatched_session_id"] = session_id
+        outcome = dispatch_findings(
+            raw_report,
+            dispatch_nodes,
+            prev,
+            run_at=current["run_at"],
+            head_commit=current["head_commit"],
+            dry_run=args.dry_run,
+        )
+        just_dispatched = outcome.recorded
+        current["cascade_issues"] = outcome.cascade_issues
+        if outcome.session_id is not None:
+            triage_session_id = outcome.session_id
+            current["dispatched_session_id"] = outcome.session_id
+        log(
+            f"Tracker: {outcome.issues_filed} issue(s) filed, "
+            f"{outcome.comments_posted} recurrence comment(s) posted"
+        )
 
     # Carry the seed's umbrella coverage forward on EVERY run, not just seed
     # runs. Without this the set exists only in the night the seed was written
@@ -2142,59 +2418,48 @@ def main() -> int:
             prev, confirmed_failing, just_dispatched
         )
 
-    # Alert logic — regression fires only on newly-confirmed serial failures.
+    # Carry the cascade signature -> issue map across a seed night too. The seed
+    # path files an umbrella of its own and never touches the map, so without
+    # this a re-baseline would forget every cascade issue this machine knows
+    # about and re-file each one on its next occurrence.
+    current.setdefault("cascade_issues", prev.get("cascade_issues") or {})
+
+    # The shadow tier (issue #2334) classifies newly-confirmed failures against
+    # the prior run's HEAD and logs the verdict the eventual active tier (#3076)
+    # would act on. It used to sit before the human page and is now the last
+    # thing the run does with the failure set, since there is no page. Non-fatal
+    # by construction: an exception here must not change the run's outcome.
+    if new_failures and not is_seed_run and resolve_fix_mode() != "off":
+        try:
+            log_shadow_verdict(
+                new_failures,
+                GateCaps(max_failures=resolve_fix_max_failures()),
+                RunFlags(
+                    is_seed_run=is_seed_run,
+                    integrity_warnings=list(integrity_warnings),
+                    dry_run=args.dry_run,
+                    baseline_sha=prev.get("head_commit") or "",
+                ),
+            )
+        except Exception as exc:
+            log(f"nightly-fix shadow tier error (non-fatal): {exc}")
+
+    # Nothing is notified anywhere: the tracker is this script's only output
+    # surface (#3134). What the run found is already either an issue, a comment
+    # on one, or a logged deferral; these lines just make the shape of the night
+    # legible in the log.
     if is_seed_run:
         seed_note = " (re-baseline: prior population absorbed)" if is_reseed else ""
-        msg = (
-            f"Nightly regression baseline established{seed_note}: "
-            f"{current['total']} tests, {current['failed']} confirmed failures."
+        log(
+            f"Baseline established{seed_note}: {current['total']} tests, "
+            f"{current['failed']} confirmed failures"
         )
-        send_telegram(msg, dry_run=args.dry_run)
     elif new_failures:
-        # Shadow tier (issue #2334): classify, gate, and log the verdict that
-        # would have been acted on. The plan mandates classification before the
-        # page so the eventual active tier (#3076) can substitute a fix attempt
-        # for the alert; the cost is that on a failing night the page is
-        # delayed by up to the classification bound (provision + baseline
-        # pytest timeouts). The alert TEXT is byte-identical in `off` and
-        # `shadow`. The whole tier is non-fatal by construction: an exception
-        # here must never suppress the human page (mirrors the TTFT gate).
-        if resolve_fix_mode() != "off":
-            try:
-                log_shadow_verdict(
-                    new_failures,
-                    GateCaps(max_failures=resolve_fix_max_failures()),
-                    RunFlags(
-                        is_seed_run=is_seed_run,
-                        integrity_warnings=list(integrity_warnings),
-                        dry_run=args.dry_run,
-                        baseline_sha=prev.get("head_commit") or "",
-                    ),
-                )
-            except Exception as exc:
-                log(f"nightly-fix shadow tier error (non-fatal): {exc}")
-
-        try:
-            serial_report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            serial_report = {}
-        summary_text = summarize_failures(new_failures, serial_report)
-        msg = (
-            f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
-            f"({current['failed']} confirmed total): {summary_text}. "
-            f"Run: pytest {' '.join(COLLECTION_PATHS)} -n0"
-        )
-        if triage_session_id:
-            msg += f" [triage session: {triage_session_id}]"
-        send_telegram(msg, dry_run=args.dry_run)
+        log(f"{len(new_failures)} newly-confirmed failure(s), {current['failed']} confirmed total")
     elif new_errors > 0:
-        msg = (
-            f"Nightly tests: collection error ({new_errors} errors). "
-            f"Run: pytest {' '.join(COLLECTION_PATHS)} -n {NIGHTLY_XDIST_WORKERS}"
-        )
-        send_telegram(msg, dry_run=args.dry_run)
+        log(f"Collection error ({new_errors} errors)")
     else:
-        log("Clean run (no newly-confirmed failures) — no Telegram alert sent")
+        log("Clean run (no newly-confirmed failures)")
 
     # Save state — never under --dry-run.
     #
@@ -2212,8 +2477,12 @@ def main() -> int:
         save_last_run(current)
         log(f"State saved to {LAST_RUN_FILE}")
 
-    # Post-run TTFT gate (issue #1227). A TTFT regression is reported as a
-    # regression (Telegram alert), not a test failure — return code unchanged.
+    # Post-run TTFT gate (issue #1227). A TTFT regression is not a test failure,
+    # so the return code is unchanged. It used to page; it now only logs, since
+    # nothing this script produces notifies anyone (#3134). The gate is kept
+    # rather than deleted: the measurement and its evidence still have value,
+    # and re-notifying is a one-line change if a cold-start regression ever
+    # needs to reach someone.
     try:
         ttft_alert = run_ttft_gate(
             log_file=TTFT_LOG_FILE,
@@ -2222,7 +2491,7 @@ def main() -> int:
             threshold=TTFT_THRESHOLD_SECONDS,
         )
         if ttft_alert:
-            send_telegram(ttft_alert, dry_run=args.dry_run)
+            log(f"TTFT regression: {ttft_alert}")
     except Exception as exc:  # noqa: BLE001
         log(f"TTFT gate hook error (non-fatal): {exc}")
 

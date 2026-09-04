@@ -4,19 +4,24 @@ Automated nightly safety net for the default test collection (`tests/` — the
 same set a bare `scripts/pytest-clean.sh` collects). A launchd job runs the
 collection each night at 03:00, verifies the run actually executed before
 trusting its result, compares failure counts against the prior run, runs a
-post-run TTFT (time-to-first-token) regression gate, and sends Telegram
-alerts only when new failures, collection errors, or a cold-start latency
-regression appear.
+post-run TTFT (time-to-first-token) regression gate, and reports what it
+found **only to the GitHub issue tracker**. It sends no Telegram, no mail, and
+no notification of any kind: a finding becomes either a new issue, a comment
+on the issue that already represents it, or a logged deferral. A quiet night
+is a silent night.
 
 ## Status
 
 Shipped (issue #972); TTFT regression gate added (issue #1227); run lock,
 best-effort failure summarizer, and triage-session dispatch added (issue #2192
-Scope 1) — see `docs/features/nightly-alert-triage.md` for those three
+Scope 1) — see `docs/features/nightly-triage-dispatch.md` for those
 additions; collection widened from `tests/unit/` to the default collection,
 run-integrity guard, collection-aware baseline, and worker-role install gate
 added (issue #2823); baseline classification stage and shadow decision gate
-added (issue #2334) — see "Baseline Classification (Shadow Mode)" below.
+added (issue #2334) — see "Baseline Classification (Shadow Mode)" below;
+cascade collapsing, pre-file dedup, and a per-run issue budget added (issue
+#3131); comment-over-create, signature-keyed cascade identity, and removal of
+all notification added (issue #3134).
 Autonomous-fix action on the gate's verdict is **not shipped**; it is deferred
 to #3076.
 
@@ -24,7 +29,7 @@ to #3076.
 
 - Acquires an advisory run lock (`data/nightly_tests.lock`) before doing anything
   else; a second overlapping invocation logs the collision and exits 0 with no test
-  run and no alert — see `docs/features/nightly-alert-triage.md#run-lock-race-1`
+  run and nothing filed — see `docs/features/nightly-triage-dispatch.md#run-lock-race-1`
 - Runs the default collection (`COLLECTION_PATHS = ["tests/"]`) through
   `scripts/pytest-clean.sh -n {NIGHTLY_XDIST_WORKERS}` (default 6, env-overridable)
   nightly at 03:00 local time, with a 300s test-DB claim window sized for an
@@ -34,8 +39,8 @@ to #3076.
   fixture-error storm, or — the case that matters most — a **coverage floor**
   on `total` catches test-DB starvation, which produces zero `error` outcomes
   and a legal exit code and would otherwise read as a clean night. A tripped
-  guard alerts loudly through `_fatal()`, writes no state, and dispatches
-  nothing
+  guard logs loudly, files or comments on the **cascade only**, and writes no
+  baseline — see "The integrity trip still reports" below
 - Compares the confirmed-failing set against the previous run's
   `data/nightly_tests_last_run.json`, but only when both runs share the same
   `collection`. A run whose recorded collection differs (the widening night,
@@ -44,49 +49,56 @@ to #3076.
   dispatches **one** umbrella triage session, rather than re-opening the
   #2429/#2430/#2462 per-node duplicate-filing churn
 - Runs the TTFT regression gate as a post-test check (see below)
-- Sends Telegram alerts to "Eng: Valor" when:
-  - A newly-confirmed failure appears or collection errors occur — the
-    new-failures alert text is a best-effort LLM summary with a raw node-ID
-    fallback (see `docs/features/nightly-alert-triage.md`)
-  - The TTFT gate detects a cold-start latency regression
+- Notifies nothing, ever. The outcome of the night — baseline established,
+  N newly-confirmed failures, collection error, clean run, TTFT regression —
+  is a log line and, where there is a finding, a tracker write
 - On newly-confirmed failures, fires a deduped, fire-and-forget Eng-session dispatch
   with literal, Python-computed issue titles (`Nightly regression: {node}`) to
   investigate and file a GitHub issue — see
-  `docs/features/nightly-alert-triage.md#triage-session-dispatch`
+  `docs/features/nightly-triage-dispatch.md#triage-session-dispatch`
 - Collapses cascades before filing: nodes sharing one normalized setup-error
   message on one xdist worker (at least `CASCADE_MIN_GROUP_SIZE`, default 3)
   become ONE umbrella issue titled
   `Nightly regression cascade [{digest}]: {message}`, with the node list in a
   collapsed section. Detection groups by (worker, message); filing merges by
   message, so four identically-poisoned workers produce one issue
-- Suppresses anything already filed by reading open issue titles via
-  `gh issue list` (the REST path, not the index-lagged `--search`) immediately
-  before dispatch. An unreadable list fails open. This is the only dedup that
-  spans machines
+- **Comments instead of filing a twin.** Open issues are read once via
+  `gh issue list --json number,title` (the REST path, not the index-lagged
+  `--search`) immediately before dispatch. A finding that already has an open
+  issue gets a recurrence comment carrying the run timestamp, HEAD, blast
+  radius, and xdist worker ids — not silence. An unreadable list fails open
+  (it files). This is the only dedup that spans machines
 - Caps a single run at `MAX_ISSUES_PER_RUN` (10) issues, umbrellas and per-node
   alike drawing from one budget; the remainder is logged and retries on a later
-  run
+  run. **Comments do not spend budget** — the cap bounds how much *new* tracker
+  surface one night creates, and a comment creates none
 - Clean runs produce no noise
 
-## Alert Conditions
+## What Each Outcome Produces (issue #3134)
 
-| Condition | Message |
-|-----------|---------|
-| First run or a collection change (re-baseline) | `Nightly regression baseline established[ (re-baseline: prior population absorbed)]: {total} tests, {failed} confirmed failures.` |
-| Run-integrity guard tripped | `Nightly tests could not run: {reason}` via `_fatal()` — no state written, no dispatch |
-| Newly-confirmed failure | Best-effort LLM summary of the confirmed failures (falls back to a raw node-ID preview on any summarizer failure), plus a `[triage session: <id>]` suffix when a triage session was dispatched — see `docs/features/nightly-alert-triage.md` |
-| Collection errors, no newly-confirmed failures | `Nightly tests: collection error ({new_errors} errors). Run: pytest tests/ -n {NIGHTLY_XDIST_WORKERS}` |
-| TTFT regression | `TTFT regression (issue #1227): {detail}` |
-| Lock collision (overlapping run) | Silent — no Telegram message, no test run |
-| Clean run (no newly-confirmed failures, no errors, no TTFT regression) | Silent — no Telegram message |
+Nothing in this table notifies anyone. The "Tracker" column is the only thing
+a human is expected to notice; the log is the full record.
+
+| Condition | Tracker | Log |
+|-----------|---------|-----|
+| First run or a collection change (re-baseline) | One umbrella triage session for the absorbed population | `Baseline established[ (re-baseline: prior population absorbed)]: {total} tests, {failed} confirmed failures` |
+| Run-integrity guard tripped | Cascade only — commented if already open, filed otherwise; per-node filing suppressed | `FATAL: {reason}` then `Integrity trip recorded: N issue(s) filed, M comment(s) posted` |
+| Newly-confirmed failure, no open issue | New issue via triage session | `Tracker: N issue(s) filed, M recurrence comment(s) posted` |
+| Newly-confirmed failure, issue already open | Recurrence comment on the existing issue | same line, with `M > 0` |
+| Issue budget exhausted | Nothing; the finding stays unrecorded and retries next run | `Issue budget reached: deferring ...` |
+| Collection errors, no newly-confirmed failures | Nothing | `Collection error ({new_errors} errors)` |
+| TTFT regression | Nothing | `TTFT regression: {detail}` |
+| Lock collision (overlapping run) | Nothing | collision logged, no test run |
+| Clean run | Nothing — `gh` is not even invoked | `Clean run (no newly-confirmed failures)` |
 
 ## TTFT Regression Gate (issue #1227)
 
 After the unit suite runs, a post-run gate reads `logs/cold_start_metrics.jsonl`
 and compares the last `TTFT_LAST_N` (10) PM-session cold starts against
 `TTFT_THRESHOLD_SECONDS` (120s — production target is 90s; the nightly
-threshold allows slack for run-to-run noise). A regression is reported as a
-Telegram alert without changing the script's exit code. The gate never
+threshold allows slack for run-to-run noise). A regression is **logged**
+without changing the script's exit code (it used to page; #3134 removed every
+notification path). The gate never
 crashes the run: a missing log file, a parse failure, or any other exception
 is swallowed and logged as non-fatal.
 
@@ -165,12 +177,11 @@ post-classification clauses (`pre_existing`, `inconclusive`,
 
 The classifier writes to `PYTEST_BASELINE_JSON_TMP`
 (`/tmp/nightly_pytest_baseline_report.json`), never
-`PYTEST_SERIAL_JSON_TMP` or `PYTEST_JSON_TMP`. `main()` re-reads
-`PYTEST_SERIAL_JSON_TMP` **after** the classifier runs, to build the human's
-alert text via `summarize_failures()`. If the classifier overwrote that path
-with the baseline commit's results, the alert would be built from a report in
-which every newly-broken node appears to have passed — summarizing the wrong
-run.
+`PYTEST_SERIAL_JSON_TMP` or `PYTEST_JSON_TMP`. Keeping the three paths
+disjoint is what makes the run's own report survive the classifier: if the
+classifier overwrote `PYTEST_SERIAL_JSON_TMP` with the baseline commit's
+results, everything downstream that re-reads it would be reading a run in
+which every newly-broken node appears to have passed.
 
 ### The provisioned baseline worktree needs its own `.venv`
 
@@ -213,9 +224,9 @@ cleanly `newly_broken` reaches `"none"`.
 
 ### What the classifier discriminates that `compute_new_failures` does not
 
-`compute_new_failures` (the existing alert-delta function) proves a node was
-**absent from the prior run's confirmed-failing set** — a Telegram-level
-"first time we've seen this fail" signal. `classify_against_baseline` proves
+`compute_new_failures` (the existing delta function) proves a node was
+**absent from the prior run's confirmed-failing set** — a "first time we've
+seen this fail" signal. `classify_against_baseline` proves
 something narrower and stronger: that the node **actually passed** at the
 prior run's HEAD SHA, by running it there. They differ exactly when the node
 was not collected at the prior SHA, was a filtered artifact of that run, or
@@ -248,14 +259,10 @@ in-code default with a warning.
 - **`off`** — classification, the gate, and the verdict log are skipped
   entirely. The detector behaves exactly as it did before this feature.
 - **`shadow`** — classifies, gates, and **logs** the verdict that would have
-  been acted on, then pages a human with **byte-identical alert text** to
-  `off` mode. Nothing is fixed. Because classification runs before the page
-  (so the eventual active tier, #3076, can substitute a fix attempt for the
-  alert), on a failing night the page is **delayed by up to the
-  classification bound** — the provision timeouts plus the baseline pytest
-  timeout. The tier is non-fatal by construction: any exception inside it is
-  logged and swallowed, and the page still fires — see
-  `docs/features/nightly-alert-triage.md`.
+  been acted on. The night's outcome line is byte-identical to `off` mode.
+  Nothing is fixed. The tier runs after the tracker writes and is non-fatal by
+  construction: any exception inside it is logged and swallowed, and the
+  outcome is still recorded — see `docs/features/nightly-triage-dispatch.md`.
 
 ### The `nightly-fix shadow-verdict:` log contract
 
@@ -302,11 +309,11 @@ exit, bucketing every node `inconclusive`.
 
 | File | Purpose |
 |------|---------|
-| `scripts/nightly_regression_tests.py` | Main script: acquires the run lock, runs the default collection through `scripts/pytest-clean.sh`, validates run integrity, computes the failure delta or re-baselines on a collection change, summarizes/dispatches on new failures, runs the TTFT gate, sends Telegram alerts, saves state |
+| `scripts/nightly_regression_tests.py` | Main script: acquires the run lock, runs the default collection through `scripts/pytest-clean.sh`, validates run integrity, computes the failure delta or re-baselines on a collection change, files or comments on findings via the tracker, runs the TTFT gate, saves state. Notifies nothing |
 | `com.valor.nightly-tests.plist` | launchd plist template with `__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__` placeholders |
 | `scripts/install_nightly_tests.sh` | Install script: refuses to install from a lane worktree, fails closed when the projects config is unreadable or the host role is undeterminable, worker-role gated (`has_worker_role()` — any machine owning a project, Telegram-independent), substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on a machine owning no project |
-| `data/nightly_tests.lock` | Advisory `flock` lock file preventing overlapping runs (gitignored) — see `docs/features/nightly-alert-triage.md` |
-| `data/nightly_tests_last_run.json` | Delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `collection`, `head_commit`, `dispatched_nodes`, `dispatched_session_id`, `seeded_nodes` (carried forward on every run), and — on a re-baseline night only — `seed_collection`, `seed_size`, `min_expected_collected` (gitignored) |
+| `data/nightly_tests.lock` | Advisory `flock` lock file preventing overlapping runs (gitignored) — see `docs/features/nightly-triage-dispatch.md` |
+| `data/nightly_tests_last_run.json` | Delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `collection`, `head_commit`, `dispatched_nodes`, `dispatched_session_id`, `seeded_nodes` (carried forward on every run), `cascade_issues` (signature → issue number, see below), and — on a re-baseline night only — `seed_collection`, `seed_size`, `min_expected_collected` (gitignored) |
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
@@ -323,9 +330,54 @@ fragile regex against pytest's output format.
 dependency. Matches the `sdlc_reflection_last_run.json` and `autoexperiment_last_run.json`
 patterns.
 
-**Best-effort Telegram** — `send_telegram()` never crashes the script. If `valor-telegram`
-is missing or the send fails, it logs a warning and continues. The test results are still
-saved.
+**The tracker is the only output surface (#3134)** — The detector notifies
+nothing: no Telegram, no mail, no page. Owner ruling, verbatim: *"i don't want
+alerts either. i just want a single legit issue if and only if it's distinct
+from issues already created. and better to comment on an existing issue than
+create a new one."* The LLM failure summarizer existed only to compose alert
+text and was deleted with it. The log is unchanged and remains the full record
+of every night.
+
+**Comment-over-create is the default posture, not a fallback** — A finding
+whose issue is already open produces a recurrence comment carrying the run
+timestamp, HEAD SHA, node count, file count, and xdist worker ids. Silence was
+the #3131 behavior and it lost the signal that a defect is still happening,
+and whether it is getting worse. A comment that fails to post leaves the
+finding **unrecorded**, so the next run retries it: a recurrence that could
+not be written down has not been reported, and marking it filed would lose it
+permanently.
+
+**Cascade identity is the normalized signature, not the rendered title** — A
+cascade's key is the normalized setup-error message (digits collapsed to `#`,
+pytest's `E ` marker and the `[gwN]` banner stripped). `cascade_issues` in the
+state file maps that signature to the issue number, so a human retitling the
+umbrella issue does not make the same defect look new. The title match remains
+as the *bootstrap*: this script never opens issues itself — a triage session
+does — so on the night of filing the number is unknowable and the entry is
+recorded as `None` (pending). `carry_cascade_issues()` upgrades it the first
+night the title appears in the open set. A pending entry that cannot be
+resolved is dropped, because that means either no issue was ever opened or it
+has since been closed, and in both cases the correct response to a recurrence
+is a fresh issue rather than silence against a record of nothing. An
+unreadable open-issue list keeps the map verbatim: `None` is "could not tell",
+never evidence that anything closed.
+
+`cascade_issues` is **per-machine**, exactly like `dispatched_nodes` — the
+cross-machine gap documented below applies to it unchanged. Per-node findings
+need no such map: the node id *is* the identity and it appears verbatim in the
+title, so the title is a faithful key there in a way it is not for a cascade.
+
+**The integrity trip still reports** — A tripped run-integrity guard says the
+*measurement* cannot be trusted, not that nothing happened. The 2026-09-03
+storm was both: an untrustworthy run and a genuine defect (one poisoned xdist
+worker, 278 setup errors). With nothing left to alert, a guard that dropped
+its finding would make a storm completely invisible. So `_handle_integrity_trip()`
+files or comments on the **cascade only** — on a night classified as
+infrastructure the individual nodes are collateral by definition — and then
+fails the run. It writes only `dispatched_nodes` and `cascade_issues`, merged
+onto the prior state: the totals and the confirmed-failing set are precisely
+the numbers just declared untrustworthy, and overwriting a good baseline with
+them is what the no-state-write invariant exists to prevent.
 
 **Confirmed-failing-set delta, not a scalar delta** — The state file persists the
 confirmed failing node-ID **set**, not just a count, so a shifting flaky set
@@ -346,8 +398,8 @@ merge cleanup deletes.
 execute (test-DB slot exhaustion, a wedged xdist controller) was measured,
 reproducibly, to exit 0 with zero tests collected. `validate_run_integrity()`
 classifies a completed run before anything downstream (dispatch, state
-persistence) trusts it; a tripped guard alerts through `_fatal()` and neither
-persists state nor dispatches.
+persistence) trusts it; a tripped guard logs loudly, records the cascade, and
+writes no baseline (see "The integrity trip still reports" above).
 
 **Collection-aware baseline, not a bare first-run flag** — The persisted state
 records which `collection` produced it. Widening the collection (or any future
@@ -373,13 +425,12 @@ So `seeded_nodes` is persisted on **every** run (not just the seed night) and
 `compute_dispatch_set()` subtracts it permanently.
 
 Be precise about the cost, because the short version overstates the safety. A
-seeded node that regresses is **alerted once, then never filed**.
+seeded node that regresses is **logged once, then never filed**.
 `compute_new_failures()` keys on `failing_tests` rather than dispatch state,
-so the night it re-fails does produce a Telegram alert — but from the next
-night it is no longer "new", so no further alert fires and no issue is ever
-opened. For a non-seeded node the durable record is a GitHub issue; for a
-seeded node it is one line in a chat log, and the umbrella may since have been
-closed. `seeded_nodes` also never retires entries, unlike `dispatched_nodes`,
+so the night it re-fails is counted as newly-confirmed in the log — but from
+the next night it is no longer "new", and no issue is ever opened. For a
+non-seeded node the durable record is a GitHub issue; for a seeded node it is
+one line in a log file, and the umbrella may since have been closed. `seeded_nodes` also never retires entries, unlike `dispatched_nodes`,
 so a renamed or deleted test stays in it indefinitely. Both costs are accepted
 deliberately: the alternative is a duplicate issue on every flap of a
 population known to flap, and closing the repair lane is what makes this
@@ -393,8 +444,8 @@ likeliest to flap. Fixing those three also defuses this interaction.
 fails, `main()` routes through `_fatal()` and skips `save_last_run()`
 entirely. Recording the seed anyway would mark every absorbed node as filed
 while no umbrella issue existed, so `compute_dispatch_set()` would suppress
-the whole night-one population forever — behind a Telegram message that reads
-like a successful baseline. Refusing to persist means the next run sees no
+the whole night-one population forever — behind a log line that reads like a
+successful baseline. Refusing to persist means the next run sees no
 prior state, re-seeds, and retries.
 
 **Starvation presents as missing tests, never as errors** — Since #2628,
@@ -411,11 +462,11 @@ suite.
 convention, not an enforced invariant** — Each machine's `dispatched_nodes`
 lives in its own `data/nightly_tests_last_run.json`; two machines with the
 same red node both dispatch unless something else prevents it. Since #3131 the
-detector reads the open issue set itself (`open_issue_titles()`) immediately
-before dispatch and drops any node whose `Nightly regression: <nodeid>` title
-is already open, which closes the common cross-machine case — but it is a
-read-then-act check with no lock, so two machines dispatching inside the same
-window still both file. The literal title remains the contract: the detector
+detector reads the open issue set itself (`open_issues()`) immediately before
+dispatch and, since #3134, comments on rather than re-files any finding whose
+issue is already open — which closes the common cross-machine case, but it is
+a read-then-act check with no lock, so two machines dispatching inside the
+same window still both file. The literal title remains the contract: the detector
 emits it verbatim, the triage session is instructed to search for it, and
 nothing verifies an issue was actually filed under it, so a future change to
 the title format silently reopens #2429/#2430/#2462 across the fleet.
@@ -502,8 +553,8 @@ launchctl list | grep nightly-tests
 ## Manual Testing
 
 ```bash
-# Dry-run: runs the suite and prints what would be sent, changing nothing.
-# No Telegram send, no Eng session spawned, no GitHub issue filed, and NO
+# Dry-run: runs the suite and prints what it would do, changing nothing.
+# No Eng session spawned, no GitHub issue filed, no comment posted, and NO
 # state written. The state write is suppressed deliberately: dispatch
 # short-circuits to a truthy sentinel so the success path runs realistically,
 # and on a seed night that path records `seeded_nodes` — which is sticky, so
@@ -526,13 +577,14 @@ rm ~/Library/LaunchAgents/com.valor.nightly-tests.plist
 
 - `pytest-json-report>=1.5` (declared in `pyproject.toml` `[project.optional-dependencies].dev`)
 - `pytest-xdist` (already present — used for `-n auto` parallelism in the unit suite)
-- `valor-telegram` on PATH (best-effort — not required)
+- `gh` on PATH — required to read open issues and post recurrence comments. An
+  unreadable open-issue list fails open (the run files); a failed comment
+  leaves the finding unrecorded so the next run retries it
 
 ## See Also
 
-- `docs/features/nightly-alert-triage.md` — the run lock, best-effort LLM summarizer,
-  and triage-session dispatch layered around this base detector (issue #2192 Scope 1);
-  also states that alerting is unchanged by the classification stage and that
-  autonomous-fix action is deferred to #3076
+- `docs/features/nightly-triage-dispatch.md` — the run lock and triage-session
+  dispatch layered around this base detector (issue #2192 Scope 1); autonomous-fix
+  action is deferred to #3076
 - `docs/features/scheduled-disk-reclaim.md` — why `.worktrees/nightly-baseline/` is
   protected from the disk-reclaim sweeper
