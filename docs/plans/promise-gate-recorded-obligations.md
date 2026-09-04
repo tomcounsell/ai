@@ -432,7 +432,7 @@ Run every row from the lane worktree (`.worktrees/promise-gate-recorded-obligati
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Schema carries ask_coverage | `grep -c "ask_coverage" agent/session_runner/router.py` | output > 0 |
-| Phase A: present but not required | `python -c "from agent.session_runner.router import PM_TURN_JSON_SCHEMA as s; print(int('ask_coverage' in s['properties']), int('ask_coverage' in s['required']))"` | output contains `1 0` |
+| Phase A: present but not required | `python -c "from agent.session_runner.router import PM_TURN_JSON_SCHEMA as s; print(int('ask_coverage' in s['properties']), int('ask_coverage' in s['required']))"` | output contains 1 0 |
 | Phrasebook gone | `grep -ci "two ways to stay on the allowed side" .claude/commands/roles/prime-pm-role.md \|\| true` | match count == 0 |
 | Present-fact norm retained | `grep -c "say only what is already true" .claude/commands/roles/prime-pm-role.md` | output > 0 |
 | Short path zero-LLM test exists | `grep -cE "zero_llm\|no_llm_call" tests/unit/test_message_drafter.py` | output > 0 |
