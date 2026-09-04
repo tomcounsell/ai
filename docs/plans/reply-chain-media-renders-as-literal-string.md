@@ -255,7 +255,17 @@ file with the tools it already has, or reports precisely what it cannot open.
 - **Caption composes with the descriptor.** Per spike-2, a caption already survives. The change is that a captioned attachment now renders as caption *plus* descriptor, where today it renders as caption alone with the file invisible.
 - **Stat the path, do not trust the record.** Spike-3 shows files are never swept but records expire at 90 days; the inverse (record present, file gone) is possible after a manual clean or a failed write, so existence is checked, mirroring `bridge/enrichment.py`'s `path.exists() and os.access(path, os.R_OK)` check.
 - **Scope every lookup by `chat_id`.** The resolver filters on `chat_id=str(chat_id)` exactly as `_cache_walk_root` does, so a filename or path can only ever come from the chat being walked. This is the answer to issue open question 4: `data/media/` is one flat directory shared across projects, but the resolution key makes a cross-chat file unnameable.
-- **Preserve the existing renderer contracts.** `filter_tool_logs` on Valor's lines, the 2000/500-char truncation, and the `strip_private` pass at both call sites all continue to apply. The truncation floor must measure the human-authored text so a long descriptor cannot push a real message under the limit, and truncation must never bisect a path.
+- **Preserve the existing renderer contracts.** `filter_tool_logs` on Valor's lines, the 2000/500-char truncation, and the `strip_private` pass at both call sites all continue to apply. Truncation must never bisect a path, and it must measure the human-authored text so a long descriptor cannot push a real message under the truncation limit.
+- **Filter first, then compose — the descriptor is never fed to `filter_tool_logs`.** `bridge/context.py:486-487` runs `content = filter_tool_logs(content)` and then `if not content: continue` for `sender == "Valor"`, and `filter_tool_logs` returns `""` whenever its result is under 5 characters (`bridge/response.py:353`). Today a caption-less Valor media hop carries the 7-character `"[media]"` and survives that gate; once the placeholder is deleted, `content` is empty and the entire entry — descriptor included — is dropped. So the drop condition must become:
+
+  ```python
+  content = filter_tool_logs(content)
+  if not content and not msg.get("media"):
+      continue
+  ```
+
+  with the descriptor appended *after* the filter runs. Feeding a descriptor into `filter_tool_logs` would let its 5-character floor and tool-log heuristics mangle machine-facing text they were never written for.
+- **Valor media hops resolve *unreadable* by construction, and that is correct.** `media_local_path` is written only at `bridge/telegram_bridge.py:1694`, inside the inbound download block; outbound stores (`bridge/telegram_relay.py`, `bridge/telegram_bridge.py:3205`) never set it. A file Valor sent is therefore never on disk under `data/media/`. Rendering it as a named-but-unreadable attachment is honest and still strictly better than dropping the hop. Do not add an outbound download to "fix" this — see No-Gos.
 - **Fail quiet, per hop.** The chain walk's existing `except Exception: break` must not become a way to lose the whole chain over one bad record. Descriptor resolution is wrapped per hop; a failure degrades that hop to *referenced but unreadable* and the walk continues.
 - **The guard is a lint-shaped test, and that is the honest mechanism.** A true runtime invariant across mediums would require unifying the Telegram and email context-rendering paths, which is a different and much larger change (see No-Gos). What is achievable and useful now is a test that scans `bridge/` for constant-string stand-ins used as content fallbacks and fails on a new one, with an explicit allow-list for the log-prefix `[media]` strings in `telegram_bridge.py` that are not agent-facing.
 
@@ -285,7 +295,7 @@ file with the tools it already has, or reports precisely what it cannot open.
 
 - [ ] `tests/unit/test_context_helpers.py::TestReplyThreadContextHeader::test_format_reply_chain_uses_the_constant` — UPDATE: chain dicts gain a `media` key; the fixture must keep passing with and without it.
 - [ ] `tests/unit/test_context_helpers.py::test_format_reply_chain_drops_variation_selector_and_backtick_echo` — UPDATE: confirm sanitisation still applies to the composed caption-plus-descriptor line.
-- [ ] `tests/unit/test_context_helpers.py::test_format_reply_chain_omits_messages_below_length_floor` — UPDATE: the length floor must measure the human-authored text, not the synthetic descriptor.
+- [ ] `tests/unit/test_context_helpers.py::test_format_reply_chain_omits_messages_below_length_floor` — UPDATE: this test must keep passing unchanged for its own case (a Valor hop with **no** media, whose post-filter remainder is under the `<5` floor in `filter_tool_logs`, is still omitted). Add a sibling case proving the complement: a Valor hop that is below the floor **and** carries media is now *retained*, rendered as its descriptor. The floor lives in `bridge/response.py:353` and applies only to Valor lines and only to text; it is never applied to a descriptor.
 - [ ] `tests/integration/test_steering.py` (reply-chain timeout guards, ~lines 45-80, 1290-1310) — UPDATE: the two `asyncio.wait_for(fetch_reply_chain(...))` guards keep the same 3.0s constant; assertions must survive the signature change.
 - [ ] `tests/integration/test_private_tag_ingestion.py` (lines 130, 171) — UPDATE: `strip_private` must still cover the descriptor text spliced into the chain block.
 
@@ -543,7 +553,8 @@ email side, and this plan should not reproduce it.
 - **Parallel**: false
 - Teach `format_reply_chain` to read `msg["media"]` and compose the line: text plus descriptor when both exist, descriptor alone when the text is empty, text alone when `media` is `None`.
 - Keep the existing contracts intact — `filter_tool_logs` on Valor's lines, the 2000/500 truncation, and the caller-side `strip_private`.
-- Apply the truncation floor to the human-authored text only, and never let truncation bisect a path.
+- **Change the Valor drop condition at `bridge/context.py:487` from `if not content: continue` to `if not content and not msg.get("media"): continue`, and append the descriptor after `filter_tool_logs` has run.** Without this, deleting the placeholder makes `filter_tool_logs` return `""` for a caption-less Valor media hop and the whole entry vanishes — a regression the current 7-character `"[media]"` string is accidentally preventing.
+- Apply truncation to the human-authored text only, and never let truncation bisect a path.
 - Delete the `msg.text or "[media]"` fallback outright. No commented-out remnant.
 
 ### 3. Unit-test the three rendering states
@@ -555,6 +566,7 @@ email side, and this plan should not reproduce it.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Cover: resolved with caption; resolved without caption; text-only unchanged; and each unreadable reason (no record, no path, `media_download_error` set, file absent).
+- Cover the Valor composition-order case both ways: a below-floor Valor hop with no media is still omitted, and a below-floor Valor hop *with* media is retained and renders its descriptor.
 - Cover the photo case where `msg.file.name` is `None`, and the `media_type is None` case.
 - Assert the resolved and unreadable renderings are textually distinguishable.
 - Assert the literal `[media]` appears in no output across every case.
