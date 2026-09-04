@@ -363,16 +363,26 @@ documented as a follow-up).
 
 ## Latency budget
 
-* p50 < 500ms
-* p99 < 3s
+* LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling 2026-09-03, set
+  at roughly 1.5x the measured p50/p99 of 1619ms/2463ms to leave
+  headroom for Anthropic API variance without hiding a genuine
+  regression; provisional/tunable, re-derive from post-merge audit
+  JSONL).
+* Zero-LLM short path (<200 chars, non-SDLC, no artifacts): p50 ~= 0ms,
+  unchanged by the ruling above.
 
-The SDK-level 3-second timeout is enforced via the RTR-correct
+The SDK-level 3-second timeout is a separate per-call bound, not the
+latency budget itself, and is enforced via the RTR-correct
 pattern: `async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:`. The
-semaphore acquire itself is bounded by the same timeout — a caller that
-cannot get a slot within `RTR_SDK_TIMEOUT` raises `TimeoutError` rather
-than queuing indefinitely, and that wait is measured as `queue_wait_ms`
-on the audit row, separately from the LLM call's own `elapsed_ms`. This is
+anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as client:`.
+`max_retries=0` is load-bearing: the SDK default (`DEFAULT_MAX_RETRIES = 2`)
+retries client-side timeouts, which would silently turn the 3s worst
+case into ~3 attempts plus backoff (~10s) on this call's inline
+delivery path. The semaphore acquire itself is bounded by the same
+timeout — a caller that cannot get a slot within `RTR_SDK_TIMEOUT` raises
+`TimeoutError` rather than queuing indefinitely, and that wait is measured
+as `queue_wait_ms` on the audit row, separately from the LLM call's own
+`elapsed_ms`. This is
 not a coroutine-level timeout around the API call itself (which stays
 forbidden — see below); it only bounds how long a call waits for a
 semaphore slot, so it does not reintroduce the #1055 hazard. Coroutine-level

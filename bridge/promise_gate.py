@@ -77,8 +77,15 @@ caller passes); ``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs.
 
 Latency
 -------
-Budget: p50 < 500ms, p99 < 3s. SDK-level 3-second timeout via the
-RTR-correct pattern: ``async with semaphore_slot(): async with
+Budget for the LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling
+2026-09-03, set at roughly 1.5x the measured p50/p99 of 1619ms/2463ms
+to leave headroom for Anthropic API variance; provisional/tunable,
+re-derive from post-merge audit JSONL). The zero-LLM short path
+(<200 chars, non-SDLC, no artifacts) keeps its existing guarantee of
+p50 ~= 0ms and is unchanged by this budget. This latency budget is
+separate from the SDK-level per-call timeout, which stays 3 seconds
+regardless and is enforced via the RTR-correct pattern: ``async with
+semaphore_slot(): async with
 anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
 client:``. ``max_retries=0`` is load-bearing for the stated bound: the
 SDK default (``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts,
