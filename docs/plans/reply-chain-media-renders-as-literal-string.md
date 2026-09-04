@@ -433,22 +433,174 @@ email side, and this plan should not reproduce it.
 
 ## Success Criteria
 
-<!-- skeleton -->
+- [ ] `bridge/context.py::fetch_reply_chain` emits the literal string `[media]` under no input. A caption-less attachment in a chain renders with its filename, media type, and a readable path.
+- [ ] Replaying the reported exchange shape (attachment, then two text replies) produces agent turn input containing a path sufficient to read the attachment without asking the human.
+- [ ] A caption on a chain-ancestor attachment renders together with the attachment descriptor, so the agent sees both the note and the file.
+- [ ] An unresolvable attachment renders as an explicit unreadable marker naming the file and the reason, textually distinguishable from the resolved rendering, for each of: no record, no path, download error, file absent from disk.
+- [ ] A `chat_id`-scoped resolution test proves a same-`message_id` record in a different chat is never resolved.
+- [ ] A 20-deep chain with media at every hop completes inside the 3-second `_REPLY_CHAIN_FETCH_TIMEOUT_S` budget, and the rendered block stays under an asserted size ceiling.
+- [ ] The bare-placeholder guard covers `bridge/` including `bridge/email_bridge.py`, and its red state was demonstrated and pasted into the PR description before merge.
+- [ ] `docs/features/reply-thread-context-hydration.md` and `docs/features/media-enrichment.md` both describe how chain-ancestor media is represented.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+- [ ] No xfail conversions required — the repo currently contains zero `pytest.mark.xfail` or runtime `pytest.xfail()` markers in `tests/`, verified at plan time.
 
 ## Team Orchestration
 
-<!-- skeleton -->
+### Team Members
+
+- **Builder (chain renderer)**
+  - Name: `chain-renderer-builder`
+  - Role: The descriptor record, the ancestor resolver, and the renderer composition in `bridge/context.py`
+  - Agent Type: builder
+  - Domain: Redis/Popoto data access, async
+  - Resume: true
+
+- **Builder (guard and budget tests)**
+  - Name: `guard-test-builder`
+  - Role: The cross-medium bare-placeholder guard and the 20-hop budget regression test
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator (renderer)**
+  - Name: `chain-renderer-validator`
+  - Role: Verifies the three rendering states, the `chat_id` scoping, and that no existing renderer contract regressed
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `chain-media-documentarian`
+  - Role: Both feature doc updates
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Validator (final)**
+  - Name: `final-validator`
+  - Role: Runs the full Verification table and confirms every Success Criterion
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
-<!-- skeleton -->
+### 1. Build the media descriptor and ancestor resolver
+
+- **Task ID**: build-resolver
+- **Depends On**: none
+- **Validates**: `tests/unit/test_context_helpers.py` (extend)
+- **Informed By**: spike-1 (Popoto `KeyField` lookup is O(1) and needs no network; the identical call already exists at `bridge/context.py:651`), spike-3 (files are never swept, records expire at 90 days, so stat the path)
+- **Assigned To**: `chain-renderer-builder`
+- **Agent Type**: builder
+- **Parallel**: true
+- Add the descriptor record to `bridge/context.py` with fields `kind` (`resolved` | `unreadable`), `filename`, `media_type`, `local_path`, `reason`.
+- Add the per-hop resolver. Media type via `bridge.media.get_media_type(msg)`; filename via `msg.file.name` with a synthetic `{media_type}-{message_id}` fallback for photos, which have no filename. Path via `TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id)`, importing `models.telegram` lazily inside the function as `_cache_walk_root` does.
+- Gate on `msg.file` / `msg.media` truthiness, not on `msg.text` falsiness — a captioned attachment must produce a descriptor too.
+- Stat the resolved path (`exists()` and `os.access(..., os.R_OK)`), mirroring `bridge/enrichment.py`, and downgrade to `unreadable` with a specific reason when it fails.
+- Optionally recover an unpersisted path with the single-match `data/media/` glob on `message_id`, following `bridge/enrichment.py:79-110`; require exactly one match.
+- Wrap resolution per hop in try/except so a failure yields an `unreadable` descriptor and the walk continues. Log at warning.
+- Attach the descriptor to each chain dict under a `media` key; entries with no media carry `None`.
+
+### 2. Compose the renderer
+
+- **Task ID**: build-renderer
+- **Depends On**: build-resolver
+- **Validates**: `tests/unit/test_context_helpers.py` (extend)
+- **Informed By**: spike-2 (the caption already survives; the attachment is what vanishes, so this is composition rather than preservation)
+- **Assigned To**: `chain-renderer-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Teach `format_reply_chain` to read `msg["media"]` and compose the line: text plus descriptor when both exist, descriptor alone when the text is empty, text alone when `media` is `None`.
+- Keep the existing contracts intact — `filter_tool_logs` on Valor's lines, the 2000/500 truncation, and the caller-side `strip_private`.
+- Apply the truncation floor to the human-authored text only, and never let truncation bisect a path.
+- Delete the `msg.text or "[media]"` fallback outright. No commented-out remnant.
+
+### 3. Unit-test the three rendering states
+
+- **Task ID**: test-states
+- **Depends On**: build-renderer
+- **Validates**: `tests/unit/test_context_helpers.py`
+- **Assigned To**: `guard-test-builder`
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Cover: resolved with caption; resolved without caption; text-only unchanged; and each unreadable reason (no record, no path, `media_download_error` set, file absent).
+- Cover the photo case where `msg.file.name` is `None`, and the `media_type is None` case.
+- Assert the resolved and unreadable renderings are textually distinguishable.
+- Assert the literal `[media]` appears in no output across every case.
+- Add the `chat_id` scoping test: a record with the same `message_id` in a different chat must not resolve.
+- Update the three existing `test_context_helpers.py` cases per **Test Impact**.
+
+### 4. Budget regression test
+
+- **Task ID**: test-budget
+- **Depends On**: build-renderer
+- **Validates**: `tests/integration/test_steering.py` (extend)
+- **Assigned To**: `guard-test-builder`
+- **Agent Type**: test-engineer
+- **Parallel**: true
+- Drive a 20-deep chain with media at every hop and assert completion inside `_REPLY_CHAIN_FETCH_TIMEOUT_S`.
+- Assert a ceiling on the rendered block size so a verbose descriptor cannot silently crowd the prompt (Risk 1).
+- Leave the two existing timeout-guard assertions (`test_steering.py` ~lines 45-80 and ~1290-1310) passing: both call sites keep the same 3.0s constant.
+
+### 5. Cross-medium bare-placeholder guard
+
+- **Task ID**: build-guard
+- **Depends On**: none
+- **Validates**: `tests/unit/` (new test module)
+- **Informed By**: spike-4 (there is no email pattern to generalise; the guard is the only cross-medium mechanism in scope)
+- **Assigned To**: `guard-test-builder`
+- **Agent Type**: test-engineer
+- **Parallel**: true
+- Scan `bridge/` for constant-string stand-ins used as content fallbacks — the `X or "[literal]"` shape and its equivalents — and fail on any hit.
+- Allow-list the log-prefix `[media]` strings in `bridge/telegram_bridge.py` (lines 786, 794, 802, 1654, 1682, 1708, 1715), which are operator-facing log text, not agent context. Keep the allow-list explicit and narrow.
+- **Demonstrate the guard red before shipping**: introduce a deliberate bare placeholder, capture the failure output, revert, and paste that output into the PR description (Risk 5).
+
+### 6. Validate the renderer
+
+- **Task ID**: validate-renderer
+- **Depends On**: build-renderer, test-states, test-budget, build-guard
+- **Assigned To**: `chain-renderer-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Confirm all three rendering states behave as specified and that text-only chains are byte-identical to today.
+- Confirm the guard fails on an injected placeholder and passes on `main` plus this branch.
+- Confirm no `[media]` literal survives in agent-facing code.
+
+### 7. Documentation
+
+- **Task ID**: document-feature
+- **Depends On**: validate-renderer
+- **Assigned To**: `chain-media-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/reply-thread-context-hydration.md` with the chain-ancestor media rendering (three states, the `chat_id` scoping, the path disclosure note from Risk 2).
+- Update `docs/features/media-enrichment.md` to state that ancestors receive a path reference and never an enrichment pass, and why.
+- Describe only the new status quo. No before/after narration, no historical artifacts.
+
+### 8. Final validation
+
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: `final-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table.
+- Confirm every Success Criterion, including the guard's red-state proof in the PR description.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `.venv/bin/python -m pytest tests/unit/test_context_helpers.py -q` | exit code 0 |
+| Renderer unit tests pass | `./scripts/pytest-clean.sh tests/unit/test_context_helpers.py -q` | exit code 0 |
+| Reply-chain integration tests pass | `./scripts/pytest-clean.sh tests/integration/test_steering.py -q -k reply_chain` | exit code 0 |
+| Bare placeholder gone from the chain renderer | `grep -c '\[media\]' bridge/context.py` | match count == 0 |
+| No bare placeholder in agent-facing bridge context | `grep -rn 'or "\[media\]"\|or "\[image\]"\|or "\[attachment\]"\|or "\[document\]"\|or "\[file\]"' bridge/ \| wc -l` | match count == 0 |
+| Guard test exists and passes | `./scripts/pytest-clean.sh tests/unit -q -k placeholder` | exit code 0 |
+| Both timeout guards still use the shared 3.0s constant | `grep -c '_REPLY_CHAIN_FETCH_TIMEOUT_S' bridge/telegram_bridge.py` | output > 2 |
+| Ancestor lookup is chat-scoped | `grep -c 'chat_id=str(chat_id)' bridge/context.py` | output > 1 |
+| Hydration path runs no AI enrichment (anti-criterion for the dropped scope) | `grep -c 'process_downloaded_media\|describe_image\|transcribe_voice\|extract_document_text' bridge/context.py` | match count == 0 |
+| Email delivery seam untouched (anti-criterion for No-Go #3136) | `git diff --name-only main...HEAD -- bridge/email_bridge.py agent/session_executor.py \| wc -l` | match count == 0 |
+| Feature docs updated | `grep -l 'chain-ancestor media\|ancestor media' docs/features/reply-thread-context-hydration.md docs/features/media-enrichment.md \| wc -l` | output > 1 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
@@ -458,4 +610,16 @@ email side, and this plan should not reproduce it.
 
 ## Open Questions
 
-<!-- skeleton -->
+The issue carried four open questions. Three are now settled by evidence and are
+recorded in Spike Results rather than left for a human:
+
+- **Q1, where resolution happens** — settled by spike-1. At hydration time, in `fetch_reply_chain`. The lookup is a Popoto `KeyField` filter with no network cost, so the 3-second budget was never actually the constraint it appeared to be.
+- **Q2, path reference versus full enrichment** — settled. Path reference. Enrichment of 20 ancestors cannot fit the budget and is usually wasted; the agent spends a tool call only on the file that matters.
+- **Q3, are ancestor files still on disk** — settled by spike-3. Files are never swept. Records expire at 90 days, so the miss is a missing record, and the resolver stats the path anyway.
+- **Q4, cross-chat safety** — settled by Risk 3. Every lookup filters on `chat_id`, so a file from another chat is unnameable. The residual concern is disclosure of path *shape* into a group chat, handled as Risk 2.
+
+What remains genuinely needs a human:
+
+1. **Is the email split at the right seam?** Spike-4 found email's attachment context is written and never read — a different defect from this one, filed as #3136. This plan therefore ships a guard that would *catch* an email regression without *fixing* email's existing gap. That is an honest boundary, but it does leave email attachments stranded until #3136 lands. Ship as split, or fold #3136 in and accept a much larger blast radius?
+2. **How much path should the descriptor expose?** A full absolute path is the most actionable thing for the agent and the most leakable thing if the agent quotes it into a group chat (Risk 2). The alternative — filename plus a retrieval instruction the agent resolves itself — is safer and one indirection slower. Preference?
+3. **Should the guard fail the build or warn?** A failing test is the only thing that reliably stops a regression, and it will also fire on a legitimate future placeholder someone has a good reason for. Hard fail with a narrow allow-list is the proposal; confirm that is the appetite for friction.
