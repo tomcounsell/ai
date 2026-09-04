@@ -41,6 +41,53 @@ This string is the canonical substring used by:
 
 Do not duplicate this string. Import from `bridge.context`.
 
+## Chain-Ancestor Media Rendering
+
+Chain-ancestor media — a photo, voice note, or document attached to one of
+the messages `fetch_reply_chain` walks — is rendered, never dropped.
+`_resolve_media_descriptor` (`bridge/context.py`) builds a small descriptor
+for that hop, and `format_reply_chain` composes it into the rendered line.
+Three states, each textually distinguishable:
+
+1. **Resolved.** The ancestor's `TelegramMessage` record carries a
+   `media_local_path` that stats readable. The line carries the caption (if
+   any) plus the descriptor — filename, media type, and the absolute path as
+   a machine-facing affordance, e.g. `[attachment: report.pdf (document) at
+   machine path /Users/.../data/media/document_..._123.pdf]`. A caption
+   composes with the descriptor rather than replacing it, so the agent sees
+   both the human's note and the file.
+2. **Referenced but unreadable.** Media exists per Telethon but the on-disk
+   path cannot be trusted: no `TelegramMessage` record (`no_record`), no
+   path recorded (`no_path_recorded`), a persisted download error
+   (`download_error: ...`), the file missing from disk (`file_missing`), a
+   path outside `MEDIA_DIR` (`invalid_path`), or an unexpected resolution
+   failure (`resolution_error`). The line names the file and the reason,
+   e.g. `[unreadable attachment: voice-456 (voice) reason:
+   no_path_recorded]`, so the agent can report the gap precisely instead of
+   guessing. Valor's own outbound media hops always render this way:
+   outbound stores never set `media_local_path`, so a file Valor sent is
+   honestly unreadable rather than silently dropped.
+3. **Text only.** No media on the hop. Renders exactly as it always has.
+
+**Chat scoping.** The path lookup filters
+`TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id)` —
+the same shape used elsewhere in this module. `data/media/` is one flat
+directory shared by every chat and project on the machine, and Telegram
+message ids are per-chat sequences, so a record with the same `message_id`
+in a different chat can genuinely exist; the `chat_id` filter is what keeps
+that record from ever answering a lookup for the wrong chat. The resolver
+never globs `MEDIA_DIR` for a match — the scoped `TelegramMessage` record is
+the only path into a descriptor.
+
+**Path disclosure.** A resolved descriptor carries the file's absolute path
+so the agent can read it in one call. That path is a machine-facing
+affordance, not the label meant for a human eye: the descriptor's
+human-readable name is the file's basename, so quoting the attachment back
+into a chat naturally reproduces the filename rather than the surrounding
+directory structure. This is a disclosure-of-shape risk, not a cross-tenant
+one — chat scoping above is what keeps a file from surfacing in the wrong
+chat at all.
+
 ## Flow
 
 ### Reply-To Arrives, Resolves To Completed Session
