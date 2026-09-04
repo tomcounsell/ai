@@ -552,3 +552,174 @@ class TestCrossRunnerAgreement:
         assert len(table.checks) == expected["checks"]
         assert len(table.malformed) == expected["malformed"]
         assert len(table.skipped) == expected["skipped"]
+
+
+class TestLeadingIndexColumnIsACheckTable:
+    """A check table may carry a leading index column (review of PR #3123).
+
+    Pinning the `(Command, Expected)` pair to indices 1 and 2 rejected the
+    `| # | Check | Command | Expected |` shape that live plans in this repo
+    already use, silently turning one plan's 30 executable checks into 0
+    checks and 2 malformed rows. That is a gate incapable of firing -- the
+    defect class #3065 exists to remove -- so the shape is pinned here.
+    """
+
+    INDEXED = textwrap.dedent("""\
+        ## Verification
+        | # | Check | Command | Expected |
+        |---|-------|---------|----------|
+        | 1 | Echo works | `echo hi` | output contains hi |
+        | 2 | True exits 0 | `true` | exit code 0 |
+        """)
+
+    def test_indexed_header_yields_executable_checks(self):
+        table = parse_verification_table(self.INDEXED)
+        assert len(table.checks) == 2
+        assert not table.malformed
+        assert not table.skipped
+
+    def test_name_comes_from_the_column_before_command(self):
+        """Not from column 0, which is the index."""
+        table = parse_verification_table(self.INDEXED)
+        assert [c.name for c in table.checks] == ["Echo works", "True exits 0"]
+        assert [c.command for c in table.checks] == ["echo hi", "true"]
+
+    def test_indexed_table_actually_grades(self):
+        table = parse_verification_table(self.INDEXED)
+        results = run_checks(table.checks, timeout=10)
+        assert [r.outcome for r in results] == [CheckOutcome.PASS, CheckOutcome.PASS]
+
+    def test_results_recap_shape_is_still_rejected(self):
+        """The #3022 false positive must stay rejected: no column ahead of
+        `Command`, and no `Expected` following it."""
+        recap = textwrap.dedent("""\
+            ## Verification
+            | Command | Observed stdout | Observed exit |
+            |---------|-----------------|---------------|
+            | `echo hi` | hi | 0 |
+            """)
+        table = parse_verification_table(recap)
+        assert not table.checks
+
+    def test_criterion_recap_shape_is_still_rejected(self):
+        recap = textwrap.dedent("""\
+            ## Verification
+            | # | Criterion | Check |
+            |---|-----------|-------|
+            | 1 | Something | Manual |
+            """)
+        table = parse_verification_table(recap)
+        assert not table.checks
+
+
+class TestRecordOutcomesHasAProductionCaller:
+    """`record_verification_outcomes` must be reachable from a real runner.
+
+    Review of PR #3123 found the writer had zero production callers, so the
+    merge predicate's verification group always took its `aggregate is None`
+    branch -- a gate that could never fire. The recording flag on this runner
+    is that caller; these tests fail if it is removed or silently no-ops.
+    """
+
+    PLAN = textwrap.dedent("""\
+        ## Verification
+        | Check | Command | Expected |
+        |-------|---------|----------|
+        | Echo works | `echo hi` | output contains hi |
+        """)
+
+    def _plan_file(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text(self.PLAN)
+        return f
+
+    def test_recording_flag_calls_the_writer_with_graded_results(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = True
+            assert validate_build.main() == 0
+
+        writer.assert_called_once()
+        args, kwargs = writer.call_args
+        assert args[0] == "owner/name"
+        assert args[1] == 4242
+        assert kwargs["pr_number"] == 77
+        graded = args[2]
+        assert [r.outcome for r in graded] == [CheckOutcome.PASS], (
+            "the writer must receive the results this run actually graded"
+        )
+
+    def test_no_flag_records_nothing(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        with (
+            patch("sys.argv", ["validate_build.py", str(f)]),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()
+
+    def test_recording_without_repo_or_issue_is_refused_not_guessed(self, tmp_path):
+        f = self._plan_file(tmp_path)
+        with (
+            patch("sys.argv", ["validate_build.py", str(f), "--record-outcomes"]),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()
+
+    def test_a_failed_write_does_not_change_the_exit_code(self, tmp_path):
+        """The exit code belongs to the checks, not to the ledger."""
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            writer.return_value = False
+            assert validate_build.main() == 0
+
+    def test_commands_are_executed_once_not_twice(self, tmp_path):
+        """Recording reuses the graded results; it must not re-run the table."""
+        f = self._plan_file(tmp_path)
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "owner/name",
+            "--issue",
+            "4242",
+            "--pr",
+            "77",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes", return_value=True),
+            patch.object(validate_build, "run_checks", wraps=validate_build.run_checks) as rc,
+        ):
+            validate_build.main()
+        assert rc.call_count == 1

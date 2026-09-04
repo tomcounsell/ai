@@ -69,7 +69,13 @@ inheritance, not a block: use the returned `run_id` and continue; only a foreign
 **Verification-table runner (§ 4.5):**
 
 ```bash
-python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.outcome == 'PASS' for x in r) else 0)"
+python scripts/validate_build.py $PLAN_PATH --record-outcomes --repo $TARGET_REPO --issue $ISSUE_NUMBER --pr $PR_NUMBER
+# REVIEW is where the graded aggregate gets RECORDED, and it is the only stage
+# that can: `--record-outcomes` stamps the record with the PR head SHA it was
+# graded against, and the merge predicate refuses an aggregate it cannot show
+# is fresh. BUILD runs the same table but has no PR yet, so it must NOT record
+# -- an unanchored record is refused at merge with a reason no lane can clear.
+# Re-run this at DOCS too if the head moved after review.
 # Each result carries a three-valued `outcome` (PASS / FAIL / UNEVALUATED), never a
 # boolean; `CheckOutcome` is a StrEnum, so `x.outcome == 'PASS'` is the comparison.
 # UNEVALUATED blocks like FAIL but says the GRADER could not answer -- report it as

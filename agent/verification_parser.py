@@ -247,29 +247,42 @@ def _iter_pipe_blocks(section: str) -> list[list[str]]:
     return blocks
 
 
-def _is_check_table_header(header_cells: list[str]) -> bool:
-    """A block is a check table when its columns match the check **contract**.
+def check_column_indices(header_cells: list[str]) -> tuple[int, int] | None:
+    """Locate a check table's ``(command, expected)`` column indices.
 
-    The contract is positional: at least three columns, the second named
-    ``Command`` and the third named ``Expected`` (case-insensitive). The first
-    column is the check's name and may be called anything (``Check``,
-    ``Anti-criterion``, ...).
+    The contract is a **shape**, not a fixed pair of offsets: an ``Expected``
+    column immediately following a ``Command`` column (case-insensitive), with
+    at least one column ahead of ``Command`` to name the check. Returns the two
+    indices, or ``None`` when the block is not a check table.
 
     The predicate this replaced asked whether *any* of the first three column
     names was ``Command``, which is a question about vocabulary rather than
     about shape. A table shaped ``| Command | Observed stdout | Observed exit |``
     -- a results recap, not a check list -- satisfied it, and its "Observed
     stdout" column was then executed as a shell command with no diagnostic
-    emitted (#3022). A sweep of this repo's plans finds every genuine check
-    table is ``(<name>, Command, Expected)``, and exactly one false positive
-    (``| # | Criterion | Check |``-shaped recaps) that the contract rejects.
+    emitted (#3022).
+
+    Pinning the pair to indices 1 and 2 fixed that but over-corrected: a
+    leading index column (``| # | Check | Command | Expected |``) is an
+    established shape in this repo's live plans, and pinning silently turned
+    one such plan's 30 executable checks into 0 checks and 2 malformed rows.
+    Searching for the adjacent pair keeps both false positives rejected --
+    ``| Command | Observed stdout | Observed exit |`` has no column ahead of
+    ``Command`` and no following ``Expected``, and ``| # | Criterion | Check |``
+    has no ``Command`` at all -- while accepting every genuine shape.
     """
-    if len(header_cells) < 3:
-        return False
-    return (
-        header_cells[1].strip().lower() == "command"
-        and header_cells[2].strip().lower() == "expected"
-    )
+    for i in range(1, len(header_cells) - 1):
+        if (
+            header_cells[i].strip().lower() == "command"
+            and header_cells[i + 1].strip().lower() == "expected"
+        ):
+            return i, i + 1
+    return None
+
+
+def _is_check_table_header(header_cells: list[str]) -> bool:
+    """Whether a block's header matches the check contract."""
+    return check_column_indices(header_cells) is not None
 
 
 # The first backticked span in a command cell. Anything outside it -- a
@@ -321,12 +334,14 @@ def parse_verification_table(markdown: str) -> ParsedTable:
     found or the section has no pipe-blocks at all.
 
     The section is split into pipe-blocks (see :func:`_iter_pipe_blocks`) and
-    each is classified independently. A **check table** (header carries a
-    ``Command`` column among its first three) contributes its data rows as
+    each is classified independently. A **check table** (an ``Expected`` column
+    immediately after a ``Command`` column, with at least one column ahead of
+    them -- see :func:`check_column_indices`) contributes its data rows as
     checks; the expected column count comes from its own header, so a table
     that carries an extra annotation column is read correctly instead of
-    having every row rejected. Only the first three columns of a check table
-    are used: Check, Command, Expected.
+    having every row rejected. Three columns of a check table are read: the one
+    ahead of ``Command`` for the name, then ``Command`` and ``Expected``
+    wherever the header puts them.
 
     A non-check table becomes a non-failing :class:`SkippedTable`. When the
     section has pipe-blocks but none of them is a check table, that is a loud
@@ -388,6 +403,10 @@ def parse_verification_table(markdown: str) -> ParsedTable:
 
     for block, header_cells in check_blocks:
         expected_columns = max(len(header_cells), 3)
+        command_idx, expected_idx = check_column_indices(header_cells)
+        # The check's name is the column immediately ahead of Command, so a
+        # leading index column yields the descriptive name rather than "1".
+        name_idx = command_idx - 1
 
         for row in _block_data_rows(block):
             cells = split_row_cells(row)
@@ -406,9 +425,9 @@ def parse_verification_table(markdown: str) -> ParsedTable:
                 )
                 continue
 
-            name = cells[0]
-            raw_command = cells[1]
-            expected = cells[2]
+            name = cells[name_idx]
+            raw_command = cells[command_idx]
+            expected = cells[expected_idx]
 
             if not name or not raw_command.strip() or not expected:
                 malformed.append(

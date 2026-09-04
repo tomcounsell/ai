@@ -123,6 +123,27 @@ that produced nothing executable) grades `UNEVALUATED` for the run, never a
 vacuous `PASS` — there being nothing to check is not evidence that
 everything checked out.
 
+### Where the graded aggregate is recorded
+
+The merge gate reads a **recorded** aggregate; it never re-executes a plan's
+commands. `record_verification_outcomes` writes it to `_verification_outcomes`
+in the lane ledger's existing `stage_states` JSON, stamped with the PR head SHA
+the run was graded against (resolved through
+`tools.pr_head_resolver.resolve_pr_head_sha`, never a bare `gh` read).
+
+**REVIEW is the recording stage, and BUILD deliberately is not.** The stamp is
+what makes the record trustworthy later, and BUILD grades the table before the
+lane has a PR to stamp against. An unanchored record is refused at merge, so a
+BUILD-time write would block every lane with a reason no lane could clear.
+`scripts/validate_build.py --record-outcomes --repo <r> --issue <n> --pr <p>` is
+the one production writer; `/do-pr-review` § 4.5 invokes it, `/do-build`
+Step 5.1 runs the same script without the flag. Re-run it at DOCS if the head
+moved after review.
+
+The write happens after the report is printed and never changes the exit code:
+a run that cannot reach the ledger must still tell the human what its checks
+found.
+
 ### Table Scoping: One `## Verification` Section, Many Pipe-Blocks (#2836)
 
 A `## Verification` section can carry more than one markdown table -- a check

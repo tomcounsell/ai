@@ -25,11 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agent.verification_parser import (  # noqa: E402
     DEFAULT_TIMEOUT_S,
     CheckOutcome,
+    CheckResult,
     ParsedTable,
-    evaluate_expectation,
     parse_verification_table,
-    timeout_reason,
-    unevaluated_reason,
+    record_verification_outcomes,
+    run_checks,
 )
 
 
@@ -197,12 +197,22 @@ def check_file_assertions(assertions: list[dict[str, str]]) -> list[dict]:
     return results
 
 
-def check_verification_table(table: ParsedTable, *, timeout: int = DEFAULT_TIMEOUT_S) -> list[dict]:
+def check_verification_table(
+    table: ParsedTable,
+    *,
+    timeout: int = DEFAULT_TIMEOUT_S,
+    check_results: list[CheckResult] | None = None,
+) -> list[dict]:
     """Run verification table commands and compare output.
 
-    Delegates table definition, expectation grammar, execution bound, and
+    Delegates table definition, expectation grammar, **execution**, bound, and
     timeout disposition to ``agent.verification_parser`` (#2843/#3065) rather
     than carrying its own. This runner keeps only its report shape.
+
+    Execution goes through ``run_checks``, so the two runners cannot drift on
+    what a check *did*, only on how it is printed. ``check_results``, when
+    given, is extended with the graded :class:`CheckResult` objects so a caller
+    can persist the aggregate without running every command a second time.
 
     The bound is ``DEFAULT_TIMEOUT_S`` and a timeout is ``UNEVALUATED``, both
     shared with ``run_checks``. This module previously carried a private 30s
@@ -238,64 +248,24 @@ def check_verification_table(table: ParsedTable, *, timeout: int = DEFAULT_TIMEO
             }
         )
 
-    for check in table.checks:
-        cmd = check.command
-        expected = check.expected
-        name = check.name
+    graded = run_checks(table.checks, timeout=timeout)
+    if check_results is not None:
+        check_results.extend(graded)
 
-        if check.unevaluated_reason:
-            # Read but unrunnable as written (no backticked span): never
-            # executed on a guess, never reported as FAIL.
+    for r in graded:
+        name = r.check.name
+        if r.outcome is CheckOutcome.PASS:
+            results.append({"status": "PASS", "message": name})
+        elif r.outcome is CheckOutcome.UNEVALUATED:
+            results.append({"status": "UNEVALUATED", "message": f"{name} -- {r.reason}"})
+        else:
             results.append(
                 {
-                    "status": "UNEVALUATED",
-                    "message": f"{name} -- {check.unevaluated_reason}",
-                }
-            )
-            continue
-
-        try:
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=timeout
-            )
-            # `output` must be unstripped stdout -- run_checks passes proc.stdout
-            # unmodified, and a stripped copy here would re-create divergence at
-            # the exact seam this convergence closes. The stripped value is used
-            # only in the FAIL message.
-            actual_output = result.stdout
-            actual_exit = result.returncode
-            outcome = evaluate_expectation(expected, exit_code=actual_exit, output=actual_output)
-
-            if outcome is CheckOutcome.PASS:
-                results.append({"status": "PASS", "message": name})
-            elif outcome is CheckOutcome.UNEVALUATED:
-                results.append(
-                    {
-                        "status": "UNEVALUATED",
-                        "message": f"{name} -- {unevaluated_reason(expected)}",
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "status": "FAIL",
-                        "message": (
-                            f"{name} -- expected: {expected},"
-                            f" got exit={actual_exit}"
-                            f" output={actual_output.strip()[:100]}"
-                        ),
-                    }
-                )
-        except subprocess.TimeoutExpired:
-            results.append(
-                {"status": "UNEVALUATED", "message": f"{name} -- {timeout_reason(timeout)}"}
-            )
-        except Exception as e:
-            results.append(
-                {
-                    "status": "UNEVALUATED",
+                    "status": "FAIL",
                     "message": (
-                        f"{name} -- runner error, the check never ran: {type(e).__name__}: {e}"
+                        f"{name} -- expected: {r.check.expected},"
+                        f" got exit={r.exit_code}"
+                        f" output={r.output[:100]}"
                     ),
                 }
             )
@@ -339,18 +309,43 @@ def check_success_criteria(criteria: list[dict[str, str]]) -> list[dict]:
 
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
-        print("Usage: python scripts/validate_build.py <plan-path>")
+        print("Usage: python scripts/validate_build.py <plan-path> [options]")
         print()
         print("Validates a build against the plan specification.")
         print("Checks file path assertions, verification table commands,")
         print("and success criteria commands.")
+        print()
+        print("Options:")
+        print("  --record-outcomes   Persist the graded aggregate to the lane's ledger,")
+        print("                      where the merge predicate reads it. Requires")
+        print("                      --repo and --issue; pass --pr so the record is")
+        print("                      stamped with the head SHA it was graded against.")
+        print("                      An unstamped record is refused at merge, so record")
+        print("                      at REVIEW/DOCS time, once the lane has a PR.")
+        print("  --repo OWNER/NAME   Target repo for the ledger key.")
+        print("  --issue N           Issue number for the ledger key.")
+        print("  --pr N              PR whose head SHA anchors the record.")
         print()
         print("Exit codes:")
         print("  0 - All checks pass or skip")
         print("  1 - One or more checks failed")
         return 0
 
-    plan_path = Path(sys.argv[1])
+    argv = sys.argv[1:]
+
+    def _opt(flag: str) -> str | None:
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    record_outcomes = "--record-outcomes" in argv
+    opt_repo = _opt("--repo")
+    opt_issue = _opt("--issue")
+    opt_pr = _opt("--pr")
+
+    plan_path = Path(argv[0])
     if not plan_path.exists():
         print(f"Plan file not found: {plan_path}")
         print("Nothing to validate.")
@@ -371,8 +366,9 @@ def main() -> int:
 
     # 2. Verification table
     verification_table = parse_verification_table(plan_text)
+    graded: list[CheckResult] = []
     if verification_table.checks or verification_table.malformed or verification_table.skipped:
-        all_results.extend(check_verification_table(verification_table))
+        all_results.extend(check_verification_table(verification_table, check_results=graded))
 
     # 3. Success criteria commands
     success_criteria = parse_success_criteria_commands(plan_text)
@@ -397,6 +393,33 @@ def main() -> int:
         f"\nResult: {pass_count} PASS, {fail_count} FAIL, "
         f"{unevaluated_count} UNEVALUATED, {skip_count} SKIP"
     )
+
+    # Persist last, and never let a ledger failure change what the human is
+    # told: the write reports its own success or failure on its own line and
+    # does not touch the exit code, which belongs to the checks.
+    if record_outcomes:
+        if not opt_repo or not opt_issue:
+            print("RECORD: skipped -- --record-outcomes requires --repo and --issue")
+        else:
+            wrote = record_verification_outcomes(
+                opt_repo,
+                int(opt_issue),
+                graded,
+                table=verification_table,
+                pr_number=int(opt_pr) if opt_pr else None,
+            )
+            if wrote:
+                anchor = f"anchored to PR #{opt_pr} head" if opt_pr else "UNANCHORED"
+                print(
+                    f"RECORD: verification outcomes written for {opt_repo}#{opt_issue} ({anchor})"
+                )
+                if not opt_pr:
+                    print(
+                        "RECORD: no --pr given, so no head SHA was stamped. "
+                        "The merge predicate refuses an unanchored record."
+                    )
+            else:
+                print(f"RECORD: FAILED to write verification outcomes for {opt_repo}#{opt_issue}")
 
     # UNEVALUATED blocks. It is not a pass, and it is not a FAIL either: the
     # exit code says "stop", the report says the grader could not answer.
