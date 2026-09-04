@@ -154,31 +154,123 @@ repo or the installed dependency, which is stronger evidence than a prototype.
 
 ## Data Flow
 
-<!-- skeleton -->
+1. **Entry point** — a Telegram message arrives at `bridge/telegram_bridge.py` `handler()`. `store_message(chat_id=str(event.chat_id), ...)` (`telegram_bridge.py:1549`) writes a `TelegramMessage` row carrying `has_media`, `media_type`, `reply_to_msg_id`, and returns `stored_msg_id`.
+2. **Bridge media download** (`telegram_bridge.py:1645-1715`) — if `message.media`, `_download_media_with_retry` writes the bytes under `data/media/{prefix}_{timestamp}_{message.id}{ext}` and persists the resolved absolute path onto `TelegramMessage.media_local_path`, or the failure string onto `media_download_error`. **This is the step that makes the fix possible: by the time any later reply is walked, the ancestor's bytes and path are already durable.**
+3. **A later reply arrives** carrying `reply_to_msg_id`. Two call sites hydrate the chain, both wrapped in `asyncio.wait_for(..., timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S)` where the constant is `3.0` (`telegram_bridge.py:193`):
+   - resume-completed branch, `telegram_bridge.py:2089`
+   - fresh-session non-Valor reply branch, `telegram_bridge.py:2604`
+4. **`fetch_reply_chain`** (`bridge/context.py:379`) walks `reply_to_msg_id` backward up to `max_depth=20`, calling `client.get_messages` and `msg.get_sender()` per hop, and appends `{"sender", "content", "message_id", "date"}`. **This is where the media reference is discarded** (`:425`).
+5. **`format_reply_chain`** (`bridge/context.py:446`) renders the dicts under `REPLY_THREAD_CONTEXT_HEADER`, filtering tool logs from Valor's lines and truncating at 2000/500 chars.
+6. **`strip_private`** runs on the formatted block at both call sites, then the block is spliced into `AgentSession.message_text`.
+7. **Worker** — `agent/session_executor.py:1850-1893` loads only the *trigger* `TelegramMessage` and skips deferred re-hydration when `extra_context["reply_chain_hydrated"]` is set or the canonical header is already present. Ancestors are never enriched by construction.
+8. **Output** — `message_text` becomes the agent's turn input. Whatever `format_reply_chain` emitted is the totality of what the agent knows about every ancestor.
+
+The fix lands entirely at steps 4 and 5. Steps 1-3 already carry everything
+needed; steps 6-8 are unchanged.
 
 ## Why Previous Fixes Failed
 
-<!-- skeleton -->
+No previous fix targeted this defect, so nothing failed. What is worth recording
+is the shape the prior work shares, because it predicts where the next instance
+will appear.
+
+| Prior Fix | What It Did | Why The Class Of Bug Survived |
+|-----------|-------------|-------------------------------|
+| PR #953 (#949) | Hydrated the reply thread on the resume-completed branch | Scoped to *whether* the chain arrives. The `msg.text or "[media]"` fallback was written here and never questioned. |
+| PR #1070 (#1064) | Pre-hydrated the chain for fresh non-Valor reply sessions | Copied the existing renderer verbatim, duplicating the placeholder to a second call site. |
+| PR #1316 (#1297) | Moved media download to intake so the worker could enrich without Telethon | Correctly fixed the *trigger* message. Scoping enrichment to one record was the right call for cost; the unexamined consequence was that ancestors keep whatever the renderer gave them. |
+
+**Root cause pattern:** media is captured correctly at the boundary and then lost
+at a specific rendering or handoff seam, because each fix asks "does the payload
+arrive?" and never "what does a non-text payload look like once it has?" The bare
+placeholder is the tell — a constant string standing in for a value that exists
+one lookup away. The guard in this plan exists to make that tell mechanically
+detectable rather than relying on somebody noticing it again.
 
 ## Architectural Impact
 
-<!-- skeleton -->
+- **New dependencies**: none. `bridge/context.py` already imports `TelegramClient` from Telethon, and the `models.telegram` import is done lazily inside `_cache_walk_root` in the same module — the descriptor resolver follows that established shape.
+- **Interface changes**: chain dicts produced by `fetch_reply_chain` gain a `media` key (a small dict, or `None`). `format_reply_chain` reads it. Both are internal to `bridge/context.py` plus its tests; the two bridge call sites pass the value through opaquely and need no edit. The exported `REPLY_THREAD_CONTEXT_HEADER` contract is unchanged, so the worker's idempotency guard keeps working untouched.
+- **Coupling**: adds a read-only dependency from `bridge/context.py` onto `models.telegram` — which already exists at line 651 — and onto `bridge/media.py::get_media_type`, which is a pure classifier. No new write paths, no new ownership.
+- **Data ownership**: unchanged. `TelegramMessage.media_local_path` remains owned by the bridge intake path. This work only reads it.
+- **Reversibility**: high. The change is one function's return shape plus one renderer branch. Reverting restores the placeholder without touching persisted state.
 
 ## Appetite
 
-<!-- skeleton -->
+**Size:** Medium
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+
+- PM check-ins: 1-2 (confirming the path-reference-not-enrichment call and the email scope split)
+- Review rounds: 1
+
+The code change is small and confined to one module. The overhead is in agreeing
+the boundary — what gets resolved at hydration time versus deferred, and how far
+the cross-medium invariant reaches.
 
 ## Prerequisites
 
-<!-- skeleton -->
+No prerequisites — this work has no external dependencies. Every input
+(`TelegramMessage` records, `data/media/` files, the Telethon `File` helper) is
+already present in a working checkout, and the unit tests for the renderer need
+neither Redis nor a Telegram client.
 
 ## Solution
 
-<!-- skeleton -->
+### Key Elements
+
+- **Media descriptor** — a small structured record (`kind`, `filename`, `media_type`, `local_path`, `reason`) attached to each chain entry that carries media. It is data, not text, so the renderer owns presentation and the tests can assert on structure.
+- **Ancestor media resolver** — resolves the descriptor for one chain hop: media type and filename come from the Telethon message already in hand; the on-disk path comes from a chat-scoped `TelegramMessage` lookup. It never performs AI work and never touches the network.
+- **Chain renderer composition** — `format_reply_chain` composes a line from the human text and the descriptor. Caption present and file resolved: both. Caption absent: descriptor alone. File unresolvable: an explicit, distinguishable unreadable marker.
+- **Bare-placeholder guard** — a test that fails when any bridge module reintroduces a constant-string stand-in for unreadable content, so email and any future medium cannot regress into the same shape.
+
+### Flow
+
+**Attachment arrives** → bridge downloads it and records the path → **later reply
+arrives** → chain walk reaches the attachment hop → resolver looks up the record
+by `(chat_id, message_id)` → **descriptor built** → renderer composes the line →
+**agent's prompt carries filename, type, and a readable path** → agent reads the
+file with the tools it already has, or reports precisely what it cannot open.
+
+### Technical Approach
+
+- **Resolve at hydration time, in `fetch_reply_chain`.** Settled by spike-1: the lookup is a Popoto `KeyField` filter, the same call already present at `bridge/context.py:651`, costing well under a millisecond against a 3-second budget that is spent almost entirely on the two Telethon RPCs per hop. Deferring to the worker would mean re-walking a chain the worker has no Telethon client for.
+- **Reference, not enrichment.** The descriptor carries a path; it never runs vision, Whisper, or document extraction. Enriching twenty ancestors would blow the budget by orders of magnitude and is usually wasted work — the agent spends a tool call only on the file that matters. This is the answer to issue open question 2, and it is the reason issue open question 1 stops being a dilemma.
+- **Two independent sources per hop, degrading separately.** Media type and filename come from the Telethon `Message` already fetched (`msg.file.name`, and `bridge/media.py::get_media_type(msg)` for the type — reuse it, do not re-walk `document.attributes`). The local path comes from Redis. A Redis miss therefore still yields a named attachment, just an unreadable one — strictly better than today's four characters.
+- **Three rendering states, all distinguishable.**
+  1. *Resolved* — the record has `media_local_path` and the file passes an existence check. Render filename, media type, and the absolute path.
+  2. *Referenced but unreadable* — media exists per Telethon but the record is missing, `media_local_path` is unset, `media_download_error` is set, or the path no longer exists on disk. Render the filename and type with an explicit unreadable marker naming the reason. The agent must be able to say "there is a file here I cannot open" without guessing.
+  3. *Text only* — no media. Unchanged from today.
+- **Caption composes with the descriptor.** Per spike-2, a caption already survives. The change is that a captioned attachment now renders as caption *plus* descriptor, where today it renders as caption alone with the file invisible.
+- **Stat the path, do not trust the record.** Spike-3 shows files are never swept but records expire at 90 days; the inverse (record present, file gone) is possible after a manual clean or a failed write, so existence is checked, mirroring `bridge/enrichment.py`'s `path.exists() and os.access(path, os.R_OK)` check.
+- **Scope every lookup by `chat_id`.** The resolver filters on `chat_id=str(chat_id)` exactly as `_cache_walk_root` does, so a filename or path can only ever come from the chat being walked. This is the answer to issue open question 4: `data/media/` is one flat directory shared across projects, but the resolution key makes a cross-chat file unnameable.
+- **Preserve the existing renderer contracts.** `filter_tool_logs` on Valor's lines, the 2000/500-char truncation, and the `strip_private` pass at both call sites all continue to apply. The truncation floor must measure the human-authored text so a long descriptor cannot push a real message under the limit, and truncation must never bisect a path.
+- **Fail quiet, per hop.** The chain walk's existing `except Exception: break` must not become a way to lose the whole chain over one bad record. Descriptor resolution is wrapped per hop; a failure degrades that hop to *referenced but unreadable* and the walk continues.
+- **The guard is a lint-shaped test, and that is the honest mechanism.** A true runtime invariant across mediums would require unifying the Telegram and email context-rendering paths, which is a different and much larger change (see No-Gos). What is achievable and useful now is a test that scans `bridge/` for constant-string stand-ins used as content fallbacks and fails on a new one, with an explicit allow-list for the log-prefix `[media]` strings in `telegram_bridge.py` that are not agent-facing.
 
 ## Failure Path Test Strategy
 
-<!-- skeleton -->
+### Exception Handling Coverage
+
+- [ ] `bridge/context.py::fetch_reply_chain` has a broad `except Exception` at the loop tail (`:437`) that logs at debug and breaks. A test must assert that a per-hop descriptor-resolution failure does **not** reach it: the hop degrades to the unreadable rendering and the walk continues to the remaining ancestors.
+- [ ] The new resolver's own `except` path must log at warning and return an unreadable descriptor, never `None` and never a bare re-raise. A test asserts the observable warning and the returned state.
+- [ ] `except Exception: pass` blocks: none exist in `bridge/context.py`, and none are introduced.
+
+### Empty/Invalid Input Handling
+
+- [ ] `format_reply_chain([])` returns `""` today; assert this is preserved once entries carry a `media` key.
+- [ ] A chain entry with `media=None` renders exactly as it does today — this is the regression fence for text-only chains.
+- [ ] A descriptor whose `filename` is `None` (the photo case, per Research) renders a synthetic label from media type and message id, never an empty name or a dangling separator.
+- [ ] A `media_local_path` that is an empty string, whitespace, or a path outside `data/media/` resolves to *unreadable* rather than being rendered as a path.
+- [ ] A record whose `media_type` is `None` while `has_media` is true renders with a generic type label rather than crashing the renderer.
+
+### Error State Rendering
+
+- [ ] The unreadable rendering is user-visible output and is tested directly, for each distinct reason: no record, no path, `media_download_error` set, path absent from disk.
+- [ ] The unreadable marker is asserted to be textually distinguishable from the resolved rendering, so an agent (and a test) can tell the two apart without heuristics.
+- [ ] A test asserts the literal string `[media]` appears in no rendered chain output under any of the above states.
 
 ## Test Impact
 
