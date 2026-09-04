@@ -526,7 +526,7 @@ async def fetch_reply_chain(
             chain.append(
                 {
                     "sender": sender_name,
-                    "content": msg.text or "[media]",
+                    "content": msg.text or "",
                     "message_id": msg.id,
                     "date": msg.date,
                     "media": media,
@@ -548,9 +548,30 @@ async def fetch_reply_chain(
     return chain
 
 
+def _format_media_descriptor(media: dict) -> str:
+    """Render one media descriptor as a compact single-line marker.
+
+    The filename (a basename) is the human-readable name to quote; the
+    absolute path is an explicitly machine-facing affordance for the agent's
+    file tools. The unreadable rendering names the file and the reason and is
+    textually distinguishable from the resolved one.
+    """
+    name = media.get("filename") or "unnamed"
+    media_type = media.get("media_type") or "file"
+    local_path = media.get("local_path")
+    if media.get("kind") == "resolved" and local_path:
+        return f"[attachment: {name} ({media_type}) at machine path {local_path}]"
+    reason = media.get("reason") or "unknown"
+    return f"[unreadable attachment: {name} ({media_type}) reason: {reason}]"
+
+
 def format_reply_chain(chain: list[dict]) -> str:
     """
     Format a reply chain for inclusion in agent context.
+
+    Each entry's line composes the human-authored text with its media
+    descriptor: both when both exist, the descriptor alone when the text is
+    empty, the text alone when the entry carries no media.
 
     Args:
         chain: List of message dicts from fetch_reply_chain()
@@ -567,11 +588,14 @@ def format_reply_chain(chain: list[dict]) -> str:
     for msg in chain:
         sender = msg["sender"]
         content = msg["content"]
+        media = msg.get("media")
 
-        # Filter tool logs from Valor's messages
+        # Filter tool logs from Valor's messages. A hop whose text filters to
+        # nothing is still kept when it carries media — its descriptor is the
+        # whole line.
         if sender == "Valor":
             content = filter_tool_logs(content)
-            if not content:
+            if not content and not media:
                 continue
 
         # Valor's messages are already summarized — include in full
@@ -580,6 +604,14 @@ def format_reply_chain(chain: list[dict]) -> str:
         max_len = 2000 if sender == "Valor" else 500
         if len(content) > max_len:
             content = content[:max_len] + "..."
+
+        # Compose after filtering and truncation: filter_tool_logs is written
+        # for human/tool text and must never see the descriptor, and
+        # truncation measures the human-authored text so it can never bisect
+        # a path.
+        if media:
+            descriptor = _format_media_descriptor(media)
+            content = f"{content} {descriptor}" if content else descriptor
 
         # Format with timestamp if available
         date_str = ""
