@@ -8,13 +8,14 @@ RETAINED because parent sessions spawning child AgentSessions remain:
 - semantically redundant -- dependent work runs as subagents WITHIN the
   session (the D1 topology: the PM continues its ``dev`` subagent across
   turns), and
-- unbounded -- with the pool gone there is no independent fanout cap on
-  concurrent child sessions until #1633's subagent refactor lands or #1926
-  (guardian consolidation) names a cap.
+- unbounded -- with the pool gone there is no per-parent fanout cap on
+  child sessions; the only bound is the worker's global
+  ``MAX_CONCURRENT_SESSIONS`` slot registry, shared machine-wide.
 
 Re-enabling child-session fanout is a real behavior change with no named
-replacement bound; removal of this gate is #1633's scope, deferred — not
-smuggled into the cutover. Existing child sessions are unaffected: resume,
+replacement bound; removing this gate needs its own lane that names a
+per-parent cap (#1633, which owned the removal, closed with the gate
+deliberately retained). Existing child sessions are unaffected: resume,
 steer, kill, ``children`` listing, and ``waiting_for_children`` lifecycle
 handling all keep working, and PM continuation chains
 (``session_completion.py`` create_pm, issue #1195) are deliberately exempt --

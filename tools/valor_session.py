@@ -864,8 +864,11 @@ def cmd_create(args: argparse.Namespace) -> int:
 
     # ------------------------------------------------------------------
     # Stopgap (#1633): refuse NEW parent-attached session creation.
-    # The granite PTY container owns the PM/Dev split; parent-linked
-    # child sessions double-consume bounded pool slots. Fires before
+    # Dependent work runs as subagents WITHIN a session (the D1 topology:
+    # the PM continues its `dev` subagent across turns), and child-session
+    # fanout has no per-parent bound -- only the worker's global
+    # MAX_CONCURRENT_SESSIONS slot registry, shared machine-wide. See
+    # models/child_session_gate.py for the full rationale. Fires before
     # any filesystem or Redis work (slug derivation, worktree
     # provisioning, enqueue) so the refused path has zero side effects.
     # ------------------------------------------------------------------

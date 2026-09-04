@@ -254,8 +254,10 @@ class TestCreateDevRoleRequiresSlug:
 class TestCreateChildSessionGate:
     """Stopgap (#1633): cmd_create refuses NEW parent-attached session creation.
 
-    The granite PTY container (PR #1612) owns the PM/Dev split from a bounded
-    pool; parent-linked child sessions double-consume pool slots. The gate
+    Dependent work runs as subagents within the session (D1 topology: the PM
+    continues its dev subagent across turns), and child-session fanout has no
+    per-parent bound -- only the worker's global MAX_CONCURRENT_SESSIONS slot
+    registry, shared machine-wide (see models/child_session_gate.py). The gate
     fires before any filesystem or Redis work and is bypassed only by
     VALOR_ALLOW_CHILD_SESSIONS=1 (loud stderr warning). Parentless creation
     and existing-child lifecycle commands are untouched.
