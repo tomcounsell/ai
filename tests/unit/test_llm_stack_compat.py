@@ -6,10 +6,13 @@ have degraded the entire fleet:
 
 * the **positive self-test** -- ``check_llm_stack_compat().compatible is
   True`` on the pinned pair, and
-* **shape assertions on the derived set** -- it contains ``temperature`` /
-  ``top_p`` / ``top_k`` (the three the 2026-08-24 incident removed) and no
-  ``anthropic_``-prefixed name (the tell that the derivation slipped back
-  onto ``AnthropicModelSettings.__annotations__``).
+* **shape assertions on the derived set** -- it contains the structural
+  create kwargs (``model`` / ``messages`` / ``max_tokens`` / ``stream``),
+  none of the incident trio ``temperature`` / ``top_p`` / ``top_k`` (gone
+  from the call site since pydantic-ai 2.33; their reappearance means a
+  below-boundary regression), and no ``anthropic_``-prefixed name (the tell
+  that the derivation slipped back onto
+  ``AnthropicModelSettings.__annotations__``).
 
 Every fail-closed path is exercised against a **synthetic module source**
 fed through the ``_models_anthropic_source`` seam, so the cases do not

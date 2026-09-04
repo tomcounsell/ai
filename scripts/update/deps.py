@@ -263,8 +263,9 @@ def get_installed_version(project_dir: Path, package: str) -> str | None:
 # Declaration-aware pin helpers
 # ---------------------------------------------------------------------------
 #
-# A `pyproject.toml` dependency line is NOT a substring haystack. The real file
-# carries all three shapes that broke the naive helpers (#3001 spike-2):
+# A `pyproject.toml` dependency line is NOT a substring haystack. At #3001
+# spike-2 time the file carried all three shapes that broke the naive helpers
+# (versions since moved by #3073; the SHAPES are what matter):
 #
 #     "pydantic-ai-slim[anthropic]==2.9.0", # ... avoids the openai/... extras
 #     "anthropic==0.125.0",
@@ -469,9 +470,10 @@ AUTO_BUMP_SETS: list[CoupledSet] = [
         gates=("llm", "import", "pytest"),
         reason=(
             "anthropic 1.0.0 removed temperature/top_p/top_k from the Messages "
-            "API and pydantic_ai/models/anthropic.py forwards all three "
-            "unconditionally, so a partial bump kills every non-harness LLM "
-            "call at argument binding — before any network I/O. An import "
+            "API and pydantic-ai < 2.33 forwarded all three unconditionally "
+            "(the 2026-08-24 incident), so a partial bump kills every "
+            "non-harness LLM call at argument binding — before any network "
+            "I/O. An import "
             "check cannot see it (`import anthropic` succeeds fine on a "
             "version whose call signature we cannot satisfy), which is why "
             "this set carries the `llm` phase."
@@ -496,8 +498,9 @@ AUTO_BUMP_SETS: list[CoupledSet] = [
 # looked like coupling was self-inflicted — a module-scope
 # `from pydantic_ai.models.openai import OpenAIChatModel` in
 # `agent/llm/wrapper.py` — and it is fixed at the import, not by widening a
-# set. Its declaration is also a floor (`openai>=1.0.0`), not an exact pin,
-# so an auto-bump could not rewrite it without inventing a pin nobody chose.
+# set. Its declaration is also a floor (`openai>=3.0.0` as of #3073), not an
+# exact pin, so an auto-bump could not rewrite it without inventing a pin
+# nobody chose.
 assert "openai" not in {member for s in AUTO_BUMP_SETS for member in s.members}, (
     "`openai` must not be a coupled-set member (spike-5): it has no packaging "
     "coupling to the anthropic stack and is declared as a floor, not a pin."
