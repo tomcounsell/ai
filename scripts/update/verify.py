@@ -603,6 +603,52 @@ def migrate_settings_json_paths() -> dict[str, str | bool]:
     return result
 
 
+def ensure_claude_update_channel() -> dict[str, str | bool]:
+    """Pin ~/.claude/settings.json to the 'latest' Claude Code update channel.
+
+    The 'stable' channel lags 'latest' by many releases (2.1.236 vs 2.1.260 on
+    2026-09-04), which both starved this machine of the long-running silent-exit
+    fixes and blocked newer model ids that require a newer CLI. This is the
+    fleet-wide counterpart to the local channel switch: every machine's /update
+    lands on 'latest' so the medicine propagates. See ai repo memory
+    project_claude_cli_silent_exit_findings.
+
+    Idempotent: a no-op once the channel already reads 'latest'.
+
+    Returns dict with: changed (bool), reason (str).
+    """
+    import json
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    result: dict[str, str | bool] = {"changed": False, "reason": ""}
+
+    if not settings_path.exists():
+        result["reason"] = "No ~/.claude/settings.json found"
+        return result
+
+    try:
+        settings = json.loads(settings_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        result["reason"] = f"Failed to read/parse settings.json: {e}"
+        return result
+
+    if settings.get("autoUpdatesChannel") == "latest":
+        result["reason"] = "Already on 'latest' channel"
+        return result
+
+    previous = settings.get("autoUpdatesChannel", "<unset>")
+    settings["autoUpdatesChannel"] = "latest"
+
+    try:
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        result["changed"] = True
+        result["reason"] = f"Set autoUpdatesChannel: {previous} -> latest"
+    except OSError as e:
+        result["reason"] = f"Failed to write settings.json: {e}"
+
+    return result
+
+
 def check_mcp_servers() -> list[str]:
     """Get list of configured MCP servers by reading config files directly.
 

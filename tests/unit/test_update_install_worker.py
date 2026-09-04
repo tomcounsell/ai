@@ -571,3 +571,20 @@ class TestInstallWorkerIdempotency:
         joined = [" ".join(c) for c in calls]
         assert any("bootstrap" in c for c in joined)
         assert not any("bootout" in c for c in joined)
+
+
+class TestWorkerTemplateCrashMitigation:
+    """The worker plist template must carry the Claude Code crash-mitigation env
+    vars (project_claude_cli_silent_exit_findings). They live in the template
+    rather than the injection block so both install paths (shell + /update) get
+    them from one source; this test catches a future edit that drops them."""
+
+    def test_template_pins_crash_mitigation_env(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        template = plistlib.load((repo_root / "com.valor.worker.plist").open("rb"))
+        env = template["EnvironmentVariables"]
+        # 1M-context beta disabled: the strongest crash correlate for long
+        # autonomous sessions (>200k peak ctx ~= 41% crash rate).
+        assert env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "1"
+        # MCP tool-result bloat bounded into context.
+        assert env["MAX_MCP_OUTPUT_TOKENS"] == "25000"

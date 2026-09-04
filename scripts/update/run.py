@@ -2761,6 +2761,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log(f"  Settings: {settings_migration.get('reason')}", v)
 
+            # Pin every machine to the 'latest' Claude Code channel — 'stable'
+            # lags many releases behind, starving the fleet of silent-exit fixes
+            # and blocking newer model ids (#project_claude_cli_silent_exit).
+            channel = verify.ensure_claude_update_channel()
+            if channel.get("changed"):
+                log(f"  Settings: {channel.get('reason')}", v, always=True)
+            else:
+                log(f"  Settings: {channel.get('reason')}", v)
+
         # Sync Claude OAuth credentials.
         # Writes a credential file outside this checkout — off under --verify (#3026).
         if config.read_only:
