@@ -267,7 +267,11 @@ file with the tools it already has, or reports precisely what it cannot open.
   with the descriptor appended *after* the filter runs. Feeding a descriptor into `filter_tool_logs` would let its 5-character floor and tool-log heuristics mangle machine-facing text they were never written for.
 - **Valor media hops resolve *unreadable* by construction, and that is correct.** `media_local_path` is written only at `bridge/telegram_bridge.py:1694`, inside the inbound download block; outbound stores (`bridge/telegram_relay.py`, `bridge/telegram_bridge.py:3205`) never set it. A file Valor sent is therefore never on disk under `data/media/`. Rendering it as a named-but-unreadable attachment is honest and still strictly better than dropping the hop. Do not add an outbound download to "fix" this — see No-Gos.
 - **Fail quiet, per hop.** The chain walk's existing `except Exception: break` must not become a way to lose the whole chain over one bad record. Descriptor resolution is wrapped per hop; a failure degrades that hop to *referenced but unreadable* and the walk continues.
-- **The guard is a lint-shaped test, and that is the honest mechanism.** A true runtime invariant across mediums would require unifying the Telegram and email context-rendering paths, which is a different and much larger change (see No-Gos). What is achievable and useful now is a test that scans `bridge/` for constant-string stand-ins used as content fallbacks and fails on a new one, with an explicit allow-list for the log-prefix `[media]` strings in `telegram_bridge.py` that are not agent-facing.
+- **The guard is two lint-shaped tests, and each claims only what it detects.** A true runtime invariant across mediums would require unifying the Telegram and email context-rendering paths, which is a different and much larger change (see No-Gos). What is achievable now is two static scans over `bridge/`:
+  1. **Placeholder-shape scan.** Parse each module with `ast` and flag any `BoolOp(op=Or)` whose right-hand operand is a bracketed string constant — the `X or "[literal]"` shape. This is the exact shape of the defect being fixed and of PR #953's original line.
+  2. **Write-only-context scan.** Assert every `extra_context["<key>"] = ...` writer has at least one reader outside `tests/`. This is the shape spike-4 found on the email side, where five keys (`attachments_unrecoverable`, `attachments_truncated`, `attachments_recovered_count`, `attachments_referenced`, `email_attachments`, all at `bridge/email_bridge.py:1494-1502`) are stamped and never read.
+- **Match on AST shape, never on line numbers.** An allow-list pinned to positions in a 2600-line, heavily-edited file fires on unrelated edits, and a guard that cries wolf gets deleted — which is the very outcome Risk 5 warns about. The AST predicate needs no allow-list at all: the seven `[media]` strings in `bridge/telegram_bridge.py` (786, 794, 802, 1654, 1682, 1708, 1715) are all f-string arguments to `logger.info`/`logger.warning` calls, which are `JoinedStr` nodes inside a `Call`, not `BoolOp` operands. They are structurally invisible to the scan rather than excused by it.
+- **Be precise about what the guard does not cover.** Scan 1 detects one syntactic shape. Of the three prior fixes tabulated in *Why Previous Fixes Failed*, only PR #953's is that shape — PR #1070's was renderer duplication to a second call site and PR #1316's was enrichment scoped to a single record, and neither is expressible as a literal-shape scan. Scan 2 generalises one step further by catching context written for the agent and never delivered. Together they cover two of the four historical instances. The remaining class, "a payload arrives and nobody asks what the non-text case renders as", is a review question, not a lint. Claiming otherwise is how the placeholder survived three PRs.
 
 ## Failure Path Test Strategy
 
@@ -365,9 +369,15 @@ Redis cannot distinguish the correct implementation from the broken one.
 **Impact:** A guard that never fails is worse than no guard — it advertises
 coverage that does not exist, which is exactly how the placeholder survived three
 prior PRs.
-**Mitigation:** Demonstrate the guard red before shipping it: introduce a
-deliberate bare placeholder in a scratch edit, capture the failure output, revert,
-and paste that output into the PR description as the red-state proof.
+**Mitigation:** Prove the red state mechanically, in the suite. The scanner is a
+pure function over source text, so a positive fixture
+(`'content = msg.text or "[media]"'` → exactly one finding) and a negative fixture
+(`'logger.info(f"[media] download failed {e}")'` → zero findings) assert both
+directions on every run. A PR-description paste would have been an honour-system
+criterion on an otherwise mechanical checklist — no Verification row could check
+it and no SDLC gate reads a PR description, which is exactly the hollow assurance
+this risk is about. Demonstrating the red state by hand remains useful reviewer
+practice; it is not the guarantee.
 
 ## Race Conditions
 
@@ -481,7 +491,9 @@ email side, and this plan should not reproduce it.
 - [ ] An unresolvable attachment renders as an explicit unreadable marker naming the file and the reason, textually distinguishable from the resolved rendering, for each of: no record, no path, download error, file absent from disk.
 - [ ] A `chat_id`-scoped resolution test proves a same-`message_id` record in a different chat is never resolved.
 - [ ] A 20-deep chain with media at every hop completes inside the 3-second `_REPLY_CHAIN_FETCH_TIMEOUT_S` budget, and the rendered block stays under an asserted size ceiling.
-- [ ] The bare-placeholder guard covers `bridge/` including `bridge/email_bridge.py`, and its red state was demonstrated and pasted into the PR description before merge.
+- [ ] The bare-placeholder guard covers `bridge/` including `bridge/email_bridge.py`, and its red state is proven by an in-suite positive fixture plus a negative fixture that keeps a `logger.` line unflagged.
+- [ ] The write-only-context scan passes with its known-gap allow-list holding exactly the five `#3136` email keys, and asserts each is still unread so the allow-list can only shrink.
+- [ ] The 20-hop budget test exercises a *stalled* lookup, proving `asyncio.wait_for` can actually interrupt the walk — an inline blocking `filter` fails it.
 - [ ] `docs/features/reply-thread-context-hydration.md` and `docs/features/media-enrichment.md` both describe how chain-ancestor media is represented.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -594,9 +606,11 @@ email side, and this plan should not reproduce it.
 - **Assigned To**: `guard-test-builder`
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- Scan `bridge/` for constant-string stand-ins used as content fallbacks — the `X or "[literal]"` shape and its equivalents — and fail on any hit.
-- Allow-list the log-prefix `[media]` strings in `bridge/telegram_bridge.py` (lines 786, 794, 802, 1654, 1682, 1708, 1715), which are operator-facing log text, not agent context. Keep the allow-list explicit and narrow.
-- **Demonstrate the guard red before shipping**: introduce a deliberate bare placeholder, capture the failure output, revert, and paste that output into the PR description (Risk 5).
+- Write the scanner as a **pure function over source text** — `find_placeholder_fallbacks(source: str) -> list[Finding]` — so it can be unit-tested on fixtures without touching the filesystem. The test module then applies it across `bridge/*.py`.
+- Scan 1, placeholder shape: parse with `ast` and flag any `BoolOp(op=Or)` whose right-hand operand is a `Constant` string matching a bracketed-placeholder pattern (`[media]`, `[image]`, `[attachment]`, `[document]`, `[file]`, and the general `^\[[a-z_ ]+\]$` shape). **No line-number allow-list.** The seven `[media]` log strings in `bridge/telegram_bridge.py` are `JoinedStr` arguments to `logger.*` calls and do not match the `BoolOp` shape, so they need no exemption (Concern 4).
+- **Prove the guard red in-suite, not in a PR description.** Add two fixture tests against the pure function: a positive fixture, `'content = msg.text or "[media]"'`, asserting exactly one finding; and a negative fixture, `'logger.info(f"[media] download failed {e}")'`, asserting zero. These run on every invocation and are what actually satisfies Risk 5. If any allow-list predicate is introduced later, pair it with an assertion that it still matches at least one real site, so a stale exemption fails loudly instead of silently widening the guard.
+- Scan 2, write-only agent context: collect every `extra_context["<key>"] = ...` assignment across `bridge/` and `agent/`, then assert each key is read somewhere outside `tests/`. Seed the known-gap allow-list with exactly the five email keys spike-4 identified (`bridge/email_bridge.py:1494-1502`), each annotated `# known gap: #3136`. Assert that every allow-listed key is *still* unread, so when #3136 lands a reader the test fails and forces the entry's removal. The allow-list ratchets shut; it cannot quietly grow stale.
+- Scan 2 changes no production code and does not fix email — it makes the existing gap visible and prevents a sixth write-only key. Fixing the delivery seam remains #3136's job (No-Gos).
 
 ### 6. Validate the renderer
 
@@ -638,7 +652,10 @@ email side, and this plan should not reproduce it.
 | Reply-chain integration tests pass | `./scripts/pytest-clean.sh tests/integration/test_steering.py -q -k reply_chain` | exit code 0 |
 | Bare placeholder gone from the chain renderer | `grep -c '\[media\]' bridge/context.py` | match count == 0 |
 | No bare placeholder in agent-facing bridge context | `grep -rn 'or "\[media\]"\|or "\[image\]"\|or "\[attachment\]"\|or "\[document\]"\|or "\[file\]"' bridge/ \| wc -l` | match count == 0 |
-| Guard test exists and passes | `./scripts/pytest-clean.sh tests/unit -q -k placeholder` | exit code 0 |
+| Guard test exists and passes, including both red-state fixtures | `./scripts/pytest-clean.sh tests/unit -q -k placeholder` | exit code 0 |
+| Write-only-context scan passes | `./scripts/pytest-clean.sh tests/unit -q -k write_only_context` | exit code 0 |
+| Ancestor Redis lookup is off-loop | `grep -c 'asyncio.to_thread' bridge/context.py` | output > 0 |
+| No inline blocking filter in the chain walk | `python - <<'PY'` — parse `bridge/context.py`, assert no `TelegramMessage.query.filter` call inside `fetch_reply_chain` lacks an enclosing `to_thread` | exit code 0 |
 | Both timeout guards still use the shared 3.0s constant | `grep -c '_REPLY_CHAIN_FETCH_TIMEOUT_S' bridge/telegram_bridge.py` | output > 2 |
 | Ancestor lookup is chat-scoped | `grep -c 'chat_id=str(chat_id)' bridge/context.py` | output > 1 |
 | Hydration path runs no AI enrichment (anti-criterion for the dropped scope) | `grep -c 'process_downloaded_media\|describe_image\|transcribe_voice\|extract_document_text' bridge/context.py` | match count == 0 |
