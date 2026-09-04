@@ -115,6 +115,17 @@ python scripts/scan_module_scope_env.py --json       # machine-readable
 
 Syntactic only: blind to an import-time env read made indirectly through a function call, and does not descend into class bodies at all. A future "0 sites" result proves the syntactic class is drained, not that every import-time env read is gone.
 
+### LLM Coupled-Set Compatibility Probe (`agent.llm.compat`)
+
+Verifies the anthropic / pydantic-ai-slim / openai pinned set is mutually compatible, from construction through (optionally) a real network round-trip. This is the module behind the boot-time degraded-stack gate (#3001); the CLI exists for hand-run rollback verification and incident diagnosis.
+
+```bash
+python -m agent.llm.compat --json                   # offline: construction + attribute-walk probe
+python -m agent.llm.compat --json --allow-network   # adds one real billed API call (semaphore + timeouts via run_typed)
+```
+
+Fails closed: any exception resolves to degraded and alerts; a missing API key reports its own distinct status rather than reading as an incompatible pair.
+
 ### Design System Sync (`tools.design_system_sync`)
 
 Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
