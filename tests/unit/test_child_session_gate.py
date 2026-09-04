@@ -1,8 +1,11 @@
 """Tests for the #1633 child-session creation stopgap.
 
-PR #1612 cut session execution over to granite PTY containers with a bounded
-PM+Dev TUI pool. NEW parent-attached AgentSession creation is refused until
-the #1633 refactor lands (dependent work runs as subagents within a session).
+NEW parent-attached AgentSession creation is refused. Dependent work runs as
+``dev`` subagents within the session (D1 topology, agent continuation), and
+child-session fanout has no per-parent bound -- the worker's machine-wide
+``MAX_CONCURRENT_SESSIONS`` slot registry is the only bound, so the gate keeps
+unbounded child creation from flooding the shared queue. Removal needs its own
+lane naming a per-parent cap (see ``models/child_session_gate.py``).
 
 Covered here:
 - ``models/child_session_gate.py`` helper semantics (env escape hatch, payload)
