@@ -52,8 +52,20 @@ to #3076.
 - On newly-confirmed failures, fires a deduped, fire-and-forget Eng-session dispatch
   with literal, Python-computed issue titles (`Nightly regression: {node}`) to
   investigate and file a GitHub issue — see
-  `docs/features/nightly-alert-triage.md#triage-session-dispatch`. Capped at
-  `MAX_DISPATCH_NODES` (10) per run; the remainder retries on a later run
+  `docs/features/nightly-alert-triage.md#triage-session-dispatch`
+- Collapses cascades before filing: nodes sharing one normalized setup-error
+  message on one xdist worker (at least `CASCADE_MIN_GROUP_SIZE`, default 3)
+  become ONE umbrella issue titled
+  `Nightly regression cascade [{digest}]: {message}`, with the node list in a
+  collapsed section. Detection groups by (worker, message); filing merges by
+  message, so four identically-poisoned workers produce one issue
+- Suppresses anything already filed by reading open issue titles via
+  `gh issue list` (the REST path, not the index-lagged `--search`) immediately
+  before dispatch. An unreadable list fails open. This is the only dedup that
+  spans machines
+- Caps a single run at `MAX_ISSUES_PER_RUN` (10) issues, umbrellas and per-node
+  alike drawing from one budget; the remainder is logged and retries on a later
+  run
 - Clean runs produce no noise
 
 ## Alert Conditions
@@ -398,14 +410,17 @@ suite.
 **`dispatched_nodes` is per-machine state, and cross-machine dedup is a
 convention, not an enforced invariant** — Each machine's `dispatched_nodes`
 lives in its own `data/nightly_tests_last_run.json`; two machines with the
-same red node both dispatch unless something else prevents it. The only thing
-that does is the literal issue title (`Nightly regression: <nodeid>`), which
-the detector emits verbatim and a triage session is instructed to search for
-before filing — nothing verifies that an issue was actually filed under that
-exact title, so a future change to the title format silently reopens
-#2429/#2430/#2462 across the fleet. `MAX_DISPATCH_NODES` (10) bounds the
-blast radius of any single run's dispatch, not the cross-machine duplication
-risk; a shared, Redis-backed dispatch set is the real fix and is deliberately
+same red node both dispatch unless something else prevents it. Since #3131 the
+detector reads the open issue set itself (`open_issue_titles()`) immediately
+before dispatch and drops any node whose `Nightly regression: <nodeid>` title
+is already open, which closes the common cross-machine case — but it is a
+read-then-act check with no lock, so two machines dispatching inside the same
+window still both file. The literal title remains the contract: the detector
+emits it verbatim, the triage session is instructed to search for it, and
+nothing verifies an issue was actually filed under it, so a future change to
+the title format silently reopens #2429/#2430/#2462 across the fleet.
+`MAX_ISSUES_PER_RUN` (10) bounds the blast radius of any single run;
+a shared, Redis-backed dispatch set is the real fix and is deliberately
 deferred.
 
 **`NIGHTLY_XDIST_WORKERS` is env-overridable, not a pinned literal** —

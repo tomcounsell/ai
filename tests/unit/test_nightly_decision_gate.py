@@ -57,14 +57,14 @@ class TestMotivatingCase:
         assert reason == "none"
 
     def test_motivating_case_is_not_disqualified_by_dispatch_truncation(self) -> None:
-        """MAX_DISPATCH_NODES truncates the triage-FILING set, never new_failures.
+        """MAX_ISSUES_PER_RUN_DEFAULT truncates the triage-FILING set, never new_failures.
 
         Folding it into this gate would make the effective ceiling
         min(NIGHTLY_FIX_MAX_FAILURES, 10), killing every configured value 11..15
         and turning NIGHTLY_FIX_MAX_FAILURES into dead config.
         """
         nodes = [f"tests/unit/test_mod.py::test_{i}" for i in range(11)]
-        assert len(nodes) > nrt.MAX_DISPATCH_NODES
+        assert len(nodes) > nrt.MAX_ISSUES_PER_RUN_DEFAULT
         verdict, reason = _decide(_clean(nodes), nodes)
         assert (verdict, reason) == ("autonomous-fix", "none")
 
@@ -208,7 +208,7 @@ class TestRunShapeDisqualifiers:
 
     def test_gate_has_no_dispatch_truncation_clause(self) -> None:
         """A run whose dispatch set was truncated is still gate-eligible."""
-        nodes = [f"a::t{i}" for i in range(nrt.MAX_DISPATCH_NODES + 3)]
+        nodes = [f"a::t{i}" for i in range(nrt.MAX_ISSUES_PER_RUN_DEFAULT + 3)]
         assert len(nodes) <= nrt.NIGHTLY_FIX_MAX_FAILURES_DEFAULT
         assert _decide(_clean(nodes), nodes) == ("autonomous-fix", "none")
 

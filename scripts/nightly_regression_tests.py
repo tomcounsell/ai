@@ -58,6 +58,23 @@ over the same dead watchdog node. A node stays suppressed while it keeps
 failing and drops out of the set once it passes, so a genuine re-regression is
 dispatchable again and a renamed node retires itself.
 
+Cascade collapsing and pre-file dedup (issue #3131)
+---------------------------------------------------
+Per-node dedup answers "has this node been filed", which says nothing about
+whether two nodes are the same defect. One poisoned xdist worker — a leaked
+global Redis pool that makes the autouse ``redis_test_db`` fixture raise for
+every subsequent test on that worker — produced 278 identical setup errors on
+2026-09-03 and 26 GitHub issues. Three things now stand between that shape and
+the tracker: an absolute ``NIGHTLY_MAX_SETUP_ERRORS`` ceiling that calls the night
+infrastructure rather than a red suite (the old relative ceiling could not fire
+at the widened collection's scale); :func:`group_setup_error_cascades`, which
+turns nodes sharing one normalized setup-error message on one worker into ONE
+umbrella issue; and :func:`open_issue_titles`, a pre-file read of the open
+issue set that suppresses anything already filed — the only check that spans
+machines, since ``dispatched_nodes`` is per-machine state. Both issue shapes
+draw from one ``NIGHTLY_MAX_ISSUES_PER_RUN`` budget, and everything suppressed is
+logged rather than silently dropped.
+
 Collection-aware baseline (issue #2823)
 ----------------------------------------
 The persisted state records which ``collection`` produced it. When the
@@ -211,11 +228,57 @@ BASELINE_UV_SYNC_TIMEOUT_SECONDS = 900
 # immediately instead of after a multi-minute wait.
 MAX_RECONFIRM_NODES = 200
 
-# Cap on how many not-yet-triaged nodes a single run will hand to
-# maybe_dispatch_triage_session in one shot. Truncated nodes are logged and
-# retried on a later run rather than lost — only the dispatched slice is
+# Hard ceiling on how many GitHub issues one run may cause — cascade umbrellas
+# and per-node issues draw from the SAME budget, so a night cannot exceed it by
+# splitting its findings across the two shapes. Suppressed nodes are logged and
+# retried on a later run rather than lost: only what actually went out is
 # recorded in dispatched_nodes.
-MAX_DISPATCH_NODES = 10
+#
+# Provisional/tunable via NIGHTLY_MAX_ISSUES_PER_RUN. 10 is inherited from the
+# old per-node cap and is a blast-radius bound, not a measurement — with
+# cascade collapsing in front of it (see group_setup_error_cascades) a healthy
+# night should never come close to it, so a run that hits the cap is itself a
+# signal worth reading in the log.
+#
+# Like the NIGHTLY_FIX_* knobs below, this and its two siblings are read at
+# CALL time via resolve_int_knob(), never at import: `.env` only reaches
+# os.environ through load_env_or_die() inside main(), so an import-time read
+# would freeze the in-code default and make the vault setting inert on the one
+# surface that matters.
+MAX_ISSUES_PER_RUN_DEFAULT = 10
+
+# A group of nodes sharing one normalized setup-error message on one xdist
+# worker is a cascade — one defect, not N — once it reaches this size. Below it
+# the nodes are filed individually, because two or three co-failing setups are
+# as likely to be genuinely distinct bugs as one poisoned worker.
+#
+# Provisional/tunable via NIGHTLY_CASCADE_MIN_GROUP_SIZE. 3 is a first guess:
+# the motivating incident (#3131) was 278 nodes on one worker, three orders of
+# magnitude above any plausible threshold, so the exact value is uncontested by
+# the evidence that exists.
+CASCADE_MIN_GROUP_SIZE_DEFAULT = 3
+
+# Ceiling on setup-error outcomes before validate_run_integrity calls the run
+# infrastructure rather than a red suite.
+#
+# This was `max(50, 0.02 * total)`, which was a bug: the relative term RAISES
+# the bar, so once COLLECTION_PATHS widened to ~16k items the ceiling became
+# 325 and the intended absolute floor of 50 was unreachable. The night of
+# 2026-09-03 put 278 identical fixture errors through it as a legitimately red
+# suite (#3131). An absolute ceiling is the honest form: 50 tests erroring in
+# *setup* is infrastructure at any collection size.
+#
+# Provisional/tunable via NIGHTLY_MAX_SETUP_ERRORS. Raising it does not make a
+# storm quieter — the cascade collapsing below handles the sub-ceiling case —
+# it only decides whether the night pages an operator instead of filing.
+MAX_SETUP_ERRORS_DEFAULT = 50
+
+# How many open issues the pre-file dedup read pulls. The `gh issue list` REST
+# path is used deliberately over `--search`, which is index-backed and lags
+# behind issue creation by minutes — exactly the window in which two machines'
+# triage sessions file the same title twice.
+OPEN_ISSUE_LIST_LIMIT = 1000
+OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 
 # Autonomous-fix gate mode (issue #2334). Two values ship:
 #   off     — skip classification, the gate, and the verdict log entirely;
@@ -277,6 +340,29 @@ def log(msg: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass  # Never crash on logging failure
+
+
+def resolve_int_knob(name: str, default: int) -> int:
+    """Read an integer knob from the environment at CALL time.
+
+    Module-scope ``os.environ`` reads freeze config at import, and this script
+    only populates ``os.environ`` from the vault ``.env`` inside ``main()``
+    (:func:`load_env_or_die`) — so an import-time read of a nightly knob is
+    always the in-code default, whatever the vault says. Same rule and same
+    failure mode as :func:`resolve_fix_mode` / :func:`resolve_fix_max_failures`,
+    generalized so the noise-control knobs cannot drift from it.
+
+    A malformed value degrades to ``default`` with a warning rather than
+    raising: a bad knob must never take down the nightly.
+    """
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log(f"WARNING: malformed {name}={raw!r} — using default {default}")
+        return default
 
 
 def load_last_run(run_file: Path | None = None) -> dict:
@@ -543,9 +629,11 @@ def validate_run_integrity(
     if total == 0:
         return "pytest collected and ran zero tests — the run did not happen", warnings
 
-    if error > max(50, 0.02 * total):
+    max_setup_errors = resolve_int_knob("NIGHTLY_MAX_SETUP_ERRORS", MAX_SETUP_ERRORS_DEFAULT)
+    if error > max_setup_errors:
         return (
-            f"{error} of {total} tests errored at setup — infrastructure, not a red suite",
+            f"{error} of {total} tests errored at setup (ceiling {max_setup_errors}) — "
+            "infrastructure, not a red suite",
             warnings,
         )
 
@@ -1400,6 +1488,248 @@ def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
     return "\n".join(lines)
 
 
+_WORKER_RE = re.compile(r"\[(gw\d+)\]")
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _phase_text(test: dict, phase: str) -> str:
+    """Concatenate the longrepr and crash message of one report phase."""
+    entry = test.get(phase) or {}
+    if not isinstance(entry, dict):
+        return ""
+    crash = entry.get("crash") or {}
+    parts = [entry.get("longrepr") or "", crash.get("message") if isinstance(crash, dict) else ""]
+    return "\n".join(str(p) for p in parts if p)
+
+
+def setup_error_signature(test: dict) -> tuple[str, str] | None:
+    """Return ``(worker_id, normalized_message)`` for a setup error, else ``None``.
+
+    A cascade is specifically a **setup**-phase storm: one poisoned xdist
+    worker whose autouse fixture raises for every test that lands on it after
+    the poisoning. A node that failed in its own test body is a finding in its
+    own right and is deliberately excluded, however many siblings share its
+    message — collapsing those would hide genuinely distinct bugs behind one
+    umbrella.
+
+    The message is normalized so incidental variation does not split one
+    cascade into many groups: only the first line is kept, whitespace is
+    collapsed, and digit runs become ``#`` (worker numbers, ports, pids, temp
+    directory suffixes). The worker id comes from the ``[gwN]`` prefix
+    pytest-xdist writes into the phase longreprs; it is ``""`` for a serial
+    run, which groups every node together — correct, since a serial run has
+    exactly one worker.
+    """
+    if (test.get("setup") or {}).get("outcome") not in ("failed", "error"):
+        return None
+
+    message = _phase_text(test, "setup")
+    if not message:
+        return None
+
+    worker = ""
+    for phase in ("setup", "teardown", "call"):
+        match = _WORKER_RE.search(_phase_text(test, phase))
+        if match:
+            worker = match.group(1)
+            break
+
+    first_line = ""
+    for line in message.splitlines():
+        stripped = line.strip()
+        # Skip xdist's own banner line, which carries the worker id and the
+        # interpreter path and would otherwise BE the signature for every node.
+        if not stripped or _WORKER_RE.search(stripped):
+            continue
+        first_line = stripped
+        break
+    if not first_line:
+        return None
+
+    # Strip pytest's `E   ` error-line marker so the title reads as the exception,
+    # not as the report formatting around it.
+    if first_line.startswith("E ") or first_line == "E":
+        first_line = first_line[1:].strip()
+
+    normalized = _DIGITS_RE.sub("#", " ".join(first_line.split()))
+    return worker, normalized
+
+
+def cascade_title(message: str) -> str:
+    """The byte-stable umbrella title for one normalized cascade message.
+
+    Keyed on the message alone — never the worker id or the node count, both of
+    which shift from night to night and from machine to machine. A title that
+    moves is a title the open-issue dedup cannot match, which is how the same
+    defect gets filed twice (#3131).
+    """
+    digest = hashlib.sha256(message.encode()).hexdigest()[:8]
+    return f"Nightly regression cascade [{digest}]: {message[:80]}"
+
+
+def group_setup_error_cascades(
+    report: dict,
+    node_ids: list[str],
+    *,
+    min_group_size: int | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Split ``node_ids`` into cascade groups and ungrouped singles.
+
+    Returns ``(cascades, singles)``. Each cascade is
+    ``{"message", "title", "workers", "nodes"}`` and stands for exactly ONE
+    issue; ``singles`` keeps the per-node path it always had.
+
+    Detection groups by ``(worker, message)`` — a poisoned worker is a
+    per-worker phenomenon, and keying on the message alone would let three
+    unrelated one-off setup errors that happen to share a message on three
+    different workers masquerade as a cascade. **Filing** then merges the
+    qualifying groups by message, so a night that poisons four workers
+    identically produces one umbrella rather than four issues racing for the
+    same title.
+    """
+    if min_group_size is None:
+        min_group_size = resolve_int_knob(
+            "NIGHTLY_CASCADE_MIN_GROUP_SIZE", CASCADE_MIN_GROUP_SIZE_DEFAULT
+        )
+
+    tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
+
+    by_worker_message: dict[tuple[str, str], list[str]] = {}
+    signature_by_node: dict[str, tuple[str, str]] = {}
+    for node in node_ids:
+        signature = setup_error_signature(tests_by_id.get(node) or {})
+        if signature is None:
+            continue
+        signature_by_node[node] = signature
+        by_worker_message.setdefault(signature, []).append(node)
+
+    cascade_messages = {
+        message
+        for (_worker, message), nodes in by_worker_message.items()
+        if len(nodes) >= min_group_size
+    }
+
+    by_message: dict[str, dict] = {}
+    for node in node_ids:
+        signature = signature_by_node.get(node)
+        if signature is None or signature[1] not in cascade_messages:
+            continue
+        worker, message = signature
+        cascade = by_message.setdefault(
+            message,
+            {"message": message, "title": cascade_title(message), "workers": set(), "nodes": []},
+        )
+        cascade["workers"].add(worker)
+        cascade["nodes"].append(node)
+
+    cascades = []
+    for message in sorted(by_message):
+        cascade = by_message[message]
+        cascade["workers"] = sorted(w for w in cascade["workers"] if w)
+        cascade["nodes"] = sorted(cascade["nodes"])
+        cascades.append(cascade)
+
+    grouped = {n for c in cascades for n in c["nodes"]}
+    return cascades, [n for n in node_ids if n not in grouped]
+
+
+def _build_cascade_prompt(cascade: dict) -> str:
+    """Build the umbrella prompt for one cascade — ONE issue, node list collapsed."""
+    nodes = cascade["nodes"]
+    workers = ", ".join(cascade["workers"]) or "serial run"
+    return (
+        "Nightly regression detector found a CASCADE: "
+        f"{len(nodes)} test node(s) that all errored in fixture SETUP with the same "
+        f"message, on xdist worker(s) {workers}. This is ONE defect, not "
+        f"{len(nodes)}. Search open issues for the EXACT title below. If found, "
+        "comment on it with the new occurrence. If not found, open exactly ONE new "
+        "issue with EXACTLY that title. Put the full node list inside a collapsed "
+        "<details> section — the body must lead with the shared error and the likely "
+        "cause of the poisoning, not with the node list. Do NOT open per-node issues "
+        "for any node below. Do NOT attempt an auto-hotfix — investigate and file "
+        "only.\n\n"
+        f'Title: "{cascade["title"]}"\n\n'
+        f"Shared setup error (normalized): {cascade['message']}\n\n"
+        "Affected node IDs:\n" + "\n".join(f"- {n}" for n in nodes)
+    )
+
+
+def open_issue_titles(
+    *,
+    limit: int = OPEN_ISSUE_LIST_LIMIT,
+    timeout: int = OPEN_ISSUE_LIST_TIMEOUT_SECONDS,
+) -> set[str] | None:
+    """Titles of every currently-open GitHub issue, or ``None`` if unreadable.
+
+    This is the pre-file dedup the triage agent's own search-before-file
+    instruction cannot provide. ``dispatched_nodes`` is per-machine state, so a
+    second machine running the same nightly re-dispatches titles this machine
+    already filed; and GitHub's search index lags issue creation by minutes, so
+    even a single machine's retry can miss its own issue. Reading the REST list
+    endpoint (``gh issue list``, not ``--search``) sees an issue the instant it
+    exists.
+
+    ``None`` means "could not tell" and the caller **fails open** — dispatching
+    a possible duplicate is a smaller harm than silently filing nothing on the
+    night an unrelated ``gh`` hiccup coincides with a real regression.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--json",
+                "title",
+            ],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout,  # timeout-guard: allow
+        )
+    except Exception as exc:  # noqa: BLE001  # TimeoutExpired, FileNotFoundError, ...
+        log(f"WARNING: could not list open issues for pre-file dedup ({exc})")
+        return None
+
+    if result.returncode != 0:
+        log(
+            f"WARNING: `gh issue list` exited {result.returncode} for pre-file dedup: "
+            f"{(result.stderr or '').strip()}"
+        )
+        return None
+
+    try:
+        return {row["title"] for row in json.loads(result.stdout) if row.get("title")}
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: could not parse open issue titles for pre-file dedup ({exc})")
+        return None
+
+
+def partition_already_open(
+    nodes: list[str], open_titles: set[str] | None
+) -> tuple[list[str], list[str]]:
+    """Split per-node dispatch candidates into ``(to_dispatch, already_open)``.
+
+    Keyed on the same ``Nightly regression: {node}`` title
+    :func:`_build_triage_prompt` emits, so the check and the filing contract
+    cannot drift. ``open_titles`` of ``None`` (unreadable) disables the
+    suppression entirely rather than guessing.
+
+    The caller records ``already_open`` as dispatched: an issue for that node
+    demonstrably exists, so retrying it every night would rebuild the churn
+    this suppression exists to end.
+    """
+    if open_titles is None:
+        return list(nodes), []
+    to_dispatch = [n for n in nodes if f"Nightly regression: {n}" not in open_titles]
+    already_open = [n for n in nodes if f"Nightly regression: {n}" in open_titles]
+    return to_dispatch, already_open
+
+
 DRY_RUN_SESSION_ID = "dry-run-session"
 
 
@@ -1707,26 +2037,92 @@ def main() -> int:
             current["min_expected_collected"] = current["total"]
     else:
         dispatch_nodes = compute_dispatch_set(prev, confirmed_failing)
-        if len(dispatch_nodes) > MAX_DISPATCH_NODES:
-            log(
-                f"Truncating dispatch: {len(dispatch_nodes)} not-yet-triaged node(s) "
-                f"exceeds MAX_DISPATCH_NODES={MAX_DISPATCH_NODES}; dispatching first "
-                f"{MAX_DISPATCH_NODES}, retrying the rest on a later run"
-            )
-            dispatch_nodes = dispatch_nodes[:MAX_DISPATCH_NODES]
         just_dispatched = []
         if dispatch_nodes:
             log(f"Not yet triaged: {len(dispatch_nodes)} node(s): " + ", ".join(dispatch_nodes))
-        suppressed = len(confirmed_failing) - len(dispatch_nodes) - len(just_dispatched)
-        if suppressed > 0:
-            log(f"Triage dispatch suppressed for {suppressed} already-filed node(s)")
+        already_filed = len(confirmed_failing) - len(dispatch_nodes)
+        if already_filed > 0:
+            log(f"Triage dispatch suppressed for {already_filed} already-filed node(s)")
 
-        triage_session_id = maybe_dispatch_triage_session(dispatch_nodes, dry_run=args.dry_run)
-        if triage_session_id is not None:
-            # Record only what actually went out. A failed dispatch leaves its nodes
-            # unfiled, so the next run picks them up again instead of losing them.
-            just_dispatched = dispatch_nodes
-            current["dispatched_session_id"] = triage_session_id
+        # Collapse the blast radius BEFORE anything is filed: N nodes sharing one
+        # setup-error message on one xdist worker are one defect (#3131).
+        cascades, single_nodes = group_setup_error_cascades(raw_report, dispatch_nodes)
+        for cascade in cascades:
+            log(
+                f"Cascade collapsed: {len(cascade['nodes'])} node(s) on worker(s) "
+                f"{','.join(cascade['workers']) or 'serial'} share one setup error — "
+                f"filing one umbrella: {cascade['title']}"
+            )
+
+        # Pre-file dedup. Per-machine `dispatched_nodes` cannot see another
+        # machine's filings, and the triage agent's own search is index-lagged;
+        # this read is the only cross-machine check that exists.
+        # Only pay for the read when there is something to file — a clean night
+        # must not shell out to `gh` at all.
+        open_titles = open_issue_titles() if dispatch_nodes else None
+        if dispatch_nodes and open_titles is None:
+            log("Pre-file dedup disabled for this run (open issues unreadable) — failing open")
+
+        # Cascade umbrellas and per-node issues draw from ONE budget, so the run
+        # cannot exceed the cap by splitting findings across the two shapes.
+        max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
+        issue_budget = max_issues
+        deferred_cascades: list[dict] = []
+        for cascade in cascades:
+            if open_titles is not None and cascade["title"] in open_titles:
+                log(
+                    f"Cascade umbrella already open ({cascade['title']}) — recording its "
+                    f"{len(cascade['nodes'])} node(s) as filed without dispatching"
+                )
+                just_dispatched.extend(cascade["nodes"])
+                continue
+            if issue_budget <= 0:
+                deferred_cascades.append(cascade)
+                continue
+            session_id = maybe_dispatch_triage_session(
+                [f"cascade:{cascade['title']}"],
+                prompt=_build_cascade_prompt(cascade),
+                slug_suffix=hashlib.sha256(cascade["message"].encode()).hexdigest()[:8],
+                dry_run=args.dry_run,
+            )
+            if session_id is not None:
+                issue_budget -= 1
+                just_dispatched.extend(cascade["nodes"])
+                triage_session_id = session_id
+                current["dispatched_session_id"] = session_id
+
+        single_nodes, already_open = partition_already_open(single_nodes, open_titles)
+        if already_open:
+            log(
+                f"Pre-file dedup: {len(already_open)} node(s) already have an open issue — "
+                "recording as filed without dispatching: " + ", ".join(already_open)
+            )
+            # An issue demonstrably exists for these; retrying them nightly is
+            # exactly the churn this suppression exists to end.
+            just_dispatched.extend(already_open)
+
+        if len(single_nodes) > issue_budget:
+            log(
+                f"Issue budget reached: {len(single_nodes)} per-node issue(s) wanted but only "
+                f"{issue_budget} of MAX_ISSUES_PER_RUN={max_issues} left "
+                f"({len(cascades) - len(deferred_cascades)} spent on cascade umbrella(s)); "
+                f"deferring {len(single_nodes) - issue_budget} node(s) to a later run: "
+                + ", ".join(single_nodes[issue_budget:])
+            )
+            single_nodes = single_nodes[:issue_budget]
+        if deferred_cascades:
+            log(
+                f"Issue budget reached: deferring {len(deferred_cascades)} cascade umbrella(s) "
+                "to a later run: " + ", ".join(c["title"] for c in deferred_cascades)
+            )
+
+        session_id = maybe_dispatch_triage_session(single_nodes, dry_run=args.dry_run)
+        if session_id is not None:
+            # Record only what actually went out. A failed dispatch leaves its
+            # nodes unfiled, so the next run picks them up again.
+            just_dispatched.extend(single_nodes)
+            triage_session_id = session_id
+            current["dispatched_session_id"] = session_id
 
     # Carry the seed's umbrella coverage forward on EVERY run, not just seed
     # runs. Without this the set exists only in the night the seed was written

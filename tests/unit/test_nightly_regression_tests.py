@@ -389,7 +389,7 @@ class TestValidateRunIntegrity:
         assert reason is None
 
     def test_error_boundary_below_threshold_does_not_trip(self) -> None:
-        # max(50, 0.02*total) with total=1000 -> 50. 50 errors == boundary, not above.
+        # MAX_SETUP_ERRORS is absolute: 50 errors == boundary, not above.
         report = self._healthy(total=1000, error=50)
         reason, warnings = nrt.validate_run_integrity(report, 1, {})
         assert reason is None
@@ -398,6 +398,20 @@ class TestValidateRunIntegrity:
         report = self._healthy(total=1000, error=51)
         reason, warnings = nrt.validate_run_integrity(report, 1, {})
         assert reason is not None
+
+    def test_setup_error_ceiling_is_absolute_not_relative(self) -> None:
+        """The #3131 regression: the ceiling must bite at the widened scale.
+
+        It was `max(50, 0.02 * total)`, where the relative term RAISES the bar.
+        At the real measured shape of 2026-09-03 — 278 setup errors in a 16255
+        item collection — that ceiling was 325, so a single poisoned xdist
+        worker read as a legitimately red suite and 26 issues were filed off
+        one defect.
+        """
+        report = self._healthy(total=16255, error=278, failed=24)
+        reason, _ = nrt.validate_run_integrity(report, 1, {})
+        assert reason is not None
+        assert "errored at setup" in reason
 
     def test_coverage_floor_trips_on_partial_starvation(self) -> None:
         """The round-6 fix: partial starvation has error=0, failed=0, exit 0,
@@ -831,6 +845,199 @@ class TestBuildTriagePrompt:
         prompt = nrt._build_triage_prompt(nodes)
         for n in nodes:
             assert f"Nightly regression: {n}" in prompt
+
+
+def _errored(nodeid: str, worker: str, message: str) -> dict:
+    """A pytest-json-report entry shaped like a real setup-phase error."""
+    return {
+        "nodeid": nodeid,
+        "outcome": "error",
+        "setup": {
+            "outcome": "failed",
+            "crash": {"path": "tests/conftest.py", "lineno": 851, "message": message},
+        },
+        "teardown": {
+            "outcome": "passed",
+            "longrepr": f"[{worker}] darwin -- Python 3.14.3 /Users/x/.venv/bin/python3",
+        },
+    }
+
+
+class TestGroupSetupErrorCascades:
+    """One poisoned xdist worker is ONE defect, not N findings (#3131)."""
+
+    MSG = (
+        "RuntimeError: Test Redis client is not on the server the db-claim registry "
+        "is keyed to: client=localhost:6379 registry=127.0.0.1:6379."
+    )
+
+    def test_identical_setup_errors_on_one_worker_collapse_to_one_cascade(self) -> None:
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(8)]
+        report = {"tests": [_errored(n, "gw3", self.MSG) for n in nodes]}
+        cascades, singles = nrt.group_setup_error_cascades(report, nodes)
+        assert singles == []
+        assert len(cascades) == 1
+        assert cascades[0]["nodes"] == sorted(nodes)
+        assert cascades[0]["workers"] == ["gw3"]
+
+    def test_identically_poisoned_workers_file_one_umbrella(self) -> None:
+        """Filing merges by message so four workers do not race for one title."""
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(12)]
+        report = {"tests": [_errored(n, f"gw{i % 4}", self.MSG) for i, n in enumerate(nodes)]}
+        cascades, singles = nrt.group_setup_error_cascades(report, nodes)
+        assert singles == []
+        assert len(cascades) == 1
+        assert cascades[0]["workers"] == ["gw0", "gw1", "gw2", "gw3"]
+
+    def test_below_threshold_stays_per_node(self) -> None:
+        nodes = ["tests/unit/test_m.py::test_a", "tests/unit/test_m.py::test_b"]
+        report = {"tests": [_errored(n, "gw1", self.MSG) for n in nodes]}
+        cascades, singles = nrt.group_setup_error_cascades(report, nodes)
+        assert cascades == []
+        assert singles == nodes
+
+    def test_test_body_failures_are_never_collapsed(self) -> None:
+        """A node that failed in its own test body is its own finding."""
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(8)]
+        report = {
+            "tests": [
+                {
+                    "nodeid": n,
+                    "outcome": "failed",
+                    "setup": {"outcome": "passed"},
+                    "call": {"outcome": "failed", "longrepr": "[gw3] AssertionError: nope"},
+                }
+                for n in nodes
+            ]
+        }
+        cascades, singles = nrt.group_setup_error_cascades(report, nodes)
+        assert cascades == []
+        assert singles == nodes
+
+    def test_distinct_messages_do_not_merge(self) -> None:
+        a = [f"tests/unit/test_a.py::test_{i}" for i in range(4)]
+        b = [f"tests/unit/test_b.py::test_{i}" for i in range(4)]
+        report = {
+            "tests": [_errored(n, "gw0", self.MSG) for n in a]
+            + [_errored(n, "gw1", "OSError: address already in use") for n in b]
+        }
+        cascades, singles = nrt.group_setup_error_cascades(report, a + b)
+        assert singles == []
+        assert {len(c["nodes"]) for c in cascades} == {4}
+        assert len({c["title"] for c in cascades}) == 2
+
+    def test_title_is_stable_across_worker_and_size(self) -> None:
+        """A title keyed on anything that shifts nightly cannot be deduped against."""
+        small = [f"tests/unit/test_m.py::test_{i}" for i in range(3)]
+        big = [f"tests/unit/test_m.py::test_{i}" for i in range(30)]
+        one = nrt.group_setup_error_cascades(
+            {"tests": [_errored(n, "gw0", self.MSG) for n in small]}, small
+        )[0][0]
+        two = nrt.group_setup_error_cascades(
+            {"tests": [_errored(n, "gw5", self.MSG) for n in big]}, big
+        )[0][0]
+        assert one["title"] == two["title"]
+
+    def test_prompt_orders_one_issue_with_a_collapsed_node_list(self) -> None:
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(5)]
+        report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+        cascade = nrt.group_setup_error_cascades(report, nodes)[0][0]
+        prompt = nrt._build_cascade_prompt(cascade)
+        assert cascade["title"] in prompt
+        assert "ONE defect" in prompt
+        assert "<details>" in prompt
+        assert "Do NOT open per-node issues" in prompt
+        for n in nodes:
+            assert n in prompt
+
+
+class TestResolveIntKnob:
+    """Noise-control knobs must resolve at CALL time, not at import.
+
+    `.env` only reaches os.environ through load_env_or_die() inside main(), so
+    an import-time read would freeze the in-code default and make the vault
+    setting inert on the one surface that matters.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _quiet_log(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+    def test_unset_uses_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("NIGHTLY_MAX_SETUP_ERRORS", raising=False)
+        assert nrt.resolve_int_knob("NIGHTLY_MAX_SETUP_ERRORS", 50) == 50
+
+    def test_a_value_set_after_import_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NIGHTLY_MAX_SETUP_ERRORS", "7")
+        assert nrt.resolve_int_knob("NIGHTLY_MAX_SETUP_ERRORS", 50) == 7
+
+    def test_malformed_degrades_to_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bad knob must never take down the nightly."""
+        monkeypatch.setenv("NIGHTLY_MAX_SETUP_ERRORS", "fifty")
+        assert nrt.resolve_int_knob("NIGHTLY_MAX_SETUP_ERRORS", 50) == 50
+
+    def test_the_ceiling_reads_the_knob(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nrt, "MIN_EXPECTED_COLLECTED", 0)
+        monkeypatch.setenv("NIGHTLY_MAX_SETUP_ERRORS", "5")
+        report = {"summary": {"total": 1000, "error": 6, "failed": 0}, "tests": []}
+        reason, _ = nrt.validate_run_integrity(report, 1, {})
+        assert reason is not None
+        assert "ceiling 5" in reason
+
+
+class TestPreFileDedup:
+    """The only dedup that spans machines: read the open issue set first (#3131)."""
+
+    def test_already_open_titles_are_suppressed(self) -> None:
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        open_titles = {"Nightly regression: tests/unit/test_a.py::test_1"}
+        to_dispatch, already = nrt.partition_already_open(nodes, open_titles)
+        assert to_dispatch == ["tests/unit/test_b.py::test_2"]
+        assert already == ["tests/unit/test_a.py::test_1"]
+
+    def test_unreadable_open_set_fails_open(self) -> None:
+        """Suppressing everything on a `gh` hiccup would silence a real regression."""
+        nodes = ["tests/unit/test_a.py::test_1"]
+        assert nrt.partition_already_open(nodes, None) == (nodes, [])
+
+    def test_open_issue_titles_uses_the_rest_list_not_the_lagging_search(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        seen: dict[str, list[str]] = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = '[{"title": "Nightly regression: a::t1"}]'
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.open_issue_titles() == {"Nightly regression: a::t1"}
+        assert seen["argv"][:4] == ["gh", "issue", "list", "--state"]
+        assert "--search" not in seen["argv"]
+
+    @pytest.mark.parametrize("failure", ["rc", "raise", "garbage"])
+    def test_open_issue_titles_returns_none_on_any_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        class FakeResult:
+            returncode = 1 if failure == "rc" else 0
+            stdout = "not json" if failure == "garbage" else "[]"
+            stderr = "boom"
+
+        def fake_run(argv, **kwargs):
+            if failure == "raise":
+                raise OSError("gh missing")
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.open_issue_titles() is None
 
 
 class TestMaybeDispatchTriage:
