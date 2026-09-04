@@ -148,6 +148,9 @@ def test_dispatch_rules_cover_expected_row_ids():
     it actively weakened the "never merge unfinished work" invariant. Merge
     enforcement lives in the merge-guard hook via ``tools.merge_predicate``;
     rows 9/10 and G6 remain scheduling-only.
+
+    Row 8g (re-dispatch a /do-patch that died before completing its stage)
+    was added by 3c689f211 (Refs #3065).
     """
     expected = {
         "1",
@@ -167,6 +170,7 @@ def test_dispatch_rules_cover_expected_row_ids():
         "8d",
         "8e",
         "8f",
+        "8g",
         "9",
         "10",
     }
