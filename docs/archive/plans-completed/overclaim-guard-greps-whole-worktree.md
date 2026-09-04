@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Superseded
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -8,6 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/2807
 last_comment_id: none
 revision_applied: true
 revision_applied_at: 2026-08-19T09:57:27Z
+superseded_by: hotfix 5dc8b6c4f (git grep over tracked source, landed 2026-09-04)
 ---
 
 # Working-tree sweep guards must scan tracked content
