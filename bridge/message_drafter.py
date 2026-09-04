@@ -624,8 +624,8 @@ def validate_poll_question(question: str) -> list[Violation]:
     violation — surfaced the same non-blocking way ``send_poll`` already
     surfaces every other validation failure (a warning log; the poll still
     sends). Deliberately NOT the LLM-primary path: a poll question is a
-    low-volume, interactive affordance, and a ~1635ms round-trip (the
-    current p50 measurement, n=1088) here would be real latency cost
+    low-volume, interactive affordance, and a ~1637ms round-trip (the
+    current p50 over the LLM-path bucket, n=592) here would be real latency cost
     for no delivery-honesty gain since the two-state
     outcome (ship or don't) is unchanged from before this plan — see No-Go 5.
 

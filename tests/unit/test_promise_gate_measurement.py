@@ -8,6 +8,8 @@ pure-function edge cases the review called out, not a rewrite of the tool.
 
 import json
 
+import pytest
+
 from tools.promise_gate_measurement import (
     _is_promise_gate_row,
     _percentile,
@@ -236,3 +238,26 @@ class TestFindContradictionsNegationGuard:
         ]
 
         assert find_contradictions(entries) == []
+
+    @pytest.mark.parametrize(
+        "evidence",
+        [
+            "delivered; blocked on an issue with the signing key",
+            "failed due to an issue in prod",
+            "the rollout failed and caused a delay",
+            "could not ship, blocked on an issue",
+        ],
+    )
+    def test_delivered_leg_still_flags_asserted_bad_outcomes(self, evidence):
+        """Only negation-SHAPED keywords ("did not", "could not") can be
+        cancelled by a following object noun. Keywords that ASSERT a bad
+        outcome ("failed", "blocked on") must never be cancelled by one:
+        "blocked on an issue with the signing key" is the ordinary way a
+        person names a real blocker, and swallowing it would lose a genuine
+        contradiction. Under-reporting is the worse error for the #3035
+        entry criterion this tool feeds."""
+        entries = [{"item": "release", "disposition": "delivered", "evidence": evidence}]
+
+        flags = find_contradictions(entries)
+
+        assert len(flags) == 1, f"expected a contradiction flag for: {evidence}"

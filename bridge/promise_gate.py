@@ -91,8 +91,8 @@ anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
 client:``. Stacking both 3-second bounds gives a structural worst case
 of ~6 seconds, above the documented p99 of 5000ms — this is a
 structural bound on the worst case, not the measured distribution
-(the current measurement, n=1088, is p50 ~1635ms / p99 ~2531ms,
-comfortably inside the 5000ms budget).
+(the current measurement over the LLM-path bucket, n=592, is p50
+~1637ms / p99 ~2482ms, comfortably inside the 5000ms budget).
 ``max_retries=0`` is load-bearing for the stated bound: the SDK default
 (``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts, which would
 silently turn the 3s worst case into ~3 attempts plus backoff (~10s) on
