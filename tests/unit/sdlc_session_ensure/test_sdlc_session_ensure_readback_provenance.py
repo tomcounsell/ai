@@ -52,6 +52,32 @@ def _no_target_repo():
         yield
 
 
+@pytest.fixture
+def _release_issue_lock_after():
+    """Deterministic teardown for tests that acquire a REAL issue lock via
+    ``touch_issue_lock`` against the shared Redis and assert it survives.
+
+    Several agents test on this machine at once, so a lock a test forgets to
+    release wedges another lane. The test body registers ``(issue_number,
+    run_id)`` pairs via the returned callable; teardown releases every
+    registered pair through ``release_issue_lock`` (the sanctioned
+    compare-and-delete helper -- never a raw Redis ``DELETE`` on this
+    Popoto-adjacent key), even if the test body raises.
+    """
+    from models.session_lifecycle import release_issue_lock
+
+    registered: list[tuple[int, str]] = []
+
+    def _register(issue_number: int, run_id: str) -> None:
+        registered.append((issue_number, run_id))
+
+    try:
+        yield _register
+    finally:
+        for issue_number, run_id in registered:
+            release_issue_lock(issue_number, run_id)
+
+
 class TestReadbackByPrimaryKey:
     """The readback resolves the row THIS call wrote, not an arbitrary row
     sharing its ``session_id``."""
@@ -140,7 +166,9 @@ class TestReleaseGatedOnProvenance:
         session.owned_run_ids = json.dumps([run_id])
         return session
 
-    def test_adopted_candidate_survives_readback_mismatch(self, _no_target_repo):
+    def test_adopted_candidate_survives_readback_mismatch(
+        self, _no_target_repo, _release_issue_lock_after
+    ):
         """The wedge itself: a reuse call that cannot confirm its bind must NOT
         delete the live lease it merely adopted."""
         from models.session_lifecycle import touch_issue_lock
@@ -152,6 +180,7 @@ class TestReleaseGatedOnProvenance:
 
         # A live lock this call did not create, owned by the id it will reuse.
         assert touch_issue_lock(issue_number, holder_run_id, session_id=session_id).acquired
+        _release_issue_lock_after(issue_number, holder_run_id)
         assert _live_lock_owner(issue_number) == holder_run_id
 
         session = self._adopting_session(session_id, holder_run_id)
@@ -172,7 +201,9 @@ class TestReleaseGatedOnProvenance:
         # The lease is untouched: still live, still owned by the holder.
         assert _live_lock_owner(issue_number) == holder_run_id
 
-    def test_adopted_candidate_survives_a_raising_readback(self, _no_target_repo):
+    def test_adopted_candidate_survives_a_raising_readback(
+        self, _no_target_repo, _release_issue_lock_after
+    ):
         """Failure Path Test Strategy, ``:618``: the readback's own ``except``
         arm is a release site too, and an adopted candidate must survive it."""
         from models.session_lifecycle import touch_issue_lock
@@ -183,6 +214,7 @@ class TestReleaseGatedOnProvenance:
         holder_run_id = "holder-run-id-306504"
 
         assert touch_issue_lock(issue_number, holder_run_id, session_id=session_id).acquired
+        _release_issue_lock_after(issue_number, holder_run_id)
 
         session = self._adopting_session(session_id, holder_run_id)
 
@@ -199,7 +231,9 @@ class TestReleaseGatedOnProvenance:
         assert "post-save readback failed" in error["reason"]
         assert _live_lock_owner(issue_number) == holder_run_id
 
-    def test_adopted_candidate_survives_a_save_failure(self, _no_target_repo):
+    def test_adopted_candidate_survives_a_save_failure(
+        self, _no_target_repo, _release_issue_lock_after
+    ):
         """Third release site (the ``session.save`` ``except`` arm)."""
         from models.session_lifecycle import touch_issue_lock
         from tools.sdlc_session_ensure import _acquire_run_lock_and_bind
@@ -209,6 +243,7 @@ class TestReleaseGatedOnProvenance:
         holder_run_id = "holder-run-id-306505"
 
         assert touch_issue_lock(issue_number, holder_run_id, session_id=session_id).acquired
+        _release_issue_lock_after(issue_number, holder_run_id)
 
         session = self._adopting_session(session_id, holder_run_id)
         session.save.side_effect = RuntimeError("redis save exploded")
@@ -221,7 +256,9 @@ class TestReleaseGatedOnProvenance:
         assert error["error"] == "RUN_BIND_FAILED"
         assert _live_lock_owner(issue_number) == holder_run_id
 
-    def test_supervised_adoption_also_survives_a_readback_mismatch(self, _no_target_repo):
+    def test_supervised_adoption_also_survives_a_readback_mismatch(
+        self, _no_target_repo, _release_issue_lock_after
+    ):
         """The second adopt shape (``ADOPTED_SUPERVISED``): a BARE ensure that
         inherited the supervisor's run_id via self-recognition never minted it
         either, so it may not release it.
@@ -238,6 +275,7 @@ class TestReleaseGatedOnProvenance:
         supervisor_run_id = "supervisor-run-id-306506"
 
         assert touch_issue_lock(issue_number, supervisor_run_id, session_id=session_id).acquired
+        _release_issue_lock_after(issue_number, supervisor_run_id)
 
         session = self._adopting_session(session_id, supervisor_run_id)
 

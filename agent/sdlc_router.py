@@ -45,6 +45,7 @@ from agent.pipeline_graph import (
     STAGE_TO_SKILL,
 )
 from agent.pipeline_state import SETTLED_STATUSES
+from agent.verification_parser import VERIFICATION_OUTCOMES_KEY, CheckOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +616,13 @@ def guard_g2_critique_cycle_cap(
             f"Escalating to human."
         ),
         guard_id="G2",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            critique_cycle_count=cycles,
+            max_critique_cycles=MAX_CRITIQUE_CYCLES,
+            critique_status=critique_status,
+        ),
     )
 
 
@@ -682,7 +690,7 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     if review_status == STATUS_COMPLETED and review_approved and docs_status == STATUS_COMPLETED:
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
-    elif review_status == STATUS_COMPLETED and review_approved and docs_status != STATUS_COMPLETED:
+    elif review_status == STATUS_COMPLETED and review_approved:
         target = SKILL_DO_DOCS
         suffix = G3_REDIRECT_REASON_DOCS_PENDING
     elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
@@ -728,6 +736,13 @@ def guard_g4_oscillation(
             "`sdlc-tool dispatch reset --issue-number N`."
         ),
         guard_id="G4",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            last_dispatched_skill=skill,
+            same_stage_dispatch_count=count,
+            max_same_stage_dispatches=MAX_SAME_STAGE_DISPATCHES,
+        ),
     )
 
 
@@ -1029,6 +1044,12 @@ def guard_g7_plan_revising(
                 f"revision is already complete."
             ),
             guard_id="G7",
+            decision_inputs=build_decision_inputs(
+                stage_states,
+                meta,
+                recent_skills=recent_skills,
+                max_plan_revising_dispatches=MAX_PLAN_REVISING_DISPATCHES,
+            ),
         )
 
     # A plan dispatch is already in the recent history — let dispatch table route.
@@ -1246,6 +1267,12 @@ def guard_g9_blocked_on_conflict(
             f"resolves conflicts — this needs a human."
         ),
         guard_id="G9",
+        decision_inputs=build_decision_inputs(
+            stage_states,
+            meta,
+            pr_number=pr_number,
+            pr_merge_state=merge_state,
+        ),
     )
 
 
@@ -2153,6 +2180,64 @@ def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context:
     return docs_status not in (STATUS_COMPLETED,)
 
 
+def _rule_verification_outcomes_hold_pr(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Recorded verification aggregate holds the PR — re-review, do not merge.
+
+    The dispatch-table twin of ``tools/merge_predicate``'s group (e), and the
+    same construction row 8f uses for group (c). Without it, group (e) is a
+    merge-refusal condition no dispatch rule can see: row 10 fires,
+    ``/do-merge`` is dispatched, the predicate refuses on a ``FAIL`` or
+    ``UNEVALUATED`` row, and the router re-dispatches ``/do-merge`` unchanged
+    until ``guard_g4_oscillation`` blocks the lane for a human. That is exactly
+    the router-predicate oscillation loop WS3d/#2062 existed to end,
+    reintroduced on the verification axis.
+
+    The dispositions mirror the predicate's, so the two cannot disagree:
+
+    - no recorded aggregate → **False**. Absence is reported and not enforced
+      on the ship side either; a lane that never recorded one is not blocked.
+    - ``FAIL`` or ``UNEVALUATED`` → **True**. The #3080 / ``ba092a06d`` ruling:
+      both hold the PR.
+    - ``PASS`` but not provably fresh — no ``head_sha`` on the record, a live
+      head the CLI could not resolve (the empty-string sentinel), or a head
+      that differs from the record's → **True**. A cached PASS from before the
+      current head is the defect this whole mechanism exists to close.
+    - ``PASS`` anchored to the current head → **False**. Row 10 may merge.
+
+    Reads ``stage_states`` only; the aggregate already travels in that blob, so
+    this rule makes no network call. Scoped to APPROVED verdicts because a lane
+    that is not approved is owned by the review/patch rows.
+
+    Termination: ``/do-pr-review`` re-runs the table and re-records an anchored
+    aggregate, so a stale or unanchored record converges in one pass. A record
+    that is genuinely ``FAIL`` converges the other way -- the re-review records
+    findings and flips the verdict, handing the lane to the patch rows -- and
+    is loop-bound by G4 in the interim, exactly as row 8f is.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
+        return False
+
+    aggregate = stage_states.get(VERIFICATION_OUTCOMES_KEY)
+    if not isinstance(aggregate, dict):
+        return False
+
+    outcome = str(aggregate.get("outcome") or "").strip().upper()
+    if outcome in (CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value):
+        return True
+
+    if "pr_head_sha" not in context:
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return True
+    recorded_head = str(aggregate.get("head_sha") or "")
+    if not recorded_head:
+        return True
+    return recorded_head.lower() != head_sha.lower()
+
+
 def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs done, ready to merge."""
     if not meta.get("pr_number"):
@@ -2212,6 +2297,11 @@ _rule_review_verdict_head_stale.__doc__ = (
 )
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
+)
+_rule_verification_outcomes_hold_pr.__doc__ = (
+    "Recorded verification outcomes carry a FAIL/UNEVALUATED row, or a PASS not anchored "
+    "to the current PR head — re-review re-records them instead of dispatching a merge "
+    "the predicate will refuse"
 )
 _rule_ready_to_merge.__doc__ = (
     "Review APPROVED (recorded verdict, head_sha-fresh) with zero findings, docs done, "
@@ -2378,6 +2468,19 @@ DISPATCH_RULES: list[DispatchRule] = [
         skill=SKILL_DO_DOCS,
         reason="Docs are required before merge",
     ),
+    # Row 8g mirrors merge_predicate group (e) on the routing side. Ordered
+    # immediately before row 10 so it preempts only the merge dispatch: a lane
+    # with docs outstanding still goes to row 9 first, and only a lane that
+    # would otherwise be sent to a gate certain to refuse is re-reviewed.
+    DispatchRule(
+        row_id="8g",
+        state_predicate=_rule_verification_outcomes_hold_pr,
+        skill=SKILL_DO_PR_REVIEW,
+        reason=(
+            "recorded verification outcomes hold the PR (blocking row, or a PASS that "
+            "is not anchored to the current head) — re-review re-records them"
+        ),
+    ),
     DispatchRule(
         row_id="10",
         state_predicate=_rule_ready_to_merge,
@@ -2497,6 +2600,12 @@ def reconcile_dispatch(
     else:
         second_summary = {"reason": second_veto.reason, "evidence": second_veto.evidence}
 
+    # RECONCILE_DEADLOCK is the loop-bound for this bounded reconciliation pass:
+    # it returns both vetoes' verdicts here, on the second guard pass, instead of
+    # letting the caller iterate into G4's oscillation cap several turns later.
+    # Currently reachable only from this guard-reconciliation path, so it has no
+    # production coverage yet — it exists as the fail-closed stop for the two-veto
+    # case Risk 2 (above) describes.
     return Blocked(
         reason=(
             f"reconciliation: guard veto did not converge — table selected row "
@@ -2591,6 +2700,13 @@ def decide_next_dispatch(
                     f"(target repo: {resolved_repo}; check GH_REPO / SDLC_TARGET_REPO env)"
                 ),
                 guard_id=None,
+                decision_inputs=build_decision_inputs(
+                    stage_states,
+                    meta,
+                    pr_number=pr_num,
+                    pr_merge_state=pr_state,
+                    resolved_target_repo=resolved_repo,
+                ),
             )
         return Blocked(
             reason="no matching dispatch rule",

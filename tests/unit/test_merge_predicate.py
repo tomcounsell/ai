@@ -990,3 +990,38 @@ def test_unresolvable_pr_head_refuses(monkeypatch, ledger_factory, tmp_path):
     mp._check_verification_outcomes(GATE_ISSUE, GATE_PR, _plan_repo(tmp_path), failed, notes)
 
     assert any("PR head unresolvable" in f for f in failed), failed
+
+
+class TestUnreadableAggregateFailsClosed:
+    """An unreadable aggregate must refuse, not pass as absent.
+
+    Review of PR #3123: group (e)'s reader was the one read in this module
+    that failed open, so a store error on a lane carrying a recorded FAIL
+    merged unimpeded. Every neighbouring group already fails closed on its own
+    read error; this pins group (e) to the same posture.
+    """
+
+    def test_read_error_refuses_and_names_the_cause(self, monkeypatch, tmp_path):
+        import agent.verification_parser as vp
+
+        def boom(*a, **kw):
+            raise vp.VerificationOutcomesUnavailableError("redis is down")
+
+        monkeypatch.setattr(vp, "read_verification_outcomes", boom)
+
+        failed: list[str] = []
+        notes: list[str] = []
+        monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: TARGET_REPO)
+        # A plan doc must resolve, or the check reports "no plan document" and
+        # returns before ever reaching the read this test is about.
+        monkeypatch.setattr(mp, "_find_plan_doc", lambda issue, root: tmp_path / "plan.md")
+        mp._check_verification_outcomes(
+            pr_number=GATE_PR,
+            issue_number=GATE_ISSUE,
+            repo_root=tmp_path,
+            failed=failed,
+            notes=notes,
+        )
+        assert failed, "an unreadable aggregate must fail the gate"
+        assert any("unreadable" in f for f in failed)
+        assert not any("reported, not enforced" in n for n in notes)

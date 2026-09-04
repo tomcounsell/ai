@@ -307,6 +307,54 @@ def check_success_criteria(criteria: list[dict[str, str]]) -> list[dict]:
     return results
 
 
+_VALUE_FLAGS = ("--repo", "--issue", "--pr", "--timeout")
+_BARE_FLAGS = ("--record-outcomes",)
+
+
+def _parse_argv(argv: list[str]) -> tuple[dict[str, str], list[str], list[str]]:
+    """Split argv into ``(options, positionals, rejected_flags)``.
+
+    A value flag whose next token is missing or is itself a flag is
+    **rejected**, not silently satisfied. The documented production invocation
+    interpolates unquoted shell variables (``--issue $ISSUE_NUMBER``), so an
+    empty variable collapses the argument list and the naive reading takes the
+    following flag as the value. That produced three real failures: a
+    ``ValueError`` that escaped after the report and changed the exit code, a
+    ledger row written under a repo literally named ``--issue``, and a plan
+    path silently read from a flag so the run exited 0 having checked nothing.
+
+    Positionals are tokens that are neither a flag nor a flag's value, so
+    ``--record-outcomes plan.md`` finds the plan rather than mistaking the flag
+    for it.
+    """
+    opts: dict[str, str] = {}
+    positionals: list[str] = []
+    rejected: list[str] = []
+
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in _BARE_FLAGS:
+            opts[token] = ""
+            i += 1
+        elif token in _VALUE_FLAGS:
+            value = argv[i + 1] if i + 1 < len(argv) else None
+            if value is None or value.startswith("--"):
+                rejected.append(token)
+                i += 1
+            else:
+                opts[token] = value
+                i += 2
+        elif token.startswith("--"):
+            rejected.append(token)
+            i += 1
+        else:
+            positionals.append(token)
+            i += 1
+
+    return opts, positionals, rejected
+
+
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
         print("Usage: python scripts/validate_build.py <plan-path> [options]")
@@ -325,27 +373,40 @@ def main() -> int:
         print("  --repo OWNER/NAME   Target repo for the ledger key.")
         print("  --issue N           Issue number for the ledger key.")
         print("  --pr N              PR whose head SHA anchors the record.")
+        print("  --timeout N         Per-check bound in seconds (env: VERIFICATION_TIMEOUT_S).")
+        print("                      A timeout is UNEVALUATED, which blocks; raise this when a")
+        print("                      legitimate suite brushes the ceiling.")
         print()
         print("Exit codes:")
         print("  0 - All checks pass or skip")
         print("  1 - One or more checks failed")
         return 0
 
-    argv = sys.argv[1:]
+    opts, positionals, bad_flags = _parse_argv(sys.argv[1:])
+    record_outcomes = "--record-outcomes" in opts
+    opt_repo = opts.get("--repo")
+    opt_issue = opts.get("--issue")
+    opt_pr = opts.get("--pr")
+    opt_timeout = opts.get("--timeout")
 
-    def _opt(flag: str) -> str | None:
-        if flag in argv:
-            i = argv.index(flag)
-            if i + 1 < len(argv):
-                return argv[i + 1]
-        return None
+    for flag in bad_flags:
+        print(f"ARGS: ignoring {flag} -- unknown flag, or its value was missing or another flag")
 
-    record_outcomes = "--record-outcomes" in argv
-    opt_repo = _opt("--repo")
-    opt_issue = _opt("--issue")
-    opt_pr = _opt("--pr")
+    if not positionals:
+        # Never return 0 having run nothing: a green exit with zero checks is
+        # indistinguishable from a clean plan, which is the whole failure this
+        # module exists to make impossible.
+        print("No plan path given. Usage: python scripts/validate_build.py <plan-path> [options]")
+        return 1
 
-    plan_path = Path(argv[0])
+    timeout = DEFAULT_TIMEOUT_S
+    if opt_timeout:
+        try:
+            timeout = int(opt_timeout)
+        except ValueError:
+            print(f"ARGS: ignoring --timeout {opt_timeout!r} -- not an integer")
+
+    plan_path = Path(positionals[0])
     if not plan_path.exists():
         print(f"Plan file not found: {plan_path}")
         print("Nothing to validate.")
@@ -368,7 +429,9 @@ def main() -> int:
     verification_table = parse_verification_table(plan_text)
     graded: list[CheckResult] = []
     if verification_table.checks or verification_table.malformed or verification_table.skipped:
-        all_results.extend(check_verification_table(verification_table, check_results=graded))
+        all_results.extend(
+            check_verification_table(verification_table, timeout=timeout, check_results=graded)
+        )
 
     # 3. Success criteria commands
     success_criteria = parse_success_criteria_commands(plan_text)
@@ -398,15 +461,28 @@ def main() -> int:
     # told: the write reports its own success or failure on its own line and
     # does not touch the exit code, which belongs to the checks.
     if record_outcomes:
-        if not opt_repo or not opt_issue:
-            print("RECORD: skipped -- --record-outcomes requires --repo and --issue")
+        try:
+            issue_int = int(opt_issue) if opt_issue else None
+            pr_int = int(opt_pr) if opt_pr else None
+        except ValueError:
+            # Reported, never raised: an unparseable argument must not escape
+            # after the summary has printed and rewrite the exit code.
+            issue_int = pr_int = None
+            print(
+                f"RECORD: skipped -- --issue/--pr must be integers (got {opt_issue!r}/{opt_pr!r})"
+            )
         else:
+            if not opt_repo or issue_int is None:
+                print("RECORD: skipped -- --record-outcomes requires --repo and --issue")
+                issue_int = None
+
+        if issue_int is not None and opt_repo:
             wrote = record_verification_outcomes(
                 opt_repo,
-                int(opt_issue),
+                issue_int,
                 graded,
                 table=verification_table,
-                pr_number=int(opt_pr) if opt_pr else None,
+                pr_number=pr_int,
             )
             if wrote:
                 anchor = f"anchored to PR #{opt_pr} head" if opt_pr else "UNANCHORED"

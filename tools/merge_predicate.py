@@ -805,9 +805,21 @@ def _check_verification_outcomes(
     # merge-guard hook (see module docstring). agent.verification_parser pulls
     # in agent.pipeline_ledger, same posture as the _check_verdict_freshness
     # trailer reader below.
-    from agent.verification_parser import read_verification_outcomes
+    from agent.verification_parser import (
+        VerificationOutcomesUnavailableError,
+        read_verification_outcomes,
+    )
 
-    aggregate = read_verification_outcomes(target_repo, issue_number)
+    try:
+        aggregate = read_verification_outcomes(target_repo, issue_number)
+    except VerificationOutcomesUnavailableError as exc:
+        # An unreadable record is not an absent one. Absence is a lane this
+        # gate deliberately does not block; a failed read is a lane about
+        # which nothing is known, and passing it would turn a recorded FAIL
+        # into an unenforced pass on a transient store error.
+        failed.append(f"verification outcomes: recorded aggregate unreadable ({exc})")
+        return
+
     if aggregate is None:
         notes.append(
             "verification-outcomes check skipped: no recorded aggregate for"
@@ -871,7 +883,7 @@ def _check_verification_outcomes(
         offending += 1
         reason = str(row.get("reason") or "").strip()
         failed.append(
-            f"verification row {row.get('name') or '<unnamed>'!r} is {row_outcome}"
+            f"verification row {(row.get('name') or '<unnamed>')!r} is {row_outcome}"
             + (f": {reason}" if reason else "")
             + " — FAIL and UNEVALUATED both hold the PR (owner ruling on #3080)"
         )
@@ -892,7 +904,7 @@ def _check_verification_outcomes(
         # a run with no checks at all, which grades UNEVALUATED rather than a
         # vacuous PASS. Refuse rather than guess what it meant.
         failed.append(
-            f"verification outcomes: recorded outcome is {outcome or '<absent>'!r},"
+            f"verification outcomes: recorded outcome is {(outcome or '<absent>')!r},"
             f" not {CheckOutcome.PASS.value} ({len(rows)} row(s) recorded)"
         )
         return

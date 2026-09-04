@@ -43,9 +43,11 @@ table (GFM spec section 4.10 -- a pipe table is a leaf block whose body
 consumes rows until a blank line or a line that cannot be part of the table).
 Every pipe-block in the section is classified on its own, independently:
 
-- A block is a **check table** when its columns match the check contract: at
-  least three columns, the second named ``Command`` and the third ``Expected``
-  (case-insensitive). Every data row in it is parsed as a check.
+- A block is a **check table** when its columns match the check contract: an
+  ``Expected`` column immediately after a ``Command`` column (case-insensitive),
+  with at least one column ahead of them naming the check. The pair is located,
+  not pinned to fixed offsets, so a leading index column is fine. Every data row
+  in it is parsed as a check.
 - A block that is not a check table -- a red/green summary, a findings recap
   -- becomes a :class:`SkippedTable`: named, reported, and non-failing. A
   second markdown table in the section is legitimate plan authoring; treating
@@ -72,11 +74,13 @@ gate that says "your code is wrong" when it means "my grader is wrong" costs
 a human the time to discover the difference, and the 2026-09 supervisor batch
 hand-verified every such "failure" as actually passing.
 
-Table classification is by column **contract** -- columns 2 and 3 of the
-header must be ``Command`` and ``Expected`` -- not by the word ``Command``
-appearing anywhere in the first three positions. A table shaped
-``| Command | Observed stdout | Observed exit |`` used to be classified as a
-check table and have its *second* column executed as a shell command (#3022).
+Table classification is by column **contract** -- an ``Expected`` column
+directly after a ``Command`` column, with something ahead of them to name the
+check -- not by the word ``Command`` appearing anywhere in the first three
+positions. A table shaped ``| Command | Observed stdout | Observed exit |`` used
+to be classified as a check table and have its *second* column executed as a
+shell command (#3022); it has no name column and no following ``Expected``, so
+the contract rejects it.
 
 The escape composes, which matters for basic-regex ``grep``: in a BRE,
 alternation is spelled ``\\|``, and to get that through the table you double
@@ -93,6 +97,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -108,9 +113,19 @@ _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 # One bound, shared by every runner of this repo's verification tables. The
 # second runner (`scripts/validate_build.py`) carried its own 30s ceiling and
 # its own SKIP-on-timeout disposition, so the two graded the same event two
-# different ways (#2901). Provisional and tunable: raise it if a legitimate
-# suite starts brushing the ceiling rather than letting rows go UNEVALUATED.
-DEFAULT_TIMEOUT_S = 120
+# different ways (#2901). Provisional and tunable.
+#
+# The bound needs a lever because a timeout is now a durable merge refusal, not
+# the non-blocking SKIP it used to be: the slowest row in this repo's plans sits
+# around a quarter of the bound on a quiet machine, so heavy contention alone
+# can push a legitimate suite over and hold a PR. Raise it via
+# VERIFICATION_TIMEOUT_S (or `--timeout`) when a real suite brushes the ceiling
+# -- but contention is a load problem, not a bound problem, so prefer rerunning
+# on a quiet machine over permanently inflating this.
+try:
+    DEFAULT_TIMEOUT_S = int(os.environ.get("VERIFICATION_TIMEOUT_S", "") or 120)
+except ValueError:
+    DEFAULT_TIMEOUT_S = 120
 
 # Underscore-prefixed metadata key inside the ledger's `stage_states_json`
 # blob, mirroring `_verdicts` / `_sdlc_dispatches` / `_run_identities`. A new
@@ -403,7 +418,20 @@ def parse_verification_table(markdown: str) -> ParsedTable:
 
     for block, header_cells in check_blocks:
         expected_columns = max(len(header_cells), 3)
-        command_idx, expected_idx = check_column_indices(header_cells)
+        indices = check_column_indices(header_cells)
+        if indices is None:
+            # Unreachable in practice: check_blocks was filtered through
+            # _is_check_table_header, which is this same call returning
+            # non-None. Guarded explicitly anyway so the invariant is
+            # enforced in code rather than assumed at this type seam.
+            malformed.append(
+                MalformedRow(
+                    line=block[0],
+                    reason="table header no longer matches the check contract",
+                )
+            )
+            continue
+        command_idx, expected_idx = indices
         # The check's name is the column immediately ahead of Command, so a
         # leading index column yields the descriptive name rather than "1".
         name_idx = command_idx - 1
@@ -594,28 +622,47 @@ def evaluate_expectation(expected: str | None, *, exit_code: int, output: str) -
     if m:
         return verdict(output.strip() == m.group(1).strip())
 
-    # output >= N / >= N  (anchored, see the note below)
-    m = re.match(r"(?:output\s*)?>=\s*(\d+)\s*$", expected)
+    # Trailing-gloss rule (applies uniformly to >, >=, ==): the `output`-prefixed
+    # spellings (`output > N`, `output >= N`, `output == N`) are the established
+    # authoring idiom in live plans -- e.g. `output > 0 (a bare file-wide grep
+    # returns 3 today)` or `output == 2 (the two read sites)` -- so they are
+    # prefix-matched and tolerate a trailing gloss. The bare spellings (`> N`,
+    # `>= N`, `== N`) have no such idiom behind them and stay anchored, so a
+    # trailing gloss on a bare form is UNEVALUATED. Each `output`-prefixed
+    # branch is tried before its bare counterpart so the prefix match wins.
+
+    # output >= N -- prefix-matched (see the trailing-gloss rule above).
+    m = re.match(r"output\s*>=\s*(\d+)", expected)
     if m:
         threshold = int(m.group(1))
         return numeric_verdict(lambda value: value >= threshold)
 
-    # output > N -- prefix-matched, preserving the long-standing reading of
-    # `output > 0 (a bare file-wide grep returns 3 today)`, which several live
-    # plans write. The bare `> N` form below is anchored instead.
+    # >= N  (anchored, see the trailing-gloss rule above)
+    m = re.match(r">=\s*(\d+)\s*$", expected)
+    if m:
+        threshold = int(m.group(1))
+        return numeric_verdict(lambda value: value >= threshold)
+
+    # output > N -- prefix-matched (see the trailing-gloss rule above).
     m = re.match(r"output\s*>\s*(\d+)", expected)
     if m:
         threshold = int(m.group(1))
         return numeric_verdict(lambda value: value > threshold)
 
-    # > N  (anchored, see the note below)
+    # > N  (anchored, see the trailing-gloss rule above)
     m = re.match(r">\s*(\d+)\s*$", expected)
     if m:
         threshold = int(m.group(1))
         return numeric_verdict(lambda value: value > threshold)
 
-    # output == N / == N  (anchored, see the note below)
-    m = re.match(r"(?:output\s*)?==\s*(\d+)\s*$", expected)
+    # output == N -- prefix-matched (see the trailing-gloss rule above).
+    m = re.match(r"output\s*==\s*(\d+)", expected)
+    if m:
+        target = int(m.group(1))
+        return numeric_verdict(lambda value: value == target)
+
+    # == N  (anchored, see the trailing-gloss rule above)
+    m = re.match(r"==\s*(\d+)\s*$", expected)
     if m:
         target = int(m.group(1))
         return numeric_verdict(lambda value: value == target)
@@ -933,11 +980,30 @@ def record_verification_outcomes(
         return False
 
 
+class VerificationOutcomesUnavailableError(Exception):
+    """The recorded aggregate could not be read, as distinct from absent.
+
+    A merge gate must tell these two apart. "No aggregate was ever recorded"
+    is a lane the gate deliberately does not block; "the aggregate exists but
+    the read failed" is a lane about which nothing is known, and treating the
+    second as the first converts a recorded ``FAIL`` into an unenforced pass on
+    a Redis blip. Every neighbouring group in ``tools/merge_predicate.py``
+    fails closed on its own read error; this makes that possible here.
+    """
+
+
 def read_verification_outcomes(target_repo: str | None, issue_number: int | None) -> dict | None:
     """Return the recorded aggregate for a lane, or ``None`` if there is none.
 
-    Non-mutating (uses :meth:`PipelineLedger.get`, so a read never litters an
-    empty ledger) and fails OPEN to ``None`` on any error or malformed blob.
+    Non-mutating: uses :meth:`PipelineLedger.get`, so a read never litters an
+    empty ledger.
+
+    Fails **closed**. ``None`` means genuine absence -- no ledger, no
+    ``stage_states`` blob, or no ``_verification_outcomes`` key in it. Anything
+    that prevents an answer (an unreachable store, an unparseable blob, a
+    record of the wrong shape) raises :class:`VerificationOutcomesUnavailableError`
+    rather than reporting absence, so the caller can refuse instead of
+    silently passing a lane it could not check.
     """
     if not target_repo or not issue_number:
         return None
@@ -948,11 +1014,11 @@ def read_verification_outcomes(target_repo: str | None, issue_number: int | None
         if ledger is None:
             return None
         raw = ledger.stage_states_json
-        blob = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(blob, dict):
+        if raw is None or raw == "":
             return None
-        record = blob.get(VERIFICATION_OUTCOMES_KEY)
-        return record if isinstance(record, dict) else None
+        blob = json.loads(raw) if isinstance(raw, str) else raw
+    except VerificationOutcomesUnavailableError:
+        raise
     except Exception as exc:
         logger.debug(
             "read_verification_outcomes: read failed for %s#%s (%s: %s)",
@@ -961,4 +1027,21 @@ def read_verification_outcomes(target_repo: str | None, issue_number: int | None
             type(exc).__name__,
             exc,
         )
+        raise VerificationOutcomesUnavailableError(
+            f"could not read verification outcomes for {target_repo}#{issue_number}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not isinstance(blob, dict):
+        raise VerificationOutcomesUnavailableError(
+            f"stage_states for {target_repo}#{issue_number} is {type(blob).__name__}, not an object"
+        )
+    if VERIFICATION_OUTCOMES_KEY not in blob:
         return None
+    record = blob[VERIFICATION_OUTCOMES_KEY]
+    if not isinstance(record, dict):
+        raise VerificationOutcomesUnavailableError(
+            f"recorded verification outcomes for {target_repo}#{issue_number} are "
+            f"{type(record).__name__}, not an object"
+        )
+    return record

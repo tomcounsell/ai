@@ -290,12 +290,14 @@ class TestExtendedExpectationGrammar:
         assert evaluate_expectation(">= 1", exit_code=0, output="abc") is FAIL
         assert evaluate_expectation("== 1", exit_code=0, output="") is FAIL
 
-    def test_trailing_prose_on_a_numeric_form_is_unevaluated(self):
+    def test_trailing_gloss_on_the_output_prefixed_form_still_grades(self):
         """`output == 2 (the two read sites)` appears verbatim in a live plan.
-        Prefix-matching it would grade a sentence nobody wrote as a number."""
+        The `output`-prefixed spellings are prefix-matched (see
+        TestNumericComparatorTrailingGlossSymmetry), so this grades rather
+        than going UNEVALUATED."""
         assert (
             evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="2")
-            is UNEVALUATED
+            is PASS
         )
 
 
@@ -559,8 +561,13 @@ class TestPipesInCommands:
         assert len(parsed.malformed) == 1
 
     def test_column_count_comes_from_the_header(self):
-        """One plan in docs/plans/ carries a 4-column Verification table.
-        Hardcoding 3 would reject every one of its rows."""
+        """A trailing extra column (Check, Command, Expected, Notes) is
+        tolerated: the row width comes from the header, not a hardcoded 3.
+        No plan under docs/plans/ actually carries this trailing-column
+        shape today -- the leading-index-column shape
+        (# | Check | Command | Expected) that plans do carry is pinned
+        separately by TestLeadingIndexColumnIsACheckTable in
+        tests/unit/test_validate_build.py."""
         table = (
             "## Verification\n\n"
             "| Check | Command | Expected | Notes |\n|--|--|--|--|\n"
@@ -1007,3 +1014,171 @@ class TestExpectationAnchoringRule:
     def test_trailing_gloss_on_a_new_bare_form_is_unevaluated(self):
         for cell in ("== 2 (the two read sites)", ">= 1 nightly", "> 0 or so", "exit 0 maybe"):
             assert evaluate_expectation(cell, exit_code=0, output="2") is UNEVALUATED
+
+
+class TestNumericComparatorTrailingGlossSymmetry:
+    """The trailing-gloss rule is now symmetric across >, >=, and ==: the
+    `output`-prefixed spellings are prefix-matched (gloss tolerated) and the
+    bare spellings stay anchored (gloss makes it UNEVALUATED), for all three
+    comparators alike. Previously only `output > N` had this idiom; `output
+    >= N` and `output == N` were anchored, which silently turned three live
+    plan rows UNEVALUATED (durability-m1-fence-canary.md:1012,
+    watch-skill-video-scoping-controls.md:606-607)."""
+
+    def test_gt_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation(
+                "output > 0 (a bare grep returns 3 today)", exit_code=0, output="3"
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output > 5 (a bare grep returns 3 today)", exit_code=0, output="3"
+            )
+            is FAIL
+        )
+
+    def test_gt_bare_with_gloss_is_unevaluated(self):
+        assert evaluate_expectation(
+            "> 0 (a bare grep returns 3 today)", exit_code=0, output="3"
+        ) is (UNEVALUATED)
+
+    def test_gte_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation(
+                "output >= 3 (holds since the last sweep)", exit_code=0, output="3"
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output >= 9 (holds since the last sweep)", exit_code=0, output="3"
+            )
+            is FAIL
+        )
+
+    def test_gte_bare_with_gloss_is_unevaluated(self):
+        assert (
+            evaluate_expectation(">= 3 (holds since the last sweep)", exit_code=0, output="3")
+            is UNEVALUATED
+        )
+
+    def test_eq_output_prefixed_with_gloss_evaluates(self):
+        assert (
+            evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="2")
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output == 2 (the two read sites)", exit_code=0, output="3")
+            is FAIL
+        )
+
+    def test_eq_bare_with_gloss_is_unevaluated(self):
+        assert (
+            evaluate_expectation("== 2 (the two read sites)", exit_code=0, output="2")
+            is UNEVALUATED
+        )
+
+    def test_live_plan_rows_verbatim(self):
+        """Pinned verbatim from real plans so a regression here is caught at
+        the exact string that would otherwise hold a PR's merge."""
+        assert (
+            evaluate_expectation(
+                "output == 2 (the `:3198` reason-string read and the `:3216` "
+                "`logger.warning` read)",
+                exit_code=0,
+                output="2",
+            )
+            is PASS
+        )
+        assert (
+            evaluate_expectation("output == 1 (exactly `import os`)", exit_code=0, output="1")
+            is PASS
+        )
+        assert (
+            evaluate_expectation(
+                "output == 1 (exactly `from __future__ import annotations`)",
+                exit_code=0,
+                output="1",
+            )
+            is PASS
+        )
+
+
+class TestReadVerificationOutcomesFailsClosed:
+    """Absent and unreadable must be distinguishable (review of PR #3123).
+
+    The reader previously returned None on any error, and the merge predicate
+    reads None as "no aggregate -- reported, not enforced". A Redis blip or a
+    corrupt blob therefore converted a recorded FAIL into an unenforced pass,
+    inverted against every neighbouring group in merge_predicate, which all
+    fail closed on their own read errors.
+    """
+
+    REPO = "owner/name"
+    ISSUE = 991234
+
+    def test_absent_ledger_reads_as_absence(self):
+        from agent.verification_parser import read_verification_outcomes
+
+        assert read_verification_outcomes(self.REPO, self.ISSUE) is None
+
+    def test_missing_identifiers_read_as_absence(self):
+        from agent.verification_parser import read_verification_outcomes
+
+        assert read_verification_outcomes(None, None) is None
+
+    def test_store_error_raises_rather_than_reporting_absence(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        def boom(*a, **kw):
+            raise ConnectionError("redis is down")
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(boom))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_unparseable_blob_raises(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        class _Row:
+            stage_states_json = "{not json"
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_record_of_the_wrong_shape_raises(self, monkeypatch):
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import (
+            VERIFICATION_OUTCOMES_KEY,
+            VerificationOutcomesUnavailableError,
+            read_verification_outcomes,
+        )
+
+        class _Row:
+            stage_states_json = json.dumps({VERIFICATION_OUTCOMES_KEY: "PASS"})
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        with pytest.raises(VerificationOutcomesUnavailableError):
+            read_verification_outcomes(self.REPO, self.ISSUE)
+
+    def test_blob_present_but_key_missing_is_absence_not_an_error(self, monkeypatch):
+        """A lane that simply never recorded one is not blocked."""
+        import agent.pipeline_ledger as pl
+        from agent.verification_parser import read_verification_outcomes
+
+        class _Row:
+            stage_states_json = json.dumps({"BUILD": "completed"})
+
+        monkeypatch.setattr(pl.PipelineLedger, "get", staticmethod(lambda *a, **kw: _Row()))
+        assert read_verification_outcomes(self.REPO, self.ISSUE) is None

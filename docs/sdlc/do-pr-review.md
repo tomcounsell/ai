@@ -69,7 +69,11 @@ inheritance, not a block: use the returned `run_id` and continue; only a foreign
 **Verification-table runner (§ 4.5):**
 
 ```bash
-python scripts/validate_build.py $PLAN_PATH --record-outcomes --repo $TARGET_REPO --issue $ISSUE_NUMBER --pr $PR_NUMBER
+python scripts/validate_build.py "$PLAN_PATH" --record-outcomes --repo "$TARGET_REPO" --issue "$ISSUE_NUMBER" --pr "$PR_NUMBER"
+# Quote every variable. An empty unquoted one collapses the argument list, and
+# the parser then rejects the flag rather than eating the next one -- but an
+# empty *quoted* value is at least visible as an empty value instead of
+# silently shifting every later argument.
 # REVIEW is where the graded aggregate gets RECORDED, and it is the only stage
 # that can: `--record-outcomes` stamps the record with the PR head SHA it was
 # graded against, and the merge predicate refuses an aggregate it cannot show

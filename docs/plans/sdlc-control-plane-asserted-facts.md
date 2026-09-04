@@ -728,6 +728,22 @@ table, and the anti-criteria rows are written to fail if the tri-state is absent
 truth depends on the modified evaluator is a row that proves nothing; the Verification section keeps
 those to direct `grep`/`pytest` assertions.
 
+### Risk 8: The #3080 gate only fires on a RECORDED aggregate; nothing enforces that § 4.5 ran
+
+**Impact:** `tools/merge_predicate.py::_check_verification_outcomes` grades a recorded aggregate
+against the PR's current head, but a lane where the § 4.5 verification-table runner is simply never
+invoked has no aggregate to grade at all — that case is "reported, not enforced" by design (see the
+module's own comment at `tools/merge_predicate.py:762-764`). The invocation itself is not a
+mechanical trigger anywhere in this codebase; it is prose in `docs/sdlc/do-pr-review.md` telling the
+REVIEW stage to run it. A lane that skips or forgets that step merges unimpeded by this gate, which
+means the #3080 ruling is machine-readable once graded but not machine-*guaranteed* to be graded.
+**Mitigation:** this is a known, accepted open edge, not a defect — fail-closed-on-absence was
+deliberately rejected because it has no incident backing it (no observed case of a lane skipping
+§ 4.5 to dodge the ruling) and because it would block every lane whose plan predates this mechanism,
+none of which ever recorded an aggregate. Closing this edge, if it is ever worth closing, means making
+the § 4.5 invocation itself mechanical (a hook or a stage-transition check) rather than tightening
+this gate's absence handling.
+
 ## Race Conditions
 
 ### Race 1: Branch truth is a live remote read taken mid-push

@@ -1949,3 +1949,185 @@ class TestG5DoubleInvocationDuringReconciliation:
         # The mutation itself is by-reference and idempotent: the second
         # (reconciliation) pass must see the already-migrated hash.
         assert states["_verdicts"]["CRITIQUE"]["artifact_hash"] == current_hash
+
+
+class TestRow8gVerificationOutcomesHoldPr:
+    """Row 8g is the routing-side twin of merge_predicate group (e).
+
+    Review of PR #3123: group (e) was a merge-refusal condition no dispatch
+    rule could see. Row 10 fired, `/do-merge` was dispatched, the predicate
+    refused on a FAIL/UNEVALUATED row, and the router re-dispatched `/do-merge`
+    unchanged until G4 blocked the lane -- the router-predicate oscillation
+    loop WS3d/#2062 ended, reintroduced on the verification axis.
+    """
+
+    HEAD = "a" * 40
+    OTHER = "b" * 40
+
+    def _states(self, aggregate=None):
+        from agent.verification_parser import VERIFICATION_OUTCOMES_KEY
+
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        if aggregate is not None:
+            states[VERIFICATION_OUTCOMES_KEY] = aggregate
+        return states
+
+    def _meta(self):
+        # The REVIEW verdict must itself be head-fresh, or row 8f (group (c)'s
+        # twin) preempts row 8g and every case below reads the same.
+        return _base_meta(
+            pr_number=3123,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict="APPROVED",
+            latest_review_head_sha=self.HEAD,
+        )
+
+    def _decide(self, aggregate, *, head=None):
+        context = {} if head is None else {"pr_head_sha": head}
+        return decide_next_dispatch(self._states(aggregate), self._meta(), context)
+
+    def test_fail_row_re_reviews_instead_of_merging(self):
+        result = self._decide({"outcome": "FAIL", "head_sha": self.HEAD}, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.row_id == "8g"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.skill != SKILL_DO_MERGE
+
+    def test_unevaluated_row_re_reviews_instead_of_merging(self):
+        """The #3080 shape: UNEVALUATED holds the PR exactly as FAIL does."""
+        result = self._decide({"outcome": "UNEVALUATED", "head_sha": self.HEAD}, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.row_id == "8g"
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_fresh_pass_still_merges(self):
+        result = self._decide({"outcome": "PASS", "head_sha": self.HEAD}, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+        assert result.row_id == "10"
+
+    def test_pass_graded_against_an_older_head_re_reviews(self):
+        """Two-pole against the fresh case above: same aggregate, head moved."""
+        result = self._decide({"outcome": "PASS", "head_sha": self.OTHER}, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.row_id == "8g"
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_pass_with_no_anchor_re_reviews(self):
+        result = self._decide({"outcome": "PASS"}, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.row_id == "8g"
+
+    def test_unresolvable_live_head_re_reviews(self):
+        """The empty-string sentinel is a lookup failure, not a match.
+
+        Row 8f reaches this state first -- an unresolvable head makes the
+        REVIEW verdict unattributable too -- and both rows send the lane to
+        re-review, so the dispatch is what matters here, not which row owns
+        it. 8g's own disposition is asserted directly below.
+        """
+        result = self._decide({"outcome": "PASS", "head_sha": self.HEAD}, head="")
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.skill != SKILL_DO_MERGE
+
+    def test_rule_holds_pr_on_an_unresolvable_live_head(self):
+        """8g fails closed on the sentinel independently of row 8f."""
+        from agent.sdlc_router import _rule_verification_outcomes_hold_pr
+
+        held = _rule_verification_outcomes_hold_pr(
+            self._states({"outcome": "PASS", "head_sha": self.HEAD}),
+            self._meta(),
+            {"pr_head_sha": ""},
+        )
+        assert held is True
+
+    def test_absent_aggregate_is_not_enforced(self):
+        """Mirrors the predicate: absence is reported there, never enforced.
+        A lane that never recorded one must still be able to merge."""
+        result = self._decide(None, head=self.HEAD)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+
+    def test_blocking_aggregate_does_not_preempt_docs(self):
+        """Ordered before row 10 but after row 9: docs still come first."""
+        from agent.verification_parser import VERIFICATION_OUTCOMES_KEY
+
+        states = dict(_ALL_COMPLETED, PATCH="completed", DOCS="pending")
+        states[VERIFICATION_OUTCOMES_KEY] = {"outcome": "FAIL", "head_sha": self.HEAD}
+        result = decide_next_dispatch(states, self._meta(), {"pr_head_sha": self.HEAD})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_DOCS
+
+    def test_inert_without_an_approved_verdict(self):
+        """A non-approved lane belongs to the review/patch rows, not to 8g."""
+        from agent.sdlc_router import _rule_verification_outcomes_hold_pr
+
+        states = self._states({"outcome": "FAIL"})
+        meta = _base_meta(pr_number=3123, latest_review_verdict="CHANGES REQUESTED")
+        assert _rule_verification_outcomes_hold_pr(states, meta, {}) is False
+
+    def test_router_and_predicate_agree_on_the_blocking_set(self):
+        """The two sides must not drift on which outcomes hold a PR."""
+        from agent.sdlc_router import _rule_verification_outcomes_hold_pr
+        from agent.verification_parser import CheckOutcome
+
+        blocking = {CheckOutcome.FAIL.value, CheckOutcome.UNEVALUATED.value}
+        for outcome in (o.value for o in CheckOutcome):
+            held = _rule_verification_outcomes_hold_pr(
+                self._states({"outcome": outcome, "head_sha": self.HEAD}),
+                self._meta(),
+                {"pr_head_sha": self.HEAD},
+            )
+            assert held is (outcome in blocking), outcome
+
+
+class TestG4BlockCarriesItsEvidence:
+    """G4's Blocked is the verdict Cluster D names as its own motivation.
+
+    Review of PR #3123: `decision_inputs` was attached to dispatches and to
+    the RECONCILE_DEADLOCK block, but the one blocked verdict the cluster
+    cites -- a lane stopped for human intervention, where the evidence is the
+    whole point -- returned without any. A human clearing an oscillation
+    streak needs to see what the router saw.
+    """
+
+    def _blocked(self):
+        from agent.sdlc_router import guard_g4_oscillation
+
+        meta = _base_meta(
+            same_stage_dispatch_count=MAX_SAME_STAGE_DISPATCHES,
+            last_dispatched_skill=SKILL_DO_MERGE,
+        )
+        return guard_g4_oscillation(_base_states(), meta, {})
+
+    def test_g4_blocks_with_decision_inputs_attached(self):
+        blocked = self._blocked()
+        assert isinstance(blocked, Blocked)
+        assert blocked.guard_id == "G4"
+        assert blocked.decision_inputs is not None
+
+    def test_evidence_names_the_streak_it_tripped(self):
+        """The three facts that make a G4 block diagnosable without a re-run."""
+        inputs = self._blocked().decision_inputs
+        assert inputs["last_dispatched_skill"] == SKILL_DO_MERGE
+        assert inputs["same_stage_dispatch_count"] == MAX_SAME_STAGE_DISPATCHES
+        assert inputs["max_same_stage_dispatches"] == MAX_SAME_STAGE_DISPATCHES
+
+    def test_evidence_is_not_identity(self):
+        """`decision_inputs` is compare=False, so it never affects equality.
+
+        Two G4 blocks reached from different stage_states must still compare
+        equal on their verdict; evidence travels alongside the decision, it
+        does not define it.
+        """
+        from agent.sdlc_router import guard_g4_oscillation
+
+        meta = _base_meta(
+            same_stage_dispatch_count=MAX_SAME_STAGE_DISPATCHES,
+            last_dispatched_skill=SKILL_DO_MERGE,
+        )
+        a = guard_g4_oscillation(_base_states(), meta, {})
+        b = guard_g4_oscillation(_base_states(REVIEW=STATUS_FAILED), meta, {})
+        assert a.decision_inputs != b.decision_inputs
+        assert a == b

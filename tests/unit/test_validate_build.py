@@ -723,3 +723,118 @@ class TestRecordOutcomesHasAProductionCaller:
         ):
             validate_build.main()
         assert rc.call_count == 1
+
+
+class TestRecordingIsWiredIntoTheReviewStage:
+    """The flag's only production invocation is one line of markdown.
+
+    Review of PR #3123 (tech debt 1): every other test in this file patches
+    the writer and asserts on `main()`, which proves the flag path works, not
+    that anything invokes it. Delete the flag from the REVIEW addendum and
+    those stay green while the merge predicate returns to its permanently
+    `aggregate is None` branch. These assertions pin the wiring itself.
+    """
+
+    REPO_ROOT = Path(__file__).parents[2]
+    REVIEW_ADDENDUM = REPO_ROOT / "docs" / "sdlc" / "do-pr-review.md"
+    BUILD_ADDENDUM = REPO_ROOT / "docs" / "sdlc" / "do-build.md"
+
+    def test_review_addendum_invokes_the_recording_flag(self):
+        text = self.REVIEW_ADDENDUM.read_text()
+        assert "--record-outcomes" in text, (
+            "the REVIEW stage is the only production caller of the verification-outcomes "
+            "writer; without it the merge predicate's group (e) can never fire"
+        )
+        assert "validate_build.py" in text
+
+    def test_review_invocation_passes_every_argument_the_writer_needs(self):
+        """A record with no --pr is unanchored, and the predicate refuses it."""
+        line = next(
+            line
+            for line in self.REVIEW_ADDENDUM.read_text().splitlines()
+            if "--record-outcomes" in line
+        )
+        for flag in ("--repo", "--issue", "--pr"):
+            assert flag in line, f"{flag} missing from the recording invocation"
+
+    def test_build_addendum_does_not_record(self):
+        """BUILD has no PR to anchor against, so recording there would write an
+        unanchored aggregate the merge gate refuses -- blocking every lane.
+
+        Scoped to invocation lines: the addendum is free to *explain* why it
+        does not record, and does.
+        """
+        invocations = [
+            line
+            for line in self.BUILD_ADDENDUM.read_text().splitlines()
+            if "validate_build.py" in line and not line.lstrip().startswith("#")
+        ]
+        assert invocations, "the BUILD addendum must still run the validator"
+        assert not any("--record-outcomes" in line for line in invocations)
+
+    def test_the_flag_the_doc_passes_is_the_flag_the_script_accepts(self):
+        """Pins the doc and the parser together, so renaming one breaks here."""
+        opts, positionals, rejected = validate_build._parse_argv(
+            ["plan.md", "--record-outcomes", "--repo", "o/n", "--issue", "1", "--pr", "2"]
+        )
+        assert not rejected
+        assert positionals == ["plan.md"]
+        assert "--record-outcomes" in opts
+        assert opts["--repo"] == "o/n"
+
+
+class TestArgvParsingRejectsFlagShapedValues:
+    """The three failure modes reproduced in review of PR #3123.
+
+    The documented invocation interpolates shell variables, so an empty one
+    collapses the argument list. The naive reading took the next flag as the
+    value, which produced a ValueError that escaped after the report and
+    changed the exit code, a ledger row written under a repo named `--issue`,
+    and a plan path read from a flag so the run exited 0 having checked nothing.
+    """
+
+    def test_missing_value_rejects_the_flag(self):
+        opts, _, rejected = validate_build._parse_argv(["p.md", "--issue", "--pr", "77"])
+        assert "--issue" in rejected
+        assert "--issue" not in opts
+        assert opts["--pr"] == "77"
+
+    def test_trailing_flag_with_no_value_is_rejected(self):
+        opts, _, rejected = validate_build._parse_argv(["p.md", "--repo"])
+        assert rejected == ["--repo"]
+        assert "--repo" not in opts
+
+    def test_positional_is_found_after_a_bare_flag(self):
+        _, positionals, _ = validate_build._parse_argv(["--record-outcomes", "p.md"])
+        assert positionals == ["p.md"]
+
+    def test_unknown_flag_is_rejected_not_treated_as_a_positional(self):
+        _, positionals, rejected = validate_build._parse_argv(["p.md", "--bogus"])
+        assert positionals == ["p.md"]
+        assert rejected == ["--bogus"]
+
+    def test_no_positional_exits_nonzero_rather_than_green_on_zero_checks(self):
+        with patch("sys.argv", ["validate_build.py", "--record-outcomes", "--repo", "o/n"]):
+            assert validate_build.main() == 1
+
+    def test_non_integer_issue_does_not_change_the_exit_code(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text(
+            "## Verification\n| Check | Command | Expected |\n"
+            "|---|---|---|\n| Echo | `echo hi` | output contains hi |\n"
+        )
+        argv = [
+            "validate_build.py",
+            str(f),
+            "--record-outcomes",
+            "--repo",
+            "o/n",
+            "--issue",
+            "not-a-number",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(validate_build, "record_verification_outcomes") as writer,
+        ):
+            assert validate_build.main() == 0
+        writer.assert_not_called()
