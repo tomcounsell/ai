@@ -83,6 +83,13 @@ The check is **surface only**: it never auto-merges, never mutates files, and ne
 
 The check matches the same pattern as the Steps 4.8/4.9 memory and BYOB MCP drift checks.
 
+### LLM stack compat check and coupled-set auto-bump
+
+Two legs of the update path belong to the LLM stack gate, documented in full in [LLM Stack Compat Gate](llm-stack-compat-gate.md):
+
+- **Verify time, every machine, every run.** `scripts/update/verify.py::check_llm_stack_compat` shells out to `{venv}/bin/python -m agent.llm.compat --json` and appends an `llm-stack-compat` `ToolCheck` to `result.valor_tools`. The failure reason goes in `.error`, which is what `run.py`'s `valor_tools` loop and `bridge/update.py::extract_update_warnings` read; `run.py` also prints the check's `detail` on pass. This is the leg that covers hand-staged pins and follower machines, neither of which auto-bumps.
+- **Auto-bump, maintainer machine only.** `scripts/update/deps.py` bumps in coupled sets (`AUTO_BUMP_SETS`), each set resolved, rewritten, synced, gated, and rolled back as a unit. The `anthropic` + `pydantic-ai-slim` set adds an `llm` gate phase that runs the predicate with `--allow-network` in the target venv.
+
 ### Technical Approach
 
 #### 1. `scripts/remote-update.sh`

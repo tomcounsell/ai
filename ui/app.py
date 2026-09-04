@@ -31,6 +31,17 @@ UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
 STATIC_DIR = UI_DIR / "static"
 
+# Degraded-LLM-stack markers (#3001). `/dashboard.json` is served by a
+# separate uvicorn process, so an in-process flag in the bridge or worker can
+# never reach it — the marker file on disk is the transport, exactly like
+# `data/last_connected` for bridge health. The default must equal
+# `agent/llm/compat.py`'s `_MARKER_DIR` (both resolve to `<repo>/data`); a
+# test asserts that equality directly. Module-level so the dashboard test can
+# redirect it without touching the live `data/` a running bridge, worker, and
+# dashboard share.
+LLM_MARKER_DIR = Path(__file__).parent.parent / "data"
+LLM_MARKER_GLOB = "llm-stack-degraded*"
+
 
 def _filter_format_timestamp(ts: float | None) -> str:
     """Jinja2 filter: format Unix timestamp to humanized relative time."""
@@ -388,6 +399,47 @@ def create_app() -> FastAPI:
         except OSError:
             pass
         return {"status": "error", "age_s": None}
+
+    def _get_llm_stack_health() -> dict:
+        """Read the degraded-LLM-stack markers written by the resolver (#3001).
+
+        Red while **any** marker survives, naming every degraded process.
+        Per-process files give each writer sole ownership of its own path:
+        after a pin fix the bridge re-resolves healthy and clears its marker
+        while a worker that deferred its restart still holds a degraded
+        memo — a shared marker would paint the board green over it.
+
+        Fail-quiet on ``OSError`` like its siblings: an unreadable marker
+        still names its process, and a health payload must never 500.
+        """
+        processes: list[str] = []
+        detail: list[dict] = []
+        try:
+            markers = sorted(LLM_MARKER_DIR.glob(LLM_MARKER_GLOB))
+        except OSError:
+            markers = []
+
+        for marker in markers:
+            _, _, proc = marker.name.partition(".")
+            proc = proc or marker.name
+            processes.append(proc)
+            entry = {"process": proc}
+            try:
+                payload = json.loads(marker.read_text())
+            except (OSError, ValueError):
+                entry["unreadable"] = True
+            else:
+                if isinstance(payload, dict):
+                    entry.update(payload)
+                else:
+                    entry["unreadable"] = True
+            detail.append(entry)
+
+        return {
+            "degraded": bool(processes),
+            "processes": processes,
+            "detail": detail,
+        }
 
     def _get_slot_reclaims_total() -> int:
         """Sum the per-project ``slot_reclaims`` Redis counters for projects
@@ -955,6 +1007,7 @@ def create_app() -> FastAPI:
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
         catchup = _get_catchup_health()
+        llm_stack = _get_llm_stack_health()
         # One scan feeds both views. Jobs group first because
         # `assemble_session_tree` nests children onto the same objects, and a
         # Job already lists every run it owns.
@@ -1028,6 +1081,13 @@ def create_app() -> FastAPI:
                     "catchup_disabled_age_hours": catchup["age_hours"],
                     "catchup_disabled_warn_hours": catchup["warn_hours"],
                     "catchup_disabled_stale": catchup["stale"],
+                    # Additive-only (issue #3001): the LLM stack's standing
+                    # degraded signal. Red while any per-process marker
+                    # survives; `detail` carries both resolved versions, the
+                    # failing axis, and the captured exception type.
+                    "llm_stack_degraded": llm_stack["degraded"],
+                    "llm_stack_degraded_processes": llm_stack["processes"],
+                    "llm_stack_degraded_detail": llm_stack["detail"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 # Additive (issue #2519): the Job view. `sessions` keeps its

@@ -154,6 +154,12 @@ class TestSharedModuleIsTheOnlyConstructor:
             "bridge/read_the_room.py",  # hotfix #1055 pattern (issue #1193)
             "bridge/promise_gate.py",  # mirrors read_the_room #1055 pattern
             "agent/llm/wrapper.py",  # PydanticAI wrapper (#1925) -- semaphore_slot() + fresh client
+            # Compat predicate (#3001). The one exemption that does NOT acquire
+            # the semaphore, because it makes no call: the client is
+            # constructed with a dummy key purely so `inspect.signature` can
+            # read the `create` target the call site names. No network, no real
+            # key, no request -- nothing for #1111 to guard.
+            "agent/llm/compat.py",
         }
     )
 

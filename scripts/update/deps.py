@@ -7,8 +7,20 @@ import re
 import shutil
 import subprocess
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+class PinDeclarationError(RuntimeError):
+    """A dependency declaration could not be resolved unambiguously.
+
+    Raised instead of silently returning a wrong-but-plausible answer or
+    silently no-opping. Both failure modes produced the 2026-08-24 half-bump
+    incident: a reader that scraped a version out of a comment, and a writer
+    whose regex could not match an extras pin and reported ``False`` into an
+    error list that ``auto_bump_deps`` recorded and then continued past.
+    """
 
 
 @dataclass
@@ -247,31 +259,139 @@ def get_installed_version(project_dir: Path, package: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Declaration-aware pin helpers
+# ---------------------------------------------------------------------------
+#
+# A `pyproject.toml` dependency line is NOT a substring haystack. The real file
+# carries all three shapes that broke the naive helpers (#3001 spike-2):
+#
+#     "pydantic-ai-slim[anthropic]==2.9.0", # ... avoids the openai/... extras
+#     "anthropic==0.125.0",
+#     "openai>=1.0.0", # Embedding API ...
+#
+#   1. `openai` occurs inside the FIRST line's trailing comment, so a substring
+#      scan for `openai` on a line containing `==` returns `2.9.0`. The real
+#      `openai` declaration is a floor with no `==` at all.
+#   2. `anthropic` also occurs in that first line, as an EXTRA. A line-ordered
+#      scan resolves the wrong declaration; today it happens to be right only
+#      because of where the lines sit.
+#   3. The writer's `"{package}==[^"]*"` cannot match an extras pin, so it
+#      no-ops and reports failure into a list `auto_bump_deps` records and then
+#      continues past — the half-bump this lane exists to prevent.
+#
+# So: strip comments, extract whole quoted requirement strings, parse each into
+# (normalized name, extras, specifier), and match on the NAME. Refuse loudly on
+# ambiguity. Deliberately regex-on-text rather than tomlkit/tomllib — the writer
+# must preserve the CRITICAL comments verbatim (see plan Rabbit Holes).
+
+# A PEP 508 requirement's leading name, optional extras, and the rest.
+_REQUIREMENT_RE = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?P<extras>\[[^\]]*\])?"
+    r"\s*(?P<spec>.*?)\s*$"
+)
+# An exact pin, and only an exact pin: `==1.2.3`. A compound specifier
+# (`==1.2.3,<2`) or an environment marker is not one, and must not be
+# mistaken for one by either helper.
+_EXACT_PIN_RE = re.compile(r"^==\s*(?P<version>[^,\s;]+)$")
+
+
+def _normalize_package(name: str) -> str:
+    """PEP 503 normalization so `Claude_Agent.SDK` matches `claude-agent-sdk`."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _strip_comment(line: str) -> str:
+    """Drop the trailing `#` comment, ignoring `#` inside a quoted string."""
+    in_string = False
+    for i, char in enumerate(line):
+        if char == '"':
+            in_string = not in_string
+        elif char == "#" and not in_string:
+            return line[:i]
+    return line
+
+
+@dataclass
+class _Declaration:
+    """One parsed dependency declaration and where its text lives."""
+
+    package: str  # normalized name
+    name_text: str  # the declaration's own spelling, e.g. "Claude_Agent.SDK"
+    requirement: str  # the full quoted body, e.g. pydantic-ai-slim[anthropic]==2.9.0
+    extras: str  # "[anthropic]" or ""
+    specifier: str  # "==2.9.0", ">=1.0.0", ""
+    line_index: int
+
+    @property
+    def pinned_version(self) -> str | None:
+        """The exact-pinned version, or None for a floor/range/unconstrained."""
+        match = _EXACT_PIN_RE.match(self.specifier)
+        return match.group("version") if match else None
+
+
+def _find_declarations(content: str, package: str) -> list[_Declaration]:
+    """Every declaration of `package` in a pyproject.toml body, comment-blind."""
+    wanted = _normalize_package(package)
+    found: list[_Declaration] = []
+
+    for line_index, line in enumerate(content.split("\n")):
+        for requirement in re.findall(r'"([^"]*)"', _strip_comment(line)):
+            match = _REQUIREMENT_RE.match(requirement)
+            if not match or _normalize_package(match.group("name")) != wanted:
+                continue
+            found.append(
+                _Declaration(
+                    package=wanted,
+                    name_text=match.group("name"),
+                    requirement=requirement,
+                    extras=match.group("extras") or "",
+                    specifier=match.group("spec"),
+                    line_index=line_index,
+                )
+            )
+
+    return found
+
+
+def _resolve_declaration(content: str, package: str, source: Path) -> _Declaration | None:
+    """The single declaration of `package`, or None if absent.
+
+    Raises `PinDeclarationError` when the file declares it more than once —
+    a rewrite would then have to guess which one the coupled set means.
+    """
+    declarations = _find_declarations(content, package)
+    if not declarations:
+        return None
+    if len(declarations) > 1:
+        raise PinDeclarationError(
+            f"{source}: {package!r} is declared {len(declarations)} times "
+            f"({[d.requirement for d in declarations]}); refusing to guess "
+            "which declaration to read or rewrite"
+        )
+    return declarations[0]
+
+
 def get_pinned_version(project_dir: Path, package: str) -> str | None:
-    """Get pinned version from pyproject.toml."""
+    """The exact-pinned version of `package` in pyproject.toml, if it has one.
+
+    Comment-blind and extras-tolerant: matches the declaration's own name,
+    never text inside a neighbouring line's comment or extras marker.
+
+    Returns None when the package is not declared at all, or is declared
+    without an exact `==` pin (a floor such as `openai>=1.0.0` is not a pin,
+    and reporting one would invent a version nobody wrote).
+
+    Raises `PinDeclarationError` on duplicate declarations.
+    """
     pyproject = project_dir / "pyproject.toml"
 
     if not pyproject.exists():
         return None
 
-    content = pyproject.read_text()
-
-    # Simple parser for == pins
-    # Format: "telethon==1.40.0",  # CRITICAL — comment
-    for line in content.split("\n"):
-        if package in line and "==" in line:
-            # Extract version from line
-            parts = line.split("==")
-            if len(parts) >= 2:
-                version_part = parts[1]
-                # Remove trailing comma, quotes, and comments
-                # First strip the quote and comma: 1.40.0",  # comment -> 1.40.0
-                if '"' in version_part:
-                    version_part = version_part.split('"')[0]
-                version = version_part.strip().rstrip(",")
-                return version
-
-    return None
+    declaration = _resolve_declaration(pyproject.read_text(), package, pyproject)
+    return declaration.pinned_version if declaration else None
 
 
 def verify_critical_versions(project_dir: Path) -> list[VersionInfo]:
@@ -311,22 +431,78 @@ def check_dep_files_changed(changed_files: list[str]) -> bool:
 # PyPI version checking and auto-bump
 # ---------------------------------------------------------------------------
 
-# `anthropic` is deliberately NOT here. It is one member of a coupled set
-# (anthropic + pydantic-ai-slim + openai) that must move together or not at all:
-# anthropic 1.0.0 dropped temperature/top_p/top_k from the Messages API, which
-# pydantic-ai passes through, so a partial bump kills every LLM call at argument
-# binding with no network I/O. Auto-bumping one member on a schedule while the
-# others stay pinned GUARANTEES that drift — it broke the whole LLM layer twice
-# on 2026-08-24 alone.
+
+@dataclass(frozen=True)
+class CoupledSet:
+    """Packages that move together or not at all.
+
+    A set is the atomic unit of every stage of an auto-bump: resolve,
+    rewrite, sync, gate, and rollback. Record-an-error-and-continue over
+    individual packages is precisely how one member stayed behind while the
+    others moved and killed the whole LLM layer twice on 2026-08-24.
+
+    ``gates`` defaults to ``("import", "pytest")`` so a newly declared set
+    never silently inherits the billed ``llm`` phase; a set that needs a
+    real API call must ask for it by name.
+
+    ``import_names`` are the set's *own* importable module names — the
+    ``import`` phase imports these, so the gate always probes what the set
+    actually moved rather than a hardcoded package list.
+
+    ``hold`` parks a set in the declaration without executing it: the bump
+    is skipped and the reason is recorded, which is how a member can be
+    described here (and gated by ``/update``'s verify leg) while a human
+    still owns the decision to move it.
+    """
+
+    members: Sequence[str]
+    import_names: tuple[str, ...]
+    reason: str
+    gates: tuple[str, ...] = ("import", "pytest")
+    hold: str | None = None
+
+
+AUTO_BUMP_SETS: list[CoupledSet] = [
+    CoupledSet(
+        members=["anthropic", "pydantic-ai-slim"],
+        import_names=("anthropic", "pydantic_ai"),
+        gates=("llm", "import", "pytest"),
+        reason=(
+            "anthropic 1.0.0 removed temperature/top_p/top_k from the Messages "
+            "API and pydantic_ai/models/anthropic.py forwards all three "
+            "unconditionally, so a partial bump kills every non-harness LLM "
+            "call at argument binding — before any network I/O. An import "
+            "check cannot see it (`import anthropic` succeeds fine on a "
+            "version whose call signature we cannot satisfy), which is why "
+            "this set carries the `llm` phase."
+        ),
+        hold="#3001 Step 2",
+    ),
+    CoupledSet(
+        members=["claude-agent-sdk"],
+        import_names=("claude_agent_sdk",),
+        reason=(
+            "The headless session runner's transport. It moves alone — no "
+            "other pinned package's API is coupled to it — so an import "
+            "check plus the fast unit-test file is the whole gate."
+        ),
+    ),
+]
+
+# `openai` is in NO coupled set, and this assertion is the enforcement.
 #
-# The smoke gate below cannot currently catch it either: it is an import check,
-# and `import anthropic` succeeds fine on a version whose call signature we
-# cannot satisfy.
-#
-# This exclusion is a STOPGAP holding the line until #3001 lands coupled-set
-# bumping plus a gate that makes a real call through agent/llm/wrapper.py.
-# Re-add `anthropic` only together with that work.
-AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]
+# spike-5 established there is no packaging coupling: `pydantic-ai-slim`'s
+# locked dependencies contain no `openai` (it appears only under the
+# `[openai]` extra, which this repo does not install). The ImportError that
+# looked like coupling was self-inflicted — a module-scope
+# `from pydantic_ai.models.openai import OpenAIChatModel` in
+# `agent/llm/wrapper.py` — and it is fixed at the import, not by widening a
+# set. Its declaration is also a floor (`openai>=1.0.0`), not an exact pin,
+# so an auto-bump could not rewrite it without inventing a pin nobody chose.
+assert "openai" not in {member for s in AUTO_BUMP_SETS for member in s.members}, (
+    "`openai` must not be a coupled-set member (spike-5): it has no packaging "
+    "coupling to the anthropic stack and is declared as a floor, not a pin."
+)
 
 
 @dataclass
@@ -347,9 +523,24 @@ class AutoBumpResult:
     bumps: list[BumpResult] = field(default_factory=list)
     synced: bool = False
     sync_error: str | None = None
-    smoke_passed: bool = False
     smoke_output: str = ""
     rolled_back: bool = False
+    # The gate phase (or "sync") that failed and triggered the rollback, so
+    # "the LLM pair is incompatible" reads differently from "an unrelated
+    # unit test is flaky" in the /update warning.
+    failed_phase: str | None = None
+    # A rollback whose own re-sync failed. The environment is NOT back to
+    # its pre-bump state, so `run.py` must not commit anything this run —
+    # a later successful bump would otherwise push a poisoned lockfile
+    # fleet-wide.
+    restore_failed: bool = False
+    # A rollback triggered by a gate that could not be evaluated on this
+    # machine (today: the `llm` gate with no resolvable Anthropic API key)
+    # rather than by a gate that evaluated and failed. Both roll back --
+    # the posture is fail-closed either way -- but "this host cannot verify
+    # the pair" must not reach the operator reading as "the pair is broken".
+    # See `agent/llm/compat.py::CompatResult.probe_skipped`.
+    gate_unverifiable: bool = False
 
     @property
     def any_bumped(self) -> bool:
@@ -389,159 +580,419 @@ def get_pypi_latest(package: str, timeout: int = 10) -> str | None:
 
 
 def bump_pin_in_pyproject(project_dir: Path, package: str, new_version: str) -> bool:
-    """Update the pinned version for a package in pyproject.toml.
+    """Rewrite `package`'s exact pin in pyproject.toml to `new_version`.
 
-    Matches lines like: "anthropic==0.62.0",  # CRITICAL — ...
-    Replaces only the version portion, preserving comments.
+    Extras-tolerant: `pydantic-ai-slim[anthropic]==2.9.0` is rewritten in
+    place with its extras marker and trailing comment intact. Only the
+    version portion of the one matched declaration changes.
+
+    Returns True on a successful rewrite. Never returns False — every refusal
+    raises `PinDeclarationError`, because a silent no-op reported as a
+    recorded-and-continued error is precisely how one member of a coupled set
+    stayed behind while the others moved.
+
+    Raises `PinDeclarationError` when pyproject.toml is missing, when the
+    package is not declared, when it is declared more than once, or when its
+    declaration is a floor/range rather than an exact pin (rewriting
+    `openai>=1.0.0` would invent a pin the maintainer never chose).
     """
     pyproject = project_dir / "pyproject.toml"
     if not pyproject.exists():
-        return False
+        raise PinDeclarationError(f"{pyproject}: no pyproject.toml to rewrite")
 
     content = pyproject.read_text()
-    # Match: "package==VERSION" — capture the full quoted string
-    pattern = re.compile(
-        rf'"{re.escape(package)}==[^"]*"',
-    )
-    new_content, count = pattern.subn(f'"{package}=={new_version}"', content)
-    if count == 0:
-        return False
+    declaration = _resolve_declaration(content, package, pyproject)
+    if declaration is None:
+        raise PinDeclarationError(f"{pyproject}: {package!r} has no dependency declaration to bump")
+    if declaration.pinned_version is None:
+        raise PinDeclarationError(
+            f"{pyproject}: {package!r} is declared as {declaration.requirement!r}, "
+            f"not an exact `==` pin; refusing to invent a pin at {new_version}"
+        )
 
-    pyproject.write_text(new_content)
+    lines = content.split("\n")
+    old_text = f'"{declaration.requirement}"'
+    # Rebuild from the declaration's own spelling, not the caller's `package`
+    # argument: matching is normalized (PEP 503) and comment-blind, so a
+    # caller spelling that differs from what's actually written
+    # (`"claude-agent-sdk"` called with `"Claude_Agent.SDK"`) would otherwise
+    # silently rename the pin on rewrite.
+    new_text = f'"{declaration.name_text}{declaration.extras}=={new_version}"'
+    line = lines[declaration.line_index]
+    if line.count(old_text) != 1:
+        raise PinDeclarationError(
+            f"{pyproject}: {old_text} is not uniquely locatable on line "
+            f"{declaration.line_index + 1}; refusing an ambiguous rewrite"
+        )
+    lines[declaration.line_index] = line.replace(old_text, new_text)
+
+    pyproject.write_text("\n".join(lines))
     return True
 
 
-def run_smoke_test(project_dir: Path) -> tuple[bool, str]:
-    """Run a minimal smoke test to verify deps still work.
+# ---------------------------------------------------------------------------
+# Gate phases
+# ---------------------------------------------------------------------------
 
-    Imports critical packages and runs a fast subset of tests.
-    Returns (passed, output).
+# The one fast test file every set runs as its `pytest` phase.
+GATE_PYTEST_TARGET = "tests/unit/test_docs_auditor_substrate.py"
+
+# Per-phase subprocess bounds. `llm` is the only phase that makes a network
+# call, so it gets the widest window; `import` is a bare import and `pytest`
+# is a single fast file.
+_GATE_TIMEOUTS = {"llm": 120, "import": 30, "pytest": 60}
+
+
+def llm_gate_argv(venv_python: Path) -> list[str]:
+    """The argv of the `llm` gate phase — the ONE construction of it.
+
+    Both the phase runner below and the manual two-leg rollback verification
+    call this helper, so a hand-run invocation can never drift from the
+    production one while still appearing to prove the gate works.
+
+    `venv_python` must be the TARGET venv's interpreter
+    (`{project_dir}/.venv/bin/python`), never the update process's own: that
+    interpreter imported its modules before the sync and would report on a
+    stack that no longer exists on disk.
     """
+    return [str(venv_python), "-m", "agent.llm.compat", "--json", "--allow-network"]
+
+
+def _gate_argv(project_dir: Path, phase: str, coupled_set: CoupledSet) -> list[str]:
+    """Argv for one gate phase of one set."""
+    python_path = project_dir / ".venv" / "bin" / "python"
+
+    if phase == "llm":
+        return llm_gate_argv(python_path)
+    if phase == "import":
+        # Set-derived, never a hardcoded package list: the gate probes what
+        # this set actually moved.
+        program = "; ".join(f"import {name}" for name in coupled_set.import_names)
+        return [str(python_path), "-c", program]
+    if phase == "pytest":
+        return [str(python_path), "-m", "pytest", GATE_PYTEST_TARGET, "-x", "-q"]
+    raise ValueError(f"unknown gate phase {phase!r}")
+
+
+# The phrase `run_gate_phases` puts in its detail text when a gate could not
+# be evaluated at all, as opposed to evaluating and failing. The detail text
+# is for the operator-facing message only -- `run_gate_phases` also returns
+# the flag as the fourth element of its tuple, so `_bump_coupled_set` reads
+# structured data rather than re-deriving the verdict by grepping prose it
+# did not produce (a payload whose `reason` happens to contain this phrase
+# with `probe_skipped: False` must not mislabel a genuinely incompatible pair).
+GATE_UNVERIFIABLE_MARKER = "unverifiable on this machine"
+
+
+def _llm_probe_was_skipped(stdout: str) -> bool:
+    """Did the ``llm`` gate's ``--json`` output carry ``probe_skipped: true``?
+
+    Best-effort only: the gate argv always passes ``--json``, but a crash
+    before ``main()`` prints anything (or non-JSON stderr noise mixed into
+    stdout) must not raise here -- it just means we fall back to the
+    generic "gate failed" message, which is still correct.
+    """
+    try:
+        return bool(json.loads(stdout).get("probe_skipped"))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
+def run_gate_phases(
+    project_dir: Path, coupled_set: CoupledSet
+) -> tuple[bool, str | None, str, bool]:
+    """Run every gate phase `coupled_set` declares, in order.
+
+    Returns ``(passed, failed_phase, output, gate_unverifiable)``. Stops at
+    the first failing phase and names it, so the rollback warning can
+    distinguish an incompatible LLM pair from a flaky unrelated unit test.
+    ``gate_unverifiable`` is ``True`` only on the ``llm`` phase's
+    ``probe_skipped`` branch -- this machine could not evaluate the pair, as
+    opposed to evaluating it and finding it broken -- and it is DATA, not
+    text to be re-derived: `_bump_coupled_set` reads this field directly
+    rather than grepping :data:`GATE_UNVERIFIABLE_MARKER` back out of
+    ``output``, which only shapes the human-readable message here.
+
+    Fail-closed throughout: a phase that cannot be run at all (no venv,
+    timeout, OSError) is a failed phase, never a skipped one.
+    """
+    if not coupled_set.gates:
+        return True, None, "no gate phases declared", False
+
     python_path = project_dir / ".venv" / "bin" / "python"
     if not python_path.exists():
-        return False, "No Python venv found"
+        return False, coupled_set.gates[0], "No Python venv found at .venv/bin/python", False
 
-    # Phase 1: import check
-    import_check = (
-        "import anthropic; import claude_agent_sdk; print(f'anthropic={anthropic.__version__}')"
+    passed_phases: list[str] = []
+    for phase in coupled_set.gates:
+        try:
+            proc = run_cmd(
+                _gate_argv(project_dir, phase, coupled_set),
+                cwd=project_dir,
+                check=False,
+                timeout=_GATE_TIMEOUTS.get(phase, 60),
+            )
+        except subprocess.TimeoutExpired:
+            return False, phase, f"{phase} gate timed out", False
+        except OSError as exc:
+            return False, phase, f"{phase} gate could not run: {exc}", False
+
+        if proc.returncode != 0:
+            detail = (proc.stdout + proc.stderr).strip()
+            if phase == "llm" and _llm_probe_was_skipped(proc.stdout):
+                # `probe_skipped=True` means this machine could not verify
+                # the pair (no Anthropic API key), not that the pair is
+                # broken. The rollback still happens -- exit status stays
+                # fail-closed -- but the operator-facing message must not
+                # read as "incompatible pair" when it is really "unverifiable
+                # host". See agent/llm/compat.py::CompatResult.probe_skipped.
+                return (
+                    False,
+                    phase,
+                    f"{phase} gate {GATE_UNVERIFIABLE_MARKER} (no API key):\n{detail}",
+                    True,
+                )
+            return False, phase, f"{phase} gate failed:\n{detail}", False
+        passed_phases.append(phase)
+
+    return True, None, f"gates passed: {', '.join(passed_phases)}", False
+
+
+# ---------------------------------------------------------------------------
+# Auto-bump
+# ---------------------------------------------------------------------------
+
+
+def _safe_pinned(project_dir: Path, package: str) -> str | None:
+    """`get_pinned_version` for logging contexts where a refusal is not fatal."""
+    try:
+        return get_pinned_version(project_dir, package)
+    except PinDeclarationError:
+        return None
+
+
+def _record_set(
+    result: AutoBumpResult,
+    coupled_set: CoupledSet,
+    current: dict[str, str | None],
+    latest: dict[str, str | None],
+    *,
+    bumped: set[str] | None = None,
+    error: str | None = None,
+) -> None:
+    """Append one `BumpResult` per member, so `run.py`'s per-package log stays legible."""
+    for member in coupled_set.members:
+        result.bumps.append(
+            BumpResult(
+                package=member,
+                old_version=current.get(member),
+                new_version=latest.get(member),
+                bumped=bool(bumped and member in bumped),
+                error=error,
+            )
+        )
+
+
+@dataclass
+class SetSnapshot:
+    """The two tracked files one coupled set's bump can touch, pre-bump.
+
+    `None` means the file did not exist before the bump, so restoring it
+    means deleting whatever the bump's sync created — not writing an empty
+    file, which would itself be a dirty worktree.
+    """
+
+    pyproject: str | None
+    lock: str | None
+
+    @classmethod
+    def take(cls, project_dir: Path) -> SetSnapshot:
+        return cls(
+            pyproject=_read_or_none(project_dir / "pyproject.toml"),
+            lock=_read_or_none(project_dir / "uv.lock"),
+        )
+
+    def restore(self, project_dir: Path) -> None:
+        _write_or_unlink(project_dir / "pyproject.toml", self.pyproject)
+        _write_or_unlink(project_dir / "uv.lock", self.lock)
+
+
+def _read_or_none(path: Path) -> str | None:
+    return path.read_text() if path.exists() else None
+
+
+def _write_or_unlink(path: Path, content: str | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(content)
+
+
+def _restore_set(
+    project_dir: Path,
+    snapshot: SetSnapshot,
+    result: AutoBumpResult,
+    resync: bool,
+) -> None:
+    """Put this set's pins AND lockfile back, and record it loudly if that fails.
+
+    The snapshot is PER-SET, taken immediately before the set's own rewrite.
+    A whole-file snapshot taken once before the loop would revert every
+    other set's good bump on one bad set (spike-4). The same reasoning is
+    why `uv.lock` is restored from the per-set snapshot rather than with a
+    blanket `git checkout -- uv.lock`, which would throw away an earlier
+    set's legitimately-bumped lockfile and leave its pin unbacked.
+
+    Both files, always: a successful restore that re-syncs and keeps
+    whatever uv resolved leaves `uv.lock` carrying unrelated transitive
+    drift. `run.py` commits on `any_bumped and not restore_failed`, so a
+    later set's good bump would ship that drift fleet-wide — the poisoned
+    lockfile this whole gate exists to prevent, reached on the success path.
+    """
+    snapshot.restore(project_dir)
+    if not resync:
+        return
+
+    # `frozen=True`: pyproject.toml and uv.lock are back to the pre-bump
+    # pair, so uv must install FROM that lock rather than re-resolve and
+    # rewrite it. An unfrozen re-sync here is precisely what dirtied the
+    # lockfile on the success path.
+    restore_sync = sync_dependencies(project_dir, frozen=True)
+    if restore_sync.success:
+        return
+
+    # The environment is NOT back to its pre-bump state. Say so — a
+    # swallowed restore failure is how a poisoned lockfile ships fleet-wide.
+    result.restore_failed = True
+
+
+def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBumpResult) -> None:
+    """Resolve, rewrite, sync, and gate one coupled set — all or nothing."""
+    current: dict[str, str | None] = {}
+    latest: dict[str, str | None] = {}
+
+    if coupled_set.hold:
+        for member in coupled_set.members:
+            current[member] = _safe_pinned(project_dir, member)
+        _record_set(result, coupled_set, current, latest, error=f"held: {coupled_set.hold}")
+        return
+
+    # Resolve EVERY member before touching the file. One unresolvable
+    # member skips the whole set — a half-resolved set is a half-bump.
+    blocker: str | None = None
+    for member in coupled_set.members:
+        try:
+            current[member] = get_pinned_version(project_dir, member)
+        except PinDeclarationError as exc:
+            current[member] = None
+            blocker = blocker or str(exc)
+            continue
+        latest[member] = get_pypi_latest(member)
+        if blocker is None and (current[member] is None or latest[member] is None):
+            blocker = f"could not determine current or latest version for {member!r}"
+
+    if blocker:
+        _record_set(result, coupled_set, current, latest, error=f"set skipped: {blocker}")
+        return
+
+    changed = {m: latest[m] for m in coupled_set.members if current[m] != latest[m]}
+    if not changed:
+        # Nothing moved — no rewrite and, critically, no sync. A quiet cycle
+        # must not re-resolve the lockfile.
+        _record_set(result, coupled_set, current, latest)
+        return
+
+    snapshot = SetSnapshot.take(project_dir)
+
+    try:
+        for member, new_version in changed.items():
+            bump_pin_in_pyproject(project_dir, member, new_version)
+    except PinDeclarationError as exc:
+        # No sync has happened yet, so restoring the file is the whole undo.
+        _restore_set(project_dir, snapshot, result, resync=False)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=f"set abandoned: could not rewrite pyproject.toml: {exc}",
+        )
+        return
+
+    # `frozen=False` because we just edited pyproject.toml and need uv to
+    # re-resolve and rewrite uv.lock.
+    sync_result = sync_dependencies(project_dir, frozen=False)
+    result.synced = result.synced or sync_result.success
+    if not sync_result.success:
+        result.sync_error = sync_result.error
+        result.rolled_back = True
+        result.failed_phase = result.failed_phase or "sync"
+        _restore_set(project_dir, snapshot, result, resync=True)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=f"set rolled back: sync failed: {sync_result.error}",
+        )
+        return
+
+    passed, failed_phase, output, gate_unverifiable = run_gate_phases(project_dir, coupled_set)
+    result.smoke_output = (
+        f"{result.smoke_output}\n{output}".strip() if result.smoke_output else output
     )
-    try:
-        result = run_cmd(
-            [str(python_path), "-c", import_check],
-            cwd=project_dir,
-            check=False,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return False, f"Import check failed: {result.stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "Import check timed out"
 
-    # Phase 2: run one fast test file
-    try:
-        result = run_cmd(
-            [
-                str(python_path),
-                "-m",
-                "pytest",
-                "tests/unit/test_docs_auditor_substrate.py",
-                "-x",
-                "-q",
-            ],
-            cwd=project_dir,
-            check=False,
-            timeout=60,
+    if not passed:
+        result.rolled_back = True
+        result.failed_phase = result.failed_phase or failed_phase
+        result.gate_unverifiable = result.gate_unverifiable or gate_unverifiable
+        _restore_set(project_dir, snapshot, result, resync=True)
+        _record_set(
+            result,
+            coupled_set,
+            current,
+            latest,
+            error=(
+                f"set rolled back: {failed_phase} gate "
+                f"{GATE_UNVERIFIABLE_MARKER if gate_unverifiable else 'failed'}"
+            ),
         )
-        output = result.stdout + result.stderr
-        if result.returncode != 0:
-            return False, f"Smoke test failed:\n{output}"
-        return True, output.strip()
-    except subprocess.TimeoutExpired:
-        return False, "Smoke test timed out (60s)"
+        return
+
+    _record_set(result, coupled_set, current, latest, bumped=set(changed))
 
 
 def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
-    """Check PyPI for newer versions of critical deps, bump pins, sync, and test.
+    """Bump every coupled set that has moved on PyPI, one set at a time.
 
-    If the smoke test fails after bumping, rolls back pyproject.toml.
+    Each set is resolved, rewritten, synced, and gated as a unit; a failure
+    at any stage restores that set's own snapshot and moves to the next set.
+    A member is reported `bumped=True` only once its whole set has survived
+    every gate, so `run.py`'s commit list never names a pin that was rolled
+    back underneath it.
+
+    Stops after the first set whose own rollback fails to re-sync
+    (`result.restore_failed`): at that point the venv no longer matches the
+    restored `pyproject.toml` / `uv.lock`, so gating a later set against
+    that inconsistent environment would rewrite both files again, run an
+    unfrozen sync, and record a verdict against a stack that isn't the one
+    on disk after `run.py` (which never commits on `restore_failed`) exits.
     """
     result = AutoBumpResult()
-    pyproject = project_dir / "pyproject.toml"
-
-    # Save original content for rollback
-    original_content = pyproject.read_text() if pyproject.exists() else ""
-
-    for package in AUTO_BUMP_PACKAGES:
-        current = get_pinned_version(project_dir, package)
-        latest = get_pypi_latest(package)
-
-        if not latest or not current:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                    error="Could not determine current or latest version",
+    for index, coupled_set in enumerate(AUTO_BUMP_SETS):
+        _bump_coupled_set(project_dir, coupled_set, result)
+        if result.restore_failed:
+            for remaining in AUTO_BUMP_SETS[index + 1 :]:
+                skipped: dict[str, str | None] = {}
+                for member in remaining.members:
+                    skipped[member] = _safe_pinned(project_dir, member)
+                _record_set(
+                    result,
+                    remaining,
+                    skipped,
+                    skipped,
+                    error="set skipped: an earlier set's rollback failed to "
+                    "re-sync, leaving the venv inconsistent with pyproject.toml",
                 )
-            )
-            continue
-
-        if current == latest:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                )
-            )
-            continue
-
-        if bump_pin_in_pyproject(project_dir, package, latest):
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=True,
-                )
-            )
-        else:
-            result.bumps.append(
-                BumpResult(
-                    package=package,
-                    old_version=current,
-                    new_version=latest,
-                    bumped=False,
-                    error="Failed to update pyproject.toml",
-                )
-            )
-
-    if not result.any_bumped:
-        return result
-
-    # Sync dependencies with new pins. `frozen=False` because we just edited
-    # pyproject.toml and need uv to re-resolve and rewrite uv.lock.
-    sync_result = sync_dependencies(project_dir, frozen=False)
-    result.synced = sync_result.success
-    if not sync_result.success:
-        result.sync_error = sync_result.error
-        # Roll back
-        pyproject.write_text(original_content)
-        sync_dependencies(project_dir, frozen=False)  # restore old deps
-        result.rolled_back = True
-        return result
-
-    # Run smoke test
-    passed, output = run_smoke_test(project_dir)
-    result.smoke_passed = passed
-    result.smoke_output = output
-
-    if not passed:
-        # Roll back
-        pyproject.write_text(original_content)
-        sync_dependencies(project_dir, frozen=False)
-        result.rolled_back = True
-
+            break
     return result

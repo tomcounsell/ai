@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1215,6 +1216,79 @@ def _main() -> int:
     return 0
 
 
+LLM_STACK_COMPAT_CHECK = "llm-stack-compat"
+
+
+def check_llm_stack_compat(project_dir: Path) -> ToolCheck:
+    """Report whether the installed anthropic + pydantic-ai pair is usable.
+
+    Runs unconditionally on every `/update`, which is the point: follower
+    machines never auto-bump, so this and the startup hook are the only
+    things standing between them and a stack that cannot make a call.
+
+    The verdict comes from `python -m agent.llm.compat --json` **inside the
+    target venv** — never from an in-process import, which would report on
+    the update process's own pre-sync modules. No `--allow-network`: the
+    signature check is local, sub-second, and unbilled.
+
+    The failure reason goes in `.error`, not only `.detail`. `run.py`'s
+    `valor_tools` loop is literally `if not tool.available and tool.error:`,
+    so an empty `.error` makes an incompatible stack produce no log line, no
+    warning, and nothing for `extract_update_warnings` to surface — a check
+    that ships dead.
+    """
+    name = LLM_STACK_COMPAT_CHECK
+    python_path = project_dir / ".venv" / "bin" / "python"
+
+    if not python_path.exists():
+        return ToolCheck(
+            name=name,
+            available=False,
+            error="No .venv/bin/python — cannot check the LLM stack",
+            detail="unknown (no venv)",
+        )
+
+    try:
+        proc = run_cmd(
+            [str(python_path), "-m", "agent.llm.compat", "--json"],
+            cwd=project_dir,
+            timeout=60,
+        )
+    except Exception as e:
+        return ToolCheck(
+            name=name,
+            available=False,
+            error=f"compat check did not run: {e}",
+            detail="unknown (check did not run)",
+        )
+
+    try:
+        verdict = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        tail = (proc.stderr or proc.stdout or "").strip()[-500:] or "no output"
+        return ToolCheck(
+            name=name,
+            available=False,
+            error=f"compat check produced no verdict: {tail}",
+            detail="unknown (no verdict)",
+        )
+
+    versions = (
+        f"anthropic {verdict.get('anthropic_version')} "
+        f"/ pydantic-ai {verdict.get('pydantic_ai_version')}"
+    )
+    compatible = bool(verdict.get("compatible"))
+    reason = verdict.get("reason") or "incompatible LLM stack (no reason reported)"
+
+    return ToolCheck(
+        name=name,
+        available=compatible,
+        version=versions,
+        error=None if compatible else reason,
+        detail=versions if compatible else f"{versions} — INCOMPATIBLE: {reason}",
+    )
+
+
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
@@ -1226,6 +1300,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_telegram_session(project_dir))
     result.valor_tools.append(check_google_token(project_dir))
     result.valor_tools.append(check_env_completeness(project_dir))
+    result.valor_tools.append(check_llm_stack_compat(project_dir))
 
     if check_ollama_model:
         from config.settings import settings as _settings

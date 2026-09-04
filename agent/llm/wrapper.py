@@ -33,23 +33,29 @@ Provider errors and exhausted schema-validation retries are logged, then
 re-raised as :class:`LLMCallError`. Each call site owns its own
 conservative default (respond / escalate / send / skip) on failure -- see
 "Preserve fail-safe posture per site" in the plan's Solution section.
+
+Import-safety contract (#3001): module scope here is **stdlib and our own
+code only**. Every third-party LLM-stack symbol (``anthropic``,
+``pydantic_ai.*``) is resolved through
+:func:`agent.anthropic_client._load_stack`, the one memoized loader, and
+only from inside the call paths below. A machine with a broken or missing
+stack can still ``import agent.llm`` (and therefore
+``import bridge.telegram_bridge``); the failure surfaces at the call, where
+it can be reported. ``_load_stack`` is imported into this module's
+namespace, so ``monkeypatch.setattr(wrapper_mod, "_load_stack", ...)`` is
+the network-isolation seam for tests -- it replaces the old
+``wrapper_mod.OpenAIChatModel`` seam, which no longer exists because
+``OpenAIChatModel`` is not a module attribute of anything here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
-import anthropic
 from pydantic import BaseModel
-from pydantic_ai import Agent
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
-from pydantic_ai.providers.ollama import OllamaProvider
 
-from agent.anthropic_client import semaphore_slot
+from agent.anthropic_client import _load_stack, semaphore_slot
 from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
@@ -81,6 +87,55 @@ class LLMCallError(Exception):
     """
 
 
+# N818 (Error suffix) is waived: the name is fixed by #3001's plan and its
+# verification greps, and it inherits the suffix-free house style of
+# LLMCallError, the class every call site already catches.
+class LLMStackIncompatible(LLMCallError):  # noqa: N818
+    """Raised when this process's LLM stack is degraded (#3001).
+
+    A subclass of :class:`LLMCallError` on purpose: every existing
+    ``except LLMCallError`` fail-safe keeps working unchanged, so a
+    degraded stack degrades each call site to its own conservative default
+    instead of surfacing a raw provider ``TypeError`` from deep inside
+    ``pydantic_ai``. The alert has already fired from
+    ``agent.llm.compat.resolve_degraded_flag`` by the time this is raised.
+    """
+
+
+def _guard_stack(caller: str, *, signature_axis: bool) -> None:
+    """Fail fast on a degraded stack, forcing flag resolution on first use.
+
+    Resolving here is what makes the alert unmissable in a process that
+    never ran a startup hook: the first call *is* the first read, and the
+    resolver alerts on the transition.
+
+    ``signature_axis`` is ``False`` for the local granite leg, which never
+    touches ``anthropic`` -- an Anthropic create-signature break must not
+    fall the two hot-path classifiers over.
+
+    ``stack_axes`` is imported here rather than at module scope so that
+    importing the ``agent.llm`` package does not import
+    ``agent.llm.compat``. `python -m agent.llm.compat` -- the argv the
+    update gate and `verify.py` both run -- imports the package before
+    executing the module, and a pre-imported ``compat`` makes runpy emit a
+    "found in sys.modules" RuntimeWarning onto stderr that is quoted
+    verbatim into operator-facing gate output.
+    """
+    from agent.llm.compat import stack_axes  # noqa: PLC0415
+
+    loader_ok, compatible = stack_axes()
+    if not loader_ok:
+        raise LLMStackIncompatible(
+            f"{caller} refused: the LLM stack failed to import "
+            "(see the LLM_STACK_COMPAT critical log for the reason)"
+        )
+    if signature_axis and not compatible:
+        raise LLMStackIncompatible(
+            f"{caller} refused: the installed anthropic + pydantic-ai pair is "
+            "incompatible (see the LLM_STACK_COMPAT critical log for the reason)"
+        )
+
+
 async def run_typed(
     prompt: str,
     output_type: type[BaseModel],
@@ -88,6 +143,7 @@ async def run_typed(
     model: str = MODEL_FAST,
     sdk_timeout: float = DEFAULT_SDK_TIMEOUT,
     hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,
+    _skip_guard: bool = False,
 ) -> BaseModel:
     """Run a schema-validated LLM call through PydanticAI.
 
@@ -111,6 +167,14 @@ async def run_typed(
             (e.g. half-open TCP sockets with no socket event). Pass
             ``None`` to disable the outer cap and rely on ``sdk_timeout``
             alone.
+        _skip_guard: internal-only (#3001). When ``True``, skips
+            ``_guard_stack`` entirely, so the call never reaches
+            ``stack_axes()`` -> ``resolve_degraded_flag()``. The sole
+            caller is ``agent.llm.compat._check_network``, the auto-bump
+            ``llm`` gate's live probe -- it must stay pure (never touch the
+            memoized degraded flag) while still getting the shared
+            ``semaphore_slot()`` and both timeouts this function already
+            applies. Not for use outside the compat gate.
 
     Returns:
         A validated instance of ``output_type``.
@@ -124,13 +188,28 @@ async def run_typed(
     if not prompt or not prompt.strip():
         raise ValueError("run_typed requires a non-empty, non-whitespace prompt")
 
+    if not _skip_guard:
+        _guard_stack("run_typed", signature_axis=True)
+
+    try:
+        stack = _load_stack()
+    except Exception as e:
+        # LLM_STACK_COMPAT_OVERRIDE=healthy short-circuits _guard_stack
+        # before the predicate runs, so a genuinely broken stack can reach
+        # here past the guard. `_load_stack`'s own contract is broader than
+        # ImportError ("raises whatever the import raises"), and a raw
+        # exception of any class would bypass every existing
+        # `except LLMCallError` fail-safe -- the exact property
+        # LLMStackIncompatible exists to preserve.
+        raise LLMStackIncompatible(f"run_typed: LLM stack failed to import: {e}") from e
+
     async with semaphore_slot():
-        async with anthropic.AsyncAnthropic(
+        async with stack.anthropic.AsyncAnthropic(
             api_key=get_anthropic_api_key(), timeout=sdk_timeout
         ) as client:
-            provider = AnthropicProvider(anthropic_client=client)
-            pydantic_model = AnthropicModel(model, provider=provider)
-            agent = Agent(pydantic_model, output_type=output_type)
+            provider = stack.AnthropicProvider(anthropic_client=client)
+            pydantic_model = stack.AnthropicModel(model, provider=provider)
+            agent = stack.Agent(pydantic_model, output_type=output_type)
 
             try:
                 if hard_timeout is not None:
@@ -159,14 +238,6 @@ async def run_typed(
     return result.output
 
 
-# Wall-clock cap for local granite calls (seconds). GRAIN OF SALT: provisional
-# and tunable via env — sized from spike-3's measured router latency (median
-# ~1.1s / p95 ~1.4s against the live granite daemon) with generous headroom for
-# a cold model load. Local calls fail open at the call site, so a timeout here
-# costs a conservative default, never a lost message.
-LOCAL_TYPED_HARD_TIMEOUT = float(os.environ.get("LOCAL_TYPED_HARD_TIMEOUT", "20.0"))
-
-
 async def run_typed_local(
     prompt: str,
     output_type: type[BaseModel],
@@ -189,7 +260,9 @@ async def run_typed_local(
       ``settings.models.ollama_host`` (the ``/v1`` OpenAI-compatible surface),
       model defaulting to ``config.models.OLLAMA_CLASSIFIER_MODEL`` (granite).
     * **Single timeout** — one outer ``asyncio.wait_for`` wall-clock cap
-      (``LOCAL_TYPED_HARD_TIMEOUT``). The hotfix-#1055 double-timeout pattern
+      (``settings.timeouts.local_typed_hard_s``, env-overridable via
+      ``TIMEOUTS__LOCAL_TYPED_HARD_S`` and read here per call, not at
+      module scope). The hotfix-#1055 double-timeout pattern
       exists for half-open WAN sockets; a localhost daemon either answers or
       refuses, so one cap suffices.
 
@@ -205,13 +278,23 @@ async def run_typed_local(
     if not prompt or not prompt.strip():
         raise ValueError("run_typed_local requires a non-empty, non-whitespace prompt")
 
+    _guard_stack("run_typed_local", signature_axis=False)
+
     if hard_timeout is None:
-        hard_timeout = LOCAL_TYPED_HARD_TIMEOUT
+        hard_timeout = settings.timeouts.local_typed_hard_s
+
+    try:
+        stack = _load_stack()
+    except Exception as e:
+        # `_load_stack`'s own contract is broader than ImportError ("raises
+        # whatever the import raises"); catch the same breadth run_typed and
+        # check_llm_stack_compat already do on this call.
+        raise LLMStackIncompatible(f"run_typed_local: LLM stack failed to import: {e}") from e
 
     base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"
-    provider = OllamaProvider(base_url=base_url)
-    pydantic_model = OpenAIChatModel(model, provider=provider)
-    agent = Agent(pydantic_model, output_type=output_type)
+    provider = stack.OllamaProvider(base_url=base_url)
+    pydantic_model = stack.OpenAIChatModel(model, provider=provider)
+    agent = stack.Agent(pydantic_model, output_type=output_type)
 
     try:
         result = await asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)

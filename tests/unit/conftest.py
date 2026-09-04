@@ -67,6 +67,72 @@ def cross_lane_repo():
 
 
 @pytest.fixture(autouse=True)
+def _redirect_llm_marker_dir(monkeypatch, tmp_path_factory):
+    """Keep degraded-LLM-stack markers out of the live ``data/`` (#3001).
+
+    ``agent.llm.compat.resolve_degraded_flag`` writes
+    ``data/llm-stack-degraded.{proc}`` — the same directory a running
+    bridge, worker, and dashboard share on this machine. Left unredirected,
+    the degraded-driving test files write real markers there, xdist workers
+    race on the same filenames, and an interrupted run leaves the operator's
+    actual dashboard red with no underlying fault.
+
+    The redirect is a **mechanism, not a per-file convention**: requiring
+    each new test file to remember its own monkeypatch is exactly the
+    consumer discipline this lane rejects, and the gap was already visible
+    once.
+
+    The **guarded import** is what makes this inert when ``compat.py`` is
+    absent (a bisect, a revert), not ``raising=False``: the string-target
+    form ``monkeypatch.setattr("agent.llm.compat._MARKER_DIR", ...)`` first
+    calls ``derive_importpath``, whose ``resolve(module)`` performs a real
+    import and raises *before* ``raising`` is consulted — erroring every
+    test in the repo. ``raising=False`` is retained only for the narrow
+    window where ``compat.py`` exists but ``_MARKER_DIR`` does not.
+
+    ``tmp_path_factory`` with ``mktemp`` on the success branch keeps the
+    early return from materializing a temp directory for every test.
+    """
+    try:
+        from agent.llm import compat as _compat
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        _compat, "_MARKER_DIR", tmp_path_factory.mktemp("llm-marker"), raising=False
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_degraded_memo(monkeypatch):
+    """Give every test an already-resolved, healthy LLM-stack flag (#3001).
+
+    ``resolve_degraded_flag`` memoizes process-wide and by design: it is a
+    boot-time verdict, not a per-call one. In a pytest worker that turns
+    into cross-test coupling in both directions. A test that fakes
+    ``anthropic.AsyncAnthropic`` (several do, for network isolation) makes
+    the predicate's signature introspection resolve against the fake and
+    memoize *degraded* for every later test in that worker; conversely a
+    test that resolves healthy first would mask a case that meant to drive
+    the degraded path. Under xdist which one lands first is not knowable.
+
+    Pinning the memo here makes the flag an explicit input: the files that
+    exercise resolution reset it in their own fixtures (which run after
+    this one and therefore win), and every other test gets a healthy stack
+    without paying for the AST introspection.
+
+    Guarded-import + ``raising=False`` for the same reason as
+    ``_redirect_llm_marker_dir`` above.
+    """
+    try:
+        from agent.llm import compat as _compat
+    except ImportError:
+        return
+    monkeypatch.setattr(_compat, "_DEGRADED", False, raising=False)
+    monkeypatch.setattr(_compat, "_LOADER_OK", True, raising=False)
+    monkeypatch.setattr(_compat, "_COMPATIBLE", True, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_embedding_provider():
     """Null out popoto's global embedding provider for every unit test.
 

@@ -48,8 +48,23 @@ if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
+from agent.llm.compat import SENTINEL as LLM_STACK_SENTINEL  # noqa: E402
 from bridge.hibernation import is_hibernating  # noqa: E402
 from monitoring.sentry_config import configure_sentry, filter_sentry_noise  # noqa: E402
+
+
+def _carries_llm_stack_sentinel(event) -> bool:
+    """Does this event carry the degraded-LLM-stack sentinel token (#3001)?
+
+    Hibernation means "we cannot reach Telegram", which is exactly when a
+    broken LLM stack most needs to be visible somewhere else. The degraded
+    alert is one of only three transports and the only remote one, so it is
+    exempt from the hibernation drop below.
+    """
+    try:
+        return LLM_STACK_SENTINEL in str(event.get("message") or "")
+    except Exception:
+        return False
 
 
 def _sentry_before_send(event, hint):
@@ -64,11 +79,16 @@ def _sentry_before_send(event, hint):
          active sessions`` fanout, #2372). The shared filter also pins known
          per-loop logger clusters to a stable fingerprint.
 
+    Case 1 has one exemption: an event carrying the ``LLM_STACK_COMPAT``
+    sentinel passes even while hibernating (#3001). Hibernation is a
+    persistent flag, not a brief window, so dropping the degraded alert
+    through it would silently delete the channel.
+
     Safety net: if is_hibernating() itself raises, pass the event through unchanged
     so we never silently lose novel errors due to a bug in the filter.
     """
     try:
-        if is_hibernating():
+        if is_hibernating() and not _carries_llm_stack_sentinel(event):
             logger.debug("Sentry event dropped: bridge is hibernating")
             return None
     except Exception:  # noqa: S110 -- filter must never suppress events
@@ -1264,6 +1284,17 @@ async def main():
             len(problematic_agent_files),
             problematic_agent_files,
         )
+
+    # LLM-stack compat (#3001): force the degraded flag to resolve now, so a
+    # broken anthropic + pydantic-ai pair alarms at boot instead of at the
+    # first non-harness call. Deliberately NOT fatal — degraded is not down.
+    # The bridge comes up, Telegram intake continues, AgentSessions keep
+    # enqueueing; only non-harness LLM calls fail fast with the typed
+    # LLMStackIncompatible. Exiting here would trade a silent LLM outage for
+    # a total outage plus a launchd crash-loop.
+    from agent.llm.compat import resolve_degraded_flag
+
+    resolve_degraded_flag("bridge")
 
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")

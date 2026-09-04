@@ -21,15 +21,21 @@ wrapper's contract without hitting the real Anthropic API:
   hang.
 
 Network isolation: every test monkeypatches ``anthropic.AsyncAnthropic``
-(a fake, non-network client) and ``agent.llm.wrapper.AnthropicModel``
-(PydanticAI's ``FunctionModel`` instead of a real HTTP-backed model), so
-no test makes a real Anthropic API call.
+(a fake, non-network client) and the memoized loader
+``agent.llm.wrapper._load_stack`` so its ``AnthropicModel`` is PydanticAI's
+``FunctionModel`` rather than a real HTTP-backed model. No test makes a
+real Anthropic API call. The loader replaced the old
+``wrapper_mod.AnthropicModel`` seam when the import-safety contract (#3001)
+moved every third-party symbol out of the wrapper's module scope.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import dataclasses
 import logging
+import subprocess
 
 import anthropic
 import pytest
@@ -37,7 +43,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from agent.llm import LLMCallError, run_typed
+from agent.llm import LLMCallError, LLMStackIncompatible, run_typed
 from agent.llm import wrapper as wrapper_mod
 
 
@@ -119,7 +125,7 @@ def spy_semaphore_slot(monkeypatch):
 
 
 def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
-    """Monkeypatch ``wrapper_mod.AnthropicModel`` to build a ``FunctionModel``.
+    """Swap the loader's ``AnthropicModel`` for an in-process ``FunctionModel``.
 
     Preserves the wrapper's real ``AnthropicProvider(anthropic_client=...)``
     construction (the caller still builds and passes ``provider``); only the
@@ -127,6 +133,12 @@ def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
     double so no network call happens. When ``capture`` is provided, the
     ``provider`` instance PydanticAI would have used is stashed under
     ``capture["provider"]`` for post-call assertions.
+
+    The seam is ``wrapper_mod._load_stack`` (#3001): the third-party stack
+    is no longer imported at the wrapper's module scope, so
+    ``wrapper_mod.AnthropicModel`` no longer exists as an attribute to
+    patch. The loader is the *only* route from this module to a real model
+    class, which makes this seam strictly stronger than the old one.
     """
 
     def fake_anthropic_model(model_name, *, provider):
@@ -134,7 +146,9 @@ def _install_function_model(monkeypatch, fn, *, capture: dict | None = None):
             capture["provider"] = provider
         return FunctionModel(fn, model_name=model_name)
 
-    monkeypatch.setattr(wrapper_mod, "AnthropicModel", fake_anthropic_model)
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
 
 
 class TestStructuredOutputSuccess:
@@ -398,8 +412,120 @@ class TestDefaultModelFromConfig:
 
             return FunctionModel(fn, model_name=model_name)
 
-        monkeypatch.setattr(wrapper_mod, "AnthropicModel", fake_anthropic_model)
+        real = wrapper_mod._load_stack()
+        fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
+        monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
 
         await run_typed("classify: hello there", Classification)
 
         assert seen_model_name["value"] == MODEL_FAST
+
+
+class TestDegradedStack:
+    """A degraded LLM stack fails fast, typed, before any client work (#3001)."""
+
+    def test_typed_exception_preserves_existing_fail_safes(self):
+        # Subclassing is the whole compatibility story: every existing
+        # `except LLMCallError` site keeps its own conservative default.
+        assert issubclass(LLMStackIncompatible, LLMCallError)
+
+    async def test_run_typed_raises_llm_stack_incompatible(self, monkeypatch):
+        from agent.llm import compat
+
+        def never_call_this(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise AssertionError("a degraded stack must not reach the model call")
+
+        _install_function_model(monkeypatch, never_call_this)
+        monkeypatch.setattr(compat, "_DEGRADED", True)
+        monkeypatch.setattr(compat, "_LOADER_OK", True)
+        monkeypatch.setattr(compat, "_COMPATIBLE", False)
+
+        with pytest.raises(LLMStackIncompatible):
+            await run_typed("classify: hello there", Classification)
+
+    async def test_load_stack_import_error_raises_llm_stack_incompatible(self, monkeypatch):
+        """``_guard_stack`` can pass while ``_load_stack()`` still fails.
+
+        ``LLM_STACK_COMPAT_OVERRIDE=healthy`` short-circuits the guard
+        before the predicate ever runs, so a genuinely broken stack can
+        still reach ``_load_stack()``. A raw ``ImportError`` there would
+        bypass every existing ``except LLMCallError`` fail-safe -- exactly
+        the property ``LLMStackIncompatible`` exists to preserve.
+        """
+        from agent.llm import compat
+
+        monkeypatch.setattr(compat, "_DEGRADED", False)
+        monkeypatch.setattr(compat, "_LOADER_OK", True)
+        monkeypatch.setattr(compat, "_COMPATIBLE", True)
+
+        def _boom():
+            raise ImportError("no module named anthropic")
+
+        monkeypatch.setattr(wrapper_mod, "_load_stack", _boom)
+
+        with pytest.raises(LLMStackIncompatible):
+            await run_typed("classify: hello there", Classification)
+
+
+class TestSkipGuardSingleCallSite:
+    """``_skip_guard`` (wrapper.py:146) is documented-not-enforced (review nit).
+
+    A future caller passing ``_skip_guard=True`` bypasses ``_guard_stack``: on
+    a genuinely degraded stack no alert fires, no marker is written, and a
+    signature break surfaces as a generic ``LLMCallError`` instead of the
+    diagnostic ``LLMStackIncompatible``. The parameter's docstring says
+    "internal-only (#3001)" but nothing in the code enforces that -- this
+    test is the enforcement, keyed on the real call graph rather than a
+    trusted comment. It scans **tracked** source only (``git ls-files``),
+    matching ``test_hub_alias_references.py``'s convention: a stale
+    ``__pycache__`` embeds string literals verbatim and would produce an
+    unreproducible phantom hit in a fresh checkout (#2807).
+
+    AST-based, not a text grep: ``_skip_guard`` appears in several
+    docstrings (this module's own module-level comment included) that
+    quote the keyword-argument spelling as prose. A text grep for
+    ``_skip_guard=True`` would count those as call sites; only an actual
+    ``ast.Call`` keyword argument node is one.
+    """
+
+    def _skip_guard_call_sites(self) -> list[str]:
+        """``"path.py:lineno"`` for every ``_skip_guard=...`` keyword argument
+        in a ``Call`` node, across every tracked ``*.py`` file."""
+        tracked = subprocess.run(
+            ["git", "ls-files", "*.py"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+
+        sites: list[str] = []
+        for path in tracked:
+            try:
+                source = open(path, encoding="utf-8").read()
+                tree = ast.parse(source, filename=path)
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg == "_skip_guard":
+                        sites.append(f"{path}:{node.lineno}")
+        return sites
+
+    def test_skip_guard_has_exactly_one_call_site_outside_wrapper(self):
+        sites = self._skip_guard_call_sites()
+        outside_wrapper = [s for s in sites if not s.startswith("agent/llm/wrapper.py:")]
+
+        assert len(outside_wrapper) == 1, (
+            f"expected exactly one `_skip_guard=` call site outside wrapper.py, "
+            f"found {len(outside_wrapper)}: {outside_wrapper}. `_skip_guard` is "
+            "meant to be reached from exactly one place: the compat gate's "
+            "`_check_network` probe. A new hit here means a caller outside the "
+            "compat gate now bypasses `_guard_stack` -- confirm that is "
+            "intentional before letting this test move."
+        )
+        assert outside_wrapper[0].startswith("agent/llm/compat.py:"), (
+            f"the one call site outside wrapper.py should be the compat gate's "
+            f"_check_network probe, found {outside_wrapper[0]!r} instead"
+        )
