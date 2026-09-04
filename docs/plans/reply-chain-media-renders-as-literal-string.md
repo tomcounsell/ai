@@ -237,6 +237,15 @@ file with the tools it already has, or reports precisely what it cannot open.
 ### Technical Approach
 
 - **Resolve at hydration time, in `fetch_reply_chain`.** Settled by spike-1: the lookup is a Popoto `KeyField` filter, the same call already present at `bridge/context.py:651`, costing well under a millisecond against a 3-second budget that is spent almost entirely on the two Telethon RPCs per hop. Deferring to the worker would mean re-walking a chain the worker has no Telethon client for.
+- **Every Redis read goes off-loop through `asyncio.to_thread`.** `fetch_reply_chain` is `async` and runs on the bridge's event loop, but Popoto sits on synchronous redis-py: `TelegramMessage.query.filter(...)` blocks the thread it is called on. Calling it directly would put up to 20 sequential blocking round-trips on the loop, and `asyncio.wait_for` cannot preempt a coroutine that is not at an `await` — a slow or hung Redis would stall the entire bridge process, not merely this hydration. The resolver therefore does:
+
+  ```python
+  records = await asyncio.to_thread(
+      lambda: list(TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id))
+  )
+  ```
+
+  which restores a real suspension point per hop so the existing `wait_for` guard can actually fire. `_cache_walk_root` (`bridge/context.py:629-651`) calls `filter` inline on the loop today; that is a pre-existing defect of the same shape, not a precedent for correctness, and it is out of scope here (see No-Gos).
 - **Reference, not enrichment.** The descriptor carries a path; it never runs vision, Whisper, or document extraction. Enriching twenty ancestors would blow the budget by orders of magnitude and is usually wasted work — the agent spends a tool call only on the file that matters. This is the answer to issue open question 2, and it is the reason issue open question 1 stops being a dilemma.
 - **Two independent sources per hop, degrading separately.** Media type and filename come from the Telethon `Message` already fetched (`msg.file.name`, and `bridge/media.py::get_media_type(msg)` for the type — reuse it, do not re-walk `document.attributes`). The local path comes from Redis. A Redis miss therefore still yields a named attachment, just an unreadable one — strictly better than today's four characters.
 - **Three rendering states, all distinguishable.**
@@ -320,16 +329,26 @@ another chat.
 record with a matching `message_id` in a *different* chat is not resolved. This
 closes issue open question 4.
 
-### Risk 4: Redis latency turns a cheap lookup into a budget overrun
+### Risk 4: Blocking Redis reads on the bridge event loop
 
-**Impact:** Twenty extra Redis round-trips inside a 3-second window that already
-spends most of itself on Telethon RPCs. If Redis is slow, the whole chain is lost
-to the timeout and the agent gets no context at all — worse than today.
-**Mitigation:** The failure mode is already bounded by the existing
-`asyncio.wait_for` at both call sites, which falls back cleanly. Beyond that: the
-resolver does one `filter` per hop with no fan-out, the regression test asserts
-the 20-hop worst case completes inside the budget, and the per-hop try/except
-means a slow or failing lookup degrades that hop rather than the walk.
+**Impact:** Popoto is synchronous redis-py. Twenty `TelegramMessage.query.filter()`
+calls issued inline from `async def fetch_reply_chain` are twenty blocking
+round-trips executed *on the bridge's event loop*. `asyncio.wait_for` bounds a
+coroutine only by cancelling it at an `await`; a coroutine that never yields
+cannot be cancelled. So a slow or hung Redis is precisely the case the existing
+3-second guard does **not** cover, and the consequence is not a lost reply chain
+but a stalled bridge process — every other handler, the nudge loop, and the
+output callbacks freeze with it.
+**Mitigation:** Wrap each hop's lookup in `await asyncio.to_thread(...)` per the
+Technical Approach. This moves the blocking call to a worker thread and puts a
+genuine suspension point in the coroutine, which is what makes the `wait_for`
+guard at both call sites real rather than nominal. Layered on top: the resolver
+does one `filter` per hop with no fan-out, the per-hop try/except degrades a slow
+or failing lookup to *referenced but unreadable* instead of losing the walk, and
+the 20-hop regression test asserts the worst case completes inside the budget.
+**Verification:** the budget regression test must drive its 20 hops against a
+*stalled* lookup, not just a fast one — a test that only exercises a healthy
+Redis cannot distinguish the correct implementation from the broken one.
 
 ### Risk 5: The guard test is written to pass rather than to bite
 
@@ -353,13 +372,26 @@ sent inside that window walks a chain whose ancestor record exists with
 **Data prerequisite:** `media_local_path` must be persisted before the resolver
 reads it.
 **State prerequisite:** none beyond the record existing.
-**Mitigation:** No synchronisation — this is a legitimate transient, and the
-correct behavior is to render *referenced but unreadable* naming the file that is
-still arriving. As a cheap recovery, the resolver may reuse the self-heal glob
-already proven in `bridge/enrichment.py:79-110`: `data/media/` filenames embed
-the `message_id` (`{prefix}_{timestamp}_{message.id}{ext}`), so a single-match
-glob recovers the path when the persist has not yet landed. Require exactly one
-match, as enrichment does, and fall through to unreadable on zero or multiple.
+**Mitigation:** No synchronisation and no recovery attempt — this is a legitimate
+transient, and the correct behavior is to render *referenced but unreadable*,
+naming the file that is still arriving. The agent can say "there is a file here
+that has not finished downloading" and a later reply resolves it normally.
+
+**Explicitly rejected: the `bridge/enrichment.py` self-heal glob.** Enrichment
+recovers an unpersisted path with `MEDIA_DIR.glob(f"*_{msg_id}.*")`
+(`bridge/enrichment.py:96`). That is unsafe here. `MEDIA_DIR` is a single flat
+repo-root directory (`bridge/media.py:23`) shared by every chat and every project
+on the machine, and the download filename pattern
+`{prefix}_{timestamp}_{message.id}{ext}` carries no chat id. Telegram message ids
+are per-chat sequences, so a collision across chats is ordinary rather than
+exotic, and "require exactly one match" only proves the match is unambiguous —
+never that it belongs to the chat being walked. Adopting the glob would hand back
+exactly the cross-chat exposure Risk 3 exists to prevent. No glob over
+`MEDIA_DIR` can be made chat-scoped without a filename change, which is out of
+scope. The only sound confirmation would be a `TelegramMessage` record in this
+chat, and that record is the very thing missing in the race being recovered from.
+Enrichment's use of the glob is scoped to a single known trigger message and is
+not a precedent for a 20-hop walk across arbitrary ancestors.
 
 ### Race 2: Popoto stale-index miss on the ancestor lookup
 
@@ -492,10 +524,11 @@ email side, and this plan should not reproduce it.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add the descriptor record to `bridge/context.py` with fields `kind` (`resolved` | `unreadable`), `filename`, `media_type`, `local_path`, `reason`.
-- Add the per-hop resolver. Media type via `bridge.media.get_media_type(msg)`; filename via `msg.file.name` with a synthetic `{media_type}-{message_id}` fallback for photos, which have no filename. Path via `TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id)`, importing `models.telegram` lazily inside the function as `_cache_walk_root` does.
+- Add the per-hop resolver. Media type via `bridge.media.get_media_type(msg)`; filename via `msg.file.name` with a synthetic `{media_type}-{message_id}` fallback for photos, which have no filename. Path via a `chat_id`-scoped `TelegramMessage` lookup, importing `models.telegram` lazily inside the function as `_cache_walk_root` does.
+- **Issue that lookup off the event loop**: `records = await asyncio.to_thread(lambda: list(TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id)))`. Popoto is blocking redis-py; an inline call would freeze the bridge and make the `asyncio.wait_for` guard unenforceable (Risk 4). A direct `TelegramMessage.query.filter(...)` inside this coroutine is a review blocker.
 - Gate on `msg.file` / `msg.media` truthiness, not on `msg.text` falsiness — a captioned attachment must produce a descriptor too.
 - Stat the resolved path (`exists()` and `os.access(..., os.R_OK)`), mirroring `bridge/enrichment.py`, and downgrade to `unreadable` with a specific reason when it fails.
-- Optionally recover an unpersisted path with the single-match `data/media/` glob on `message_id`, following `bridge/enrichment.py:79-110`; require exactly one match.
+- **Do not glob `data/media/`.** `MEDIA_DIR` is flat and shared across chats and projects, and the filename pattern carries no chat id, so the `bridge/enrichment.py:96` self-heal recovery cannot be chat-scoped and would reintroduce the cross-chat exposure Risk 3 closes. An unpersisted path renders *unreadable*; see Race 1.
 - Wrap resolution per hop in try/except so a failure yields an `unreadable` descriptor and the walk continues. Log at warning.
 - Attach the descriptor to each chain dict under a `media` key; entries with no media carry `None`.
 
