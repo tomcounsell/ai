@@ -307,6 +307,7 @@ class _RouteDecision:
     exit_reason: ExitReason | None = None
     next_message: str | None = None
     compliance_miss: bool = False
+    counts_as_compliance_nudge: bool = True
 
 
 # Process-wide ``claude --version`` cache. "" is the cached-failure sentinel:
@@ -896,6 +897,16 @@ class SessionRunner:
                 if decision.should_break:
                     summary.exit_reason = decision.exit_reason or summary.exit_reason
                     break
+                if not decision.counts_as_compliance_nudge:
+                    # The coverage bounce (issue #3027, Tech Debt 3) is its
+                    # own mechanism with its own budget
+                    # (self_draft_attempts / SELF_DRAFT_MAX_ATTEMPTS) — it
+                    # must not also spend the shared compliance-nudge
+                    # budget, or a coverage bounce following any earlier
+                    # non-routing turn breaks the loop before the PM gets a
+                    # turn to consume the advisory.
+                    message = decision.next_message or PM_COMPLIANCE_NUDGE
+                    continue
                 nudges += 1
                 if nudges > MAX_COMPLIANCE_NUDGES:
                     # Non-routing PM exhausted its nudges — hand off to the
@@ -1563,6 +1574,19 @@ class SessionRunner:
         (``agent/output_handler.py::_inject_self_draft_steering``) so a turn
         that qualifies for both never ping-pongs past the shared cap.
 
+        Deliberately does NOT also spend the separate compliance-nudge
+        budget (``MAX_COMPLIANCE_NUDGES``, checked in ``run()``): the caller
+        returns a ``_RouteDecision`` with ``counts_as_compliance_nudge=False``
+        for a fired bounce. Without this, a coverage bounce following any
+        earlier non-routing turn in the same ``run()`` would be the second
+        non-breaking decision against a shared cap of 1, so ``run()`` would
+        break the loop immediately after pushing the advisory — before the
+        PM ever gets a turn to consume it — and the run's recorded
+        ``exit_message`` would misreport "compliance nudges exhausted"
+        even though the PM's turn was schema-valid and routable. The
+        coverage bounce is a distinct mechanism with its own budget (the
+        ``self_draft_attempts`` cap above), not a compliance nudge.
+
         Also enforces its OWN turn-scoped once-only rule
         (``self._coverage_bounce_used_this_run``, reset per ``run()``
         invocation): exactly one coverage bounce per human turn. Without
@@ -1653,6 +1677,7 @@ class SessionRunner:
                 should_break=False,
                 next_message=ASK_COVERAGE_BOUNCE_CONTINUE_MESSAGE,
                 compliance_miss=miss,
+                counts_as_compliance_nudge=False,
             )
 
         if classification.destination == "user" and classification.payload:

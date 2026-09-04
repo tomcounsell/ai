@@ -83,14 +83,19 @@ to leave headroom for Anthropic API variance; provisional/tunable,
 re-derive from post-merge audit JSONL). The zero-LLM short path
 (<200 chars, non-SDLC, no artifacts) keeps its existing guarantee of
 p50 ~= 0ms and is unchanged by this budget. This latency budget is
-separate from the SDK-level per-call timeout, which stays 3 seconds
-regardless and is enforced via the RTR-correct pattern: ``async with
-semaphore_slot(): async with
+separate from the SDK-level per-call timeout: the semaphore acquire and
+the API call are each separately bounded at 3 seconds via the
+RTR-correct pattern: ``async with
+semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
 anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
-client:``. ``max_retries=0`` is load-bearing for the stated bound: the
-SDK default (``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts,
-which would silently turn the 3s worst case into ~3 attempts plus
-backoff (~10s) on this call's now-inline delivery path.
+client:``. Stacking both 3-second bounds gives a structural worst case
+of ~6 seconds, above the documented p99 of 5000ms — this is a
+structural bound on the worst case, not the measured distribution
+(measured p99 is ~2531ms, comfortably inside the 5000ms budget).
+``max_retries=0`` is load-bearing for the stated bound: the SDK default
+(``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts, which would
+silently turn the 3s worst case into ~3 attempts plus backoff (~10s) on
+this call's now-inline delivery path.
 The other anthropic-client helper (the convenience one that
 constructs the client for you) is **not** used here — it does not
 accept a ``timeout`` argument and would silently violate the 3-second
