@@ -109,10 +109,11 @@ _NEGATION_CANCELING_OBJECTS = ("blocker", "issue", "problem", "delay", "obstacle
 # side of the keyword.
 _ABSENCE_PREFIXES = ("no ", "zero ", "without ")
 
-# Lookback window for _ABSENCE_PREFIXES. Long enough for "without " (8 chars),
-# short enough that it cannot reach into a previous clause. Provisional /
-# tunable alongside _NEGATION_WINDOW_CHARS.
-_ABSENCE_PREFIX_LOOKBACK = 8
+# Lookback window for _ABSENCE_PREFIXES: exactly the longest prefix, which is
+# all an ``endswith`` test can ever need. Derived from the tuple rather than
+# written as a literal so that adding a longer prefix cannot silently make it
+# a no-op.
+_ABSENCE_PREFIX_LOOKBACK = max(len(p) for p in _ABSENCE_PREFIXES)
 
 
 def _iter_keyword_matches(evidence_lower: str, keywords: tuple[str, ...]):
@@ -151,21 +152,29 @@ def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
     """True when at least one ``_NEGATIVE_EVIDENCE_KEYWORDS`` occurrence in
     ``evidence_lower`` still reads as a genuine bad outcome.
 
-    A match is cancelled only when it is **negation-shaped**
-    (``_NEGATION_SHAPED_KEYWORDS`` -- it denies an outcome) AND is followed,
-    within ``_NEGATION_WINDOW_CHARS``, by a ``_NEGATION_CANCELING_OBJECTS``
-    noun: "did not hit any blockers" denies the bad outcome, so it reads as
-    good news. Keywords that ASSERT a bad outcome ("failed", "failure",
-    "blocked on") are never cancelled, because "blocked on an issue with the
-    signing key" and "failed due to an issue in prod" are the ordinary way a
-    person names a real blocker. Cancelling those would drop genuine
-    contradictions, and under-reporting is the worse error for the #3035
-    entry criterion this tool feeds.
+    A match is cancelled by exactly two legs, and by nothing else:
 
-    A match is also cancelled when the keyword is directly preceded by a
-    ``_ABSENCE_PREFIXES`` word ("no failures", "zero failures"): asserting
-    the absence of a bad outcome is good news, the same shape as
-    "did not hit any blockers".
+    1. **Trailing object noun, negation-shaped keywords only.** The keyword
+       is in ``_NEGATION_SHAPED_KEYWORDS`` (it *denies* an outcome) AND is
+       followed, within ``_NEGATION_WINDOW_CHARS``, by a
+       ``_NEGATION_CANCELING_OBJECTS`` noun: "did not hit any blockers"
+       denies the bad outcome, so it reads as good news. Keywords that
+       ASSERT a bad outcome ("failed", "failure", "blocked on") are never
+       cancelled *by this leg*, because "blocked on an issue with the
+       signing key" and "failed due to an issue in prod" are the ordinary
+       way a person names a real blocker. Cancelling those would drop
+       genuine contradictions, and under-reporting is the worse error for
+       the #3035 entry criterion this tool feeds.
+    2. **Leading absence prefix, any keyword.** The keyword is directly
+       preceded by an ``_ABSENCE_PREFIXES`` word ("no failures", "zero
+       failures", "without failures"). This asserts the *absence* of the
+       bad outcome, the same shape as leg 1 reached from the other side of
+       the keyword, so it applies to asserted-outcome keywords too.
+
+    Known blind spot: a double negation ("not without failures") cancels via
+    leg 2 and is not re-flagged. That shape is vanishingly rare in real
+    evidence text, and the alternative -- a general negation parser -- is far
+    more machinery than a human-reviewed sampling aid warrants.
 
     Symmetric to :func:`_any_positive_keyword_unnegated` in that both scope
     their check to a window around the match instead of the whole string.
@@ -374,7 +383,13 @@ def find_contradictions(entries: list[dict[str, Any]]) -> list[ContradictionFlag
       bad outcome rather than the disposition. Keywords that ASSERT a bad
       outcome ("failed", "blocked on") are never cancelled this way, so
       ``"delivered; blocked on an issue with the signing key"`` still
-      flags. See :func:`_any_negative_keyword_unnegated`.
+      flags. A second cancellation leg applies to *every* negative keyword,
+      asserted-outcome ones included: an ``_ABSENCE_PREFIXES`` word
+      directly before the match ("no failures", "zero failures", "without
+      failures") asserts the bad outcome's absence, so ``"delivered clean,
+      no failures"`` does not flag. See
+      :func:`_any_negative_keyword_unnegated`, which documents both legs and
+      the double-negation blind spot.
     """
     flags: list[ContradictionFlag] = []
     for entry in entries:
