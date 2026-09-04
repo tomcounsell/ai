@@ -69,7 +69,11 @@ inheritance, not a block: use the returned `run_id` and continue; only a foreign
 **Verification-table runner (§ 4.5):**
 
 ```bash
-python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
+python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.outcome == 'PASS' for x in r) else 0)"
+# Each result carries a three-valued `outcome` (PASS / FAIL / UNEVALUATED), never a
+# boolean; `CheckOutcome` is a StrEnum, so `x.outcome == 'PASS'` is the comparison.
+# UNEVALUATED blocks like FAIL but says the GRADER could not answer -- report it as
+# UNEVALUATED in the review, never as a finding about the code.
 # A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it, or a
 # pipe-block with rows but no Command column), not a finding about the code. Write
 # pipes in the table as `\|`. See #2570, #2836. A row in `t.skipped` is a non-check
