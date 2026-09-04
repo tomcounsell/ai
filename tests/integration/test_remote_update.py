@@ -804,7 +804,7 @@ class TestAutoBumpDeps:
             ),
             patch(
                 "scripts.update.deps.run_gate_phases",
-                return_value=(False, "pytest", "pytest gate failed:\nboom"),
+                return_value=(False, "pytest", "pytest gate failed:\nboom", False),
             ),
         ):
             result = auto_bump_deps(tmp_path)
@@ -832,7 +832,12 @@ class TestAutoBumpDeps:
             ),
             patch(
                 "scripts.update.deps.run_gate_phases",
-                return_value=(False, "llm", "llm gate failed:\nINCOMPATIBLE: no temperature"),
+                return_value=(
+                    False,
+                    "llm",
+                    "llm gate failed:\nINCOMPATIBLE: no temperature",
+                    False,
+                ),
             ),
         ):
             result = auto_bump_deps(tmp_path)
@@ -854,8 +859,8 @@ class TestAutoBumpDeps:
 
         def gates(_project_dir, coupled_set):
             if "anthropic" in coupled_set.members:
-                return False, "import", "import gate failed"
-            return True, None, "gates passed"
+                return False, "import", "import gate failed", False
+            return True, None, "gates passed", False
 
         with (
             patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A, SET_B]),
@@ -944,10 +949,11 @@ class TestAutoBumpDeps:
         """No venv to gate with is a FAILED gate, never a skipped one."""
         from scripts.update.deps import run_gate_phases
 
-        passed, phase, output = run_gate_phases(tmp_path, SET_A)
+        passed, phase, output, gate_unverifiable = run_gate_phases(tmp_path, SET_A)
         assert passed is False
         assert phase == "llm"
         assert "No Python venv" in output
+        assert gate_unverifiable is False
 
     def test_restore_failure_blocks_commit(self, tmp_path: Path):
         """A rollback whose re-sync failed must stop the run committing.
@@ -992,7 +998,9 @@ class TestAutoBumpDeps:
             patch(
                 "scripts.update.deps.run_gate_phases",
                 side_effect=lambda _d, s: (
-                    (False, "import", "boom") if "anthropic" in s.members else (True, None, "ok")
+                    (False, "import", "boom", False)
+                    if "anthropic" in s.members
+                    else (True, None, "ok", False)
                 ),
             ),
         ):
@@ -1021,8 +1029,8 @@ class TestAutoBumpDeps:
 
         scenarios = [
             # (sync result, gate result)
-            (MagicMock(success=False, error="sync died"), (True, None, "ok")),
-            (MagicMock(success=True, error=None), (False, "pytest", "gate died")),
+            (MagicMock(success=False, error="sync died"), (True, None, "ok", False)),
+            (MagicMock(success=True, error=None), (False, "pytest", "gate died", False)),
         ]
         for sync_result, gate_result in scenarios:
             pyproject.write_text(TWO_SET_PYPROJECT)
@@ -1104,7 +1112,9 @@ class TestAutoBumpDeps:
             patch(
                 "scripts.update.deps.run_gate_phases",
                 side_effect=lambda _d, s: (
-                    (False, "import", "boom") if "anthropic" in s.members else (True, None, "ok")
+                    (False, "import", "boom", False)
+                    if "anthropic" in s.members
+                    else (True, None, "ok", False)
                 ),
             ),
         ):

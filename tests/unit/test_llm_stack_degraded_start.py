@@ -545,6 +545,81 @@ def test_resolver_itself_never_propagates_an_unexpected_exception(monkeypatch, c
 
 
 # --------------------------------------------------------------------------
+# Round 4 review (PR #3089): three guards that shipped with zero coverage
+# --------------------------------------------------------------------------
+
+
+def test_healthy_resolution_survives_a_raising_clear_marker(predicate, captures, monkeypatch):
+    """A raising `_clear_marker` on an already-healthy resolution costs only a stale marker.
+
+    Guards the try/except around `_clear_marker(proc)` in the resolution
+    path's healthy branch (compat.py:718-721). The globals above it are
+    already committed healthy, so a raise there must never flip the
+    verdict back to degraded — distinct from `test_override_branch_is_
+    exception_total`, which guards the break-glass env-var branch's
+    identical-looking but separate try/except.
+    """
+
+    def _boom(_proc):
+        raise NotADirectoryError("marker dir is a file")
+
+    monkeypatch.setattr(compat, "_clear_marker", _boom)
+    predicate(_healthy())
+
+    assert compat.resolve_degraded_flag("bridge") is False
+    assert compat.stack_axes() == (True, True)
+    assert _markers() == []
+    assert captures == [], "a healthy resolution must not alarm"
+
+
+def test_alert_survives_a_raising_root_log_handler(predicate, captures, monkeypatch):
+    """A raising `logger.critical` must cost only the log channel, not Sentry.
+
+    Guards the try/except around the stdlib log call inside `_alert_degraded`
+    (compat.py:563-565). Under the fault this module exists to survive — a
+    third-party handler installed under the root logger that raises from
+    `emit` — the plain `logger.critical` call is itself the raiser. Without
+    the guard, that would abort `_alert_degraded` before the Sentry capture
+    ever runs, losing the fleet-wide signal entirely.
+    """
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("root handler is broken")
+
+    monkeypatch.setattr(compat.logger, "critical", _boom)
+    predicate(_signature_break())
+
+    assert compat.resolve_degraded_flag("bridge") is True
+    assert len(captures) >= 1
+
+
+def test_run_boundary_realert_preserves_the_real_axis(predicate, captures, monkeypatch):
+    """The run-boundary re-alert must carry the real axis, never hardcode loader.
+
+    Guards `dataclasses.replace(result, ...)` in the run-boundary except
+    clause (compat.py:737-744). On a signature break (`loader_ok=True`), a
+    downstream helper (`_write_marker`) raising a non-OSError escapes
+    `_alert_degraded` and lands in the outer except, which must re-alert
+    using the REAL axis carried through from the already-resolved `result`
+    rather than the `result is None` fallback's hardcoded `loader_ok=False`.
+    Losing that would relabel every helper-raised signature break as a
+    loader break.
+    """
+
+    def _boom(_result, _proc):
+        raise TypeError("json.dumps escaped its OSError-only guard")
+
+    monkeypatch.setattr(compat, "_write_marker", _boom)
+    predicate(_signature_break())
+
+    assert compat.resolve_degraded_flag("bridge") is True
+    assert captures, "must still alert even when the axis-preserving replace is exercised"
+    for capture in captures:
+        assert "axis=signature" in capture["message"]
+        assert "axis=loader" not in capture["message"]
+
+
+# --------------------------------------------------------------------------
 # Startup hooks: degraded is not down
 # --------------------------------------------------------------------------
 

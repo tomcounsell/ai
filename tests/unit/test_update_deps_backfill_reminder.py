@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -194,39 +195,65 @@ class TestLlmGateProbeSkippedReporting:
 
         monkeypatch.setattr(deps, "run_cmd", fake_run)
 
-        passed, failed_phase, output = deps.run_gate_phases(project_dir, self._llm_only_set())
+        passed, failed_phase, output, gate_unverifiable = deps.run_gate_phases(
+            project_dir, self._llm_only_set()
+        )
 
         assert passed is False
         assert failed_phase == "llm"
         assert deps.GATE_UNVERIFIABLE_MARKER in output
         assert "incompatible" not in output.split(":")[0]
+        assert gate_unverifiable is True
 
-    def test_the_marker_constant_is_what_run_gate_phases_actually_emits(
-        self, tmp_path: Path, monkeypatch
-    ):
-        """The two halves of the deps -> run.py contract must not drift apart.
+    def test_bump_coupled_set_reads_gate_unverifiable_as_data(self, tmp_path: Path, monkeypatch):
+        """`_bump_coupled_set` must read `gate_unverifiable` off the tuple, not re-derive it.
 
-        `_bump_coupled_set` sets `AutoBumpResult.gate_unverifiable` by looking
-        for `GATE_UNVERIFIABLE_MARKER` in the detail text, and `run.py` reads
-        only that field. Reword the message without the constant and the flag
-        silently stops being set, so `/update` would report an unverifiable
-        host as an incompatible pair again with every test still green. This
-        asserts the message is built FROM the constant.
+        Replaces a prior self-referential test that duplicated production's
+        marker-grepping logic inline instead of driving `_bump_coupled_set`,
+        so deleting the real assignment in `_bump_coupled_set` left it green
+        (round 4 review, tech-debt item 2). This drives auto-bump end to end
+        (`auto_bump_deps` -> `_bump_coupled_set`) with `run_gate_phases`
+        patched to return the unverifiable 4-tuple, and must FAIL if the
+        `result.gate_unverifiable = result.gate_unverifiable or gate_unverifiable`
+        assignment is deleted from `_bump_coupled_set`.
         """
-        project_dir = self._venv(tmp_path)
-        payload = json.dumps({"compatible": False, "loader_ok": True, "probe_skipped": True})
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[project]\ndependencies = [\n"
+            '    "anthropic==0.62.0",\n'
+            '    "pydantic-ai-slim[anthropic]==2.9.0",\n'
+            "]\n"
+        )
+        coupled_set = self._llm_only_set()
 
-        def fake_run(cmd, **kwargs):
-            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout=payload, stderr="")
+        monkeypatch.setattr(deps, "AUTO_BUMP_SETS", [coupled_set])
+        monkeypatch.setattr(
+            deps,
+            "get_pypi_latest",
+            lambda package, timeout=10: {
+                "anthropic": "1.0.0",
+                "pydantic-ai-slim": "2.35.0",
+            }.get(package),
+        )
+        monkeypatch.setattr(
+            deps,
+            "sync_dependencies",
+            lambda *args, **kwargs: MagicMock(success=True, error=None),
+        )
+        monkeypatch.setattr(
+            deps,
+            "run_gate_phases",
+            lambda _project_dir, _coupled_set: (
+                False,
+                "llm",
+                "llm gate unverifiable on this machine (no API key):\nboom",
+                True,
+            ),
+        )
+        result = deps.auto_bump_deps(tmp_path)
 
-        monkeypatch.setattr(deps, "run_cmd", fake_run)
-
-        _, _, output = deps.run_gate_phases(project_dir, self._llm_only_set())
-
-        result = deps.AutoBumpResult()
-        assert result.gate_unverifiable is False, "must default to False"
-        result.gate_unverifiable = deps.GATE_UNVERIFIABLE_MARKER in output
         assert result.gate_unverifiable is True
+        assert result.rolled_back is True
 
     def test_probe_skipped_false_reports_gate_failed(self, tmp_path: Path, monkeypatch):
         project_dir = self._venv(tmp_path)
@@ -239,14 +266,52 @@ class TestLlmGateProbeSkippedReporting:
 
         monkeypatch.setattr(deps, "run_cmd", fake_run)
 
-        passed, failed_phase, output = deps.run_gate_phases(project_dir, self._llm_only_set())
+        passed, failed_phase, output, gate_unverifiable = deps.run_gate_phases(
+            project_dir, self._llm_only_set()
+        )
 
         assert passed is False
         assert failed_phase == "llm"
         assert "llm gate failed" in output
         assert "unverifiable" not in output
+        assert gate_unverifiable is False
 
     def test_probe_skipped_helper_is_best_effort_on_bad_json(self):
         """Non-JSON stdout must fall back to False, never raise."""
         assert deps._llm_probe_was_skipped("not json at all") is False
         assert deps._llm_probe_was_skipped("") is False
+
+
+@pytest.mark.unit
+class TestAutoBumpRollbackOperatorMessage:
+    """`run.py`'s operator-facing text must not call an unverifiable gate incompatible.
+
+    Round 4 review, tech-debt item 2's second half: `run.py:1517-1532`'s
+    branch on `AutoBumpResult.gate_unverifiable` is the only place an
+    operator ever sees this distinction, so it needs its own coverage
+    independent of `deps.py`. Drives `run._format_auto_bump_rollback_message`
+    (extracted from that branch so it is unit-testable without driving
+    `run_update`'s real system-touching steps) directly.
+    """
+
+    def test_unverifiable_gate_warns_unverifiable_not_incompatible(self):
+        from scripts.update import run
+
+        bump = deps.AutoBumpResult(rolled_back=True, failed_phase="llm", gate_unverifiable=True)
+
+        log_line, warning_text = run._format_auto_bump_rollback_message(bump)
+
+        assert "unverifiable, not incompatible" in log_line
+        assert "phase failed" not in log_line
+        assert "unverifiable" in warning_text
+
+    def test_genuinely_failed_gate_warns_phase_failed(self):
+        from scripts.update import run
+
+        bump = deps.AutoBumpResult(rolled_back=True, failed_phase="pytest", gate_unverifiable=False)
+
+        log_line, warning_text = run._format_auto_bump_rollback_message(bump)
+
+        assert "phase failed" in log_line
+        assert "unverifiable" not in log_line
+        assert "unverifiable" not in warning_text

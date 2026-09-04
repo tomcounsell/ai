@@ -954,6 +954,28 @@ def _nightly_tests_staleness_warning(project_dir: Path) -> str | None:
     return None
 
 
+def _format_auto_bump_rollback_message(bump: deps.AutoBumpResult) -> tuple[str, str]:
+    """Build the operator-facing log line and warning text for a rolled-back auto-bump.
+
+    A gate that could not be evaluated on this machine (the ``llm`` phase's
+    ``CompatResult.probe_skipped`` case: no Anthropic API key) is not an
+    incompatible pair, and must not read like one to the operator -- even
+    though both roll back. Split out of ``run_update`` so this text selection
+    is unit-testable without driving the rest of that function's real
+    system-touching steps.
+
+    Returns ``(log_line, warning_text)``.
+    """
+    phase = bump.failed_phase or "gate"
+    if bump.gate_unverifiable:
+        log_line = f"WARN: Auto-bump rolled back ({phase} gate unverifiable, not incompatible)"
+        warning_text = f"Auto-bump rolled back after {phase} phase was unverifiable (no API key)"
+    else:
+        log_line = f"WARN: Auto-bump rolled back ({phase} phase failed)"
+        warning_text = f"Auto-bump rolled back after {phase} phase failure"
+    return log_line, warning_text
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
@@ -1509,27 +1531,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"  {b.package}: {b.old_version} (up to date)", v)
 
         if bump.rolled_back:
-            phase = bump.failed_phase or "gate"
-            # A gate that could not be evaluated on this machine (the llm
-            # phase's CompatResult.probe_skipped case: no Anthropic API key)
-            # is not an incompatible pair, and must not read like one to the
-            # operator -- even though both roll back.
-            unverifiable = bump.gate_unverifiable
-            if unverifiable:
-                log(
-                    f"WARN: Auto-bump rolled back ({phase} gate unverifiable, not incompatible)",
-                    v,
-                    always=True,
-                )
-            else:
-                log(f"WARN: Auto-bump rolled back ({phase} phase failed)", v, always=True)
+            log_line, warning_text = _format_auto_bump_rollback_message(bump)
+            log(log_line, v, always=True)
             log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
-            _append_warning(
-                result,
-                f"Auto-bump rolled back after {phase} phase was unverifiable (no API key)"
-                if unverifiable
-                else f"Auto-bump rolled back after {phase} phase failure",
-            )
+            _append_warning(result, warning_text)
 
         if bump.restore_failed:
             # The rollback's own re-sync failed, so the venv does NOT match

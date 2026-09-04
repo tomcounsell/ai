@@ -675,11 +675,12 @@ def _gate_argv(project_dir: Path, phase: str, coupled_set: CoupledSet) -> list[s
 
 
 # The phrase `run_gate_phases` puts in its detail text when a gate could not
-# be evaluated at all, as opposed to evaluating and failing. Named because
-# `_bump_coupled_set` reads it back out to set `AutoBumpResult.gate_unverifiable`
-# -- `run_gate_phases`' 3-tuple is patched by name in several tests, so the
-# flag travels through the detail string here and reaches `run.py` as a typed
-# field rather than as a literal duplicated across two modules.
+# be evaluated at all, as opposed to evaluating and failing. The detail text
+# is for the operator-facing message only -- `run_gate_phases` also returns
+# the flag as the fourth element of its tuple, so `_bump_coupled_set` reads
+# structured data rather than re-deriving the verdict by grepping prose it
+# did not produce (a payload whose `reason` happens to contain this phrase
+# with `probe_skipped: False` must not mislabel a genuinely incompatible pair).
 GATE_UNVERIFIABLE_MARKER = "unverifiable on this machine"
 
 
@@ -697,22 +698,30 @@ def _llm_probe_was_skipped(stdout: str) -> bool:
         return False
 
 
-def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, str | None, str]:
+def run_gate_phases(
+    project_dir: Path, coupled_set: CoupledSet
+) -> tuple[bool, str | None, str, bool]:
     """Run every gate phase `coupled_set` declares, in order.
 
-    Returns ``(passed, failed_phase, output)``. Stops at the first failing
-    phase and names it, so the rollback warning can distinguish an
-    incompatible LLM pair from a flaky unrelated unit test.
+    Returns ``(passed, failed_phase, output, gate_unverifiable)``. Stops at
+    the first failing phase and names it, so the rollback warning can
+    distinguish an incompatible LLM pair from a flaky unrelated unit test.
+    ``gate_unverifiable`` is ``True`` only on the ``llm`` phase's
+    ``probe_skipped`` branch -- this machine could not evaluate the pair, as
+    opposed to evaluating it and finding it broken -- and it is DATA, not
+    text to be re-derived: `_bump_coupled_set` reads this field directly
+    rather than grepping :data:`GATE_UNVERIFIABLE_MARKER` back out of
+    ``output``, which only shapes the human-readable message here.
 
     Fail-closed throughout: a phase that cannot be run at all (no venv,
     timeout, OSError) is a failed phase, never a skipped one.
     """
     if not coupled_set.gates:
-        return True, None, "no gate phases declared"
+        return True, None, "no gate phases declared", False
 
     python_path = project_dir / ".venv" / "bin" / "python"
     if not python_path.exists():
-        return False, coupled_set.gates[0], "No Python venv found at .venv/bin/python"
+        return False, coupled_set.gates[0], "No Python venv found at .venv/bin/python", False
 
     passed_phases: list[str] = []
     for phase in coupled_set.gates:
@@ -724,9 +733,9 @@ def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, s
                 timeout=_GATE_TIMEOUTS.get(phase, 60),
             )
         except subprocess.TimeoutExpired:
-            return False, phase, f"{phase} gate timed out"
+            return False, phase, f"{phase} gate timed out", False
         except OSError as exc:
-            return False, phase, f"{phase} gate could not run: {exc}"
+            return False, phase, f"{phase} gate could not run: {exc}", False
 
         if proc.returncode != 0:
             detail = (proc.stdout + proc.stderr).strip()
@@ -741,11 +750,12 @@ def run_gate_phases(project_dir: Path, coupled_set: CoupledSet) -> tuple[bool, s
                     False,
                     phase,
                     f"{phase} gate {GATE_UNVERIFIABLE_MARKER} (no API key):\n{detail}",
+                    True,
                 )
-            return False, phase, f"{phase} gate failed:\n{detail}"
+            return False, phase, f"{phase} gate failed:\n{detail}", False
         passed_phases.append(phase)
 
-    return True, None, f"gates passed: {', '.join(passed_phases)}"
+    return True, None, f"gates passed: {', '.join(passed_phases)}", False
 
 
 # ---------------------------------------------------------------------------
@@ -927,7 +937,7 @@ def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBu
         )
         return
 
-    passed, failed_phase, output = run_gate_phases(project_dir, coupled_set)
+    passed, failed_phase, output, gate_unverifiable = run_gate_phases(project_dir, coupled_set)
     result.smoke_output = (
         f"{result.smoke_output}\n{output}".strip() if result.smoke_output else output
     )
@@ -935,14 +945,17 @@ def _bump_coupled_set(project_dir: Path, coupled_set: CoupledSet, result: AutoBu
     if not passed:
         result.rolled_back = True
         result.failed_phase = result.failed_phase or failed_phase
-        result.gate_unverifiable = result.gate_unverifiable or (GATE_UNVERIFIABLE_MARKER in output)
+        result.gate_unverifiable = result.gate_unverifiable or gate_unverifiable
         _restore_set(project_dir, snapshot, result, resync=True)
         _record_set(
             result,
             coupled_set,
             current,
             latest,
-            error=f"set rolled back: {failed_phase} gate failed",
+            error=(
+                f"set rolled back: {failed_phase} gate "
+                f"{GATE_UNVERIFIABLE_MARKER if gate_unverifiable else 'failed'}"
+            ),
         )
         return
 
