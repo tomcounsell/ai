@@ -59,9 +59,16 @@ behind the script.
 ### Layer 2: PreToolUse hook validator
 
 `.claude/hooks/validators/validate_no_redis_flush.py` blocks `.flushdb(...)` / `.flushall(...)` call
-shapes and `redis-cli ... FLUSHDB` / `FLUSHALL` invocations in any Bash command an agent is about to
-run, unconditionally, with no Popoto-vocabulary gate (unlike the raw-delete validator, which only
-fires alongside a `_POPOTO_CONTEXT` token). It catches a flush the moment it's typed. It cannot catch
+shapes and `redis-cli ... FLUSHDB` / `FLUSHALL` invocations in **executable command position** in any
+Bash command an agent is about to run, with no Popoto-vocabulary gate (unlike the raw-delete
+validator, which only fires alongside a `_POPOTO_CONTEXT` token). Since #3021 it scans commands, not
+raw text co-occurrence: quoted-delimiter heredoc bodies whose consumer is not an interpreter are
+stripped, and single-quoted plus substitution-free double-quoted string contents are masked, so prose
+that merely mentions a flush (`git commit -m '...'`, `gh issue create --body "..."`, a heredoc
+writing a doc file) passes. The masking stands down whenever an interpreter token (`bash`, `sh`,
+`python*`, `node`, `xargs`, `eval`, `redis-cli`, and kin) survives outside the inert regions —
+quoted code fed to `python -c` or piped into `bash` still blocks — and unterminated quotes or
+heredocs fail closed. It catches a flush the moment it's typed. It cannot catch
 one already sitting inside a file Claude wrote in an earlier step, because a Bash-string validator
 only sees the command it's given, not the file's contents. That gap is exactly why Layer 1 exists and
 why it is the layer that actually stopped the incident class: file contents at execution time reach

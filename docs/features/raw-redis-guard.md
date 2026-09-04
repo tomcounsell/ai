@@ -139,14 +139,29 @@ before. Note that this differs from the dispatcher's own per-validator posture,
 which fails *open* for this validator: an unexpected exception inside it is
 logged and the dispatcher moves to the next validator.
 
-## Known residual
+## Heredoc bodies (#2736)
 
-Prose that names an interpreter still blocks even when the interpreter is only
-quoted as an example rather than executed. A heredoc writing a doc file that
-quotes a path-invoked interpreter next to a blocked call shape is the shape that
-does it. Matching on command text always carries some false positives; the fix
-direction is to drop heredoc bodies whose consuming command is not itself an
-interpreter.
+`_strip_quoted_heredoc_bodies()` runs after the repo-scope gate and before the
+executable-context and pattern gates. It removes the bodies of heredocs whose
+delimiter is single-quoted (`<<'EOF'` and `<<-'EOF'`) — those bodies undergo no
+parameter expansion or command substitution, so a heredoc writing a doc file
+that quotes an interpreter example next to a blocked call shape is data, and it
+passes.
+
+Three cases deliberately keep their bodies in scope, each fail-closed:
+
+- **Unquoted delimiters** (`<<EOF`): `$(...)` inside such a body really can
+  execute, so stripping it would turn a false-positive fix into a fail-open
+  hole.
+- **Interpreter-consumed heredocs**: when the physical line holding the heredoc
+  operator matches `_EXECUTABLE_CONTEXT` (`python3 <<'EOF'`, or
+  `cat <<'PY' | python3`), the body executes and stays matched.
+- **Unterminated heredocs**, and any ambiguity (two heredocs on one line, an
+  early terminator match): resolve toward keeping text, which only over-blocks.
+
+Pinned by `TestQuotedHeredocBodies` in
+`tests/unit/test_validate_no_raw_redis_delete.py`, assembled from fragments per
+that file's convention so the test file itself never trips the live hook.
 
 ## Related
 

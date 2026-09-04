@@ -4,14 +4,22 @@ type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-08-26
-tracking: https://github.com/tomcounsell/ai/issues/2736
+tracking: https://github.com/tomcounsell/ai/issues/2779
 last_comment_id: none
-covers: [2779, 2736, 3021, 2715]
+covers: [2779, 2715]
 revision_applied: true
 revision_applied_at: 2026-08-26T14:29:04Z
 ---
 
 # Wave 4 — Hooks, Guards, and Gate Authoring Discipline
+
+> **Scope note (2026-09-04):** #2736 and #3021 were closed by targeted hotfixes landed
+> directly on main (`3fb191c6c`: quoted-heredoc-body stripping in the raw-Redis validator;
+> `51aac637e`: inert-region masking in the flush validator). Remaining scope is #2779 and
+> #2715 only; tracking re-pointed to #2779. Body sections referencing the closed pair
+> describe already-landed behavior and need re-scoping when planning resumes — the
+> structural command-position parser this plan proposes is still unbuilt, but the acute
+> false-positive cases it motivated are gone.
 
 ## Problem
 

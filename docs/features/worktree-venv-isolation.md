@@ -133,7 +133,9 @@ than as a downstream symptom:
 - `scripts/pytest-clean.sh` **aborts** before running anything in two cases. If
   the venv is off the pin: a suite that runs to green on the wrong interpreter
   produces a verdict that looks authoritative and is worthless. And if the
-  caller is a **linked worktree with no `.venv` at all** (#3033) — see
+  caller is a **linked worktree without an executable `.venv/bin/pytest`**
+  (#3033) — absent venv, half-provisioned venv from a failed `uv sync`, or a
+  sync without `--extra dev` — see
   [The absent-venv case](#the-absent-venv-case-3033) below.
 - `.githooks/pre-commit` blocks with an explicit "broken environment, NOT a
   lint failure" message when `ruff` is missing from the resolved interpreter,
@@ -170,10 +172,24 @@ surfaced only because a reviewer forced `PYTHONPATH`.
 The off-pin check does not cover this. Off-pin means a *wrong* venv; absent
 means *no* venv, which degrades silently rather than mismatching.
 
-`scripts/pytest-clean.sh` therefore refuses to run from a linked worktree with
-no `.venv`, naming the worktree, the missing path, and the remedy (`uv sync` in
-the worktree). It keys on `.git` being a **file** — a linked worktree's gitdir
-pointer — so a primary checkout is unaffected.
+`scripts/pytest-clean.sh` therefore refuses to run from a linked worktree unless
+an executable `.venv/bin/pytest` exists, naming the worktree, what is missing,
+and the remedy (`uv sync --extra dev` in the worktree). Mere `.venv` presence is
+not enough — that weaker check was bypassed two ways in practice: a failed
+`uv sync` creates `.venv` before dying, and a sync without `--extra dev`
+provisions a venv with no pytest in it, both of which fell through to PATH and
+silently tested the primary checkout. The abort message distinguishes a missing
+venv from an incomplete one. The guard keys on `.git` being a **file** — a
+linked worktree's gitdir pointer — so a primary checkout is unaffected, and the
+wrapper invokes pytest through the venv (`.venv/bin/python -m pytest`), never by
+PATH resolution.
+
+The wrapper also exports `PYTHONPATH` with the invoking checkout's root
+prepended (preserving any caller value). This closes the third observed
+mechanism: even a fully provisioned worktree resolves `tools.*` through the
+primary checkout's editable-install `.pth` entry, so without the pin a
+venv-equipped worktree can still import `main`'s code. With it, the checkout
+being tested always wins import resolution.
 
 Verified live (2026-08-31): in a real venv-less worktree,
 `import tools.sdlc_stage_query` resolved to the primary checkout and the
