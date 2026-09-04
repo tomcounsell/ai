@@ -103,6 +103,17 @@ _NEGATION_SHAPED_KEYWORDS = ("could not", "couldn't", "unable", "did not", "didn
 # claimed disposition itself.
 _NEGATION_CANCELING_OBJECTS = ("blocker", "issue", "problem", "delay", "obstacle")
 
+# Words that, immediately preceding a negative-evidence keyword, assert the
+# ABSENCE of the bad outcome ("no failures", "zero failures") rather than its
+# occurrence. Same shape as "did not hit any blockers", reached from the other
+# side of the keyword.
+_ABSENCE_PREFIXES = ("no ", "zero ", "without ")
+
+# Lookback window for _ABSENCE_PREFIXES. Long enough for "without " (8 chars),
+# short enough that it cannot reach into a previous clause. Provisional /
+# tunable alongside _NEGATION_WINDOW_CHARS.
+_ABSENCE_PREFIX_LOOKBACK = 8
+
 
 def _iter_keyword_matches(evidence_lower: str, keywords: tuple[str, ...]):
     """Yield (start_index, keyword) for every non-overlapping occurrence of
@@ -151,6 +162,11 @@ def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
     contradictions, and under-reporting is the worse error for the #3035
     entry criterion this tool feeds.
 
+    A match is also cancelled when the keyword is directly preceded by a
+    ``_ABSENCE_PREFIXES`` word ("no failures", "zero failures"): asserting
+    the absence of a bad outcome is good news, the same shape as
+    "did not hit any blockers".
+
     Symmetric to :func:`_any_positive_keyword_unnegated` in that both scope
     their check to a window around the match instead of the whole string.
     """
@@ -159,6 +175,9 @@ def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
             window = evidence_lower[idx + len(kw) : idx + len(kw) + _NEGATION_WINDOW_CHARS]
             if any(obj in window for obj in _NEGATION_CANCELING_OBJECTS):
                 continue
+        preceding = evidence_lower[max(0, idx - _ABSENCE_PREFIX_LOOKBACK) : idx]
+        if any(preceding.endswith(prefix) for prefix in _ABSENCE_PREFIXES):
+            continue
         return True
     return False
 

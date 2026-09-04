@@ -178,8 +178,10 @@ async def test_forward_deferral_with_recorded_expectation_allows_real_api(
 ):
     """R1 discriminator, exercised against the real LLM (#3016 override case).
 
-    Same forward-looking text blocks 8/8 on the real LLM layer per the
-    plan's measured history. With an open inbound expectation recorded on
+    Re-measured on this branch at ``24d0f22db``, n=12 calls on this exact
+    text: the real LLM layer blocked 11/11 of the calls it answered, and
+    1/12 exceeded ``RTR_SDK_TIMEOUT`` and fell open to the heuristic. With
+    an open inbound expectation recorded on
     the session's bound Job, the identical text passes as
     ``promise_recorded_override`` — the durably-recorded-obligation
     discriminator is what clears the gate, not any change to the text's
