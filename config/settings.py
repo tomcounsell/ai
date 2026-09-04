@@ -828,6 +828,20 @@ class FeatureSettings(BaseModel):
             "comment above this field. Env: FEATURES__BRIDGE_MSG_CLAIM_TTL_SECONDS."
         ),
     )
+    max_critique_cycles: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum CRITIQUE -> PLAN revision cycles before the SDLC router "
+            "escalates to human review (agent/pipeline_graph.py's "
+            "MAX_CRITIQUE_CYCLES, consumed by get_next_stage and the router's "
+            "G2 gate). Provisional and tunable: 2 admits one genuine revision "
+            "after the first NEEDS REVISION verdict before a human rules. "
+            "Promoted off a module-scope os.getenv read (#3087). Env: "
+            "FEATURES__MAX_CRITIQUE_CYCLES."
+        ),
+    )
 
 
 class SessionRunnerSettings(BaseModel):

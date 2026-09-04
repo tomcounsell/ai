@@ -25,6 +25,8 @@ Usage:
 import logging
 import os
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 # Maximum number of PATCH -> TEST cycles before escalating to human.
@@ -37,7 +39,9 @@ MAX_PATCH_CYCLES = 3
 # NEEDS REVISION verdict before a human rules. Counted by
 # `_revision_round_count` (tools/sdlc_verdict.py) since #2885's fix — the
 # 2026-09-02 batch showed lanes running 9+ rounds with this cap inert.
-MAX_CRITIQUE_CYCLES = int(os.getenv("MAX_CRITIQUE_CYCLES", "2"))
+# Overridable via FEATURES__MAX_CRITIQUE_CYCLES (settings read, not a
+# module-scope env read — the #2866 census ratchet counts those).
+MAX_CRITIQUE_CYCLES = int(settings.features.max_critique_cycles)
 
 # Maximum number of READY TO BUILD (with concerns) rounds before the concern-closing
 # revision is built on rather than re-critiqued (#2787). Counts *with-concerns rounds
