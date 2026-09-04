@@ -1084,13 +1084,21 @@ class TestMarkerRefusalReportsWhatPersisted:
 def test_no_module_in_tools_or_agent_claims_state_not_persisted():
     """#2740 AC3 / the Verification anti-criterion, as a test rather than a
     one-off grep: the overclaiming sentence is gone from all FOUR sites --
-    three inside `write_marker` plus `main()`'s non-zero-exit wrapper."""
+    three inside `write_marker` plus `main()`'s non-zero-exit wrapper.
+
+    Scoped to TRACKED files via `git grep` (#2807): the assertion is about
+    the source tree, so build artifacts must not count -- a stale pre-fix
+    `.pyc` under `__pycache__` embeds the string literal and made the old
+    `grep -r` fail a clean checkout. `git grep` also pins the tool to the
+    repo's own index instead of whatever `grep` PATH resolves to (ugrep
+    honors .gitignore; /usr/bin/grep does not), and shares the old exit
+    contract: 1 means no match."""
     import pathlib
     import subprocess
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     hits = subprocess.run(
-        ["grep", "-rn", "State NOT persisted", "tools/", "agent/"],
+        ["git", "grep", "-In", "State NOT persisted", "--", "tools", "agent"],
         cwd=repo_root,
         capture_output=True,
         text=True,
