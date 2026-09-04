@@ -7,6 +7,7 @@ import ast
 import json
 import pathlib
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,17 @@ from agent.steering import (
     pop_steering_message,
     push_steering_message,
 )
+
+# Per-process unique suffix (#2707): steering keys are freeform Redis lists, so two
+# pytest processes that ever share a db must never compute byte-identical key names
+# from these tests. _uid() is deterministic within a process, unique across them.
+_UNIQ = uuid.uuid4().hex[:8]
+
+
+def _uid(purpose: str) -> str:
+    """Session/room id unique per test run, still greppable by purpose."""
+    return f"{purpose}_{_UNIQ}"
+
 
 _BRIDGE_SRC = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
 
@@ -124,7 +136,7 @@ class TestSteeringQueue:
     """Tests for push/pop/clear operations on the steering Redis queue."""
 
     def test_push_and_pop_single_message(self):
-        session_id = "test_session_001"
+        session_id = _uid("test_session_001")
         push_steering_message(session_id, "focus on OAuth", "Tom")
 
         msg = pop_steering_message(session_id)
@@ -138,7 +150,7 @@ class TestSteeringQueue:
         assert pop_steering_message(session_id) is None
 
     def test_push_and_pop_fifo_order(self):
-        session_id = "test_session_fifo"
+        session_id = _uid("test_session_fifo")
         push_steering_message(session_id, "first", "Tom")
         push_steering_message(session_id, "second", "Tom")
         push_steering_message(session_id, "third", "Tom")
@@ -153,7 +165,7 @@ class TestSteeringQueue:
         assert pop_steering_message(session_id) is None
 
     def test_pop_all_drains_queue(self):
-        session_id = "test_session_popall"
+        session_id = _uid("test_session_popall")
         push_steering_message(session_id, "msg1", "Tom")
         push_steering_message(session_id, "msg2", "Tom")
         push_steering_message(session_id, "msg3", "Tom")
@@ -168,7 +180,7 @@ class TestSteeringQueue:
         assert pop_all_steering_messages(session_id) == []
 
     def test_pop_all_empty_queue(self):
-        assert pop_all_steering_messages("nonexistent_session") == []
+        assert pop_all_steering_messages(_uid("nonexistent_session")) == []
 
     def test_concurrent_drainers_split_disjointly(self):
         """Two concurrent drainers of one session_id partition the queue with no loss/dup.
@@ -182,7 +194,7 @@ class TestSteeringQueue:
         """
         import threading
 
-        session_id = "test_concurrent_drainers"
+        session_id = _uid("test_concurrent_drainers")
         n = 200
         for i in range(n):
             push_steering_message(session_id, f"msg-{i}", "Tom")
@@ -209,7 +221,7 @@ class TestSteeringQueue:
         assert pop_all_steering_messages(session_id) == []
 
     def test_clear_steering_queue(self):
-        session_id = "test_session_clear"
+        session_id = _uid("test_session_clear")
         push_steering_message(session_id, "msg1", "Tom")
         push_steering_message(session_id, "msg2", "Tom")
 
@@ -218,11 +230,11 @@ class TestSteeringQueue:
         assert pop_steering_message(session_id) is None
 
     def test_clear_empty_queue(self):
-        count = clear_steering_queue("nonexistent_session")
+        count = clear_steering_queue(_uid("nonexistent_session"))
         assert count == 0
 
     def test_has_steering_messages(self):
-        session_id = "test_session_has"
+        session_id = _uid("test_session_has")
         assert has_steering_messages(session_id) is False
 
         push_steering_message(session_id, "hello", "Tom")
@@ -232,7 +244,7 @@ class TestSteeringQueue:
         assert has_steering_messages(session_id) is False
 
     def test_explicit_abort_flag(self):
-        session_id = "test_session_abort_explicit"
+        session_id = _uid("test_session_abort_explicit")
         push_steering_message(session_id, "stop everything", "Tom", is_abort=True)
 
         msg = pop_steering_message(session_id)
@@ -241,45 +253,45 @@ class TestSteeringQueue:
 
     @pytest.mark.parametrize("keyword", sorted(ABORT_KEYWORDS))
     def test_auto_detect_abort_keywords(self, keyword):
-        session_id = f"test_session_abort_{keyword}"
+        session_id = _uid(f"test_session_abort_{keyword}")
         push_steering_message(session_id, keyword, "Tom")
 
         msg = pop_steering_message(session_id)
         assert msg["is_abort"] is True
 
     def test_non_abort_message(self):
-        session_id = "test_session_noabort"
+        session_id = _uid("test_session_noabort")
         push_steering_message(session_id, "focus on the login page", "Tom")
 
         msg = pop_steering_message(session_id)
         assert msg["is_abort"] is False
 
     def test_abort_keyword_case_insensitive(self):
-        session_id = "test_session_abort_case"
+        session_id = _uid("test_session_abort_case")
         push_steering_message(session_id, "STOP", "Tom")
 
         msg = pop_steering_message(session_id)
         assert msg["is_abort"] is True
 
     def test_abort_keyword_with_whitespace(self):
-        session_id = "test_session_abort_ws"
+        session_id = _uid("test_session_abort_ws")
         push_steering_message(session_id, "  cancel  ", "Tom")
 
         msg = pop_steering_message(session_id)
         assert msg["is_abort"] is True
 
     def test_isolation_between_sessions(self):
-        push_steering_message("session_a", "msg for a", "Tom")
-        push_steering_message("session_b", "msg for b", "Tom")
+        push_steering_message(_uid("session_a"), "msg for a", "Tom")
+        push_steering_message(_uid("session_b"), "msg for b", "Tom")
 
-        msg_a = pop_steering_message("session_a")
-        msg_b = pop_steering_message("session_b")
+        msg_a = pop_steering_message(_uid("session_a"))
+        msg_b = pop_steering_message(_uid("session_b"))
 
         assert msg_a["text"] == "msg for a"
         assert msg_b["text"] == "msg for b"
 
     def test_timestamp_is_recent(self):
-        session_id = "test_session_ts"
+        session_id = _uid("test_session_ts")
         before = time.time()
         push_steering_message(session_id, "test", "Tom")
         after = time.time()
@@ -314,7 +326,7 @@ class TestBridgeSteeringCheck:
         """Steering check should find sessions in 'running' status."""
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_running"
+        session_id = _uid("test_bridge_running")
         self._create_session(session_id, "running")
 
         # Replicate the bridge steering check logic
@@ -332,7 +344,7 @@ class TestBridgeSteeringCheck:
         """Steering check should find sessions in 'active' status."""
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_active"
+        session_id = _uid("test_bridge_active")
         self._create_session(session_id, "active")
 
         matching_session = None
@@ -349,7 +361,7 @@ class TestBridgeSteeringCheck:
         """When both running and active sessions exist, running wins."""
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_prefer_running"
+        session_id = _uid("test_bridge_prefer_running")
         # Create both -- running should be found first
         self._create_session(session_id, "running")
         self._create_session(session_id, "active")
@@ -368,7 +380,7 @@ class TestBridgeSteeringCheck:
         """Steering check should NOT match sessions in 'pending' status."""
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_pending"
+        session_id = _uid("test_bridge_pending")
         self._create_session(session_id, "pending")
 
         matching_session = None
@@ -387,7 +399,7 @@ class TestBridgeSteeringCheck:
         """
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_completed"
+        session_id = _uid("test_bridge_completed")
         self._create_session(session_id, "completed")
 
         matching_session = None
@@ -418,7 +430,7 @@ class TestBridgeSteeringCheck:
         """Steering check should detect pending sessions for logging."""
         from models.agent_session import AgentSession
 
-        session_id = "test_bridge_race_window"
+        session_id = _uid("test_bridge_race_window")
         self._create_session(session_id, "pending")
 
         # First, the main check should find nothing
@@ -438,7 +450,7 @@ class TestBridgeSteeringCheck:
 
     def test_steering_push_only_after_session_match(self):
         """push_steering_message should only be called after session match."""
-        session_id = "test_bridge_push_guard"
+        session_id = _uid("test_bridge_push_guard")
         self._create_session(session_id, "running")
 
         from models.agent_session import AgentSession
@@ -520,7 +532,7 @@ class TestPendingSessionSteering:
         """A pending session within 7s should accept steering messages."""
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
 
-        session_id = "test_pending_steer_recent"
+        session_id = _uid("test_pending_steer_recent")
         self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC))
 
         # Simulate the bridge logic: check age and push steering
@@ -548,7 +560,7 @@ class TestPendingSessionSteering:
         """A pending session older than 7s should NOT be steered into."""
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
 
-        session_id = "test_pending_steer_old"
+        session_id = _uid("test_pending_steer_old")
         # Create with timestamp 10s in the past
         self._create_session(
             session_id,
@@ -579,7 +591,7 @@ class TestPendingSessionSteering:
 
     def test_multiple_steering_messages_into_pending(self):
         """Multiple follow-up messages should all queue into a pending session."""
-        session_id = "test_pending_multi_steer"
+        session_id = _uid("test_pending_multi_steer")
         self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC))
 
         push_steering_message(session_id, "first follow-up", "Tom")
@@ -597,8 +609,8 @@ class TestPendingSessionSteering:
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
         from models.agent_session import AgentSession
 
-        chat_id = "test_intake_pending_chat"
-        session_id = "test_intake_pending_session"
+        chat_id = _uid("test_intake_pending_chat")
+        session_id = _uid("test_intake_pending_session")
         self._create_session(
             session_id, "pending", chat_id=chat_id, created_at=datetime.now(tz=UTC)
         )
@@ -631,8 +643,8 @@ class TestPendingSessionSteering:
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
         from models.agent_session import AgentSession
 
-        chat_id = "test_intake_old_pending_chat"
-        session_id = "test_intake_old_pending_session"
+        chat_id = _uid("test_intake_old_pending_chat")
+        session_id = _uid("test_intake_old_pending_session")
         self._create_session(
             session_id,
             "pending",
@@ -688,7 +700,7 @@ class TestWatchdogSteering:
         """
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_abort"
+        session_id = _uid("test_watchdog_abort")
         push_steering_message(session_id, "stop", "Tom", is_abort=True)
 
         result = await _handle_steering(session_id)
@@ -707,7 +719,7 @@ class TestWatchdogSteering:
         path now that the SDK-client injection arm is gone)."""
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_repush"
+        session_id = _uid("test_watchdog_repush")
         push_steering_message(session_id, "focus on OAuth", "Tom")
 
         result = await _handle_steering(session_id)
@@ -725,7 +737,7 @@ class TestWatchdogSteering:
         regardless of whether the session record exists in the DB."""
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_repush_multi"
+        session_id = _uid("test_watchdog_repush_multi")
         push_steering_message(session_id, "first", "Tom")
         push_steering_message(session_id, "second", "Tom")
 
@@ -744,7 +756,7 @@ class TestWatchdogSteering:
         import agent.health_check as hc
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_repush_retry"
+        session_id = _uid("test_watchdog_repush_retry")
         push_steering_message(session_id, "update the tests", "Tom")
 
         real_repush = hc._repush_messages
@@ -1006,7 +1018,7 @@ class TestResolveRootSessionId:
 
         # Create a completed session with context_summary
         session = AgentSession(
-            session_id="test_completed_resume_helper_ctx",
+            session_id=_uid("test_completed_resume_helper_ctx"),
             project_key="test",
             status="completed",
             message_text="original task",
@@ -1029,7 +1041,7 @@ class TestResolveRootSessionId:
 
         # --- Test fallback when context_summary is None ---
         session_no_summary = AgentSession(
-            session_id="test_completed_resume_helper_no_ctx",
+            session_id=_uid("test_completed_resume_helper_no_ctx"),
             project_key="test",
             status="completed",
             message_text="done",
@@ -1083,7 +1095,7 @@ class TestResolveRootSessionId:
         from models.agent_session import AgentSession
 
         session = AgentSession(
-            session_id="test_fallback_reply_chain_949",
+            session_id=_uid("test_fallback_reply_chain_949"),
             project_key="test",
             status="completed",
             message_text="errored out",
@@ -1123,7 +1135,7 @@ class TestResolveRootSessionId:
         from models.agent_session import AgentSession
 
         session = AgentSession(
-            session_id="test_resume_carries_chain",
+            session_id=_uid("test_resume_carries_chain"),
             project_key="test",
             status="completed",
             message_text="",
@@ -1478,7 +1490,7 @@ class TestResolveRootSessionId:
             from models.agent_session import AgentSession
 
             session = AgentSession(
-                session_id="test_fetch_fail_fallback_resume",
+                session_id=_uid("test_fetch_fail_fallback_resume"),
                 project_key="test",
                 status="completed",
                 message_text="prior",
@@ -1711,7 +1723,7 @@ class TestRoomDualRead:
         )
 
     def test_pop_all_drains_legacy_then_room(self):
-        session_id = "test_dualread_order"
+        session_id = _uid("test_dualread_order")
         push_steering_message(session_id, "legacy-1", "Tom")
         self._push_room(self.ROOM_ID, "room-1")
 
@@ -1720,7 +1732,7 @@ class TestRoomDualRead:
         assert pop_all_steering_messages(session_id, room_id=self.ROOM_ID) == []
 
     def test_pop_all_without_room_id_is_legacy_only(self):
-        session_id = "test_dualread_legacy_only"
+        session_id = _uid("test_dualread_legacy_only")
         push_steering_message(session_id, "legacy-only", "Tom")
         self._push_room(self.ROOM_ID + "-b", "room-untouched")
 
@@ -1731,7 +1743,7 @@ class TestRoomDualRead:
         assert [m["text"] for m in msgs] == ["room-untouched"]
 
     def test_has_and_peek_see_the_room_leg(self):
-        session_id = "test_dualread_haspeek"
+        session_id = _uid("test_dualread_haspeek")
         assert has_steering_messages(session_id, room_id=self.ROOM_ID + "-c") is False
         self._push_room(self.ROOM_ID + "-c", "room-only")
         assert has_steering_messages(session_id) is False  # legacy leg empty
@@ -1747,7 +1759,7 @@ class TestRoomDualRead:
         clear_steering_queue(session_id, room_id=self.ROOM_ID + "-c")
 
     def test_clear_clears_both_legs(self):
-        session_id = "test_dualread_clear"
+        session_id = _uid("test_dualread_clear")
         push_steering_message(session_id, "legacy", "Tom")
         self._push_room(self.ROOM_ID + "-d", "room")
         cleared = clear_steering_queue(session_id, room_id=self.ROOM_ID + "-d")
@@ -1765,7 +1777,7 @@ class TestRoomDualRead:
         """
         from agent.health_check import _handle_steering
 
-        session_id = "test_dualread_hook"
+        session_id = _uid("test_dualread_hook")
         self._push_room(self.ROOM_ID + "-e", "room-steer")
 
         result = await _handle_steering(session_id, room_id=self.ROOM_ID + "-e")
@@ -1786,7 +1798,7 @@ class TestAbortSiblingPreservation:
     async def test_abort_repushes_non_abort_siblings(self):
         from agent.health_check import _handle_steering
 
-        session_id = "test_abort_siblings"
+        session_id = _uid("test_abort_siblings")
         push_steering_message(session_id, "do X first", "Tom")
         push_steering_message(session_id, "stop", "Tom")  # auto-detected abort
         push_steering_message(session_id, "then do Y", "Tom")
@@ -1811,8 +1823,8 @@ class TestAbortSiblingPreservation:
         from agent.health_check import _handle_steering
         from agent.steering import _room_queue_key
 
-        session_id = "test_abort_siblings_room"
-        room = "test-proj|telegram:4343"
+        session_id = _uid("test_abort_siblings_room")
+        room = f"test-proj-{_UNIQ}|telegram:4343"
         self_push = _get_redis().rpush
         self_push(
             _room_queue_key(room),
@@ -1838,7 +1850,7 @@ class TestAbortSiblingPreservation:
     async def test_abort_alone_leaves_queue_empty(self):
         from agent.health_check import _handle_steering
 
-        session_id = "test_abort_alone"
+        session_id = _uid("test_abort_alone")
         push_steering_message(session_id, "stop", "Tom")
 
         result = await _handle_steering(session_id)
@@ -1858,8 +1870,8 @@ class TestAbortSiblingPreservation:
 # and the Room leg is age-bounded by time since origination.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TEST_PROJECT = "test-room-durability"
-ROOM = "test-proj|telegram:9001"
+TEST_PROJECT = f"test-room-durability-{_UNIQ}"
+ROOM = f"test-proj-{_UNIQ}|telegram:9001"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -2018,7 +2030,7 @@ def test_superseded_row_derives_the_live_session_room():
     from models.agent_session import AgentSession
     from models.room import room_id_for_session
 
-    session_id = "test_superseded_room"
+    session_id = _uid("test_superseded_room")
     rows = []
     try:
         old = AgentSession()
@@ -2081,7 +2093,7 @@ def test_created_at_sort_key_is_total():
 
 class TestKeySelection:
     def test_room_id_targets_the_room_key(self):
-        session_id = "test_keysel_room"
+        session_id = _uid("test_keysel_room")
         push_steering_message(session_id, "hello", "Tom", room_id=ROOM)
         assert _texts(_room_queue_key(ROOM)) == ["hello"]
         assert _texts(_queue_key(session_id)) == []
@@ -2096,7 +2108,7 @@ class TestKeySelection:
         """The issue's explicit criterion: no project_key → legacy key."""
         from models.room import room_id_for_session
 
-        row = _Row(project_key=None, session_id="test_keysel_noproject")
+        row = _Row(project_key=None, session_id=_uid("test_keysel_noproject"))
         assert room_id_for_session(row) is None
         push_steering_message(row.session_id, "hello", "Tom", room_id=room_id_for_session(row))
         assert _texts(_queue_key(row.session_id)) == ["hello"]
@@ -2108,7 +2120,7 @@ class TestKeySelection:
         assert _texts(_queue_key("")) == []
 
     def test_payload_shape_is_unchanged(self):
-        session_id = "test_keysel_payload"
+        session_id = _uid("test_keysel_payload")
         push_steering_message(session_id, "hi", "Tom", room_id=ROOM + "-shape")
         (entry,) = _raw(_room_queue_key(ROOM + "-shape"))
         assert set(entry) == {"text", "sender", "timestamp", "is_abort"}
@@ -2118,7 +2130,7 @@ class TestKeySelection:
         assert set(entry) == {"text", "sender", "timestamp", "is_abort", "target_agent"}
 
     def test_originating_push_stamps_now(self):
-        session_id = "test_keysel_stamp"
+        session_id = _uid("test_keysel_stamp")
         before = time.time()
         push_steering_message(session_id, "hi", "Tom")
         (entry,) = _raw(_queue_key(session_id))
@@ -2130,7 +2142,7 @@ class TestKeySelection:
 
 class TestAbortRouting:
     def test_abort_routing_explicit_flag_stays_legacy(self):
-        session_id = "test_abort_routing_explicit"
+        session_id = _uid("test_abort_routing_explicit")
         push_steering_message(session_id, "wind it down", "Tom", is_abort=True, room_id=ROOM + "-x")
         assert _texts(_queue_key(session_id)) == ["wind it down"]
         assert _texts(_room_queue_key(ROOM + "-x")) == []
@@ -2151,7 +2163,7 @@ class TestAbortRouting:
 
     def test_abort_keyword_prefix_still_targets_the_room(self):
         """Only a bare keyword is an abort — a sentence starting with one is not."""
-        session_id = "test_abort_keyword_prefix"
+        session_id = _uid("test_abort_keyword_prefix")
         push_steering_message(session_id, "stop the deploy", "Tom", room_id=ROOM + "-prefix")
         assert _texts(_room_queue_key(ROOM + "-prefix")) == ["stop the deploy"]
         assert _texts(_queue_key(session_id)) == []
@@ -2162,7 +2174,7 @@ class TestAbortRouting:
 
 class TestRoomAgeBound:
     def test_stale_room_entry_dropped_fresh_kept(self):
-        session_id = "test_age_drop"
+        session_id = _uid("test_age_drop")
         room = ROOM + "-age"
         _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
         _push_raw(_room_queue_key(room), "fresh")
@@ -2173,14 +2185,14 @@ class TestRoomAgeBound:
 
     def test_stale_legacy_entry_is_not_dropped(self):
         """The legacy leg is never filtered — today's behavior is preserved bit for bit."""
-        session_id = "test_age_legacy"
+        session_id = _uid("test_age_legacy")
         _push_raw(_queue_key(session_id), "ancient", timestamp=time.time() - 10_000_000)
         drained = pop_all_steering_messages(session_id, room_id=ROOM + "-agelegacy")
         assert [m["text"] for m in drained] == ["ancient"]
 
     def test_peek_skips_stale_room_entry_without_deleting(self):
         """``valor-session status`` must not advertise what the next drain discards."""
-        session_id = "test_age_peek"
+        session_id = _uid("test_age_peek")
         room = ROOM + "-agepeek"
         _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
         _push_raw(_room_queue_key(room), "fresh")
@@ -2194,7 +2206,7 @@ class TestRoomAgeBound:
     @pytest.mark.parametrize("stamp", [None, "not-a-number"])
     def test_undatable_room_entry_is_kept(self, stamp):
         """Fail open: dropping an entry we cannot date would delete steers silently."""
-        session_id = "test_age_malformed"
+        session_id = _uid("test_age_malformed")
         room = f"{ROOM}-malformed-{stamp}"
         payload = {"text": "keep me", "sender": "Tom", "is_abort": False}
         if stamp is not None:
@@ -2218,7 +2230,7 @@ class TestRoomAgeBound:
 
 class TestLegPreservation:
     def test_pop_all_stamps_the_source_leg(self):
-        session_id = "test_leg_stamp"
+        session_id = _uid("test_leg_stamp")
         room = ROOM + "-stamp"
         push_steering_message(session_id, "from-legacy", "Tom")
         _push_raw(_room_queue_key(room), "from-room")
@@ -2233,7 +2245,7 @@ class TestLegPreservation:
         """Anti-laundering: a diagnostic written to legacy never reaches the Room."""
         from agent.health_check import _repush_messages
 
-        session_id = "test_leg_repush_legacy"
+        session_id = _uid("test_leg_repush_legacy")
         room = ROOM + "-repushlegacy"
         _repush_messages(
             session_id,
@@ -2246,7 +2258,7 @@ class TestLegPreservation:
     def test_repush_returns_a_room_sourced_message_to_the_room(self):
         from agent.health_check import _repush_messages
 
-        session_id = "test_leg_repush_room"
+        session_id = _uid("test_leg_repush_room")
         room = ROOM + "-repushroom"
         _repush_messages(
             session_id,
@@ -2260,7 +2272,7 @@ class TestLegPreservation:
         """Absent ``_leg`` → legacy, the same fail-safe as absent ``room_id``."""
         from agent.health_check import _repush_messages
 
-        session_id = "test_leg_repush_untagged"
+        session_id = _uid("test_leg_repush_untagged")
         room = ROOM + "-repushuntagged"
         _repush_messages(session_id, [{"text": "hand built", "sender": "Tom"}], room_id=room)
         assert _texts(_queue_key(session_id)) == ["hand built"]
@@ -2292,7 +2304,7 @@ class TestLegPreservation:
         """``_leg`` is a transient reader stamp — it must never reach Redis."""
         from agent.health_check import _repush_messages
 
-        session_id = "test_leg_not_persisted"
+        session_id = _uid("test_leg_not_persisted")
         room = ROOM + "-notpersisted"
         _repush_messages(
             session_id,
@@ -2304,7 +2316,7 @@ class TestLegPreservation:
 
     def test_runner_requeue_carries_target_agent(self):
         """The runner used to strip ``target_agent`` on requeue — it must not."""
-        row = _Row(chat_id="777000222", session_id="test_leg_target_agent")
+        row = _Row(chat_id="777000222", session_id=_uid("test_leg_target_agent"))
         from models.room import room_id_for_session
 
         room = room_id_for_session(row)
@@ -2323,7 +2335,7 @@ class TestOriginationAge:
     def test_timestamp_preserved_by_repush(self):
         from agent.health_check import _repush_messages
 
-        session_id = "test_origination_age_repush"
+        session_id = _uid("test_origination_age_repush")
         stamp = time.time() - 500
         _repush_messages(
             session_id,
@@ -2333,7 +2345,7 @@ class TestOriginationAge:
         assert entry["timestamp"] == pytest.approx(stamp)
 
     def test_timestamp_preserved_by_runner_push(self):
-        row = _Row(chat_id="777000333", session_id="test_timestamp_preserved_runner")
+        row = _Row(chat_id="777000333", session_id=_uid("test_timestamp_preserved_runner"))
         stamp = time.time() - 900
         _bare_runner(row)._default_steering_push(
             {"text": "do X", "sender": "Tom", "timestamp": stamp}
@@ -2350,7 +2362,7 @@ class TestOriginationAge:
         """
         from agent.health_check import _repush_messages
 
-        session_id = "test_origination_age_cycle"
+        session_id = _uid("test_origination_age_cycle")
         room = ROOM + "-cycle"
         _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
 
@@ -2371,7 +2383,7 @@ class TestOriginationAge:
     def test_requeue_of_an_undated_message_does_not_raise(self):
         from agent.health_check import _repush_messages
 
-        session_id = "test_origination_age_undated"
+        session_id = _uid("test_origination_age_undated")
         _repush_messages(session_id, [{"text": "do X", "sender": "Tom"}])
         (entry,) = _raw(_queue_key(session_id))
         assert isinstance(entry["timestamp"], float)
@@ -2386,7 +2398,7 @@ class TestHandleSteeringRepushPaths:
         """The abort itself dies with the session; siblings go back where they were."""
         from agent.health_check import _handle_steering
 
-        session_id = "test_hook_abort_siblings"
+        session_id = _uid("test_hook_abort_siblings")
         room = ROOM + "-hookabort"
         push_steering_message(session_id, "diagnostic", "watchdog")  # legacy-sourced
         push_steering_message(session_id, "stop", "Tom")  # auto-detected abort
@@ -2403,7 +2415,7 @@ class TestHandleSteeringRepushPaths:
         """The retries live inside ``except`` blocks — a missed keyword there is silent."""
         import agent.health_check as hc
 
-        session_id = "test_hook_retry"
+        session_id = _uid("test_hook_retry")
         room = ROOM + "-hookretry"
         _push_raw(_room_queue_key(room), "room instruction")
 
@@ -2426,7 +2438,7 @@ class TestHandleSteeringRepushPaths:
     async def test_abort_sibling_retry_path_still_forwards_the_room(self, monkeypatch):
         import agent.health_check as hc
 
-        session_id = "test_hook_abort_retry"
+        session_id = _uid("test_hook_abort_retry")
         room = ROOM + "-hookabortretry"
         _push_raw(_room_queue_key(room), "room instruction")
         push_steering_message(session_id, "stop", "Tom")
@@ -2454,7 +2466,7 @@ class TestLegacyByRuleWriters:
     def test_watchdog_loop_break_steer_stays_legacy(self):
         from monitoring.session_watchdog import _inject_watchdog_steer
 
-        session_id = "test_legacy_watchdog"
+        session_id = _uid("test_legacy_watchdog")
         assert _inject_watchdog_steer(session_id, "Read", "repeated tool") is True
         assert len(_raw(_queue_key(session_id))) == 1
 
