@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
-last_comment_id: none
+last_comment_id: 5220047921
 ---
 
 # Telegram Forum-Topic Awareness
