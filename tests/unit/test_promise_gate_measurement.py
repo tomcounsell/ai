@@ -261,3 +261,21 @@ class TestFindContradictionsNegationGuard:
         flags = find_contradictions(entries)
 
         assert len(flags) == 1, f"expected a contradiction flag for: {evidence}"
+
+    @pytest.mark.parametrize(
+        "evidence",
+        [
+            "delivered clean, no failures",
+            "shipped with zero failures",
+            "merged without failures",
+        ],
+    )
+    def test_delivered_leg_absence_prefix_is_not_a_contradiction(self, evidence):
+        """Asserting the ABSENCE of a bad outcome ("no failures") is good
+        news, the same shape as "did not hit any blockers" reached from the
+        other side of the keyword. Without this, "failure" being a keyword
+        while "problem" is not made the list asymmetric: "no failures"
+        flagged and "no problems" did not."""
+        entries = [{"item": "release", "disposition": "delivered", "evidence": evidence}]
+
+        assert find_contradictions(entries) == []
