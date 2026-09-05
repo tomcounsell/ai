@@ -484,15 +484,83 @@ No new tests are added. `TestScorePurity`'s surviving two tests are the regressi
 
 ## Rabbit Holes
 
-_placeholder_
+- **Consolidating every naive guard in the repo onto `utils.utc.to_unix_ts`.** Seven other modules
+  carry the same one-liner. Tempting to sweep them all while the context is loaded. Don't — each has
+  its own inbound sources to audit, and the audit is the work. File a follow-up instead.
+- **Rewriting `_ts` to raise on a naive value.** The robustness-principle literature argues silent
+  coercion hides producer bugs, and a `raise` would be the principled endpoint. It is also a behavior
+  change on a hot health-check path, in a chore whose premise is "remove dead code". Out of scope.
+- **Deleting `renormalize_last_active_scores` because its only remaining caller is a completed
+  migration.** The repo's rule is that an applied migration stays in the registry; deleting its
+  implementation breaks a fresh machine's `/update`. The issue's Downstream constraints say so
+  explicitly.
+- **Auditing `agent/session_health.py` end to end.** It is ~6500 lines and every read of it surfaces
+  something. This plan touches six two-line sites, named by symbol. Resist widening.
+- **Re-deriving popoto's contract from the GitHub CHANGELOG.** The installed artifact in
+  `.venv/lib/python3.14/site-packages/popoto/` is what runs. Read that, and `~/src/popoto` only to
+  cross-check. The CHANGELOG's 1.9.0 entry sits under `[Unreleased]` in the local checkout, which
+  reads as "not shipped" and is misleading.
+- **Chasing the `POPOTO_DATETIME_KEY_LEGACY` kill switch.** It is unset, and per spike-1 the score is
+  pure even when it is on. Note it in Risks and move on.
 
 ## Risks
 
-_placeholder_
+### Risk 1: A future popoto downgrade below 1.8.2 re-introduces the skew with the compensation gone
+
+**Likelihood: low. Impact: high** — `Job.recent_for_room` trusts scores, so a skewed index buries
+recently-active Jobs and the bind-or-mint hot path mints duplicates.
+
+**Mitigation, already shipped:** `docs/features/popoto-version-floor-guard.md` is a fail-closed
+interlock that refuses to rebuild indexes when the running interpreter's popoto is below the floor in
+`pyproject.toml`. The floor is `>=1.9.0`. A downgrade cannot silently rebuild. No new guard is added
+by this plan; the build should re-read that doc and confirm the interlock reads the floor from
+`pyproject.toml` rather than a hardcoded version.
+
+### Risk 2: `POPOTO_DATETIME_KEY_LEGACY` is set on some machine, restoring naive decoding
+
+**Likelihood: very low. Impact: negligible.** `git grep` finds no reference in this repo. Even if set,
+spike-1 shows `convert_to_numeric` normalizes naive → UTC inside the score function, so scores stay
+pure; only in-memory comparisons of a legacy row against an aware `now` would raise `TypeError`, which
+is popoto's documented and intended consequence.
+
+### Risk 3: The `test_renormalize_..._backfill_still_runs` rework produces a weaker test
+
+**Likelihood: medium. Impact: medium.** The lazy path is to delete half two outright and lose the
+only assertion that `repair_indexes` reaches its final step. The Test Impact entry calls for
+re-anchoring, not deleting, and the Failure Path mutation table names the mutation that proves it
+(delete `cls.backfill_open_expectations_index()`, expect red).
+
+### Risk 4: A line-number-driven edit hits the wrong code in `agent/session_health.py`
+
+**Likelihood: medium. Impact: low** (caught by tests, but wastes a review round). The file is ~6500
+lines and this plan cites six line numbers. **Locate each site by its local variable name and
+enclosing function, not by line number**, and re-derive at the head the build actually starts from.
+
+### Risk 5: `models/job.py` imports go unused after the override is deleted
+
+**Likelihood: low. Impact: trivial** (ruff catches it). `UTC` and `datetime` are both still used by
+`_now()` at line 78, so neither import should be removed. Named here because "delete the override,
+delete its imports" is the reflexive move and it is wrong.
 
 ## Race Conditions
 
-_placeholder_
+No new concurrency. The change removes writes rather than adding them, and every removal narrows an
+existing window.
+
+- **`repair_indexes` is already lock-guarded** (`cls._repair_lock`, released in a `finally`). Removing
+  a call from inside the critical section shortens the time the lock is held. The lock's acquisition
+  and release are untouched.
+- **The sweep's own concurrent-write hazard disappears from the repair path.**
+  `renormalize_last_active_scores` repairs a row with a fresh re-read plus
+  `save(update_fields=["last_active_at"])` specifically so a concurrent expectation write is not
+  clobbered. Running it at every worker start means that clobber-proof-but-still-racy write happens on
+  every start; after this change it happens only during the one-shot migration. Strictly fewer writes
+  racing with live traffic.
+- **`Job.save()` removal changes no write ordering.** The override mutated an in-memory attribute
+  before delegating; it held no lock and issued no Redis command of its own.
+- **Fleet-wide staging is a non-issue.** Machines share one Redis. A machine still running the old
+  code sweeps scores that are already correct and repairs zero rows; a machine on the new code skips
+  the sweep. Both write the same scores. No ordering constraint between deploys.
 
 ## No-Gos (Out of Scope)
 
