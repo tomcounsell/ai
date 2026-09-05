@@ -470,62 +470,56 @@ The lead agent orchestrates and never builds directly.
 
 - **Builder (guard)**
   - Name: `guard-builder`
-  - Role: the wipe-refusal guard and the ref-slug fix inside `preserve_uncommitted_worktree_changes`, plus the two `PerformanceSettings` fields
+  - Role: the wipe check, the additive-only preserve branch, the enriched refusal record, and the ref-slug fix — all inside `preserve_uncommitted_worktree_changes`
   - Agent Type: builder
-  - Domain: concurrency (paste the async/concurrency rules from `DOMAIN_FRAMING.md` — the guard operates on a directory another process may be actively deleting)
+  - Domain: concurrency (paste the async/concurrency rules from `DOMAIN_FRAMING.md` — this code operates on a directory another process may be actively deleting)
   - Resume: true
 
 - **Test engineer (regression)**
   - Name: `wipe-test-engineer`
-  - Role: the eight new tests in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`, including the fixture worktree whose tracked files are deleted on disk
+  - Role: the nine new tests in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`, including the `_gut` fixture helper and the mixed-shape fixture
   - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
   - Name: `guard-validator`
-  - Role: verifies the guard cannot be bypassed, that the index is untouched on refusal, and that every pre-existing test in the file still passes unmodified except the one flagged UPDATE
+  - Role: verifies the check cannot be bypassed, that the index is untouched on a pure wipe, that the additive commit carries zero deletions, and that every pre-existing test in `tests/unit/worktree_manager/` still passes unmodified except the one flagged UPDATE
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `session-isolation-doc`
-  - Role: `docs/features/session-isolation.md` and the docstring rewrite
+  - Role: `docs/features/session-isolation.md` (including the `refs/stash` correction) and the docstring rewrite
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Add the two provisional tunables to settings
+**Cite by symbol, not by line.** Every line number in this module has now drifted twice (once between the issue and the first plan draft, once between that draft and this revision, via `55ad9ac89`). Locate `preserve_uncommitted_worktree_changes` by name; the anchors in **Freshness Check** are for orientation only.
 
-- **Task ID**: build-settings
-- **Depends On**: none
-- **Validates**: `tests/unit/test_settings.py` (if a settings test module exists; otherwise the fields are covered indirectly by the guard tests)
-- **Informed By**: spike-3 (the insertions-ratio predicate is rejected, so no insertion-related field is added)
-- **Assigned To**: guard-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `wipe_refusal_min_deleted_files: int = 50` (ge=1) and `wipe_refusal_deleted_fraction: float = 0.5` (gt=0.0, le=1.0) to `PerformanceSettings` in `config/settings.py`, directly below `max_content_filename_bytes`.
-- Mark both "Provisional/tunable" in their `description`, matching the neighbouring field's idiom, and name the `PERFORMANCE__`-prefixed env keys explicitly.
-- Do NOT add a `model_post_init` flat-name override. The nested `PERFORMANCE__` prefix works natively; the flat-override hack on `max_content_filename_bytes` exists only because that key was already documented under a bare name.
-
-### 2. Implement the wipe-refusal guard
+### 1. Implement the wipe check and the additive-only preserve
 
 - **Task ID**: build-guard
-- **Depends On**: build-settings
+- **Depends On**: none
 - **Validates**: `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` (extended in task 3)
-- **Informed By**: spike-1 (the signal precedes staging), spike-2 (`ls-tree -d HEAD` removes the hardcoded directory list), spike-3 (insertions-ratio rejected), spike-4 (`ls-files --deleted -z` is the NUL-safe primitive)
+- **Informed By**: spike-1 (the signal precedes staging), spike-2 (`ls-tree -d HEAD` removes the hardcoded directory list), spike-3 (insertions-ratio rejected), spike-5 (the additive-only pathspec, and the two mechanical traps in it), spike-6 (read HEAD, not the index)
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Domain**: concurrency
 - **Parallel**: false
-- In `preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1406`), insert the guard **between** the `status --porcelain` non-empty check and `git add -A`. Add a comment stating the ordering constraint and why staging first is unsafe.
-- Structural check: `git -C {worktree_dir} ls-tree --name-only -d HEAD`; refuse with `refused="missing-tracked-dirs"` if any listed name is not a directory on disk. Include the missing names in the error string.
-- Proportional check: `git -C {worktree_dir} ls-files --deleted -z` and `git -C {worktree_dir} ls-files -z`, both split on NUL with empty trailing segments dropped. Refuse with `refused="majority-deleted"` when `deleted >= settings.performance.wipe_refusal_min_deleted_files` **and** `tracked > 0` and `deleted / tracked >= settings.performance.wipe_refusal_deleted_fraction`. Evaluate the floor first so an empty index cannot divide by zero.
-- Refusal returns `{"preserved": False, "was_clean": False, "refused": <reason>, "ref": ref, "errors": [<detail with counts>]}` and logs at ERROR under the tag `[worktree-wip-refused-wipe]` with slug, reason, and counts.
-- Wrap the guard's own git reads in a narrow `try/except` that logs at WARNING under `[worktree-wip-guard-failed]` and falls through to today's behavior. Do not let it swallow errors the outer handler should see.
+- In `preserve_uncommitted_worktree_changes`, insert the check **between** the `status --porcelain` non-empty branch and `git add -A`. Add a comment stating the ordering constraint and why staging first is unsafe.
+- Structural check: `git -C <worktree_dir> ls-tree --name-only -d HEAD`, split on newlines; a listed name that is not a directory on disk in the worktree means a wipe. Collect the missing names sorted.
+- On no missing directory, fall through to today's `git add -A` path unchanged.
+- On a wipe, compute the additive-only pathspec: `git -C <wt> ls-files --modified --others --exclude-standard -z` minus the set from `git -C <wt> ls-files --deleted -z`, both split on NUL with empty trailing segments dropped.
+  - **Empty set** → return `{"preserved": False, "was_clean": False, "refused": "missing-tracked-dirs", "ref": ref, "errors": [<detail>]}` **without staging or committing.** Do not call `git add` with an empty pathspec file: it exits 0 having staged nothing, and the following `git commit` then fails with "nothing to commit" and the outer handler logs a misleading `[worktree-wip-preserve-failed]` (spike-5).
+  - **Non-empty set** → write the NUL-joined paths to a temporary file and run `git -C <wt> add --pathspec-from-file=<tmpfile> --pathspec-file-nul --`, then the existing commit / `rev-parse` / `update-ref` path, returning `preserved: True` alongside the `refused` key.
+- **`git add` has no `-z`.** It is `--pathspec-file-nul`; `-z` exits non-zero with ``error: unknown switch `z` ``. Never use `git add -A` on the wipe path — it restages the deletions the check just declined.
+- Emit the ERROR record under `[worktree-wip-refused-wipe]` with `slug`, `branch`, `head` (from `git -C <wt> rev-parse HEAD`), `missing` (sorted names), `preserved_paths` (count staged), and `deleted_paths` (count from `ls-files --deleted`). Capture all of it before returning — the force-remove that follows destroys the evidence.
+- Wrap the check's own git reads in a narrow `try/except` that logs at WARNING under `[worktree-wip-guard-failed]` and falls through to today's behavior. Do not let it swallow errors the outer handler should see.
 - Add the comment recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions.
+- **Add no settings field and no env key.** The proportional guard and its two tunables were cut in the revision pass; do not reintroduce them.
 
-### 3. Fix the ref-slug / branch mismatch
+### 2. Fix the ref-slug / branch mismatch
 
 - **Task ID**: build-ref-slug
 - **Depends On**: build-guard
@@ -534,48 +528,51 @@ The lead agent orchestrates and never builds directly.
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Resolve the worktree's checked-out branch with `git -C {worktree_dir} rev-parse --abbrev-ref HEAD`. When it matches `session/<name>`, use `<name>` for the `refs/session-wip/` ref; otherwise (detached HEAD, non-session branch, or a failed read) fall back to the `slug` argument as today.
-- Keep the `_validate_slug` guarantee: validate the derived name against `VALID_SLUG_RE` before it reaches a ref path, and fall back if it does not match.
+- Resolve the worktree's checked-out branch with `git -C <worktree_dir> rev-parse --abbrev-ref HEAD`. **Gate on the `session/` prefix**: only when the output matches `session/<name>` use `<name>` for the `refs/session-wip/` ref; otherwise (detached HEAD, non-session branch, or a failed read) fall back to the `slug` argument as today.
+- The `session/` prefix is the load-bearing gate, not `VALID_SLUG_RE`. On a detached HEAD `rev-parse --abbrev-ref HEAD` returns the literal string `HEAD`, which *passes* `VALID_SLUG_RE` (`agent/worktree_manager.py:21`), so a builder implementing the regex leg alone writes `refs/session-wip/HEAD`. Keep the regex as a second gate on the extracted `<name>`, never as the only one.
+- The branch string is also one of the fields in the `[worktree-wip-refused-wipe]` record, so read it once and reuse it.
 - This makes the docstring's `git checkout refs/session-wip/{slug}` recovery instruction true on the `_cleanup_stale_worktree` producer, where today the ref can name a different slug than the branch that received the commit.
 
-### 4. Regression tests
+### 3. Regression tests
 
 - **Task ID**: build-tests
 - **Depends On**: build-guard, build-ref-slug
 - **Validates**: `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`
-- **Informed By**: spike-3 (the untracked-artifacts fixture shape is the one that matters)
+- **Informed By**: spike-5 (the mixed-shape fixture is the one that matters), spike-6 (the partially-staged case)
 - **Assigned To**: wipe-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add a `_gut(wt, *dirs)` fixture helper alongside the existing `_dirty`, deleting the named tracked directories from disk.
-- Write the eight tests enumerated in **Test Impact**, reusing `_init_git_repo` / `_add_linked_worktree` / `_git`.
-- `test_wipe_with_untracked_artifacts_still_refuses` must create untracked files so `git add -A` would report insertions — this is the test that pins spike-3's finding.
-- `test_index_untouched_on_refusal` asserts `git diff --cached --name-only` is empty after a refusal.
-- Update `test_git_failure_returns_error_dict_and_never_raises` if the guard's reads change the error shape; do not weaken its assertions.
+- Write the nine tests enumerated in **Test Impact**, reusing `_init_git_repo` / `_add_linked_worktree` / `_git`.
+- `test_mixed_wipe_preserves_additions_and_drops_deletions` asserts on the commit's diff against its parent: both the edit and the new file present, **zero deletions**, and the removed directory still tracked at the new HEAD.
+- `test_partially_staged_wipe_still_detected` runs `git add -A` before calling preserve.
+- `test_wipe_with_untracked_artifacts_still_refuses_deletions` must create untracked files so `git add -A` would report insertions — this pins spike-3's finding.
+- `test_index_untouched_on_pure_wipe` asserts `git diff --cached --name-only` is empty afterwards.
+- Update `test_git_failure_returns_error_dict_and_never_raises` if the new reads change the error shape; do not weaken its assertions.
 
-### 5. Validate
+### 4. Validate
 
 - **Task ID**: validate-guard
 - **Depends On**: build-tests
 - **Assigned To**: guard-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` and confirm the whole directory is green, not just the new file.
-- **Mutation-check each guard separately**: disable the structural check and confirm `test_missing_tracked_directory_refuses` fails; disable the proportional check and confirm `test_majority_of_tracked_files_deleted_refuses` fails; move the guard to after `git add -A` and confirm `test_index_untouched_on_refusal` fails. A test that stays green under its own guard's removal is not testing it.
+- Run `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` and confirm the whole directory is green, not just the new file. `TestReapIdleWorktree` in `test_worktree_manager_cleanup.py` must stay green untouched — a break there means the change leaked outside its surface.
+- **Mutation-check each assertion separately**: remove the structural check and confirm `test_pure_wipe_writes_no_commit_and_no_ref` fails; replace the additive-only staging with `git add -A` and confirm `test_mixed_wipe_preserves_additions_and_drops_deletions` fails on the zero-deletions assertion; move the check to after `git add -A` and confirm both `test_index_untouched_on_pure_wipe` and `test_partially_staged_wipe_still_detected` fail; drop the `session/` prefix gate and confirm `test_detached_head_falls_back_to_slug_argument` fails. A test that stays green under removal of the thing it names is not testing it.
 - Confirm no pre-existing test in the file was weakened: diff the test file and check that only additions and the one flagged UPDATE appear.
 - Run the Verification table commands and report each result.
 
-### 6. Documentation
+### 5. Documentation
 
 - **Task ID**: document-feature
 - **Depends On**: validate-guard
 - **Assigned To**: session-isolation-doc
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/session-isolation.md` (the line-254 subsection and the line-307 table row) per the Documentation section.
-- Rewrite the `preserve_uncommitted_worktree_changes` docstring's mechanism list to include the wipe check as step 2 and state the before-staging ordering constraint.
+- Update `docs/features/session-isolation.md` per the Documentation section, **including the `refs/stash` correction at line 263** — the doc and the docstring currently contradict each other and the doc is the wrong one.
+- Rewrite the `preserve_uncommitted_worktree_changes` docstring's mechanism list and Returns block to cover both wipe branches and the before-staging ordering constraint.
 
-### 7. Final validation
+### 6. Final validation
 
 - **Task ID**: validate-all
 - **Depends On**: document-feature
@@ -583,24 +580,29 @@ The lead agent orchestrates and never builds directly.
 - **Agent Type**: validator
 - **Parallel**: false
 - Re-run every Verification row against the final head and confirm all Success Criteria.
-- Confirm the diff touches no bridge, watchdog, or restart code (the #3166 anti-criterion).
+- Confirm the diff touches no bridge, watchdog, or restart code (the #3166 anti-criterion), and adds no `config/settings.py` field.
 
 ## Verification
 
+Every row is read the same way: **the command must exit 0.** Anti-criteria are written as `! grep -q …`, which exits 0 exactly when the forbidden pattern is absent. Pipes inside the table cells are escaped as `\|` so the Markdown table renders; unescape them to `|` before pasting into a shell, or the ERE alternation matches a literal backslash-pipe and the row certifies nothing. This is deliberate — `grep -c` prints `0` while *exiting 1* on no match, so a table mixing "output > 0" rows with "count == 0" rows is read by two contradictory rules. Run each row from the lane worktree.
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
-| Guard exists in the producer | `grep -c 'worktree-wip-refused-wipe' agent/worktree_manager.py` | output > 0 |
-| Structural signal uses ls-tree, not a hardcoded directory list | `grep -c 'ls-tree' agent/worktree_manager.py` | output > 0 |
-| Proportional signal uses the ls-files primitive | `grep -c 'ls-files' agent/worktree_manager.py` | output > 0 |
-| Both tunables landed as provisional | `grep -c 'wipe_refusal_min_deleted_files\|wipe_refusal_deleted_fraction' config/settings.py` | output > 0 |
-| Regression tests exist | `grep -c 'def test_missing_tracked_directory_refuses\|def test_majority_of_tracked_files_deleted_refuses\|def test_wipe_with_untracked_artifacts_still_refuses\|def test_index_untouched_on_refusal' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | output > 0 |
-| Anti-criterion — no hardcoded top-level directory list in the guard | `grep -c '"tests/", *"bridge/"\|tests/.*bridge/.*agent/.*config/' agent/worktree_manager.py` | match count == 0 |
-| Anti-criterion — the rejected insertions-ratio predicate is absent | `grep -c 'diff --cached --numstat\|--shortstat' agent/worktree_manager.py` | match count == 0 |
-| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `git diff --name-only origin/main...HEAD -- bridge/ monitoring/ \| grep -c .` | match count == 0 |
-| No stale xfails in scope | `grep -rn 'xfail' tests/unit/worktree_manager/` | exit code 1 |
+| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit 0 |
+| Lint clean | `python -m ruff check .` | exit 0 |
+| Format clean | `python -m ruff format --check .` | exit 0 |
+| Refusal tag exists in the producer | `grep -q 'worktree-wip-refused-wipe' agent/worktree_manager.py` | exit 0 |
+| Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit 0 |
+| Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit 0 |
+| Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit 0 |
+| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_index_untouched_on_pure_wipe' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
+| Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit 0 |
+| Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit 0 |
+| Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit 0 |
+| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `test -z "$(git diff --name-only origin/main...HEAD -- bridge/ monitoring/)"` | exit 0 |
+| No stale xfails in scope | `! grep -rq 'xfail' tests/unit/worktree_manager/` | exit 0 |
+
+The three `! grep -qE` rows were mutation-checked during the revision pass: each was run against a seeded file containing the forbidden shape (`TOP = ["tests", "bridge", "agent", "config"]`, a plain unslashed list; and `x = "git diff --cached --numstat"`) and each exited 1 as required, so they bite rather than certifying vacuously. The first draft's `grep -c '"tests/", *"bridge/"'` passed against both seeds.
 
 ## Critique Results
 

@@ -15,12 +15,12 @@ last_comment_id: none
 Every "is anything using this worktree lane?" decision in the codebase resolves by
 hydrating the whole `AgentSession` table and filtering in Python.
 
-`_scan_worktree_sessions()` (`agent/worktree_manager.py:433`) is the shared engine
-behind both public wrappers — `worktree_busy_check()` (`:522`, fail-open) and
-`worktree_busy_probe()` (`:538`, fail-closed). Its query is:
+`_scan_worktree_sessions()` (`agent/worktree_manager.py:457`) is the shared engine
+behind both public wrappers — `worktree_busy_check()` (`:546`, fail-open) and
+`worktree_busy_probe()` (`:562`, fail-closed). Its query is:
 
 ```python
-sessions = AgentSession.query.all()   # agent/worktree_manager.py:478
+sessions = AgentSession.query.all()   # agent/worktree_manager.py:502
 ```
 
 It then discards, in Python, every row whose `status` is terminal and every row whose
@@ -50,20 +50,38 @@ hydration from scratch — nothing is shared across the loop.
 
 ## Freshness Check
 
-**Baseline commit:** `9705769a0` (`main`, 2026-09-05)
+**Baseline commit:** `491a88624` (`origin/main`, 2026-09-05). Every line number below
+and everywhere else in this document was re-derived against that commit during the
+revision pass; the original draft was anchored at `9705769a0`, and `55ad9ac89` (#3162,
+landed 2026-09-05T12:52:41Z) added 102 lines to `agent/worktree_manager.py` between the
+two, shifting every citation in that file by ~24 lines.
 **Issue filed at:** 2026-08-10T05:58:43Z (26 days before planning)
 **Disposition:** **Minor drift — with one premise correction that resizes the work.**
 
-**File:line references re-verified:**
+**File:line references re-verified at `491a88624`:**
 
 | Issue claim | Verified at | Status |
 |---|---|---|
-| `_scan_worktree_sessions()` at `agent/worktree_manager.py:433` | `:433` | Holds — exact line, unchanged |
-| `AgentSession.query.all()` at `:478` | `:478` | Holds |
-| `worktree_busy_check()` at `:522` (fail-open) | `:522` | Holds |
-| `worktree_busy_probe()` at `:538` (fail-closed) | `:538` | Holds |
-| Probe called per candidate lane in `tools/disk_reclaim.py` | `:415` | Holds |
+| `_scan_worktree_sessions()` in `agent/worktree_manager.py` | `:457` | Holds (draft said `:433`) |
+| `AgentSession.query.all()` | `:502` | Holds (draft said `:478`) |
+| `worktree_busy_check()` (fail-open) | `:546` | Holds (draft said `:522`) |
+| `worktree_busy_probe()` (fail-closed) | `:562` | Holds (draft said `:538`) |
+| Probe called per candidate lane in `tools/disk_reclaim.py` | `:415` | Holds exactly |
+| Sweep's deferred import block (where the batch probe joins) | `tools/disk_reclaim.py:358`–`:364` | Holds |
 | `slug` is an indexed `KeyField` | `models/agent_session.py:392` | Holds |
+| `status` is an `IndexedField` | `models/agent_session.py:160` | Holds |
+| `AgentSession.create_child()` takes `slug: str \| None = None` | `models/agent_session.py:1931` | Holds (draft said `:1939`) |
+| Materialize-inside-try precedent | `models/agent_session.py:1389` | Holds |
+| Scheduled child inherits parent `working_dir` | `tools/agent_session_scheduler.py:434`–`:435` | Holds |
+| …and its `AgentSession.create(...)` passes no `slug=` | `tools/agent_session_scheduler.py:440`–`:457` | Holds (draft said `:439`) |
+| `working_dir` derived from slug (well-behaved counter-example) | `tools/valor_session.py:753` | Holds (draft said `:750`) |
+| Synthetic `dev-{aid[:8]}` slug is a local variable | `agent/session_executor.py:1314` | Holds |
+| `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES` / `ALL_STATUSES` | `models/session_lifecycle.py:65` / `:72` / `:109` | Holds |
+| `remove_worktree` calls `worktree_busy_check` | `agent/worktree_manager.py:1696` | Holds (draft said `:1594`) |
+
+**Guard chain in `sweep_worktrees`, re-derived at `491a88624`:** protected `:389`,
+`too_young` `:394`, dirty `:398`, live process `:407`, busy probe `:415`. The draft's
+`:387` for guard 1 pointed at the comment above the `if`; the rest hold exactly.
 
 **Premise correction — the amplification factor is smaller than the issue states.**
 
@@ -74,7 +92,7 @@ probe is the **fifth** guard, and every guard ahead of it is cheaper:
 
 | Order | Guard | Line |
 |---|---|---|
-| 1 | `PROTECTED_WORKTREE_SLUGS` | `:387` |
+| 1 | `PROTECTED_WORKTREE_SLUGS` | `:389` |
 | 2 | `too_young` | `:394` |
 | 3 | `_worktree_is_dirty` | `:398` |
 | 4 | `_worktree_has_live_process` | `:407` |

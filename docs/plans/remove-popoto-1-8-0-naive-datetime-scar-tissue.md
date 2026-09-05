@@ -267,11 +267,14 @@ set plus two pipelines per 500-row chunk to repair a skew that cannot occur. Job
 `Meta.ttl`), so that cost grows with the lifetime population forever. Removing the call takes a
 guaranteed-zero-repair sweep off the worker-start critical path.
 
-**What gets riskier.** Nothing structurally, but the repo gives up a defence-in-depth layer it would
-have to re-add if the popoto floor were ever lowered below 1.8.2. That is bounded by
-`docs/features/popoto-version-floor-guard.md`, the existing fail-closed interlock that already
-refuses to rebuild indexes under a below-floor popoto. The floor guard is the mechanism that makes
-this removal safe to keep removed; the plan adds no new guard because one already exists.
+**What gets riskier.** The repo gives up a defence-in-depth layer on the *write* path and keeps one
+on the *rebuild* path. `docs/features/popoto-version-floor-guard.md`'s interlock is real but
+rebuild-scoped: `assert_popoto_floor()` has exactly three explicit production call sites, each at the
+head of a model's own `repair_indexes()` (`models/job.py:712`, `models/agent_session.py:2436`,
+`models/room.py:240`), plus a global seam that wraps `Model.rebuild_indexes`
+(`config/popoto_floor.py:329-344`). None of those sit on `Job.save()`, `touch()`, `mark_active()`,
+`revive()`, or `mint()` — the write path the deleted reattach covered. See Risk 1 for the exact
+residual gap and why this plan accepts it.
 
 **`session_health.py` altitude.** Six inline coercions collapse into calls to the module's own named
 helper. The module keeps one place where "a naive timestamp means UTC" is written down, which is what
@@ -389,8 +392,24 @@ drift**):
 | 1805 | `_has_progress` startup-grace leg | `started_aware` |
 | 1852 | `_has_progress` own-progress leg | `_hb_own_aware` |
 
-At line 658 `_ts(last_at)` is already computed eleven lines earlier for the epoch gate; reuse that
-value rather than calling `_ts` twice.
+**`_check_tool_timeout` is the one site that is not the bare two-line pattern — do it exactly this
+way.** There is no existing `_ts(last_at)` value to reuse: at `agent/session_health.py:640-641` the
+epoch gate reads
+
+```python
+anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
+if anchor is not None and _ts(last_at) < anchor:
+    return None
+```
+
+where `_ts(last_at)` is an inline sub-expression that Python's `and` short-circuits away entirely
+when `anchor is None` (both `started_at` and `created_at` absent). Hoist it instead: bind
+`last_at_ts = _ts(last_at)` on its own line **above** the anchor assignment, then use `last_at_ts`
+both in the epoch-gate comparison and in the final age computation, replacing lines 658-659 with
+`age = datetime.now(tz=UTC).timestamp() - last_at_ts`. The hoist is safe because
+`if not isinstance(last_at, datetime): return None` at `:634-635` already guarantees `_ts` returns a
+float and never `None`, and it is behavior-preserving because `_ts` is pure. It also removes one
+redundant `_ts` call on the anchor-present path.
 
 **`agent/session_pickup.py`** — no code change. Spike-2 found no popoto-attributing comment, and all
 three coercers there (`is_scheduled_eligible`, both `_ensure_tz` copies) keep their naive branch under
