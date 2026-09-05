@@ -268,9 +268,9 @@ _install_redis_flush_ownership_guard()
 # collection and therefore before EVERY fixture, autouse or installed-plugin.
 # "Claimed" is the only state a test can observe, and the same hook exports
 # POPOTO_TEST_DB so popoto's plugin is pointed at this process's own db from its
-# very first flush -- no commit window in which the guard is live and the plugin
-# still targets its db-15 default (db 15 is the top slot of the claim pool, so
-# every flush of it was a cross-process wipe).
+# very first flush. Since popoto 1.9.0 that export IS the plugin's opt-in: the
+# plugin swaps and flushes nothing unless POPOTO_TEST_DB or the popoto_test_db
+# ini option names a db, so it can only ever flush the db this process claimed.
 
 
 # --- Process-wide REDIS_URL export (#2805) ---------------------------------

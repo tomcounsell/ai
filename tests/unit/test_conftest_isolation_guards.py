@@ -1123,18 +1123,18 @@ class TestSessionClaimHook:
         """THE binding measurement for writer 3.
 
         popoto ships a ``pytest11`` plugin that this repo loads on every run.
-        Left on its default it sits on db 15 — the top slot of the claim pool —
-        and its autouse ``_popoto_flush_db`` flushes that db before EVERY test
-        in EVERY pytest process on the machine. It is by a wide margin the
-        highest-frequency writer, and it lives in installed library code where
-        no review of ``tests/`` can see it.
+        Its autouse ``_popoto_flush_db`` flushes the db it is pointed at before
+        EVERY test, in EVERY pytest process on the machine, from installed
+        library code where no review of ``tests/`` can see it. The plugin is
+        opt-in: it swaps and flushes nothing until ``POPOTO_TEST_DB`` or the
+        ``popoto_test_db`` ini option names a db, and this repo's opt-in is the
+        export in ``pytest_configure``, which names the db this process claimed.
 
         Asserted on the environment rather than on ``POPOTO_REDIS_DB``: inside a
         test body the autouse ``redis_test_db`` fixture has already replaced
         that client with one on the claimed db, so reading it here would measure
-        this repo's own fixture and pass on ``main`` too. ``POPOTO_TEST_DB`` is
-        the plugin's own documented resolution input, and it is unset on
-        ``main`` — which is the red state.
+        this repo's own fixture instead of the plugin's input. ``POPOTO_TEST_DB``
+        is the plugin's own documented resolution input.
 
         The ``== claim_test_db()`` form is the drift detector: if a future
         popoto changes its resolution order, this fails loudly instead of the

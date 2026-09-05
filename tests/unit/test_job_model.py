@@ -981,19 +981,21 @@ class TestRecencyLookup:
 class TestScorePurity:
     """Sorted-set scores must be pure UTC epochs, on every write path.
 
-    popoto 1.8.0 decodes datetimes without tzinfo, so a reloaded Job's
-    ``last_active_at`` is naive and the next save would score it as
-    ``naive.timestamp()`` — local time. On a UTC+07 host that buries a Job
-    active seconds ago seven hours in the past, which is what made a live
-    ``last_active_at__gte=now-1h`` filter return zero rows.
+    A reloaded Job's ``last_active_at`` used to come back naive, and the next
+    save scored it as ``naive.timestamp()``, local time. On a UTC+07 host that
+    buried a Job active seconds ago seven hours in the past, which is what made
+    a live ``last_active_at__gte=now-1h`` filter return zero rows. popoto 1.9.0
+    decodes a stored datetime as aware UTC; these tests pin the score itself,
+    which must stay a wall-clock epoch whichever way the value decodes.
     """
 
     def test_resave_after_reload_keeps_the_score_a_utc_epoch(self, scratch_room_id):
         import time
+        from datetime import UTC
 
         job = Job.mint(scratch_room_id, "check the deploy")
         reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
-        assert reloaded.last_active_at.tzinfo is None, "popoto still decodes naive (premise)"
+        assert reloaded.last_active_at.tzinfo is UTC, "popoto >= 1.9.0 decodes aware UTC"
 
         reloaded.add_expectation("I'll report back")
 
