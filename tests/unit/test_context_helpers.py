@@ -778,6 +778,25 @@ class TestResolveMediaDescriptor:
         assert descriptor["media_type"] is None
         assert descriptor["filename"] == "media-7"
 
+    async def test_link_preview_message_yields_no_descriptor(self, chain_chat_id):
+        """Regression (PR #3146 review): MessageMediaWebPage is set on any
+        plain-text message that gets a link preview. It must never be
+        treated as an attachment, even though Telethon's Message.file can
+        fall back to the web preview's own photo/document and read truthy."""
+        from telethon.tl.types import MessageMediaWebPage, WebPageEmpty
+
+        from bridge.context import _resolve_media_descriptor
+
+        web_page_media = MessageMediaWebPage(webpage=WebPageEmpty(id=1))
+        msg = _FakeChainMsg(
+            555,
+            text="check this out https://example.com",
+            media=web_page_media,
+            file=_FakeFile("example.com"),
+        )
+        descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
+        assert descriptor is None, "a link-preview message must not render an attachment marker"
+
     async def test_chat_id_scoped_lookup_ignores_other_chats_record(self, chain_chat_id):
         """Risk 3: a record with a matching message_id in a DIFFERENT chat
         must never resolve — message ids are per-chat sequences and the

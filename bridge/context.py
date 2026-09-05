@@ -8,6 +8,13 @@ import subprocess
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.tl.types import (
+    MessageMediaContact,
+    MessageMediaDice,
+    MessageMediaGeo,
+    MessageMediaPoll,
+    MessageMediaWebPage,
+)
 
 # Reuse the canonical tool-log filter from bridge.response (single source of truth).
 # See docs/features/bridge-response-improvements.md and issue #1359.
@@ -377,6 +384,22 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 # Reply Chain Management
 # =============================================================================
 
+# Telethon media kinds that are never a downloadable attachment. Telegram sets
+# MessageMediaWebPage on any plain-text message that gets a link preview, and
+# Message.file/.photo/.document fall back to the web preview's photo/document
+# for that case too — so neither `msg.media` nor `msg.file` truthiness alone
+# distinguishes "has an attachment" from "has a link preview". Polls, geo
+# pins, contacts, and dice hit the same non-file-media shape. Excluding these
+# up front keeps ordinary link messages from rendering a spurious
+# "[unreadable attachment]" marker (see PR #3146 review).
+_NON_FILE_MEDIA_TYPES = (
+    MessageMediaWebPage,
+    MessageMediaPoll,
+    MessageMediaGeo,
+    MessageMediaContact,
+    MessageMediaDice,
+)
+
 
 def _media_descriptor(
     kind: str,
@@ -413,7 +436,14 @@ async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
     Never raises: any failure logs at warning and degrades to an
     "unreadable" descriptor so the chain walk continues past this hop.
     """
-    if not (getattr(msg, "file", None) or getattr(msg, "media", None)):
+    media = getattr(msg, "media", None)
+    if isinstance(media, _NON_FILE_MEDIA_TYPES):
+        # Checked before the file/media truthiness test below: Telethon's
+        # Message.file (and .photo/.document) fall back to the web preview's
+        # own photo/document for MessageMediaWebPage, so a truthy msg.file
+        # cannot be trusted to rule these out on its own.
+        return None
+    if not (getattr(msg, "file", None) or media):
         return None
 
     try:
