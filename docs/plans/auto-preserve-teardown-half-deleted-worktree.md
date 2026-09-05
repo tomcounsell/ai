@@ -331,15 +331,29 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+Three of the issue's five Next Steps bullets were completed during planning rather than deferred, and are recorded where they belong:
+
+- The **ordering question** in `_cleanup_stale_worktree` is answered, not deferred. Within a single pass the ordering is already correct: preserve runs at `agent/worktree_manager.py:948`, before that pass's own `git worktree remove --force`. The "preserve running against a tree a previous pass already gutted" hypothesis is a *cross-pass* concern, which is Race 1 in the Race Conditions section and is what the guard detects. No code change is needed for ordering.
+- The **`refs/session-wip/*` audit** is done: `git for-each-ref refs/session-wip/` returns zero refs on this machine. Nothing to audit, nothing to ship.
+- The **sharper "missing tracked directory" variant** is not an alternative to evaluate later — it is the primary guard in this plan, and spike-2 removed the need for the hardcoded directory list the issue proposed.
+
+Genuinely out of scope:
+
+- [SEPARATE-SLUG #3166] The bridge SIGTERM restart loop that amplified one latent race into nine teardown passes in seventeen minutes. Filed and open as its own reliability investigation with its own evidence. This plan's guard is correct with or without it, and touching bridge restart or watchdog code from this lane would put an unrelated subsystem into a worktree-teardown PR.
 
 ## Update System
 
-_placeholder_
+No update system changes required. The guard is a code-path change inside a module every machine already runs; `/update`'s `git pull` plus `uv sync` propagates it with no new dependency, no new config file, and no migration step. The two settings fields have working defaults, so an installation that never sets `PERFORMANCE__WIPE_REFUSAL_*` gets the intended behavior.
+
+No `.env.example` entry is needed: these are tunables with in-code defaults, not credentials, and they live on a pydantic settings group whose nested `PERFORMANCE__` prefix is already wired.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required — this is a bridge-internal change.
+
+`preserve_uncommitted_worktree_changes` is called only from within `agent/worktree_manager.py` (lines 948 and 1660) on teardown paths the bridge and worker drive automatically. There is no CLI entry point to add to `pyproject.toml [project.scripts]`, no MCP tool to register, and nothing for the agent to invoke. The agent's relationship to this code is as a *subject* of it, not a caller: its worktree is what gets torn down.
+
+The one agent-facing surface in this subsystem is the sibling `validate_no_destructive_git_in_worktree.py` PreToolUse hook, and it is explicitly out of scope (see Rabbit Holes).
 
 ## Documentation
 
