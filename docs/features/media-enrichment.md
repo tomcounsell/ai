@@ -88,7 +88,29 @@ On `TimeoutError`, the helper retries **once** with a 2x leash (still capped at 
 
 ## Reply-chain note
 
-The reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is therefore **silently skipped in the worker** until a follow-up issue lands. Tracked as a companion to #1297. Reply-context enrichment that the bridge handler hydrates synchronously (the existing `REPLY_THREAD_CONTEXT_HEADER` block) is unaffected — it's already pre-baked into `session.message_text`.
+The reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is therefore **silently skipped in the worker**. Reply-context enrichment that the bridge handler hydrates synchronously (the existing `REPLY_THREAD_CONTEXT_HEADER` block) is unaffected — it's already pre-baked into `session.message_text`. What that block carries for a chain ancestor's media is the settled status quo described in the next section.
+
+## Chain-Ancestor Media Is Reference-Only
+
+Chain-ancestor media never goes through `enrich_message`'s AI pass —
+no vision description, no transcription, no document extraction.
+`bridge/context.py`'s reply-chain resolver hands the agent a path reference
+instead: filename, media type, and (when resolvable) the absolute on-disk
+path, composed into the rendered chain line by `format_reply_chain`. See
+[Reply-Thread Context Hydration](reply-thread-context-hydration.md#chain-ancestor-media-rendering)
+for the rendering outcomes.
+
+The reasoning: a chain can run up to 20 hops deep, and the reply-chain fetch
+shares the same 3-second budget as the Telethon RPCs already in that loop.
+Running AI enrichment over every hop that carries media cannot fit that
+budget, and most of it is wasted work — a description or transcript for a
+file nobody in the conversation ends up asking about. A path reference costs
+one scoped Redis lookup per hop carrying downloadable file media (per
+`get_media_type`; non-file media resolves nothing), and the session-routing
+walk skips resolution entirely via `resolve_media=False`. The agent spends a
+tool call only on the one file that matters to the turn it is answering,
+reading it with `Read` or `valor-ingest` the same way it would any other
+file on disk.
 
 ## Implementation files
 

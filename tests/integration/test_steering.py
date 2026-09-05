@@ -946,7 +946,7 @@ class TestResolveRootSessionId:
         mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
 
         # API chain: returns a chain with root human message at msg_id=8800
-        async def mock_fetch_reply_chain(client, cid, mid, max_depth=20):
+        async def mock_fetch_reply_chain(client, cid, mid, max_depth=20, resolve_media=True):
             return [
                 {"sender": "Bob", "content": "hello", "message_id": 8800, "date": None},
                 {"sender": "Valor", "content": "hi", "message_id": 8801, "date": None},
@@ -2497,3 +2497,347 @@ class TestLegacyByRuleWriters:
                 "must pass room_id=None — it feeds _reenqueue_leftover_steering, which "
                 "spawns a continuation session."
             )
+
+
+# =============================================================================
+# #2732: reply-chain media — budget, stall liveness, and message_text delivery
+# =============================================================================
+
+
+class _MediaFakeFile:
+    def __init__(self, name):
+        self.name = name
+
+
+def _media_fake_document(filename: str = "report.pdf"):
+    """A genuine MessageMediaDocument the resolver's classifier gate accepts
+    (PR #3146 review round 2): get_media_type is the descriptor gate, so a
+    bare object() no longer reads as an attachment."""
+    from types import SimpleNamespace
+
+    from telethon.tl.types import DocumentAttributeFilename, MessageMediaDocument
+
+    media = MessageMediaDocument.__new__(MessageMediaDocument)
+    media.document = SimpleNamespace(attributes=[DocumentAttributeFilename(file_name=filename)])
+    return media
+
+
+class _MediaFakeSender:
+    first_name = "Hazem"
+
+
+class _MediaFakeMsg:
+    """Minimal Telethon Message stand-in for driving fetch_reply_chain."""
+
+    def __init__(self, id, text="", reply_to=None, media=None, file=None, out=False):
+        self.id = id
+        self.text = text
+        self.reply_to_msg_id = reply_to
+        self.media = media
+        self.file = file
+        self.out = out
+        self.date = None
+
+    async def get_sender(self):
+        return _MediaFakeSender()
+
+
+class _MediaFakeClient:
+    def __init__(self, msgs):
+        self._msgs = {m.id: m for m in msgs}
+
+    async def get_messages(self, chat_id, ids=None):
+        return self._msgs.get(ids)
+
+
+def _media_chain_msgs(depth: int) -> list[_MediaFakeMsg]:
+    """A depth-deep chain with media at EVERY hop — the Risk 1 worst case."""
+    return [
+        _MediaFakeMsg(
+            i,
+            text=f"hop {i}: short caption for this attachment",
+            reply_to=i - 1 if i > 1 else None,
+            media=_media_fake_document(),
+            file=_MediaFakeFile(f"file_{i}.pdf"),
+        )
+        for i in range(1, depth + 1)
+    ]
+
+
+def _unique_chat_id() -> int:
+    return int(uuid.uuid4().int % 10**9) + 2 * 10**9
+
+
+class TestReplyChainMediaBudget:
+    """#2732 Task 4: the 20-hop worst case fits the 3s budget, the budget is
+    enforceable against a stalled Redis, and the rendered block stays bounded."""
+
+    async def test_reply_chain_20_hop_media_walk_fits_budget(self):
+        import asyncio
+
+        from bridge.context import fetch_reply_chain
+        from bridge.telegram_bridge import _REPLY_CHAIN_FETCH_TIMEOUT_S
+
+        client = _MediaFakeClient(_media_chain_msgs(20))
+        chat_id = _unique_chat_id()
+
+        t0 = time.monotonic()
+        chain = await asyncio.wait_for(
+            fetch_reply_chain(client, chat_id, 20, max_depth=20),
+            timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
+        )
+        elapsed = time.monotonic() - t0
+
+        assert len(chain) == 20
+        assert all(entry["media"] is not None for entry in chain), (
+            "every hop carries media in this fixture; each must get a descriptor"
+        )
+        assert elapsed < _REPLY_CHAIN_FETCH_TIMEOUT_S, (
+            f"20-hop media walk took {elapsed:.2f}s — must fit the "
+            f"{_REPLY_CHAIN_FETCH_TIMEOUT_S}s pre-hydration budget with room to spare"
+        )
+
+    async def test_reply_chain_stalled_lookup_timing_bound_keeps_loop_live(self):
+        """Risk 4 discriminator: an inline blocking filter does not hang — it
+        returns LATE, and wait_for raises the same TimeoutError afterwards.
+        Only wall time (and event-loop liveness) tells the implementations
+        apart, so this asserts a monotonic bound, not just the exception.
+
+        The stall is 5s, not 60s: the asyncio.to_thread worker is not
+        cancellable and keeps sleeping after the test returns, so a long
+        stall would hang teardown.
+        """
+        import asyncio
+
+        from bridge.context import fetch_reply_chain
+
+        client = _MediaFakeClient(_media_chain_msgs(20))
+        chat_id = _unique_chat_id()
+
+        def _stalled_filter(**kwargs):
+            time.sleep(5.0)
+            return []
+
+        ticks = 0
+
+        async def _heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.2)
+                ticks += 1
+
+        heartbeat = asyncio.get_running_loop().create_task(_heartbeat())
+        try:
+            with patch("models.telegram.TelegramMessage") as mock_tm:
+                mock_tm.query.filter = _stalled_filter
+                t0 = time.monotonic()
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        fetch_reply_chain(client, chat_id, 20, max_depth=20),
+                        timeout=3.0,
+                    )
+                elapsed = time.monotonic() - t0
+        finally:
+            heartbeat.cancel()
+
+        assert elapsed < 4.0, (
+            f"wait_for could not preempt the walk until {elapsed:.2f}s — the Redis "
+            "lookup is blocking the event loop instead of running under "
+            "asyncio.to_thread (Risk 4: an inline filter makes the 3s guard nominal)"
+        )
+        assert ticks >= 5, (
+            f"heartbeat ticked only {ticks} times during the stall — the bridge "
+            "event loop froze, which stalls every handler, the nudge loop, and "
+            "output callbacks, not just this hydration"
+        )
+
+    async def test_reply_chain_rendered_block_size_bounded(self):
+        """Risk 1: twenty descriptor lines must not crowd the prompt. Ceiling
+        gives each hop ~400 chars (caption + one compact descriptor line +
+        formatting overhead) — a verbose descriptor blows through it."""
+        from bridge.context import fetch_reply_chain, format_reply_chain
+
+        client = _MediaFakeClient(_media_chain_msgs(20))
+        chat_id = _unique_chat_id()
+
+        chain = await fetch_reply_chain(client, chat_id, 20, max_depth=20)
+        formatted = format_reply_chain(chain)
+
+        assert len(chain) == 20
+        assert formatted.count("attachment:") == 20, "every hop renders exactly one descriptor"
+        assert "[media]" not in formatted
+        assert len(formatted) < 8000, (
+            f"rendered 20-hop media block is {len(formatted)} chars — descriptor "
+            "verbosity is crowding the prompt (Risk 1 ceiling: 8000)"
+        )
+
+
+class TestReplyChainMessageTextDelivery:
+    """#2732 Task 5 — owns Success Criterion 2: the rendered chain block that
+    reaches AgentSession.message_text carries a resolvable absolute path for
+    an ancestor attachment, at BOTH hydration call sites. Stamping a
+    descriptor that never arrives is the email-seam failure mode (spike-4)
+    this must rule out. Assertion shape follows
+    tests/integration/test_private_tag_ingestion.py (strip_private coverage).
+    """
+
+    def _make_client(self):
+        # The reported exchange shape: caption-less attachment, two text
+        # replies. Hop 2 carries a <private> region to prove strip_private
+        # covers the block without stripping the descriptor.
+        return _MediaFakeClient(
+            [
+                _MediaFakeMsg(
+                    1,
+                    text="",
+                    media=_media_fake_document(),
+                    file=_MediaFakeFile("recommendation.pdf"),
+                ),
+                _MediaFakeMsg(
+                    2,
+                    text="we use <private>OLDSECRET2732</private> for staging",
+                    reply_to=1,
+                ),
+                _MediaFakeMsg(3, text="valor can help flesh this out", reply_to=2),
+            ]
+        )
+
+    async def _hydrated_chain_block(self, chat_id: int) -> str:
+        """Mirror both call sites exactly: fetch under the 3s guard, format,
+        then the caller-side strip_private pass."""
+        import asyncio
+
+        from agent.private_tag import strip_private
+        from bridge.context import fetch_reply_chain, format_reply_chain
+        from bridge.telegram_bridge import _REPLY_CHAIN_FETCH_TIMEOUT_S
+
+        chain = await asyncio.wait_for(
+            fetch_reply_chain(self._make_client(), chat_id, 3),
+            timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
+        )
+        return strip_private(format_reply_chain(chain))
+
+    def _seed_ancestor_media(self, chat_id: int):
+        from bridge.media import MEDIA_DIR
+        from models.telegram import TelegramMessage
+
+        media_file = MEDIA_DIR / f"test2732_delivery_{uuid.uuid4().hex}.pdf"
+        media_file.write_bytes(b"%PDF delivery")
+        TelegramMessage(
+            chat_id=str(chat_id),
+            message_id=1,
+            direction="in",
+            sender="Hazem",
+            content="",
+            timestamp=time.time(),
+            has_media=True,
+            media_local_path=str(media_file),
+        ).save()
+        return media_file
+
+    def _cleanup(self, chat_id: int, session_id: str, media_file):
+        from models.agent_session import AgentSession
+        from models.telegram import TelegramMessage
+
+        media_file.unlink(missing_ok=True)
+        for record in TelegramMessage.query.filter(chat_id=str(chat_id)):
+            record.delete()
+        for record in AgentSession.query.filter(session_id=session_id):
+            record.delete()
+
+    def _assert_delivered(self, message_text: str, media_file):
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+        assert str(media_file) in message_text, (
+            "the ancestor attachment's absolute path must reach the agent's turn "
+            "input — a descriptor that never arrives is the spike-4 failure mode"
+        )
+        assert "recommendation.pdf" in message_text
+        assert REPLY_THREAD_CONTEXT_HEADER in message_text
+        assert "[media]" not in message_text
+        # strip_private ran over the block: the wrapped region is gone, the
+        # surrounding non-private context and the descriptor both survive.
+        assert "OLDSECRET2732" not in message_text
+        assert "<private>" not in message_text
+        assert "for staging" in message_text
+
+    async def test_resume_completed_message_text_delivery_carries_resolved_path(self):
+        """Resume-completed call site, end-to-end through the real
+        resume_completed_session -> dispatch -> enqueue machinery."""
+        from bridge.answer_routing import resume_completed_session
+        from models.agent_session import AgentSession
+
+        chat_id = _unique_chat_id()
+        session_id = _uid("test_msgtext_delivery_resume")
+        media_file = self._seed_ancestor_media(chat_id)
+        try:
+            reply_chain_context = await self._hydrated_chain_block(chat_id)
+
+            completed = AgentSession(
+                session_id=session_id,
+                project_key="test",
+                status="completed",
+                message_text="original task",
+                context_summary="prior work on the recommendation",
+                created_at=datetime.now(tz=UTC),
+            )
+            completed.save()
+
+            await resume_completed_session(
+                completed=completed,
+                text="what do you think?",
+                sender_name="Tom",
+                telegram_chat_id=str(chat_id),
+                telegram_message_id=int(uuid.uuid4().int % 10**9),
+                project_key="test",
+                working_dir=str(pathlib.Path(__file__).resolve().parents[2]),
+                reply_chain_context=reply_chain_context,
+            )
+
+            records = list(AgentSession.query.filter(session_id=session_id))
+            assert records, "resume must re-enqueue an AgentSession"
+            delivered = [r for r in records if str(media_file) in (r.message_text or "")]
+            assert delivered, (
+                "no re-enqueued AgentSession.message_text carries the resolved path — "
+                f"got: {[(r.status, (r.message_text or '')[:120]) for r in records]}"
+            )
+            self._assert_delivered(delivered[0].message_text, media_file)
+            assert "what do you think?" in delivered[0].message_text
+        finally:
+            self._cleanup(chat_id, session_id, media_file)
+
+    async def test_fresh_session_message_text_delivery_carries_resolved_path(self):
+        """Fresh-session call site: the handler splices the chain block ahead
+        of CURRENT MESSAGE and enqueues with reply_chain_hydrated stamped."""
+        from agent.agent_session_queue import enqueue_agent_session
+        from models.agent_session import AgentSession
+
+        chat_id = _unique_chat_id()
+        session_id = _uid("test_msgtext_delivery_fresh")
+        media_file = self._seed_ancestor_media(chat_id)
+        try:
+            reply_chain_context = await self._hydrated_chain_block(chat_id)
+            enqueued_message_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\nwhat do you think?"
+
+            await enqueue_agent_session(
+                project_key="test",
+                session_id=session_id,
+                working_dir=str(pathlib.Path(__file__).resolve().parents[2]),
+                message_text=enqueued_message_text,
+                sender_name="Tom",
+                chat_id=str(chat_id),
+                telegram_message_id=int(uuid.uuid4().int % 10**9),
+                extra_context_overrides={"reply_chain_hydrated": True},
+            )
+
+            records = list(AgentSession.query.filter(session_id=session_id))
+            assert records, "fresh-session enqueue must create an AgentSession"
+            message_text = records[0].message_text or ""
+            self._assert_delivered(message_text, media_file)
+            assert "CURRENT MESSAGE:\nwhat do you think?" in message_text
+            assert (records[0].extra_context or {}).get("reply_chain_hydrated") is True, (
+                "the hydration flag and the delivered block must travel together — "
+                "a stamped flag without the block suppresses the worker's retry"
+            )
+        finally:
+            self._cleanup(chat_id, session_id, media_file)
