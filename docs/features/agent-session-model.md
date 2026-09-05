@@ -125,6 +125,28 @@ session = AgentSession.get_by_id(agent_session_id)
 
 **Why not `query.get(string)`?** Popoto's `query.get()` requires a key object (`db_key=` / `redis_key=` kwargs), not a positional string. Passing a bare string raises `AttributeError: 'str' object has no attribute 'redis_key'`. The `get_by_id` helper handles `None`/empty/whitespace input gracefully and logs `WARNING`-level messages on backend failures — surfacing regressions instead of hiding them.
 
+### Lookup by `session_id` (newest wins)
+
+`session_id` is a plain `Field()`; the primary key is the `AutoKeyField` `id`.
+Two `ensure` calls for one logical session therefore leave two rows sharing a
+`session_id`, and SDLC lanes make that deterministic (`sdlc-local-{issue}`).
+Popoto resolves `filter(session_id=...)` with `SMEMBERS` on the class set, so
+the raw result order is a Redis set's order. Every single-row read goes through
+one resolver (#3091):
+
+- `AgentSession.rows_for_session_id(session_id, **filters)` returns every
+  matching row newest-first: `created_at` descending as a UTC epoch, then `id`
+  descending so equal stamps resolve the same way on every call. A missing
+  `created_at` sorts oldest. Extra filters (`status="pending"`) narrow the
+  query before ordering.
+- `AgentSession.newest_for_session_id(session_id, **filters)` returns the first
+  of those rows or `None`.
+
+Callers with a domain preference (an eng-typed row owns `stage_states`)
+iterate `rows_for_session_id` and fall back to `[0]`, which is then the newest
+row rather than a coin flip. Moving session identity into the key, so the
+duplicate shape cannot arise, is #3169.
+
 ### Session Lookup Chain
 
 `_find_session()` resolves an AgentSession using a three-tier lookup:

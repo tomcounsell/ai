@@ -100,7 +100,7 @@ def _reload_session(session: AgentSession):
         session_id = getattr(session, "session_id", None)
         if not session_id:
             return session
-        matches = list(AgentSession.query.filter(session_id=session_id))
+        matches = AgentSession.rows_for_session_id(session_id)
         if not matches:
             return session
         # Prefer a PM session (canonical owner of stage_states)

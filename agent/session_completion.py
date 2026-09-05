@@ -127,13 +127,12 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
             # Tie-breaking: prefer any record currently in "running" status first
             # (ensures the live session is selected), then fall back to most-recent
             # by created_at only if no running records exist.
-            fresh_records = list(AgentSession.query.filter(session_id=session_id))
+            fresh_records = AgentSession.rows_for_session_id(session_id)
             if fresh_records:
                 running = [r for r in fresh_records if getattr(r, "status", None) == "running"]
                 if running:
                     if len(running) > 1:
-                        # Multiple running records — take most recent by created_at
-                        running.sort(key=lambda r: r.created_at or 0, reverse=True)
+                        # Multiple running records: rows arrive newest-first
                         logger.warning(
                             "[lifecycle] Multiple running records for session_id=%s — "
                             "using most recent (id=%s)",
@@ -143,11 +142,7 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
                     session = running[0]
                 else:
                     if len(fresh_records) > 1:
-                        # Multiple non-running records — take most recent by created_at
-                        fresh_records.sort(
-                            key=lambda r: r.created_at or 0,
-                            reverse=True,
-                        )
+                        # Multiple non-running records: rows arrive newest-first
                         logger.warning(
                             "[lifecycle] Multiple records for session_id=%s, none running — "
                             "using most recent (id=%s)",
@@ -400,10 +395,9 @@ async def _await_outbox_drained(
     consumer run in different processes; there is no cross-process ordering
     guarantee.
 
-    Uses the synchronous ``redis.Redis.from_url(...)`` client (matching the
-    pattern in ``agent/output_handler.py`` and ``bridge/telegram_relay.py``;
-    the codebase has no async-redis usage) wrapped via ``asyncio.to_thread``
-    so the event loop is not blocked by the sub-millisecond ``LLEN`` call.
+    Uses the shared synchronous ``text_redis()`` client (the codebase has no
+    async-redis usage) wrapped via ``asyncio.to_thread`` so the event loop is
+    not blocked by the sub-millisecond ``LLEN`` call.
 
     Returns:
         ``True`` if the outbox drained inside ``timeout_seconds``, ``False``
@@ -412,17 +406,15 @@ async def _await_outbox_drained(
     """
     try:
         import asyncio as _asyncio
-        import os
         import time as _time
 
-        import redis  # sync client — codebase has no async-redis usage
+        from utils.redis_client import text_redis
 
         session_id = getattr(parent, "session_id", None)
         if not session_id:
             return True
 
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        r = redis.Redis.from_url(redis_url, decode_responses=True)
+        r = text_redis()
         deadline = _time.time() + timeout_seconds
         queue_key = f"telegram:outbox:{session_id}"
         while _time.time() < deadline:
@@ -576,10 +568,9 @@ def _queue_completion_suppress_reaction(
     """
     try:
         import json
-        import os
         import time as _t
 
-        import redis
+        from utils.redis_client import text_redis
 
         session_id = getattr(parent, "session_id", None)
         if not session_id:
@@ -606,8 +597,7 @@ def _queue_completion_suppress_reaction(
             "priority_ranked": True,
         }
         queue_key = f"telegram:outbox:{session_id}"
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        r = redis.Redis.from_url(redis_url, decode_responses=True)
+        r = text_redis()
         r.rpush(queue_key, json.dumps(payload))
         r.expire(queue_key, _OUTBOX_TTL)
         return True

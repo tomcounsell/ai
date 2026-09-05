@@ -75,7 +75,7 @@ def start_transcript(
     # session exists (defensive fallback for standalone transcript usage).
     try:
         now = time.time()
-        existing = list(AgentSession.query.filter(session_id=session_id))
+        existing = AgentSession.rows_for_session_id(session_id)
         if existing:
             s = existing[0]
             s.log_path = log_path
@@ -129,7 +129,7 @@ def start_transcript(
             )
             # Log lifecycle transition
             try:
-                sessions = list(AgentSession.query.filter(session_id=session_id))
+                sessions = AgentSession.rows_for_session_id(session_id)
                 if sessions:
                     sessions[0].log_lifecycle_transition("active", "transcript started")
             except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
@@ -198,7 +198,7 @@ def append_turn(
 
     # Update SessionLog counters
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
@@ -238,7 +238,7 @@ def append_tool_result(
 
     # Increment tool_call_count in SessionLog
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1

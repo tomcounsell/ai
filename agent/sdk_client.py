@@ -118,13 +118,12 @@ def _get_prior_session_uuid(session_id: str) -> str | None:
 
         sessions = [
             s
-            for s in AgentSession.query.filter(session_id=session_id)
+            for s in AgentSession.rows_for_session_id(session_id)
             if s.status in ("completed", "running", "active", "dormant", "killed", "failed")
         ]
         if not sessions:
             return None
-        # Sort by created_at desc to get the newest record
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        # rows arrive newest-first
         uuid = getattr(sessions[0], "claude_session_uuid", None)
         if uuid:
             logger.info(f"_get_prior_session_uuid({session_id!r}): found UUID {uuid}")
@@ -273,17 +272,13 @@ def accumulate_session_tokens(
 
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             logger.debug(
                 "accumulate_session_tokens: no AgentSession for session_id=%s — skipping",
                 session_id,
             )
             return
-        # Newest record wins — matches the pattern used by
-        # `_store_claude_session_uuid`.
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        session = sessions[0]
         try:
             session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
             session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
@@ -388,10 +383,10 @@ def _store_exit_returncode(session_id: str | None, returncode: int | None) -> No
     try:
         from models.agent_session import AgentSession
 
-        for s in AgentSession.query.filter(session_id=session_id):
+        s = AgentSession.newest_for_session_id(session_id)
+        if s is not None:
             s.exit_returncode = int(returncode)
             s.save(update_fields=["exit_returncode"])
-            break
     except Exception as _e:
         logger.debug("exit_returncode store failed for session_id=%s: %s", session_id, _e)
 
@@ -412,11 +407,8 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            # Sort by created_at desc, update the newest record
-            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-            session = sessions[0]
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is not None:
             session.claude_session_uuid = claude_uuid
             session.save()
             logger.info(f"Stored Claude Code UUID {claude_uuid} on session {session_id}")
@@ -447,13 +439,12 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return env
-        # Pick the newest active session
+        # Pick the newest active session (rows arrive newest-first)
         active = [s for s in sessions if s.status in ("running", "active", "pending")]
         candidates = active if active else sessions
-        candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
         session = candidates[0]
 
         # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH

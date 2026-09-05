@@ -85,7 +85,7 @@ def _resolve_medium(session_id: str) -> str:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             extra = getattr(sessions[0], "extra_context", None) or {}
             transport = extra.get("transport")
@@ -105,7 +105,7 @@ def _is_child_session(session_id: str) -> bool:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return False
         return bool(getattr(sessions[0], "parent_agent_session_id", None))

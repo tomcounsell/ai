@@ -1188,6 +1188,52 @@ class AgentSession(Model):
             )
         return results[0]
 
+    @staticmethod
+    def _newest_first_key(row: "AgentSession") -> tuple[float, str]:
+        """Sort key placing the newest row last: ``(created_at epoch, id)``.
+
+        ``created_at`` is compared as a UTC epoch so naive and aware values
+        order together; a missing or unparseable ``created_at`` sorts oldest.
+        ``id`` breaks exact ties deterministically, so two rows minted in the
+        same instant resolve the same way on every call.
+        """
+        from utils.utc import to_unix_ts
+
+        try:
+            ts = to_unix_ts(getattr(row, "created_at", None))
+        except Exception:  # noqa: BLE001 — an unreadable stamp sorts oldest
+            ts = None
+        return (ts if ts is not None else float("-inf"), str(getattr(row, "id", "") or ""))
+
+    @classmethod
+    def rows_for_session_id(cls, session_id: str, **filters) -> list["AgentSession"]:
+        """Every row sharing ``session_id``, newest first.
+
+        ``session_id`` is a plain ``Field()``; the primary key is the
+        ``AutoKeyField`` ``id``. Two ``ensure`` calls for one logical session
+        therefore produce two rows with one ``session_id``, and SDLC lanes
+        make that deterministic (``sdlc-local-{issue}``). Popoto resolves the
+        filter via ``SMEMBERS`` on the class set, so the raw result order is a
+        Redis set's order. This method is the single place that order is
+        fixed: newest ``created_at`` first, ``id`` as the tie-break (see
+        :meth:`_newest_first_key`). Extra ``filters`` narrow the query
+        (``status="pending"``) before ordering.
+
+        Callers that need one row use :meth:`newest_for_session_id`; callers
+        with domain preferences (an eng-typed row first) iterate this list
+        and fall back to ``[0]``, which is then the newest rather than a
+        coin flip.
+        """
+        rows = list(cls.query.filter(session_id=session_id, **filters))
+        rows.sort(key=cls._newest_first_key, reverse=True)
+        return rows
+
+    @classmethod
+    def newest_for_session_id(cls, session_id: str, **filters) -> "AgentSession | None":
+        """The newest row for ``session_id`` (see :meth:`rows_for_session_id`), or None."""
+        rows = cls.rows_for_session_id(session_id, **filters)
+        return rows[0] if rows else None
+
     @property
     def live_fence(self) -> dict | None:
         """Newest ``spawn_history`` entry — the live execution fence, or None.
@@ -1989,10 +2035,9 @@ class AgentSession(Model):
         }
         try:
             # Re-fetch the freshest version to minimize lost-update window.
-            # query.filter(session_id=...) is correct — session_id is a regular Field(),
-            # not the AutoKeyField. query.get() requires the AutoKey (id field).
-            rows = list(AgentSession.query.filter(session_id=self.session_id))
-            fresh = rows[0] if rows else None
+            # session_id is a regular Field(), not the AutoKeyField, so this is
+            # a newest-wins lookup rather than a query.get().
+            fresh = AgentSession.newest_for_session_id(self.session_id)
             if fresh is None:
                 # Session vanished — fall back to self to avoid losing the entry.
                 fresh = self

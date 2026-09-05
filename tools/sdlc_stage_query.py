@@ -86,9 +86,9 @@ def _find_session_by_id(session_id: str):
 
         attempts = 0
         for attempts in class_set_retry_attempts():  # noqa: B007 — final value used below
-            sessions = list(AgentSession.query.filter(session_id=session_id))
+            sessions = AgentSession.rows_for_session_id(session_id)
             if sessions:
-                # Prefer eng sessions (they own stage_states)
+                # Prefer eng sessions (they own stage_states); newest otherwise
                 for s in sessions:
                     if getattr(s, "session_type", None) == "eng":
                         return s

@@ -54,7 +54,7 @@ def _set_unhealthy(session_id: str, reason: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = AgentSession.query.filter(session_id=session_id)
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             sessions[0].unhealthy_reason = reason
             sessions[0].save()
@@ -139,7 +139,7 @@ def is_session_unhealthy(session_id: str) -> str | None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = AgentSession.query.filter(session_id=session_id)
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             return sessions[0].unhealthy_reason
         return None
@@ -152,7 +152,7 @@ def clear_unhealthy(session_id: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = AgentSession.query.filter(session_id=session_id)
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             sessions[0].unhealthy_reason = None
             sessions[0].save()
@@ -287,7 +287,7 @@ def _get_session_context(session_id: str) -> str:
     try:
         from models.agent_session import AgentSession
 
-        sessions = AgentSession.query.filter(session_id=session_id)
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return ""
 
@@ -648,10 +648,8 @@ async def watchdog_hook(
         # to a legacy-only drain and re-push. Newest-first because this query
         # carries no status filter: a superseded row can sit beside the live one
         # and derive a Room nothing drains.
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-            s = sessions[0]
+        s = AgentSession.newest_for_session_id(session_id)
+        if s is not None:
             s.tool_call_count = count
             s.save()
             steering_room_id = room_id_for_session(s)

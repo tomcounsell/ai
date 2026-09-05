@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
 
 from tests.db_claim import subprocess_env
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 # Resolve the repo root for subprocess cwd
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -165,6 +166,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
@@ -179,6 +181,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
@@ -202,6 +205,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [issue_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(1672)
@@ -214,6 +218,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = ConnectionError("Redis down")
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
@@ -234,6 +239,7 @@ class TestFindSessionById:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [teammate_session, eng_session]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
@@ -248,6 +254,7 @@ class TestFindSessionById:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [teammate_session]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
@@ -259,6 +266,7 @@ class TestFindSessionById:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("nonexistent")

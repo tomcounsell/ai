@@ -260,12 +260,8 @@ class TestCompleteAgentSessionRequeryNoStatusFilter:
 
         # _complete_agent_session now lives in agent.session_completion — patch there.
         with patch("agent.session_completion.AgentSession") as mock_agent_session_cls:
-            mock_query = MagicMock()
-            mock_agent_session_cls.query = mock_query
-            mock_filter = MagicMock()
-            # Fresh record returned (status-independent query)
-            mock_filter.__iter__ = MagicMock(return_value=iter([fresh_session]))
-            mock_query.filter.return_value = mock_filter
+            # Fresh record returned (status-independent, newest-first lookup)
+            mock_agent_session_cls.rows_for_session_id.return_value = [fresh_session]
 
             finalize_called_with = []
 

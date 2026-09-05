@@ -166,7 +166,7 @@ def _fetch_live_active_run_id(agent_session: AgentSession | None) -> str | None:
     if not sid:
         return None
     try:
-        rows = list(AgentSession.query.filter(session_id=sid))
+        rows = AgentSession.rows_for_session_id(sid)
     except Exception as exc:
         logger.debug(
             "[%s] issue-lock renewal: active_run_id re-fetch failed (%s: %s) -- skipping this tick",
@@ -307,11 +307,10 @@ def _capture_turn_count(session_id: str) -> int | None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return None
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        return sessions[0].turn_count
+        return session.turn_count
     except Exception as exc:  # noqa: BLE001 - capture must never crash finalization
         logger.debug(
             "[memory_extraction] turn_count capture failed for %s (non-fatal): %s",
@@ -833,19 +832,17 @@ def steer_session(session_id: str, message: str) -> dict:
         }
 
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return {
                 "success": False,
                 "session_id": session_id,
                 "error": f"Session not found: {session_id}",
             }
 
-        # Newest-first: this query carries no status filter, so a superseded row
-        # can sit beside the live one and would derive a Room the live session
-        # never drains.
-        sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-        session = sessions[0]
+        # Newest-first (newest_for_session_id): this query carries no status
+        # filter, so a superseded row can sit beside the live one and would
+        # derive a Room the live session never drains.
         current_status = getattr(session, "status", None)
 
         if current_status in _TERMINAL_STATUSES:
@@ -1586,13 +1583,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 try:
                     from models.agent_session import AgentSession as _FreshAS
 
-                    _fresh = list(_FreshAS.query.filter(session_id=session.session_id))
-                    if _fresh:
-                        agent_session = sorted(
-                            _fresh,
-                            key=lambda s: s.created_at or 0,
-                            reverse=True,
-                        )[0]
+                    _fresh = _FreshAS.newest_for_session_id(session.session_id)
+                    if _fresh is not None:
+                        agent_session = _fresh
                 except Exception as _reread_err:
                     # Fall back to stale in-memory copy.
                     logger.warning(
@@ -1796,12 +1789,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             await asyncio.sleep(0.1)
                         # Re-read session for fresh pm_sent_message_ids
                         try:
-                            fresh_sessions = list(
-                                AgentSession.query.filter(session_id=session.session_id)
-                            )
-                            if fresh_sessions:
-                                fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-                                agent_session = fresh_sessions[0]
+                            fresh_session = AgentSession.newest_for_session_id(session.session_id)
+                            if fresh_session is not None:
+                                agent_session = fresh_session
                         except Exception as _reread_err:
                             logger.debug(
                                 f"[{session.project_key}] Session re-read after outbox "

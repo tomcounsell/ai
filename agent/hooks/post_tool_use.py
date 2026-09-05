@@ -40,7 +40,7 @@ def _complete_pipeline_stage(session_id: str) -> None:
         from agent.pipeline_state import resolve_pipeline_state_machine
         from models.agent_session import AgentSession
 
-        parent_sessions = list(AgentSession.query.filter(session_id=session_id))
+        parent_sessions = AgentSession.rows_for_session_id(session_id)
         if not parent_sessions:
             logger.warning(
                 f"[post_tool_use] Session {session_id} not found, skipping complete_stage"

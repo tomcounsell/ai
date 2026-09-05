@@ -60,7 +60,7 @@ def _session_room_id(session_id: str) -> str:
     from models.agent_session import AgentSession
     from models.room import room_id_for_session
 
-    sessions = list(AgentSession.query.filter(session_id=session_id))
+    sessions = AgentSession.rows_for_session_id(session_id)
     if not sessions:
         raise JobToolError(f"unknown session {session_id!r} — cannot resolve a Room")
     rid = room_id_for_session(sessions[0])

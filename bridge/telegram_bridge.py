@@ -2369,25 +2369,16 @@ async def main():
 
                     if intent == "interjection":
                         # Re-check session status (Race 1 mitigation: session may
-                        # have completed during classification). Materialize before
-                        # sorting — `query.filter` returns a QueryBuilder with no
-                        # `.sort`, and this path has no enclosing guard.
+                        # have completed during classification). Newest row per
+                        # status, so a superseded duplicate cannot win.
                         from models.room import room_id_for_session
 
                         fresh_session = None
                         for check_status in ("running", "active", "pending"):
-                            sessions = list(
-                                AgentSession.query.filter(
-                                    session_id=target_session.session_id,
-                                    status=check_status,
-                                )
+                            fresh_session = AgentSession.newest_for_session_id(
+                                target_session.session_id, status=check_status
                             )
-                            if sessions:
-                                sessions.sort(
-                                    key=lambda s: (s.created_at is not None, s.created_at),
-                                    reverse=True,
-                                )
-                                fresh_session = sessions[0]
+                            if fresh_session is not None:
                                 break
 
                         if fresh_session:
@@ -2505,7 +2496,7 @@ async def main():
             try:
                 from models.agent_session import AgentSession
 
-                existing_sessions = list(AgentSession.query.filter(session_id=session_id))
+                existing_sessions = AgentSession.rows_for_session_id(session_id)
                 if existing_sessions and existing_sessions[0].classification_type:
                     classification_result["type"] = existing_sessions[0].classification_type
                     logger.info(
@@ -2821,9 +2812,7 @@ async def main():
             # Newest-first: this query has no status filter, so a superseded row
             # for the same session_id can appear beside the live one and would
             # derive a Room the live session never drains.
-            sessions = list(AgentSession.query.filter(session_id=session_id))
-            sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-            session = sessions[0] if sessions else None
+            session = AgentSession.newest_for_session_id(session_id)
         except Exception as e:
             logger.debug(f"[edit] Session lookup failed (non-fatal): {e}")
             session = None
@@ -2875,10 +2864,7 @@ async def main():
 
                 # Newest-first before the Python-side status filter: unfiltered
                 # query, so a superseded row can sit beside the live one.
-                edit_sessions = list(AgentSession.query.filter(session_id=new_session_id))
-                edit_sessions.sort(
-                    key=lambda s: (s.created_at is not None, s.created_at), reverse=True
-                )
+                edit_sessions = AgentSession.rows_for_session_id(new_session_id)
                 active_edit = next(
                     (s for s in edit_sessions if s.status in ("pending", "running", "active")),
                     None,

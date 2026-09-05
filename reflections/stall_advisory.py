@@ -311,7 +311,7 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
 
         fresh_status = None
         try:
-            fresh = AgentSession.query.filter(session_id=session_id).first()
+            fresh = AgentSession.newest_for_session_id(session_id)
             if fresh is not None:
                 fresh_status = fresh.status
         except Exception as exc:

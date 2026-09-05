@@ -154,7 +154,7 @@ def update_task_type_profile(session_id: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             logger.debug(f"[trm] update_task_type_profile: session {session_id} not found")
             return

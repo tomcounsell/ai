@@ -719,11 +719,10 @@ def _linkify_text(text: str) -> str:
 
 
 def _get_redis_connection():
-    """Get a Redis connection using the project's standard pattern."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _should_run_rtr(args: argparse.Namespace) -> bool:
@@ -932,8 +931,7 @@ def cmd_send(args: argparse.Namespace) -> int:
             try:
                 from models.agent_session import AgentSession
 
-                matches = list(AgentSession.query.filter(session_id=valor_session_id))
-                session = matches[0] if matches else None
+                session = AgentSession.newest_for_session_id(valor_session_id)
             except Exception as e:
                 logger.warning(
                     "Path B RTR: session lookup failed for %s: %s",

@@ -201,7 +201,7 @@ def main():
 
                 try:
                     local_sid = f"local-{session_id}"
-                    matches = list(AgentSession.query.filter(session_id=local_sid))
+                    matches = AgentSession.rows_for_session_id(local_sid)
                     if matches:
                         agent_session = matches[0]
                         # Use lifecycle module for consistent transition logging
@@ -271,11 +271,9 @@ def main():
 
                         if attached is None and worker_bridge_session_id:
                             try:
-                                matches = list(
-                                    AgentSession.query.filter(session_id=worker_bridge_session_id)
+                                attached = AgentSession.newest_for_session_id(
+                                    worker_bridge_session_id
                                 )
-                                if matches:
-                                    attached = matches[0]
                             except Exception:
                                 attached = None
 

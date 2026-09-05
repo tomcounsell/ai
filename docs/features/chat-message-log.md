@@ -111,8 +111,7 @@ Inbound writes happen in the bridge process (sync within the bridge handler). Ou
 **Mitigation:** `append_chat_log` re-fetches the freshest version from Redis before appending:
 
 ```python
-rows = list(AgentSession.query.filter(session_id=self.session_id))
-fresh = rows[0] if rows else self
+fresh = AgentSession.newest_for_session_id(self.session_id) or self
 log = list(fresh.chat_message_log or [])
 log.append(entry)
 log = log[-CHAT_LOG_MAX_ENTRIES:]

@@ -73,13 +73,11 @@ def poll_eligible(chat_id: str | int | None, session_id: str | None) -> PollElig
         from config.enums import SessionType
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        # Newest record wins: a stale duplicate row must not decide a live
+        # session's eligibility.
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return PollEligibility(ok=False, reason="unknown_session_type")
-        # Newest record wins, matching the relay's own lookup idiom — a stale
-        # duplicate row must not decide a live session's eligibility.
-        sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-        session = sessions[0]
 
         session_type = getattr(session, "session_type", None)
         if session_type == SessionType.ENG:

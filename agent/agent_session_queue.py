@@ -403,7 +403,7 @@ async def _push_agent_session(
             def _init_stage_states():
                 from agent.pipeline_state import PipelineStateMachine
 
-                sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+                sessions = AgentSession.rows_for_session_id(session_id, status="pending")
                 if sessions and not sessions[0].stage_states:
                     sm = PipelineStateMachine(sessions[0])
                     # PipelineStateMachine.__init__ already sets ISSUE=ready, rest=pending
@@ -418,7 +418,7 @@ async def _push_agent_session(
     try:
 
         def _log_lifecycle():
-            sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+            sessions = AgentSession.rows_for_session_id(session_id, status="pending")
             if sessions:
                 sessions[0].log_lifecycle_transition("pending", "agent session enqueued")
 
@@ -1007,19 +1007,11 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle", channel:
         await asyncio.sleep(NOTIFY_HEALTHCHECK_INTERVAL)
 
         try:
-            import redis as _redis
-            from popoto.redis_db import POPOTO_REDIS_DB
-
             from config.settings import settings
+            from utils.redis_client import derived_redis
 
-            kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
-            probe_conn = _redis.Redis(
-                host=kw.get("host", "localhost"),
-                port=kw.get("port", 6379),
-                db=kw.get("db", 0),
-                username=kw.get("username"),
-                password=kw.get("password"),
-                decode_responses=kw.get("decode_responses", False),
+            probe_conn = derived_redis(
+                decode_responses=False,
                 # Short-lived probe connection ONLY — never the listen()
                 # connection, whose socket_timeout=None is load-bearing.
                 socket_timeout=settings.timeouts.redis_socket_s,
@@ -1113,19 +1105,14 @@ async def _session_notify_listener() -> None:
             agent/session_health.py.
             """
             import redis as _redis
-            from popoto.redis_db import POPOTO_REDIS_DB
+
+            from utils.redis_client import derived_redis
 
             conn: _redis.Redis | None = None
             pubsub = None
             try:
-                kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
-                conn = _redis.Redis(
-                    host=kw.get("host", "localhost"),
-                    port=kw.get("port", 6379),
-                    db=kw.get("db", 0),
-                    username=kw.get("username"),
-                    password=kw.get("password"),
-                    decode_responses=kw.get("decode_responses", False),
+                conn = derived_redis(
+                    decode_responses=False,
                     # KEEP socket_timeout=None. Do NOT "helpfully" add a finite
                     # timeout here (see this function's docstring, above): a
                     # finite timeout on THIS connection previously caused
@@ -1500,12 +1487,12 @@ def _capture_thread_rollup(session_id: str) -> dict | None:
         or ``None`` if no terminal record exists for ``session_id``.
     """
     duplicates = [
-        s for s in AgentSession.query.filter(session_id=session_id) if s.status in TERMINAL_STATUSES
+        s for s in AgentSession.rows_for_session_id(session_id) if s.status in TERMINAL_STATUSES
     ]
     if not duplicates:
         return None
 
-    prior = max(duplicates, key=lambda s: s.created_at)
+    prior = duplicates[0]  # rows arrive newest-first
     return {
         "thread_first_created_at": prior.thread_first_created_at or prior.created_at,
         "thread_run_count": (prior.thread_run_count or 1) + 1,

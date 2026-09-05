@@ -67,9 +67,9 @@ def resolve_inflight_session() -> AgentSession | None:
     """
     valor_session_id = os.environ.get("VALOR_SESSION_ID")
     if valor_session_id:
-        matches = list(AgentSession.query.filter(session_id=valor_session_id))
-        if matches:
-            return matches[0]
+        match = AgentSession.newest_for_session_id(valor_session_id)
+        if match is not None:
+            return match
         # VALOR miss-fallthrough: fall through to AGENT_SESSION_ID below.
 
     agent_session_id = os.environ.get("AGENT_SESSION_ID")

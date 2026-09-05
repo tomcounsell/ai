@@ -110,10 +110,10 @@ def _safe_unlink(path: str) -> None:
 
 
 def _get_redis_connection() -> redis.Redis:
-    """Get a synchronous Redis connection for queue operations."""
+    """The shared sync text Redis client for queue operations."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _deliverable_peer(chat_id, kind: str, message: dict) -> bool:
@@ -223,9 +223,10 @@ def _session_reached_terminal_status(session_id: str) -> bool:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
 
-        for session in AgentSession.query.filter(session_id=session_id):
-            return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
-        return False
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
+            return False
+        return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
     except Exception as e:  # noqa: BLE001
         logger.debug("Relay: terminal-status lookup failed for %s: %s", session_id, e)
         return False
@@ -404,7 +405,7 @@ def _bind_outbound_message_to_job(message: dict, msg_id) -> None:
             return
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return
         from bridge.job_router import (
@@ -807,11 +808,9 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            # Use the newest session record
-            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-            sessions[0].record_pm_message(msg_id)
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is not None:
+            session.record_pm_message(msg_id)
             logger.debug(f"Relay: recorded msg_id={msg_id} on session {session_id}")
         else:
             logger.warning(f"Relay: session {session_id} not found for recording msg_id={msg_id}")
@@ -836,12 +835,11 @@ def _record_relay_sent_draft(session_id: str, text: str) -> None:
         from bridge.message_drafter import extract_artifacts
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
         artifacts = extract_artifacts(text) or {}
-        sessions[0].record_recent_sent_draft(text, artifacts)
+        session.record_recent_sent_draft(text, artifacts)
         logger.debug(f"Relay: registered PM self-send in recent_sent_drafts for {session_id}")
     except Exception as e:
         logger.warning(f"Relay: failed to record recent_sent_draft for {session_id}: {e}")
@@ -911,9 +909,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
         if session is None:
             queue_session_id = message.get("session_id") or ""
             if queue_session_id and not queue_session_id.startswith(("cli-", "local-")):
-                rows = list(AgentSession.query.filter(session_id=queue_session_id))
-                if rows:
-                    session = rows[0]
+                session = AgentSession.newest_for_session_id(queue_session_id)
 
         # Tier 3: fallback by chat_id for manual CLI sends.
         # NOTE: get_active_session_for_chat is async; we replicate its core query

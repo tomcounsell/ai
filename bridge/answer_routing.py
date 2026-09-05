@@ -81,17 +81,6 @@ class AnswerTarget:
     completed_sessions: list | None = None
 
 
-def _newest_first(sessions: list) -> list:
-    """Sort newest-first, tolerating a ``None`` ``created_at``.
-
-    Verbatim from the ladder. The sort is load-bearing on the LIVE branch: the
-    Room is derived from whichever record this picks, so it must be the live
-    one.
-    """
-    sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-    return sessions
-
-
 def _completed_created_at(s) -> float:
     """Verbatim from the ladder — handles both datetime and float timestamps."""
     ts = getattr(s, "created_at", None)
@@ -118,16 +107,16 @@ def resolve_answer_target(session_id: str) -> AnswerTarget:
     from models.agent_session import AgentSession
 
     for check_status in ("running", "active"):
-        sessions = list(AgentSession.query.filter(session_id=session_id, status=check_status))
-        if sessions:
-            live = _newest_first(sessions)[0]
+        # Newest-first is load-bearing on the LIVE branch: the Room is derived
+        # from whichever record this picks, so it must be the live one.
+        live = AgentSession.newest_for_session_id(session_id, status=check_status)
+        if live is not None:
             return AnswerTarget(
                 kind=AnswerTargetKind.LIVE, session=live, matched_status=live.status
             )
 
-    pending_sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
-    if pending_sessions:
-        pending = _newest_first(pending_sessions)[0]
+    pending = AgentSession.newest_for_session_id(session_id, status="pending")
+    if pending is not None:
         age = _pending_age_seconds(pending.created_at, time.time())
         return AnswerTarget(
             kind=AnswerTargetKind.PENDING,
@@ -136,14 +125,13 @@ def resolve_answer_target(session_id: str) -> AnswerTarget:
             pending_age_s=age,
         )
 
-    completed_sessions = list(AgentSession.query.filter(session_id=session_id, status="completed"))
+    completed_sessions = AgentSession.rows_for_session_id(session_id, status="completed")
     if completed_sessions:
         # Belt-and-suspenders: a concurrent reply may have created a
         # pending/running record between the checks above.
         for guard_status in ("pending", "running", "active"):
-            live = list(AgentSession.query.filter(session_id=session_id, status=guard_status))
-            if live:
-                guard = _newest_first(live)[0]
+            guard = AgentSession.newest_for_session_id(session_id, status=guard_status)
+            if guard is not None:
                 return AnswerTarget(
                     kind=AnswerTargetKind.LIVE_GUARD,
                     session=guard,

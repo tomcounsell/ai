@@ -344,7 +344,7 @@ class TestRecordSentMessage:
         mock_session.record_pm_message = MagicMock()
 
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = [mock_session]
+            mock_as.newest_for_session_id.return_value = mock_session
             _record_sent_message("test-session", 42)
 
         mock_session.record_pm_message.assert_called_once_with(42)
@@ -352,14 +352,14 @@ class TestRecordSentMessage:
     def test_handles_missing_session(self):
         """Should not crash when session is not found."""
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = []
+            mock_as.newest_for_session_id.return_value = None
             # Should not raise
             _record_sent_message("nonexistent-session", 42)
 
     def test_handles_query_exception(self):
         """Should not crash on Redis errors."""
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.side_effect = Exception("Redis down")
+            mock_as.newest_for_session_id.side_effect = Exception("Redis down")
             # Should not raise
             _record_sent_message("test-session", 42)
 

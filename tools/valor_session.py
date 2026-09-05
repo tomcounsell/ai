@@ -987,10 +987,9 @@ def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
 
     attempts = 0
     for attempts in class_set_retry_attempts():  # noqa: B007 — final value used below
-        sessions = list(AgentSession.query.filter(session_id=id_arg))
-        if sessions:
-            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-            return sessions[0]
+        session = AgentSession.newest_for_session_id(id_arg)
+        if session is not None:
+            return session
 
     fallback = AgentSession.get_by_id(id_arg)
     log_class_set_exhaustion(
@@ -1496,7 +1495,7 @@ def cmd_children(args: argparse.Namespace) -> int:
 
         # Resolve the parent's agent_session_id from its session_id
         parent_id = args.id
-        parent_sessions = list(AgentSession.query.filter(session_id=parent_id))
+        parent_sessions = AgentSession.rows_for_session_id(parent_id)
         if parent_sessions:
             parent_agent_id = parent_sessions[0].agent_session_id
         else:
@@ -1728,12 +1727,11 @@ def cmd_wait_for_children(args: argparse.Namespace) -> int:
             )
             return 1
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             print(f"Error: Session not found: {session_id}", file=sys.stderr)
             return 1
 
-        session = sessions[0]
         current_status = getattr(session, "status", None)
         if current_status in TERMINAL_STATUSES:
             print(

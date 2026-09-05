@@ -329,7 +329,7 @@ def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
         from agent.pipeline_state import resolve_pipeline_state_machine
         from models.agent_session import AgentSession
 
-        parent_sessions = list(AgentSession.query.filter(session_id=pm_session_id))
+        parent_sessions = AgentSession.rows_for_session_id(pm_session_id)
         if not parent_sessions:
             logger.warning(
                 f"[pre_tool_use] Parent session {pm_session_id} not found, "

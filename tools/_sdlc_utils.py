@@ -354,7 +354,7 @@ def find_session_by_issue(issue_number: int, include_terminal: bool = False):
         # WRITE created so the subsequent READ finds it (#1558).
         local_id = f"sdlc-local-{issue_number}"
         try:
-            local = list(AgentSession.query.filter(session_id=local_id))
+            local = AgentSession.rows_for_session_id(local_id)
             # Verify the returned record's id actually matches — a query backend
             # (or test mock) that ignores the filter must not yield a false hit.
             local = [s for s in local if getattr(s, "session_id", None) == local_id]
@@ -464,7 +464,7 @@ def find_session(
     # Step 1: explicit session_id argument wins over everything below.
     if session_id:
         try:
-            sessions = list(AgentSession.query.filter(session_id=session_id))
+            sessions = AgentSession.rows_for_session_id(session_id)
             if sessions:
                 for s in sessions:
                     if getattr(s, "session_type", None) == "eng":
@@ -489,7 +489,7 @@ def find_session(
     env_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
     if env_id:
         try:
-            sessions = list(AgentSession.query.filter(session_id=env_id))
+            sessions = AgentSession.rows_for_session_id(env_id)
             if sessions:
                 for s in sessions:
                     if getattr(s, "session_type", None) == "eng":

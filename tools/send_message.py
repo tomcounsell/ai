@@ -81,10 +81,9 @@ def _resolve_transport() -> str:
 
 
 def _get_redis():
-    import redis
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _lookup_session(session_id: str):
@@ -96,7 +95,7 @@ def _lookup_session(session_id: str):
     """
     from models.agent_session import AgentSession
 
-    return AgentSession.query.filter(session_id=session_id).first()
+    return AgentSession.newest_for_session_id(session_id)
 
 
 def _legacy_telegram_rpush(

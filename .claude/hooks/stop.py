@@ -35,7 +35,7 @@ def _check_sdlc_stage_progress(session_id: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return
 
@@ -72,7 +72,7 @@ def _update_agent_session_log_path(session_id: str, jsonl_path: str) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             s = sessions[0]
             s.log_path = jsonl_path
@@ -174,7 +174,7 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
             # paths that still create local-* records.
             sidecar_session_id = f"local-{session_id}"
             try:
-                matches = list(AgentSession.query.filter(session_id=sidecar_session_id))
+                matches = AgentSession.rows_for_session_id(sidecar_session_id)
             except Exception:
                 matches = []
             if not matches:

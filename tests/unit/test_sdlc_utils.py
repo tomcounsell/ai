@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 class TestFindSessionByIssue:
     """Tests for the shared find_session_by_issue function."""
@@ -24,6 +26,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(941)
@@ -38,6 +41,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(941)
@@ -61,6 +65,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = ConnectionError("Redis down")
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(941)
@@ -77,6 +82,7 @@ class TestFindSessionByIssue:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(941)
@@ -114,6 +120,7 @@ class TestDeterministicIdVsIssueUrl:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = _filter
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -142,6 +149,7 @@ class TestDeterministicIdVsIssueUrl:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = _filter
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1148)
@@ -164,6 +172,7 @@ class TestMessageTextFallback:
         bridge = self._session(message_text="SDLC issue 1147")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -176,6 +185,7 @@ class TestMessageTextFallback:
         bridge = self._session(message_text="please work on issue #1147 today")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -188,6 +198,7 @@ class TestMessageTextFallback:
         bridge = self._session(message_text="ISSUE 1147 is urgent")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -201,6 +212,7 @@ class TestMessageTextFallback:
         decoy = self._session(message_text="tissue 1147 sample count")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [decoy]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -213,6 +225,7 @@ class TestMessageTextFallback:
         other = self._session(message_text="SDLC issue 1140")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [other]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -225,6 +238,7 @@ class TestMessageTextFallback:
         s = self._session(message_text=None)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -237,6 +251,7 @@ class TestMessageTextFallback:
         s = self._session(message_text="")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -252,6 +267,7 @@ class TestMessageTextFallback:
         url_match = self._session(issue_url="https://github.com/tomcounsell/ai/issues/1147")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [text_match, url_match]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = find_session_by_issue(1147)
@@ -290,6 +306,7 @@ class TestTerminalSessionFiltering:
             return []
 
         mock_as.query.filter.side_effect = _filter
+        wire_session_lookup(mock_as)
         return mock_as
 
     def test_terminal_session_excluded_via_issue_url_by_default(self):
@@ -594,6 +611,7 @@ class TestFindSessionEnsure:
         # goes through the session_id env path (mocked AgentSession query below).
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [created]
+        wire_session_lookup(mock_as)
         type(created).session_type = "eng"
 
         with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
@@ -685,6 +703,7 @@ class TestFindSessionEnsure:
         env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
+        wire_session_lookup(mock_as)
 
         ensure_mock = MagicMock()
         with patch("tools._sdlc_utils.AgentSession", mock_as):
@@ -708,6 +727,7 @@ class TestFindSessionEnsure:
         explicit_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [explicit_session]
+        wire_session_lookup(mock_as)
 
         # find_session_by_issue would return a DIFFERENT session — must not win.
         issue_session = MagicMock(name="issue_session")
@@ -729,6 +749,7 @@ class TestFindSessionEnsure:
         env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
+        wire_session_lookup(mock_as)
 
         fsbi = MagicMock()
         with patch("tools._sdlc_utils.AgentSession", mock_as):
@@ -749,6 +770,7 @@ class TestFindSessionEnsure:
         env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
+        wire_session_lookup(mock_as)
 
         fsbi = MagicMock()
         with patch("tools._sdlc_utils.AgentSession", mock_as):
@@ -770,6 +792,7 @@ class TestFindSessionEnsure:
         env_session.session_type = "eng"
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [env_session]
+        wire_session_lookup(mock_as)
 
         with patch("tools._sdlc_utils.AgentSession", mock_as):
             with patch.object(

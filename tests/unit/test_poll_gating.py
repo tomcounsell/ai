@@ -12,6 +12,7 @@ import pytest
 
 from bridge.poll_gating import poll_eligible
 from bridge.read_the_room import is_group_chat
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 
 class TestIsGroupChatHasExactlyOneHome:
@@ -57,6 +58,7 @@ class TestPollEligible:
     def test_group_plus_eng_is_eligible(self):
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = [_session("eng")]
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert result.ok
         assert result.reason == "eligible"
@@ -70,6 +72,7 @@ class TestPollEligible:
     def test_teammate_session_is_not_eng(self):
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = [_session("teammate")]
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert not result.ok
         assert result.reason == "not_eng_session"
@@ -77,6 +80,7 @@ class TestPollEligible:
     def test_missing_record_is_ineligible(self):
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = []
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert not result.ok
         assert result.reason == "unknown_session_type"
@@ -85,6 +89,7 @@ class TestPollEligible:
         """session_type is null=True on the model, so this is reachable."""
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = [_session(None)]
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert not result.ok
         assert result.reason == "unknown_session_type"
@@ -92,6 +97,7 @@ class TestPollEligible:
     def test_unrecognized_session_type_is_ineligible(self):
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = [_session("something-new")]
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert not result.ok
         assert result.reason == "unknown_session_type"
@@ -103,6 +109,7 @@ class TestPollEligible:
         """A delivery seam must not throw."""
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.side_effect = RuntimeError("redis down")
+            wire_session_lookup(model)
             result = poll_eligible(-1003449100931, "sess-1")
         assert not result.ok
         assert result.reason == "eligibility_error"
@@ -115,6 +122,7 @@ class TestPollEligible:
         new.created_at = 99
         with patch("models.agent_session.AgentSession") as model:
             model.query.filter.return_value = [old, new]
+            wire_session_lookup(model)
             assert poll_eligible(-1003449100931, "sess-1").ok
 
     def test_gate_compares_the_enum_not_a_bare_literal(self):

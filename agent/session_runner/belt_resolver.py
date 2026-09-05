@@ -330,11 +330,9 @@ def check_and_stamp_belt_state(
         # the resolver's pure compile path must stay import-light.
         from models.agent_session import AgentSession  # noqa: PLC0415
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        session = sessions[0]
 
         current = "on" if enforce else "off"
         prior = getattr(session, "belt_enforce_state", None)

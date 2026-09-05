@@ -437,12 +437,12 @@ The worker communicates ownership by setting two env vars before `subprocess.Pop
 On the subprocess's first prompt, the hook:
 
 1. Reads `AGENT_SESSION_ID` and resolves it via `AgentSession.get_by_id()` (indexed, O(1)).
-2. Falls back to `VALOR_SESSION_ID` via `query.filter(session_id=...)` if the primary misses.
+2. Falls back to `VALOR_SESSION_ID` via `AgentSession.newest_for_session_id(...)` if the primary misses.
 3. If resolved and non-terminal: writes that `agent_session_id` into the sidecar and returns. **The `create_local()` call is never reached.**
 4. If the resolved target is terminal (killed/completed/failed/abandoned/cancelled): falls through to the existing `create_local` gate, preserving terminal-session semantics (no zombie revival).
 5. If neither env var resolves: falls through to the existing gate, which blocks the creation unless `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set (direct-CLI path).
 
-The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, with a fallback via `query.filter(session_id=f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
+The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, with a fallback via `AgentSession.rows_for_session_id(f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
 
 **Race prevention invariant:** the worker's `AgentSession.create()/save()` must complete synchronously before `subprocess.Popen`. Python interpreter startup + hook import + Redis connection take hundreds of ms, while Redis commits are sub-ms; the race is theoretically possible but practically impossible. If the race ever fires, the hook falls through to `create_local()`.
 

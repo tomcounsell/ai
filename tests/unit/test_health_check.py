@@ -20,6 +20,7 @@ from agent.health_check import (
     _write_activity_stream,
     watchdog_hook,
 )
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 
 def _make_transcript(tool_calls: list[tuple[str, dict]]) -> Path:
@@ -312,6 +313,7 @@ class TestGetSessionContext:
 
         mock_as_cls = MagicMock()
         mock_as_cls.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as_cls)
         mock_module = MagicMock()
         mock_module.AgentSession = mock_as_cls
 
@@ -340,6 +342,7 @@ class TestGetSessionContext:
 
         mock_as_cls = MagicMock()
         mock_as_cls.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as_cls)
         mock_module = MagicMock()
         mock_module.AgentSession = mock_as_cls
 
@@ -361,6 +364,7 @@ class TestGetSessionContext:
     def test_no_session_returns_empty(self):
         mock_as_cls = MagicMock()
         mock_as_cls.query.filter.return_value = []
+        wire_session_lookup(mock_as_cls)
         mock_module = MagicMock()
         mock_module.AgentSession = mock_as_cls
 

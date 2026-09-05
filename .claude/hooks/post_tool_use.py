@@ -492,7 +492,7 @@ def _update_agent_session(hook_input: dict) -> None:
             # paths that still create local-* records.
             local_sid = f"local-{session_id}"
             try:
-                matches = list(AgentSession.query.filter(session_id=local_sid))
+                matches = AgentSession.rows_for_session_id(local_sid)
             except Exception:
                 matches = []
             if not matches:

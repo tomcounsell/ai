@@ -1033,9 +1033,9 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
-            if fresh_sessions:
-                session = fresh_sessions[0]
+            fresh_session = AgentSession.newest_for_session_id(session.session_id)
+            if fresh_session is not None:
+                session = fresh_session
                 logger.debug(f"Refreshed session {session.session_id} for structured draft")
         except Exception as e:
             logger.debug(f"Could not refresh session for draft: {e}")

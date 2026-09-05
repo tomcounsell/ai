@@ -17,6 +17,8 @@ import logging
 
 import pytest
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 @pytest.fixture(autouse=True)
 def _clear_pending_tasks():
@@ -253,6 +255,7 @@ class TestTrivialSessionGateSignals:
 
         fake_cls = MagicMock()
         fake_cls.query.filter.side_effect = RuntimeError("redis down")
+        wire_session_lookup(fake_cls)
         monkeypatch.setattr("models.agent_session.AgentSession", fake_cls)
 
         assert se._capture_turn_count("whatever") is None

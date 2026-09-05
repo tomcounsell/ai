@@ -415,16 +415,13 @@ def run_crash_recovery() -> dict:
                     continue
 
                 # Re-read status to prevent race with recovery mechanisms (#1537)
-                fresh_sessions = list(AgentSession.query.filter(session_id=session_id))
-                if not fresh_sessions:
+                fresh_session = AgentSession.newest_for_session_id(session_id)
+                if fresh_session is None:
                     logger.debug(
                         "crash_recovery: session %s disappeared before auto-resume",
                         session_id,
                     )
                     continue
-                # Pick newest by created_at if duplicates
-                fresh_sessions.sort(key=lambda s: getattr(s, "created_at", 0) or 0, reverse=True)
-                fresh_session = fresh_sessions[0]
 
                 if fresh_session.status not in RESUMABLE_STATUSES:
                     logger.debug(

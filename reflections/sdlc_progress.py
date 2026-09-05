@@ -890,7 +890,7 @@ def _row_is_nonterminal(session_id: str) -> bool:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
 
-        fresh = AgentSession.query.filter(session_id=session_id).first()
+        fresh = AgentSession.newest_for_session_id(session_id)
         if fresh is None:
             return False
         return getattr(fresh, "status", None) not in TERMINAL_STATUSES

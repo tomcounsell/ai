@@ -38,8 +38,7 @@ def _get_session(session_id: str):
     from models.agent_session import AgentSession
 
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        return sessions[0] if sessions else None
+        return AgentSession.newest_for_session_id(session_id)
     except Exception as e:
         logger.debug(f"Failed to look up session {session_id}: {e}")
         return None

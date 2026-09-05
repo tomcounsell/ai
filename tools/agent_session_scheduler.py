@@ -105,7 +105,7 @@ def _get_scheduling_depth() -> int:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             return int(sessions[0].scheduling_depth or 0)
     except Exception:  # noqa: S110 -- depth defaults to 0

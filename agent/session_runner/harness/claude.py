@@ -821,10 +821,8 @@ async def get_response_via_harness(
             # session_id is a Field (not KeyField), so multiple records can share
             # an id across resumes — pick the newest by created_at to avoid
             # accumulating onto a stale record.
-            sessions = list(AgentSession.query.filter(session_id=session_id))
-            if sessions:
-                sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-                session = sessions[0]
+            session = AgentSession.newest_for_session_id(session_id)
+            if session is not None:
                 _fields = ["turn_count", "tool_call_count"]
                 if total_num_turns:
                     session.turn_count = (session.turn_count or 0) + total_num_turns
