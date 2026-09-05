@@ -1,29 +1,24 @@
 ---
 name: do-sdlc
-description: "Supervises a full SDLC pipeline run to merge in a local Claude Code session, and defines the single-stage router contract that /sdlc executes. Asked for directly or assigned by a PM session."
+description: "Walks an issue through every stage of the SDLC pipeline to merge, dispatching each stage to a subagent and looping until merge or a blocking guard. Asked for directly or assigned by a PM session."
 context: fork
 ---
 
 # do-sdlc — SDLC Pipeline Supervisor and Single-Stage Router
 
-This skill is the **one substantive SDLC skill**. It has two entry modes over one shared step
-spine:
+This skill is the **one substantive SDLC skill**, and it has one job: walk an issue through every
+stage of the pipeline to merge. It executes Steps 1–7, assessing state and dispatching each stage
+to a subagent on the stage-appropriate model (opus/sonnet), looping until merge, a blocking guard,
+or the iteration cap. You are the supervisor, never the worker: you assess, dispatch, and track,
+and the stage subagents do all the work.
 
-| Mode | Entry | Executes | Contract |
-|------|-------|----------|----------|
-| **Router mode** | a single-stage router invocation | Steps 1–4 once | dispatch ONE sub-skill, then return; the supervising session re-invokes |
-| **Supervisor mode** | `/do-sdlc` | Steps 1–7 | loop until merge/blocked |
+Callers that need a single stage rather than a full run do not invoke this skill. They call
+`sdlc-tool next-skill` for the dispatch decision and invoke the returned `/do-*` skill directly,
+which is the same routing tool this skill uses in Step 4.
 
-Router mode assesses state and dispatches exactly one `/do-*` skill, expecting the supervising
-session to re-invoke it after each stage completes. Supervisor mode is the local stand-in for that
-session: it re-invokes the router itself, dispatching each stage to a subagent on the
-stage-appropriate model (opus/sonnet), until merge, a blocking guard, or the iteration cap. You
-are the supervisor or router, never the worker: you assess, dispatch, and track, and the stage
-subagents do all the work.
-
-**Redundant-context check.** If a live supervising context already owns this issue, supervisor
-mode is redundant — that context IS the supervision loop. Do not run it; drive the pipeline one
-stage at a time through router mode instead. A live *supervised-run signal* for the issue number
+**Redundant-context check.** If a live supervising context already owns this issue, that context
+IS the supervision loop. Stand down and report it rather than starting a second loop over the same
+issue. A live *supervised-run signal* for the issue number
 is a different case: if its `owner_run_id` is one this run already holds, it is this run's own
 hand-off and must be inherited, not treated as grounds to stand down (see Step 2).
 
@@ -33,8 +28,9 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 
 The defaults drive the pipeline through `sdlc-tool` (a stage-state CLI on `PATH`), `gh`, and
 `git`. Repo-coupled specifics — worktree ownership, target-repo and `GH_REPO` semantics, the
-router's internal guard implementation and its source references, the router-shim relationship,
-and `sdlc-tool` command discipline — live in that context file, not in this global body.
+router's internal guard implementation and its source references, how callers drive a single stage
+without this skill, and `sdlc-tool` command discipline — live in that context file, not in this
+global body.
 
 The probe also determines the run's **verdict authority**: a repo that declares no verdict
 substrate (no `docs/sdlc/` context) uses posted GitHub reviews as its authoritative REVIEW
@@ -46,8 +42,7 @@ supervised runs in substrate-less repos are valid work.
 ## Hard Rules
 
 1. **NEVER write code, run tests, or create plans directly** — every stage executes inside a stage
-   subagent that invokes the stage's `/do-*` skill (supervisor mode), or is dispatched as exactly
-   one sub-skill after which the router returns (router mode).
+   subagent that invokes the stage's `/do-*` skill.
 2. **NEVER decide dispatch yourself** — `sdlc-tool next-skill` is the only source of dispatch
    decisions; it encodes all guards (G1–G9) and dispatch rows. Do not second-guess it, reorder
    stages, or skip it "because the next stage is obvious".
@@ -63,13 +58,11 @@ supervised runs in substrate-less repos are valid work.
    fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork
    reports "running in the background, I'll continue when it completes" and then never does. Every
    stage subagent must be spawned with `run_in_background: false` so its result is in hand before
-   the loop advances — in router mode too, for the one stage you dispatch.
+   the loop advances.
 7. **NEVER spawn agent teammates for stage work.** Where agent teams are enabled, ignore those
    affordances: a teammate's idle notification is not a completion signal (teammates go idle
    mid-task with deliverables unfinished), and an in-process teammate cannot be reliably resumed.
    Every dispatch is a foreground subagent per Rule 6.
-8. **NEVER loop in router mode** — invoke one sub-skill, then return. The supervising session
-   handles progression.
 
 ## Worktree & branch ownership
 
@@ -110,9 +103,9 @@ exits 0. Resolve the slug from `GH_REPO` or from `gh repo view --json nameWithOw
   number,title,state,headRefName,reviewDecision,statusCheckRollup,body` to get the branch name,
   review state, and check status. Then extract the linked issue number from the PR body (look
   for `Closes #N` or `Fixes #N`).
-- **Bare feature description** (no number): in supervisor mode, dispatch a `/do-issue` stage
-  subagent first (sonnet), read the created issue number from its report, then proceed. In router
-  mode, do not proceed without an issue number — surface that to the supervising session.
+- **Bare feature description** (no number): dispatch a `/do-issue` stage subagent first (sonnet),
+  read the created issue number from its report, then proceed. Never run a stage without an issue
+  number.
 
 **PR state informs Step 3**: a provided PR's current state (checks passing/failing, review
 approved/changes-requested) tells you which stage to resume from. Skip stages already complete —
@@ -294,9 +287,8 @@ CLEAN, CI is all-passing, and the recorded REVIEW verdict is APPROVED at the cur
 ## Step 4: Dispatch ONE Sub-Skill
 
 **Do not pattern-match against a hand-edited table.** Call the routing tool and dispatch whatever
-skill it returns; it evaluates every guard and dispatch row against live state. In router mode
-this is the whole job: call `next-skill`, record the dispatch, invoke the ONE returned skill, then
-**return**. In supervisor mode the same call feeds Step 5's loop.
+skill it returns; it evaluates every guard and dispatch row against live state. The same call feeds
+Step 5's loop on every iteration.
 
 ```bash
 # Get the next dispatch decision
@@ -350,11 +342,11 @@ the router's internals from a shell or skill script.
 
 Do NOT restart from scratch if prior stages are already complete.
 
-## Step 5: Supervision Loop (supervisor mode only)
+## Step 5: Supervision Loop
 
 Repeat the following cycle. **Iteration cap: 15 dispatches** (a happy path is 8 stages; the cap is
 a backstop above realistic patch/re-review cycles — G4 catches genuine oscillation long before
-it). Router mode never enters this step; it returns after Step 4.
+it).
 
 ### 5a. Ask the router
 

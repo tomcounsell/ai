@@ -1,6 +1,6 @@
 ---
 name: do-issue
-description: "Create a self-contained GitHub issue ready for planning. Triggered by 'create an issue', 'file an issue', 'track this', or by /sdlc at Step 1."
+description: "Creates a self-contained GitHub issue ready for planning. Use when work needs tracking before it can be planned, on 'create an issue', 'file an issue', or 'track this', and when dispatched at the intake stage."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 argument-hint: "<title or description>"
 ---

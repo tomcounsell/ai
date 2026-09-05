@@ -47,7 +47,7 @@ CLASSIFICATION_PROMPT = """Classify this work request into exactly one category:
 - bug: Something broken that previously worked
 - feature: New functionality or capability
 - chore: Maintenance, refactoring, documentation, dependencies
-- sdlc: References the SDLC pipeline, mentions "/sdlc", "issue #N", \
+- sdlc: References the SDLC pipeline, mentions "/do-sdlc", "issue #N", \
 "run the pipeline", or asks for pipeline/build/plan execution
 
 Request: {message}

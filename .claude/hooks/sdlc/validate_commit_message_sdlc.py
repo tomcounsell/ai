@@ -96,7 +96,7 @@ def main():
             if staged_code:
                 block(
                     f"Cannot commit code files to main: {', '.join(staged_code[:3])}. "
-                    "Use /sdlc to create a branch and PR. "
+                    "Use /do-sdlc to create a branch and PR. "
                     "Docs, plans, and configs can be committed to main."
                 )
         except Exception:

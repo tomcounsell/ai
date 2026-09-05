@@ -41,7 +41,7 @@ For a standalone debug script run from an ambient shell: never point it at a tes
 
 ## Development Workflow
 
-Conversation first: chat arrives via Telegram or a local session. If it becomes real work, create a GitHub issue, then let the Eng session steer the pipeline via `/sdlc` one stage at a time. A 👍 reaction signals "done for now".
+Conversation first: chat arrives via Telegram or a local session. If it becomes real work, create a GitHub issue, then let the Eng session steer the pipeline one stage at a time, asking `sdlc-tool next-skill` for each dispatch and invoking the returned `/do-*` skill. `/do-sdlc` walks every stage in one invocation and is for local sessions with no supervising Eng session. A 👍 reaction signals "done for now".
 
 **Landing a hotfix on `main`**: a commit that puts code on `main` without a PR must declare its issue disposition: `Closes #N`, `Refs #N`, or `No-issue: <reason>`. Enforced by `.githooks/commit-msg` and `.githooks/pre-push`; `docs/plans/` commits are exempt. See [`docs/features/hotfix-issue-disposition.md`](docs/features/hotfix-issue-disposition.md).
 

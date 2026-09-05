@@ -70,7 +70,7 @@ reference skills carry `user-invocable: false` · fork skills carry `context: fo
 (the CLI/module tokens in the script's `COUPLING_SIGNALS` set) must carry the canonical
 probe step deferring to the per-repo skill-context seam. Rule 21 additionally flags
 Bucket-C coupling: backtick-coded slash-invocations of project-only skills (names derived
-live from the repo's `.claude/skills/` listing — e.g. a bare `/sdlc`) and curated infra
+live from the repo's `.claude/skills/` listing — e.g. a bare `/setup`) and curated infra
 tokens (`sdk_client.py`, `SDLC_TARGET_REPO`), unless the **same physical line** carries
 conditional framing ("in this repo", "this repo's", or the probe sentence). Both rules scan
 every `*.md` sub-file in the skill dir, not just SKILL.md (probe coverage is read from

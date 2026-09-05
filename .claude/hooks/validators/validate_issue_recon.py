@@ -18,7 +18,7 @@ Usage:
   python validate_issue_recon.py <issue_number>
   python validate_issue_recon.py  # auto-detect from current branch or args
 
-The validator is called by /do-plan (or /sdlc before dispatching /do-plan)
+The validator is called by /do-plan (or by whoever dispatches /do-plan)
 to gate the ISSUE → PLAN transition.
 """
 

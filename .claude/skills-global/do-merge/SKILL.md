@@ -1,6 +1,6 @@
 ---
 name: do-merge
-description: "Use when merging a pull request that has cleared the SDLC pipeline. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage."
+description: "Merges a pull request that has cleared the SDLC pipeline. Use when a PR has passed review and is ready to land, on 'merge this PR', or when dispatched at the MERGE stage."
 ---
 
 # Do-Merge (Deterministic Merge Gate)

@@ -1,24 +1,32 @@
 # do-sdlc addendum — this repo only
 <!-- Do not duplicate content from the global do-sdlc skill (.claude/skills-global/do-sdlc/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
-## `/sdlc` is this repo's router-mode entry point
+## Single-stage work goes through `sdlc-tool`, not a skill
 
-The generic body describes "router mode" abstractly. In this repo it is reached through `/sdlc`, a
-thin `context: fork` shim (`.claude/skills/sdlc/SKILL.md`) that reads the global body's Steps 1–4
-(resolve → session-ensure → assess → dispatch ONE), executes them once, and returns.
+`/do-sdlc` is the only SDLC skill entry point. It walks an issue through every stage to merge.
+There is no router shim: the `/sdlc` skill was retired, and nothing replaces it.
 
-| | `/sdlc` | `/do-sdlc` |
+A caller that needs one stage rather than a whole run asks the router directly:
+
+```bash
+sdlc-tool next-skill --issue <N>      # dispatch decision, honouring guards G1-G9
+sdlc-tool dispatch record ...          # record before invoking, preserves the G4 signal
+```
+
+then invokes the returned `/do-*` skill itself. That is the same `sdlc-tool next-skill` →
+`agent.sdlc_router.decide_next_dispatch()` path `/do-sdlc` uses in Step 4, reading the same stored
+stage state, so there is exactly one source of dispatch truth however work is driven.
+
+| | single-stage via `sdlc-tool` | `/do-sdlc` |
 |---|---|---|
-| Contract | dispatch ONE stage, return | loop until merge/blocked |
-| Progression | the eng session re-invokes | the skill re-invokes the router itself |
-| Model assignment | eng session passes `--model` when spawning dev sessions | supervisor passes `model:` on the Agent tool |
-| Where it runs | bridge eng sessions + local | local Claude Code sessions |
+| Contract | one dispatch decision, caller invokes | loop until merge/blocked |
+| Progression | the calling session re-asks the router | the skill loops itself |
+| Model assignment | caller passes `--model` when spawning dev sessions | supervisor passes `model:` on the Agent tool |
+| Where it runs | bridge eng sessions, dev subagents | local Claude Code sessions |
 
-Both entry points consume the same router (`sdlc-tool next-skill` →
-`agent.sdlc_router.decide_next_dispatch()`) and the same stored stage state — there is exactly one
-source of dispatch truth. The "supervising session" the global body defers to is the bridge eng
-session; when one already owns the issue, supervisor mode is redundant and work drives through
-`/sdlc` one stage at a time.
+The "live supervising context" the global body stands down for is the bridge eng session. When one
+already owns the issue, `/do-sdlc` must not start a second loop; that session drives the pipeline a
+stage at a time through the router calls above.
 
 ## `{target_repo_path}` is `SDLC_TARGET_REPO`
 
