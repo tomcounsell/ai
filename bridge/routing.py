@@ -1441,13 +1441,10 @@ _DEFAULT_RESOLVER_TIMEOUT = 5.0
 
 
 def _get_redis():
-    """Return a Redis connection (lazy import to avoid circular dependency)."""
-    import os
+    """Popoto's bytes client: the resolver cache decodes its own values."""
+    from utils.redis_client import bytes_redis
 
-    import redis
-
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=False)
+    return bytes_redis()
 
 
 class ResolverUnavailableError(Exception):

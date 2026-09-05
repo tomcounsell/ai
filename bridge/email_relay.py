@@ -65,11 +65,10 @@ EMAIL_RELAY_HEARTBEAT_TTL = 300  # 5 minutes
 
 
 def _get_redis_connection():
-    """Return a sync Redis connection for LPOP/RPUSH (called via to_thread)."""
-    import redis
+    """The shared sync text Redis client for LPOP/RPUSH (called via to_thread)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _normalize_payload(message: dict) -> dict | None:
