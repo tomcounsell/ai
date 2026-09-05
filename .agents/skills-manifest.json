@@ -1,0 +1,788 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "ask-me",
+      "scope": "global",
+      "source": ".claude/skills-global/ask-me/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/ask-me/SKILL.md": "a5a586ba09a73c6b656bfcc68d6f3482635b8a55cb52f9e36551730588c96c4f"
+      },
+      "target": ".agents/skills-global/ask-me",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "audit-hooks",
+      "scope": "global",
+      "source": ".claude/skills-global/audit-hooks/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/audit-hooks/SKILL.md": "c799e39a1b819ceffc901a6ef770c0f82dce3ebb1104029957b4c64afc8a8a01",
+        ".claude/skills-global/audit-hooks/BEST_PRACTICES.md": "998f0df9d1a49059425f5c5ad10fac79c0f5e4bcc30ae56fc110ef6d7d0d6c1d"
+      },
+      "target": ".agents/skills-global/audit-hooks",
+      "resources": [
+        "BEST_PRACTICES.md",
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "audit-models",
+      "scope": "global",
+      "source": ".claude/skills-global/audit-models/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/audit-models/SKILL.md": "24fde6edc21287889cbd2f10827bb94778548aba54f3b1135ed78b88529014cb"
+      },
+      "target": ".agents/skills-global/audit-models",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "audit-skills",
+      "scope": "global",
+      "source": ".claude/skills-global/audit-skills/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/audit-skills/SKILL.md": "92129f03e08fb246e7aaa5cf29bae631c79b74bc59a83b630b1ffa565346d81b",
+        ".claude/skills-global/audit-skills/references/anthropic-skill-creator.md": "dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf",
+        ".claude/skills-global/audit-skills/references/anthropic-skills-docs.txt": "416956fd4a823b16f7db50feeeb2889a18591762356f9ef1bcb36c886c3d7d0a",
+        ".claude/skills-global/audit-skills/references/rubric.md": "119f1fba4ccf6e8f2374d60366314f3fad02a4034490f7fe117758946139aa27",
+        ".claude/skills-global/audit-skills/scripts/sync_best_practices.py": "bea8ec72535e7c4257a8deb38e002efc67735c585c969af46ef7bf42deb9a27e",
+        ".claude/skills-global/audit-skills/scripts/audit_skills.py": "757e8f792b61cd36b593e20c079d88f1a9d287bbee3d96869271aa2b72d71b69"
+      },
+      "target": ".agents/skills-global/audit-skills",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "audit-tools",
+      "scope": "global",
+      "source": ".claude/skills-global/audit-tools/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/audit-tools/SKILL.md": "2b06237f0823d572c023026d6c447b4fbd2695ddeadae947d03977c180c03582",
+        ".claude/skills-global/audit-tools/CHECKS.md": "7bab81a5fcec66a910f77e684ad225abb8cfb38f16e1d30bea17e373a65d604a"
+      },
+      "target": ".agents/skills-global/audit-tools",
+      "resources": [
+        "CHECKS.md",
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "authenticity-pass",
+      "scope": "project",
+      "source": ".claude/skills/authenticity-pass/SKILL.md",
+      "source_files": {
+        ".claude/skills/authenticity-pass/SKILL.md": "39f46bb3276535abb82b5deb967a4dc4ba2f806c0670565f7685c7f81d637bea"
+      },
+      "target": ".agents/skills/authenticity-pass",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "build-agent",
+      "scope": "global",
+      "source": ".claude/skills-global/build-agent/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/build-agent/SKILL.md": "c778a8f4903d131f69a56783bac7415e53aecdb16364e79f60242cda0b4f5d1e",
+        ".claude/skills-global/build-agent/references/cma-primitives.md": "07c13cf1d2bc5ed8a3f6b609d6b74fa2c38e58b488a05833f6b996a656e2285c",
+        ".claude/skills-global/build-agent/references/build-sheet.md": "134c4a9a063998e376bd96da63784188ba304f6edd65fa8772466381a4854ea0"
+      },
+      "target": ".agents/skills-global/build-agent",
+      "resources": [
+        "SKILL.md",
+        "references/build-sheet.md",
+        "references/cma-primitives.md"
+      ]
+    },
+    {
+      "name": "calendar-sync",
+      "scope": "global",
+      "source": ".claude/skills-global/calendar-sync/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/calendar-sync/SKILL.md": "12d40dddfb50b31cc47b4c7a6a6117b3e8381c63f6f63628942cc1734f38ba6c"
+      },
+      "target": ".agents/skills-global/calendar-sync",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "checking-system-logs",
+      "scope": "project",
+      "source": ".claude/skills/checking-system-logs/SKILL.md",
+      "source_files": {
+        ".claude/skills/checking-system-logs/SKILL.md": "baf76947221e44f7fe894d6fd53366d5e24d82727e2a929a06cdb9eece501ae1"
+      },
+      "target": ".agents/skills/checking-system-logs",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "computer-use",
+      "scope": "global",
+      "source": ".claude/skills-global/computer-use/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/computer-use/SKILL.md": "63df30eb5db8bfb1aa8f005e61f53478a7d8742e23277cd68576a7171ac378b0"
+      },
+      "target": ".agents/skills-global/computer-use",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "cowork",
+      "scope": "global",
+      "source": ".claude/skills-global/cowork/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/cowork/SKILL.md": "8fcf2d6de8fbb3fdc72679e116339789aa5c3c79d345bedb300175069291662b"
+      },
+      "target": ".agents/skills-global/cowork",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "de-slop",
+      "scope": "global",
+      "source": ".claude/skills-global/de-slop/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/de-slop/SKILL.md": "c5f6955595c9415f676c084071c58d38de2cfe7c96d08418d72fcff6c4767599",
+        ".claude/skills-global/de-slop/references/PROSE.md": "66f53fdf964b1f4c8ba1b4db8bb136c8275fe4111f2781dcf786a759c2b95a6d",
+        ".claude/skills-global/de-slop/references/SIGNS.md": "7c8f8746c22a16bd2c854b587ab1e7116023dcec8741e60680124de134b10c30"
+      },
+      "target": ".agents/skills-global/de-slop",
+      "resources": [
+        "SKILL.md",
+        "references/PROSE.md",
+        "references/SIGNS.md"
+      ]
+    },
+    {
+      "name": "do-build",
+      "scope": "global",
+      "source": ".claude/skills-global/do-build/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-build/WORKFLOW.md": "0dd3d269dda0f8e2353bab1e869b6ca9cab3672b64b006b387622502fef02afc",
+        ".claude/skills-global/do-build/PR_AND_CLEANUP.md": "0680a636930693f9699143335d8fa9c7d4229ab4805b3e78c893c0ae8e2ea0cb",
+        ".claude/skills-global/do-build/SKILL.md": "bd8c2d708654bf1bf13e97fcab2b276e45f222748785c013bf4c4c0f3b0ae08f"
+      },
+      "target": ".agents/skills-global/do-build",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-debrief",
+      "scope": "global",
+      "source": ".claude/skills-global/do-debrief/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-debrief/SKILL.md": "0b6949a6b32419575b1298462c68457aca9363c8a200b985cd7fb9b9894dea83"
+      },
+      "target": ".agents/skills-global/do-debrief",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-deploy",
+      "scope": "project",
+      "source": ".claude/skills/do-deploy/SKILL.md",
+      "source_files": {
+        ".claude/skills/do-deploy/SKILL.md": "55a492c1a87aefa7f873251e4f26afd120010b42b6780592ac574720aea4312a"
+      },
+      "target": ".agents/skills/do-deploy",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-deploy-example",
+      "scope": "global",
+      "source": ".claude/skills-global/do-deploy-example/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-deploy-example/SKILL.md": "de6ab6b12540dec31c0f4cfbbc9f105e55f214c4eed02712e9e9f461c67df07a"
+      },
+      "target": ".agents/skills-global/do-deploy-example",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-design-audit",
+      "scope": "global",
+      "source": ".claude/skills-global/do-design-audit/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-design-audit/SKILL.md": "0f7fe9d0d8df8866da2556528d207f264038d3c343965427c078c74ccf7121a9"
+      },
+      "target": ".agents/skills-global/do-design-audit",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-design-system",
+      "scope": "global",
+      "source": ".claude/skills-global/do-design-system/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-design-system/SKILL.md": "9d8e7afbdf816b5db000958f373dd5ab598dd3dd5492d10d2e2fc351254c5e21",
+        ".claude/skills-global/do-design-system/charter-template.md": "17758cc267102d2f6ec11887e97b2b90994072c4bf7c74345e00a884103fa85e",
+        ".claude/skills-global/do-design-system/references/moodboard-capture.md": "5f78b3f8369c3f1909761c700eaa9b1e627a6d55b8693c475419365f1748d95d",
+        ".claude/skills-global/do-design-system/references/pen-editing.md": "85f4548d3ca20567c82fadd1c315e0335139a699d630d35973d0889448c39d3a",
+        ".claude/skills-global/do-design-system/references/file-organization.md": "2020a217718f797a21b165f23f15979a2bc0613bd6bba509bf1324a09db4873a"
+      },
+      "target": ".agents/skills-global/do-design-system",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-discover-paths",
+      "scope": "global",
+      "source": ".claude/skills-global/do-discover-paths/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-discover-paths/SKILL.md": "bc8f46064f83f1da61a86af92dbf4c564e2788baff17de09f08cd36bf6a439ed"
+      },
+      "target": ".agents/skills-global/do-discover-paths",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-docs",
+      "scope": "global",
+      "source": ".claude/skills-global/do-docs/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-docs/SKILL.md": "14416625795b82eee83ac3487d7acd63d3002217852fab251447f2b2de47cb5b"
+      },
+      "target": ".agents/skills-global/do-docs",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-integration-audit",
+      "scope": "global",
+      "source": ".claude/skills-global/do-integration-audit/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-integration-audit/SKILL.md": "1efda9aeecb53d69981ac2286c2d1461ee878df62adc5389795c5789f9da197a"
+      },
+      "target": ".agents/skills-global/do-integration-audit",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-investigation-issue",
+      "scope": "global",
+      "source": ".claude/skills-global/do-investigation-issue/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-investigation-issue/TEMPLATE.md": "94393f6b682d0444c6039890e42b2e1d65efe0d300495aed04bf60a892faadc4",
+        ".claude/skills-global/do-investigation-issue/SKILL.md": "75d6b6031316ee49c21054208c6269f927cae225637f857982bc87b486f0b9e8"
+      },
+      "target": ".agents/skills-global/do-investigation-issue",
+      "resources": [
+        "SKILL.md",
+        "TEMPLATE.md"
+      ]
+    },
+    {
+      "name": "do-issue",
+      "scope": "global",
+      "source": ".claude/skills-global/do-issue/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-issue/RECON.md": "7f61e5a7cf248798c6e216a980324c4d706f3b66c1c66af0ac43abd95865507d",
+        ".claude/skills-global/do-issue/ISSUE_TEMPLATE.md": "594bd8df9c73f99c1538221c3a3b13f2f10f583c23b5f0911c63d5fd6dd34cc8",
+        ".claude/skills-global/do-issue/CHECKLIST.md": "ed5200fadc4690e6dbc9130e9998bb8abf76f4e5a448fafaff910cf6da3d32cd",
+        ".claude/skills-global/do-issue/SKILL.md": "1dac31398487712757101bb0897fa5c1459d0422f48b241c3040cfb443443ef1"
+      },
+      "target": ".agents/skills-global/do-issue",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-merge",
+      "scope": "global",
+      "source": ".claude/skills-global/do-merge/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-merge/SKILL.md": "a66bf38412b6d7e6dd5d5e4c3a4bf438e1432fbdd66e3ab71bf054d63f9f7789"
+      },
+      "target": ".agents/skills-global/do-merge",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-patch",
+      "scope": "global",
+      "source": ".claude/skills-global/do-patch/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-patch/SKILL.md": "a8a402fb36a3be3d94d4594ff5a45ea2f8d93840cdec6f788075698a4fdc4846"
+      },
+      "target": ".agents/skills-global/do-patch",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-plan",
+      "scope": "global",
+      "source": ".claude/skills-global/do-plan/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-plan/EXAMPLES.md": "c4974baf91794a3ae74bcfede8b5c182bfba67d077713d833ef855b449c30f24",
+        ".claude/skills-global/do-plan/PLAN_TEMPLATE.md": "9fc72747f3b21aa112f91e984f81c0544cc7f9584767bb9f091e150e13c1caf2",
+        ".claude/skills-global/do-plan/DOMAIN_FRAMING.md": "dd04ab2edc31b06f80423f565218502616be16093cb04c6b0426bf553e4af717",
+        ".claude/skills-global/do-plan/SKILL.md": "7f6d8c457bd7e2018cfce1ddf8f80466f991bcf3c685a54a4b3a40a6155a6205",
+        ".claude/skills-global/do-plan/SCOPING.md": "adc5db200c52adf8cc86f78bf0ab4a88956409c2531bb07066cee2a01016e5dd"
+      },
+      "target": ".agents/skills-global/do-plan",
+      "resources": [
+        "PLAN_TEMPLATE.md",
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-plan-critique",
+      "scope": "global",
+      "source": ".claude/skills-global/do-plan-critique/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-plan-critique/SKILL.md": "58a99ebae22b57ee86d119ece6fbb5ea90f0ab181114bc5476e86138a99bb966",
+        ".claude/skills-global/do-plan-critique/CRITICS.md": "6e4934c63fbc7ce447c48ce11c53d2a274a1370719a811ee7bc394985b4f898b"
+      },
+      "target": ".agents/skills-global/do-plan-critique",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-pr-review",
+      "scope": "global",
+      "source": ".claude/skills-global/do-pr-review/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-pr-review/SKILL.md": "31855338a7f95e1b3d58c6fcc01b27b8572b9bdedda0b3b9455df07ed82b0af2",
+        ".claude/skills-global/do-pr-review/sub-skills/checkout.md": "88be6746cd33c686f17574c1bfa839574fc3399445270b10c8b7bb739d670fa2",
+        ".claude/skills-global/do-pr-review/sub-skills/outcome-contract.md": "a1b6f59e0858a7baa1db25ee2bd6c79de19734217106fa00e60e4c74d15a5755",
+        ".claude/skills-global/do-pr-review/sub-skills/screenshot.md": "14112b5d5c1e8306fbc23b2d0b94abdd803d0a9275f9cf18a11439660399250f",
+        ".claude/skills-global/do-pr-review/sub-skills/code-review.md": "98089466b80c169b82039e273e160ada22ba58908792b627e440211b7c2d99df",
+        ".claude/skills-global/do-pr-review/sub-skills/post-review.md": "a79c747cc6c9621fea9a3dafd4556ca029ef044bf09091e5d40f0b0d7a6e6083"
+      },
+      "target": ".agents/skills-global/do-pr-review",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-presentation",
+      "scope": "global",
+      "source": ".claude/skills-global/do-presentation/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-presentation/THEME.md": "6e21ab3bd2d0b051b6916ca8aea191303458caa09a17549b93a17c2a3daf13ac",
+        ".claude/skills-global/do-presentation/SKILL.md": "2abea88317b998bec6b5ec1a2064b8b0ca8b77c7c56b8d0541b0e6a44ece09a5",
+        ".claude/skills-global/do-presentation/CONTENT_GUIDE.md": "cd222d2509d107068b3c10e1fcd74998cf92eb17db2ce109918373371ad72f3c"
+      },
+      "target": ".agents/skills-global/do-presentation",
+      "resources": [
+        "CONTENT_GUIDE.md",
+        "SKILL.md",
+        "THEME.md"
+      ]
+    },
+    {
+      "name": "do-sdlc",
+      "scope": "global",
+      "source": ".claude/skills-global/do-sdlc/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-sdlc/RUN_IDENTITY.md": "7cffecc34eb5d87b2a4db734ae456a068442854d7d4d91face14951e012d46d0",
+        ".claude/skills-global/do-sdlc/SKILL.md": "b00a8d45c21062987b54d9ec863b96e0807e4eccab2c00f377cd00cb41e27a9c"
+      },
+      "target": ".agents/skills-global/do-sdlc",
+      "resources": [
+        "RUN_IDENTITY.md",
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-test",
+      "scope": "global",
+      "source": ".claude/skills-global/do-test/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-test/PYTHON.md": "84bc6d15253d0346e700ef030d66c540378eb1d2be7c27c97cf781cc45caaa13",
+        ".claude/skills-global/do-test/quality-gates.md": "e4c26b002c3de42d118f5b44e4bc797f8cdf7200cd90e805cde0b37e02eb5314",
+        ".claude/skills-global/do-test/parallel-dispatch.md": "511dad84ca947da53ab1c47c877bdaccdeb6264d985955cd9e205c6d08627180",
+        ".claude/skills-global/do-test/SKILL.md": "913ebda2ba2dda608592aa375f5d0530ef8af173a9d25b52c9ef3f2f2fc7b270",
+        ".claude/skills-global/do-test/baseline-verification.md": "2592ed8a4af7f6a23c3088ecefc30e898d9249ccb37bcf81a15b65b7d9d65eb3",
+        ".claude/skills-global/do-test/special-targets.md": "a75525a61fbedcd3bd68d66248f7a9f48d42c8129b3e865288fcee28106581dc"
+      },
+      "target": ".agents/skills-global/do-test",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "do-voice-recording",
+      "scope": "global",
+      "source": ".claude/skills-global/do-voice-recording/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/do-voice-recording/SKILL.md": "9db81ace47c2dc1a259c85147e95c35d5c166bf3403f58714e7a0a759c0d0305"
+      },
+      "target": ".agents/skills-global/do-voice-recording",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "ebook-ingest",
+      "scope": "project",
+      "source": ".claude/skills/ebook-ingest/SKILL.md",
+      "source_files": {
+        ".claude/skills/ebook-ingest/SKILL.md": "b48d36e85264ad8406059f25842468a11b58ddc10262d4354bd7e059794371c9",
+        ".claude/skills/ebook-ingest/scripts/annas_get.py": "41161ee7b43d1bcc6f83cb5ea9586dfa41233ea3f22b145a592ce53a5ec11b60",
+        ".claude/skills/ebook-ingest/scripts/clean_book.py": "533052525d57c480a5019effc96def8f0b196bea18382a36a0b4fb00a07e6d85"
+      },
+      "target": ".agents/skills/ebook-ingest",
+      "resources": [
+        "CONVERSION.md",
+        "SKILL.md",
+        "scripts/annas_get.py",
+        "scripts/clean_book.py"
+      ]
+    },
+    {
+      "name": "email",
+      "scope": "global",
+      "source": ".claude/skills-global/email/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/email/SKILL.md": "a7282c9f6e7db279a4d7616c1cfba3714c0e6ed461accd1bd3dfa70d1e3c24f4"
+      },
+      "target": ".agents/skills-global/email",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "frontend-design",
+      "scope": "global",
+      "source": ".claude/skills-global/frontend-design/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/frontend-design/SKILL.md": "0dfd6c24353ccc4e902686e7207b4be448090e318b5fac899784582ae165c143",
+        ".claude/skills-global/frontend-design/reference/ux-writing.md": "0cd5e958d92be6e2331cb199d6ed5d98597aa20ec4922d4c3df56e7753cfc00c",
+        ".claude/skills-global/frontend-design/reference/spatial-design.md": "10c743ee8245fc1be9e8af2b79dd08b0dae19fcde33d46c9730c000d7e13b7cd",
+        ".claude/skills-global/frontend-design/reference/motion-design.md": "c35a59b5f795721c914cfccf9b470e89a5010c563cd85ab46a67031531678f3f",
+        ".claude/skills-global/frontend-design/reference/typography.md": "71c2e62adf8dff3e3a6f57c37c72e5ca6c1e2902b906915c74d3cc04ab72c3c1",
+        ".claude/skills-global/frontend-design/reference/interaction-design.md": "997d5e66ae54fcf8e59a0fcf0a2db49982ffe7b9b6cc091bcf64a3b3e0828ed7",
+        ".claude/skills-global/frontend-design/reference/color-and-contrast.md": "be502ad08270cd60cabb6769a6e1ed517ecaeeb7d40f6e610f1802689ee78ddc",
+        ".claude/skills-global/frontend-design/reference/responsive-design.md": "5add44195a42cf7fa82aecadaad79b8875446b930e06d087d73f3722533fd95a"
+      },
+      "target": ".agents/skills-global/frontend-design",
+      "resources": [
+        "SKILL.md",
+        "reference/color-and-contrast.md",
+        "reference/interaction-design.md",
+        "reference/motion-design.md",
+        "reference/responsive-design.md",
+        "reference/spatial-design.md",
+        "reference/typography.md",
+        "reference/ux-writing.md"
+      ]
+    },
+    {
+      "name": "google-workspace",
+      "scope": "global",
+      "source": ".claude/skills-global/google-workspace/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/google-workspace/SKILL.md": "daccdcc9c2aece615facd80886c630aa1b95494353f5d88b63b3c78b576749b2"
+      },
+      "target": ".agents/skills-global/google-workspace",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "grill-me",
+      "scope": "global",
+      "source": ".claude/skills-global/grill-me/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/grill-me/SKILL.md": "6e51aa4a0c80b513adf858cf596e0126e507ac1731c4c5340bd6c2ca1d1073ac"
+      },
+      "target": ".agents/skills-global/grill-me",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "imagine-agent",
+      "scope": "global",
+      "source": ".claude/skills-global/imagine-agent/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/imagine-agent/SKILL.md": "491c1eb0605424a702c5ef2ada120e15e09df1c21ffedb23e77ae2fdf899f49a"
+      },
+      "target": ".agents/skills-global/imagine-agent",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "linkedin",
+      "scope": "project",
+      "source": ".claude/skills/linkedin/SKILL.md",
+      "source_files": {
+        ".claude/skills/linkedin/SKILL.md": "5a350b17d422ad5e4d3daa4b170bd302846d7f8f2ef0757b5dd36bf3621779a5",
+        ".claude/skills/linkedin/references/messages.md": "71516ea320afb965dad44fec8894166acf892aeb084446cb858e328c454be6fc",
+        ".claude/skills/linkedin/references/dom-model.md": "8f1dac7892df379002f1ef4be40af4543a41ed10d937a14fa5b2efe42e66fa43",
+        ".claude/skills/linkedin/references/feed-engagement.md": "9a990f53ba50a4295e2dc9d49d93caf620b9c8921e932e1fe90dc199eadc2fb2",
+        ".claude/skills/linkedin/references/posting.md": "36bbc3d47bc594c7d198d32ac617d41efe209687153e23a2041238a5faaf4d72"
+      },
+      "target": ".agents/skills/linkedin",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "mermaid-render",
+      "scope": "global",
+      "source": ".claude/skills-global/mermaid-render/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/mermaid-render/SKILL.md": "deaab9e5cce02689d2bc6cd9236a1b72814f6aa661ea51c7f79b40835990212e"
+      },
+      "target": ".agents/skills-global/mermaid-render",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "new-audit-skill",
+      "scope": "global",
+      "source": ".claude/skills-global/new-audit-skill/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/new-audit-skill/AUDIT_TEMPLATE.md": "7c71e7dfa7519f286a9ef42fb12b10db18a974abef3955d19d8649372cad75b0",
+        ".claude/skills-global/new-audit-skill/SKILL.md": "107f26ec9a2686818de7b9a932faec956134ac213701589e53f644f34ccc540d",
+        ".claude/skills-global/new-audit-skill/BEST_PRACTICES.md": "7cabe5905fe48359238cf7512ff29e4028aec9a0cf1af7d266c7e3ce7ac52b3e"
+      },
+      "target": ".agents/skills-global/new-audit-skill",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "new-skill",
+      "scope": "global",
+      "source": ".claude/skills-global/new-skill/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/new-skill/AGENT.md": "16dd2b22e849262616e9d9851b5f649b7358c7884342ba93fb7343feada1c929",
+        ".claude/skills-global/new-skill/WORKFLOW_TEMPLATE.md": "62b801ffb33ca4b47e3b88938afc2f4607276e1b97527bfffef74ddee4a2e640",
+        ".claude/skills-global/new-skill/SKILL_TEMPLATE.md": "4d4dfbc97cd75abace675d63e3a69c21a7cc129e78582a9770d10e986b1f6697",
+        ".claude/skills-global/new-skill/SKILL.md": "bdd241b04765c1306af711764160d0ab9c1e1dd4a276cdee37b115d9b74e73b8",
+        ".claude/skills-global/new-skill/SESSION_CAPTURE.md": "cee019dfd7e3f2b561feceac5eef66d39467bcba8a9521fadf73b14d3cdc8d1a"
+      },
+      "target": ".agents/skills-global/new-skill",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "officecli",
+      "scope": "project",
+      "source": ".claude/skills/officecli/SKILL.md",
+      "source_files": {
+        ".claude/skills/officecli/SKILL.md": "86bf380744cd9dbc3dbdd2c872fac72bf71dc818ca0c532ca3ab01b5f4b6b787"
+      },
+      "target": ".agents/skills/officecli",
+      "resources": [
+        "COMMANDS.md",
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "ontologies",
+      "scope": "global",
+      "source": ".claude/skills-global/ontologies/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/ontologies/SKILL.md": "1b0a13e9bb791a9300bab0b2f2fff6951661ec1e757347f2191998fc2d8fc9f1"
+      },
+      "target": ".agents/skills-global/ontologies",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "pen-design",
+      "scope": "global",
+      "source": ".claude/skills-global/pen-design/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/pen-design/SKILL.md": "8f10e20e184ffddda25fc700e725c52b09938f076b8242e8867237924b5803af"
+      },
+      "target": ".agents/skills-global/pen-design",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "present",
+      "scope": "global",
+      "source": ".claude/skills-global/present/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/present/SKILL.md": "d315832f336788974e0eac38bbe0f4fb08cb05fd7b9edb1904bce69f54efab62"
+      },
+      "target": ".agents/skills-global/present",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "prime",
+      "scope": "project",
+      "source": ".claude/skills/prime/SKILL.md",
+      "source_files": {
+        ".claude/skills/prime/SKILL.md": "2991427889560e152958e6821ccf9870e97f5d72b343c73a3f9c1a9a75c4faf8"
+      },
+      "target": ".agents/skills/prime",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "reading-sms-messages",
+      "scope": "project",
+      "source": ".claude/skills/reading-sms-messages/SKILL.md",
+      "source_files": {
+        ".claude/skills/reading-sms-messages/SKILL.md": "0315d59673e89c55fb89b591350f5dacefdf2e9b762ffa5ca435b68555221ab7"
+      },
+      "target": ".agents/skills/reading-sms-messages",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "reclassify",
+      "scope": "global",
+      "source": ".claude/skills-global/reclassify/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/reclassify/SKILL.md": "9f5308b5c7e0589265c74e3b87b495393dde28e4e100edfd15395ba0848dc5ab"
+      },
+      "target": ".agents/skills-global/reclassify",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "sdlc",
+      "scope": "project",
+      "source": ".claude/skills/sdlc/SKILL.md",
+      "source_files": {
+        ".claude/skills/sdlc/SKILL.md": "268042faf28b77e61807af7ca7ead4d8c731ec9bd11f4b8a5bb0c5b901b606c7"
+      },
+      "target": ".agents/skills/sdlc",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "sentry",
+      "scope": "project",
+      "source": ".claude/skills/sentry/SKILL.md",
+      "source_files": {
+        ".claude/skills/sentry/SKILL.md": "bcff0636369e52c53a357099c5fc664b1b864523f0c6a228426719260d5c8522"
+      },
+      "target": ".agents/skills/sentry",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "setup",
+      "scope": "project",
+      "source": ".claude/skills/setup/SKILL.md",
+      "source_files": {
+        ".claude/skills/setup/SKILL.md": "36d3e33c55887a684572f7f7eaf92e4e2683dfcb6b6be9990f15b50b96bda936",
+        ".claude/skills/setup/references/environment.md": "04e2c28b58c7d36b0a3a2fcb066fe486eb56135583cda73683a1842706ebce8d",
+        ".claude/skills/setup/references/optional-surfaces.md": "f6f10b80e5d416084c2560ffd87785950c28d259e89b47613ea8e81dfc47efae",
+        ".claude/skills/setup/references/verification.md": "7a807a1c9f0f17c88c193d5f8c21f791504c9038ec189597d52dfebecf47c233",
+        ".claude/skills/setup/references/auth.md": "5c2e2a780be5bdf5b4d9583dda7287da312553ee6ca8b12fecb255fb74940463",
+        ".claude/skills/setup/references/mesh-network.md": "0cd23d8b36a19a35b589646351fd6f3ace6779acbb8f0a5f9074bf9d7de0b5b3",
+        ".claude/skills/setup/references/projects-config.md": "b3e8ad9e7efa255056e82fa5dc5c4489a1ad402937ff409b2b3262a7ea4fab59"
+      },
+      "target": ".agents/skills/setup",
+      "resources": [
+        "SKILL.md",
+        "references/auth.md",
+        "references/environment.md",
+        "references/mesh-network.md",
+        "references/optional-surfaces.md",
+        "references/projects-config.md",
+        "references/verification.md"
+      ]
+    },
+    {
+      "name": "telegram",
+      "scope": "project",
+      "source": ".claude/skills/telegram/SKILL.md",
+      "source_files": {
+        ".claude/skills/telegram/SKILL.md": "59563c1af42adff7ec17a7446646ac1a0250b6f811b135f4c7377393880ed438"
+      },
+      "target": ".agents/skills/telegram",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "update",
+      "scope": "project",
+      "source": ".claude/skills/update/SKILL.md",
+      "source_files": {
+        ".claude/skills/update/SKILL.md": "a53f42e15d7d4449a11ddc9c66142b777c3a7c1c78dde5b7bbe16f149cc2e26b",
+        ".claude/skills/update/references/troubleshooting.md": "0977825431b18fcf57b973a6dc1c079aa92bd111fefd30248d1d0e2681ce0065",
+        ".claude/skills/update/references/modules.md": "7b4be0912adcb4131c4ce3e3f3d73e2be407df4fdeb5b164a85330ea6eb34608"
+      },
+      "target": ".agents/skills/update",
+      "resources": [
+        "SKILL.md",
+        "references/modules.md",
+        "references/troubleshooting.md"
+      ]
+    },
+    {
+      "name": "weekly-review",
+      "scope": "global",
+      "source": ".claude/skills-global/weekly-review/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/weekly-review/SKILL.md": "0d6d4461e2fca0bc4d92d0e80dd994571a933a5d89036d5c6efedadd4fb74ac3"
+      },
+      "target": ".agents/skills-global/weekly-review",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "x-com",
+      "scope": "project",
+      "source": ".claude/skills/x-com/SKILL.md",
+      "source_files": {
+        ".claude/skills/x-com/SKILL.md": "c882f8b1bad6bdb02a5a21ec31ba325d5e26953871d919541e34167d7f479bf6",
+        ".claude/skills/x-com/references/dms.md": "95ac891cbda0135c3d7ca87f3e6b20192ae7dc66cfb102379824e8dee23d8b27",
+        ".claude/skills/x-com/references/timeline-engagement.md": "398236a6f0f80aea26ce88cf19ff0bcc65d5fba25b40e39541d6c156175429c6",
+        ".claude/skills/x-com/references/posting.md": "57476d6346dedf2db33672f8a37bce26f46431d89a356f20746ae0beb3ca20e9"
+      },
+      "target": ".agents/skills/x-com",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "zoom-out",
+      "scope": "global",
+      "source": ".claude/skills-global/zoom-out/SKILL.md",
+      "source_files": {
+        ".claude/skills-global/zoom-out/SKILL.md": "c14dab662e783a9aa9567d3fb39528fff3eaf5b9d17f8fe11843b7ab6ee528a5"
+      },
+      "target": ".agents/skills-global/zoom-out",
+      "resources": [
+        "SKILL.md"
+      ]
+    }
+  ]
+}
