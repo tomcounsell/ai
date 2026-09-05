@@ -359,14 +359,11 @@ def _gate_enabled() -> bool:
       (unset), or any value not in {``"1"``, ``"true"``, ``"yes"``,
       ``"on"``} → gate is enabled (default-on).
 
-    The structural shape mirrors ``bridge/read_the_room.py:_read_enabled``,
-    but RTR's default is ``"false"`` (opt-in feature) so an empty-string
-    env var matches RTR's default-off state invisibly. Here the default
-    is ``"true"`` (default-on safety control), so empty-string MUST be
-    treated as the default rather than as a disable signal — otherwise
-    a stray ``PROMISE_GATE_ENABLED=`` in an env file silently disables
-    the gate while telemetry shows ``source="promise_gate_disabled"``
-    on every send.
+    The default here is ``"true"`` (default-on safety control), so
+    empty-string MUST be treated as the default rather than as a disable
+    signal — otherwise a stray ``PROMISE_GATE_ENABLED=`` in an env file
+    silently disables the gate while telemetry shows
+    ``source="promise_gate_disabled"`` on every send.
 
     Only an explicit non-empty value that is not in the allow-set
     disables the gate. Whitespace-only values are treated as empty

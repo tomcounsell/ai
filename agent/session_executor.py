@@ -2203,7 +2203,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # the session-ensure resolver -- it was previously unset here.
             # Known secondary consumers that now pick it up (issue #2190 PR
             # review): tools/valor_telegram.py::_should_run_rtr (RTR
-            # auto-detect gate, also gated by READ_THE_ROOM_ENABLED),
+            # caller-type auto-detect gate),
             # tools/send_message.py / tools/react_with_emoji.py routing, and
             # tools/agent_session_scheduler.py session_id resolution.
             "VALOR_SESSION_ID": session.session_id or "",

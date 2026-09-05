@@ -299,6 +299,56 @@ class TestDraftMessage:
         assert "local_file_path_reference" in rules
 
     @pytest.mark.asyncio
+    async def test_short_sdlc_reply_takes_full_composition_path(self):
+        """After the ``is_sdlc`` repair, a short SDLC reply must NOT take the
+        short-output verbatim pass-through -- it needs the stage progress
+        and link footer the branch was written to produce (Risk 2). Uses
+        ``is_sdlc=True`` -- the real predicate production reads."""
+        from unittest.mock import patch
+
+        # spec=[...] is load-bearing here, not incidental: a bare MagicMock()
+        # auto-vivifies ANY attribute access (including the old, wrong
+        # phantom session field this repair replaced) as a truthy Mock,
+        # which would make this test pass against the unrepaired code too --
+        # the exact "test proves the fake, not the guard" trap this plan's
+        # Risk 3 names. The spec list restricts the mock to only the
+        # attributes production is meant to read, so a `getattr(session,
+        # <old field name>, None)` correctly raises AttributeError and
+        # falls back to the `None` default.
+        session = MagicMock(spec=["session_id", "is_sdlc"])
+        session.session_id = "mock-session-sdlc"
+        session.is_sdlc = True
+        short_text = "Done."
+        assert len(short_text) < 200
+
+        with patch(
+            "bridge.message_drafter._compose_structured_draft",
+            return_value="composed output",
+        ) as mock_compose:
+            result = await draft_message(short_text, session=session)
+
+        mock_compose.assert_called_once()
+        assert result.text == "composed output"
+
+    @pytest.mark.asyncio
+    async def test_short_non_sdlc_reply_still_takes_short_path(self):
+        """A short reply from a session explicitly NOT flagged SDLC still
+        takes the fast verbatim pass-through (Risk 2 pair)."""
+        from unittest.mock import patch
+
+        session = MagicMock(spec=["session_id", "is_sdlc"])
+        session.session_id = "mock-session-non-sdlc"
+        session.is_sdlc = False
+        short_text = "Done."
+        assert len(short_text) < 200
+
+        with patch("bridge.message_drafter._compose_structured_draft") as mock_compose:
+            result = await draft_message(short_text, session=session)
+
+        mock_compose.assert_not_called()
+        assert result.text == short_text
+
+    @pytest.mark.asyncio
     async def test_short_output_with_no_violation_still_passes_through_verbatim(self):
         """A short-output message with NO violation still returns verbatim
         pass-through with needs_self_draft=False (control case for the above)."""

@@ -131,9 +131,8 @@ def inbound_enabled() -> bool:
     """Read ``CONTEXT_RECALL_INBOUND_ENABLED`` fresh on each call.
 
     Default ``false`` (plan decision D1 — inbound ships dark). Read fresh
-    rather than via a cached ``pydantic-settings`` field so the kill switch can
-    be flipped without a process restart, mirroring
-    ``bridge/read_the_room.py::_read_enabled``.
+    rather than via a cached ``pydantic-settings`` field so the kill switch
+    can be flipped without a process restart.
     """
     return os.environ.get("CONTEXT_RECALL_INBOUND_ENABLED", "false").strip().lower() in _TRUTHY
 

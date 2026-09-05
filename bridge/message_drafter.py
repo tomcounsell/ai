@@ -1144,7 +1144,7 @@ async def draft_message(
     #   - no artifacts (commit hashes, PRs, URLs deserve drafter polish)
     #   - no explicit question to the human (? triggers open_questions handling)
     #   - no fenced code block (preserve formatting)
-    is_sdlc = bool(session and getattr(session, "sdlc_slug", None))
+    is_sdlc = bool(session and getattr(session, "is_sdlc", False))
     has_any_artifacts = any(v for v in artifacts.values())
     if (
         len(raw_response) < SHORT_OUTPUT_THRESHOLD

@@ -308,7 +308,7 @@ class TestDrafterFailureRecovery:
         handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-e2e-local-path"
-        session.sdlc_slug = None  # keep is_sdlc False so the short-output path fires
+        session.is_sdlc = False  # keep is_sdlc False so the short-output path fires
 
         raw = "Done. Saved to /tmp/x.txt."
 

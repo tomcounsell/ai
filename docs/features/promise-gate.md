@@ -234,9 +234,6 @@ explicit:
 | `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive) | enabled | explicit-on |
 | `"0"`, `"false"`, `"no"`, `"off"`, or any other non-empty value | disabled | explicit disable signal |
 
-This contract is intentionally stricter than the structurally-similar
-`bridge/read_the_room.py:_read_enabled` — RTR's default is `"false"`,
-so an empty-string env var matches its default-off state invisibly.
 The promise gate's default is `"true"` (default-on safety control),
 so empty-string is treated as the default rather than as a disable
 signal. Otherwise a stray `PROMISE_GATE_ENABLED=` would silently

@@ -4,8 +4,9 @@ Covers:
 
 * All verdict branches (send / trim-long / trim-short / trim-missing-text /
   suppress-with-anchor / suppress-fallthrough / failure).
-* Short-circuit return paths (flag off, empty draft, empty snapshot, no
-  chat_id, ``len < SHORT_OUTPUT_THRESHOLD`` bypass, SDLC bypass).
+* Short-circuit return paths (empty draft, empty snapshot, no chat_id,
+  ``len < SHORT_OUTPUT_THRESHOLD`` bypass, SDLC bypass) -- RTR runs
+  unconditionally, with no env-var gate.
 * Snapshot construction (K cap, time-window filter, mixed sender attribution).
 * Fail-open exception handling (``anthropic.APITimeoutError``,
   ``APIConnectionError``, ``APIError``, ``ValueError``, last-resort).
@@ -56,25 +57,17 @@ class FakeSession:
         self,
         *,
         session_id: str = "sess-test",
-        sdlc_slug: str | None = None,
+        is_sdlc: bool = False,
         telegram_message_id: int | None = None,
     ):
         self.session_id = session_id
-        self.sdlc_slug = sdlc_slug
+        self.is_sdlc = is_sdlc
         self.telegram_message_id = telegram_message_id
         self.session_events: list[dict] | None = None
         self._save_calls = 0
 
     def save(self):
         self._save_calls += 1
-
-
-def _enable_rtr(monkeypatch):
-    monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
-
-
-def _disable_rtr(monkeypatch):
-    monkeypatch.setenv("READ_THE_ROOM_ENABLED", "false")
 
 
 def _long_draft(extra: str = "") -> str:
@@ -155,7 +148,6 @@ def testis_group_chat(chat_id, expected):
 
 def test_dm_excluded_returns_send(monkeypatch):
     """A positive (DM) chat_id short-circuits to send without a Haiku call."""
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("suppress"))
 
     verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
@@ -169,7 +161,6 @@ def test_dm_excluded_returns_send(monkeypatch):
 
 def test_stale_trigger_deterministic_suppress(monkeypatch):
     """A trigger older than the threshold suppresses without calling Haiku."""
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
     _patch_trigger_age(monkeypatch, RTR_STALE_TRIGGER_SECONDS + 60)
 
@@ -185,7 +176,6 @@ def test_stale_trigger_deterministic_suppress(monkeypatch):
 def test_fresh_trigger_threads_age_into_prompt(monkeypatch):
     """A fresh trigger does not deterministically suppress; its age is passed
     to the Haiku prompt as a temporal signal."""
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     _patch_trigger_age(monkeypatch, 42)
@@ -201,7 +191,6 @@ def test_fresh_trigger_threads_age_into_prompt(monkeypatch):
 
 def test_absent_trigger_age_omits_age_block(monkeypatch):
     """With no trigger id (age None) the prompt carries no trigger-age block."""
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
 
@@ -231,31 +220,26 @@ def test_humanize_age(age_seconds, expected):
 # === Short-circuit tests ========================================================
 
 
-def test_disabled_flag_returns_send(monkeypatch):
-    _disable_rtr(monkeypatch)
-    session = FakeSession()
-    verdict = asyncio.run(read_the_room("anything", GROUP_CHAT_ID, session))
-    assert verdict.action == "send"
-    assert verdict.reason == "rtr_disabled"
-    assert session.session_events in (None, [])
-
-
 def test_empty_draft_returns_send(monkeypatch):
-    _enable_rtr(monkeypatch)
+    """Runs with no RTR-related env var set anywhere -- RTR is unconditional."""
     verdict = asyncio.run(read_the_room("", GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "empty_draft"
 
 
+def test_empty_draft_none_returns_send(monkeypatch):
+    verdict = asyncio.run(read_the_room(None, GROUP_CHAT_ID, FakeSession()))
+    assert verdict.action == "send"
+    assert verdict.reason == "empty_draft"
+
+
 def test_whitespace_only_draft_returns_send(monkeypatch):
-    _enable_rtr(monkeypatch)
     verdict = asyncio.run(read_the_room("   \n  \t", GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "empty_draft"
 
 
 def test_no_chat_id_returns_send(monkeypatch):
-    _enable_rtr(monkeypatch)
     verdict = asyncio.run(read_the_room(_long_draft(), None, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "no_chat_id"
@@ -263,7 +247,6 @@ def test_no_chat_id_returns_send(monkeypatch):
 
 def test_short_output_short_circuits(monkeypatch):
     """Below ``SHORT_OUTPUT_THRESHOLD`` we should never call Haiku."""
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
 
     short_draft = "Tiny ack."
@@ -274,11 +257,16 @@ def test_short_output_short_circuits(monkeypatch):
 
 
 def test_sdlc_session_short_circuits_with_event(monkeypatch):
-    """SDLC sessions skip RTR and emit a ``rtr.bypassed`` event."""
-    _enable_rtr(monkeypatch)
+    """SDLC sessions skip RTR and emit a ``rtr.bypassed`` event.
+
+    Uses ``is_sdlc=True`` -- the real predicate production reads
+    (``getattr(session, "is_sdlc", False)``). This test must fail against
+    the unrepaired ``read_the_room.py`` (which read a different, phantom
+    session field instead); see the red-state proof pasted into the PR.
+    """
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
 
-    session = FakeSession(sdlc_slug="sdlc-1193")
+    session = FakeSession(is_sdlc=True)
     verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "sdlc_session"
@@ -288,8 +276,44 @@ def test_sdlc_session_short_circuits_with_event(monkeypatch):
     assert session.session_events[0]["reason"] == "sdlc_session"
 
 
+def test_short_sdlc_reply_takes_short_output_path_not_bypass(monkeypatch):
+    """The ``len < SHORT_OUTPUT_THRESHOLD`` check runs BEFORE the SDLC bypass,
+    so a short SDLC ``delivery_text`` returns ``short_output`` and never
+    reaches (or emits) the ``rtr.bypassed`` branch. This is not a regression
+    -- both branches return ``send`` -- but it means ``rtr.bypassed`` counts
+    undercount real SDLC bypasses whenever the composed message is short."""
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
+
+    session = FakeSession(is_sdlc=True)
+    verdict = asyncio.run(read_the_room("Tiny ack.", GROUP_CHAT_ID, session))
+    assert verdict.action == "send"
+    assert verdict.reason == "short_output"
+    create_mock.assert_not_awaited()
+    assert not session.session_events
+
+
+def test_no_session_does_not_trigger_bypass_or_raise(monkeypatch):
+    """``session=None`` must not fire the SDLC bypass and must not raise --
+    ``_append_event`` no-ops on a ``None`` session."""
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
+
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session=None))
+    assert verdict.action == "send"
+    create_mock.assert_awaited_once()
+
+
+def test_is_sdlc_attribute_exists_on_real_agent_session():
+    """Canary against the exact defect this plan repairs: a future rename of
+    ``AgentSession.is_sdlc`` must fail loud here rather than silently
+    degrading the RTR/drafter bypass back to "no bypass" via ``getattr``'s
+    default. Checked against the real imported model, not a fake."""
+    from models.agent_session import AgentSession
+
+    assert hasattr(AgentSession, "is_sdlc")
+
+
 def test_empty_snapshot_returns_send(monkeypatch):
-    _enable_rtr(monkeypatch)
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
     _patch_snapshot(monkeypatch, [])
 
@@ -303,7 +327,6 @@ def test_empty_snapshot_returns_send(monkeypatch):
 
 
 def test_send_verdict(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
 
@@ -313,8 +336,20 @@ def test_send_verdict(monkeypatch):
     create_mock.assert_awaited_once()
 
 
+def test_runs_unconditionally_with_no_rtr_env_var_set(monkeypatch):
+    """Core acceptance-criterion claim: RTR reaches the Haiku pass with no
+    RTR-related env var set anywhere in the process -- there is no such var
+    left to set; every other test in this module makes the same claim by
+    construction."""
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
+
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
+    assert verdict.action == "send"
+    create_mock.assert_awaited_once()
+
+
 def test_trim_long_verdict_preserves_revised_text(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "moved on"}])
     revised = "Quick pointer: look at the dashboard for details."
     _patch_anthropic(
@@ -332,7 +367,6 @@ def test_trim_short_verdict_preserves_text(monkeypatch):
     for coercing too-short trims to suppress (see the test in
     tests/unit/output_handler/test_output_handler_filters.py).
     """
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "moved on"}])
     _patch_anthropic(
         monkeypatch,
@@ -346,7 +380,6 @@ def test_trim_short_verdict_preserves_text(monkeypatch):
 
 
 def test_trim_with_no_revised_text_falls_back_to_send(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "moved on"}])
     _patch_anthropic(
         monkeypatch,
@@ -359,7 +392,6 @@ def test_trim_with_no_revised_text_falls_back_to_send(monkeypatch):
 
 
 def test_suppress_verdict(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "answered already"}])
     _patch_anthropic(
         monkeypatch,
@@ -375,7 +407,6 @@ def test_suppress_verdict(monkeypatch):
 
 
 def test_api_timeout_returns_send_and_logs_event(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     err = anthropic.APITimeoutError(request=MagicMock())
     _patch_anthropic(monkeypatch, raises=err)
@@ -390,7 +421,6 @@ def test_api_timeout_returns_send_and_logs_event(monkeypatch):
 
 
 def test_api_connection_error_returns_send(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     err = anthropic.APIConnectionError(request=MagicMock())
     _patch_anthropic(monkeypatch, raises=err)
@@ -405,7 +435,6 @@ def test_api_connection_error_returns_send(monkeypatch):
 def test_value_error_on_bad_tool_use_returns_send(monkeypatch):
     """A response with no tool_use block is treated as a parse error
     and falls open to send."""
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
 
     bad_msg = MagicMock()
@@ -420,7 +449,6 @@ def test_value_error_on_bad_tool_use_returns_send(monkeypatch):
 
 
 def test_unexpected_exception_caught_last_resort(monkeypatch):
-    _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     _patch_anthropic(monkeypatch, raises=RuntimeError("boom"))
 

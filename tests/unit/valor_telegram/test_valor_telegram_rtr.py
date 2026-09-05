@@ -91,13 +91,18 @@ class TestCmdSendRTR:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_rtr_short_circuits_when_disabled(self, mock_redis_fn, mock_resolve, monkeypatch):
+    def test_rtr_short_circuits_for_human_caller(self, mock_redis_fn, mock_resolve, monkeypatch):
         """RTR not invoked when VALOR_SESSION_ID is unset (human caller).
 
-        The gate is the *caller-type* check; READ_THE_ROOM_ENABLED is the
-        secondary kill switch checked inside read_the_room() itself. With
-        no VALOR_SESSION_ID and no --read-the-room flag, the gate returns
-        False and read_the_room is never called.
+        RTR runs unconditionally now -- the *only* gate on Path B is the
+        caller-type check (`_should_run_rtr`). With no VALOR_SESSION_ID and
+        no --read-the-room flag, the gate returns False and read_the_room is
+        never called, regardless of any env var.
+
+        (This test previously had a sibling, `test_rtr_short_circuits_when_disabled`,
+        that additionally set the now-removed kill-switch env var to a
+        disabling value; once that var was gone, the two bodies were
+        identical, so they were merged into this one.)
         """
         from unittest.mock import AsyncMock
 
@@ -105,33 +110,6 @@ class TestCmdSendRTR:
 
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "false")
-
-        rtr_mock = AsyncMock()
-        monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
-
-        mock_redis = MagicMock()
-        mock_redis_fn.return_value = mock_redis
-
-        args = self._make_args(message="hello world")
-        result = cmd_send(args)
-
-        assert result == 0
-        rtr_mock.assert_not_called()
-        mock_redis.rpush.assert_called_once()
-
-    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
-    @patch("tools.valor_telegram._get_redis_connection")
-    def test_rtr_short_circuits_for_human_caller(self, mock_redis_fn, mock_resolve, monkeypatch):
-        """No VALOR_SESSION_ID + no --read-the-room flag → RTR skipped even
-        if READ_THE_ROOM_ENABLED=true."""
-        from unittest.mock import AsyncMock
-
-        from tools.valor_telegram import cmd_send
-
-        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
-        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock()
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -157,7 +135,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="send"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -192,7 +169,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="send"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -222,7 +198,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         revised = "Got it — see thread for details."
         rtr_mock = AsyncMock(
@@ -256,7 +231,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(
             return_value=RoomVerdict(action="trim", revised_text="ok", reason="short")
@@ -294,7 +268,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="suppress", reason="self_duplicate"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -328,7 +301,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="suppress", reason="self_duplicate"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -360,7 +332,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(side_effect=RuntimeError("haiku down"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -394,7 +365,6 @@ class TestCmdSendRTR:
 
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="send"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -417,7 +387,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock()
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)
@@ -467,7 +436,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         # Stand-in session object: matches what query.filter(session_id=...)
         # would yield in production but uses a MagicMock so we can inspect
@@ -523,7 +491,6 @@ class TestCmdSendRTR:
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
         monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
-        monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
 
         rtr_mock = AsyncMock(return_value=RoomVerdict(action="send"))
         monkeypatch.setattr("bridge.read_the_room.read_the_room", rtr_mock)

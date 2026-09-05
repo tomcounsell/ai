@@ -1042,10 +1042,9 @@ class TelegramRelayOutputHandler:
         # Lightweight Haiku call inspects the chat snapshot + the drafted
         # message and returns one of {send, trim, suppress}. RTR is a
         # *guard*, not a blocker: every error path returns send and the
-        # delivery proceeds with the original delivery_text. RTR is gated
-        # by the READ_THE_ROOM_ENABLED env var (default off) and short-
-        # circuits for SDLC sessions, short outputs, empty drafts, missing
-        # chat_ids, and empty snapshots.
+        # delivery proceeds with the original delivery_text. RTR runs
+        # unconditionally and short-circuits for SDLC sessions, short
+        # outputs, empty drafts, missing chat_ids, and empty snapshots.
         try:
             from bridge.read_the_room import (
                 RTR_SUPPRESS_EMOJI,
