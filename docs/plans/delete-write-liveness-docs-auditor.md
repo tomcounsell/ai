@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2743
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-05T13:16:29Z
 ---
 
 # Delete `_write_liveness` from `docs_auditor`
