@@ -97,6 +97,32 @@ class TestNoOpTick:
         assert result["findings"] == []
 
 
+class TestCorruptGoal:
+    def test_corrupt_goal_is_a_finding_and_nothing_acts(self, owned_project, monkeypatch):
+        """#2862: a flagged Job whose goal no longer decodes is retained by the
+        scan root and surfaced as ``corrupt-goal``; nothing is steered,
+        respawned, or written."""
+        rid = f"{owned_project}|telegram:1"
+        job, _eid = _mint_job_with_outbound(rid, "session/some-lane")
+        corrupt_bytes = '{"versions": [{"ts": "2026-08-01T00:00:00+00:00", "author": "pm"'
+        job.goal = corrupt_bytes
+        job.save()
+
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_steer", lambda *a, **k: pytest.fail("steered a corrupt Job"))
+        monkeypatch.setattr(
+            er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned from a corrupt Job")
+        )
+        monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
+
+        result = er._reconcile_project(_project(owned_project))
+
+        assert f"corrupt-goal: {job.job_id}" in result["findings"]
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        assert fresh.goal == corrupt_bytes
+        assert fresh.has_open_expectations is True
+
+
 class TestShippedWorkGuard:
     def test_shipped_work_is_steered_never_respawned(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"

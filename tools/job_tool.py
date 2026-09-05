@@ -105,10 +105,15 @@ def create_job(session_id: str, goal: str):
 def author_goal(session_id: str, job_id: str, text: str):
     """Append a PM-authored goal version (the mandated first step on a
     placeholder-goal Job)."""
+    from models.job import CorruptGoalError
+
     if not text or not text.strip():
         raise JobToolError("goal text must be non-empty")
     job = _own_room_job(session_id, job_id)
-    job.append_goal_version(text.strip(), author="pm")
+    try:
+        job.append_goal_version(text.strip(), author="pm")
+    except CorruptGoalError as e:
+        raise JobToolError(str(e)) from e
     return job
 
 
@@ -121,6 +126,8 @@ def add_expectation(
     owner: str,
 ) -> str:
     """Record an expectation on the Job (PM-authored, never a placeholder)."""
+    from models.job import CorruptGoalError
+
     if not text or not text.strip():
         raise JobToolError("expectation text must be non-empty")
     if not owner or not owner.strip():
@@ -130,7 +137,7 @@ def add_expectation(
     job = _own_room_job(session_id, job_id)
     try:
         expectation_id = job.add_expectation(text.strip(), direction=direction, owner=owner.strip())
-    except ValueError as e:
+    except (ValueError, CorruptGoalError) as e:
         raise JobToolError(str(e)) from e
     try:
         # Operator metric counterpart to metrics:promise_advisories_issued —
@@ -152,8 +159,13 @@ def add_expectation(
 
 def remove_expectation(session_id: str, job_id: str, expectation_id: str) -> bool:
     """Discharge a delivered expectation (append-only removal)."""
+    from models.job import CorruptGoalError
+
     job = _own_room_job(session_id, job_id)
-    removed = job.discharge_expectation(expectation_id)
+    try:
+        removed = job.discharge_expectation(expectation_id)
+    except CorruptGoalError as e:
+        raise JobToolError(str(e)) from e
     if removed:
         logger.info(
             "[job-tool] session %s discharged expectation %s on job %s",
@@ -173,6 +185,9 @@ def _job_summary(job) -> dict:
         "goal_is_placeholder": job.goal_is_placeholder(),
         "goal_versions": len(job.goal_versions()),
         "open_expectations": job.open_expectations(),
+        # True means the stored goal bytes do not decode; every write is
+        # refused until a human repairs them (#2862).
+        "goal_corrupt": job.goal_is_corrupt(),
     }
 
 

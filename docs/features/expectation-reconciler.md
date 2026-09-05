@@ -54,6 +54,12 @@ the expectation is still open — a PM discharge racing the tick always wins.
   are readable ownership records; a second PM reads and decides (#2704).
 - **Never raises**: every boundary (ORM scan, per-expectation pass, git/gh
   subprocess, steer/create) logs a warning and continues.
+- **A corrupt goal is a finding, never an empty loop** (#2862):
+  `Job.with_open_expectations()` retains a flagged Job whose `goal` no
+  longer decodes, and the tick records `corrupt-goal: <job_id>` in its
+  findings and moves on. It cannot act on obligations it cannot read; the
+  row waits for a human. See rule 8 in
+  [`durability-model.md`](durability-model.md).
 - **Single-machine ownership**: acts only for projects this machine owns
   (`machine_owns_project`).
 - Composes with `reflections/sdlc_progress.py` (PR-based stall recovery)

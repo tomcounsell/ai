@@ -920,6 +920,16 @@ async def _check_jobs_at_rest_with_open_expectations() -> int:
 
         for job in _Job.at_rest_with_open_expectations():
             flagged += 1
+            if job.goal_is_corrupt():
+                logger.error(
+                    "[at-rest-expectation] Job %s (room=%s) is at rest with a CORRUPT "
+                    "goal: its open-expectation flag is the last known truth and "
+                    "cannot be re-derived. Writes are refused until the stored bytes "
+                    "are repaired; needs a human (#2862).",
+                    job.job_id,
+                    job.room_id,
+                )
+                continue
             open_entries = job.open_expectations()
             logger.error(
                 "[at-rest-expectation] INVARIANT VIOLATION: Job %s (room=%s) "

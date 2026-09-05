@@ -19,7 +19,9 @@ import pytest
 
 from models.job import (
     GOAL_PLACEHOLDER_PREFIX,
+    JOB_AT_REST_AGE_SECONDS,
     JOB_RECENT_OVERFETCH,
+    CorruptGoalError,
     Job,
     mint_placeholder_goal,
 )
@@ -343,9 +345,15 @@ class TestFieldScopedLifecycleSaves:
 
 
 class TestGoalSelfHeal:
-    """``_goal_data()`` is total: no goal shape can make it raise."""
+    """``_goal_data()`` is total: no goal shape can make a READ raise.
 
-    @pytest.mark.parametrize("raw", [None, "", "not json at all", "[]", '{"versions": null}'])
+    The shapes here are ones this system's own writer can plausibly leave
+    behind (a null field, a non-object value, a wrong-typed key). They coerce
+    to empty AND stay writable. Bytes that do not decode at all are a
+    different category, covered by :class:`TestCorruptGoal`.
+    """
+
+    @pytest.mark.parametrize("raw", [None, "", "[]", '{"versions": null}'])
     def test_malformed_goal_reads_as_empty(self, scratch_room_id, raw):
         job = Job.mint(scratch_room_id, "check the deploy")
         job.goal = raw
@@ -356,6 +364,21 @@ class TestGoalSelfHeal:
         assert reloaded.all_expectations() == []
         assert reloaded.goal_versions() == []
         assert reloaded.current_goal() == ""
+
+    @pytest.mark.parametrize("raw", [None, "", "[]", '{"versions": null}'])
+    def test_benign_shapes_are_not_corrupt_and_stay_writable(self, scratch_room_id, raw):
+        """The permissive coercion is kept for our own writer's shapes: they
+        are not flagged as corrupt, and a mutation proceeds normally."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.goal = raw
+        job.save()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal_is_corrupt() is False
+        eid = reloaded.add_expectation("I'll report back")
+
+        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert [e["id"] for e in fresh.open_expectations()] == [eid]
 
     def test_malformed_entries_cannot_lose_the_goal_write(self, scratch_room_id):
         """Derivation happens before the save, so a junk entry costs a wrong
@@ -427,6 +450,155 @@ class TestGoalSelfHeal:
         # The obligation survived the conversion; only the retired key is gone.
         assert "legacy1" in ids
         assert "promises" not in json.loads(reloaded.goal)
+
+
+# Bytes a truncated write leaves behind: mostly-valid JSON that no longer
+# decodes. Whatever is recoverable from it lives only in these bytes.
+CORRUPT_GOAL = '{"versions": [{"ts": "2026-08-01T00:00:00+00:00", "author": "pm", "text": "Ship'
+
+
+def _corrupt(job: Job) -> Job:
+    """Replace the stored goal with undecodable bytes, keeping the projection
+    the instance already carries (a truncated write never touches the flag)."""
+    job.goal = CORRUPT_GOAL
+    job.save()
+    return Job.query.get(id=job.id, room_id=job.room_id)
+
+
+@pytest.fixture
+def sentry_captures(monkeypatch):
+    import sentry_sdk
+
+    captured: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sentry_sdk, "capture_message", lambda msg, level="info", **_: captured.append((msg, level))
+    )
+    return captured
+
+
+class TestCorruptGoal:
+    """#2862 Part 2: undecodable goal bytes fail CLOSED on every write.
+
+    Reads stay tolerant (empty, so no unrelated caller crashes) but loud
+    (ERROR log + Sentry). The read-modify-write pair is where the data loss
+    lived: ``_goal_data()`` parsed corruption as ``{}`` and the next
+    ``_write_goal_data`` persisted that emptiness over the only copy of the
+    original bytes. Every assertion here is on the stored bytes, not the
+    accessor, because the accessor is exactly what used to lie.
+    """
+
+    def test_corrupt_goal_is_a_distinct_condition_from_shape_coercion(self, scratch_room_id):
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        assert job.goal_is_corrupt() is True
+        # Reads still answer (tolerant), so unrelated callers keep working.
+        assert job.open_expectations() == []
+        assert job.current_goal() == ""
+
+    def test_read_is_loud_error_log_and_one_sentry_event(
+        self, scratch_room_id, caplog, sentry_captures
+    ):
+        import logging
+
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        with caplog.at_level(logging.ERROR, logger="models.job"):
+            job.open_expectations()
+            job.current_goal()
+            job.goal_versions()
+
+        errors = [
+            r for r in caplog.records if r.levelno == logging.ERROR and "CORRUPT" in r.message
+        ]
+        assert len(errors) == 3, "every read logs; the log is the signal of record"
+        assert all(job.job_id in r.message for r in errors)
+        # Sentry is deduplicated per process per Job so cadence readers cannot
+        # flood one bad row into thousands of events.
+        assert len(sentry_captures) == 1
+        msg, level = sentry_captures[0]
+        assert job.job_id in msg
+        assert level == "error"
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda j: j.add_expectation("I'll report back"),
+            lambda j: j.append_goal_version("Real goal v2", author="pm"),
+            lambda j: j.discharge_expectation("anything"),
+            lambda j: j._write_goal_data({"versions": [], "expectations": []}),
+        ],
+        ids=["add_expectation", "append_goal_version", "discharge_expectation", "chokepoint"],
+    )
+    def test_mutation_after_corruption_preserves_the_original_bytes(
+        self, scratch_room_id, sentry_captures, mutate
+    ):
+        """The read-modify-write sequence specifically: corrupt, then mutate,
+        and the stored bytes are byte-identical afterwards."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")  # projection True before corruption
+        job = _corrupt(job)
+
+        with pytest.raises(CorruptGoalError) as excinfo:
+            mutate(job)
+        assert job.job_id in str(excinfo.value)
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal == CORRUPT_GOAL
+        assert reloaded.has_open_expectations is True
+        assert reloaded.status == "active"
+
+    def test_backfill_never_rederives_the_flag_from_an_empty_parse(self, scratch_room_id):
+        """The second destruction path: the daily backfill derives the flag
+        from ``_goal_data()``, which reads corruption as empty. Without the
+        skip it would stamp ``False`` and drop the Job out of the reconciler's
+        index; the stored flag is the last known truth and stays."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")
+        job = _corrupt(job)
+        assert job.has_open_expectations is True
+
+        Job.backfill_open_expectations_index()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.has_open_expectations is True
+        assert reloaded.goal == CORRUPT_GOAL
+
+    def test_corrupt_job_stays_in_the_reconciler_scan_root(self, scratch_room_id):
+        """``with_open_expectations()`` re-verifies each flagged row against
+        the goal. A corrupt goal cannot disprove the flag, so the Job is
+        retained rather than silently presenting as obligation-free."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")
+        job = _corrupt(job)
+
+        assert job.job_id in {j.job_id for j in Job.with_open_expectations()}
+
+        job.mark_at_rest()
+        assert job.job_id in {j.job_id for j in Job.at_rest_with_open_expectations()}
+
+    def test_corrupt_job_never_rests_by_age(self, scratch_room_id):
+        """Rest-by-age skips a Job with open expectations. A corrupt goal
+        cannot prove its obligations are met, so it is pinned active until a
+        human repairs it (corruption is the case that most needs one)."""
+        import time
+
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        far_future = time.time() + JOB_AT_REST_AGE_SECONDS * 10
+        Job.sweep_to_rest(now=far_future)
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.status == "active"
+        assert reloaded.goal == CORRUPT_GOAL
+
+    def test_non_string_goal_value_is_corrupt(self, scratch_room_id):
+        """A non-string in the field is also not something this system wrote
+        intact (the ``TypeError`` branch of the decode)."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.goal = 12345
+        assert job.goal_is_corrupt() is True
+        with pytest.raises(CorruptGoalError):
+            job.add_expectation("I'll report back")
 
 
 class TestOpenExpectationIndex:

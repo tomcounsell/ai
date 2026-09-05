@@ -247,6 +247,33 @@ class TestAtRestInvariantAlarm:
         finally:
             job.delete()
 
+    async def test_corrupt_goal_at_rest_is_named_not_counted_as_zero(self, caplog):
+        """#2862: an at-rest Job whose goal no longer decodes is retained by
+        the intersection (its flag is the last known truth) and the alarm
+        names the corruption instead of reporting zero open expectations."""
+        import logging
+
+        from agent.session_health import _check_jobs_at_rest_with_open_expectations
+
+        rid = f"test-backstop-corrupt-{uuid.uuid4().hex[:8]}|telegram:1"
+        job = Job.mint(rid, "check the deploy")
+        job.add_expectation("I'll report back")
+        job.goal = '{"versions": [{"ts": "2026-08-01T00:00:00+00:00"'
+        job.save()
+        job.mark_at_rest()
+        try:
+            with caplog.at_level(logging.ERROR):
+                flagged = await _check_jobs_at_rest_with_open_expectations()
+            assert flagged >= 1
+            ours = [r for r in caplog.records if job.job_id in r.message and "CORRUPT" in r.message]
+            assert ours, "the alarm must name the corruption"
+            assert not any(
+                job.job_id in r.message and "0 open expectation" in r.message
+                for r in caplog.records
+            )
+        finally:
+            job.delete()
+
     async def test_steady_state_is_empty_and_open_expectation_blocks_rest(self, caplog):
         """Steady state: the sweep runs from the same invocation (rest-by-age
         end-to-end) but an open expectation PINS the Job active, so the

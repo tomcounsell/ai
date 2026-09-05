@@ -79,6 +79,30 @@ def _now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+class CorruptGoalError(RuntimeError):
+    """The stored ``goal`` bytes are not JSON, so no write may replace them.
+
+    A ``goal`` that fails to decode is the one copy of that Job's obligation
+    history. Every mutator (:meth:`Job.add_expectation`,
+    :meth:`Job.discharge_expectation`, :meth:`Job.append_goal_version`) and
+    the ``_write_goal_data`` chokepoint itself raise this rather than persist
+    an empty structure over the original bytes. Reads stay tolerant so an
+    unrelated caller never crashes on a corrupt row; writes fail closed so the
+    corruption stays recoverable (issue #2862).
+    """
+
+
+# Sentinel returned by ``Job._parse_goal`` when the stored bytes do not decode.
+_CORRUPT = object()
+
+# Job ids whose corrupt goal this process has already sent to Sentry. The
+# ERROR log fires on every read (it is the signal of record); the Sentry
+# capture fires once per process per Job so the cadence readers (reconciler,
+# health sweep) cannot flood one bad row into thousands of events.
+_corrupt_goal_reported: set[str] = set()
+_CORRUPT_GOAL_REPORT_CAP = 1000
+
+
 def mint_placeholder_goal(message_text: str) -> str:
     """The mechanical mint-time goal — router-seeded, never model-authored.
 
@@ -214,11 +238,70 @@ class Job(Model):
 
     # -- Goal (append-only versioned) ---------------------------------------
 
-    def _goal_data(self) -> dict:
+    def _parse_goal(self):
+        """Decode the stored ``goal`` bytes, or return :data:`_CORRUPT`.
+
+        Two categorically different failures share this field and must not
+        share a handler. A null/empty field or a wrong-shaped JSON value is
+        something this system's own writer can plausibly leave behind, and
+        ``_goal_data`` coerces those to empty. Bytes that do not decode at all
+        (or a non-string value) were not written intact by this system; that
+        is corruption, and the caller decides how loudly to treat it.
+        """
+        if not self.goal:
+            return {}
         try:
-            data = json.loads(self.goal) if self.goal else {}
+            return json.loads(self.goal)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("[job] invalid goal JSON on %s; treating as empty", self.job_id)
+            return _CORRUPT
+
+    def goal_is_corrupt(self) -> bool:
+        """True when the stored ``goal`` bytes do not decode as JSON.
+
+        A pure predicate (no logging, no Sentry) so scan helpers and the
+        maintenance path can branch on it without re-reporting.
+        """
+        return self._parse_goal() is _CORRUPT
+
+    def _report_corrupt_goal(self) -> None:
+        """ERROR log on every call; one Sentry event per process per Job."""
+        raw = self.goal
+        preview = repr(raw)[:80]
+        logger.error(
+            "[job] CORRUPT goal on %s (room=%s): stored value does not decode as "
+            "JSON (%s, %d chars); reading as empty and refusing every write until "
+            "repaired. Preview: %s",
+            self.job_id,
+            self.room_id,
+            type(raw).__name__,
+            len(str(raw)),
+            preview,
+        )
+        if self.job_id in _corrupt_goal_reported:
+            return
+        if len(_corrupt_goal_reported) < _CORRUPT_GOAL_REPORT_CAP:
+            _corrupt_goal_reported.add(self.job_id)
+        try:
+            import sentry_sdk
+
+            sentry_sdk.capture_message(
+                f"[job] corrupt goal JSON on Job {self.job_id} (room={self.room_id}); "
+                "writes refused until repaired",
+                level="error",
+            )
+        except Exception:  # noqa: BLE001 — the ERROR log above is the signal of record
+            logger.warning("[job] Sentry capture for corrupt goal failed", exc_info=True)
+
+    def _goal_data(self) -> dict:
+        """Tolerant read: every caller gets a well-shaped dict.
+
+        Corruption reads as empty so an unrelated caller never crashes on a
+        bad row, but it is never quiet: :meth:`_report_corrupt_goal` fires,
+        and every write path refuses until the bytes are repaired.
+        """
+        data = self._parse_goal()
+        if data is _CORRUPT:
+            self._report_corrupt_goal()
             data = {}
         if not isinstance(data, dict):
             logger.warning("[job] non-object goal JSON on %s; treating as empty", self.job_id)
@@ -252,7 +335,33 @@ class Job(Model):
                 )
         return data
 
+    def _mutable_goal_data(self) -> dict:
+        """The read half of every read-modify-write; refuses on corruption.
+
+        ``_goal_data`` reads a corrupt goal as empty. Feeding that empty dict
+        back through ``_write_goal_data`` would persist ``{"versions": [],
+        "expectations": []}`` over the only copy of the original bytes, so a
+        mutator must never start from it. Raising here (before any mutation)
+        also makes :meth:`discharge_expectation` loud instead of a misleading
+        ``False``.
+        """
+        if self.goal_is_corrupt():
+            self._report_corrupt_goal()
+            raise CorruptGoalError(
+                f"job {self.job_id}: stored goal is not JSON; refusing to mutate it "
+                "(the stored bytes are the only copy of its history)"
+            )
+        return self._goal_data()
+
     def _write_goal_data(self, data: dict, *, save: bool = True) -> None:
+        # Fail closed on corruption at the chokepoint itself, so no caller
+        # (including a migration handing back a freshly read dict) can turn a
+        # truncated-but-present goal into a clean, empty, plausible one.
+        if self.goal_is_corrupt():
+            self._report_corrupt_goal()
+            raise CorruptGoalError(
+                f"job {self.job_id}: stored goal is not JSON; refusing to overwrite it"
+            )
         # Derive BEFORE assigning goal so a derivation failure on malformed
         # entries raises without half-writing the record.
         has_open = any(
@@ -297,7 +406,7 @@ class Job(Model):
 
     def append_goal_version(self, text: str, *, author: str) -> None:
         """Append a new goal version (never overwrites prior versions)."""
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         data["versions"].append({"ts": _now().isoformat(), "author": author, "text": text})
         self._write_goal_data(data)
 
@@ -336,7 +445,7 @@ class Job(Model):
             raise ValueError("expectation 'owner' must be non-empty (who must deliver this?)")
         if holder is None:
             holder = "requester" if direction == "inbound" else "pm"
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         expectation_id = uuid.uuid4().hex[:12]
         data["expectations"].append(
             {
@@ -359,7 +468,7 @@ class Job(Model):
         Always owner-authored — no mechanical trigger ever discharges; the
         reconciler surfaces evidence and the PM discharges deliberately.
         """
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         for entry in data["expectations"]:
             if entry.get("id") == expectation_id and entry.get("removed_ts") is None:
                 entry["removed_ts"] = _now().isoformat()
@@ -486,7 +595,9 @@ class Job(Model):
             cutoff = now_ts - JOB_AT_REST_AGE_SECONDS
             for job in cls.query.filter(status="active"):
                 try:
-                    if job.open_expectations():
+                    # A corrupt goal cannot prove its obligations are met, so
+                    # the Job stays active (pinned visible) until repaired.
+                    if job.open_expectations() or job.goal_is_corrupt():
                         continue
                     last_ts = to_unix_ts(job.last_active_at)
                     if last_ts is not None and last_ts < cutoff:
@@ -528,7 +639,7 @@ class Job(Model):
         flagged = []
         try:
             for job in cls.query.filter(status="at-rest", has_open_expectations=True):
-                if job.open_expectations():
+                if job.open_expectations() or job.goal_is_corrupt():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a backstop query never raises
             logger.warning("[job] at_rest_with_open_expectations query failed: %s", e)
@@ -545,7 +656,7 @@ class Job(Model):
         flagged = []
         try:
             for job in cls.query.filter(has_open_expectations=True):
-                if job.open_expectations():
+                if job.open_expectations() or job.goal_is_corrupt():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a scan helper never raises
             logger.warning("[job] with_open_expectations query failed: %s", e)
@@ -816,6 +927,12 @@ class Job(Model):
                 try:
                     fresh = cls.query.get(id=job.id, room_id=job.room_id)
                     if fresh is None:
+                        continue
+                    if fresh.goal_is_corrupt():
+                        # The stored flag is the last known truth; an empty
+                        # parse cannot disprove it. Re-deriving here would drop
+                        # the Job out of the reconciler's index (#2862).
+                        fresh._report_corrupt_goal()
                         continue
                     derived = any(
                         entry.get("removed_ts") is None

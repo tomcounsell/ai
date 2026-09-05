@@ -175,6 +175,25 @@ Rules, in flow order:
 7. **Reconciler**: open outbound expectations whose owners are gone are
    recovered by `reflections/expectation_reconciler.py` — see
    [`expectation-reconciler.md`](expectation-reconciler.md).
+8. **A corrupt goal fails closed on every write** (#2862). The `goal` bytes
+   are the only copy of a Job's obligation history, so two categories of
+   bad shape get two handlers. A null field or a wrong-shaped JSON value is
+   something our own writer can leave behind: `_goal_data()` coerces it to
+   empty and it stays writable. Bytes that do not decode at all (or a
+   non-string value) are corruption: `Job.goal_is_corrupt()` is true, reads
+   still answer empty so unrelated callers keep working, but every read
+   logs at ERROR and sends one Sentry event per process per Job, and every
+   mutator (`add_expectation`, `discharge_expectation`,
+   `append_goal_version`, and the `_write_goal_data` chokepoint itself)
+   raises `CorruptGoalError` instead of persisting `{"versions": [],
+   "expectations": []}` over the original bytes. The Job is **pinned
+   visible** until a human repairs it: `sweep_to_rest` never rests it, the
+   daily `has_open_expectations` backfill never re-derives its flag from
+   the empty parse, `with_open_expectations()` /
+   `at_rest_with_open_expectations()` retain it (the stored flag is the
+   last known truth and an empty parse cannot disprove it), the reconciler
+   reports it as a `corrupt-goal: <job_id>` finding, the at-rest alarm
+   names the corruption, and `job_tool show` exposes `goal_corrupt: true`.
 
 `tools/job_tool.py` enforces **Room scope at the tool layer**: every Job
 lookup filters on the calling session's own `room_id`, so cross-Room Jobs

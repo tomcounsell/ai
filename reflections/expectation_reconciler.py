@@ -408,6 +408,13 @@ def _reconcile_project(project: dict) -> dict:
     now = time.time()
     min_age = _min_age_seconds()
     for job in jobs:
+        if job.goal_is_corrupt():
+            # with_open_expectations() retains a flagged Job whose goal no
+            # longer decodes: the flag is the last known truth and an empty
+            # parse cannot disprove it. Nothing here can act on obligations
+            # it cannot read, so the row surfaces as a finding for a human.
+            findings.append(f"corrupt-goal: {job.job_id}")
+            continue
         for entry in job.open_expectations(direction="outbound"):
             try:
                 eid = str(entry.get("id") or "")
