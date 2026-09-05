@@ -573,35 +573,258 @@ across processes.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- `[SEPARATE-SLUG #3176]` **The synthetic-slug blind spot.** A slugless eng session runs in
+  `.worktrees/dev-{aid[:8]}/` while its stored row keeps `slug=None` and a main-checkout
+  `working_dir`, so neither busy predicate can see it. Pre-existing, orthogonal to query
+  shape, and unchanged by anything here. Filed as #3176 with its own recon; the open
+  question there (whether persisting the synthesized identity is safe given that a slug
+  drives worker routing) is genuinely unresolved and does not belong inside a query-cost
+  chore.
+
+Nothing else is deferred. The `slug=` narrowing is not deferred — it is **rejected** on
+evidence (spike-1) and recorded as Decision 1, with an anti-criterion asserting it does not
+appear in the diff. Indexing `working_dir` and stamping slugs onto scheduled children are
+rejected likewise, in Rabbit Holes.
 
 ## Update System
 
-_placeholder_
+No update system changes required. This changes two functions and adds a third inside code
+that already ships with the repo. No new dependency (`NON_TERMINAL_STATUSES` is already
+imported in the same block as `TERMINAL_STATUSES`), no new config file, no new
+environment variable, no migration.
+
+The popoto >= 1.9.0 floor this plan relies on is already committed in `pyproject.toml:21`
+via `8c1a36ad1`, so `/update`'s existing `uv sync` propagates it with no change to the
+update script or skill.
+
+No Popoto schema migration is required: no model, field, or index is added, removed, or
+retyped. The change consumes the existing `status` `IndexedField`.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required. Both entry points already exist and neither changes shape:
+
+- `tools/disk_reclaim.py` already has its CLI (`python -m tools.disk_reclaim`) and is
+  already declared in `config/reflections.yaml` as the daily sweep. The change is internal
+  to `sweep_worktrees`; its arguments, JSON output shape, and `DISK_RECLAIM_APPLY` arming
+  gate are untouched.
+- `agent/worktree_manager` is imported directly by `tools/disk_reclaim.py` and by
+  `remove_worktree`/`cleanup_after_merge`. `worktree_busy_probe_many` is added for the
+  in-process caller only and needs no CLI entry point in `pyproject.toml [project.scripts]`
+  and no MCP surface.
+
+Nothing new becomes reachable from Telegram, so there is no bridge wiring and no
+agent-invocation integration test to add.
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+- [ ] Update `docs/features/scheduled-disk-reclaim.md` — the fail-open/fail-closed
+      explanation at `:127`–`:133` and the touched-files list at `:173` are correct today
+      and describe a per-lane probe. Document the batch probe, the lazy snapshot, and the
+      fresh re-probe before removal, keeping the fail-closed rationale as the reason the
+      re-probe exists.
+- [ ] Update `docs/features/session-isolation.md:226` — "scans `AgentSession.query.all()`
+      for live sessions" becomes the indexed non-terminal query. The surrounding
+      segment-aware-containment description stays exactly as written; it is still the
+      matcher, and saying so explicitly is the point.
+- [ ] No new file in `docs/features/`, so no new row in `docs/features/README.md`. Both
+      features are already indexed there.
+
+### External Documentation Site
+Not applicable — this repo has no Sphinx/MkDocs site.
+
+### Inline Documentation
+- [ ] Rewrite the `_scan_worktree_sessions` docstring: it currently says "Walks the
+      AgentSession table", which stops being true. State the indexed query, and state why
+      the Python terminal-status check survives it (Decision 2) so nobody deletes it as
+      dead code later.
+- [ ] Docstring on `worktree_busy_probe_many` covering the contract, the fan-out of a fetch
+      error to every requested slug, and the fact that it shares one matcher with the
+      single-slug path.
+- [ ] A comment at the `sweep_worktrees` map read naming why the default is
+      `("error", "not_probed")` and not `("clear", "")` (Risk 4).
 
 ## Success Criteria
 
-_placeholder_
+- [ ] `_scan_worktree_sessions` issues an indexed `status__in` query; `AgentSession.query.all()`
+      no longer appears in `agent/worktree_manager.py`.
+- [ ] The `working_dir` segment-prefix matcher is byte-for-byte the predicate it is today;
+      no `filter(slug=` appears in `agent/worktree_manager.py`.
+- [ ] A sweep over N lanes performs **one** session query, and **zero** when every lane is
+      filtered out above guard 5.
+- [ ] `worktree_busy_check` returns `None` for both clear and error; `worktree_busy_probe`
+      returns `clear`/`busy`/`error`; a batch fetch failure yields `error` for every
+      requested slug.
+- [ ] `worktree_busy_probe_many` and N single-slug probes agree on identical fixture rows
+      across all three states.
+- [ ] The three stale-monkeypatch tests in `tests/unit/test_disk_reclaim.py` exercise the
+      new guard path, proven by mutation: forcing the batch probe to return clear makes
+      `test_busy_check_error_also_blocks_removal` fail.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+- [ ] No xfail conversions apply — no expected-failure markers exist in
+      `tests/unit/test_disk_reclaim.py` or `tests/unit/worktree_manager/` (verified at plan time).
 
 ## Team Orchestration
 
-_placeholder_
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead
+never builds directly.
+
+### Team Members
+
+- **Builder (worktree-manager)**
+  - Name: `scan-builder`
+  - Role: `agent/worktree_manager.py` only — `_fetch_live_sessions`, the `sessions=`
+    injection, and `worktree_busy_probe_many`.
+  - Agent Type: builder
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Builder (disk-reclaim)**
+  - Name: `sweep-builder`
+  - Role: `tools/disk_reclaim.py` only — lazy batch map, map read with the error default,
+    fresh re-probe before `cleanup_after_merge`.
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer**
+  - Name: `guard-tester`
+  - Role: the Test Impact dispositions and the new tests, including the mutation proof.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `posture-validator`
+  - Role: read-only verification that the fail-open/fail-closed postures and the matcher
+    are unchanged, and that no test passes vacuously.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `docs-writer`
+  - Role: the two feature docs and the docstrings.
+  - Agent Type: documentarian
+  - Resume: true
+
+`scan-builder` and `sweep-builder` touch disjoint files and declare that split explicitly,
+so they can run in parallel without the shared-worktree livelock.
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. Narrow the query and add the batch probe
+- **Task ID**: build-scan
+- **Depends On**: none
+- **Validates**: `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+- **Informed By**: spike-1 (slug narrowing rejected — a scheduled child carries the parent's
+  worktree `working_dir` with `slug=None`), spike-2 (`status__in` selects exactly the
+  non-terminal rows), spike-4 (keep the Python terminal check)
+- **Assigned To**: scan-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- **Owns exclusively**: `agent/worktree_manager.py`
+- Add `_fetch_live_sessions()` returning `(rows, error_reason)`: the deferred import of
+  `AgentSession` / `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES`, then
+  `AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES))`. Import failure →
+  `model_import_failed:{Type}`; query failure → `query_failed:{Type}`. Keep the existing
+  WARNING logs verbatim.
+- Give `_scan_worktree_sessions` a keyword-only `sessions=None`; when `None`, call
+  `_fetch_live_sessions()` and return `("error", reason, "")` on a reason. Leave the
+  matching loop, including `if status in TERMINAL_STATUSES: continue`, untouched.
+- Add `worktree_busy_probe_many(repo_root, slugs) -> dict[str, tuple[str, str]]`: fetch
+  once; on error return `("error", reason)` for every slug; otherwise call
+  `_scan_worktree_sessions(repo_root, s, sessions=rows)` per slug and collapse to the same
+  tri-state `worktree_busy_probe` produces. Return `{}` for an empty `slugs` without querying.
+- Do not touch `worktree_busy_check` or `worktree_busy_probe`.
+
+### 2. Unamplify the sweep
+- **Task ID**: build-sweep
+- **Depends On**: none (interface agreed from this plan; integrate against build-scan)
+- **Validates**: `tests/unit/test_disk_reclaim.py`
+- **Informed By**: spike-3 (guard 5 is reached by a minority of lanes, so the map must be
+  lazy), Decision 4 (staleness), Risk 4 (the default must not be clear)
+- **Assigned To**: sweep-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- **Owns exclusively**: `tools/disk_reclaim.py`
+- In `sweep_worktrees`, replace the per-lane `worktree_busy_probe` at guard 5 with a read
+  from a lazily-built map (built on first read, over every directory child that could still
+  reach guard 5).
+- Read it as `busy_map.get(slug, ("error", "not_probed"))`. Never default to clear.
+- Immediately before `cleanup_after_merge`, call the single-slug `worktree_busy_probe` once
+  more and skip on `busy`/`error` using the existing `live_session:` / `busy_check_error:`
+  reason strings.
+- Import `worktree_busy_probe_many` alongside the existing deferred imports at `:359`.
+- Change no guard ordering, no skip-reason string, and no JSON output shape.
+
+### 3. Re-point the tests, then prove they bite
+- **Task ID**: build-tests
+- **Depends On**: build-scan, build-sweep
+- **Validates**: `tests/unit/test_disk_reclaim.py`,
+  `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+- **Assigned To**: guard-tester
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Apply every disposition in Test Impact.
+- Add: batch-vs-single agreement across clear/busy/error; exactly one fetch per sweep;
+  zero fetches when every lane is `too_young`; snapshot-clear + re-probe-busy is not
+  removed; an unknown status value reads `busy`; `worktree_busy_probe_many(root, [])`
+  returns `{}` and queries nothing.
+- **Mutation-check each guard and re-measure after each change**: force
+  `worktree_busy_probe_many` to return clear unconditionally and confirm
+  `test_busy_check_error_also_blocks_removal` and `test_skips_lane_with_live_session` both
+  **fail**. Paste the red output into the PR.
+
+### 4. Posture validation
+- **Task ID**: validate-postures
+- **Depends On**: build-tests
+- **Assigned To**: posture-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Diff the matching loop against `main` and confirm the predicate is unchanged.
+- Confirm `worktree_busy_check` still collapses error to `None` and `worktree_busy_probe`
+  still returns three states.
+- Confirm no `filter(slug=`, no `query.all()`, and no clear-valued default on the map read.
+- Confirm the mutation run reported red for the guards it targets.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-postures
+- **Assigned To**: docs-writer
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Apply every item in the Documentation section.
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: posture-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table and confirm all Success Criteria.
 
 ## Verification
 
-_placeholder_
+| Check | Command | Expected |
+|-------|---------|----------|
+| Busy-guard tests pass | `./scripts/pytest-clean.sh tests/unit/worktree_manager/test_worktree_manager_busy_guards.py -q` | exit code 0 |
+| Disk-reclaim tests pass | `./scripts/pytest-clean.sh tests/unit/test_disk_reclaim.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check agent/worktree_manager.py tools/disk_reclaim.py` | exit code 0 |
+| Format clean | `python -m ruff format --check agent/worktree_manager.py tools/disk_reclaim.py` | exit code 0 |
+| Indexed query present | `grep -c 'status__in' agent/worktree_manager.py` | output > 0 |
+| Batch probe wired into the sweep | `grep -c 'worktree_busy_probe_many' tools/disk_reclaim.py` | output > 0 |
+| Full scan gone (anti-criterion) | `grep -c 'query\.all()' agent/worktree_manager.py` | match count == 0 |
+| Slug narrowing rejected (anti-criterion, Decision 1) | `grep -c 'filter(slug=' agent/worktree_manager.py` | match count == 0 |
+| No clear-valued default on the map read (anti-criterion, Risk 4) | `grep -cE '\.get\([^)]*,[[:space:]]*\("clear"' tools/disk_reclaim.py` | match count == 0 |
+| Terminal-status check survives (anti-criterion, Decision 2) | `grep -c 'in TERMINAL_STATUSES' agent/worktree_manager.py` | output > 0 |
+| Fail-open wrapper intact | `grep -c 'def worktree_busy_check' agent/worktree_manager.py` | output > 0 |
+| Fail-closed wrapper intact | `grep -c 'def worktree_busy_probe' agent/worktree_manager.py` | output > 0 |
+| Guard order unchanged in the sweep | `grep -n 'too_young\|live_process:\|live_session:\|open_pr\|unmerged' tools/disk_reclaim.py \| head -5` | output contains too_young |
+| No stale xfails in scope | `grep -rn 'xfail' tests/unit/test_disk_reclaim.py tests/unit/worktree_manager/` | exit code 1 |
+
+The three anti-criteria rows above must each be demonstrated red before being trusted:
+introduce the forbidden pattern deliberately, confirm the row FAILS, revert, and paste the
+FAIL output into the PR description.
 
 ## Critique Results
 
@@ -611,4 +834,17 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+1. **The issue's stated magnitude is wrong, and the corrected one is small — still ship it?**
+   The Freshness Check measured 2 probes per sweep on this checkout, not 73, because the
+   probe is the fifth guard and `too_young` eliminates most lanes first. Present-day cost is
+   roughly 14 ms/day. The durable argument is that aged **unmerged** lanes reach the probe
+   every night and are never removed, so the multiplier only grows — but that is a slower
+   and smaller problem than the issue describes. Ship at Small appetite as planned, or close
+   #2712 as "measured, not worth it"?
+
+2. **Is the pre-removal re-probe (Decision 4) worth its complexity?** Dropping it makes the
+   change a pure simplification and forces the three `test_disk_reclaim.py` monkeypatches to
+   be re-pointed only once. Keeping it preserves the fail-closed guarantee exactly at the
+   moment of deletion, which is the guarantee #2517 built the probe for. The plan keeps it;
+   a reviewer who thinks `remove_worktree`'s own guards suffice should say so at critique,
+   not at build.
