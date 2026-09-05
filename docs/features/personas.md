@@ -27,7 +27,16 @@ config/
 ```
 
 As of issue #1692, `teammate.md` is now also tracked in the repo at
-`config/personas/teammate.md` and is no longer vault-only.
+`config/personas/teammate.md` and is no longer vault-only. Overlay
+resolution still prefers the private copy when one exists (see
+`_resolve_overlay_path` above), so a stale private `teammate.md` left over
+from before the move silently shadows the maintained repo copy — any edit
+to `config/personas/teammate.md` reaches nothing on a machine still holding
+one. `/update` Step 4.10 (`scripts/update/persona_drift.py`) warns when a
+private `teammate.md` drifts from the repo copy, the same mechanism it has
+long used for `engineer.md`; the fix on an affected machine is to delete
+the private stub once its content (if any) has been reconciled into the
+repo overlay.
 
 **Private** (`~/Desktop/Valor/personas/` and `~/Desktop/Valor/identity.json`):
 ```
@@ -88,7 +97,7 @@ See [bridge-worker-architecture.md](bridge-worker-architecture.md) and [email-br
 | Persona | In-repo overlay | Private overlay | Role | Used by |
 |---------|-----------------|-----------------|------|---------|
 | `engineer` | `config/personas/engineer.md` | `~/Desktop/Valor/personas/engineer.md` | Full system access, git operations, SDLC pipeline orchestration and execution | Eng sessions; `Eng:` groups; default for unknown group session types |
-| `teammate` | (none) | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats (non-`Eng:` groups) |
+| `teammate` | `config/personas/teammate.md` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats (non-`Eng:` groups) |
 | `customer-service` | `config/personas/customer-service.md` | `~/Desktop/Valor/personas/customer-service.md` | Professional, action-oriented, no code writes | Email-spawned sessions when `project.email.persona` is set |
 
 ## Configuration
@@ -160,7 +169,10 @@ If you see these warnings at session startup, sync the private overlay on that m
 | Segment file missing | Raises `FileNotFoundError` with segment path for debugging |
 | Identity config missing | Raises `FileNotFoundError` (identity.json is required) |
 
-> Note: because there is no in-repo `config/personas/teammate.md`, the `teammate` persona requires the private `~/Desktop/Valor/personas/teammate.md` to exist — it is NOT served from base segments alone. If that file is absent, `load_persona_prompt("teammate")` raises `FileNotFoundError`.
+> Note: `config/personas/teammate.md` (in repo, as of issue #1692) is the
+> fallback overlay, so `load_persona_prompt("teammate")` only raises
+> `FileNotFoundError` if *both* the private and the in-repo copy are
+> missing — the in-repo copy alone is normally sufficient.
 
 ## API
 
