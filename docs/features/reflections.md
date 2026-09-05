@@ -850,7 +850,7 @@ worker-role install gate, update ordering, and the `/dashboard.json`
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
 
-`ReflectionIgnore` and `PRReviewAudit` each live in exactly one module (`models/reflection_ignore.py`, `models/pr_review_audit.py`); there is no `models/reflections.py` compatibility shim. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import these function-locally, straight from their canonical modules. With a single module object holding each model, a wrong `unittest.mock.patch` target fails loudly instead of silently falling through to an unintended real-Redis integration test.
+`ReflectionIgnore` and `PRReviewAudit` each live in exactly one canonical module: `models/reflection_ignore.py` and `models/pr_review_audit.py`. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import them function-locally, straight from those modules. Because a single module object holds each model, a wrong `unittest.mock.patch` target fails loudly the moment it is applied, so a mis-targeted test surfaces as a failure at patch time rather than running as an unintended real-Redis integration test.
 
 ## Dependencies
 
