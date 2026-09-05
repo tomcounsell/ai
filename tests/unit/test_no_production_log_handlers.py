@@ -20,9 +20,11 @@ condition were inverted. ``test_production_process_still_attaches_the_handler``
 below is the companion probe (precedent:
 ``tests/unit/test_watchdog_log_isolation.py::_run_probe``) that runs the
 same import in a subprocess with ``PYTEST_CURRENT_TEST`` stripped and
-``pytest`` never imported, asserting the ``RotatingFileHandler`` for
-``logs/bridge.log`` IS attached to the root logger — pinning that production
-behavior is unchanged.
+``pytest`` never imported, asserting a ``RotatingFileHandler`` requesting
+exactly ``logs/bridge.log`` IS attached to the root logger — pinning that
+production behavior is unchanged. The probe redirects the handler's actual
+file into a tmp directory, so it never reads, writes, rotates, or restores
+the real production log.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -75,50 +78,82 @@ def test_production_process_still_attaches_the_handler():
     "pytest" is not in ``sys.modules``) with ``PYTEST_CURRENT_TEST`` scrubbed
     from the environment, mirroring
     ``tests/unit/test_watchdog_log_isolation.py::_run_probe``.
+
+    The probe must never touch the REAL ``logs/bridge.log``: a live bridge
+    (or a nightly run in the serving checkout) writes it concurrently, and a
+    snapshot/restore around the subprocess was proven to destroy those
+    concurrent writes. So BEFORE the import, the probe patches
+    ``RotatingFileHandler.__init__`` to record the requested filename and
+    redirect the actual open into a private tmp directory. The assertion is
+    on the recorded request — exact-path equality with
+    ``REPO_ROOT/logs/bridge.log`` — while the bytes land in the tmp file.
     """
     probe = f"""
-import json, logging, logging.handlers, sys
+import json, logging, logging.handlers, pathlib, sys, tempfile
 sys.path.insert(0, {str(REPO_ROOT)!r})
+
+requested = []
+tmp_dir = tempfile.mkdtemp(prefix="probe-bridge-log-")
+_real_init = logging.handlers.RotatingFileHandler.__init__
+
+def _redirecting_init(self, filename, *args, **kwargs):
+    requested.append(str(filename))
+    redirected = pathlib.Path(tmp_dir) / pathlib.Path(filename).name
+    _real_init(self, str(redirected), *args, **kwargs)
+
+# Patch the class __init__ (not a name binding), so every construction form
+# — logging.handlers.RotatingFileHandler(...) included — is redirected.
+logging.handlers.RotatingFileHandler.__init__ = _redirecting_init
+
 import bridge.telegram_bridge as m
 assert m.__file__.startswith({str(REPO_ROOT)!r}), m.__file__
 root = logging.getLogger()
-has_bridge_log_handler = any(
-    isinstance(h, logging.handlers.RotatingFileHandler)
-    and "bridge.log" in getattr(h, "baseFilename", "")
-    for h in root.handlers
-)
-print(json.dumps({{"has_bridge_log_handler": has_bridge_log_handler}}))
+attached = [
+    h for h in root.handlers
+    if isinstance(h, logging.handlers.RotatingFileHandler)
+]
+print(json.dumps({{
+    "has_bridge_log_handler": bool(attached),
+    "requested_paths": requested,
+    "actual_paths": [getattr(h, "baseFilename", "") for h in attached],
+    "tmp_dir": tmp_dir,
+}}))
 """
     env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
     env.pop("PYTEST_CURRENT_TEST", None)
 
-    # The probe deliberately emulates a real (non-pytest) process, so
-    # bridge.telegram_bridge's module-scope import-time logging (e.g. the
-    # routing-map INFO lines) genuinely writes to the real logs/bridge.log —
-    # that IS the production behavior under test. Snapshot/restore the file
-    # around the subprocess so this probe does not itself leave test-run
-    # artifacts in the operator's production log (the exact class of
-    # pollution #2854 is about).
-    bridge_log = REPO_ROOT / "logs" / "bridge.log"
-    prior_bytes = bridge_log.read_bytes() if bridge_log.exists() else None
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", probe],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        if prior_bytes is None:
-            bridge_log.unlink(missing_ok=True)
-        else:
-            bridge_log.write_bytes(prior_bytes)
+    # timeout: this module has an import-time hang precedent (TCC/iCloud
+    # open() deadlock in _get_active_projects, fixed in 261ebbd77). A wedged
+    # probe should fail this test with output, not ride the 420s suite cap.
+    # 180s, not 60: under a pytest-inherited environment the probe import
+    # measures ~65s on a worker-only host (blocks ~60s, then completes), so
+    # a 60s bound fails a healthy probe. Measured 2026-09-05.
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
 
     assert result.returncode == 0, result.stderr
     state = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # Best-effort cleanup of the probe subprocess's redirect directory.
+    shutil.rmtree(state.get("tmp_dir", ""), ignore_errors=True)
+
     assert state["has_bridge_log_handler"] is True, (
         "Production process no longer attaches the logs/bridge.log handler "
         f"— production logging regressed: {state}"
+    )
+    expected = str(REPO_ROOT / "logs" / "bridge.log")
+    assert state["requested_paths"] == [expected], (
+        "Production process requested an unexpected log path "
+        f"(want exactly [{expected!r}]): {state}"
+    )
+    # The redirect held: nothing the probe attached points at the real log.
+    assert all(expected not in p for p in state["actual_paths"]), (
+        f"Probe redirect failed — real production log was opened: {state}"
     )
