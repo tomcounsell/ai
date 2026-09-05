@@ -61,15 +61,75 @@ A replayed triage turn re-files nothing. Three independent defenses, cheapest fi
 
 ## Prior Art
 
-_placeholder_
+
+This is the fourth pass over nightly triage duplicate filing. Each prior pass closed a real hole; each left the prompt untouched.
+
+- **PR #2195** (2026-07-24) "Nightly regression detector: run lock, readable alerts, triage dispatch" — introduced `maybe_dispatch_triage_session` and the run lock. First appearance of the `list[str]`-only dispatch signature this plan changes.
+- **Issue #2559 / PR #2581** (2026-08-06) "Dedup nightly triage dispatch per node" — moved title computation from the agent into Python (`f"Nightly regression: {n}"`) so the same node yields a byte-identical title everywhere, and added per-node `dispatched_nodes` suppression. This is where the "search for the exact title before opening" instruction was written into `_build_triage_prompt` — correct in intent, and the wording that failed on 2026-08-24.
+- **Commit `8524e765b`** (2026-08) "Quiet the nightly regression detector" — established the REST-not-search principle for the script's own reads: `open_issues()` uses `gh issue list`, and the constant comments reject `--search` in as many words. **The prompt was not updated in the same pass.** That asymmetry is the whole of fix 1.
+- **Commit `8eb2344b9`** "Nightly detector: comment on the open issue instead of filing a twin" (#3134) — added `partition_already_open` returning issue *numbers*, enabling comment-over-create.
+- **Issue #3001** (CLOSED) — the umbrella that absorbed the 39-issue flood; its Work Item 3 is the parent scope for all idempotency work here.
+- **Issue #3075 / PR #3142** (merged 2026-09-05T02:13Z) — closed-issue-aware dedup, body-failure cascade collapsing, environmental classification. Added `closed_issue_dispositions()`, `partition_closed_matches()`, `closed_epilogue()`. Follow-up `35a225c19` added consecutive-night escalation. **This landed the detector-side half of fix 2 and left the prompt-side half undone** — see Why Previous Fixes Failed.
 
 ## Research
 
-_placeholder_
+
+The only external surface is the GitHub CLI/API. Verified directly against it rather than by web search, which is stronger evidence:
+
+**Commands run:**
+
+```bash
+gh issue list --state all --json number,title,state,stateReason --limit 5
+```
+
+**Key findings:**
+
+- **The command in the issue works as written, and is fast.** Exit 0 in ~1.0s wall clock for a 5-row read on this repo. It is the REST list endpoint, not the search index.
+- **`stateReason` is an empty string for OPEN issues**, not `null` and not absent. Sample row: `{"number":3170,"state":"OPEN","stateReason":"","title":"..."}`. Any filter the prompt tells the agent to write must branch on `state` first and read `stateReason` only when `state == "CLOSED"` — a naive `stateReason` switch will mis-handle every open issue. This is a real trap for the agent and the prompt must pre-empt it.
+- **Closed rows carry `COMPLETED` / `NOT_PLANNED`** as expected, matching the `state_reason` values `closed_issue_dispositions()` already parses (`scripts/nightly_regression_tests.py:1992`), so the prompt's vocabulary and the script's are already aligned.
+- **`--limit` above 100 causes `gh` to page the REST endpoint** 100 rows at a time; the module already relies on this for `CLOSED_ISSUE_LIST_LIMIT = 4000` (~40 calls, bounded by `CLOSED_ISSUE_LIST_TIMEOUT_SECONDS = 180`). The issue proposes `--limit 200` for the agent's read, which is two calls — cheap, but see Risks for whether 200 is enough coverage.
+
+No web search was run: the training-data question ("does GitHub's search index lag?") is already settled inside this repo by `8524e765b` with a production incident behind it, and a web answer would be weaker evidence than the module's own comments and the 2026-08-24 wave.
 
 ## Spike Results
 
-_placeholder_
+
+All verifiable assumptions were resolved during recon, by direct code read and one live command. No agents were dispatched — every question was cheaper to answer inline than to hand off.
+
+### spike-1: The `gh issue list --state all` read is viable for the agent
+- **Assumption**: "`gh issue list --state all --json number,title,state,stateReason --limit 200` returns what the prompt needs, fast enough to run once per node list."
+- **Method**: code-read + live command
+- **Finding**: Confirmed. Exit 0, ~1.0s for a small read, returns all four fields. `stateReason` is `""` for open issues (see Research) — the prompt must account for that.
+- **Confidence**: high
+- **Impact on plan**: Fix 1 is a prompt-text change with no new Python machinery. The prompt should instruct **one** read for the whole node list, not one per node.
+
+### spike-2: How much of fix 2 did #3075 already land?
+- **Assumption**: "`dispatch_findings` already partitions but does not pass dispositions through."
+- **Method**: code-read of `dispatch_findings` (2447–2676) and `maybe_dispatch_triage_session` (2295)
+- **Finding**: Confirmed exactly. The partitions exist and are acted on by the script itself (it posts the comments). What reaches the agent is `maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)` at line 2664 — a bare `list[str]`. By the time nodes reach that call they have *already* survived `partition_already_open` and `partition_closed_matches`, so **every node in `single_nodes` is known to have no issue in any state**. The script knows the answer is "file it" and says nothing.
+- **Confidence**: high
+- **Impact on plan**: Fix 2 is smaller than the issue implies and its shape is inverted from the obvious reading. The pre-resolved disposition for the per-node path is uniformly `file` — the value is not in telling the agent *which* nodes are already handled (those never arrive), it is in telling the agent **that the script already checked, and what it checked against**, so a replay does not re-derive. See Solution.
+
+### spike-3: Is the lane worktree a sound home for the ledger?
+- **Assumption**: "A file under `.worktrees/{slug}/` is visible to a replayed turn."
+- **Method**: code-read of `maybe_dispatch_triage_session:2334` and `agent/worktree_manager.py`
+- **Finding**: Partly. The slug is `nightly-triage-{sha256(",".join(sorted(set(dispatch_nodes))))[:8]}` — a pure function of the node set, so a replay of the same dispatch does resolve to the same `.worktrees/{slug}/`. But the worktree is a git checkout: a stray file there shows up in the agent's own `git status` and is destroyed on lane teardown. `DATA_DIR = PROJECT_DIR / "data"` (line 155) is already this script's state home (`nightly_tests_last_run.json`, `nightly_tests.lock`), is gitignored (`.gitignore:181`), survives teardown, and is reachable by absolute path from inside a worktree.
+- **Confidence**: high
+- **Impact on plan**: Ledger goes in `data/`, keyed by slug, **not** in the lane worktree — a deliberate deviation from the issue's literal wording. Recorded in Open Questions.
+
+### spike-4: Are there xfail markers to convert?
+- **Assumption**: "A bug this old has an expected-failure test documenting it."
+- **Method**: `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py"`
+- **Finding**: **Zero matches anywhere in `tests/`** — neither decorator nor runtime form, for this bug or any other.
+- **Confidence**: high
+- **Impact on plan**: No conversion tasks. Nothing in Success Criteria about xfails.
+
+### spike-5: Does the stale `session/nightly-triage-idempotency-3075` branch contain unlanded work?
+- **Assumption**: "The branch might hold work this plan would duplicate."
+- **Method**: `git merge-base --is-ancestor` + `git log main..origin/session/...`
+- **Finding**: Not an ancestor of main, 4 commits ahead of it — but those commits are on main by content as squash-merge `97354ce1e` (PR #3142). It is a leftover lane.
+- **Confidence**: high
+- **Impact on plan**: Build branches from `main`. Called out in Freshness Check notes and Rabbit Holes.
 
 ## Data Flow
 
