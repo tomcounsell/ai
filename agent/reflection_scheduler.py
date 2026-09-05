@@ -831,9 +831,9 @@ class ReflectionScheduler:
         ``sync_reflections_yaml`` refreshes it from the vault) and restarts
         nothing: only a ``--full`` update cycles ``com.valor.reflection-worker``.
         Without this, the live scheduler keeps whatever it read at process
-        start. After #2875 deleted the ``agent.sustainability`` shim that meant
-        a pre-migration process raised ``ImportError`` on every tick of every
-        reflection until something happened to restart it.
+        start. When #2875 removed the legacy import shim, a pre-migration
+        process raised ``ImportError`` on every tick of every reflection until
+        something happened to restart it.
 
         Change detection is one ``stat()`` on the loaded path: ``(st_mtime_ns,
         st_size)``. A registry that was absent at load time is re-resolved each
