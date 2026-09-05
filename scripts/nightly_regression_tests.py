@@ -1601,25 +1601,34 @@ _ENVIRONMENTAL_MARKERS = (
 
 
 def is_environmental_failure(test: dict) -> bool:
-    """True when the failure ITSELF is a network-layer fault, not a code path.
+    """True when EVERY failing phase is a network-layer fault, not a code path.
 
-    Each phase's normalized first error line is checked, lowercased. An
-    assertion failure never classifies, whatever its compared data contains: a
-    genuine network fault surfaces as a raised ConnectionRefusedError /
-    gaierror / SSLError first line, while an ``assert`` whose expected string
-    happens to mention a network error is a code regression the detector must
-    file. A node classified environmental is logged and excluded from filing —
-    no issue, no umbrella (the exclusion runs before cascade grouping) — and
-    deliberately NOT recorded as dispatched, so it re-evaluates every night and
-    starts filing again the moment its failure stops looking environmental.
+    Each failing phase's normalized first error line is checked, lowercased. A
+    single code-level failure anywhere disqualifies the node: an assertion
+    failure (whatever its compared data contains) or any non-network error in
+    one phase means the node files, even when another phase — say a teardown
+    flake — looks environmental. Only a node whose failures are network-shaped
+    in every failing phase classifies: a genuine network fault surfaces as a
+    raised ConnectionRefusedError / gaierror / SSLError first line. A node
+    classified environmental is logged and excluded from filing — no issue, no
+    umbrella (the exclusion runs before cascade grouping) — and deliberately
+    NOT recorded as dispatched, so it re-evaluates every night and starts
+    filing again the moment its failure stops looking environmental. That
+    non-recording also means a persistently environmental-looking code bug is
+    silenced to log lines with no escalation path — tracked in #3163.
     """
+    saw_environmental = False
     for phase in ("setup", "call", "teardown"):
         line = _normalized_first_error_line(_phase_text(test, phase)).lower()
-        if not line or line.startswith(("assert ", "assertionerror")):
+        if not line:
             continue
+        if line.startswith(("assert ", "assertionerror")):
+            return False
         if any(marker in line for marker in _ENVIRONMENTAL_MARKERS):
-            return True
-    return False
+            saw_environmental = True
+        else:
+            return False
+    return saw_environmental
 
 
 def cascade_title(message: str) -> str:
@@ -1933,7 +1942,7 @@ def closed_issue_dispositions(
                 "--limit",
                 str(limit),
                 "--json",
-                "number,title,stateReason",
+                "number,title,stateReason,closedAt",
             ],
             cwd=PROJECT_DIR,
             capture_output=True,
@@ -1953,24 +1962,37 @@ def closed_issue_dispositions(
 
     try:
         rows = json.loads(result.stdout)
-        if len(rows) >= CLOSED_ISSUE_LIST_LIMIT:
+        if len(rows) >= limit:
+            # INFO, not WARNING: at this repo's size (~1888 closed issues vs
+            # the 1000-row window) saturation is the steady state, so an
+            # alarm-grade line every night is noise. Scoping or widening the
+            # window is tracked in #3163.
             log(
-                f"WARNING: closed-issue dedup window saturated ({len(rows)} rows at the "
-                f"{CLOSED_ISSUE_LIST_LIMIT} limit) — closures older than the window are "
-                "invisible to dedup and may re-file"
+                f"INFO: closed-issue dedup window saturated ({len(rows)} rows at the "
+                f"{limit} limit) — closures older than the window are "
+                "invisible to dedup and may re-file (#3163)"
             )
-        # `gh issue list` orders newest-created first, so the FIRST row per
-        # title is the newest closure — the authoritative disposition. A title
-        # closed more than once is the designed steady state (COMPLETED →
-        # legitimate re-file → later NOT_PLANNED consolidation), and keeping
-        # the last row instead resolved six live nightly nodes to their oldest
-        # closure, re-introducing the churn this map exists to stop.
+        # The authoritative disposition for a duplicated title is its newest
+        # CLOSURE (max closedAt), not its newest-created row: creation order
+        # diverges from closure order in exactly the wave-dup shape #3161
+        # keeps generating — a later-created duplicate closed NOT_PLANNED
+        # early while the original was closed COMPLETED later. Keying on
+        # creation order suppressed the design's one legitimate re-file case
+        # (a fixed bug regressing); keying on the last listed row resolved six
+        # live nodes to their oldest closure. Max closedAt drops any reliance
+        # on gh's implicit sort. A missing closedAt loses to any real one;
+        # among rows with none, the first (newest-created) wins as fallback.
         dispositions: dict[str, tuple[int, str]] = {}
+        newest_closed_at: dict[str, str] = {}
         for row in rows:
-            if row.get("title") and row.get("number") is not None:
-                dispositions.setdefault(
-                    row["title"], (int(row["number"]), str(row.get("stateReason") or ""))
-                )
+            title = row.get("title")
+            if not title or row.get("number") is None:
+                continue
+            closed_at = str(row.get("closedAt") or "")
+            if title in dispositions and closed_at <= newest_closed_at[title]:
+                continue
+            dispositions[title] = (int(row["number"]), str(row.get("stateReason") or ""))
+            newest_closed_at[title] = closed_at
         return dispositions
     except Exception as exc:  # noqa: BLE001
         log(f"WARNING: could not parse closed issues for dedup ({exc})")

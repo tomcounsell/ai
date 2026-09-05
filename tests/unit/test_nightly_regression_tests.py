@@ -2519,7 +2519,7 @@ class TestReviewFindings3142:
         return outcome, commented, filed
 
     def test_duplicate_closed_titles_resolve_to_newest_closure(self, monkeypatch, tmp_path):
-        """The FIRST row per title (newest-created) wins, never the oldest.
+        """The row with the newest ``closedAt`` per title wins, never the oldest.
 
         The #3142 review blocker: last-write-wins over gh's newest-first
         listing resolved six live nightly nodes to their oldest COMPLETED
@@ -2531,11 +2531,11 @@ class TestReviewFindings3142:
             returncode = 0
             stdout = (
                 '[{"number": 3112, "title": "Nightly regression: a::t", '
-                '"stateReason": "NOT_PLANNED"},'
+                '"stateReason": "NOT_PLANNED", "closedAt": "2026-09-03T21:00:00Z"},'
                 ' {"number": 2919, "title": "Nightly regression: a::t", '
-                '"stateReason": "COMPLETED"},'
+                '"stateReason": "COMPLETED", "closedAt": "2026-08-25T10:00:00Z"},'
                 ' {"number": 2917, "title": "Nightly regression: a::t", '
-                '"stateReason": "COMPLETED"}]'
+                '"stateReason": "COMPLETED", "closedAt": "2026-08-24T10:00:00Z"}]'
             )
             stderr = ""
 
@@ -2546,10 +2546,41 @@ class TestReviewFindings3142:
         assert to_file == []
         assert closed_matches == [("a::t", 3112, "NOT_PLANNED")]
 
+    def test_wave_shape_newest_closure_wins_over_newest_created(self, monkeypatch, tmp_path):
+        """Creation order is not closure order: max ``closedAt`` decides.
+
+        The #3142 round-2 blocker, in the wave-dup shape #3161 keeps
+        generating: the later-created duplicate (#3061) was closed NOT_PLANNED
+        early, the original (#3057) was closed COMPLETED later. The newest
+        CLOSURE is COMPLETED, so the node must re-file (the one legitimate
+        re-file case). First-row-per-title keyed on creation order suppressed
+        it.
+        """
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        class FakeResult:
+            returncode = 0
+            stdout = (
+                '[{"number": 3061, "title": "Nightly regression: w::t", '
+                '"stateReason": "NOT_PLANNED", "closedAt": "2026-08-31T05:31:00Z"},'
+                ' {"number": 3059, "title": "Nightly regression: w::t", '
+                '"stateReason": "NOT_PLANNED", "closedAt": "2026-08-31T05:31:30Z"},'
+                ' {"number": 3057, "title": "Nightly regression: w::t", '
+                '"stateReason": "COMPLETED", "closedAt": "2026-08-31T09:20:00Z"}]'
+            )
+            stderr = ""
+
+        monkeypatch.setattr(nrt.subprocess, "run", lambda argv, **kw: FakeResult())
+        closed_map = nrt.closed_issue_dispositions()
+        assert closed_map == {"Nightly regression: w::t": (3057, "COMPLETED")}
+        to_file, closed_matches = nrt.partition_closed_matches(["w::t"], closed_map)
+        assert to_file == ["w::t"]
+        assert closed_matches == []
+
     def test_saturated_closed_window_logs_a_warning(self, monkeypatch, tmp_path):
+        """Saturation compares the caller's ``limit``, not the module constant."""
         log_file = tmp_path / "nightly.log"
         monkeypatch.setattr(nrt, "LOG_FILE", log_file)
-        monkeypatch.setattr(nrt, "CLOSED_ISSUE_LIST_LIMIT", 2)
 
         class FakeResult:
             returncode = 0
@@ -2560,7 +2591,7 @@ class TestReviewFindings3142:
             stderr = ""
 
         monkeypatch.setattr(nrt.subprocess, "run", lambda argv, **kw: FakeResult())
-        assert nrt.closed_issue_dispositions() is not None
+        assert nrt.closed_issue_dispositions(limit=2) is not None
         assert "saturated" in log_file.read_text()
 
     def test_assert_diff_embedding_network_string_is_not_environmental(self):
@@ -2577,6 +2608,26 @@ class TestReviewFindings3142:
             "t.py::a", "gw0", "E   ConnectionRefusedError: [Errno 61] Connection refused"
         )
         assert nrt.is_environmental_failure(test)
+
+    def test_call_assertion_with_teardown_network_flake_is_not_environmental(self):
+        """A code-level failure in ANY phase disqualifies the node (#3142 r2 nit).
+
+        Under any-phase classification, a teardown network flake suppressed a
+        genuine call-phase assertion regression. Every failing phase must look
+        network-shaped for the node to classify environmental.
+        """
+        test = _body_failed(
+            "t.py::mixed",
+            "gw0",
+            "E   AssertionError: assert 'wrong output' == 'expected output'",
+        )
+        test["teardown"] = {
+            "outcome": "failed",
+            "longrepr": (
+                "[gw0] darwin\nE   ConnectionResetError: [Errno 54] Connection reset by peer"
+            ),
+        }
+        assert not nrt.is_environmental_failure(test)
 
     def test_environmental_setup_storm_files_nothing(self, monkeypatch, tmp_path):
         """A >=3-node network setup storm is excluded BEFORE cascade grouping.
