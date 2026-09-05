@@ -237,7 +237,7 @@ Written **before** `subprocess.run(... valor_session create ...)`, so it exists 
 
 The write is best-effort and logged on failure, matching how the module treats every other side effect: a ledger that cannot be written must not stop the night from filing. That is the same fail-open posture `open_issues()` takes (`None` means "could not tell", dispatch proceeds), and for the same reason — a missing defense is a smaller harm than a silent night during a real regression.
 
-**Dry-run.** `maybe_dispatch_triage_session` short-circuits on `dry_run` before the subprocess (line 2345). The ledger write must sit **after** that short-circuit, or `--dry-run` starts writing state files. This is exactly the bug the dry-run sentinel was introduced to fix (the docstring at line 2316 records it) and the plan must not reintroduce it.
+**Dry-run.** `maybe_dispatch_triage_session` short-circuits on `dry_run` before the subprocess (line 2340, returning `DRY_RUN_SESSION_ID` at 2345). The ledger write must sit **after** that short-circuit, or `--dry-run` starts writing state files. This is exactly the bug the dry-run sentinel was introduced to fix (the docstring at line 2316 records it) and the plan must not reintroduce it.
 
 ## Failure Path Test Strategy
 
@@ -245,13 +245,13 @@ The write is best-effort and logged on failure, matching how the module treats e
 ### Exception Handling Coverage
 
 - [ ] `write_triage_ledger` is the one new function that can fail (disk full, permissions, a `data/` that is somehow a file). It must catch broadly, `log()` a `WARNING`, and return `False` — never raise into the dispatch path. Test asserts the observable: dispatch still proceeds and a warning line reaches `LOG_FILE`.
-- [ ] Existing handlers in scope are unchanged: `open_issues` (line 1963), `closed_issue_dispositions` (line 2029), `maybe_dispatch_triage_session` (line 2364) each already catch broadly and `log()` — all three have `test_open_issues_returns_none_on_any_failure`-style coverage. No `except Exception: pass` exists in this module; every handler logs.
+- [ ] Existing handlers in scope are unchanged: `open_issues` (lines 1970 and 1987), `closed_issue_dispositions` (lines 2033 and 2078), `maybe_dispatch_triage_session` (lines 2367 and 2373) each already catch broadly and `log()` — all three have `test_open_issues_returns_none_on_any_failure`-style coverage. No `except Exception: pass` exists in this module; every handler logs.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `_build_triage_prompt([])` — currently unreachable (`maybe_dispatch_triage_session` returns `None` on an empty list first, line 2333, covered by `test_...([]) is None`). The new keyword argument must not change that: passing an empty disposition list alongside a non-empty node list must degrade to the old prompt rather than emitting a malformed pre-resolved block.
+- [ ] `_build_triage_prompt([])` — currently unreachable (`maybe_dispatch_triage_session` returns `None` on an empty list first, line 2329, covered by `test_...([]) is None`). The new keyword argument must not change that: passing an empty disposition list alongside a non-empty node list must degrade to the old prompt rather than emitting a malformed pre-resolved block.
 - [ ] `write_triage_ledger(slug, [])` — must write nothing and return `False` rather than creating an empty ledger a replay would read as "nothing to file".
-- [ ] Disposition list and node list of **differing length** — a defect that would silently mislabel nodes. The prompt builder must zip them `strict=True` (matching line 1483's existing use) so a mismatch raises at build time rather than producing a prompt attributing one node's disposition to another.
+- [ ] Disposition list and node list of **differing length** — a defect that would silently mislabel nodes. The prompt builder must zip them `strict=True` (matching line 1482's existing use) so a mismatch raises at build time rather than producing a prompt attributing one node's disposition to another.
 
 ### Error State Rendering
 
