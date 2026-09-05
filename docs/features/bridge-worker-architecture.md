@@ -217,6 +217,23 @@ Telegram media (photos, voice, audio, documents) requires both Telethon RPC (dow
 
 Full contract and field-level reference live in [media-enrichment.md](media-enrichment.md). The sibling reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is silently skipped in the worker until a follow-up lands.
 
+### Medium Parity for Inbound Attachments
+
+An agent's interaction with a bridge is identical for every messaging medium. A file that arrives by Telegram and the same file arriving by email reach the agent in one shape, through one code path, and the agent acts on both the same way. The mechanism has one shape, one classifier, one renderer, one delivery seam, and one producer per medium:
+
+| Piece | Where | Role |
+|-------|-------|------|
+| Descriptor shape | `bridge/context.py::media_descriptor` | `{kind, filename, media_type, local_path, reason}`; `kind` is `resolved` (readable at `local_path`) or `unreadable` (`reason` says why) |
+| Classifier | `bridge/context.py::describe_local_media` | Turns a persisted path into a descriptor: inside the medium's media root and readable means `resolved`; otherwise `no_path_recorded`, `invalid_path`, or `file_missing` |
+| Renderer | `bridge/context.py::format_media_descriptor` / `format_attachments` | `[attachment: report.pdf (document) at machine path /abs/path]` or `[unreadable attachment: name (type) reason: ...]`, one line per file |
+| Delivery seam | `agent/session_executor.py::prepend_trigger_attachments` | Reads `extra_context["attachments"]` and prepends the rendered block to the turn input, ahead of the injection banner so sender-controlled filenames sit inside the untrusted zone |
+| Telegram producer | `bridge/context.py::telegram_media_descriptor`, called from the intake in `bridge/telegram_bridge.py` after the download, and from `_resolve_media_descriptor` for reply-chain ancestors | Type and filename from the Telethon message, path and download error from the download (intake) or the `TelegramMessage` record (chain) |
+| Email producer | `bridge/email_bridge.py::_attachment_descriptors` | One descriptor per persisted MIME part, classified under `EMAIL_ATTACHMENT_DIR`, plus an `unreadable` descriptor for `truncated` or `not_recovered` parts |
+
+The rule for the next medium (SMS, Slack, a web form): add a producer that emits `media_descriptor` dicts onto `extra_context["attachments"]` at intake. Nothing else changes: the worker already renders and delivers them, and `tests/unit/test_attachment_descriptor_parity.py` is where the new producer proves it yields the same descriptor as the existing ones for the same file. A medium-specific context key for files is the failure mode this replaces: five email-only keys were stamped and read by nothing (#3136), and `tests/unit/test_bridge_context_guards.py` now fails on any `extra_context` key written in `bridge/` or `agent/` with no reader.
+
+Telegram keeps its worker-side AI pass (vision, transcription, document extraction) on top of the descriptor; the descriptor is what makes the file itself reachable on every medium.
+
 ### Media Intake Resilience
 
 The media contract assumes (a) `TelegramMessage.query.get(stored_msg_id)` always returns the record the bridge just created, and (b) `_download_media_with_retry` returns either a path or a populated error string. Both assumptions can fail transiently — a Popoto stale-index condition can return `None` from `query.get`, and the size-aware retry wrapper can return `(None, None)` ("no_path" outcome) when `client.download_media` reports success but the file is missing post-download. Defense in depth lives in two layers:

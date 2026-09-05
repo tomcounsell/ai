@@ -1,6 +1,6 @@
-"""Cross-medium static guards for agent-facing bridge context (#2732).
+"""Cross-medium static guards for agent-facing bridge context (#2732, #3136).
 
-Three AST scans, each written as a pure function over source text so the
+Four AST scans, each written as a pure function over source text so the
 red-state fixtures below run without touching the filesystem (Risk 5 in
 docs/plans/reply-chain-media-renders-as-literal-string.md):
 
@@ -23,9 +23,13 @@ docs/plans/reply-chain-media-renders-as-literal-string.md):
    ``_cache_walk_root`` defect the plan leaves out of scope. Popoto is
    synchronous redis-py; an inline call blocks the bridge event loop and
    makes the 3-second ``asyncio.wait_for`` guard unenforceable (Risk 4).
+4. **Attachment merge** — every enqueue site in ``bridge/telegram_bridge.py``
+   that seeds extra_context from ``_injection_ctx`` also merges
+   ``_attachment_ctx``, so the #3136 attachment descriptor reaches the agent
+   on every dispatch branch, never on just one.
 
 Test names are selectable with ``-k placeholder``, ``-k write_only_context``,
-and ``-k off_loop`` respectively, matching the plan's Verification rows.
+``-k off_loop``, and ``-k attachment_merge`` respectively.
 """
 
 from __future__ import annotations
@@ -256,18 +260,13 @@ def _tree_write_only_keys() -> tuple[dict[str, list[str]], set[str]]:
 
 # Derived empirically against the tree; every entry is asserted STILL unread
 # below, so this list can only shrink — landing a reader forces the entry's
-# removal. Email-seam entries are #3136's delivery gap: stamped onto the email
-# session's extra_context in bridge/email_bridge.py and consumed by nothing.
-# (attachments_truncated is NOT here: it is read via parsed.get(...) at
-# bridge/email_bridge.py, so under the receiver-agnostic predicate it has
-# readers.) The two session-snapshot keys are save_session_snapshot metadata
-# serialized wholesale for humans; no code reads them in key position.
+# removal. The email attachment seam is delivered (#3136): descriptors on
+# "attachments" are read by agent/session_executor.py. email_from is email
+# transport metadata whose fact already reaches the agent as sender_name. The
+# two session-snapshot keys are save_session_snapshot metadata serialized
+# wholesale for humans; no code reads them in key position.
 WRITE_ONLY_ALLOW_LIST = {
-    "attachments_unrecoverable",  # known gap: #3136
-    "attachments_recovered_count",  # known gap: #3136
-    "attachments_referenced",  # known gap: #3136
-    "email_attachments",  # known gap: #3136
-    "email_from",  # known gap: #3136 (email transport metadata, same seam)
+    "email_from",  # email transport metadata; the sender arrives as sender_name
     "correlation_id",  # session-snapshot metadata, serialized wholesale
     "message_preview",  # session-snapshot metadata, serialized wholesale
 }
@@ -336,8 +335,8 @@ def test_write_only_context_allow_list_matches_tree():
     writes, read_keys = _tree_write_only_keys()
 
     # Non-vacuity pins: the collector must keep seeing the known real sites.
-    # bridge/email_bridge.py subscript writes:
-    assert "attachments_unrecoverable" in writes, (
+    # bridge/email_bridge.py subscript writes (the #3136 attachment seam):
+    assert "attachments" in writes, (
         "collector no longer sees bridge/email_bridge.py's subscript writes — "
         "the scan went blind, fix the collector before trusting a green run"
     )
@@ -541,4 +540,67 @@ def test_fetch_reply_chain_lookups_are_off_loop():
     assert not stale, (
         f"off-loop exemption(s) no longer match an inline call: {sorted(stale)} "
         "— the pre-existing defect was fixed, delete the exemption"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan 4: the Telegram intake's attachment descriptor rides every enqueue site
+# ---------------------------------------------------------------------------
+
+
+def find_injection_merges_missing_attachments(source: str) -> list[int]:
+    """Line numbers of dict literals that unpack ``_injection_ctx`` without
+    also unpacking ``_attachment_ctx``.
+
+    ``bridge/telegram_bridge.py`` seeds each enqueue site's extra_context
+    overrides from a dict literal that unpacks the intake-time context dicts.
+    The #3136 attachment descriptor lives in ``_attachment_ctx`` and must be
+    merged everywhere the injection banner is, or a Telegram file reaches the
+    agent on one dispatch branch and silently vanishes on another.
+    """
+    findings: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        unpacked = {
+            v.id
+            for k, v in zip(node.keys, node.values, strict=True)
+            if k is None and isinstance(v, ast.Name)
+        }
+        if "_injection_ctx" in unpacked and "_attachment_ctx" not in unpacked:
+            findings.append(node.lineno)
+    return findings
+
+
+def test_attachment_merge_fixture_flags_injection_only_seed():
+    """Red state, proven in-suite: the pre-#3136 seed shape yields one finding."""
+    assert find_injection_merges_missing_attachments("x = {**_injection_ctx}") == [1]
+    assert (
+        find_injection_merges_missing_attachments("x = {**_injection_ctx, **_attachment_ctx}") == []
+    )
+
+
+def test_attachment_merge_covers_every_telegram_enqueue_site():
+    source = (BRIDGE_DIR / "telegram_bridge.py").read_text()
+    seeds = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Dict)
+        and any(
+            k is None and isinstance(v, ast.Name) and v.id == "_injection_ctx"
+            for k, v in zip(node.keys, node.values, strict=True)
+        )
+    ]
+    assert len(seeds) >= 2, (
+        "expected the resume-completed and fresh-session enqueue sites to seed "
+        "overrides from _injection_ctx; the scan went blind if neither is found"
+    )
+    assert "dict(_injection_ctx)" not in source, (
+        "a dict(_injection_ctx) seed bypasses the attachment merge; unpack both dicts"
+    )
+    missing = find_injection_merges_missing_attachments(source)
+    assert not missing, (
+        f"enqueue site(s) at line(s) {missing} seed extra_context from _injection_ctx "
+        "without _attachment_ctx: a Telegram file would reach the agent on one "
+        "dispatch branch and vanish on another"
     )

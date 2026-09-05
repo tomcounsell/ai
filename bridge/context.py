@@ -378,18 +378,21 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 # =============================================================================
 
 
-def _media_descriptor(
+def media_descriptor(
     kind: str,
     filename: str | None,
     media_type: str | None,
     local_path: str | None,
     reason: str | None,
 ) -> dict:
-    """Build the media descriptor attached to a reply-chain entry.
+    """Build the one attachment descriptor every medium hands the agent.
 
     `kind` is "resolved" (file readable at `local_path`) or "unreadable"
-    (`reason` names why). The descriptor is data, not text: the renderer owns
-    presentation and tests assert on this structure.
+    (`reason` names why). The descriptor is data, not text: `format_media_descriptor`
+    owns presentation and tests assert on this structure. Producers are the
+    Telegram intake (`telegram_media_descriptor`), the reply-chain resolver
+    (`_resolve_media_descriptor`), and the email intake
+    (`bridge/email_bridge.py`); a new medium adds a producer, never a shape.
     """
     return {
         "kind": kind,
@@ -400,16 +403,75 @@ def _media_descriptor(
     }
 
 
+def describe_local_media(
+    filename: str | None,
+    media_type: str | None,
+    local_path: str | None,
+    *,
+    media_root: Path,
+) -> dict:
+    """Classify an on-disk file the bridge persisted into a descriptor.
+
+    Shared by every producer so "resolved" means the same thing on every
+    medium: a recorded path, inside `media_root`, that stats readable. Each
+    failure degrades to an "unreadable" descriptor with a specific reason
+    (`no_path_recorded`, `invalid_path`, `file_missing`) rather than raising.
+    """
+    if not local_path or not str(local_path).strip():
+        return media_descriptor("unreadable", filename, media_type, None, "no_path_recorded")
+    path = Path(str(local_path).strip())
+    try:
+        inside_root = path.resolve().is_relative_to(media_root.resolve())
+    except (OSError, ValueError):
+        inside_root = False
+    if not inside_root:
+        return media_descriptor("unreadable", filename, media_type, None, "invalid_path")
+    if not (path.exists() and os.access(path, os.R_OK)):
+        return media_descriptor("unreadable", filename, media_type, None, "file_missing")
+    return media_descriptor("resolved", filename, media_type, str(path), None)
+
+
+def telegram_media_descriptor(
+    msg,
+    *,
+    local_path: str | None,
+    download_error: str | None,
+) -> dict | None:
+    """Descriptor for the file media on one Telethon message.
+
+    Returns None when the message carries no media, or media that is not a
+    downloadable file: `get_media_type` is the eligibility authority, non-None
+    exactly for the Photo/Document set the intake download path can resolve.
+    Link previews, polls, geo pins, venues, contacts, dice, stories, and every
+    future Telethon media kind fail closed with no descriptor, instead of
+    rendering a false "[unreadable attachment]" marker for a file that never
+    existed.
+
+    Media type and filename come from the Telethon message in hand (photos
+    have no filename, so one is synthesized from the type and message id);
+    the path and any download error come from whichever side has them: the
+    live intake passes what it just downloaded, the reply-chain resolver
+    passes what the `TelegramMessage` record persisted.
+    """
+    if not getattr(msg, "media", None):
+        return None
+    media_type = get_media_type(msg)
+    if media_type is None:
+        return None
+    filename = getattr(getattr(msg, "file", None), "name", None) or f"{media_type}-{msg.id}"
+    if download_error:
+        return media_descriptor(
+            "unreadable", filename, media_type, None, f"download_error: {download_error}"
+        )
+    return describe_local_media(filename, media_type, local_path, media_root=MEDIA_DIR)
+
+
 async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
     """Resolve the media descriptor for one reply-chain hop.
 
-    Returns None when the message carries no media, or media that is not a
-    downloadable file (get_media_type is the eligibility authority: only
-    photo/document kinds ever resolve). Otherwise returns a
-    descriptor (see `_media_descriptor`): media type and filename come from
-    the Telethon message already in hand, the on-disk path from the
-    `TelegramMessage` record the bridge wrote at intake. The two sources
-    degrade separately — a Redis miss still yields a named attachment,
+    The Telethon message supplies type and filename; the on-disk path comes
+    from the `TelegramMessage` record the bridge wrote at intake. The two
+    sources degrade separately: a Redis miss still yields a named attachment,
     downgraded to "unreadable" with a specific reason.
 
     Never raises: any failure logs at warning and degrades to an
@@ -419,22 +481,9 @@ async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
         return None
 
     try:
-        # Classifier gate (PR #3146 review, round 2): get_media_type is
-        # non-None exactly for the Photo/Document set the intake download
-        # path can resolve, so a descriptor exists only when a file could
-        # ever have been downloaded. Everything else — link previews (whose
-        # msg.file falls back to the web preview's own photo/document),
-        # polls, geo pins static or live, venues, contacts, dice, stories,
-        # and every future Telethon media kind — fails closed with no
-        # descriptor, instead of rendering a false "[unreadable attachment]"
-        # marker for a file that never existed.
         media_type = get_media_type(msg)
         if media_type is None:
             return None
-        filename = getattr(getattr(msg, "file", None), "name", None)
-        if not filename:
-            # Photos genuinely have no filename — synthesize a stable label.
-            filename = f"{media_type}-{msg.id}"
 
         # Lazy import: models.telegram pulls in Popoto/Redis, which this
         # module must not require at import time (same shape as _cache_walk_root).
@@ -449,37 +498,23 @@ async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
             lambda: list(TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id))
         )
         if not records:
-            return _media_descriptor("unreadable", filename, media_type, None, "no_record")
+            filename = getattr(getattr(msg, "file", None), "name", None)
+            if not filename:
+                filename = f"{media_type}-{msg.id}"
+            return media_descriptor("unreadable", filename, media_type, None, "no_record")
 
         record = records[0]
-        download_error = getattr(record, "media_download_error", None)
-        if download_error:
-            return _media_descriptor(
-                "unreadable", filename, media_type, None, f"download_error: {download_error}"
-            )
-
-        local_path = getattr(record, "media_local_path", None)
-        if not local_path or not str(local_path).strip():
-            return _media_descriptor("unreadable", filename, media_type, None, "no_path_recorded")
-
-        path = Path(str(local_path).strip())
-        try:
-            inside_media_dir = path.resolve().is_relative_to(MEDIA_DIR.resolve())
-        except (OSError, ValueError):
-            inside_media_dir = False
-        if not inside_media_dir:
-            return _media_descriptor("unreadable", filename, media_type, None, "invalid_path")
-
-        if not (path.exists() and os.access(path, os.R_OK)):
-            return _media_descriptor("unreadable", filename, media_type, None, "file_missing")
-
-        return _media_descriptor("resolved", filename, media_type, str(path), None)
+        return telegram_media_descriptor(
+            msg,
+            local_path=getattr(record, "media_local_path", None),
+            download_error=getattr(record, "media_download_error", None),
+        )
     except Exception as e:
         logger.warning(
             f"Could not resolve media descriptor for message "
             f"{getattr(msg, 'id', 'unknown')} in chat {chat_id}: {e}"
         )
-        return _media_descriptor(
+        return media_descriptor(
             "unreadable",
             f"media-{getattr(msg, 'id', 'unknown')}",
             None,
@@ -567,7 +602,7 @@ async def fetch_reply_chain(
     return chain
 
 
-def _format_media_descriptor(media: dict) -> str:
+def format_media_descriptor(media: dict) -> str:
     """Render one media descriptor as a compact single-line marker.
 
     The filename (a basename) is the human-readable name to quote; the
@@ -582,6 +617,16 @@ def _format_media_descriptor(media: dict) -> str:
         return f"[attachment: {name} ({media_type}) at machine path {local_path}]"
     reason = media.get("reason") or "unknown"
     return f"[unreadable attachment: {name} ({media_type}) reason: {reason}]"
+
+
+def format_attachments(descriptors: list[dict]) -> str:
+    """Render the descriptors stamped on a trigger message, one marker per line.
+
+    This is the block the worker prepends to the agent's turn input for the
+    files on the message itself (`extra_context["attachments"]`), on every
+    medium; the reply chain renders the same markers inline per hop.
+    """
+    return "\n".join(format_media_descriptor(d) for d in descriptors if isinstance(d, dict))
 
 
 def format_reply_chain(chain: list[dict]) -> str:
@@ -634,7 +679,7 @@ def format_reply_chain(chain: list[dict]) -> str:
         # truncation measures the human-authored text so it can never bisect
         # a path.
         if media:
-            descriptor = _format_media_descriptor(media)
+            descriptor = format_media_descriptor(media)
             content = f"{content} {descriptor}" if content else descriptor
 
         # Format with timestamp if available

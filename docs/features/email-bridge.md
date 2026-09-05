@@ -388,7 +388,7 @@ When an inbound email carries attachments, the bridge extracts, persists, and su
 2. **Persistence** — the IMAP poll loop (`_email_inbox_loop`) calls `_persist_attachments(parsed)` **only on the poll path**. Bytes are written to `data/media/email-attachments/{message_id_hash}/{sanitized_filename}`. The subdir is keyed by a SHA-256 of the Message-ID; when the Message-ID is empty it falls back to `from_addr:subject:timestamp` so attachments from different Message-ID-less emails never collide. Same-name files within one email are disambiguated with an index suffix (`image.png`, `image_1.png`).
 3. **Vault mirror** — each persisted file is fire-and-forget copied into `~/work-vault/email-attachments/` (target name `{date}_{sender}_{msgid}_{filename}`) so the KnowledgeWatcher indexes it. Every failure is logged and never fatal — a broken vault dir does not prevent disk persistence or session enqueue.
 4. **History + read output** — `_record_history()` stores the attachment **metadata only** (never bytes) in the per-message JSON blob; `valor-email read --json` surfaces the `attachments` array per message. Blobs written before this feature hydrate as `attachments: []` (back-compat).
-5. **Session context** — `_process_inbound_email()` sets `extra_context["email_attachments"]` to the list of readable stored paths + metadata, so the agent sees the files in its prompt context and can open them.
+5. **Session context** — `_process_inbound_email()` calls `_attachment_descriptors(parsed)` and stamps the result on `extra_context["attachments"]`: one medium-agnostic descriptor per persisted file (`bridge.context.media_descriptor` shape, classified by `bridge.context.describe_local_media` rooted at `EMAIL_ATTACHMENT_DIR`), plus an `unreadable` descriptor when a file is known to be missing (see the attachment-wedge guard below). The worker renders those descriptors at the transport-agnostic seam (`agent/session_executor.py::prepend_trigger_attachments`) as `[attachment: invoice.pdf (document) at machine path /.../invoice.pdf]`, the same marker a Telegram file produces, so the agent opens the file the same way on either medium. The medium-parity principle is recorded in [Bridge/Worker Architecture](bridge-worker-architecture.md#medium-parity-for-inbound-attachments).
 
 **Empty-body emails** that carry attachments are processed, not dropped (the empty-body guard is relaxed when attachments are present — a file with no text is a legitimate message).
 
@@ -400,24 +400,16 @@ When an inbound email carries attachments, the bridge extracts, persists, and su
 
 ### Attachment-wedge guard
 
-If the email body references attachments (contains phrases like "attached", "attachment", "enclosed", "find attached") but **no files were recoverable** (empty `email_attachments` list) **or only some were recovered** (cap hit, malformed parts — `attachments_truncated: true`), the bridge sets additional keys in `extra_context` before enqueuing the session:
+When the bridge knows a file did not arrive, it says so through the same descriptor list rather than a side channel. `_attachment_descriptors` appends one `unreadable` descriptor (no filename, no path) in two cases:
 
-```python
-extra_context["attachments_unrecoverable"] = True     # always set when guard fires
-extra_context["attachments_truncated"] = True/False    # True = partial recovery (cap hit)
-extra_context["attachments_recovered_count"] = M       # how many files did arrive
-extra_context["attachments_referenced"] = True         # body contains attachment-reference phrases
-```
+| Case | Descriptor `reason` | Rendered marker |
+|------|---------------------|-----------------|
+| A part was dropped at the size or parts cap, or failed to decode (`attachments_truncated: true`), regardless of body wording | `truncated: a part exceeded the size cap or failed to decode; ask the sender to resend` | `[unreadable attachment: unnamed (file) reason: truncated: ...]` |
+| No file was persisted and the body references attachments ("attached", "enclosed", "find attached", ...) | `not_recovered: the body refers to attachments but none arrived; ask the sender to resend` | `[unreadable attachment: unnamed (file) reason: not_recovered: ...]` |
 
-**Policy: inform, not block.** The session is always enqueued — the email is preserved and the agent uses the context to respond gracefully (e.g. "your attachments didn't arrive; please resend") rather than wedging silently with no output. The alternative (hard-block / auto-reply) was rejected as too aggressive — a body that says "attached" colloquially but carries no real attachment would be dropped entirely.
+Files that did persist keep their `resolved` descriptors alongside the marker, so partial recovery reads as "these arrived, something else did not."
 
-The agent distinguishes:
-- `attachments_unrecoverable=True`, `attachments_recovered_count=0` — zero files arrived; ask sender to resend.
-- `attachments_unrecoverable=True`, `attachments_truncated=True`, `recovered_count=M` — M files arrived but more were referenced; partial recovery, ask for the missing files.
-
-Security: the injected context is a static template (integer counts, boolean flags) — no untrusted body text is echoed. Full pre-execution inspection is tracked under issue #1630.
-
-No on-disk reaper ships with this feature — retention matches the existing Telegram `data/media/` behavior (accepted residual; the vault copy is the durable, indexed record).
+**Policy: inform, not block.** The session is always enqueued; the agent uses the marker to respond gracefully ("your attachment didn't arrive; please resend") instead of wedging silently. Hard-blocking or auto-replying was rejected: a body that says "attached" colloquially but carries no real attachment would be dropped entirely.
 
 ### Draft with attachment (`valor-email draft`)
 

@@ -112,6 +112,22 @@ tool call only on the one file that matters to the turn it is answering,
 reading it with `Read` or `valor-ingest` the same way it would any other
 file on disk.
 
+## The Trigger Message Carries the Same Reference
+
+The file on the message being answered gets both: the AI pass above, and
+the same path reference a chain ancestor gets. At intake the bridge builds
+`telegram_media_descriptor(message, local_path=..., download_error=...)`
+from the download it just made and stamps it on
+`extra_context["attachments"]`; the worker renders it at the
+transport-agnostic seam (`agent/session_executor.py::prepend_trigger_attachments`)
+as `[attachment: report.pdf (document) at machine path /.../report.pdf]`
+ahead of the enrichment description. An email attachment arrives through
+the identical descriptor and seam (`bridge/email_bridge.py::_attachment_descriptors`),
+so the agent's file handling is one behavior across mediums; the principle
+is recorded in [Bridge/Worker
+Architecture](bridge-worker-architecture.md#medium-parity-for-inbound-attachments)
+and enforced by `tests/unit/test_attachment_descriptor_parity.py`.
+
 ## Implementation files
 
 - `bridge/telegram_bridge.py` — handler, intake timing, bridge-side download, persistence. Hosts `_download_media_with_retry` (size-aware timeout + 1-retry wrapper around `download_media`).

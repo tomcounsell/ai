@@ -642,12 +642,19 @@ class TestInboundAttachmentsEndToEnd:
             routing.EMAIL_TO_PROJECT.update(original_email_map)
             routing.ACTIVE_PROJECTS[:] = original_active
 
-        # extra_context exposes the readable stored path + metadata.
+        # extra_context carries the medium-agnostic descriptor (#3136): the same
+        # shape a Telegram file produces, delivered at the executor seam.
         extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
-        email_atts = extra.get("email_attachments")
-        assert email_atts and len(email_atts) == 1
-        assert email_atts[0]["filename"] == "invoice.pdf"
-        assert email_atts[0]["path"] == stored_path
+        descriptors = extra.get("attachments")
+        assert descriptors and len(descriptors) == 1
+        assert descriptors[0]["kind"] == "resolved"
+        assert descriptors[0]["filename"] == "invoice.pdf"
+        assert descriptors[0]["local_path"] == stored_path
+
+        from agent.session_executor import prepend_trigger_attachments
+
+        delivered = prepend_trigger_attachments(parsed["body"], extra, project_key)
+        assert f"[attachment: invoice.pdf (document) at machine path {stored_path}]" in delivered
 
         # read output (cache hit) exposes attachment metadata.
         read = get_recent_emails(limit=5)
@@ -707,8 +714,9 @@ class TestInboundAttachmentsEndToEnd:
             routing.ACTIVE_PROJECTS[:] = original_active
 
         extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
-        names = [a["filename"] for a in extra.get("email_attachments", [])]
+        names = [d["filename"] for d in extra.get("attachments", [])]
         assert names == ["a.pdf", "b.csv"]
+        assert all(d["kind"] == "resolved" for d in extra["attachments"])
 
     @pytest.mark.asyncio
     async def test_wedge_guard_zero_recovery(self, tmp_path, monkeypatch):
@@ -753,12 +761,12 @@ class TestInboundAttachmentsEndToEnd:
 
         mock_enqueue.assert_called_once()
         extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
-        assert extra.get("attachments_unrecoverable") is True, (
-            "Wedge guard must tag attachments_unrecoverable when body references attachments "
-            "but no files were recovered"
+        (descriptor,) = extra["attachments"]
+        assert descriptor["kind"] == "unreadable", (
+            "body references attachments but no files were recovered: the agent "
+            "must receive an explicit unreadable marker"
         )
-        assert extra.get("attachments_recovered_count") == 0
-        assert extra.get("attachments_referenced") is True
+        assert descriptor["reason"].startswith("not_recovered")
 
     @pytest.mark.asyncio
     async def test_wedge_guard_truncated_partial(self, tmp_path, monkeypatch):
@@ -813,14 +821,11 @@ class TestInboundAttachmentsEndToEnd:
 
         mock_enqueue.assert_called_once()
         extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
-        assert extra.get("attachments_unrecoverable") is True, (
-            "Wedge guard must tag attachments_unrecoverable when attachments_truncated=True"
+        resolved, truncated = extra["attachments"]
+        assert resolved["kind"] == "resolved" and resolved["filename"] == "summary.pdf", (
+            "the one file that was persisted must still resolve"
         )
-        assert extra.get("attachments_truncated") is True
-        assert extra.get("attachments_recovered_count") == 1, (
-            "One file was successfully persisted, so recovered_count must be 1"
-        )
-        assert extra.get("attachments_referenced") is True
+        assert truncated["kind"] == "unreadable" and truncated["reason"].startswith("truncated")
 
 
 # ---------------------------------------------------------------------------

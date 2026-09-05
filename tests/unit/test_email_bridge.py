@@ -8,6 +8,7 @@ calls.
 import email.message
 import email.mime.multipart
 import email.mime.text
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1357,12 +1358,15 @@ class TestBodyReferencesAttachments:
         assert isinstance(result, bool)
 
 
-class TestWedgeGuardExtraContext:
-    """Truth-table tests for the attachments_unrecoverable tagging in _process_inbound_email.
+class TestAttachmentDescriptors:
+    """Inbound email attachments reach the agent as medium-agnostic descriptors (#3136).
 
-    Each test drives the real _process_inbound_email() function (not a copy of its logic)
-    and inspects the extra_context_overrides passed to the mocked enqueue_agent_session.
-    Deleting the production wedge guard would fail these tests.
+    Each test drives the real _process_inbound_email() and inspects
+    ``extra_context_overrides["attachments"]``: the same descriptor shape the
+    Telegram intake stamps (see tests/unit/test_attachment_descriptor_parity.py),
+    delivered by ``agent.session_executor.prepend_trigger_attachments``. The
+    delivery tests push the stamped context through that real seam, so a
+    stamp with no reader fails here rather than passing silently.
     """
 
     _PROJECT_KEY = "wedge-test-project"
@@ -1388,6 +1392,22 @@ class TestWedgeGuardExtraContext:
             "timestamp": 1700000000.0,
         }
 
+    def _persisted(self, tmp_path, monkeypatch, name: str = "r1.pdf") -> dict:
+        """A real file under the monkeypatched root, shaped as _persist_attachments leaves it."""
+        import bridge.email_bridge as eb
+
+        store = tmp_path / "store"
+        store.mkdir(exist_ok=True)
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+        path = store / name
+        path.write_bytes(b"%PDF-1.4 test")
+        return {
+            "filename": name,
+            "content_type": "application/pdf",
+            "size": path.stat().st_size,
+            "path": str(path),
+        }
+
     def _project_config(self) -> dict:
         return {
             "_key": self._PROJECT_KEY,
@@ -1403,7 +1423,7 @@ class TestWedgeGuardExtraContext:
     def _projects_json(self) -> dict:
         return {"projects": {self._PROJECT_KEY: self._project_config()}}
 
-    async def _run(self, parsed: dict, monkeypatch) -> dict:
+    async def _run(self, parsed: dict) -> dict:
         """Route parsed dict through real _process_inbound_email; return extra_context_overrides."""
         import bridge.routing as routing
         from bridge.email_bridge import _process_inbound_email
@@ -1423,11 +1443,7 @@ class TestWedgeGuardExtraContext:
             # Stay on this process's claimed test db (issues #2060, #2628), not
             # a hardcoded db=1 — otherwise a concurrent pytest process that
             # claimed db1 could flush this client's data mid-test.
-            # claim_test_db() is the single authority for the number; asking it
-            # directly rather than reading the value back off the popoto
-            # client's connection_kwargs avoids a second derivation of the same
-            # fact that would drift the moment anything re-points popoto, and
-            # it is the only shape the derivation guard accepts (#2655).
+            # claim_test_db() is the single authority for the number (#2655).
             test_r = redis.Redis(db=claim_test_db(), decode_responses=True)
             with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
                 with patch("bridge.email_bridge._get_redis", return_value=test_r):
@@ -1441,50 +1457,76 @@ class TestWedgeGuardExtraContext:
         assert mock_enqueue.called, "enqueue_agent_session should have been called"
         return mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
 
+    @staticmethod
+    def _deliver(ctx: dict, body: str = "Please see attached reports.") -> str:
+        from agent.session_executor import prepend_trigger_attachments
+
+        return prepend_trigger_attachments(body, ctx, "wedge-test-project")
+
     @pytest.mark.asyncio
-    async def test_case_a_references_empty_list_tagged(self, monkeypatch):
-        """(a) body references attachments + empty list → tagged, recovered_count=0."""
+    async def test_references_but_nothing_recovered_yields_not_recovered_marker(self):
         parsed = self._make_parsed(attachments=[], attachments_truncated=False)
-        ctx = await self._run(parsed, monkeypatch)
-        assert ctx.get("attachments_unrecoverable") is True
-        assert ctx.get("attachments_recovered_count") == 0
-        assert ctx.get("attachments_truncated") is False
-        assert ctx.get("attachments_referenced") is True
+        ctx = await self._run(parsed)
+        descriptors = ctx["attachments"]
+        assert len(descriptors) == 1
+        assert descriptors[0]["kind"] == "unreadable"
+        assert descriptors[0]["reason"].startswith("not_recovered")
+        assert descriptors[0]["local_path"] is None
+        delivered = self._deliver(ctx)
+        assert delivered.startswith("[unreadable attachment: unnamed (file) reason: not_recovered")
+        assert delivered.endswith("Please see attached reports.")
 
     @pytest.mark.asyncio
-    async def test_case_b_references_truncated_non_empty_tagged(self, monkeypatch):
-        """(b) body references attachments + non-empty + truncated=True → tagged."""
-        att = {
-            "filename": "r1.pdf",
-            "content_type": "application/pdf",
-            "size": 100,
-            "path": "/tmp/r1.pdf",
-        }
+    async def test_truncated_with_partial_recovery_yields_both_markers(self, tmp_path, monkeypatch):
+        att = self._persisted(tmp_path, monkeypatch)
         parsed = self._make_parsed(attachments=[att], attachments_truncated=True)
-        ctx = await self._run(parsed, monkeypatch)
-        assert ctx.get("attachments_unrecoverable") is True
-        assert ctx.get("attachments_truncated") is True
-        assert ctx.get("attachments_recovered_count") == 1
-        assert ctx.get("attachments_referenced") is True
+        ctx = await self._run(parsed)
+        kinds = [(d["kind"], d["filename"]) for d in ctx["attachments"]]
+        assert kinds == [("resolved", "r1.pdf"), ("unreadable", None)]
+        resolved, truncated = ctx["attachments"]
+        assert resolved["local_path"] == att["path"]
+        assert resolved["media_type"] == "document"
+        assert truncated["reason"].startswith("truncated")
+        delivered = self._deliver(ctx)
+        assert f"[attachment: r1.pdf (document) at machine path {att['path']}]" in delivered
+        assert "[unreadable attachment: unnamed (file) reason: truncated" in delivered
 
     @pytest.mark.asyncio
-    async def test_case_c_references_non_empty_not_truncated_not_tagged(self, monkeypatch):
-        """(c) body references attachments + non-empty + not truncated → no guard tag."""
-        att = {
-            "filename": "r1.pdf",
-            "content_type": "application/pdf",
-            "size": 100,
-            "path": "/tmp/r1.pdf",
-        }
+    async def test_full_recovery_yields_only_resolved_markers(self, tmp_path, monkeypatch):
+        att = self._persisted(tmp_path, monkeypatch)
         parsed = self._make_parsed(attachments=[att], attachments_truncated=False)
-        ctx = await self._run(parsed, monkeypatch)
-        assert "attachments_unrecoverable" not in ctx
+        ctx = await self._run(parsed)
+        assert [d["kind"] for d in ctx["attachments"]] == ["resolved"]
+        delivered = self._deliver(ctx)
+        assert att["path"] in delivered, "the agent's turn input must carry a readable path"
+        assert "unreadable" not in delivered
 
     @pytest.mark.asyncio
-    async def test_case_d_no_reference_not_tagged(self, monkeypatch):
-        """(d) body has no attachment reference → not tagged, no false positive."""
+    async def test_truncation_is_surfaced_even_without_a_body_reference(self):
+        parsed = self._make_parsed(
+            body="Let's schedule a call.", attachments=[], attachments_truncated=True
+        )
+        ctx = await self._run(parsed)
+        assert [d["reason"].split(":")[0] for d in ctx["attachments"]] == ["truncated"]
+
+    @pytest.mark.asyncio
+    async def test_no_reference_and_no_files_stamps_nothing(self):
         parsed = self._make_parsed(
             body="Let's schedule a call.", attachments=[], attachments_truncated=False
         )
-        ctx = await self._run(parsed, monkeypatch)
-        assert "attachments_unrecoverable" not in ctx
+        ctx = await self._run(parsed)
+        assert "attachments" not in ctx
+        assert self._deliver(ctx, "Let's schedule a call.") == "Let's schedule a call."
+
+    @pytest.mark.asyncio
+    async def test_persisted_file_gone_from_disk_is_unreadable_file_missing(
+        self, tmp_path, monkeypatch
+    ):
+        att = self._persisted(tmp_path, monkeypatch)
+        Path(att["path"]).unlink()
+        parsed = self._make_parsed(attachments=[att], attachments_truncated=False)
+        ctx = await self._run(parsed)
+        (descriptor,) = ctx["attachments"]
+        assert descriptor["kind"] == "unreadable"
+        assert descriptor["reason"] == "file_missing"
+        assert descriptor["filename"] == "r1.pdf"

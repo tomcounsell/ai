@@ -1092,6 +1092,31 @@ def _last_resort_flush_and_fail(session: AgentSession, status: str) -> None:
         )
 
 
+def prepend_trigger_attachments(
+    enriched_text: str, extra_context: dict | None, project_key: str
+) -> str:
+    """Prepend the trigger message's attachment markers to the turn input.
+
+    `extra_context["attachments"]` is the list of media descriptors the intake
+    seam stamped for the files on the message itself (Telegram intake and
+    email intake both produce it; see `bridge.context.media_descriptor`).
+    Rendered through `bridge.context.format_attachments`, the same formatter
+    the reply chain uses per hop, so one mechanism serves every medium.
+    Fail-quiet: a malformed descriptor list never breaks the turn.
+    """
+    try:
+        descriptors = (extra_context or {}).get("attachments")
+        if not descriptors:
+            return enriched_text
+        from bridge.context import format_attachments
+
+        block = format_attachments(descriptors)
+        return f"{block}\n\n{enriched_text}" if block else enriched_text
+    except Exception as err:
+        logger.debug(f"[{project_key}] attachment prepend skipped: {err}")
+        return enriched_text
+
+
 async def _execute_agent_session(session: AgentSession) -> None:
     """
     Execute a single agent session:
@@ -1922,6 +1947,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Enrichment failed, using raw text: {e}")
+
+        # #3136: files on the trigger message, any medium. The intake seam
+        # (Telegram or email) stamped media descriptors onto
+        # extra_context["attachments"]; render them here so the agent gets
+        # the same marker shape on every transport. Prepended BEFORE the
+        # banner so the markers, whose filenames the sender controls, sit
+        # inside the zone the banner declares untrusted.
+        enriched_text = prepend_trigger_attachments(
+            enriched_text, getattr(session, "extra_context", None), session.project_key
+        )
 
         # #1630: prepend the injection-screen banner if the bridge flagged this
         # inbound message at intake. The banner is stashed on the persisted

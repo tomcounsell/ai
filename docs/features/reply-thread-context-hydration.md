@@ -45,8 +45,16 @@ Do not duplicate this string. Import from `bridge.context`.
 
 Chain-ancestor file media — a photo, voice note, or document attached to one
 of the messages `fetch_reply_chain` walks — is rendered, never dropped.
-`_resolve_media_descriptor` (`bridge/context.py`) builds a small descriptor
-for that hop, and `format_reply_chain` composes it into the rendered line.
+`_resolve_media_descriptor` (`bridge/context.py`) looks up the hop's
+`TelegramMessage` record and hands its path and download error to
+`telegram_media_descriptor`, the same producer the live Telegram intake uses
+for the trigger message; `format_reply_chain` composes the result into the
+rendered line through `format_media_descriptor`. The descriptor shape
+(`media_descriptor`), the path classifier (`describe_local_media`), and the
+renderer are shared with the email intake as well, so a file reads the same
+to the agent whether it sits on a chain ancestor, on the current Telegram
+message, or on an email (see [Bridge/Worker
+Architecture](bridge-worker-architecture.md#medium-parity-for-inbound-attachments)).
 Descriptor eligibility is decided by `get_media_type` (`bridge/media.py`),
 the same classifier the download path uses: only photo and document kinds
 ever resolve, so the renderer can never claim a file exists for media the

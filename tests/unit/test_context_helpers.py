@@ -357,9 +357,9 @@ def _descriptor(
     local_path="/data/media/doc_1_10.pdf",
     reason=None,
 ):
-    from bridge.context import _media_descriptor
+    from bridge.context import media_descriptor
 
-    return _media_descriptor(kind, filename, media_type, local_path, reason)
+    return media_descriptor(kind, filename, media_type, local_path, reason)
 
 
 class TestMediaDescriptorRendering:
@@ -458,10 +458,10 @@ class TestMediaDescriptorRendering:
         assert f"[unreadable attachment: report.pdf (document) reason: {reason}]" in formatted
 
     def test_resolved_and_unreadable_renderings_are_distinguishable(self):
-        from bridge.context import _format_media_descriptor
+        from bridge.context import format_media_descriptor
 
-        resolved = _format_media_descriptor(_descriptor())
-        unreadable = _format_media_descriptor(
+        resolved = format_media_descriptor(_descriptor())
+        unreadable = format_media_descriptor(
             _descriptor(kind="unreadable", local_path=None, reason="no_record")
         )
         assert resolved != unreadable
@@ -523,17 +523,17 @@ class TestMediaDescriptorRendering:
             assert "[media]" not in format_reply_chain(chain)
 
     def test_filename_none_renders_unnamed_not_dangling(self):
-        from bridge.context import _format_media_descriptor
+        from bridge.context import format_media_descriptor
 
-        rendered = _format_media_descriptor(
+        rendered = format_media_descriptor(
             _descriptor(kind="unreadable", filename=None, local_path=None, reason="no_record")
         )
         assert rendered == "[unreadable attachment: unnamed (document) reason: no_record]"
 
     def test_media_type_none_renders_generic_label(self):
-        from bridge.context import _format_media_descriptor
+        from bridge.context import format_media_descriptor
 
-        rendered = _format_media_descriptor(_descriptor(media_type=None))
+        rendered = format_media_descriptor(_descriptor(media_type=None))
         assert rendered == (
             "[attachment: report.pdf (file) at machine path /data/media/doc_1_10.pdf]"
         )

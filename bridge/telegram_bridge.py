@@ -119,6 +119,7 @@ from bridge.context import (  # noqa: E402
     matched_context_patterns,
     references_prior_context,
     resolve_root_session_id,
+    telegram_media_descriptor,
 )
 from bridge.dispatch import (  # noqa: E402
     dispatch_telegram_session,
@@ -1658,6 +1659,11 @@ async def main():
         # set ``media_download_error`` to ``"timeout after Xs (retried)"`` so
         # downstream can distinguish "first attempt was unlucky" from
         # "we tried twice and the file is just too big".
+        # #3136: the descriptor for the file on THIS message, built by the
+        # same producer the reply-chain resolver uses, so the agent sees one
+        # marker shape for a file whether it arrived by Telegram or email.
+        # Merged into extra_context at both enqueue sites below.
+        _attachment_ctx: dict = {}
         if message.media and stored_msg_id is not None:
             _media_type_for_download = get_media_type(message) or "media"
             _local_path, _download_error = await _download_media_with_retry(
@@ -1729,6 +1735,15 @@ async def main():
                     )
             except Exception as e:
                 logger.warning(f"[media] failed to persist media_local_path: {e}")
+
+            try:
+                _descriptor = telegram_media_descriptor(
+                    message, local_path=_local_path, download_error=_download_error
+                )
+                if _descriptor:
+                    _attachment_ctx = {"attachments": [_descriptor]}
+            except Exception as e:
+                logger.warning(f"[media] attachment descriptor skipped (non-fatal): {e}")
 
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
@@ -2142,7 +2157,10 @@ async def main():
                     # REPLY_THREAD_CONTEXT_HEADER substring check (defensive).
                     # #1630: seed with the injection banner (if flagged), then
                     # merge the reply-chain flag additively.
-                    _completed_extra_overrides: dict | None = dict(_injection_ctx) or None
+                    _completed_extra_overrides: dict | None = {
+                        **_injection_ctx,
+                        **_attachment_ctx,
+                    } or None
                     if reply_chain_context:
                         _completed_extra_overrides = {
                             **(_completed_extra_overrides or {}),
@@ -2603,7 +2621,7 @@ async def main():
         )
         # #1630: seed with the injection banner (if flagged); the reply-chain
         # flag below merges additively.
-        extra_overrides: dict | None = dict(_injection_ctx) or None
+        extra_overrides: dict | None = {**_injection_ctx, **_attachment_ctx} or None
         # #2694: attach the context-recall advisory for the new_work branch (a
         # running session never re-reads extra_context, which is why the
         # interjection branch uses steering instead). Guarded on truthiness so

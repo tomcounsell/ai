@@ -184,6 +184,7 @@ tests/
 | unit | `test_transcript_liveness.py` | 12 | Transcript state management |
 | unit | `test_messenger.py` | 11 | Message formatting and delivery |
 | unit | `test_duplicate_delivery.py` | 7 | Duplicate message prevention |
+| unit | `test_recovery_strip_private.py` | 3 | Recovery scanners strip `<private>` spans at intake (#3040) |
 | unit | `test_file_extraction.py` | 20 | File extraction from messages |
 | integration | `test_message_routing.py` | 21 | Message routing end-to-end |
 | integration | `test_reply_delivery.py` | — | Reply delivery flow |
@@ -196,6 +197,7 @@ tests/
 |-------|------|------:|-------------|
 | unit | `test_email_bridge.py` | 31 | Parsing, SMTP output, batch cap, env loading |
 | integration | `test_email_bridge.py` | 5 | Inbound routing, thread continuation, health timestamp |
+| unit | `test_attachment_descriptor_parity.py` | 11 | Same file yields one attachment descriptor on Telegram and email; executor delivery seam (#3136) |
 
 ### `sdlc` — Pipeline stages and observer
 
