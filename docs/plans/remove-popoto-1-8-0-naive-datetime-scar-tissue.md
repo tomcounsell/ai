@@ -644,15 +644,138 @@ No new feature doc is created — this removes a mechanism rather than adding on
 
 ## Success Criteria
 
-_placeholder_
+The issue's six acceptance criteria, plus three the plan adds from findings the issue did not have.
+
+- [ ] `git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/features/utc-timestamps.md` returns no line describing 1.8.0 decoding as current behavior. *(AC1)*
+- [ ] `Job.save` is popoto's `Model.save` — no `def save` in `models/job.py` — and `repair_indexes()` no longer calls `renormalize_last_active_scores()`. *(AC2)*
+- [ ] `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` passes. *(AC3)*
+- [ ] The reattach and renormalize-after-rebuild tests are gone, and `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` passes. *(AC4)*
+- [ ] No comment in `agent/session_health.py` or `agent/session_pickup.py` states popoto strips, drops, or omits tzinfo. *(AC5 — already true on main per spike-2; verify it stays true.)*
+- [ ] This plan records the keep-or-remove decision for the session-health and pickup guards with reasoning. *(AC6 — see Spike Results, satisfied at plan time.)*
+- [ ] **Added:** `docs/features/popoto-index-hygiene.md` no longer says `Job.repair_indexes()` runs the sweep. *(Third doc, not in the issue.)*
+- [ ] **Added:** `tests/unit/test_session_health_tool_timeout.py`'s two naive tests pass **unedited**. *(Tripwire: an edit there means the approach drifted.)*
+- [ ] **Added:** the backfill-reachability assertion in `TestGuardedRepair` is re-anchored, not deleted, and fails under the mutation in the Failure Path table. *(Prevents shipping a vacuous test.)*
 
 ## Step by Step Tasks
 
-_placeholder_
+Ordered so each step leaves the suite green. Steps 1-2 are the behavior change; 3-5 are the paperwork
+the change makes true.
+
+### 1. Delete the `Job.save()` override
+
+- Remove `def save(...)` and its docstring from `models/job.py` (currently lines 144-188). Locate by
+  symbol, not line number.
+- Leave the `datetime` and `UTC` imports alone — `_now()` still uses both.
+- Run `scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` and expect **two failures**
+  (`test_reattach_preserves_the_instant_and_is_idempotent`,
+  `test_scoped_save_naming_the_field_still_reattaches`). Failures here are the proof the override was
+  actually removed; step 3 clears them.
+
+### 2. Remove the post-rebuild sweep from `repair_indexes()`
+
+- Delete the `# rebuild_indexes() re-scores every row via field.on_save on ...` comment, the
+  `scanned, renormalized = cls.renormalize_last_active_scores()` call, and the `if renormalized:` log
+  block (currently `models/job.py:770-783`).
+- Keep `rebuilt = cls.rebuild_indexes()` and `cls.backfill_open_expectations_index()`.
+- Confirm `renormalize_last_active_scores` still exists and is still called from
+  `scripts/update/migrations.py:1162`.
+- `git grep "re-normalized"` to confirm no log consumer depended on the deleted line.
+
+### 3. Update the tests
+
+- Delete `test_reattach_preserves_the_instant_and_is_idempotent` and
+  `test_scoped_save_naming_the_field_still_reattaches` from `TestScorePurity`.
+- Rewrite the docstring and assertion message of
+  `test_scoped_save_excluding_the_field_leaves_the_score_untouched` so it pins popoto's
+  field-scoped-save contract instead of the deleted override.
+- Delete `test_repair_renormalizes_scores_the_rebuild_skewed` from `TestGuardedRepair`, and with it
+  the now-unused `UTC_PLUS_7_REBUILD_SKEW_SECONDS` constant if nothing else references it
+  (`git grep` first).
+- Split `test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs`: keep half one
+  (classmethod returns `(0, 0)` and logs on broken `SSCAN`) as its own test; re-anchor half two's
+  backfill-reachability assertion to a hazard `repair_indexes` still has, rather than to a
+  monkeypatched sweep that is no longer called.
+- `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` — green.
+
+### 4. Collapse the six inline coercions in `agent/session_health.py`
+
+- For each of the six sites in the Technical Approach table, located **by local variable name and
+  enclosing function**, replace `X_aware = X if X.tzinfo else X.replace(tzinfo=UTC)` plus the
+  `(NOW - X_aware).total_seconds()` subtraction with `NOW.timestamp() - _ts(X)`.
+- At `_check_tool_timeout` (line ~658), reuse the `_ts(last_at)` value already computed for the epoch
+  gate rather than calling `_ts` twice.
+- Leave `_ts`, `_at_rest_coerce_ts`, and `_session_is_alive` untouched. Leave
+  `agent/session_pickup.py` untouched entirely.
+- `scripts/pytest-clean.sh tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py` — green, with **no test edits**.
+
+### 5. Correct the docstrings and docs
+
+- `models/job.py`: `recent_for_room` (line ~533), `renormalize_last_active_scores` (lines ~807-833).
+- `scripts/update/migrations.py`: `_migrate_backfill_job_last_active_scores` docstring only.
+- `docs/features/durability-model.md`, `docs/features/popoto-index-hygiene.md`,
+  `docs/features/utc-timestamps.md` per the Documentation section.
+- Verify: `git grep -n "1\.8\.0\|reattach\|re-attach" -- models/ scripts/ docs/features/` shows only
+  accurate historical statements in the past tense.
+
+### 6. Mutation check
+
+Run the three mutations in the Failure Path Test Strategy table and confirm each turns the suite red.
+Re-measure after every review round — a green suite on a deletion-only change proves nothing by
+itself.
+
+### 7. Final validation
+
+- `python -m ruff check` and `python -m ruff format` (black formatting only; no other linters).
+- `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity`.
+- `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py`.
+- Walk the Success Criteria checklist.
+- `./scripts/valor-service.sh restart` after merge, then `tail -5 logs/bridge.log`.
 
 ## Verification
 
-_placeholder_
+```bash
+# AC1 + AC5 + the added third-doc criterion: no stale version claims anywhere
+git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/features/utc-timestamps.md
+git grep -n -i "popoto.*\(strip\|drop\|omit\|naive\)" agent/session_health.py agent/session_pickup.py
+git grep -n "renormalize" docs/features/popoto-index-hygiene.md
+
+# AC2: the override is gone and the sweep call with it
+git grep -n "def save" models/job.py            # expect: no output
+git grep -n "renormalize_last_active_scores" models/job.py
+#   expect: the def, the batch-size comment, the batch helper docstring — NOT a call in repair_indexes
+git grep -n "renormalize_last_active_scores" scripts/update/migrations.py   # expect: still called
+
+# AC3: score purity survives on a non-UTC host
+TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity
+
+# AC4 + the tripwire
+scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py
+scripts/pytest-clean.sh tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py
+git diff main --stat -- tests/unit/test_session_health_tool_timeout.py   # expect: no change
+
+# The six rewritten sites carry no leftover inline coercion
+git grep -n "tzinfo else" agent/session_health.py
+#   expect: no output (the surviving guards all use the `if x.tzinfo is None:` statement form
+#   inside _ts / _at_rest_coerce_ts / _session_is_alive)
+
+# Formatting
+python -m ruff check
+python -m ruff format --check
+```
+
+**Mutation checks** (each must turn the suite red):
+
+```bash
+# 1. _ts keeps the tolerance
+#    delete `val = val.replace(tzinfo=UTC)` in agent/session_health.py::_ts
+#    → test_check_tool_timeout_handles_naive_datetime raises TypeError
+# 2. repair_indexes still reaches its final step
+#    delete `cls.backfill_open_expectations_index()` in models/job.py::repair_indexes
+#    → the re-anchored TestGuardedRepair test fails
+# 3. score purity is popoto's, not ours (this one must stay GREEN)
+#    make models/job.py::_now() return `datetime.now()` (naive local)
+#    → TestScorePurity still passes, proving the property survives without our compensation
+```
 
 ## Open Questions
 
