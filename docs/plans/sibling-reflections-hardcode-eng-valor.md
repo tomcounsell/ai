@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -428,6 +428,9 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 ---
 
 ## Open Questions
+
+*Status is `Ready` in the sense that the plan is complete and the build sequence is unambiguous. Question 2 below is a live design decision that the critique stage should adjudicate — it changes one success criterion, not the shape of the work.*
+
 
 1. ~~**Is `scripts/memory_consolidation.py:352` in scope?**~~ **Answered** by issue comment `5505275340`: the four-site list is "illustrative, not exhaustive" and the closing condition is the grep sweep. It is in scope, and the plan includes it. The comment's second site, `scripts/nightly_regression_tests.py:105`, no longer exists — verified in the Freshness Check. No supervisor input needed.
 
