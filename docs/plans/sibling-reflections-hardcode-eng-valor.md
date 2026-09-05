@@ -247,27 +247,89 @@ Both `expectation_reconciler._escalate_once` and `sdlc_progress._escalate_once` 
 
 ## Failure Path Test Strategy
 
-<!-- TODO -->
+The whole point of this change is what happens when resolution *fails*, so the failure paths carry more weight than the happy path. Every case below is a unit test against a synthetic project dict — spike-4 established that no local run can resolve a real chat.
+
+**`send_eng_telegram` (mirroring `TestTelegramChatRouting`'s shape):**
+
+| Case | Input | Assertion |
+|---|---|---|
+| Resolves | `{"slug":"valor","telegram":{"groups":{"Eng: Valor":{"chat_id":-1003449100931}}}}` | argv carries `"-1003449100931"`, **not** `"Eng: Valor"`; returns `True` |
+| No `telegram` key | `{"slug":"royop"}` | `subprocess.run` **never called**; returns `False`; warning names `royop` |
+| No `Eng:` group | `{"telegram":{"groups":{"Ops: X":{"chat_id":1}}}}` | never called; `False` |
+| Malformed `chat_id` | `{"telegram":{"groups":{"Eng: X":{"chat_id":"-100123"}}}}` (string) | never called; `False` |
+| Bool `chat_id` | `{"telegram":{"groups":{"Eng: X":{"chat_id":True}}}}` | never called; `False` — `resolve_eng_group` rejects `bool` explicitly; pin it |
+| `valor-telegram` absent | resolvable dict, `subprocess.run` raises `FileNotFoundError` | swallowed; returns **`True`** (a destination resolved) |
+| Timeout | raises `TimeoutExpired` | swallowed; `True` |
+| Non-zero exit | `returncode=1` | swallowed, warning logged; `True` |
+| `resolve_eng_group` raises | monkeypatched to raise | swallowed; `False`; no subprocess |
+
+**`resolve_host_eng_chat` / `send_host_eng_telegram`:**
+
+| Case | Assertion |
+|---|---|
+| `PROJECT_ROOT` matches a project with an `Eng:` group | returns `str(chat_id)`, not the name |
+| `PROJECT_ROOT` matches a project **without** an `Eng:` group | returns `FALLBACK_ENG_CHAT` — the narrowed fallback, this checkout only |
+| Root is a **foreign** registered repo with no group | returns `None`; no subprocess; warning |
+| Root is unregistered and is **not** `PROJECT_ROOT` | returns `None` |
+| `load_local_projects()` raises | swallowed; falls through to the rung-3 rule |
+
+**Suppression reaches the summary** (the mitigation named in Architectural Impact):
+
+- `_reconcile_project` with an unresolvable project → `findings` contains an `alert-suppressed` entry and the reflection's `summary` carries it.
+- `_check_project_stalls` likewise, and `counts["escalated"]` is **not** incremented for a suppressed page.
+
+**Anti-test — the mutation that must fail.** Change `str(chat_id)` back to `group_name` in `send_eng_telegram` and the resolves-case test must go red. If it stays green the test is asserting the wrong thing (it is checking "not `Eng: Valor`" rather than "is the id"), which is exactly the shape of assertion that passes without reaching the code. Run this mutation once per guard, per review round.
 
 ## Test Impact
 
-<!-- TODO -->
+Arity changes to `_escalate_once` (`expectation_reconciler`) and `_send_alert` (`sdlc_progress`) break every 1-argument monkeypatch bound to them. The other three senders keep their arity, so their fixtures survive untouched.
+
+- [ ] `tests/unit/reflections/test_expectation_reconciler.py:204` — **UPDATE**: the `lambda j, e, m:` patch of `_escalate_once` must become `lambda p, j, e, m:`. One site.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py:326` — **UPDATE**: `lambda msg: lab.alerts.append(msg)` → 2-arg form.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py:48,1699-1706` — **UPDATE**: `_REAL_SEND_ALERT` is re-installed deliberately to put the real subprocess boundary under test; the restore and the call that follows both need the new arity.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py:1855-1859` — **UPDATE**: `test_send_alert_swallows_filenotfound` calls `sdlc_progress._send_alert("hello")` directly; must pass a project dict.
+- [ ] `tests/integration/test_sdlc_stall_auto_resume_e2e.py:133` — **UPDATE**: `monkeypatch.setattr(sdlc_progress, "_send_alert", alerts.append)` — `list.append` is 1-arity and will raise on the new signature.
+- [ ] `tests/unit/test_sentry_triage_apply.py` (13 references) — **NO CHANGE EXPECTED**: `_send_telegram_notification(message)` keeps its arity. Any breakage here means the Solution's arity claim was wrong; treat it as a signal to re-read, not to edit fixtures.
+- [ ] `tests/unit/reflections/test_stall_advisory_reflection.py` (5 sites) — **NO CHANGE EXPECTED**, same reasoning. These are `patch.object(...)` autospec-free mocks and tolerate either way, so they are a weak signal; the real check is that `_send_alert`'s signature is genuinely unchanged.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestTelegramChatRouting` (8 cases, in a 176-test module) — **NO CHANGE EXPECTED**, and this is the load-bearing regression check on the `_resolve_notify_chat` lift. If these need editing, the lift changed behavior and must be reworked rather than the tests adjusted.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py` — **VERIFY ONLY**: PR #3077 touched it (14 lines); confirm the lift leaves it green.
+- [ ] New: `tests/unit/reflections/test_utilities_eng_telegram.py` — **CREATE**: the two tables in Failure Path Test Strategy, alongside the existing `test_utilities_resolve_eng_group.py`.
 
 ## Rabbit Holes
 
-<!-- TODO -->
+- **Rewriting `valor-telegram`'s `resolve_chat` cascade.** Sending by numeric id sidesteps the ambiguity entirely. Do not go fix the cascade; that is its own issue if anyone wants it.
+- **Making `stall_advisory` per-project.** It queries `AgentSession` globally by design (`_RUNNING_PROBE_STATUSES`), and a session's project is not the axis it classifies on. Turning it into a `run_per_project_audit` consumer is a redesign of the reflection, not a routing fix.
+- **Splitting the `sentry_triage` digest per project.** Superficially attractive — the digest already carries a `[{proj}]` per finding. But the class counters, the auto-action block, the per-run filing cap, and the new-issue suppression state are all computed once per run across every project. Per-project digests mean re-deriving all of that. Out of scope; note it as a possible follow-up issue and move on.
+- **"Simplifying" the `PROJECT_ROOT`-narrowed fallback into an unconditional default.** `docs_auditor`'s docstring warns against exactly this, in those words. Lifting the function is the moment someone will be tempted. The narrowing is the fix; an unconditional default recreates the bug.
+- **Chasing the `Eng:` prefix convention into `bridge/routing.py` and `_resolve_persona`.** `resolve_eng_group` keys off the same prefix those do. Reading them to confirm the convention is fine; changing them is not this issue.
+- **Repointing `docs/features/*.md` chat-resolution prose.** The blast-radius tool flags nine docs sections mentioning `Eng:` or `resolve_chat`. Most describe the bridge's inbound routing, which this change does not touch. Only the docs listed under `## Documentation` are in scope.
 
 ## Risks
 
-<!-- TODO -->
+- **Alerts can now go nowhere.** A project with no configured `Eng:` group gets silence instead of a misrouted page. Mitigated by the warning log plus the `findings`/`summary` thread-through, but "no message arrived" stops being proof of health. This is an accepted trade, matching #2754.
+- **No local end-to-end verification is possible.** Every project in this machine's `projects.json` carries an empty `telegram` block (spike-4), so only the suppression branch is observable here. Resolution correctness rests entirely on unit tests against synthetic dicts. A reviewer cannot confirm the happy path by running anything on this box, and should not be asked to.
+- **The `_resolve_notify_chat` lift touches three-day-old code.** PR #3077 merged 2026-09-02 with 248 lines of new tests. The lift is safe only insofar as `TestTelegramChatRouting` passes **unmodified**. Any need to edit those 8 cases is a stop-and-rethink signal.
+- **`scripts/memory_consolidation.py` has a different error contract.** It uses `check=True` and routes `CalledProcessError` to a fallback log file. The helper swallows errors and returns `True`, which would silently retire that fallback. The wiring must map a `False` return to the fallback-log write, or contradiction records get dropped on a bridge outage.
+- **`list.append` as a monkeypatch is arity-fragile.** `tests/integration/test_sdlc_stall_auto_resume_e2e.py:133` binds `alerts.append` directly to `_send_alert`. It will raise, not silently pass — which is the good outcome, but it means an integration test fails in a way that looks unrelated to routing.
+- **Concurrent `docs/plans/` edits.** Observed during this very plan: a peer lane's `git add -A` swept an uncommitted section of this file into its own commit. Commit each section as it lands; never leave the plan dirty across an await.
 
 ## Race Conditions
 
-<!-- TODO -->
+None introduced. Every changed path is synchronous, single-threaded `subprocess.run` inside a reflection tick, and no shared mutable state is added.
+
+Two pre-existing orderings are worth naming so the change does not disturb them:
+
+- **`expectation_reconciler._escalate_once`** claims its `SET NX` sentinel *before* sending. If the send then suppresses, the sentinel is already burned and no retry happens for that `(job, eid)` until the TTL lapses. This plan does not change the ordering — reversing it would re-open the double-page window the sentinel exists to close — but the suppression finding is what makes the burned sentinel legible.
+- **`sdlc_progress._escalate_once`** has the same shape via `_escalation_set(slug, sha)`, and its docstring already documents "under-alert during a flap beats spam during one". Suppression is consistent with that stance.
 
 ## No-Gos (Out of Scope)
 
-<!-- TODO -->
+- **Prompt-text references to the chat name.** `reflections/agents/circuit_health_gate.py:64,75` and `reflections/agents/system_health_digest.py:7,137` name `'Eng: Valor'` inside LLM prompt strings, not argv. Different fix shape, explicitly excluded by the issue. They are single-quoted, so they also sit outside any double-quoted grep sweep.
+- **`docs_auditor`'s surviving literal.** `FALLBACK_ENG_CHAT = "Eng: Valor"` (moving to `utilities.py`) and the docstring mention at `docs_auditor.py:1569` are #2754's deliberate narrowing. Any "clean grep" success criterion must exempt the named constant and its docstring, or it will demand undoing a merged fix. The criterion this plan uses is the **argv adjacency** `"--chat", "Eng: Valor"`, not the bare literal — see Success Criteria.
+- **Per-project `sentry_triage` digests** and **per-project `stall_advisory`**. Named in Rabbit Holes; both are reflection redesigns.
+- **`valor-telegram`'s chat-resolution cascade.** Untouched.
+- **Bridge inbound routing and persona resolution.** `bridge/routing.py`, `_resolve_persona`, and the `Eng:` prefix convention they share with `resolve_eng_group` stay as they are.
+- **`scripts/memory_consolidation.py` — IN scope, decided.** It is the fifth argv site (line 352) and the issue's own exit criterion is a grep sweep that fails while it stands. Including it costs one call-site swap plus preserving the `CalledProcessError` fallback contract. Excluding it would leave the lane unable to close on its stated criterion. This is a scope *addition* relative to the issue body's four-site list and is flagged for the critique to confirm.
 
 ## Update System
 
