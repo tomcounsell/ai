@@ -197,11 +197,66 @@ One Python file, one test file, one doc. No new dependencies, no migration, no s
 
 ## Solution
 
-_placeholder_
+
+### Key Elements
+
+- **A disposition record per node** — a small dataclass (`NodeDisposition`) carrying the node id, its computed title, what the script resolved (`file`), the REST read it resolved against, and the timestamp of that read. Built in `dispatch_findings` from state it already holds, passed through `maybe_dispatch_triage_session` to `_build_triage_prompt`.
+- **A prompt that hands over a command, not an instruction** — the literal `gh issue list --state all --json number,title,state,stateReason --limit 200` line, with an explicit "do not use `gh search`, `gh issue list --search`, or the search API; that index lags issue creation by minutes and is how #2960–#2999 happened" and an explicit note that `stateReason` is `""` for open issues.
+- **A pre-seeded session ledger** — `data/nightly-triage-ledger/{slug}.json`, written by the script *before* the session is dispatched, holding the dispositions and an empty `filed` list. The prompt tells the agent to read it first every turn, append `{number, title, node}` to `filed` immediately after each `gh issue create`, and treat any node already present in `filed` as done.
+
+### Flow
+
+Nightly run confirms failures → `dispatch_findings` reads live open+closed REST state → partitions and comments on everything already tracked → **writes `data/nightly-triage-ledger/{slug}.json` with the surviving nodes' dispositions** → dispatches one Eng session with a prompt that names the ledger path and the exact REST command → agent reads ledger → for each node not in `filed`: runs the one REST read, confirms no exact-title match, opens the issue, **appends to `filed` before moving to the next node** → turn replayed → agent reads the same ledger → every node is in `filed` → files nothing.
+
+### Technical Approach
+
+**Fix 1 — the prompt reads live state.** Replace the "search ALL issues" wording in `_build_triage_prompt` (line 1470) with the literal command. The read is **one call for the whole node list**, not one per node; the agent filters the returned JSON on each exact title locally. Keep the existing open/closed/`NOT_PLANNED`/`COMPLETED` decision prose verbatim — #3075 got that right and it must stay aligned with `partition_closed_matches`. Add the `stateReason == ""` warning for open rows (see Research). The prohibition on `--search` must be stated as a prohibition, not merely as a preference, and must carry its reason, so a future editor cannot soften it back.
+
+**Fix 2 — the script's decisions cross the boundary.** In `dispatch_findings`, after the `partition_already_open` and `partition_closed_matches` calls, the surviving `single_nodes` are known to have no issue in any state. Build one `NodeDisposition` per surviving node and pass the list through the new keyword argument. The prompt then leads with, per node, the script's own finding: *"the detector read all open and closed issues at `{read_at}` and found no issue titled `{title}`; your read below is a second check against issues created since."* This does two things: it makes the agent's own read a confirmation rather than a derivation, and — because the same list is written to the ledger — a replay inherits the script's decision instead of re-deriving it.
+
+Deliberately **not** done: passing the already-open and closed-not-planned nodes through. The script comments on those itself and drops them before this point; handing them to the agent would create a second writer for the same comment. The channel carries only nodes the agent is being asked to act on.
+
+**Fix 3 — the ledger.** `data/nightly-triage-ledger/{slug}.json`, written by a new `write_triage_ledger(slug, dispositions)` helper in the same module, using the same `DATA_DIR.mkdir(parents=True, exist_ok=True)` idiom `save_last_run` already uses (line 467). Shape:
+
+```json
+{
+  "slug": "nightly-triage-a1b2c3d4",
+  "created_at": "2026-09-05T06:00:00Z",
+  "dispositions": [
+    {"node": "tests/unit/test_a.py::test_1",
+     "title": "Nightly regression: tests/unit/test_a.py::test_1",
+     "disposition": "file",
+     "resolved_against": "gh issue list --state all (open+closed REST read)",
+     "resolved_at": "2026-09-05T06:00:00Z"}
+  ],
+  "filed": []
+}
+```
+
+Written **before** `subprocess.run(... valor_session create ...)`, so it exists the instant the session can start. Absolute path interpolated into the prompt — the agent runs from its lane worktree and a relative path would resolve wrong.
+
+The write is best-effort and logged on failure, matching how the module treats every other side effect: a ledger that cannot be written must not stop the night from filing. That is the same fail-open posture `open_issues()` takes (`None` means "could not tell", dispatch proceeds), and for the same reason — a missing defense is a smaller harm than a silent night during a real regression.
+
+**Dry-run.** `maybe_dispatch_triage_session` short-circuits on `dry_run` before the subprocess (line 2345). The ledger write must sit **after** that short-circuit, or `--dry-run` starts writing state files. This is exactly the bug the dry-run sentinel was introduced to fix (the docstring at line 2316 records it) and the plan must not reintroduce it.
 
 ## Failure Path Test Strategy
 
-_placeholder_
+
+### Exception Handling Coverage
+
+- [ ] `write_triage_ledger` is the one new function that can fail (disk full, permissions, a `data/` that is somehow a file). It must catch broadly, `log()` a `WARNING`, and return `False` — never raise into the dispatch path. Test asserts the observable: dispatch still proceeds and a warning line reaches `LOG_FILE`.
+- [ ] Existing handlers in scope are unchanged: `open_issues` (line 1963), `closed_issue_dispositions` (line 2029), `maybe_dispatch_triage_session` (line 2364) each already catch broadly and `log()` — all three have `test_open_issues_returns_none_on_any_failure`-style coverage. No `except Exception: pass` exists in this module; every handler logs.
+
+### Empty/Invalid Input Handling
+
+- [ ] `_build_triage_prompt([])` — currently unreachable (`maybe_dispatch_triage_session` returns `None` on an empty list first, line 2333, covered by `test_...([]) is None`). The new keyword argument must not change that: passing an empty disposition list alongside a non-empty node list must degrade to the old prompt rather than emitting a malformed pre-resolved block.
+- [ ] `write_triage_ledger(slug, [])` — must write nothing and return `False` rather than creating an empty ledger a replay would read as "nothing to file".
+- [ ] Disposition list and node list of **differing length** — a defect that would silently mislabel nodes. The prompt builder must zip them `strict=True` (matching line 1483's existing use) so a mismatch raises at build time rather than producing a prompt attributing one node's disposition to another.
+
+### Error State Rendering
+
+- [ ] The night's user-visible output is the GitHub issue and `logs/nightly_tests.log`. A failed ledger write must appear in the log with the slug named, not be swallowed — the operator's only signal that the replay defense is degraded for that dispatch.
+- [ ] `--dry-run` must print what it *would* write and write nothing; assert no file appears under `data/nightly-triage-ledger/`.
 
 ## Test Impact
 
