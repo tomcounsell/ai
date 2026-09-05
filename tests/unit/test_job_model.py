@@ -1029,7 +1029,9 @@ class TestScorePurity:
         job.has_open_expectations = True
         job.save(update_fields=["has_open_expectations"])
 
-        assert job.last_active_at.tzinfo is None, "a field-scoped save touched an out-of-scope field"
+        assert job.last_active_at.tzinfo is None, (
+            "a field-scoped save touched an out-of-scope field"
+        )
         assert _scores(scratch_room_id) == [(_member, score_before)]
 
 
