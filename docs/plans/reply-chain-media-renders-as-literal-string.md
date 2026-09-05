@@ -493,19 +493,19 @@ email side, and this plan should not reproduce it.
 
 ## Success Criteria
 
-- [ ] `bridge/context.py::fetch_reply_chain` emits the literal string `[media]` under no input. A caption-less attachment in a chain renders with its filename, media type, and a readable path.
-- [ ] Replaying the reported exchange shape (attachment, then two text replies) produces agent turn input containing a path sufficient to read the attachment without asking the human.
-- [ ] A caption on a chain-ancestor attachment renders together with the attachment descriptor, so the agent sees both the note and the file.
-- [ ] An unresolvable attachment renders as an explicit unreadable marker naming the file and the reason, textually distinguishable from the resolved rendering, for each of: no record, no path, download error, file absent from disk.
-- [ ] A `chat_id`-scoped resolution test proves a same-`message_id` record in a different chat is never resolved.
-- [ ] A 20-deep chain with media at every hop completes inside the 3-second `_REPLY_CHAIN_FETCH_TIMEOUT_S` budget, and the rendered block stays under an asserted size ceiling.
-- [ ] The bare-placeholder guard covers `bridge/` including `bridge/email_bridge.py`, and its red state is proven by an in-suite positive fixture plus a negative fixture that keeps a `logger.` line unflagged.
-- [ ] The write-only-context scan passes with an empirically derived allow-list containing only keys the scan proves unread under its stated reader predicate, each email-seam entry annotated `# known gap: #3136`, and asserts every entry is still unread so the allow-list can only shrink.
-- [ ] The 20-hop budget test exercises a *stalled* lookup, proving `asyncio.wait_for` can actually interrupt the walk — an inline blocking `filter` fails it.
-- [ ] `docs/features/reply-thread-context-hydration.md` and `docs/features/media-enrichment.md` both describe how chain-ancestor media is represented.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions required — the repo currently contains zero `pytest.mark.xfail` or runtime `pytest.xfail()` markers in `tests/`, verified at plan time.
+- [x] `bridge/context.py::fetch_reply_chain` emits the literal string `[media]` under no input. A caption-less attachment in a chain renders with its filename, media type, and a readable path.
+- [x] Replaying the reported exchange shape (attachment, then two text replies) produces agent turn input containing a path sufficient to read the attachment without asking the human.
+- [x] A caption on a chain-ancestor attachment renders together with the attachment descriptor, so the agent sees both the note and the file.
+- [x] An unresolvable attachment renders as an explicit unreadable marker naming the file and the reason, textually distinguishable from the resolved rendering, for each of: no record, no path, download error, file absent from disk.
+- [x] A `chat_id`-scoped resolution test proves a same-`message_id` record in a different chat is never resolved.
+- [x] A 20-deep chain with media at every hop completes inside the 3-second `_REPLY_CHAIN_FETCH_TIMEOUT_S` budget, and the rendered block stays under an asserted size ceiling.
+- [x] The bare-placeholder guard covers `bridge/` including `bridge/email_bridge.py`, and its red state is proven by an in-suite positive fixture plus a negative fixture that keeps a `logger.` line unflagged.
+- [x] The write-only-context scan passes with an empirically derived allow-list containing only keys the scan proves unread under its stated reader predicate, each email-seam entry annotated `# known gap: #3136`, and asserts every entry is still unread so the allow-list can only shrink.
+- [x] The 20-hop budget test exercises a *stalled* lookup, proving `asyncio.wait_for` can actually interrupt the walk — an inline blocking `filter` fails it.
+- [x] `docs/features/reply-thread-context-hydration.md` and `docs/features/media-enrichment.md` both describe how chain-ancestor media is represented.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions required — the repo currently contains zero `pytest.mark.xfail` or runtime `pytest.xfail()` markers in `tests/`, verified at plan time.
 
 ## Team Orchestration
 
