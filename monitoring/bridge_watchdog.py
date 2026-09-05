@@ -74,6 +74,7 @@ from scripts.update.service import (  # noqa: E402
     UPDATE_RESTART_MARKER_TTL_SECONDS,
     get_process_start_ts,
 )
+from tools.process_lookup import find_python_service_pids  # noqa: E402
 
 LOGS_DIR = PROJECT_DIR / "logs"
 WATCHDOG_LOG_FILE = LOGS_DIR / "watchdog.log"  # monkeypatch seam, mirrors worker LOG_FILE
@@ -189,17 +190,17 @@ class HealthStatus:
 
 
 def is_bridge_running() -> tuple[bool, int | None]:
-    """Check if bridge process is running. Returns (running, pid)."""
+    """Check if bridge process is running. Returns (running, pid).
+
+    Uses the ancestor-safe lookup rather than ``pgrep`` (#3164): the watchdog
+    is a launchd job today and never a bridge descendant, but any caller that
+    moves under the bridge would otherwise read a healthy bridge as dead and
+    start a second one.
+    """
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", "telegram_bridge.py"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            pid = int(result.stdout.strip().split("\n")[0])
-            return True, pid
+        pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")
+        if pids:
+            return True, pids[0]
         return False, None
     except Exception as e:
         logger.debug(f"Error checking bridge process: {e}")
@@ -692,7 +693,15 @@ def check_bridge_health() -> HealthStatus:
 
 
 def kill_stale_processes() -> int:
-    """Kill any stale bridge processes. Returns count killed."""
+    """Kill any stale bridge processes. Returns count killed.
+
+    This probe deliberately stays on ``pgrep`` while every other Python
+    service-PID probe moved to ``tools.process_lookup`` (#3164). Here BSD
+    ``pgrep``'s exclusion of the caller's ancestors is load-bearing rather
+    than a bug: this function SIGKILLs every match, so an ancestor-safe lookup
+    would let a bridge-descended caller kill its own live ancestor bridge.
+    Do not "finish the sweep" by converting this call site.
+    """
     killed = 0
     try:
         result = subprocess.run(

@@ -154,7 +154,7 @@ The `/update` command (`scripts/update/run.py`) automatically manages the worker
 
 - **Full update** (`--full`): Installs worker plist, verifies worker starts (30s heartbeat poll + kickstart fallback with 15s re-poll; exits with error if worker still not running after 45s total)
 - **Cron update** (`scripts/remote-update.sh`): Bootout old worker, substitute paths, bootstrap new
-- **Python API**: `scripts/update/service.py` exposes `install_worker()`, `restart_worker()`, `get_worker_status()`, `is_worker_running()`
+- **Python API**: `scripts/update/service.py` exposes `install_worker()`, `restart_worker()`, `get_worker_status()`, `is_worker_running()`. `is_worker_running()` and `get_worker_pid()` resolve the PID via `tools.process_lookup.find_python_service_pids(module="worker", script_suffix="worker/__main__.py")` — an ancestor-safe lookup, not `pgrep`, so a worker-hosted agent session correctly sees its own ancestor worker as running (#3164).
 
 The worker is installed after reflections and before stale session cleanup in the update sequence.
 

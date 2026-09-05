@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from tools.process_lookup import find_python_service_pids
+
 logger = logging.getLogger(__name__)
 
 # Service label prefix is install-time configurable via .env. Defaults to
@@ -125,13 +127,8 @@ def run_cmd(
 
 def get_bridge_pid() -> int | None:
     """Get PID of running bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "telegram_bridge.py"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")
+    return pids[0] if pids else None
 
 
 def is_bridge_running() -> bool:
@@ -213,20 +210,13 @@ def restart_service(project_dir: Path) -> bool:
 
 
 def get_worker_pid() -> int | None:
-    """Get PID of running worker process."""
-    try:
-        result = run_cmd(["pgrep", "-fi", "python -m worker"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    try:
-        result = run_cmd(["pgrep", "-fi", "python.*worker/__main__"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    """Get PID of running worker process.
+
+    Both launch shapes are accepted: ``python -m worker`` (how launchd starts
+    it) and ``python .../worker/__main__.py`` (a direct start).
+    """
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    return pids[0] if pids else None
 
 
 def is_worker_running() -> bool:
@@ -697,13 +687,8 @@ def is_update_cron_installed() -> bool:
 
 def get_email_pid() -> int | None:
     """Get PID of running email bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "bridge.email_bridge"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(module="bridge.email_bridge")
+    return pids[0] if pids else None
 
 
 def is_email_running() -> bool:

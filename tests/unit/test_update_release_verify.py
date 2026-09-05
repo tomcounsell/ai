@@ -39,6 +39,7 @@ from scripts.update.service import (
     read_boot_beacon,
     verify_running_release,
 )
+from tools import process_lookup
 
 pytestmark = pytest.mark.unit
 
@@ -642,6 +643,24 @@ def test_full_verify_matching_worker_never_attempts_self_heal(run_mod, monkeypat
     assert result.success is True
 
 
+def _pin_ancestry_guard(run_mod, monkeypatch, *, worker_pid=None, is_ancestor=False):
+    """Pin the self-heal ancestry guard (#3164) instead of reading the live tree.
+
+    ``_self_heal_stale_worker`` refuses to kickstart a worker that is an ancestor
+    of the running process — restarting it would SIGKILL the ``/update`` caller
+    mid-run. These tests routinely execute inside an agent session that IS a
+    worker descendant, so leaving the guard on the real process table would make
+    the self-heal tests pass or fail by host state.
+
+    Both plausible binding sites are patched — the name as ``run.py`` holds it and
+    the ``tools.process_lookup`` definition — so the pin survives either import
+    style.
+    """
+    monkeypatch.setattr(run_mod.service, "get_worker_pid", lambda: worker_pid)
+    monkeypatch.setattr(process_lookup, "is_own_ancestor", lambda pid: is_ancestor)
+    monkeypatch.setattr(run_mod, "is_own_ancestor", lambda pid: is_ancestor, raising=False)
+
+
 def _write_worker_beacon(project_dir, sha, ts_iso):
     (project_dir / "data").mkdir(exist_ok=True)
     (project_dir / "data" / "worker_boot_sha").write_text(f"{sha}\n{ts_iso}\n")
@@ -653,6 +672,7 @@ def test_self_heal_healed_on_fresh_beacon(run_mod, monkeypatch, tmp_path):
 
     monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_ATTEMPTS", 1)
     monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_INTERVAL_S", 0)
+    _pin_ancestry_guard(run_mod, monkeypatch)
     monkeypatch.setattr(
         "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
     )
@@ -666,6 +686,7 @@ def test_self_heal_healed_on_fresh_beacon(run_mod, monkeypatch, tmp_path):
 
 def test_self_heal_deferred_when_busy(run_mod, monkeypatch, tmp_path):
     """Sessions never drain → deferred, and kickstart is never called."""
+    _pin_ancestry_guard(run_mod, monkeypatch)
     monkeypatch.setattr(
         "scripts.update.drain.wait_for_idle", lambda t, p, log=None: False, raising=False
     )
@@ -681,6 +702,7 @@ def test_self_heal_failed_when_no_fresh_beacon(run_mod, monkeypatch, tmp_path):
     """kickstart runs but no fresh beacon appears in the window → failed."""
     monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_ATTEMPTS", 2)
     monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_INTERVAL_S", 0)
+    _pin_ancestry_guard(run_mod, monkeypatch)
     monkeypatch.setattr(
         "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
     )
@@ -691,11 +713,43 @@ def test_self_heal_failed_when_no_fresh_beacon(run_mod, monkeypatch, tmp_path):
 
 def test_self_heal_failed_when_kickstart_fails(run_mod, monkeypatch, tmp_path):
     """A failed kickstart short-circuits to failed (no beacon poll)."""
+    _pin_ancestry_guard(run_mod, monkeypatch)
     monkeypatch.setattr(
         "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
     )
     monkeypatch.setattr(run_mod.service, "kickstart_worker", lambda: False)
     assert run_mod._self_heal_stale_worker(tmp_path, 1000.0, v=False) == "failed"
+
+
+def test_self_heal_defers_when_the_worker_is_our_own_ancestor(run_mod, monkeypatch, tmp_path):
+    """Never restart the worker this process is running inside (#3164).
+
+    ``tools.process_lookup`` is ancestor-safe by design, so ``get_worker_pid``
+    now returns the live worker even to a session the worker itself spawned.
+    Kickstarting that PID would SIGKILL the ``/update`` run mid-flight, so the
+    self-heal must DEFER — the 30-min cron restarts the worker from outside.
+    ``pgrep`` used to make this unreachable by accident; it is now an explicit
+    decision, which is exactly why it needs a test.
+
+    The guard runs BEFORE the drain gate: draining is a multi-minute wait, and
+    the answer is already known without it.
+    """
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_ATTEMPTS", 1)
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_INTERVAL_S", 0)
+    _pin_ancestry_guard(run_mod, monkeypatch, worker_pid=4242, is_ancestor=True)
+
+    drain_calls: list[int] = []
+    kick_calls: list[int] = []
+    monkeypatch.setattr(
+        "scripts.update.drain.wait_for_idle",
+        lambda t, p, log=None: drain_calls.append(1) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(run_mod.service, "kickstart_worker", lambda: kick_calls.append(1) or True)
+
+    assert run_mod._self_heal_stale_worker(tmp_path, 1000.0, v=False) == "deferred"
+    assert kick_calls == [], "the caller's own ancestor worker must never be kickstarted"
+    assert drain_calls == [], "the ancestry guard must short-circuit BEFORE the drain gate"
 
 
 def test_full_verify_unknown_warns_only(run_mod, monkeypatch, tmp_path):
