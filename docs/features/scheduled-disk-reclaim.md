@@ -131,7 +131,40 @@ Redis hiccup would cause more pain than the guard prevents.
 
 It is wrong for an unattended reaper, which would delete every lane during an
 outage. `worktree_busy_probe()` returns `clear` / `busy` / `error` so the sweep
-can skip on `error`. Both wrap one scan; only the failure posture differs.
+can skip on `error`. Both wrap `_scan_worktree_sessions`; only the failure
+posture differs.
+
+### The batch probe: one scan per sweep, not one per lane
+
+`_scan_worktree_sessions` no longer hydrates the whole `AgentSession` table.
+`_fetch_live_sessions()` issues one indexed, materialized query —
+`AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES)`. Narrowing on the
+index accepts a fail-open reading for any status outside `ALL_STATUSES`: such a
+row is never fetched, so its lane reads clear. The trade is deliberate — no live
+out-of-enum value exists and the only status write site
+(`models/session_lifecycle.py`) rejects unknown values — and it is settled at the
+query. The Python `status not in TERMINAL_STATUSES` check that follows cannot
+exclude a fetched row (the two status sets are disjoint); it is retained as the
+correct predicate for a caller that injects rows of its own.
+`worktree_busy_probe_many(repo_root, slugs)` fetches once
+and matches every candidate slug against that one in-memory list through the
+same segment-aware containment matcher the single-slug wrappers use, so batch
+and single-slug results cannot drift apart.
+
+`sweep_worktrees` builds this batch map lazily, the first time a lane reaches
+the busy guard — an all-`too_young` sweep still pays zero session queries, and
+a sweep that does reach the guard pays exactly one, materialized once, for
+however many lanes are classified against it. A missing slug in the map reads
+as `error`/`not_probed`, never as `clear`.
+
+The batch snapshot is a point-in-time read, and everything the sweep does for
+the remaining lanes after it (`_tree_stats`, `git status`, `merged_via_tree`)
+can take long enough for a new session to start inside one of them. So on the
+`apply=True` path only, immediately before `cleanup_after_merge`,
+`sweep_worktrees` re-probes that one lane fresh with the single-slug,
+fail-closed `worktree_busy_probe()` — the authorizing read for an actual
+deletion is never older than the guard right below it. The dry-run path
+(`apply=False`) deletes nothing, so it takes no re-probe.
 
 ## Registering the reflection
 
@@ -170,6 +203,7 @@ transcripts — the preserved `memory/` stores are text files measured in KB.
 
 - `docs/features/worktree-venv-isolation.md` — how lanes get their env, and the measurement
 - `docs/features/adding-reflection-tasks.md` — the reflection contract
-- `agent/worktree_manager.py` — `cleanup_after_merge`, `worktree_busy_probe`
+- `agent/worktree_manager.py` — `cleanup_after_merge`, `worktree_busy_probe`,
+  `worktree_busy_probe_many`
 - `docs/features/nightly-regression-tests.md` — the nightly baseline classifier that
   owns `.worktrees/nightly-baseline/`, the one lane `PROTECTED_WORKTREE_SLUGS` excludes

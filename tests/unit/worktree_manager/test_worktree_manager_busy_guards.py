@@ -9,12 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agent.worktree_manager import (
+    _fetch_live_sessions,
     _scan_worktree_sessions,
     _worktree_has_live_process,
     cleanup_after_merge,
     remove_worktree,
     worktree_busy_check,
     worktree_busy_probe,
+    worktree_busy_probe_many,
 )
 
 
@@ -34,17 +36,50 @@ def _make_session(
     )
 
 
+class _RaisingOnIter:
+    """A ``query.filter(...)`` return value that raises when materialized.
+
+    ``AgentSession.query.filter(...)`` returns a lazy ``QueryBuilder`` in
+    production; the real failure surfaces during iteration (``list(...)``),
+    not at the ``filter()`` call itself (Decision 0). A plain
+    ``side_effect`` on ``.filter`` would raise too early and leave that
+    failure mode untested, so these fixtures raise from ``__iter__`` instead.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def __iter__(self):
+        raise self._exc
+
+
+class _CountingRows(list):
+    """A list subclass that counts how many times it was iterated.
+
+    Used to prove a batch fetch materializes exactly once per sweep rather
+    than once per slug (Decision 0 / Risk 1b).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
 class TestWorktreeBusyCheck:
     """Tests for worktree_busy_check (issue #1357)."""
 
     @patch("models.agent_session.AgentSession")
     def test_no_sessions_returns_none(self, mock_as):
-        mock_as.query.all.return_value = []
+        mock_as.query.filter.return_value = []
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
     def test_terminal_session_does_not_block(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session("/fake/repo/.worktrees/sdlc-1218", "completed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "killed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "failed"),
@@ -55,7 +90,7 @@ class TestWorktreeBusyCheck:
 
     @patch("models.agent_session.AgentSession")
     def test_running_session_blocks(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218",
                 "running",
@@ -69,7 +104,7 @@ class TestWorktreeBusyCheck:
     @patch("models.agent_session.AgentSession")
     def test_subdir_match_blocks(self, mock_as):
         """working_dir below the worktree root still counts as busy."""
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218/sub/dir",
                 "running",
@@ -83,7 +118,7 @@ class TestWorktreeBusyCheck:
     @patch("models.agent_session.AgentSession")
     def test_substring_near_miss_does_not_block(self, mock_as):
         """sdlc-1218-other must NOT match sdlc-1218 (segment-aware)."""
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218-other",
                 "running",
@@ -94,7 +129,7 @@ class TestWorktreeBusyCheck:
     @patch("models.agent_session.AgentSession")
     def test_relative_working_dir_match(self, mock_as):
         """working_dir stored as a relative path resolves against repo_root."""
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(".worktrees/sdlc-1218", "running", session_id="0_REL"),
         ]
         # Use the actual cwd-resolvable repo root so resolve() works.
@@ -107,12 +142,12 @@ class TestWorktreeBusyCheck:
     @patch("models.agent_session.AgentSession")
     def test_query_raises_returns_none(self, mock_as):
         """Popoto query failure fails open (returns None) and logs WARNING."""
-        mock_as.query.all.side_effect = RuntimeError("redis down")
+        mock_as.query.filter.return_value = _RaisingOnIter(RuntimeError("redis down"))
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
 
     @patch("models.agent_session.AgentSession")
     def test_session_with_no_working_dir_skipped(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(None, "running"),
             _make_session("", "running"),
         ]
@@ -132,7 +167,7 @@ class TestWorktreeBusyProbe:
     @patch("models.agent_session.AgentSession")
     def test_query_failure_reports_error_state(self, mock_as):
         """A Redis outage must read as "error", never as "clear"."""
-        mock_as.query.all.side_effect = RuntimeError("redis down")
+        mock_as.query.filter.return_value = _RaisingOnIter(RuntimeError("redis down"))
         state, detail = worktree_busy_probe(Path("/fake/repo"), "sdlc-1218")
         assert state == "error"
         assert detail.startswith("query_failed:")
@@ -147,7 +182,7 @@ class TestWorktreeBusyProbe:
 
     @patch("models.agent_session.AgentSession")
     def test_live_session_in_lane_reports_busy(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218",
                 "running",
@@ -160,7 +195,7 @@ class TestWorktreeBusyProbe:
     @patch("models.agent_session.AgentSession")
     def test_busy_falls_back_to_agent_session_id(self, mock_as):
         """An empty session_id must not degrade the detail into a falsy blank."""
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218",
                 "running",
@@ -172,7 +207,7 @@ class TestWorktreeBusyProbe:
 
     @patch("models.agent_session.AgentSession")
     def test_unrelated_sessions_report_clear(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session("/fake/repo/.worktrees/sdlc-9999", "running"),
             _make_session("/fake/repo/.worktrees/sdlc-1218-other", "running"),
             _make_session("/fake/repo", "running"),
@@ -182,7 +217,7 @@ class TestWorktreeBusyProbe:
     @patch("models.agent_session.AgentSession")
     def test_terminal_session_in_lane_reports_clear(self, mock_as):
         """The probe's own terminal filtering, observable at the probe level."""
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session("/fake/repo/.worktrees/sdlc-1218", "completed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "killed"),
             _make_session("/fake/repo/.worktrees/sdlc-1218", "failed"),
@@ -191,7 +226,7 @@ class TestWorktreeBusyProbe:
 
     @patch("models.agent_session.AgentSession")
     def test_no_sessions_reports_clear(self, mock_as):
-        mock_as.query.all.return_value = []
+        mock_as.query.filter.return_value = []
         assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("clear", "")
 
 
@@ -200,7 +235,7 @@ class TestScanWorktreeSessions:
 
     @patch("models.agent_session.AgentSession")
     def test_query_failure_tuple(self, mock_as):
-        mock_as.query.all.side_effect = ValueError("boom")
+        mock_as.query.filter.return_value = _RaisingOnIter(ValueError("boom"))
         assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == (
             "error",
             "query_failed:ValueError",
@@ -216,7 +251,7 @@ class TestScanWorktreeSessions:
 
     @patch("models.agent_session.AgentSession")
     def test_busy_tuple_carries_both_ids(self, mock_as):
-        mock_as.query.all.return_value = [
+        mock_as.query.filter.return_value = [
             _make_session(
                 "/fake/repo/.worktrees/sdlc-1218/sub",
                 "running",
@@ -232,8 +267,175 @@ class TestScanWorktreeSessions:
 
     @patch("models.agent_session.AgentSession")
     def test_clear_tuple(self, mock_as):
-        mock_as.query.all.return_value = []
+        mock_as.query.filter.return_value = []
         assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == ("clear", "", "")
+
+    def test_unknown_status_value_reads_busy(self):
+        """An injected out-of-enum status stays fail-closed (Risk 2, spike-4).
+
+        The index union cannot return such a row, so this is the one path
+        where the surviving Python ``not in TERMINAL_STATUSES`` check can
+        still exclude something: a caller handing rows in via ``sessions=``.
+        The out-of-enum status read on the fetching path is fail-open by
+        accepted trade, settled at the query, and is not what this asserts.
+        """
+        rows = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218",
+                "some_future_status",
+                session_id="0_UNKNOWN",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows) == (
+            "busy",
+            "0_UNKNOWN",
+            "agt-1",
+        )
+
+    def test_raising_row_is_skipped_and_later_busy_row_still_wins(self):
+        """A row that raises on attribute access is skipped, not fatal.
+
+        Covers the per-row ``except Exception`` / ``continue`` branch, which
+        had zero test coverage before this change. ``MagicMock(spec=["status"])``
+        has a ``status`` attribute but no ``working_dir``, so
+        ``getattr(session, "working_dir", None)`` does not raise -- the
+        matcher must be exercised with a row that raises on the attribute it
+        *does* try to read.
+        """
+
+        class _BoomOnWorkingDir:
+            @property
+            def working_dir(self):
+                raise RuntimeError("attribute access exploded")
+
+        rows = [
+            _BoomOnWorkingDir(),
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218",
+                "running",
+                session_id="0_LATER",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows) == (
+            "busy",
+            "0_LATER",
+            "agt-1",
+        )
+
+    def test_injected_sessions_skips_fetch(self):
+        """``sessions=`` bypasses ``_fetch_live_sessions`` entirely.
+
+        A model-import failure that would normally produce
+        ``model_import_failed:`` must not surface when rows are injected --
+        the injected path never touches the deferred import that fetching
+        would use.
+        """
+        rows = [
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "running", session_id="0_INJ"),
+        ]
+        with patch.dict(sys.modules, {"models.agent_session": None}):
+            result = _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows)
+        assert result == ("busy", "0_INJ", "agt-1")
+
+
+class TestFetchLiveSessions:
+    """Tests for ``_fetch_live_sessions`` — the single Redis touch point."""
+
+    @patch("models.agent_session.AgentSession")
+    def test_materializes_exactly_once(self, mock_as):
+        """``list(...)`` must consume the query object exactly once (Decision 0)."""
+        rows = _CountingRows(
+            [_make_session("/fake/repo/.worktrees/sdlc-1218", "running")],
+        )
+        mock_as.query.filter.return_value = rows
+        fetched, error_reason = _fetch_live_sessions()
+        assert error_reason == ""
+        assert len(fetched) == 1
+        assert rows.iterations == 1
+
+    @patch("models.agent_session.AgentSession")
+    def test_query_failure_on_iteration(self, mock_as):
+        mock_as.query.filter.return_value = _RaisingOnIter(RuntimeError("redis down"))
+        rows, error_reason = _fetch_live_sessions()
+        assert rows == []
+        assert error_reason == "query_failed:RuntimeError"
+
+    def test_model_import_failure(self):
+        with patch.dict(sys.modules, {"models.agent_session": None}):
+            rows, error_reason = _fetch_live_sessions()
+        assert rows == []
+        assert error_reason.startswith("model_import_failed:")
+
+    @patch("models.agent_session.AgentSession")
+    def test_filters_on_non_terminal_status(self, mock_as):
+        """The query is built from ``status__in=NON_TERMINAL_STATUSES``."""
+        mock_as.query.filter.return_value = []
+        _fetch_live_sessions()
+        assert mock_as.query.filter.call_count == 1
+        _, kwargs = mock_as.query.filter.call_args
+        assert "status__in" in kwargs
+
+
+class TestWorktreeBusyProbeMany:
+    """Tests for ``worktree_busy_probe_many`` — the batch probe (Task 1)."""
+
+    def test_empty_slugs_returns_empty_and_queries_nothing(self):
+        with patch("agent.worktree_manager._fetch_live_sessions") as mock_fetch:
+            result = worktree_busy_probe_many(Path("/fake/repo"), [])
+        assert result == {}
+        mock_fetch.assert_not_called()
+
+    @patch("models.agent_session.AgentSession")
+    def test_agrees_with_single_slug_probe_across_states(self, mock_as):
+        """One rows object, two slugs, two different verdicts."""
+        mock_as.query.filter.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/lane-b",
+                "running",
+                session_id="0_B",
+                agent_session_id="agt-B",
+            ),
+        ]
+        result = worktree_busy_probe_many(Path("/fake/repo"), ["lane-a", "lane-b"])
+        assert result == {
+            "lane-a": ("clear", ""),
+            "lane-b": ("busy", "0_B"),
+        }
+        # Same fixture, driven through the single-slug wrapper, must agree.
+        assert worktree_busy_probe(Path("/fake/repo"), "lane-a") == ("clear", "")
+        assert worktree_busy_probe(Path("/fake/repo"), "lane-b") == ("busy", "0_B")
+
+    @patch("models.agent_session.AgentSession")
+    def test_fetch_error_fans_out_to_every_slug(self, mock_as):
+        """A Redis outage must not default any requested slug to clear."""
+        mock_as.query.filter.return_value = _RaisingOnIter(RuntimeError("redis down"))
+        result = worktree_busy_probe_many(Path("/fake/repo"), ["lane-a", "lane-b"])
+        assert result == {
+            "lane-a": ("error", "query_failed:RuntimeError"),
+            "lane-b": ("error", "query_failed:RuntimeError"),
+        }
+
+    @patch("models.agent_session.AgentSession")
+    def test_never_raises_on_fetch_failure(self, mock_as):
+        """Decision 6: the batch probe itself must not propagate."""
+        mock_as.query.filter.side_effect = RuntimeError("boom before even building a builder")
+        result = worktree_busy_probe_many(Path("/fake/repo"), ["lane-a"])
+        assert result == {"lane-a": ("error", "query_failed:RuntimeError")}
+
+    @patch("models.agent_session.AgentSession")
+    def test_one_rows_object_serves_many_slugs_with_one_materialization(self, mock_as):
+        rows = _CountingRows(
+            [_make_session("/fake/repo/.worktrees/lane-a", "running", session_id="0_A")]
+        )
+        mock_as.query.filter.return_value = rows
+        result = worktree_busy_probe_many(
+            Path("/fake/repo"), ["lane-a", "lane-b", "lane-c", "lane-d"]
+        )
+        assert result["lane-a"] == ("busy", "0_A")
+        assert result["lane-b"] == ("clear", "")
+        assert result["lane-c"] == ("clear", "")
+        assert result["lane-d"] == ("clear", "")
+        assert rows.iterations == 1
 
 
 class TestRemoveWorktreeBusyGuard:

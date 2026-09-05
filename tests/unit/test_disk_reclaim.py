@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -63,6 +64,12 @@ def all_clear(monkeypatch):
         return {"worktree_removed": True, "branch_deleted": True, "errors": []}
 
     monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+    # The happy path now crosses both the lazy batch map and the fresh
+    # single-slug re-probe immediately before removal (Decision 4) -- stub
+    # both so a test that neutralizes "every guard" actually does.
+    monkeypatch.setattr(
+        wm, "worktree_busy_probe_many", lambda _r, slugs: {s: ("clear", "") for s in slugs}
+    )
     monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("clear", ""))
     monkeypatch.setattr(wm, "merged_via_tree", lambda *_a, **_k: True)
     monkeypatch.setattr(wm, "cleanup_after_merge", fake_cleanup)
@@ -185,9 +192,17 @@ def test_skips_lane_with_live_os_process(repo, all_clear, monkeypatch):
 
 
 def test_skips_lane_with_live_session(repo, all_clear, monkeypatch):
+    """The batch map -- not the single-slug wrapper -- is what guard 5 reads.
+
+    Once `sweep_worktrees` consults `worktree_busy_probe_many`, patching only
+    `worktree_busy_probe` leaves this test passing vacuously against a guard
+    the code no longer calls at that point.
+    """
     import agent.worktree_manager as wm
 
-    monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("busy", "sess-1"))
+    monkeypatch.setattr(
+        wm, "worktree_busy_probe_many", lambda _r, slugs: {"lane": ("busy", "sess-1")}
+    )
     sweep = sweep_worktrees(repo, apply=True)
     assert _reasons(sweep)["lane"] == "live_session:sess-1"
     assert all_clear == []
@@ -198,12 +213,15 @@ def test_busy_check_error_also_blocks_removal(repo, all_clear, monkeypatch):
 
     `worktree_busy_check` is fail-open by design and returns None both when a
     lane is genuinely idle and when Redis is unreachable. An unattended reaper
-    that used it would delete every lane during a Redis outage.
+    that used it would delete every lane during a Redis outage. This exercises
+    the batch guard-5 path, which is where a Redis outage now surfaces first.
     """
     import agent.worktree_manager as wm
 
     monkeypatch.setattr(
-        wm, "worktree_busy_probe", lambda _r, _s: ("error", "query_failed:ConnectionError")
+        wm,
+        "worktree_busy_probe_many",
+        lambda _r, slugs: dict.fromkeys(slugs, ("error", "query_failed:ConnectionError")),
     )
     sweep = sweep_worktrees(repo, apply=True)
     assert sweep.removed == []
@@ -315,6 +333,164 @@ def test_protected_worktree_is_skipped_even_when_pr_state_is_unavailable(repo, m
 def test_missing_worktrees_dir_is_not_an_error(tmp_path, all_clear):
     sweep = sweep_worktrees(tmp_path / "empty", apply=True)
     assert sweep.removed == [] and sweep.skipped == [] and sweep.errors == []
+
+
+# --- batch probe: one scan per sweep, not one per lane (Decision 0/4/5) -----
+
+
+class _CountingRows(list):
+    """A list subclass that counts how many times it was iterated.
+
+    Stands in for the materialized rows `_fetch_live_sessions` returns, so a
+    test can prove the batch fetch is consumed exactly once per sweep-wide
+    query rather than once per lane classified against it (Decision 0).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
+def _multi_lane_repo(tmp_path, names):
+    root = tmp_path / "repo"
+    for name in names:
+        lane = root / ".worktrees" / name
+        lane.mkdir(parents=True)
+        (lane / "file.txt").write_text("content")
+    _age(root / ".worktrees")
+    return root
+
+
+def test_reprobe_call_count_equals_removed_count_under_apply_true(repo, all_clear, monkeypatch):
+    """Decision 4: the fresh single-slug re-probe fires once per lane
+    actually removed under `apply=True`. The counter wraps whatever the
+    `all_clear` fixture installed at `wm.worktree_busy_probe` (a clear-returning
+    stub), purely to count calls -- it does not change behavior. What this
+    pins is the real call site and its count, not the probe implementation.
+    """
+    import agent.worktree_manager as wm
+
+    calls: list[str] = []
+    original = wm.worktree_busy_probe
+
+    def counting_probe(repo_root, slug):
+        calls.append(slug)
+        return original(repo_root, slug)
+
+    monkeypatch.setattr(wm, "worktree_busy_probe", counting_probe)
+    sweep = sweep_worktrees(repo, apply=True)
+    assert sweep.removed == ["lane"]
+    assert calls == ["lane"]
+    assert len(calls) == len(sweep.removed)
+
+
+def test_reprobe_call_count_is_zero_under_apply_false(repo, all_clear, monkeypatch):
+    """The `apply=False` early return deletes nothing, so it opens no TOCTOU
+    window and pays no re-probe -- the expected count is zero regardless of
+    `len(sweep.removed)`.
+    """
+    import agent.worktree_manager as wm
+
+    calls: list[str] = []
+    original = wm.worktree_busy_probe
+
+    def counting_probe(repo_root, slug):
+        calls.append(slug)
+        return original(repo_root, slug)
+
+    monkeypatch.setattr(wm, "worktree_busy_probe", counting_probe)
+    sweep = sweep_worktrees(repo, apply=False)
+    assert sweep.removed == ["lane"]
+    assert calls == []
+
+
+def test_snapshot_clear_but_reprobe_busy_blocks_removal(repo, all_clear, monkeypatch):
+    """Race 1: a session can start in the window between the batch snapshot
+    and the fresh re-probe. The re-probe, not the stale snapshot, must win.
+    """
+    import agent.worktree_manager as wm
+
+    monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("busy", "sess-late"))
+    sweep = sweep_worktrees(repo, apply=True)
+    assert sweep.removed == []
+    assert _reasons(sweep)["lane"] == "live_session:sess-late"
+
+
+def test_sweep_materializes_session_query_exactly_once_across_many_lanes(monkeypatch, tmp_path):
+    """One batch session query for the whole sweep, not one per lane that
+    reaches guard 5 -- measured by counting iterations of the fetched rows,
+    never by counting `filter()` calls (Decision 0, Success Criterion 4).
+
+    Driven under `apply=False` so no per-lane re-probe (Decision 4) adds its
+    own materialization on top of the batch one; that count is covered
+    separately by the reprobe-count tests above.
+    """
+    import agent.worktree_manager as wm
+
+    root = _multi_lane_repo(tmp_path, ["lane-a", "lane-b", "lane-c"])
+    monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+    monkeypatch.setattr(wm, "merged_via_tree", lambda *_a, **_k: True)
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: set())
+    monkeypatch.setattr(disk_reclaim, "_worktree_is_dirty", lambda _p: False)
+
+    rows = _CountingRows([])
+    with patch("models.agent_session.AgentSession") as mock_as:
+        mock_as.query.filter.return_value = rows
+        sweep = sweep_worktrees(root, apply=False)
+
+    assert sorted(sweep.removed) == ["lane-a", "lane-b", "lane-c"]
+    assert rows.iterations == 1
+    assert mock_as.query.filter.call_count == 1
+
+
+def test_sweep_makes_zero_materializations_when_every_lane_is_too_young(monkeypatch, tmp_path):
+    """An all-`too_young` sweep never reaches guard 5, so the batch map is
+    never built and the session table is never touched at all.
+    """
+    root = tmp_path / "repo"
+    for name in ("lane-a", "lane-b"):
+        lane = root / ".worktrees" / name
+        lane.mkdir(parents=True)
+        (lane / "file.txt").write_text("content")
+    # Freshly touched (no _age() call): every lane fails the age guard before
+    # guard 5 is ever reached.
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: set())
+
+    rows = _CountingRows([])
+    with patch("models.agent_session.AgentSession") as mock_as:
+        mock_as.query.filter.return_value = rows
+        sweep = sweep_worktrees(root, apply=True)
+
+    assert sweep.removed == []
+    assert {reason for _, reason in sweep.skipped} == {"too_young"}
+    assert rows.iterations == 0
+    mock_as.query.filter.assert_not_called()
+
+
+def test_sweep_completes_when_batch_fetch_raises(repo, monkeypatch):
+    """Decision 6: a raising fetch must not escape into the sweep itself.
+
+    `tools/disk_reclaim.py` has no `except` around guard 5 by design -- the
+    never-raises guarantee belongs to `worktree_busy_probe_many` alone. This
+    drives the *real* batch probe (not a mock of it) so the raise happens
+    exactly where it does in production: inside `_fetch_live_sessions`.
+    """
+    import agent.worktree_manager as wm
+
+    monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: set())
+    monkeypatch.setattr(disk_reclaim, "_worktree_is_dirty", lambda _p: False)
+
+    with patch("models.agent_session.AgentSession") as mock_as:
+        mock_as.query.filter.side_effect = RuntimeError("redis down")
+        sweep = sweep_worktrees(repo, apply=True)  # must not raise
+
+    assert sweep.removed == []
+    assert _reasons(sweep)["lane"] == "busy_check_error:query_failed:RuntimeError"
 
 
 # --- open_pr_branches fails closed ------------------------------------------

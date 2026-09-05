@@ -454,17 +454,89 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
     )
 
 
-def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
+def _fetch_live_sessions() -> tuple[list, str]:
+    """Fetch every non-terminal ``AgentSession`` row, once, materialized.
+
+    This is the single place that decides what "live session" means at the
+    Redis boundary, and the single place where Redis is actually touched for
+    a busy-guard decision. It narrows on the indexed ``status`` field
+    (``status__in=NON_TERMINAL_STATUSES``) instead of hydrating the whole
+    table and discarding terminal rows in Python — a strict push-down of a
+    filter the matching loop already performed, so it cannot change which
+    sessions are considered.
+
+    The ``list(...)`` wrapper is load-bearing, not stylistic:
+    ``AgentSession.query.filter(...)`` returns a lazy
+    ``popoto.models.query.QueryBuilder`` that re-runs the whole query on every
+    iteration and issues no Redis command itself, so a ``try`` around
+    ``filter()`` alone would catch nothing — the connection error surfaces
+    during iteration. Materializing here, inside this function's own
+    ``try``, is what turns a Redis outage into ``("error", ...)`` instead of
+    an exception that escapes every caller. Handing a bare, unmaterialized
+    builder to a caller that loops it once per slug would also reintroduce
+    one full Redis query per slug — the exact amplification this function
+    exists to remove, one layer down. Mirrors the established shape at
+    ``models/agent_session.py:1389`` (``rows = list(cls.query.filter(...))``).
+
+    Returns:
+        ``(rows, error_reason)``. On success, ``rows`` is a materialized
+        ``list`` of ``AgentSession`` instances and ``error_reason`` is
+        ``""``. On failure, ``rows`` is ``[]`` and ``error_reason`` is
+        ``"model_import_failed:{Type}"`` or ``"query_failed:{Type}"``.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import NON_TERMINAL_STATUSES
+    except Exception as e:
+        logger.warning("_fetch_live_sessions: model imports failed (%s)", e)
+        return ([], f"model_import_failed:{type(e).__name__}")
+
+    try:
+        rows = list(AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES)))
+    except Exception as e:
+        logger.warning("_fetch_live_sessions: AgentSession query failed (%s)", e)
+        return ([], f"query_failed:{type(e).__name__}")
+
+    return (rows, "")
+
+
+def _scan_worktree_sessions(
+    repo_root: Path, slug: str, *, sessions: list | None = None
+) -> tuple[str, str, str]:
     """Check whether any non-terminal AgentSession references this worktree.
 
-    Walks the AgentSession table looking for rows whose ``working_dir`` lives
-    inside ``.worktrees/{slug}/`` (or is exactly that directory) and whose
-    ``status`` is not in ``TERMINAL_STATUSES``. The first match wins.
+    Matches rows whose ``working_dir`` lives inside ``.worktrees/{slug}/``
+    (or is exactly that directory) and whose ``status`` is not in
+    ``TERMINAL_STATUSES``. The first match wins.
 
-    Imports of ``models.agent_session`` and ``models.session_lifecycle`` are
-    deferred to function body to keep ``worktree_manager.py``'s import-time
-    graph unchanged (worktree_manager is loaded by tooling that should not
-    pay the Popoto bootstrap cost just to validate slugs).
+    When ``sessions`` is ``None`` (the default, used by every single-slug
+    caller), this fetches the candidate rows itself via
+    :func:`_fetch_live_sessions` — one indexed, materialized query per call.
+    When ``sessions`` is given (used by :func:`worktree_busy_probe_many`),
+    this matches against that pre-fetched list instead of querying again, so
+    batch and single-slug callers share one matcher and cannot drift apart.
+
+    Import of ``models.session_lifecycle`` is deferred to function body to
+    keep ``worktree_manager.py``'s import-time graph unchanged
+    (worktree_manager is loaded by tooling that should not pay the Popoto
+    bootstrap cost just to validate slugs). This import is unconditional —
+    it happens whether or not ``sessions`` was injected — because the
+    injected-``sessions=`` path never calls ``_fetch_live_sessions`` and so
+    would otherwise leave ``TERMINAL_STATUSES`` unbound in this frame.
+
+    Narrowing on the index accepts a fail-open reading for any status outside
+    ``ALL_STATUSES``: such a row is absent from the ``status__in`` union, so it
+    is never fetched and the lane reads clear. That trade is deliberate --
+    spike 4 found no live out-of-enum values and no write site for one outside
+    ``models/session_lifecycle.py``, whose setter rejects unknown statuses --
+    and it is settled at the query, not here. The Python
+    ``status not in TERMINAL_STATUSES`` check below therefore cannot exclude a
+    row on either shipped path: ``TERMINAL_STATUSES`` and
+    ``NON_TERMINAL_STATUSES`` are disjoint, so every fetched row passes it by
+    construction, and ``worktree_busy_probe_many`` injects index-filtered rows
+    too. It is kept because it is cheap and it is the correct predicate for a
+    caller that injects rows of its own -- the only path that can present an
+    out-of-enum status -- not because it is what holds the fail-closed line.
 
     Path comparison normalizes both sides via ``os.path.normpath`` (no symlink
     resolution) then matches the worktree's path components segment-by-segment
@@ -481,6 +553,8 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     Args:
         repo_root: Path to the main repository.
         slug: Work item slug whose worktree we want to remove.
+        sessions: Pre-fetched, materialized rows to match against instead of
+            fetching. ``None`` (default) fetches internally.
 
     Returns:
         ``(state, a, b)`` where ``state`` is one of ``"clear"``, ``"busy"``, or
@@ -488,7 +562,6 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
         agent_session_id. For ``"error"``, ``a`` is the reason.
     """
     try:
-        from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
     except Exception as e:
         logger.warning("_scan_worktree_sessions: model imports failed (%s)", e)
@@ -498,11 +571,10 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     worktree_norm = os.path.normpath(str(worktree_dir))
     worktree_parts = Path(worktree_norm).parts
 
-    try:
-        sessions = AgentSession.query.all()
-    except Exception as e:
-        logger.warning("_scan_worktree_sessions: AgentSession query failed (%s)", e)
-        return ("error", f"query_failed:{type(e).__name__}", "")
+    if sessions is None:
+        sessions, error_reason = _fetch_live_sessions()
+        if error_reason:
+            return ("error", error_reason, "")
 
     for session in sessions:
         try:
@@ -574,6 +646,52 @@ def worktree_busy_probe(repo_root: Path, slug: str) -> tuple[str, str]:
     if state == "error":
         return ("error", a)
     return ("clear", "")
+
+
+def worktree_busy_probe_many(repo_root: Path, slugs: list[str]) -> dict[str, tuple[str, str]]:
+    """Tri-state busy check for many slugs, fetched once instead of per-slug.
+
+    This is :func:`worktree_busy_probe` for a whole sweep: fetches the
+    non-terminal session rows exactly once via :func:`_fetch_live_sessions`,
+    then matches each requested slug against that same materialized list by
+    calling :func:`_scan_worktree_sessions` with ``sessions=`` pre-populated.
+    It shares one matcher with the single-slug path — it does not
+    re-implement containment matching — so batch and single-slug results
+    cannot drift apart as either is maintained.
+
+    Never raises: every Redis touch happens inside ``_fetch_live_sessions``'s
+    own ``try``, and the per-row matching keeps its own ``try``. If the fetch
+    fails, every requested slug gets ``("error", reason)`` — the failure is
+    fanned out to all of them rather than defaulting any of them to
+    ``"clear"``, so a Redis outage during a sweep skips every lane instead of
+    silently clearing one.
+
+    Args:
+        repo_root: Path to the main repository.
+        slugs: Worktree slugs to check. An empty list returns ``{}`` and
+            issues no query.
+
+    Returns:
+        ``{slug: (state, detail)}`` with the same tri-state each single-slug
+        :func:`worktree_busy_probe` call would have produced for that slug.
+    """
+    if not slugs:
+        return {}
+
+    rows, error_reason = _fetch_live_sessions()
+    if error_reason:
+        return dict.fromkeys(slugs, ("error", error_reason))
+
+    result: dict[str, tuple[str, str]] = {}
+    for slug in slugs:
+        state, a, b = _scan_worktree_sessions(repo_root, slug, sessions=rows)
+        if state == "busy":
+            result[slug] = ("busy", a or b or "unknown")
+        elif state == "error":
+            result[slug] = ("error", a)
+        else:
+            result[slug] = ("clear", "")
+    return result
 
 
 def _worktree_has_live_process(worktree_dir: Path) -> int | None:
