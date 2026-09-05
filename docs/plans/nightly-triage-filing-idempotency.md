@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3170
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-05T13:17:33Z
 ---
 
 # Nightly Triage Filing Idempotency
@@ -330,7 +332,7 @@ New coverage to add (not modifications):
 
 - **Diagnosing why the turn was replayed.** The `_agent_session_health_check` requeue legs, the `tool_timeout` path, the role driver's stale-UUID fallback — all of it is #3161's, all of it needs the nightly host this machine is not, and none of it is a prerequisite for making filing idempotent. If the replay mechanism is fixed tomorrow these three defenses are still correct.
 - **Building a general-purpose agent-side idempotency framework.** A `filed_issues` ledger abstraction for every dispatching skill is a tempting generalization of fix 3 and would swallow the appetite whole. One JSON file, one writer, one reader.
-- **Branching from `session/nightly-triage-idempotency-3075`.** Its name matches this work and it is not merged, which makes it look like the natural base. Its content is already on main via PR #3142's squash. Branching there duplicates landed code and produces a diff nobody can review. **Branch from `main`.**
+- **Branching from `session/nightly-triage-idempotency-3075`.** Its name matches this work and it is not merged, which makes it look like the natural base. Its content is already on main via PR #3142's squash. Branching there duplicates landed code and produces a diff nobody can review. **Branch from `main`.** The branch is now gone from origin (Freshness Check), so the remaining hazard is narrower than at drafting: only a local `git checkout` of the surviving local ref, which is checked out in a worktree on this machine. Verification row 15 still guards it.
 - **Rewriting the open/closed decision prose in the prompt.** #3075 tuned that language against `partition_closed_matches` and `closed_epilogue`. Fix 1 changes the *read mechanism*, not the *decision rule*. Rewording the rule risks drift between the prompt and the pre-flight — the exact failure #2559 pinned literal titles to prevent.
 - **Chasing the two-simultaneous-filers shape** (#2971, #2982–#2989 interleaving the 20:40 wave). That is a second machine, not a replay; `open_issues()` already reads live REST state and sees another machine's issues instantly. Different problem, no evidence it is currently broken.
 - **Tuning `--limit 200`.** Picking the perfect window is a research project with a wrong answer at every repo size. Take the issue's number, state the failure mode, and move on — see Risks.
@@ -688,7 +690,7 @@ War room, FULL depth (Risk & Robustness, Scope & Value, History & Consistency) p
 ## Open Questions
 
 
-1. **The ledger lives in `data/nightly-triage-ledger/{slug}.json`, not "under the lane worktree" as the issue specifies.** Reasoning in spike-3: `.worktrees/{slug}/` is a git checkout, so a ledger there pollutes the agent's own `git status`, and it is destroyed on lane teardown — a replay after teardown would find nothing. `data/` is already this script's state home, is gitignored, survives teardown, and is reachable by absolute path from inside a worktree. The slug-keyed filename preserves the "session-local" property the issue was reaching for. **Confirm this deviation is acceptable, or say the word and it moves to the worktree.**
+1. **The ledger lives in `data/nightly-triage-ledger/{slug}.json`, not "under the lane worktree" as the issue specifies.** Reasoning in spike-3: `.worktrees/{slug}/` is a git checkout, so a ledger there pollutes the agent's own `git status`, and it is destroyed on lane teardown — a replay after teardown would find nothing. `data/` is already this script's state home, is gitignored, survives teardown, and is reachable by absolute path from inside a worktree. The slug-keyed filename preserves the "session-local" property the issue was reaching for. **Independent corroboration found during revision:** `55ad9ac89` (Closes #3162) landed a stale-branch sweep that reaps nightly-triage worktrees, and its reaper refuses to reap a lane whose `git status --porcelain` is non-empty. A ledger written inside `.worktrees/{slug}/` would leave every triage lane permanently dirty and permanently unreapable, reintroducing exactly the accumulation #3162 just fixed. That turns this from a judgement call into a near-forced choice. **Answered by default: the ledger goes in `data/`.** Say the word if you still want it in the worktree, but it would need #3162's reaper taught about the file first.
 
 2. **`--limit 200` for the agent's confirmation read is taken from the issue verbatim and is narrower than the script's own `CLOSED_ISSUE_LIST_LIMIT = 4000`.** Risk 1 argues this is fine *because* fix 2 makes the script's wide read the authority and the agent's read only a check for issues created since. If you would rather the agent's read match the script's window, that is a one-token change with roughly 40 REST calls of cost per dispatch instead of 2.
 
