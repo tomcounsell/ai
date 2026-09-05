@@ -121,6 +121,32 @@ investigate failing tests that have never been triaged before. The set comes fro
   nightly regressions is out of scope and explicitly called out as a No-Go in the
   originating plan (`docs/plans/nightly-regression-triage.md`).
 
+### Lane reaping
+
+Every dispatch mints a `session/nightly-triage-*` branch and a
+`.worktrees/nightly-triage-*` worktree, and the triage session leaves both behind
+when it ends. The 2026-08-24 incident accumulated 13 branches and 14 worktrees this
+way (issue #3162). The rule that keeps the count at zero: **a nightly-triage lane is
+disposable the moment its session ends, and the bridge's boot-time stale-branch sweep
+owns its teardown.** `cleanup_stale_branches` (`agent/session_revival.py`, run at
+every bridge boot and by the `stale-branch-cleanup` reflection) selects
+`session/nightly-triage-*` branches whose tip commit is older than the sweep's
+72-hour window (`agent/worktree_manager.py::stale_nightly_triage_slug`), reaps the
+matching worktree through the fail-closed `reap_idle_worktree`, then deletes the
+branch through the usual unmerged-branch guard. The sweep reads its candidates from
+`git branch --list 'session/*'`, which marks a branch checked out in another worktree
+with a leading `+ `; the parser strips that marker along with `* `, so a lane whose
+branch is still checked out is a candidate like any other (the sweep once stripped
+only `* `, which silently excluded every lane it was meant to reap). The window is the sweep's existing
+one, three nightly cycles, and it is only the coarse filter: a live triage session is
+protected by `worktree_busy_probe` and the live-process scan, both of which keep the
+lane on any answer other than "clear". A lane with a dirty tree is kept, never
+auto-preserved, so a half-deleted worktree (issue #3167) stays on disk for a human
+rather than being committed. Every other `session/*` namespace keeps its worktree;
+only this namespace is reaped by the sweep, because only this namespace is minted
+by a script with nothing to come back for. `tools/disk_reclaim.py` remains the
+14-day backstop when armed.
+
 ## Files
 
 | File | Purpose |

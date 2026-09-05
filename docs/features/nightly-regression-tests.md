@@ -358,6 +358,7 @@ exit, bucketing every node `inconclusive`.
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
 | `.worktrees/nightly-baseline/` | Persistent, provisioned baseline worktree the classifier re-points at the prior run's HEAD SHA and runs pytest in; carries its own `.venv` (gitignored, protected from `tools/disk_reclaim.py` — see `docs/features/scheduled-disk-reclaim.md`) |
+| `.worktrees/nightly-triage-*/` | One lane per triage dispatch, disposable once its session ends. Reaped with its `session/nightly-triage-*` branch by the bridge's boot-time stale-branch sweep after the 72-hour window — see `docs/features/nightly-triage-dispatch.md#lane-reaping` |
 | `.worktrees/nightly-baseline/.nightly-baseline-provisioned` | Marker recording the `uv.lock` SHA-256 digest the worktree's `.venv` was last synced against, so re-provisioning only re-runs `uv sync` when the lockfile actually moved. Ignored via a root `.gitignore` entry (effective inside the lane once the baseline SHA carries it); either way the lane's `protected` guard in `sweep_worktrees` pre-empts any dirty-tree signal the untracked file could raise |
 | `/tmp/nightly_pytest_baseline_report.json` | The classifier's own `--json-report` output (`PYTEST_BASELINE_JSON_TMP`); never shares a path with `PYTEST_JSON_TMP` or `PYTEST_SERIAL_JSON_TMP` |
 

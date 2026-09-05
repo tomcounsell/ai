@@ -20,6 +20,30 @@ logger = logging.getLogger(__name__)
 WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# Branches minted by scripts/nightly_regression_tests.py's triage dispatch
+# (`valor_session create --slug nightly-triage-<hash8>`): one lane per night's
+# findings, each a single-shot Eng session that files issues and then goes
+# quiet. Nothing returns to the lane once that session ends, so the boot-time
+# stale-branch sweep reaps its worktree along with the branch (issue #3162).
+# The slug group is what the sweep hands to :func:`reap_idle_worktree`.
+NIGHTLY_TRIAGE_BRANCH_RE = re.compile(r"^session/(nightly-triage-[a-zA-Z0-9._-]+)$")
+
+
+def stale_nightly_triage_slug(branch: str, age_hours: float, max_age_hours: float) -> str | None:
+    """Slug of a nightly-triage lane whose branch has aged past the sweep window.
+
+    Returns ``None`` for every other branch namespace and for a nightly-triage
+    branch still inside the window. ``age_hours`` is measured from the branch
+    tip's commit time, the same clock ``cleanup_stale_branches`` already uses
+    to select ``session/*`` branches, so one threshold governs both the branch
+    and its worktree.
+    """
+    match = NIGHTLY_TRIAGE_BRANCH_RE.match(branch)
+    if match is None or age_hours <= max_age_hours:
+        return None
+    return match.group(1)
+
+
 # ---------------------------------------------------------------------------
 # Unmerged-branch guard (issue #1646)
 # ---------------------------------------------------------------------------
@@ -978,6 +1002,84 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
             logger.info(f"Manually removed stale worktree directory: {worktree_path}")
             # Prune again to clean up the now-missing reference.
             prune_worktrees(repo_root)
+
+
+def reap_idle_worktree(repo_root: Path, slug: str) -> tuple[bool, str]:
+    """Remove ``.worktrees/{slug}`` once nothing can still want it.
+
+    Built for the unattended stale-branch sweep (``cleanup_stale_branches``
+    at bridge boot), so every guard fails closed and the caller gets
+    ``(removed, reason)`` instead of an exception. A question a guard cannot
+    answer reads as "keep", the posture ``tools/disk_reclaim.py`` takes, and
+    the opposite of the interactive :func:`remove_worktree`.
+
+    Guards, cheapest first:
+
+    - the lane directory exists and is the worktree git registers for
+      ``session/{slug}`` (a branch checked out anywhere else is left alone);
+    - ``git status --porcelain`` is empty;
+    - no live OS process has its cwd inside the lane;
+    - no non-terminal ``AgentSession`` claims the lane
+      (:func:`worktree_busy_probe`, an unanswerable query keeps the lane).
+
+    The clean-tree guard is also what keeps this path clear of issue #3167.
+    A clean tree has nothing to preserve, so this function never calls
+    ``preserve_uncommitted_worktree_changes``. A worktree that lost tracked
+    files to an interrupted teardown reads as maximally dirty here and is
+    skipped, where the preserve path would commit the deletion.
+
+    Returns:
+        ``(True, "removed")`` on success, otherwise ``(False, reason)`` with
+        ``reason`` in ``missing``, ``not_registered_at_lane_path``,
+        ``git_status_unavailable``, ``uncommitted_changes``,
+        ``process_scan_error:<type>``, ``live_process:<pid>``,
+        ``busy_check_error:<detail>``, ``live_session:<id>``, or
+        ``git_worktree_remove_failed:<stderr>``.
+    """
+    _validate_slug(slug)
+    worktree_dir = repo_root / WORKTREES_DIR / slug
+    if not worktree_dir.is_dir():
+        return (False, "missing")
+
+    registered = _find_worktree_for_branch(repo_root, f"session/{slug}")
+    if registered is None or Path(registered).resolve() != worktree_dir.resolve():
+        return (False, "not_registered_at_lane_path")
+
+    status = subprocess.run(
+        ["git", "-C", str(worktree_dir), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=settings.timeouts.git_subprocess_s,
+    )
+    if status.returncode != 0:
+        return (False, "git_status_unavailable")
+    if status.stdout.strip():
+        return (False, "uncommitted_changes")
+
+    try:
+        live_pid = _worktree_has_live_process(worktree_dir)
+    except Exception as e:
+        return (False, f"process_scan_error:{type(e).__name__}")
+    if live_pid is not None:
+        return (False, f"live_process:{live_pid}")
+
+    state, detail = worktree_busy_probe(repo_root, slug)
+    if state == "error":
+        return (False, f"busy_check_error:{detail}")
+    if state == "busy":
+        return (False, f"live_session:{detail}")
+
+    result = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_dir)],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=settings.timeouts.git_subprocess_s,
+    )
+    if result.returncode != 0:
+        return (False, f"git_worktree_remove_failed:{result.stderr.strip()}")
+    logger.info(f"Reaped idle worktree: {worktree_dir}")
+    return (True, "removed")
 
 
 # Success marker for per-worktree venv provisioning (issue #2052). Written

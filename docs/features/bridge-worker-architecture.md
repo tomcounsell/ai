@@ -680,7 +680,7 @@ inventory, keyed by the module that actually owns each symbol:
 `agent.session_revival`
 - `maybe_send_revival_prompt` — send a revival prompt to a dormant session
 - `queue_revival_agent_session` — enqueue a revival session from a reply
-- `cleanup_stale_branches` — clean up stale git branches on startup
+- `cleanup_stale_branches` — clean up stale git branches on startup (and the worktree of a stale `session/nightly-triage-*` branch, see `docs/features/nightly-triage-dispatch.md#lane-reaping`)
 
 Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, `_cleanup_orphaned_claude_processes`, `_reap_orphan_session_processes`, or `register_worker_pid` imported in `bridge/telegram_bridge.py`, that is a regression.
 

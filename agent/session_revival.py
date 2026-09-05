@@ -7,7 +7,12 @@ import time
 from pathlib import Path
 
 from agent.branch_manager import get_branch_state, get_plan_context, sanitize_branch_name
-from agent.worktree_manager import merged_via_tree, safe_delete_branch
+from agent.worktree_manager import (
+    merged_via_tree,
+    reap_idle_worktree,
+    safe_delete_branch,
+    stale_nightly_triage_slug,
+)
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -194,6 +199,14 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
     """
     Clean up session branches older than max_age_hours.
     Returns list of cleaned branch names.
+
+    A ``session/nightly-triage-*`` branch past the window also has its
+    ``.worktrees/nightly-triage-*`` lane reaped first, through the fail-closed
+    :func:`agent.worktree_manager.reap_idle_worktree` (issue #3162). Those
+    lanes are single-shot triage sessions that nothing revisits, and a checked
+    -out branch cannot be deleted, so without this step the branch and its
+    worktree would outlive every sweep. Every other namespace keeps its
+    worktree; only the branch is considered.
     """
     wd = Path(working_dir)
     cleaned = []
@@ -209,7 +222,11 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
         )
-        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
+        # `git branch --list` marks the current branch with `* ` and a branch
+        # checked out in any other worktree with `+ `. Every lane branch is
+        # checked out in its worktree, so stripping only `*` used to drop the
+        # exact branches this sweep exists for (issue #3162).
+        branches = [b.strip().lstrip("*+ ") for b in result.stdout.strip().split("\n") if b.strip()]
 
         for branch in branches:
             age_result = subprocess.run(
@@ -228,6 +245,26 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
                 continue
 
             age_hours = (time.time() - last_commit_ts) / 3600
+
+            triage_slug = stale_nightly_triage_slug(branch, age_hours, max_age_hours)
+            if triage_slug is not None:
+                try:
+                    removed, reason = reap_idle_worktree(wd, triage_slug)
+                except Exception as e:
+                    removed, reason = False, f"reap_error:{type(e).__name__}"
+                if removed:
+                    logger.info(
+                        "Reaped idle nightly-triage worktree .worktrees/%s (age: %.1fh)",
+                        triage_slug,
+                        age_hours,
+                    )
+                elif reason != "missing":
+                    logger.warning(
+                        "Kept nightly-triage worktree .worktrees/%s: %s (age: %.1fh)",
+                        triage_slug,
+                        reason,
+                        age_hours,
+                    )
 
             if age_hours > max_age_hours:
                 # Guard deletion against unmerged commits (issue #1646)

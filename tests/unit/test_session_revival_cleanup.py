@@ -8,8 +8,12 @@ Verifies the scheduler-driven stale-branch cleanup vector is closed:
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from agent.worktree_manager import merged_via_tree, safe_delete_branch
 
@@ -151,3 +155,94 @@ class TestSiteDStaleBranchCleanup:
         assert merged_via_tree(str(repo), branch, "main") is True, (
             "merged_via_tree should return True for squash-merged branch"
         )
+
+
+# ---------------------------------------------------------------------------
+# Nightly-triage lane reaping (issue #3162)
+# ---------------------------------------------------------------------------
+
+
+def _commit_dated(repo: Path, message: str, when: str) -> None:
+    env = {**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", message],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+
+
+def _registered_worktrees(repo: Path) -> set[Path]:
+    out = _git(repo, "worktree", "list", "--porcelain").stdout
+    return {
+        Path(line.split(" ", 1)[1]).resolve()
+        for line in out.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
+class TestNightlyTriageLaneSweep:
+    """cleanup_stale_branches reaps a stale nightly-triage worktree, and only that namespace.
+
+    Every lane here is checked out in its worktree, so ``git branch --list``
+    reports it with the ``+ `` marker. These tests therefore also pin the
+    branch-list parsing: a sweep that drops the marker's branches never sees a
+    lane at all.
+    """
+
+    @pytest.fixture
+    def idle_lanes(self, monkeypatch):
+        import agent.worktree_manager as wm
+
+        monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+        monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("clear", ""))
+
+    @staticmethod
+    def _add_lane(repo: Path, slug: str, when: str) -> Path:
+        lane = repo / ".worktrees" / slug
+        _git(repo, "worktree", "add", "-b", f"session/{slug}", str(lane), "main")
+        _commit_dated(lane, f"lane {slug}", when)
+        return lane
+
+    async def test_stale_triage_lane_is_reaped_and_branch_deleted(self, tmp_path, idle_lanes):
+        from agent.session_revival import cleanup_stale_branches
+
+        repo = _make_repo(tmp_path)
+        old = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
+        lane = self._add_lane(repo, "nightly-triage-1a2b3c4d", old)
+
+        cleaned = await cleanup_stale_branches(str(repo), max_age_hours=72)
+
+        assert "session/nightly-triage-1a2b3c4d" in cleaned
+        assert not lane.exists()
+        assert lane.resolve() not in _registered_worktrees(repo)
+        assert not _branch_exists(repo, "session/nightly-triage-1a2b3c4d")
+
+    async def test_young_triage_lane_is_untouched(self, tmp_path, idle_lanes):
+        from agent.session_revival import cleanup_stale_branches
+
+        repo = _make_repo(tmp_path)
+        recent = (datetime.now(UTC) - timedelta(hours=10)).isoformat()
+        lane = self._add_lane(repo, "nightly-triage-1a2b3c4d", recent)
+
+        cleaned = await cleanup_stale_branches(str(repo), max_age_hours=72)
+
+        assert cleaned == []
+        assert lane.is_dir()
+        assert _branch_exists(repo, "session/nightly-triage-1a2b3c4d")
+
+    async def test_other_namespaces_keep_their_worktree(self, tmp_path, idle_lanes):
+        """A stale dev lane's branch stays checked out; the sweep only reaps triage lanes."""
+        from agent.session_revival import cleanup_stale_branches
+
+        repo = _make_repo(tmp_path)
+        old = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
+        lane = self._add_lane(repo, "dev-a4e15370", old)
+
+        cleaned = await cleanup_stale_branches(str(repo), max_age_hours=72)
+
+        assert cleaned == []
+        assert lane.is_dir()
+        assert _branch_exists(repo, "session/dev-a4e15370")

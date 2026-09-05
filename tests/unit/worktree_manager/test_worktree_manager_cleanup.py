@@ -1,16 +1,184 @@
 """Unit tests for agent/worktree_manager.py — worktree cleanup and lookup."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import agent.worktree_manager as wm
 from agent.worktree_manager import (
     _cleanup_stale_worktree,
     _find_worktree_for_branch,
     _validate_slug,
     cleanup_after_merge,
+    reap_idle_worktree,
+    stale_nightly_triage_slug,
 )
+
+
+class TestStaleNightlyTriageSlug:
+    """Selection for the nightly-triage worktree sweep (issue #3162)."""
+
+    WINDOW = 72.0
+
+    def test_old_nightly_triage_branch_is_selected(self):
+        assert (
+            stale_nightly_triage_slug("session/nightly-triage-1a2b3c4d", 73.0, self.WINDOW)
+            == "nightly-triage-1a2b3c4d"
+        )
+
+    def test_young_nightly_triage_branch_is_not_selected(self):
+        assert (
+            stale_nightly_triage_slug("session/nightly-triage-1a2b3c4d", 71.0, self.WINDOW) is None
+        )
+
+    def test_branch_exactly_at_window_is_not_selected(self):
+        assert (
+            stale_nightly_triage_slug("session/nightly-triage-1a2b3c4d", self.WINDOW, self.WINDOW)
+            is None
+        )
+
+    def test_seed_dispatch_suffix_is_selected(self):
+        """Re-baseline dispatches use a named suffix instead of a hash."""
+        assert (
+            stale_nightly_triage_slug("session/nightly-triage-idempotency-3075", 100.0, self.WINDOW)
+            == "nightly-triage-idempotency-3075"
+        )
+
+    @pytest.mark.parametrize(
+        "branch",
+        [
+            "session/dev-a4e15370",
+            "session/sdlc-3162",
+            "session/nightly-baseline",
+            "session/dev-nightly-triage-1a2b3c4d",
+            "nightly-triage-1a2b3c4d",
+            "session/nightly-triage-",
+        ],
+    )
+    def test_other_namespaces_are_never_selected(self, branch):
+        assert stale_nightly_triage_slug(branch, 1000.0, self.WINDOW) is None
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+
+@pytest.fixture
+def lane_repo(tmp_path):
+    """A real repo with one clean nightly-triage lane checked out under .worktrees/."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("initial\n")
+    (repo / "tracked.py").write_text("print('hi')\n")
+    _git(repo, "add", "README.md", "tracked.py")
+    _git(repo, "commit", "-m", "initial")
+    slug = "nightly-triage-1a2b3c4d"
+    lane = repo / ".worktrees" / slug
+    _git(repo, "worktree", "add", "-b", f"session/{slug}", str(lane), "main")
+    return repo, slug, lane
+
+
+@pytest.fixture
+def idle(monkeypatch):
+    """Neutralize the process and session guards so a test can trip exactly one."""
+    monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+    monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("clear", ""))
+
+
+class TestReapIdleWorktree:
+    """Fail-closed teardown of a nightly-triage lane (issue #3162)."""
+
+    def test_clean_idle_lane_is_removed_without_preserve(self, lane_repo, idle, monkeypatch):
+        repo, slug, lane = lane_repo
+        preserve_calls = []
+        monkeypatch.setattr(
+            wm,
+            "preserve_uncommitted_worktree_changes",
+            lambda *a, **k: preserve_calls.append(a),
+        )
+
+        assert reap_idle_worktree(repo, slug) == (True, "removed")
+
+        assert not lane.exists()
+        assert _find_worktree_for_branch(repo, f"session/{slug}") is None
+        assert preserve_calls == [], "a clean tree has nothing to preserve"
+
+    def test_half_deleted_tree_is_kept_and_never_preserved(self, lane_repo, idle, monkeypatch):
+        """The #3167 shape: tracked files vanished from disk.
+
+        The lane reads as dirty and is skipped. The preserve path must not
+        run, because committing that state is the data-loss mechanism.
+        """
+        repo, slug, lane = lane_repo
+        (lane / "tracked.py").unlink()
+        preserve_calls = []
+        monkeypatch.setattr(
+            wm,
+            "preserve_uncommitted_worktree_changes",
+            lambda *a, **k: preserve_calls.append(a),
+        )
+
+        assert reap_idle_worktree(repo, slug) == (False, "uncommitted_changes")
+
+        assert lane.is_dir()
+        assert preserve_calls == []
+
+    def test_untracked_file_keeps_the_lane(self, lane_repo, idle):
+        repo, slug, lane = lane_repo
+        (lane / "scratch.txt").write_text("notes\n")
+
+        assert reap_idle_worktree(repo, slug) == (False, "uncommitted_changes")
+        assert lane.is_dir()
+
+    def test_live_process_keeps_the_lane(self, lane_repo, monkeypatch):
+        repo, slug, lane = lane_repo
+        monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: 4242)
+        monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("clear", ""))
+
+        assert reap_idle_worktree(repo, slug) == (False, "live_process:4242")
+        assert lane.is_dir()
+
+    def test_live_session_keeps_the_lane(self, lane_repo, monkeypatch):
+        repo, slug, lane = lane_repo
+        monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+        monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("busy", "sess-1"))
+
+        assert reap_idle_worktree(repo, slug) == (False, "live_session:sess-1")
+        assert lane.is_dir()
+
+    def test_busy_probe_error_fails_closed(self, lane_repo, monkeypatch):
+        repo, slug, lane = lane_repo
+        monkeypatch.setattr(wm, "_worktree_has_live_process", lambda _p: None)
+        monkeypatch.setattr(
+            wm, "worktree_busy_probe", lambda _r, _s: ("error", "query_failed:ConnectionError")
+        )
+
+        assert reap_idle_worktree(repo, slug) == (
+            False,
+            "busy_check_error:query_failed:ConnectionError",
+        )
+        assert lane.is_dir()
+
+    def test_branch_checked_out_elsewhere_is_left_alone(self, lane_repo, idle, tmp_path):
+        """A directory at the lane path that is not the branch's worktree stays."""
+        repo, slug, lane = lane_repo
+        elsewhere = tmp_path / "elsewhere"
+        _git(repo, "worktree", "remove", "--force", str(lane))
+        _git(repo, "worktree", "add", str(elsewhere), f"session/{slug}")
+        lane.mkdir()
+        (lane / "leftover").write_text("x\n")
+
+        assert reap_idle_worktree(repo, slug) == (False, "not_registered_at_lane_path")
+        assert lane.is_dir()
+        assert elsewhere.is_dir()
+
+    def test_missing_lane_reports_missing(self, tmp_path, idle):
+        assert reap_idle_worktree(tmp_path, "nightly-triage-ffffffff") == (False, "missing")
 
 
 class TestValidateSlug:
