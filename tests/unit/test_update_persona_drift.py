@@ -1,4 +1,4 @@
-"""Unit tests for PM persona overlay drift check.
+"""Unit tests for the persona overlay drift check (engineer + teammate).
 
 Exercises the real implementation in ``scripts.update.persona_drift`` so the
 production code (Step 4.10 in ``scripts/update/run.py``) is covered by these
@@ -12,6 +12,8 @@ Verifies:
   - Both absent → no warning, no error
   - IOError reading file → warning appended, no crash
   - Default repo template path resolves to the real PM persona file
+  - The teammate pair (added for issue #2733) gets the same coverage, plus
+    ``check_all_persona_drift`` aggregation across both pairs
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ from unittest.mock import patch
 
 from scripts.update.persona_drift import (
     DEFAULT_TEMPLATE_REL,
+    PERSONA_OVERLAY_PAIRS,
+    TEAMMATE_TEMPLATE_REL,
+    PersonaOverlayPair,
+    check_all_persona_drift,
     check_pm_persona_drift,
 )
 
@@ -29,13 +35,15 @@ def _setup(
     tmp_path: Path,
     template_text: str | None,
     overlay_text: str | None,
+    *,
+    template_rel: Path = DEFAULT_TEMPLATE_REL,
 ) -> tuple[Path, Path]:
-    """Create a fake project_dir with the template at the real relative path
+    """Create a fake project_dir with the template at the given relative path
     and an overlay file alongside. Returns (project_dir, overlay_path).
     """
     project_dir = tmp_path / "repo"
     project_dir.mkdir()
-    template_path = project_dir / DEFAULT_TEMPLATE_REL
+    template_path = project_dir / template_rel
     if template_text is not None:
         template_path.parent.mkdir(parents=True, exist_ok=True)
         template_path.write_text(template_text)
@@ -153,3 +161,130 @@ def test_default_template_path_points_at_real_file():
         f"DEFAULT_TEMPLATE_REL ({DEFAULT_TEMPLATE_REL}) does not resolve to a real file "
         f"at {template_path}. The drift check would silently no-op on every machine."
     )
+
+
+# === Teammate pair (issue #2733) ================================================
+#
+# Added after a private ~/Desktop/Valor/personas/teammate.md stub was found
+# silently shadowing the repo-maintained overlay. This is the fleet-wide
+# mechanism: it surfaces that shadow on any other machine that still has one.
+
+
+def test_teammate_template_path_points_at_real_file():
+    """The teammate template path resolves to a real file, same regression
+    class as test_default_template_path_points_at_real_file above."""
+    repo_root = Path(__file__).resolve().parents[2]
+    template_path = repo_root / TEAMMATE_TEMPLATE_REL
+    assert template_path.exists(), (
+        f"TEAMMATE_TEMPLATE_REL ({TEAMMATE_TEMPLATE_REL}) does not resolve to a real "
+        f"file at {template_path}. The drift check would silently no-op."
+    )
+
+
+def test_teammate_overlay_absent_no_warning(tmp_path):
+    """Absent-overlay case: a fresh machine with no private teammate.md gets
+    no warning (not "the overlay drifted to nothing")."""
+    project_dir, _ = _setup(
+        tmp_path, "# Teammate Persona\n", None, template_rel=TEAMMATE_TEMPLATE_REL
+    )
+
+    warnings = check_pm_persona_drift(
+        project_dir,
+        template_rel=TEAMMATE_TEMPLATE_REL,
+        overlay_path=tmp_path / "nonexistent-teammate.md",
+        persona_name="teammate",
+    )
+
+    assert warnings == []
+
+
+def test_teammate_overlay_drift_produces_labeled_warning(tmp_path):
+    """Drifted-overlay case: a shadowing private teammate.md that differs
+    from the repo copy produces exactly one warning, labeled 'teammate' so
+    it is never mistaken for the engineer/PM warning."""
+    project_dir, overlay = _setup(
+        tmp_path,
+        "# Teammate Persona\n\nCasual and friendly.\n",
+        "# Teammate Persona\n\nCasual and friendly, but a 9-line stub.\n",
+        template_rel=TEAMMATE_TEMPLATE_REL,
+    )
+
+    warnings = check_pm_persona_drift(
+        project_dir,
+        template_rel=TEAMMATE_TEMPLATE_REL,
+        overlay_path=overlay,
+        persona_name="teammate",
+    )
+
+    assert len(warnings) == 1
+    assert "teammate persona overlay drift" in warnings[0]
+    assert "PM persona" not in warnings[0]
+
+
+def test_teammate_template_unreadable_warns_not_raises(tmp_path):
+    """An unreadable teammate template produces a warning, never an
+    exception -- the never-raise contract must hold per-pair."""
+    project_dir, overlay = _setup(
+        tmp_path,
+        "# Teammate Persona\n",
+        "# Teammate Persona\n",
+        template_rel=TEAMMATE_TEMPLATE_REL,
+    )
+    template_path = project_dir / TEAMMATE_TEMPLATE_REL
+
+    original_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == template_path:
+            raise OSError("Permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", failing_read_text):
+        warnings = check_pm_persona_drift(
+            project_dir,
+            template_rel=TEAMMATE_TEMPLATE_REL,
+            overlay_path=overlay,
+            persona_name="teammate",
+        )
+
+    assert len(warnings) == 1
+    assert "WARNING" in warnings[0] or "drift check failed" in warnings[0]
+
+
+def test_persona_overlay_pairs_covers_engineer_and_teammate():
+    """PERSONA_OVERLAY_PAIRS is the single source `/update` Step 4.10 loops
+    over -- pin its membership so a future pair addition is deliberate."""
+    names = {pair.name for pair in PERSONA_OVERLAY_PAIRS}
+    assert names == {"engineer", "teammate"}
+
+
+def test_check_all_persona_drift_aggregates_both_pairs(tmp_path):
+    """check_all_persona_drift runs every pair and aggregates warnings --
+    both an engineer-side and a teammate-side drift produce two labeled
+    warnings, not one clobbering the other."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+
+    engineer_template = project_dir / DEFAULT_TEMPLATE_REL
+    engineer_template.parent.mkdir(parents=True, exist_ok=True)
+    engineer_template.write_text("# Engineer\noriginal\n")
+    engineer_overlay = tmp_path / "overlay-engineer.md"
+    engineer_overlay.write_text("# Engineer\nchanged\n")
+
+    teammate_template = project_dir / TEAMMATE_TEMPLATE_REL
+    teammate_template.write_text("# Teammate\noriginal\n")
+    teammate_overlay = tmp_path / "overlay-teammate.md"
+    teammate_overlay.write_text("# Teammate\nchanged\n")
+
+    with patch(
+        "scripts.update.persona_drift.PERSONA_OVERLAY_PAIRS",
+        [
+            PersonaOverlayPair("engineer", DEFAULT_TEMPLATE_REL, engineer_overlay),
+            PersonaOverlayPair("teammate", TEAMMATE_TEMPLATE_REL, teammate_overlay),
+        ],
+    ):
+        warnings = check_all_persona_drift(project_dir)
+
+    assert len(warnings) == 2
+    assert any("engineer persona overlay drift" in w for w in warnings)
+    assert any("teammate persona overlay drift" in w for w in warnings)

@@ -2178,11 +2178,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # --verify mode: report drift but do not warn aggressively
             _append_warning(result, f"BYOB MCP drift: {mcp_byob_result.message}")
 
-    # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
-    # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
-    # All logic lives in scripts/update/persona_drift.py so unit tests exercise the real code.
-    log("Checking PM persona overlay drift...", v)
-    _persona_warnings = persona_drift.check_pm_persona_drift(project_dir)
+    # Step 4.10: Check persona overlay drift between in-repo templates and private
+    # vault overlays (engineer + teammate — see persona_drift.PERSONA_OVERLAY_PAIRS).
+    # Surface only — never auto-merges. Fails gracefully if a vault file is absent
+    # (fresh machine). All logic lives in scripts/update/persona_drift.py so unit
+    # tests exercise the real code.
+    log("Checking persona overlay drift...", v)
+    _persona_warnings = persona_drift.check_all_persona_drift(project_dir)
     if _persona_warnings:
         # Human-gated (#2893): the vault overlay is a standing per-machine
         # customization that no /update cycle can reconcile, so this collapses
@@ -2198,9 +2200,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Resolved — clear stored state (and emit one resolved note) so a
         # future regression warns again instead of staying silent.
         if warn_state.should_emit("persona-drift", "", project_dir):
-            log("  PM persona overlay drift: resolved", v, always=True)
+            log("  Persona overlay drift: resolved", v, always=True)
             result.warn_keys_emitted.add("persona-drift")
-        log("  PM persona overlay: in sync (or files absent)", v)
+        log("  Persona overlays: in sync (or files absent)", v)
 
     # Step 4.95: Check that each active project repo has a '## Running' README section.
     # Warn only — never blocks the update. Guides devs to document startup commands

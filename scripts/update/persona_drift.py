@@ -1,13 +1,15 @@
-"""Engineer persona overlay drift check.
+"""Persona overlay drift check.
 
-Compares the in-repo engineer persona template against the private per-machine
-vault overlay and returns a list of human-readable warnings. The check is
-purely a surface — it never auto-merges, never mutates files, and never
-raises (any unexpected error becomes a warning).
+Compares an in-repo persona template against its private per-machine vault
+overlay and returns a list of human-readable warnings. The check is purely a
+surface — it never auto-merges, never mutates files, and never raises (any
+unexpected error becomes a warning).
 
-The default template path matches the actual file in the repo
-(`config/personas/engineer.md`); the `config/personas/segments/`
-directory holds universal segments only and has no `engineer.md`.
+Covers two persona pairs (see ``PERSONA_OVERLAY_PAIRS``): ``engineer``
+(the original PM/engineer check) and ``teammate`` (added for issue #2733,
+after a private ``teammate.md`` stub was found silently shadowing the
+repo-maintained overlay — this is the fleet-wide mechanism that surfaces
+that shadow on any other machine instead of it loading silently).
 
 Used by `scripts/update/run.py` Step 4.10 and exercised end-to-end by
 `tests/unit/test_update_persona_drift.py`.
@@ -17,9 +19,30 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
+from typing import NamedTuple
 
 DEFAULT_TEMPLATE_REL = Path("config/personas/engineer.md")
 DEFAULT_OVERLAY_PATH = Path.home() / "Desktop" / "Valor" / "personas" / "engineer.md"
+
+TEAMMATE_TEMPLATE_REL = Path("config/personas/teammate.md")
+TEAMMATE_OVERLAY_PATH = Path.home() / "Desktop" / "Valor" / "personas" / "teammate.md"
+
+
+class PersonaOverlayPair(NamedTuple):
+    """One persona's (repo template, private overlay) pair to drift-check."""
+
+    name: str
+    template_rel: Path
+    overlay_path: Path
+
+
+# Every persona pair `/update` Step 4.10 checks. Add a row here to cover a
+# new persona; `check_all_persona_drift` loops over this list, so covering a
+# second persona is a loop, not a rewrite of the check itself.
+PERSONA_OVERLAY_PAIRS: list[PersonaOverlayPair] = [
+    PersonaOverlayPair("engineer", DEFAULT_TEMPLATE_REL, DEFAULT_OVERLAY_PATH),
+    PersonaOverlayPair("teammate", TEAMMATE_TEMPLATE_REL, TEAMMATE_OVERLAY_PATH),
+]
 
 
 def check_pm_persona_drift(
@@ -27,8 +50,9 @@ def check_pm_persona_drift(
     *,
     template_rel: Path = DEFAULT_TEMPLATE_REL,
     overlay_path: Path | None = None,
+    persona_name: str = "PM",
 ) -> list[str]:
-    """Return warnings produced by the engineer persona drift check.
+    """Return warnings produced by a persona overlay drift check.
 
     Parameters
     ----------
@@ -41,6 +65,10 @@ def check_pm_persona_drift(
     overlay_path:
         Absolute path to the private vault overlay. Defaults to
         ``~/Desktop/Valor/personas/engineer.md``.
+    persona_name:
+        Human-readable label used in the warning text (e.g. ``"PM"`` or
+        ``"teammate"``), so a warning about one persona is never mistaken
+        for another.
 
     Returns
     -------
@@ -79,9 +107,30 @@ def check_pm_persona_drift(
                 ]
             )
             warnings.append(
-                f"PM persona overlay drift: {diff_lines} lines differ. "
+                f"{persona_name} persona overlay drift: {diff_lines} lines differ. "
                 f"Run 'diff {repo_template} {overlay}' to review."
             )
     except Exception as exc:  # noqa: BLE001 - drift check must never crash /update
-        warnings.append(f"PM persona overlay drift check failed (WARNING): {exc}")
+        warnings.append(f"{persona_name} persona overlay drift check failed (WARNING): {exc}")
+    return warnings
+
+
+def check_all_persona_drift(project_dir: Path) -> list[str]:
+    """Run the drift check for every pair in ``PERSONA_OVERLAY_PAIRS``.
+
+    Aggregates warnings across all covered personas into a single list so
+    `/update` Step 4.10 can emit one combined report, matching the
+    single-key behavior it had before a second persona was added. Never
+    raises — each pair's check already contains its own failures.
+    """
+    warnings: list[str] = []
+    for pair in PERSONA_OVERLAY_PAIRS:
+        warnings.extend(
+            check_pm_persona_drift(
+                project_dir,
+                template_rel=pair.template_rel,
+                overlay_path=pair.overlay_path,
+                persona_name=pair.name,
+            )
+        )
     return warnings
