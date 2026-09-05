@@ -60,14 +60,42 @@ def drip_project(monkeypatch):
             pass
 
 
-def _status_of(session_id: str) -> str:
-    rows = AgentSession.query.filter(session_id=session_id)
-    return rows[0].status if rows else "<gone>"
+def _readback(session_id: str, pk: str, expected: str) -> tuple[bool, str]:
+    """Read the session's status back and describe what was found.
+
+    Returns ``(ok, detail)``. ``detail`` names the verdict explicitly (NO ROW
+    versus WRONG STATUS), then the project key the drip resolves, the Redis db
+    it reads, every AgentSession row matching ``session_id`` with its status,
+    and whether the two recovery flags the drip consumes are still present.
+    The two nightly-only failures (#3155, #3156) cannot be reproduced locally,
+    so the assertion message is the only evidence the next triage gets.
+    """
+    r = session_recovery_drip.get_redis()
+    resolved_pk = session_recovery_drip.get_project_key()
+    rows = AgentSession.rows_for_session_id(session_id)
+    statuses = [getattr(row, "status", None) for row in rows]
+    flags = " ".join(
+        f"{pk}:{suffix}={'present' if r.exists(f'{pk}:{suffix}') else 'absent'}"
+        for suffix in ("recovery:active", "worker:recovering")
+    )
+    db = r.connection_pool.connection_kwargs.get("db")
+    observed = statuses[0] if statuses else None
+    if observed is None:
+        verdict = f"NO ROW: zero AgentSession rows match session_id (expected status {expected!r})"
+    elif observed != expected:
+        verdict = f"WRONG STATUS: expected {expected!r}, got {observed!r}"
+    else:
+        verdict = "ok"
+    detail = (
+        f"{verdict}; session_id={session_id} project_key={pk} resolved_project_key={resolved_pk}"
+        f" redis_db={db} rows={len(rows)} statuses={statuses} {flags}"
+    )
+    return observed == expected, detail
 
 
 def test_drip_skips_paused_budget_but_drips_paused(drip_project):
     """A control ``paused`` session drips to pending; ``paused_budget`` does not."""
-    _pk, make = drip_project
+    pk, make = drip_project
     control = make("paused")
     budget = make("paused_budget")
 
@@ -75,10 +103,10 @@ def test_drip_skips_paused_budget_but_drips_paused(drip_project):
     for _ in range(5):
         session_recovery_drip.run()
 
-    assert _status_of(control.session_id) == "pending", "paused control should drip to pending"
-    assert _status_of(budget.session_id) == "paused_budget", (
-        "paused_budget must never be dripped — it is the flapping-loop guard"
-    )
+    ok, detail = _readback(control.session_id, pk, "pending")
+    assert ok, f"paused control should drip to pending. {detail}"
+    ok, detail = _readback(budget.session_id, pk, "paused_budget")
+    assert ok, f"paused_budget must never be dripped (flapping-loop guard). {detail}"
 
 
 def test_drip_ignores_flag_only_running_session(drip_project):
@@ -87,10 +115,11 @@ def test_drip_ignores_flag_only_running_session(drip_project):
     The drip only ever transitions paused states; a flag-only running session
     is never a candidate, so no status change can occur.
     """
-    _pk, make = drip_project
+    pk, make = drip_project
     running = make("running", budget_tripped=True)
 
     for _ in range(3):
         session_recovery_drip.run()
 
-    assert _status_of(running.session_id) == "running"
+    ok, detail = _readback(running.session_id, pk, "running")
+    assert ok, f"flag-only running session must stay running. {detail}"
