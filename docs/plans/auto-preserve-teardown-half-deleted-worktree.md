@@ -223,11 +223,49 @@ Every current caller discards the return value, so nothing downstream changes. T
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+
+`preserve_uncommitted_worktree_changes` has one broad `except Exception` at the bottom of its body, which is the documented non-blocking contract (it logs at ERROR with the `[worktree-wip-preserve-failed]` tag and returns the error in the result dict). `test_git_failure_returns_error_dict_and_never_raises` already asserts that observable behavior by patching `subprocess.run` to raise.
+
+- [ ] The new guard adds no new `except Exception: pass`. Its own failure mode is a narrow catch around the two `ls-files`/`ls-tree` reads that logs at WARNING and falls through to today's behavior.
+- [ ] Add `test_guard_computation_failure_falls_open_and_warns` — patch the `ls-files` calls to fail, assert the function still preserves a legitimately dirty tree and that a WARNING naming the guard was logged. This is the test that proves fail-open is deliberate rather than accidental.
+
+### Empty/Invalid Input Handling
+
+- [ ] **Unborn HEAD** (a worktree whose branch has no commits): `git ls-tree -d HEAD` fails. Covered by the fail-open path above; add an explicit case so the behavior is pinned rather than incidental.
+- [ ] **Empty repository / zero tracked files**: `deleted / tracked` would divide by zero. The absolute floor (`wipe_refusal_min_deleted_files`) is evaluated first and short-circuits, but add a guard test with a repo whose index is empty to pin it.
+- [ ] **Detached HEAD in the stale worktree**: the branch-resolution half of the fix must fall back to the directory name rather than writing `refs/session-wip/HEAD`. Test it.
+- [ ] **Untracked-only dirty tree**: zero deleted files, so neither guard fires and preservation proceeds. Already covered by `test_untracked_only_is_preserved`; re-run it as a non-regression.
+
+### Error State Rendering
+
+There is no user-visible surface here; the observable is the log line and the returned dict.
+
+- [ ] The refusal log must be ERROR (not WARNING) and must name the slug, the refusal reason, and the counts — a silent refusal is the same class of bug as the silent commit, just in the other direction. Assert on the log record in the refusal tests, the way the existing `worktree-wip-preserved` test does.
+- [ ] Give the refusal its own greppable tag, `[worktree-wip-refused-wipe]`, distinct from `[worktree-wip-preserve-failed]`, so an operator scanning logs can tell "we declined to save a wipe" from "git broke."
 
 ## Test Impact
 
-_placeholder_
+All existing tests for this function live in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`. Its fixtures (`_init_git_repo`, `_add_linked_worktree`, `_dirty`, `_git`) build real git repos with real linked worktrees, so the regression fixture is an addition to that file, not new scaffolding.
+
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py::TestPreserveUncommittedChanges::test_dirty_tree_preserved_in_named_ref_and_wip_commit` — **no change expected.** `_dirty()` modifies one tracked file, stages a second, and adds an untracked one: zero deletions, so neither guard fires. Re-run as the primary non-regression proof that legitimate work is still preserved.
+- [ ] `...::test_clean_tree_is_noop_and_creates_no_ref` — **no change expected.** The clean-tree early return runs before the guard.
+- [ ] `...::test_untracked_only_is_preserved` — **no change expected.** Zero deletions.
+- [ ] `...::test_git_failure_returns_error_dict_and_never_raises` — **UPDATE.** It patches `subprocess.run` to raise on *every* call, which now includes the guard's `ls-files` reads. Confirm the assertion still holds (`preserved: False`, error dict, `[worktree-wip-preserve-failed]` logged) and that the guard's own narrow catch does not swallow the failure before the outer handler sees it. Adjust the assertion if the error message changes shape.
+- [ ] `...::test_remove_worktree_preserves_dirty_tree_before_force_remove` — **no change expected.** `_dirty()` again; asserts the `remove_worktree` path still preserves. This is the test that proves the guard did not break Path B.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::…` (lines 298, 376) — **REVIEW, likely no change.** Both patch `preserve_uncommitted_worktree_changes` wholesale, so they are insulated from its internals. Confirm neither asserts on a return value whose shape changed.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_creation.py:38` — **no change expected.** Patches `_cleanup_stale_worktree` entirely.
+
+**New tests** (the regression suite the issue asks for), all in `test_worktree_manager_uncommitted.py`:
+
+- [ ] `test_missing_tracked_directory_refuses` — fixture worktree with tracked top-level directories deleted on disk; assert `preserved is False`, `refused == "missing-tracked-dirs"`, no new commit on the branch, no `refs/session-wip/{slug}` created, and the `[worktree-wip-refused-wipe]` ERROR logged with the missing directory names.
+- [ ] `test_majority_of_tracked_files_deleted_refuses` — every top-level directory still present but most tracked files removed; assert the proportional guard fires with `refused == "majority-deleted"`.
+- [ ] `test_wipe_with_untracked_artifacts_still_refuses` — the incident's actual shape (spike-3): tracked files deleted **and** untracked artifacts present so `add -A` would report insertions. Assert refusal. This test is the one that would have failed under the issue's proposed insertions-ratio predicate, and it exists to keep anyone from "simplifying" the guard back to that shape.
+- [ ] `test_large_deletion_with_real_work_is_preserved` — deletions above the floor but below the fraction, with genuine edits present; assert `preserved is True`. The false-positive boundary.
+- [ ] `test_index_untouched_on_refusal` — after a refusal, assert `git diff --cached --name-only` is empty. Pins the "check before `git add -A`" decision so a later refactor cannot quietly move the guard after staging.
+- [ ] `test_guard_computation_failure_falls_open_and_warns` — see Failure Path Test Strategy.
+- [ ] `test_ref_slug_follows_checked_out_branch` — a worktree directory named `foo` with `session/bar` checked out; assert the WIP ref is `refs/session-wip/bar`, matching the branch that received the commit. Pins the recon-found mismatch fix.
+- [ ] `test_detached_head_falls_back_to_directory_name` — the edge case of the previous test.
 
 ## Rabbit Holes
 
