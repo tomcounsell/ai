@@ -564,19 +564,83 @@ existing window.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+Carried from the issue's Downstream constraints and Dropped bucket, plus two the plan adds.
+
+- **No popoto floor change.** `pyproject.toml` keeps `popoto>=1.9.0`. Do not bump, do not pin exact.
+- **No new dependencies.**
+- **`renormalize_last_active_scores()` stays**, and so does its `MIGRATIONS` entry
+  (`backfill_job_last_active_scores`) and its `TestRenormalizeBatching` coverage.
+- **`bridge/poll_reconcile.py` and `bridge/poll_registry.py` stay untouched.** Their `tzinfo is None`
+  guards parse ISO strings the bridge writes itself with `datetime.now(UTC).isoformat()` through a
+  plain Redis `SET`, never through popoto. The 1.9.0 rationale does not reach them.
+- **The other seven modules carrying the same guard stay untouched**:
+  `agent/session_runner/liveness.py`, `agent/agent_session_queue.py`,
+  `monitoring/session_watchdog.py`, `monitoring/bridge_watchdog.py`, `reflections/crash_recovery.py`,
+  `models/agent_session.py`, `utils/utc.py`. Deliberately deferred to keep this chore small.
+- **`utils.utc.to_unix_ts` keeps its naive branch** regardless of anything decided here. It is the
+  documented general read-path coercer and its contract spans floats, ISO strings, and datetimes from
+  every source, not just popoto.
+- **`agent/session_pickup.py` ends up with no code change.** Named in the issue's Solution Sketch; the
+  Spike Results decision keeps all three of its coercers. Recorded as a decision so a reviewer does
+  not read it as an omission.
+- **No `raise`-on-naive hardening.** Changing `_ts` from coerce to reject is a behavior change on the
+  health-check hot path. Separate issue if wanted.
+- **No `AgentSession.save()` UTC-stamp removal.** `docs/features/utc-timestamps.md` gates that on
+  confirming `auto_now` fires on every save path, which is unfinished and unrelated to the Job score.
 
 ## Update System
 
-_placeholder_
+**No update-system changes required.**
+
+- `scripts/update/migrations.py` is edited, but only its docstring. `MIGRATIONS` is untouched,
+  `_migrate_backfill_job_last_active_scores` keeps its identity and behavior, and
+  `data/migrations_completed.json` needs no entry. No new migration is added — nothing about this
+  change requires a data touch, because the stored hashes were always correct and the scores are
+  already pure on every machine after the shipped one-shot sweep.
+- No new dependency, config file, env var, or secret to propagate.
+- `scripts/remote-update.sh` and `.claude/skills/update/` need no edits.
+- **Rollout ordering is unconstrained.** Machines share one Redis; a mixed fleet (some on the old
+  code still sweeping, some on the new code skipping) converges on the same scores because the sweep
+  repairs zero rows either way. See Race Conditions.
 
 ## Agent Integration
 
-_placeholder_
+**No agent integration required.** This is a model-internal and health-check-internal change.
+
+- No new CLI entry point in `pyproject.toml [project.scripts]`.
+- The bridge imports nothing new. `bridge/telegram_bridge.py` is untouched.
+- `Job` and `agent/session_health.py` are already reached through existing paths (the router's
+  bind-or-mint, the worker's health tick, `scripts/popoto_index_cleanup.run_cleanup`). No public
+  signature changes: `Job.save` keeps popoto's signature by inheriting it, and
+  `Job.repair_indexes()` keeps its `(quarantined, rebuilt)` return arity.
+- **Service restart is still required** after merge, per the repo's standing rule for worker and
+  agent code: `./scripts/valor-service.sh restart`, then confirm with `tail -5 logs/bridge.log`.
 
 ## Documentation
 
-_placeholder_
+Three feature docs currently describe the removed mechanism as current behavior. All three are
+updates, not new files, so no `docs/features/README.md` index entry is needed.
+
+- [ ] Update `docs/features/durability-model.md` (lines 79-108): rename the
+      `### last_active_at score purity (Job.save())` heading, which names a method that will no longer
+      exist. Replace the reattach paragraph with popoto's own contract (`convert_to_numeric`
+      normalizes naive → UTC since popoto#519/1.8.2; `_decode_datetime` returns aware UTC since
+      popoto#537/1.9.0). Keep the `backfill_job_last_active_scores` migration description; delete the
+      closing renormalize-after-rebuild rationale.
+- [ ] Update `docs/features/popoto-index-hygiene.md` (line 40): delete the "one extra step the other
+      guarded paths do not" paragraph's renormalize content — after this change `Job.repair_indexes()`
+      carries no extra step. Keep the cross-link to the durability model, retargeted at the renamed
+      heading.
+- [ ] Update `docs/features/utc-timestamps.md` (lines 87, 94): line 87's instruction to route
+      read-path conversions through `utils.utc.to_unix_ts` **stays** — it is the convention this plan
+      leans on — but its rationale changes from "popoto deserialization can return naive datetimes" to
+      the sources that genuinely still can (ISO strings, floats, non-popoto producers). Line 94's
+      "ai pins `popoto>=1.8.0`" becomes `popoto>=1.9.0`.
+- [ ] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`) and `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`.
+- [ ] Verify no feature doc is left dangling: `git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/` returns nothing describing the removed code as current.
+
+No new feature doc is created — this removes a mechanism rather than adding one, and no
+`docs/infra/` entry is needed (no new dependency, service, external API, or deployment change).
 
 ## Success Criteria
 
