@@ -205,11 +205,77 @@ defers the module-by-module consolidation. `_ts` stays; a follow-up may fold it 
 
 ## Data Flow
 
-_placeholder_
+### Write path: how `last_active_at` reaches a Redis score
+
+```
+Job.mint()            models/job.py:221   last_active_at=_now()      ─┐
+Job.touch()           models/job.py:500   self.last_active_at=_now() ─┼→ Model.save()
+Job.mark_active()     models/job.py:521   self.last_active_at=_now() ─┘      │
+                                                                             ▼
+                                          SortedFieldMixin.convert_to_numeric
+                                          (naive → UTC → .timestamp(); pure)
+                                                                             │
+                                                                             ▼
+                                          ZADD $SortF:Job:last_active_at:<room>
+```
+
+`git grep -n "last_active_at\s*=" -- '*.py'` outside `tests/` returns exactly four hits: the field
+declaration (`:129`), the reattach itself (`:181`), and the three writers above. `_now()` is
+`datetime.now(tz=UTC)` (`models/job.py:78-79`). **No production writer can produce a naive value**,
+and per spike-1 the score would be correct even if one did. The override is dead on both legs.
+
+### Read path
+
+```
+Job.query.get()/filter() → popoto _decode_datetime  ──→ aware UTC datetime (1.9.0)
+                             (encoding.py:105-162)          │
+                                                            ▼
+                              Job.recent_for_room() ZREVRANGE over the same scores
+```
+
+### The `repair_indexes` sweep
+
+```
+worker start → scripts/popoto_index_cleanup.run_cleanup()
+                 └→ _run_guarded_repairs() → Job.repair_indexes()
+                       ├─ leg 1: quarantine identity-less hashes
+                       ├─ leg 2: clear $IndexF:Job:* keys
+                       ├─ rebuild_indexes()   ← re-scores via field.on_save
+                       ├─ renormalize_last_active_scores()   ← THIS CALL GOES
+                       └─ backfill_open_expectations_index()
+```
+
+`rebuild_indexes()` re-scores each row through the same `field.on_save` → `convert_to_numeric` path
+proven pure in spike-1. Whether the rebuilt instance decodes aware (1.9.0) or naive (kill switch on),
+the score it writes is the UTC epoch. The sweep after it can only ever repair zero rows.
+
+The **other** caller stays: `scripts/update/migrations.py:1162` calls
+`Job.renormalize_last_active_scores()` from `_migrate_backfill_job_last_active_scores`, which is
+registered in `MIGRATIONS` and recorded in `data/migrations_completed.json`. An already-applied
+migration stays in the registry, so the classmethod and its `TestRenormalizeBatching` coverage stay.
 
 ## Architectural Impact
 
-_placeholder_
+**Direction: coupling removed, no new coupling added.** The repo currently holds a private copy of a
+timezone invariant that its dependency now guarantees. Three layers assert the same thing:
+popoto's `convert_to_numeric`, `Job.save()`'s reattach, and `renormalize_last_active_scores()`'s
+post-rebuild sweep. After this change, one layer asserts it — the one that owns the score.
+
+**What gets cheaper.** `Job.repair_indexes()` runs at every worker start via
+`scripts/popoto_index_cleanup.run_cleanup`. It currently pays an `SSCAN` walk of the whole Job class
+set plus two pipelines per 500-row chunk to repair a skew that cannot occur. Job is immortal (no
+`Meta.ttl`), so that cost grows with the lifetime population forever. Removing the call takes a
+guaranteed-zero-repair sweep off the worker-start critical path.
+
+**What gets riskier.** Nothing structurally, but the repo gives up a defence-in-depth layer it would
+have to re-add if the popoto floor were ever lowered below 1.8.2. That is bounded by
+`docs/features/popoto-version-floor-guard.md`, the existing fail-closed interlock that already
+refuses to rebuild indexes under a below-floor popoto. The floor guard is the mechanism that makes
+this removal safe to keep removed; the plan adds no new guard because one already exists.
+
+**`session_health.py` altitude.** Six inline coercions collapse into calls to the module's own named
+helper. The module keeps one place where "a naive timestamp means UTC" is written down, which is what
+`docs/features/utc-timestamps.md` has asked for since #777.
 
 ## Appetite
 
