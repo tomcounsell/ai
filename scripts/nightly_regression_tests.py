@@ -147,7 +147,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -291,6 +291,19 @@ MAX_ISSUES_PER_RUN_DEFAULT = 10
 # the evidence that exists.
 CASCADE_MIN_GROUP_SIZE_DEFAULT = 3
 
+# A group of nodes whose test BODIES fail with the same normalized first error
+# line is one root cause once it reaches this size (#3075: 2026-08-24 filed 39
+# issues over what were two causes, both body failures the setup-cascade path
+# could not see). Deliberately higher than the setup threshold: body failures
+# sharing a message are more often coincidence than setup storms are, and the
+# false-merge cost (two distinct bugs behind one umbrella) is real. The rule is
+# exact equality of the normalized first `E ` line — the 2026-08-24 second
+# cause (nine worker-key nodes inside a 66-node TypeError batch) had a
+# different first line and stays a separate group under it.
+#
+# Provisional/tunable via NIGHTLY_BODY_CASCADE_MIN_GROUP_SIZE.
+BODY_CASCADE_MIN_GROUP_SIZE_DEFAULT = 5
+
 # Ceiling on setup-error outcomes before validate_run_integrity calls the run
 # infrastructure rather than a red suite.
 #
@@ -312,6 +325,16 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 # triage sessions file the same title twice.
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
+
+# How many closed issues the closed-state dedup read pulls (#3075 defect 1:
+# a node whose exact-title issue was closed as a duplicate was re-reported as
+# "previously untriaged" forever, because dedup consulted open issues only).
+# `gh issue list` orders newest-CREATED first, not most-recently-updated, so
+# an old issue closed recently can sit outside this window, and the repo
+# already holds more closed issues than the limit. closed_issue_dispositions()
+# logs a warning when the read saturates the window so the truncation is
+# visible instead of silent.
+CLOSED_ISSUE_LIST_LIMIT = 1000
 
 # Posting one recurrence comment. Bounded on the same rule as the list read
 # above; a comment that cannot be posted is logged and the finding is left
@@ -1431,11 +1454,17 @@ def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
     titles = [f"Nightly regression: {n}" for n in dispatch_nodes]
     lines = [
         "Nightly regression detector found confirmed test failures that have not "
-        "been triaged before. For EACH node below, search open issues for the "
-        "EXACT title given. If found, comment on it with any new information. If "
-        "not found, open a new issue with EXACTLY that title, describing the "
-        "failure, its likely cause, and suggested next steps. Do NOT attempt an "
-        "auto-hotfix — this is an investigation-and-file-an-issue task only.\n",
+        "been triaged before. For EACH node below, search ALL issues — open AND "
+        "closed — for the EXACT title given. If an OPEN issue exists, comment on "
+        "it with any new information. If a CLOSED issue exists, the close reason "
+        "decides: closed as not-planned (duplicate/consolidated) — comment there "
+        "pointing at the recurrence and do NOT open a new issue, the consolidation "
+        "target is the live tracker; closed as completed (fixed) — the failure "
+        "recurring after a fix is new information, open a new issue with EXACTLY "
+        "the title and link the closed one. If no issue exists in any state, open "
+        "a new issue with EXACTLY that title, describing the failure, its likely "
+        "cause, and suggested next steps. Do NOT attempt an auto-hotfix — this is "
+        "an investigation-and-file-an-issue task only.\n",
     ]
     for node, title in zip(dispatch_nodes, titles, strict=True):
         lines.append(f'- Title: "{title}"\n  Node: {node}')
@@ -1488,25 +1517,118 @@ def setup_error_signature(test: dict) -> tuple[str, str] | None:
             worker = match.group(1)
             break
 
+    normalized = _normalized_first_error_line(message)
+    if not normalized:
+        return None
+    return worker, normalized
+
+
+def _normalized_first_error_line(message: str) -> str:
+    """First substantive line of a failure message, normalized for grouping.
+
+    Shared by the setup-cascade and body-failure signatures so the two cannot
+    drift in what counts as "the same error". Skips xdist's ``[gwN]`` banner
+    line (which would otherwise BE the signature for every node), strips
+    pytest's ``E `` error-line marker, collapses whitespace, and replaces digit
+    runs with ``#`` (ports, pids, worker numbers, temp-dir suffixes).
+    """
     first_line = ""
     for line in message.splitlines():
         stripped = line.strip()
-        # Skip xdist's own banner line, which carries the worker id and the
-        # interpreter path and would otherwise BE the signature for every node.
         if not stripped or _WORKER_RE.search(stripped):
             continue
         first_line = stripped
         break
     if not first_line:
-        return None
-
-    # Strip pytest's `E   ` error-line marker so the title reads as the exception,
-    # not as the report formatting around it.
+        return ""
     if first_line.startswith("E ") or first_line == "E":
         first_line = first_line[1:].strip()
+    return _DIGITS_RE.sub("#", " ".join(first_line.split()))
 
-    normalized = _DIGITS_RE.sub("#", " ".join(first_line.split()))
-    return worker, normalized
+
+def body_failure_signature(test: dict) -> str | None:
+    """Normalized first error line for a test that failed in its own BODY, else ``None``.
+
+    The complement of :func:`setup_error_signature`: setup must have passed and
+    the ``call`` phase must have failed, so the two signatures partition a
+    failure set rather than double-counting it.
+
+    Unlike a setup cascade, a body-failure group is keyed on the message alone,
+    never the worker: one broken shared dependency (the 2026-08-24 case was a
+    ``TypeError`` at argument binding inside the LLM wrapper) fails its callers
+    on every worker at once, and a per-worker key would split one cause into
+    ten groups all below threshold.
+    """
+    if (test.get("setup") or {}).get("outcome") != "passed":
+        return None
+    if (test.get("call") or {}).get("outcome") not in ("failed", "error"):
+        return None
+    message = _phase_text(test, "call")
+    if not message:
+        return None
+    return _normalized_first_error_line(message) or None
+
+
+# Failure text that names a NETWORK operation failing — DNS, TLS, connection
+# refused/reset, connect-phase timeouts — is environmental (#3075 defect 3,
+# carried from #2932): the code did not regress, the world around the run did.
+# Deliberately narrow: a bare TimeoutError / asyncio.TimeoutError is NOT here,
+# because unit-test timeouts are routinely genuine code regressions and
+# classifying them environmental would silence exactly the failures the
+# detector exists to catch. Matching is substring over each phase's NORMALIZED
+# FIRST ERROR LINE only, and assertion failures never classify: an assert-diff
+# that embeds "Connection refused" as compared DATA is a code-level
+# expectation mismatch, and matching raw full phase text silently suppressed
+# exactly that shape (#3142 review).
+_ENVIRONMENTAL_MARKERS = (
+    "socket.gaierror",
+    "getaddrinfo",
+    "name or service not known",
+    "nodename nor servname provided",
+    "temporary failure in name resolution",
+    "ssl.sslerror",
+    "sslcertverificationerror",
+    "certificate_verify_failed",
+    "ssl handshake",
+    "connectionrefusederror",
+    "connection refused",
+    "connectionreseterror",
+    "connection reset by peer",
+    "connecttimeout",
+    "httpx.connecterror",
+    "requests.exceptions.connectionerror",
+)
+
+
+def is_environmental_failure(test: dict) -> bool:
+    """True when EVERY failing phase is a network-layer fault, not a code path.
+
+    Each failing phase's normalized first error line is checked, lowercased. A
+    single code-level failure anywhere disqualifies the node: an assertion
+    failure (whatever its compared data contains) or any non-network error in
+    one phase means the node files, even when another phase — say a teardown
+    flake — looks environmental. Only a node whose failures are network-shaped
+    in every failing phase classifies: a genuine network fault surfaces as a
+    raised ConnectionRefusedError / gaierror / SSLError first line. A node
+    classified environmental is logged and excluded from filing — no issue, no
+    umbrella (the exclusion runs before cascade grouping) — and deliberately
+    NOT recorded as dispatched, so it re-evaluates every night and starts
+    filing again the moment its failure stops looking environmental. That
+    non-recording also means a persistently environmental-looking code bug is
+    silenced to log lines with no escalation path — tracked in #3163.
+    """
+    saw_environmental = False
+    for phase in ("setup", "call", "teardown"):
+        line = _normalized_first_error_line(_phase_text(test, phase)).lower()
+        if not line:
+            continue
+        if line.startswith(("assert ", "assertionerror")):
+            return False
+        if any(marker in line for marker in _ENVIRONMENTAL_MARKERS):
+            saw_environmental = True
+        else:
+            return False
+    return saw_environmental
 
 
 def cascade_title(message: str) -> str:
@@ -1519,6 +1641,97 @@ def cascade_title(message: str) -> str:
     """
     digest = hashlib.sha256(message.encode()).hexdigest()[:8]
     return f"Nightly regression cascade [{digest}]: {message[:80]}"
+
+
+_BODY_CASCADE_KEY_PREFIX = "body::"
+
+
+def body_cascade_title(message: str) -> str:
+    """The byte-stable umbrella title for one normalized body-failure group.
+
+    A separate namespace from :func:`cascade_title` so a body-failure group and
+    a setup cascade that happen to share a normalized message can never collide
+    on one title — they are different defects by construction (setup poisoning
+    vs. shared-dependency breakage) and merging their recurrence threads would
+    hide one behind the other.
+    """
+    digest = hashlib.sha256((_BODY_CASCADE_KEY_PREFIX + message).encode()).hexdigest()[:8]
+    return f"Nightly regression group [{digest}]: {message[:80]}"
+
+
+def cascade_state_key(cascade: dict) -> str:
+    """The ``cascade_issues`` persistence key for one cascade dict."""
+    if cascade.get("kind") == "body":
+        return _BODY_CASCADE_KEY_PREFIX + cascade["message"]
+    return cascade["message"]
+
+
+def title_for_state_key(key: str) -> str:
+    """Recompute the umbrella title a persisted ``cascade_issues`` key filed under."""
+    if key.startswith(_BODY_CASCADE_KEY_PREFIX):
+        return body_cascade_title(key[len(_BODY_CASCADE_KEY_PREFIX) :])
+    return cascade_title(key)
+
+
+def group_body_failure_cascades(
+    report: dict,
+    node_ids: list[str],
+    *,
+    min_group_size: int | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Split ``node_ids`` into same-root-cause body-failure groups and singles.
+
+    The 39-for-2 fix (#3075): nodes whose test bodies fail with an identical
+    normalized first error line are one root cause once the group is large.
+    Returns ``(groups, singles)`` in the same ``{"message", "title", "workers",
+    "nodes", "kind"}`` shape as :func:`group_setup_error_cascades`, so the two
+    share one filing path.
+
+    **False-merge risk, stated plainly:** two genuinely distinct defects that
+    raise the same exception with byte-identical normalized first lines will
+    merge into one umbrella. That is accepted as the smaller harm — the
+    triage session reads the node list and can split the issue, whereas 39
+    separate issues drowned the two real causes entirely. The grouping rule is
+    exact equality of the normalized line, nothing fuzzier, precisely to keep
+    that risk small: the 2026-08-24 second cause (worker-key assertions inside
+    a TypeError batch) had a different first line and stays separate under it.
+    """
+    if min_group_size is None:
+        min_group_size = resolve_int_knob(
+            "NIGHTLY_BODY_CASCADE_MIN_GROUP_SIZE", BODY_CASCADE_MIN_GROUP_SIZE_DEFAULT
+        )
+
+    tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
+
+    by_message: dict[str, list[str]] = {}
+    for node in node_ids:
+        signature = body_failure_signature(tests_by_id.get(node) or {})
+        if signature is None:
+            continue
+        by_message.setdefault(signature, []).append(node)
+
+    groups = []
+    for message in sorted(by_message):
+        nodes = by_message[message]
+        if len(nodes) < min_group_size:
+            continue
+        workers = set()
+        for node in nodes:
+            match = _WORKER_RE.search(_phase_text(tests_by_id.get(node) or {}, "call"))
+            if match:
+                workers.add(match.group(1))
+        groups.append(
+            {
+                "message": message,
+                "title": body_cascade_title(message),
+                "workers": sorted(workers),
+                "nodes": sorted(nodes),
+                "kind": "body",
+            }
+        )
+
+    grouped = {n for g in groups for n in g["nodes"]}
+    return groups, [n for n in node_ids if n not in grouped]
 
 
 def group_setup_error_cascades(
@@ -1571,7 +1784,13 @@ def group_setup_error_cascades(
         worker, message = signature
         cascade = by_message.setdefault(
             message,
-            {"message": message, "title": cascade_title(message), "workers": set(), "nodes": []},
+            {
+                "message": message,
+                "title": cascade_title(message),
+                "workers": set(),
+                "nodes": [],
+                "kind": "setup",
+            },
         )
         cascade["workers"].add(worker)
         cascade["nodes"].append(node)
@@ -1591,19 +1810,37 @@ def _build_cascade_prompt(cascade: dict) -> str:
     """Build the umbrella prompt for one cascade — ONE issue, node list collapsed."""
     nodes = cascade["nodes"]
     workers = ", ".join(cascade["workers"]) or "serial run"
+    if cascade.get("kind") == "body":
+        shape = (
+            f"{len(nodes)} test node(s) whose test BODIES all failed with the same "
+            "normalized error line — one shared root cause (a broken common "
+            "dependency), not independent findings"
+        )
+        error_label = "Shared failure line (normalized)"
+        cause_hint = "the shared root cause"
+    else:
+        shape = (
+            f"{len(nodes)} test node(s) that all errored in fixture SETUP with the same "
+            f"message, on xdist worker(s) {workers}"
+        )
+        error_label = "Shared setup error (normalized)"
+        cause_hint = "the likely cause of the poisoning"
     return (
         "Nightly regression detector found a CASCADE: "
-        f"{len(nodes)} test node(s) that all errored in fixture SETUP with the same "
-        f"message, on xdist worker(s) {workers}. This is ONE defect, not "
-        f"{len(nodes)}. Search open issues for the EXACT title below. If found, "
-        "comment on it with the new occurrence. If not found, open exactly ONE new "
-        "issue with EXACTLY that title. Put the full node list inside a collapsed "
-        "<details> section — the body must lead with the shared error and the likely "
-        "cause of the poisoning, not with the node list. Do NOT open per-node issues "
-        "for any node below. Do NOT attempt an auto-hotfix — investigate and file "
-        "only.\n\n"
+        f"{shape}. This is ONE defect, not "
+        f"{len(nodes)}. Search ALL issues — open AND closed — for the EXACT title "
+        "below. If an OPEN one exists, comment on it with the new occurrence. If a "
+        "CLOSED one exists: closed as not-planned means comment there and do NOT "
+        "re-file (its consolidation target is the live tracker); closed as "
+        "completed means the recurrence is new information — open exactly ONE new "
+        "issue with EXACTLY that title, linking the closed one. If none exists, "
+        "open exactly ONE new issue with EXACTLY that title. Put the full node "
+        "list inside a collapsed <details> section — the body must lead with the "
+        f"shared error and {cause_hint}, not with the node list. Do NOT open "
+        "per-node issues for any node below. Do NOT attempt an auto-hotfix — "
+        "investigate and file only.\n\n"
         f'Title: "{cascade["title"]}"\n\n'
-        f"Shared setup error (normalized): {cascade['message']}\n\n"
+        f"{error_label}: {cascade['message']}\n\n"
         "Affected node IDs:\n" + "\n".join(f"- {n}" for n in nodes)
     )
 
@@ -1669,6 +1906,158 @@ def open_issues(
     except Exception as exc:  # noqa: BLE001
         log(f"WARNING: could not parse open issues for dedup ({exc})")
         return None
+
+
+def closed_issue_dispositions(
+    *,
+    limit: int = CLOSED_ISSUE_LIST_LIMIT,
+    timeout: int = OPEN_ISSUE_LIST_TIMEOUT_SECONDS,
+) -> dict[str, tuple[int, str]] | None:
+    """Map ``title -> (number, state_reason)`` for closed issues, or ``None``.
+
+    The closed half of the dedup (#3075 defect 1). ``stateReason`` is what
+    makes closed state usable at all — closed-as-duplicate and closed-as-fixed
+    demand opposite responses:
+
+    - ``NOT_PLANNED`` (duplicate, consolidated, won't-fix): the finding is
+      already on record somewhere; re-filing it is the churn this exists to
+      end. The caller comments on the closed issue instead.
+    - ``COMPLETED`` (fixed): the node failing AGAIN after a fix is genuinely
+      new information and deserves a fresh issue. The caller re-files.
+    - Empty/unknown reason: treated like ``NOT_PLANNED`` — a comment preserves
+      the recurrence signal either way, and a comment on the wrong side costs
+      nothing where a duplicate issue costs tracker noise forever.
+
+    ``None`` means "could not tell"; the caller fails open by filing, matching
+    :func:`open_issues`.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "closed",
+                "--limit",
+                str(limit),
+                "--json",
+                "number,title,stateReason,closedAt",
+            ],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout,  # timeout-guard: allow
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: could not list closed issues for dedup ({exc})")
+        return None
+
+    if result.returncode != 0:
+        log(
+            f"WARNING: `gh issue list --state closed` exited {result.returncode} for dedup: "
+            f"{(result.stderr or '').strip()}"
+        )
+        return None
+
+    try:
+        rows = json.loads(result.stdout)
+        if len(rows) >= limit:
+            # INFO, not WARNING: at this repo's size (~1888 closed issues vs
+            # the 1000-row window) saturation is the steady state, so an
+            # alarm-grade line every night is noise. Scoping or widening the
+            # window is tracked in #3163.
+            log(
+                f"INFO: closed-issue dedup window saturated ({len(rows)} rows at the "
+                f"{limit} limit) — closures older than the window are "
+                "invisible to dedup and may re-file (#3163)"
+            )
+        # The authoritative disposition for a duplicated title is its newest
+        # CLOSURE (max closedAt), not its newest-created row: creation order
+        # diverges from closure order in exactly the wave-dup shape #3161
+        # keeps generating — a later-created duplicate closed NOT_PLANNED
+        # early while the original was closed COMPLETED later. Keying on
+        # creation order suppressed the design's one legitimate re-file case
+        # (a fixed bug regressing); keying on the last listed row resolved six
+        # live nodes to their oldest closure. Max closedAt drops any reliance
+        # on gh's implicit sort. A missing closedAt loses to any real one;
+        # among rows with none, the first (newest-created) wins as fallback.
+        dispositions: dict[str, tuple[int, str]] = {}
+        newest_closed_at: dict[str, str] = {}
+        for row in rows:
+            title = row.get("title")
+            if not title or row.get("number") is None:
+                continue
+            closed_at = str(row.get("closedAt") or "")
+            if title in dispositions and closed_at <= newest_closed_at[title]:
+                continue
+            dispositions[title] = (int(row["number"]), str(row.get("stateReason") or ""))
+            newest_closed_at[title] = closed_at
+        return dispositions
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: could not parse closed issues for dedup ({exc})")
+        return None
+
+
+def partition_closed_matches(
+    nodes: list[str], closed_map: dict[str, tuple[int, str]] | None
+) -> tuple[list[str], list[tuple[str, int, str]]]:
+    """Split unfiled candidates into ``(to_file, closed_matches)``.
+
+    Runs AFTER :func:`partition_already_open`, on the nodes with no open issue.
+    ``closed_matches`` holds ``(node, number, state_reason)`` for nodes whose
+    exact title matches a closed issue that must NOT be re-filed
+    (``NOT_PLANNED`` or unknown reason). A ``COMPLETED`` closure stays in
+    ``to_file`` — a failure recurring after its fix is new information, the
+    one legitimate re-file case.
+
+    ``closed_map`` of ``None`` (unreadable) disables the suppression rather
+    than guessing, same fail-open posture as the open partition.
+    """
+    if closed_map is None:
+        return list(nodes), []
+    to_file: list[str] = []
+    closed_matches: list[tuple[str, int, str]] = []
+    for node in nodes:
+        entry = closed_map.get(f"Nightly regression: {node}")
+        if entry is None or entry[1] == "COMPLETED":
+            to_file.append(node)
+        else:
+            closed_matches.append((node, entry[0], entry[1] or "unknown"))
+    return to_file, closed_matches
+
+
+def closed_epilogue(state_reason: str) -> str:
+    """The one policy sentence for a recurrence on a CLOSED, not-re-filed issue.
+
+    Shared by the per-node and cascade recurrence comments so the wording
+    cannot drift between the two (#3142 review nit: it already had).
+    """
+    return (
+        f"This issue is closed ({state_reason or 'unknown'}), so no duplicate was filed. "
+        "If this closure consolidated into another issue, that issue is the live tracker "
+        "for the recurrence; close as completed instead if recurrence should re-file."
+    )
+
+
+def closed_recurrence_comment(
+    node: str, state_reason: str, *, run_at: str, head_commit: str | None
+) -> str:
+    """Recurrence comment for a node whose issue is CLOSED and not re-filed.
+
+    Says explicitly why no new issue was opened, so a human reading the closed
+    issue understands the detector saw the recurrence and where the live
+    tracker is expected to be (a NOT_PLANNED closure normally points at its
+    consolidation target in its own close comment).
+    """
+    return "\n".join(
+        [
+            *_recurrence_header(run_at, head_commit),
+            f"- Node: `{node}`",
+            "",
+            closed_epilogue(state_reason),
+        ]
+    )
 
 
 def comment_on_issue(number: int, body: str, *, dry_run: bool = False) -> bool:
@@ -1782,7 +2171,7 @@ def resolve_cascade_issue(
     """
     if open_issue_map is None:
         return None
-    recorded = prev_cascade_issues.get(cascade["message"])
+    recorded = prev_cascade_issues.get(cascade_state_key(cascade))
     if isinstance(recorded, int) and recorded in set(open_issue_map.values()):
         return recorded
     return open_issue_map.get(cascade["title"])
@@ -1924,6 +2313,11 @@ class DispatchOutcome:
     session_id: str | None = None
     issues_filed: int = 0
     comments_posted: int = 0
+    # Nodes classified environmental (network-layer failure text) and filed
+    # nowhere. Deliberately never merged into ``recorded``: an environmental
+    # node re-evaluates every night and files normally the moment its failure
+    # stops looking environmental.
+    environmental: list[str] = field(default_factory=list)
 
 
 def carry_cascade_issues(
@@ -1951,14 +2345,14 @@ def carry_cascade_issues(
 
     open_numbers = set(open_issue_map.values())
     carried: dict[str, int | None] = {}
-    for message, number in prev_cascade_issues.items():
+    for key, number in prev_cascade_issues.items():
         if number is None:
-            resolved = open_issue_map.get(cascade_title(message))
+            resolved = open_issue_map.get(title_for_state_key(key))
             if resolved is not None:
-                carried[message] = resolved
+                carried[key] = resolved
             continue
         if number in open_numbers:
-            carried[message] = number
+            carried[key] = number
     return carried
 
 
@@ -1978,13 +2372,19 @@ def dispatch_findings(
     ordinary path and the integrity-trip path so the two cannot drift in how
     they dedup. The order is deliberate:
 
-    1. Collapse the blast radius (:func:`group_setup_error_cascades`) **before**
-       anything is filed. N nodes sharing one setup-error message are one
-       defect, and filing them individually is how 278 errors became 26 issues.
-    2. Read the open issues once, and only when there is something to file — a
-       clean night must not shell out to ``gh`` at all.
-    3. For every finding that already has an open issue, comment. For the rest,
-       spend the issue budget.
+    1. Collapse the blast radius **before** anything is filed: environmental
+       exclusion first (:func:`is_environmental_failure` — network faults file
+       nothing, not even a cascade umbrella, so a DNS outage poisoning fixture
+       setup on a whole worker cannot masquerade as a code regression), then
+       setup storms via :func:`group_setup_error_cascades` (278 errors once
+       became 26 issues), then same-root-cause body failures via
+       :func:`group_body_failure_cascades` (39 issues once covered 2 causes).
+    2. Read the open and closed issue sets once each, and only when there is
+       something to file — a clean night must not shell out to ``gh`` at all.
+    3. For every finding that already has an open issue, comment. For one whose
+       issue is CLOSED as not-planned, comment there — never re-file
+       (#3075 defect 1); a closure marked completed re-files, because failing
+       again after a fix is new information. For the rest, spend the budget.
 
     ``cascades_only`` suppresses per-node filing entirely. The integrity-trip
     path passes it: on a night this script has just declared infrastructural,
@@ -1996,21 +2396,48 @@ def dispatch_findings(
     shapes. Comments do not spend budget: the cap exists to bound how much
     *new* tracker surface one night creates, and a comment creates none.
     """
+    tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
+    # Environmental exclusion runs FIRST, on the full dispatch set, so a
+    # network fault that poisons fixture setup on a whole worker is excluded
+    # before cascade grouping can collapse it into a code-regression umbrella
+    # (#3142 review blocker: the grouped case is the most likely real-world
+    # environmental shape).
+    environmental = [
+        n for n in dispatch_nodes if is_environmental_failure(tests_by_id.get(n) or {})
+    ]
+    if environmental:
+        env_set = set(environmental)
+        dispatch_nodes = [n for n in dispatch_nodes if n not in env_set]
+        log(
+            f"{len(environmental)} node(s) classified ENVIRONMENTAL (network-layer "
+            "failure text) — no issue filed, re-evaluated next run: " + ", ".join(environmental)
+        )
+
     cascades, single_nodes = group_setup_error_cascades(report, dispatch_nodes)
+
+    if not cascades_only:
+        body_cascades, single_nodes = group_body_failure_cascades(report, single_nodes)
+        cascades = cascades + body_cascades
+
     for cascade in cascades:
+        shared = "one setup error" if cascade.get("kind") != "body" else "one failure line"
         log(
             f"Cascade collapsed: {len(cascade['nodes'])} node(s) on worker(s) "
-            f"{','.join(cascade['workers']) or 'serial'} share one setup error — "
+            f"{','.join(cascade['workers']) or 'serial'} share {shared} — "
             f"one finding, not {len(cascade['nodes'])}: {cascade['title']}"
         )
 
     open_issue_map = open_issues() if dispatch_nodes else None
     if dispatch_nodes and open_issue_map is None:
         log("Dedup disabled for this run (open issues unreadable) — failing open")
+    closed_issue_map = closed_issue_dispositions() if dispatch_nodes else None
+    if dispatch_nodes and closed_issue_map is None:
+        log("Closed-state dedup disabled for this run (closed issues unreadable) — failing open")
 
     outcome = DispatchOutcome(
         recorded=[],
         cascade_issues=carry_cascade_issues(prev.get("cascade_issues") or {}, open_issue_map),
+        environmental=environmental,
     )
 
     max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
@@ -2028,7 +2455,24 @@ def dispatch_findings(
             if posted:
                 outcome.comments_posted += 1
                 outcome.recorded.extend(cascade["nodes"])
-                outcome.cascade_issues[cascade["message"]] = existing
+                outcome.cascade_issues[cascade_state_key(cascade)] = existing
+            continue
+        closed_entry = (closed_issue_map or {}).get(cascade["title"])
+        if closed_entry is not None and closed_entry[1] != "COMPLETED":
+            # Closed as not-planned (duplicate/consolidated): the umbrella is
+            # already on record; re-filing it is the churn. Comment the
+            # recurrence there and deliberately record NO cascade_issues entry
+            # — the issue is closed, and a COMPLETED closure would have fallen
+            # through to a legitimate re-file instead.
+            number, reason = closed_entry
+            body = (
+                cascade_recurrence_comment(cascade, run_at=run_at, head_commit=head_commit)
+                + "\n\n"
+                + closed_epilogue(reason)
+            )
+            if comment_on_issue(number, body, dry_run=dry_run):
+                outcome.comments_posted += 1
+                outcome.recorded.extend(cascade["nodes"])
             continue
         if issue_budget <= 0:
             deferred_cascades.append(cascade)
@@ -2036,7 +2480,7 @@ def dispatch_findings(
         session_id = maybe_dispatch_triage_session(
             [f"cascade:{cascade['title']}"],
             prompt=_build_cascade_prompt(cascade),
-            slug_suffix=hashlib.sha256(cascade["message"].encode()).hexdigest()[:8],
+            slug_suffix=hashlib.sha256(cascade_state_key(cascade).encode()).hexdigest()[:8],
             dry_run=dry_run,
         )
         if session_id is not None:
@@ -2046,7 +2490,7 @@ def dispatch_findings(
             outcome.session_id = session_id
             # Pending: the triage session opens the issue, so its number is not
             # knowable here. carry_cascade_issues() upgrades this on a later run.
-            outcome.cascade_issues[cascade["message"]] = None
+            outcome.cascade_issues[cascade_state_key(cascade)] = None
 
     if deferred_cascades:
         log(
@@ -2075,6 +2519,22 @@ def dispatch_findings(
         log(
             f"{len(already_open)} node(s) already have an open issue — commented the "
             "recurrence instead of filing: " + ", ".join(n for n, _ in already_open)
+        )
+
+    single_nodes, closed_matches = partition_closed_matches(single_nodes, closed_issue_map)
+    for node, number, reason in closed_matches:
+        if comment_on_issue(
+            number,
+            closed_recurrence_comment(node, reason, run_at=run_at, head_commit=head_commit),
+            dry_run=dry_run,
+        ):
+            outcome.comments_posted += 1
+            outcome.recorded.append(node)
+    if closed_matches:
+        log(
+            f"{len(closed_matches)} node(s) have a CLOSED not-planned issue — commented "
+            "the recurrence there instead of re-filing (#3075): "
+            + ", ".join(n for n, _, _ in closed_matches)
         )
 
     if len(single_nodes) > issue_budget:
@@ -2340,9 +2800,13 @@ def main() -> int:
                 f"(old={prev.get('collection')!r}, new={COLLECTION_PATHS!r}). "
                 f"The following {seed_size} node(s) were already failing at the "
                 "moment of the re-baseline and have been absorbed into the seed — "
-                "they are NOT individually filed. Search open issues for the EXACT "
-                f'title "{seed_title}". If found, comment on it. If not found, open '
-                f"ONE umbrella issue with EXACTLY that title, summarizing the "
+                "they are NOT individually filed. Search open AND closed issues for "
+                f'the EXACT title "{seed_title}". If an open one exists, comment on '
+                "it. If a closed one exists, comment there and do NOT re-file — the "
+                "seed umbrella is a declaration, and a re-baseline retry at the same "
+                "commit must not mint a twin, whatever the close reason. Only if "
+                f"neither exists, open ONE umbrella issue with EXACTLY that title, "
+                "summarizing the "
                 "population, its size, and pointing at the persisted state file "
                 "for the full node list. Do NOT file per-node issues for these. Do "
                 "NOT attempt an auto-hotfix.\n\n"
@@ -2397,7 +2861,8 @@ def main() -> int:
             current["dispatched_session_id"] = outcome.session_id
         log(
             f"Tracker: {outcome.issues_filed} issue(s) filed, "
-            f"{outcome.comments_posted} recurrence comment(s) posted"
+            f"{outcome.comments_posted} recurrence comment(s) posted, "
+            f"{len(outcome.environmental)} node(s) excluded as environmental"
         )
 
     # Carry the seed's umbrella coverage forward on EVERY run, not just seed

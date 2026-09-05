@@ -21,7 +21,8 @@ added (issue #2823); baseline classification stage and shadow decision gate
 added (issue #2334) — see "Baseline Classification (Shadow Mode)" below;
 cascade collapsing, pre-file dedup, and a per-run issue budget added (issue
 #3131); comment-over-create, signature-keyed cascade identity, and removal of
-all notification added (issue #3134).
+all notification added (issue #3134); closed-issue-aware dedup, body-failure
+cascade collapsing, and environmental-failure exclusion added (issue #3075).
 Autonomous-fix action on the gate's verdict is **not shipped**; it is deferred
 to #3076.
 
@@ -62,12 +63,32 @@ to #3076.
   `Nightly regression cascade [{digest}]: {message}`, with the node list in a
   collapsed section. Detection groups by (worker, message); filing merges by
   message, so four identically-poisoned workers produce one issue
-- **Comments instead of filing a twin.** Open issues are read once via
-  `gh issue list --json number,title` (the REST path, not the index-lagged
-  `--search`) immediately before dispatch. A finding that already has an open
-  issue gets a recurrence comment carrying the run timestamp, HEAD, blast
-  radius, and xdist worker ids — not silence. An unreadable list fails open
-  (it files). This is the only dedup that spans machines
+- Collapses body-failure cascades the same way (issue #3075): nodes whose
+  failure normalizes to one identical first error line group into one umbrella
+  once the group reaches `BODY_CASCADE_MIN_GROUP_SIZE` (default 5, env
+  `NIGHTLY_BODY_CASCADE_MIN_GROUP_SIZE`), under a distinct `body::` state-key
+  namespace so setup and body umbrellas never collide. A node that fails alone
+  in its own body stays its own finding
+- Excludes environmental failures before any grouping or filing (issue #3075):
+  a node classifies environmental only when EVERY failing phase's normalized
+  first error line looks network-shaped (DNS, TLS, refused/reset, connect
+  errors) — an assertion failure in any phase disqualifies it, so a regression
+  whose assert-diff merely mentions a network string still files. Environmental
+  nodes file nothing and are deliberately never recorded as dispatched, so they
+  re-evaluate every night; the escalation gap for a persistent
+  environmental-looking failure is tracked in #3163
+- **Comments instead of filing a twin.** Open AND closed issues are read once
+  via `gh issue list` (the REST path, not the index-lagged `--search`)
+  immediately before dispatch. A finding with an open issue gets a recurrence
+  comment carrying the run timestamp, HEAD, blast radius, and xdist worker
+  ids — not silence. A finding whose exact title exists only CLOSED resolves
+  by the closure's `stateReason`, taken from the title's most recent closure
+  (max `closedAt`, since creation order diverges from closure order):
+  `NOT_PLANNED` means a human consolidated or declined it — comment on the
+  closed issue, never re-file; `COMPLETED` means it was fixed — failing again
+  is new information, so it re-files; an unknown reason comments. Either
+  unreadable list fails open (it files). This is the only dedup that spans
+  machines
 - Caps a single run at `MAX_ISSUES_PER_RUN` (10) issues, umbrellas and per-node
   alike drawing from one budget; the remainder is logged and retries on a later
   run. **Comments do not spend budget** — the cap bounds how much *new* tracker
@@ -85,6 +106,9 @@ a human is expected to notice; the log is the full record.
 | Run-integrity guard tripped | Cascade only — commented if already open, filed otherwise; per-node filing suppressed | `FATAL: {reason}` then `Integrity trip recorded: N issue(s) filed, M comment(s) posted` |
 | Newly-confirmed failure, no open issue | New issue via triage session | `Tracker: N issue(s) filed, M recurrence comment(s) posted` |
 | Newly-confirmed failure, issue already open | Recurrence comment on the existing issue | same line, with `M > 0` |
+| Newly-confirmed failure, exact title closed `NOT_PLANNED` (newest closure) | Recurrence comment on the closed issue; never re-filed | same line, with `M > 0` |
+| Newly-confirmed failure, exact title closed `COMPLETED` (newest closure) | New issue — failing again after a fix is new information | `Tracker: N issue(s) filed ...` |
+| Environmental failure (every failing phase network-shaped) | Nothing; unrecorded, re-evaluates nightly (escalation gap: #3163) | environmental exclusion logged, surfaced in the run summary |
 | Issue budget exhausted | Nothing; the finding stays unrecorded and retries next run | `Issue budget reached: deferring ...` |
 | Collection errors, no newly-confirmed failures | Nothing | `Collection error ({new_errors} errors)` |
 | TTFT regression | Nothing | `TTFT regression: {detail}` |
