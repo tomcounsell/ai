@@ -481,7 +481,7 @@ class Job(Model):
         A bounded reverse-range read over the ``last_active_at`` SortedField's
         per-Room partition: one ``ZREVRANGE`` for the top members, then one
         pipelined hydration of just those members. Cost is a function of
-        ``limit``, not of the Room's lifetime Job count — popoto 1.8.0's
+        ``limit``, not of the Room's lifetime Job count — popoto's
         ``QueryBuilder`` has no early-limit path for a SortedField, so a
         ``filter()`` here would hydrate every Job in the Room (twice, per
         popoto#2639) to answer a top-5 question. This runs on the bind-or-mint
@@ -739,18 +739,13 @@ class Job(Model):
     ) -> tuple[int, int]:
         """Sweep every recency score back to the pure UTC epoch its hash implies.
 
-        The single shared implementation behind two callers:
-
-        - the one-shot ``backfill_job_last_active_scores`` migration
-          (``scripts/update/migrations.py``), which sweeps skew written
-          before the :meth:`save` UTC-reattach override shipped; and
-        - :meth:`repair_indexes`, because popoto's ``rebuild_indexes()``
-          re-scores every row via ``field.on_save`` on naive-decoded
-          instances — ``naive.timestamp()`` is local time, bypassing the
-          :meth:`save` override entirely — so on a non-UTC host every
-          rebuild (run at worker startup via
-          ``scripts/popoto_index_cleanup.run_cleanup``) would re-skew every
-          score the migration repaired.
+        The one-shot repair behind the ``backfill_job_last_active_scores``
+        migration (``scripts/update/migrations.py``): it swept skew written
+        before popoto#519/1.8.2 made a ``SortedField(type=datetime)`` score a
+        pure function of the stored value regardless of tzinfo. That
+        migration has already run fleet-wide and stays recorded in
+        ``MIGRATIONS``, so this classmethod stays as its implementation —
+        it has no recurring caller.
 
         Cursored and pipelined (issue #2848). The class set is walked with
         ``SSCAN`` and re-chunked into ``batch_size`` rows. Each chunk costs
@@ -768,8 +763,7 @@ class Job(Model):
         A row whose score sits outside a 1-second tolerance is re-read fresh
         and repaired with the structural clobber-proof idiom
         ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
-        write that can never touch ``goal``/``status``, and one that names
-        the field so the :meth:`save` tz-reattach fires. Repairs are the only
+        write that can never touch ``goal``/``status``. Repairs are the only
         per-row writes and the only per-row round trips. **Instant-
         preserving**: each row keeps its own stored instant; no constant
         timestamp is ever stamped (spike-4 tie-break hazard). A Job whose
@@ -782,10 +776,9 @@ class Job(Model):
 
         Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
         the return when the enumeration itself fails before any row is seen
-        (Redis down) — the guard logs a WARNING and swallows the error so
-        :meth:`repair_indexes` still reaches
-        :meth:`backfill_open_expectations_index`. An ``SSCAN`` failure part
-        way through returns the counts accumulated so far.
+        (Redis down) — the guard logs a WARNING and swallows the error rather
+        than raising into the caller. An ``SSCAN`` failure part way through
+        returns the counts accumulated so far.
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
