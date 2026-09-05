@@ -1,7 +1,7 @@
 ---
 title: Remove Job UTC-reattach and 1.8.0-era naive-tzinfo guards
 slug: remove-popoto-1-8-0-naive-datetime-scar-tissue
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -778,6 +778,8 @@ python -m ruff format --check
 ```
 
 ## Open Questions
+
+*Status is `Ready` in the sense that the plan is complete and the build sequence is unambiguous. None of the questions below blocks the build: each has a recorded decision with its reasoning in Spike Results, and question 1 is the one the critique stage should adjudicate because it changes one success criterion, not the shape of the work.*
 
 1. **The session-health decision is a third option, not one of the issue's two.** The issue offered
    (a) remove the one-liners and their comments, or (b) keep the naive branch only inside the
