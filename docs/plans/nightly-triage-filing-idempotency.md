@@ -133,23 +133,67 @@ All verifiable assumptions were resolved during recon, by direct code read and o
 
 ## Data Flow
 
-_placeholder_
+
+The defect lives at one boundary. Tracing a single failing node from pytest to the tracker:
+
+1. **Entry point** — `run_tests()` produces a pytest-json report; `extract_failing_node_ids()` then `reconfirm_serial()` yield a confirmed-failing set.
+2. **`compute_dispatch_set(prev, confirmed_failing)`** — drops nodes a previous *run* already dispatched. This is per-machine, per-night state in `data/nightly_tests_last_run.json`. It defends against night-over-night duplicates, not within-session replay.
+3. **`dispatch_findings(...)`** — the decision layer.
+   - `partition_environmental` removes network-fault nodes (and escalates ones that have been environmental too many consecutive nights).
+   - `group_setup_error_cascades` / `group_body_failure_cascades` collapse shared root causes into umbrellas.
+   - `open_issues()` and `closed_issue_dispositions()` read **live REST state** — `gh issue list`, deliberately not `--search`.
+   - `partition_already_open` → comment on the open issue, record, drop the node.
+   - `partition_closed_matches` → comment on a `NOT_PLANNED` closure, record, drop the node. A `COMPLETED` closure falls through and re-files.
+   - What survives is `single_nodes`: **nodes with no issue in any state, as of a REST read seconds ago.**
+4. **The boundary where the information is lost** — `maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)` (line 2664). Signature accepts `list[str]`. Every disposition, every issue number, every fact about *what was checked and when* stops here.
+5. **`_build_triage_prompt(dispatch_nodes)`** — reconstitutes a prompt from node ids alone, and instructs the agent to re-derive the state of the world by "searching ALL issues".
+6. **`tools.valor_session create --role eng --slug nightly-triage-{hash} --message <prompt>`** — one Eng session, one lane worktree at `.worktrees/{slug}/`.
+7. **The agent** searches (index-backed, lagging), finds nothing, files. **On a replayed turn it does the same thing again**, because nothing in steps 4–6 left a trace it could consult and step 5's read cannot see minutes-old issues.
+8. **Output** — one GitHub issue per node. Or three, as on 2026-08-24.
+
+The fix does not move where decisions are made. It stops discarding them at step 4, hardens the read at step 5, and adds a durable trace at step 7 for the case where a replay bypasses both.
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #2581 (#2559) | Moved title computation into Python; added per-node `dispatched_nodes` suppression across runs; wrote the "search for the EXACT title" instruction into the prompt. | Right layer for cross-*night* dedup, wrong layer for within-*session* replay. `dispatched_nodes` is written after the dispatch returns, so a turn replayed inside one dispatch never sees it. And the instruction it added is the one that fails: "search" names a read mechanism that cannot see minutes-old issues. |
+| Commit `8524e765b` | Established REST-not-search for the detector's own reads; wrote the rationale into the constants. | Fixed the script's read and left the agent's read alone. The module now documents in two places that `--search` lags by minutes, while still telling the agent to search. The principle was correct and its application was incomplete. |
+| Commit `8eb2344b9` (#3134) | `partition_already_open` returns issue numbers so the script comments instead of staying quiet. | Made the script's own knowledge richer without widening the channel to the agent. More was known; the same nothing was passed on. |
+| PR #3142 (#3075) | Closed-issue-aware dedup, cascade collapsing, environmental classification. Answered "where does idempotency belong?" — in the script. | Answered it **for the script's own filing decisions** and stopped there. The prompt was updated to *describe* the open-and-closed rule in prose, but not to hand the agent either the resolved answer or a reliable way to read it. The agent still re-derives everything. |
+
+**Root cause pattern:** every fix improved what the *script* knows and none of them widened the channel to the *agent*. `maybe_dispatch_triage_session(list[str])` has been the choke point since PR #2195, and four passes of increasingly sophisticated dedup have all been squeezed through it and dropped. The agent has been left to reconstruct, over an unreliable read, a decision that was fully resolved in Python seconds earlier. Fixing the reads without fixing the channel is what keeps this recurring.
 
 ## Architectural Impact
 
-_placeholder_
+
+- **New dependencies**: none. No new imports, no new packages, no new services. `gh` and `subprocess` are already in use throughout the module.
+- **Interface changes**: `maybe_dispatch_triage_session` and `_build_triage_prompt` both gain one optional keyword argument carrying the resolved dispositions. Both are module-private in practice (`_build_triage_prompt` by name, `maybe_dispatch_triage_session` by having exactly two callers, both inside this module). Existing positional calls keep working — the cascade path (`prompt=` override) and the baseline-seed path (`slug_suffix=`) are untouched.
+- **Coupling**: decreases the agent's coupling to GitHub's search index, which is the point. Slightly increases coupling between `dispatch_findings` and the prompt builder — deliberate, and the direction the module has been moving since #2559 pinned literal titles for exactly this reason: the pre-flight check and the agent's instructions must not be able to drift.
+- **Data ownership**: introduces one new piece of state, `data/nightly-triage-ledger/{slug}.json`, owned by the nightly script (which seeds it) and appended to by the triage agent. It is gitignored, machine-local, and advisory — losing it degrades to today's behavior rather than breaking anything.
+- **Reversibility**: high. Fixes 1 and 2 are text and a keyword argument in one file. Fix 3 adds one small write and one prompt paragraph. Any of the three can be reverted independently without touching the others.
 
 ## Appetite
 
-_placeholder_
+
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0 — the three fixes are specified in the issue and recon settled the one design question (ledger location) with a rationale; nothing needs a scope call.
+- Review rounds: 1
+
+One Python file, one test file, one doc. No new dependencies, no migration, no service restart. The work is bounded by the care the guards need, not by the code volume.
 
 ## Prerequisites
 
-_placeholder_
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `gh` authenticated | `gh auth status` | The prompt's `gh issue list --state all` read and the plan's own verification both need a working `gh`. |
+| Repo venv on the pinned interpreter | `python -m tools.doctor` | `scripts/pytest-clean.sh` aborts on an off-pin venv; a worktree without one blocks the pre-commit lint hook. |
 
 ## Solution
 
