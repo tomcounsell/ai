@@ -147,23 +147,185 @@ the path.
 
 ## Spike Results
 
-_placeholder_
+Four spikes ran against baseline `f3594dd23`. All four are `code-read` plus an executable replay
+of the real `FEATURE_MAP` and the real first-hit loop, parsed out of `tests/conftest.py` with
+`ast.literal_eval` so the numbers come from the shipped dict rather than a transcription of it.
+The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 files.
+
+### spike-1 (retrieved, not re-derived): does the basename-to-marker coupling silently mistag files?
+
+- **Assumption**: "Keeping the original basename as a prefix preserves the marker."
+- **Method**: retrieved verbatim from the #2879 lane. The prototype and its finding are recorded
+  at `docs/archive/plans-completed/split-remaining-large-test-files.md:87-98`; PR #3005's review
+  thread replays it over all 24 new basenames and records the insertion indices it turns on
+  (`bridge`=0, `routing`=8, `sdlc`=15, `lifecycle`=32, `config`=45, `worktree_manager`=63).
+- **Finding**: **Sufficient, but not automatically.** `FEATURE_MAP` is iterated in insertion order
+  and breaks on first hit, so a generic key placed early beats a specific key placed late.
+  `test_worktree_manager_config.py` tags `config`, not `git`. `test_worktree_manager_lifecycle.py`
+  tags `sessions`, not `git`. Both silently, with the collection total unchanged.
+- **Confidence**: high (mechanically verified in the originating lane, and the algorithm re-run
+  here reproduces it).
+- **Impact on plan**: this is the guard's primary target. It also establishes that "intended
+  marker" must come from a source outside the basename, because the basename is the thing that
+  lies. The package directory is that source.
+
+### spike-2: is "every test file must resolve to some marker" a viable rule?
+
+- **Assumption**: "Most test files already carry a marker, so requiring one needs a short exemption list."
+- **Method**: replay the resolver over all 834 tracked test files, count `None` results.
+- **Finding**: **Not viable.** 552 of 834 files (66%) resolve to no marker at all. A
+  must-be-marked rule would need a 552-entry exemption list on day one, which is a manifest
+  pretending to be a guard.
+- **Confidence**: high.
+- **Impact on plan**: the guard asserts *consistency* of the marker a file resolves to, never
+  *presence*. Unmarked files are only a violation when a sibling or a parent directory declares
+  an intent they contradict.
+
+### spike-3: does the package directory work as the declaration of intent?
+
+- **Assumption**: "A test file inside `tests/**/{pkg}/` intends the marker that `{pkg}` itself resolves to."
+- **Method**: partition the 834 files by parent directory, excluding the known roots
+  (`tests`, `unit`, `integration`, `e2e`, `tools`, `performance`, `ai_judge`); resolve each
+  directory name and each basename; compare.
+- **Finding**: **Yes, and it fires on real defects today.** 80 files sit in 11 package
+  directories. Six of those directory names resolve (`bridge`, `reflections`, `sdlc_router_decision`,
+  `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`), covering 47 files, of which
+  **21 disagree with their directory**: all 19 in `tests/unit/reflections/`, both files in
+  `tests/integration/reflections/`, and `tests/unit/bridge/test_dispatch.py`. Wait, that is 22
+  by that phrasing; the exact set is 18 of the 19 unit-reflections files (`test_reflection_*`
+  names already resolve correctly), plus 2 integration-reflections files, plus 1 bridge file.
+  The four packages produced by #2879 and #2941 that do resolve (`sdlc_router_decision`,
+  `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`) are **100% consistent**, which is
+  PR #3005's 24/24 claim reproduced independently.
+  The five packages whose directory name does not resolve (`hooks`, `memory_extraction`,
+  `output_handler`, `session_runner`, and `tests/unit/bridge` is not among them) have no directory
+  intent, so a second rule is needed for them: sibling uniformity. Under that rule
+  `memory_extraction` and `output_handler` are uniform (all `None`) and pass, while `hooks` and
+  `session_runner` each have exactly one odd file out.
+- **Confidence**: high.
+- **Impact on plan**: produces rules R1 (directory intent) and R2 (sibling uniformity), and the
+  21-entry pre-existing baseline they must be introduced against.
+
+### spike-4: is there a rule that catches mistags with no declaration of intent at all?
+
+- **Assumption**: "Every mistag mechanism needs an external statement of what was intended."
+- **Method**: implement a whole-token variant of the resolver (split the stem on `_`, require the
+  pattern's tokens to appear as a contiguous run) and diff its result against the shipped
+  substring resolver across all 834 files.
+- **Finding**: **Yes, one exists and it is cheap.** Substring and whole-token disagree on only
+  **16 of 834 files**, and 12 of those are the benign `reflection`-matching-`reflections` plural,
+  where both spellings map to the same marker. The remaining 4 are genuine fragment matches:
+  `test_pm_briefings_no_slots_configured.py` (`config` inside `configured`),
+  `test_youtube_transcription.py` (`transcript` inside `transcription`),
+  `test_long_task_checkpointing.py` (`checkpoint` inside `checkpointing`), and
+  `test_migrate_reflections_callables.py` / siblings which fall in the plural class.
+  Adding `"reflections": "reflections"` immediately before the existing `"reflection"` key erases
+  the entire benign class with provably zero collateral: any stem containing the token
+  `reflections` already contained the substring `reflection`, and both keys map to the same
+  marker, so no file can change marker and none can lose one.
+- **Confidence**: high.
+- **Impact on plan**: produces rule R3 (whole-token match), which applies suite-wide and needs no
+  intent declaration, plus two in-scope zero-collateral `FEATURE_MAP` additions.
+
+### spike-5: what does making the package directory authoritative actually cost?
+
+- **Assumption**: "Fixing the 21 pre-existing violations in the same change is cheap."
+- **Method**: simulate a directory-authoritative resolver (directory name wins when it resolves,
+  basename otherwise) plus the two key additions, and diff marker assignment for all 834 files.
+- **Finding**: **The fix is attractive but it cannot ship with the guard.** The simulation gains
+  39 markers, corrects 6, and loses 0. But it makes rule R1 tautological: if the effective marker
+  is taken from the directory, then "the effective marker equals the directory's marker" is true
+  by construction and the guard asserts nothing. The renaming alternative also fails, because
+  `config` sits at index 45 and `reflection` at 52, so a file renamed to
+  `test_reflections_pm_briefings_no_slots_configured.py` still resolves to `config` first. The
+  ordering trap that motivates the guard also blocks the obvious remedy.
+- **Confidence**: high.
+- **Impact on plan**: the resolver stays unchanged, the 21 violations enter a path-keyed baseline
+  with a per-entry reason, and the resolver question is filed separately as #3175 so it can be
+  decided on evidence the guard will then be able to produce.
+
 
 ## Data Flow
 
-_placeholder_
+There are two consumers of one resolution function. Today the function exists only as an inlined
+loop inside the pytest hook, which is why nothing else can check it.
+
+**Path A, marker assignment (existing, at collection time):**
+
+1. **Entry point**: `pytest` collects an item; `pytest_collection_modifyitems` runs
+   (`tests/conftest.py:1206`).
+2. **Stem extraction**: `item.nodeid` is split on `::`, the last path segment taken, `test_`
+   and `.py` stripped.
+3. **Resolution**: the stem is substring-matched against `FEATURE_MAP` in insertion order, first
+   hit wins, no hit means no marker.
+4. **Output**: `item.add_marker(getattr(pytest.mark, marker_name))`. Consumed later by
+   `pytest -m <marker>`.
+
+**Path B, the guard (new, at test time and in CI):**
+
+1. **Entry point**: `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'` from the repo root,
+   so untracked scratch files are invisible and a deleted file cannot leave a stale expectation.
+2. **Partition**: each path is split into (package directory, basename). A parent directory in
+   `KNOWN_ROOT_DIRS` means "not a package", so the file is covered by R3 only.
+3. **Resolution**: the **same** `resolve_marker()` used by Path A step 3, returning both the
+   marker and the pattern that matched, because R3 needs the pattern and not just the result.
+4. **Rules**: R1 compares the basename's marker to the package directory name's marker; R2
+   compares each package's basenames to one another; R3 re-matches the winning pattern at
+   `_`-delimited token granularity.
+5. **Baseline subtraction**: paths present in `KNOWN_MISTAGS` are removed from the violation set,
+   and separately the baseline is checked for entries that no longer correspond to a violation.
+6. **Output**: an assertion failure naming each offending path, its resolved marker, its expected
+   marker, and the pattern that caused it.
+
+The single point of truth is step 3. Path A and Path B must call the same function or the guard
+degrades into a second implementation that can drift away from the thing it is guarding.
+
 
 ## Architectural Impact
 
-_placeholder_
+- **New dependencies**: none. `tests/marker_map.py` is standard library only (`os`, `pathlib`,
+  `subprocess`, `argparse`). It deliberately does not import `pytest`, so the CI job and the
+  pre-commit path can run it on a bare interpreter with no venv.
+- **Interface changes**: `FEATURE_MAP` moves from `tests/conftest.py` to `tests/marker_map.py` and
+  `tests/conftest.py` imports it back. `git grep FEATURE_MAP` confirms `tests/conftest.py` is the
+  only importer today; the ten other hits are docstring prose in split test modules. The
+  inlined resolution loop in `pytest_collection_modifyitems` is replaced by a call to
+  `resolve_marker()`, preserving behavior exactly.
+- **Coupling**: decreases. Marker resolution becomes a named, importable, testable function
+  instead of four lines buried in a collection hook that only pytest can reach.
+- **Data ownership**: unchanged. `FEATURE_MAP` remains test-suite-owned and lives under `tests/`.
+  It is not promoted into `tools/`, where a pytest marker table has no business.
+- **Reversibility**: high. Deleting the guard file, the workflow, and moving the dict back is a
+  clean revert with no data or state to unwind.
+
 
 ## Appetite
 
-_placeholder_
+**Size:** Medium
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 1 (one open question, on whether the GitHub Actions workflow is wanted)
+- Review rounds: 1-2
+
+The code is small: one new stdlib module, one new test file, a four-line change to a collection
+hook, and a short workflow. The Medium sizing is entirely alignment cost. The guard is introduced
+against 24 pre-existing violations, and how those are dispositioned is a judgement call a reviewer
+will and should push on.
+
 
 ## Prerequisites
 
-_placeholder_
+No external prerequisites. The work touches only the test suite and a workflow file, needs no
+secrets, no services, and no Redis.
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Repo venv on the committed pin | `python -m tools.doctor` | Running `scripts/pytest-clean.sh` at all |
+| `git ls-files` reachable from the repo root | `git -C . ls-files 'tests/**/test_*.py' \| head -1` | The guard enumerates its population from git, not the filesystem |
+| Standard library only for the audit module | `python -c "import ast,sys; m=ast.parse(open('tests/marker_map.py').read()); mods={a.name.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.Import) for a in n.names} \| {n.module.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.ImportFrom) and n.module}; assert mods <= set(sys.stdlib_module_names), mods"` | The CI job runs on a bare interpreter |
+
 
 ## Solution
 
