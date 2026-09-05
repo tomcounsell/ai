@@ -278,7 +278,13 @@ author inherits a known boundary rather than an assumed guarantee.
 
 **Size:** Small
 
-**Team:** Solo dev, code reviewer
+**Team:** Three agents, two checkouts — one builder (`guard-builder`, owning both
+files including their docstrings), one mutation validator (`mutation-validator`),
+one guard-semantics reviewer (`guard-reviewer`). The validator requires a
+**second `.worktrees/{slug}/` checkout of its own**; this is load-bearing rather
+than a convenience, because its per-fix revert protocol edits the working tree
+and would corrupt the builder's measurements in both directions if shared. See
+Team Orchestration for the full roles.
 
 **Interactions:**
 - PM check-ins: 0 (scope is fully specified by the issue plus the two items folded in from #2768; the one judgment call is in Open Questions)
@@ -304,8 +310,8 @@ not in writing the AST branches.
 
 - **Route 1 positional leg**: makes a `db` at the third positional slot of a Redis construction a candidate, judged by exactly the same value rules as a written-out `db=`.
 - **Route 2 keyword leg**: makes a `url=` keyword on `from_url` a candidate, judged by exactly the same URL rules as a positional URL.
-- **Route 1 direct-fixture leg**: accepts a bare `ast.Name` that is a sanctioned fixture parameter **and has no local rebinding**, making `CLAIM_FIXTURE_NAMES` mirror `CLAIM_URL_NAMES` for real rather than in docstring only.
-- **Route 2 rebinding check**: applies that same condition to route 2's existing bare-name leg, which today accepts a local that merely shares the sanctioned name.
+- **Route 1 direct-fixture leg**: accepts a bare `ast.Name` only when it is a sanctioned name that is *positively* a parameter of the enclosing function, carries no default, and is rebound by no binding form, making `CLAIM_FIXTURE_NAMES` mirror `CLAIM_URL_NAMES` for real rather than in docstring only.
+- **Route 2 rebinding check**: applies that same three-part condition to route 2's existing bare-name leg, which today accepts any local or defaulted parameter that merely shares the sanctioned name.
 - **Per-kind violation message**: `format_violation` renders each of the three kinds explicitly, and the remedial text is pinned by assertion rather than left to review.
 - **Residual-gap disclosure**: a module-level paragraph naming, in one place, every enumeration the guard still carries and what each one costs.
 - **Signature tripwire**: a test that re-derives the `db` parameter index from `inspect.signature(redis.Redis.__init__)`, so a redis-py reshuffle turns the suite red rather than quietly reopening the positional hole.
@@ -468,7 +474,9 @@ No expected-failure markers are affected. The suite carries no `pytest.mark.xfai
 
 - **Making the positional leg callee-agnostic.** It is the module's stated ideal and it is wrong here. A third positional argument has no meaning without the callee; the callee-agnostic version of the splat leg produced 183 violations across 100+ unrelated files, and a guard that fires on every test helper gets deleted rather than fixed. Scope it to `Redis`/`StrictRedis`, disclose the cost, and move on.
 - **Widening `REDIS_CONSTRUCTORS` to catch more aliases.** Every name added is a guess about the future and buys nothing measurable: the tree has zero non-`redis.Redis` constructions. The disclosure paragraph is the deliverable here, not a longer list.
-- **Widening `CLAIM_FIXTURE_NAMES` to "any function parameter with no local rebinding".** Comment 5277517215 argues for it, and it is the single largest trap in this plan. Spike-4 measured the shipped leg and it does not launder, so the widening buys no correctness and costs the reserved-identifier property that makes the leg safe. Add the direct-use leg for the reserved names only.
+- **Widening `CLAIM_FIXTURE_NAMES` to "any function parameter with no local rebinding".** Comment 5277517215 argues for it, and it is the single largest trap in this plan. Spike-4 measured the shipped leg and it does not launder, so the widening buys no correctness and costs the reserved-identifier property that makes the leg safe. Add the direct-use leg for the reserved names only. Note the distinction from fix 3: the parameter check is an *additional* requirement layered on the reserved-identifier check, never a replacement for it.
+- **Extending `_LocalBindings` to record every binding form.** The obvious way to make the negative check sound, and the wrong one. `_LocalBindings` maps `name -> [value nodes]` for `_resolve_one_hop`, which needs the bound value; a `for` target or a `with ... as` has no single value node to record, so the extension would either lie or need a second dict. Answer the different question in a separate helper (`_rebound_names`) and leave the one-hop map alone.
+- **Giving route 2 its own `_resolve_one_hop` leg.** It would close residual gap 6 and make the two routes symmetric, which is tempting precisely because symmetry is this plan's theme. It is also new accept surface in a guard, needing its own laundering probes, its own mutation check, and its own review — a seventh fix in a plan already carrying six, for a false positive that fails loudly and has zero live sites. Disclose it as gap 6 and leave it to a successor issue if anyone ever hits it.
 - **Making `_matches` kind-aware.** It would require adding a `kind` field to all four `ALLOWLIST` entries and to `Exemption`, for a collision that cannot happen while `ALLOWLIST` is db-0-only and `apply_dispositions` refuses to cover a `pool_db` candidate. Disclose the property, do not restructure the dataclass.
 - **Teaching `_resolve_one_hop` a second hop.** Multi-hop resolution is a general dataflow problem, unbounded in effort, and orthogonal to the three argument-shape holes this plan closes. Listed as residual gap 3 instead.
 - **Reformatting or re-organizing the guard while in there.** The module is dense, heavily commented, and every comment is load-bearing history. Its docstring already records one case where a maintainer who trusted a wrong comment would have deleted the only thing holding the invariant up. Touch the six places and nothing else.
@@ -527,9 +535,18 @@ untouched by this work.
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every relevant item is in scope for this plan.
+One item is deferred, and it is named rather than left implicit: **route 2 does
+not gain a `_resolve_one_hop` leg.** A one-hop URL alias
+(`url = redis_test_url(); redis.Redis.from_url(url)`) therefore stays a false
+positive, where the route-1 equivalent is accepted. It is deferred rather than
+dropped: it is disclosed as residual gap 6 in the module docstring, carries a
+Verification row pinning the current behavior so the gap cannot close by
+accident, and Rabbit Holes records the measurement that rules it out of this
+plan's scope (new accept surface in a shared guard, needing its own probes and
+mutation check, for a loud-failing false positive with zero live sites). If
+anyone hits it, that is a successor issue with real evidence attached.
 
-The two additions folded in from #2768 when it was closed as a duplicate of
+Everything else relevant is in scope. The two additions folded in from #2768 when it was closed as a duplicate of
 #2764 (pinning `format_violation()`'s remedial message content, and disclosing
 `REDIS_CONSTRUCTORS` as a residual permit list) are in scope as fixes 4 and 5
 rather than left to a successor issue. The design avenues that are deliberately
@@ -627,15 +644,19 @@ mutation evidence.
   - Agent Type: `code-reviewer`
   - Resume: true
 
-- **Documentarian**
-  - Name: `guard-documentarian`
-  - Role: Docstring work only (fix 5 and the Documentation checklist). No behavior changes.
-  - Agent Type: `documentarian`
-  - Resume: true
+There is deliberately **no separate documentarian**. Fix 5 and the whole
+Documentation checklist are docstring edits inside the two files
+`guard-builder` already owns exclusively, carry no behavior risk, and are best
+written by the agent that just wrote the code being disclosed. A fourth standing
+agent would add a resumable identity and a dependency edge on four build tasks
+to gain nothing.
 
-**Worktree ownership note.** `mutation-validator` reverts hunks in the working
-tree. It must run in its own worktree, never in `guard-builder`'s, or the two
-corrupt each other's measurements in both directions.
+**Worktree ownership note.** This is the reason the team is three agents across
+two checkouts rather than a solo dev. `mutation-validator` reverts hunks in the
+working tree. It must run in its own worktree, never in `guard-builder`'s, or the
+two corrupt each other's measurements in both directions. Appetite states the
+same requirement so a reader sizing the work from that section gets the real
+number.
 
 ## Step by Step Tasks
 
@@ -729,10 +750,10 @@ corrupt each other's measurements in both directions.
 
 - **Task ID**: `document-residual-gaps`
 - **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`
-- **Assigned To**: `guard-documentarian`
-- **Agent Type**: documentarian
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
 - **Parallel**: false
-- Add the **What this guard still cannot see** section to the module docstring with all four residual gaps from Technical Approach fix 5, naming `REDIS_CONSTRUCTORS` as the residual permit list.
+- Add the **What this guard still cannot see** section to the module docstring with all **six** residual gaps from Technical Approach fix 5, naming `REDIS_CONSTRUCTORS` as the residual permit list. Gaps 5 (a `db` inside a starred unpack at the positional index) and 6 (route 2 has no one-hop alias leg, so a one-hop URL alias is a documented false positive) are the two added during the critique revision and are the ones most easily dropped by an author working from the earlier four-item list.
 - Cross-reference it from `_splat_candidate`'s existing "known cost" paragraph.
 - Rewrite the module docstring's route description to state which argument positions each route reads.
 - Update the `Candidate.kind` contract comment and the `REDIS_DB_POSITIONAL_INDEX` comment.
