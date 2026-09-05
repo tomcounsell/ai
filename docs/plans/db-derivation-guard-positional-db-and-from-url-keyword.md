@@ -463,8 +463,9 @@ imports the guard, and no live call site changes, so nothing else can break.
 - [ ] `tests/unit/test_db_derivation_guard.py::test_guard_sees_a_non_zero_number_of_candidates` — UPDATE: extend the floor assertions to cover `db-positional` without requiring a live site. The tree has zero positional sites, so the floor for that kind is 0 and the non-vacuity evidence has to come from the planted rows, not from the tree. State that in the test's docstring so a future reader does not "fix" it by asserting a floor that can never be met.
 - [ ] `tests/unit/test_db_derivation_guard.py::test_no_test_derives_its_own_redis_db` — UPDATE (assertion unchanged, must stay green): the three new legs must add zero violations to the live tree. If this goes red, a new leg has a false positive and the fix is wrong.
 - [ ] `tests/unit/test_db_derivation_guard.py::test_no_stale_disposition_entries` — UPDATE (assertion unchanged, must stay green): the new legs must not orphan any of the four `ALLOWLIST` entries, and must not silently absorb one either. `_matches` is kind-agnostic, so a new-kind candidate on the same `(path, expr)` could consume an entry; asserted explicitly rather than assumed.
-- [ ] `tests/unit/test_db_derivation_guard.py` — UPDATE: new refusal tests for the route-2 laundering shape (`redis_test_url = "redis://localhost:6379/9"; from_url(redis_test_url)` must go red) and its route-1 twin, plus the paired accept tests for the genuine fixture parameter on both routes. These four rows are fix 3 / fix 3b's demonstrated-red-and-green evidence; the route-2 refusal is currently green-when-it-should-be-red and is the single most important new assertion in this plan.
-- [ ] `tests/unit/test_db_derivation_guard.py::TestSplatHandling` — UPDATE: add one case proving the positional leg and the splat leg compose (`redis.Redis("h", 6379, 7, **kw)` yields both violations, not one that swallows the other).
+- [ ] `tests/unit/test_db_derivation_guard.py` — UPDATE: new refusal tests for **both** route-2 laundering shapes (`redis_test_url = "redis://localhost:6379/9"; from_url(redis_test_url)` and `def t(redis_test_url="redis://localhost:6379/9"): from_url(redis_test_url)`, both currently green and both must go red), and for all eight route-1 shadow shapes (`LAUNDER1`, `LAUNDER2`, `LDEFAULT`, `LMODULE`, `LFOR`, `LWALRUS`, `LWITH`, `LAUG`), plus the paired accept tests for the genuine fixture parameter on both routes in all four parameter spellings (plain, keyword-only, positional-only, `async def`). The two route-2 refusals are green-when-they-should-be-red and are the single most important new assertions in this plan.
+- [ ] `tests/unit/test_db_derivation_guard.py` — UPDATE: unit tests for the two new helpers directly, not only through `scan_source`. `_parameter_names_without_defaults` must handle right-to-left `args.defaults` alignment and `kw_defaults`' `None`-means-no-default convention; `_rebound_names` must cover every binding form in fix 3's leg-3 list and must not descend into nested function scopes. These are the parts most likely to be written correctly for the shapes in the table and wrongly for the shape nobody listed.
+- [ ] `tests/unit/test_db_derivation_guard.py::TestSplatHandling` — UPDATE: add one case proving the positional leg and the splat leg compose (`redis.Redis("h", 6379, 7, **kw)` yields both violations, not one that swallows the other), and one asserting `redis.Redis("h", 6379, *rest)` plus its `StrictRedis` mirror yield zero candidates. The starred case belongs here rather than with the `EDGE` shapes: `redis.Redis(*args)` short-circuits on the length guard and never reaches the branch it appears to test.
 - [ ] `tests/unit/test_db_derivation_guard.py` — UPDATE: new test for the signature tripwire (fix 6), new tests for the four spike-4 laundering probes, new tests for the empty/invalid inputs listed in Failure Path Test Strategy, and new per-kind message assertions (fix 4).
 - [ ] `tests/unit/test_db_derivation_guard.py::test_every_redis_construction_in_the_tree_is_attribute_qualified` — no change. It measures callee node kinds, which this work does not touch.
 
@@ -586,7 +587,8 @@ runtime surface.
 
 ### Inline Documentation
 
-- [ ] Add a **What this guard still cannot see** section to the module docstring of `tests/db_derivation_guard.py`, enumerating the four residual gaps listed in Technical Approach fix 5, and naming `REDIS_CONSTRUCTORS` as the residual permit list it is (#2768's second folded-in item).
+- [ ] Add a **What this guard still cannot see** section to the module docstring of `tests/db_derivation_guard.py`, enumerating the six residual gaps listed in Technical Approach fix 5, and naming `REDIS_CONSTRUCTORS` as the residual permit list it is (#2768's second folded-in item).
+- [ ] Document the shared accept predicate and its two helpers where they are defined: state that the check is positive (the name must be a parameter), and say why absence from `_LocalBindings` was rejected as a proxy — that reasoning is exactly what a future maintainer would otherwise re-derive by shipping the bug again.
 - [ ] Update the `_splat_candidate` docstring's existing "known cost" paragraph to cross-reference the new module-level section rather than remaining the only place a residual gap is disclosed.
 - [ ] Update the `Candidate.kind` comment (`# "db-kwarg" | "from-url"`) to include `"db-positional"`. It is a contract comment, not decoration.
 - [ ] Update the `CLAIM_FIXTURE_NAMES` docstring: its "mirrors CLAIM_URL_NAMES / the `redis_test_url` leg of Route 2 exactly" claim becomes true when fix 3 lands. If fix 3 is dropped in critique, correct the sentence instead of leaving a false claim standing.
@@ -603,14 +605,17 @@ runtime surface.
 - [ ] `redis.Redis.from_url(url="redis://localhost:6379/9")` yields exactly one violation naming db 9, matching what the positional form already yields.
 - [ ] `redis.Redis(db=scratch_test_db)` used directly on the fixture parameter yields zero violations, matching the aliased form.
 - [ ] `redis.Redis("h", 6379, claim_test_db())` and `from_url(url=redis_test_url())` yield zero violations.
-- [ ] The four route-1 laundering probes stay red: `scratch_test_db = 7`, `test_db = 7`, a `scratch_test_db=7` default argument, and any non-`CLAIM_FIXTURE_NAMES` identifier.
-- [ ] The route-2 laundering shape goes red where it is green today: `redis_test_url = "redis://localhost:6379/9"; from_url(redis_test_url)` yields one violation naming db 9.
-- [ ] The genuine fixture parameter still passes on both routes: `def t(redis_test_url): from_url(redis_test_url)` and `def t(scratch_test_db): Redis(db=scratch_test_db)` each yield zero violations.
+- [ ] Every route-1 laundering probe stays red, each with its own executable Verification row: `scratch_test_db = 7` (`LAUNDER1`), `test_db = 7` (`LAUNDER2`), a `scratch_test_db=7` default argument (`LDEFAULT`), a module-level `scratch_test_db = 7` (`LMODULE`), a `for scratch_test_db in xs:` target (`LFOR`), a `(scratch_test_db := 7)` walrus (`LWALRUS`), a `with c as scratch_test_db:` binding (`LWITH`), and a `scratch_test_db += 1` rebind of a genuine parameter (`LAUG`). These eight are the measured output of spike-7: the plan's first-draft accept condition flipped six of them green.
+- [ ] Both route-2 laundering shapes go red where they are green today: `redis_test_url = "redis://localhost:6379/9"; from_url(redis_test_url)` (`URLLAUNDER`) and `def t(redis_test_url="redis://localhost:6379/9"): from_url(redis_test_url)` (`URLDEFAULT`) each yield one violation.
+- [ ] The genuine fixture parameter still passes on both routes: `def t(redis_test_url): from_url(redis_test_url)` and `def t(scratch_test_db): Redis(db=scratch_test_db)` each yield zero violations. Keyword-only, positional-only, and `async def` parameter spellings pass too, and their defaulted forms do not.
+- [ ] The accept condition is **positive**, not an absence check: the shared predicate reads the enclosing function's `posonlyargs`/`args`/`kwonlyargs`, excludes any parameter carrying a default, and excludes any name rebound by any binding form. Asserted directly against `_parameter_names_without_defaults` and `_rebound_names` as well as end-to-end.
+- [ ] `redis.Redis("h", 6379, *rest)` and its `StrictRedis` mirror yield zero candidates (`STARRED`, `STARSTRICT`), and the suppression is disclosed as residual gap 5 rather than left silent.
+- [ ] The route-2 one-hop alias false positive is pinned and disclosed, not fixed: `URLHOP` yields one violation against `DBHOP`'s zero, and residual gap 6 says so in the module docstring.
 - [ ] The live tree is unchanged: 0 undispositioned violations and 0 stale disposition entries, before and after.
 - [ ] A positional violation's message names the `Redis(...)` shape and its db, and does not render as `from_url(...)` (spike-3's measured defect).
 - [ ] Every violation message, for all three kinds, names `claim_test_db()`, `redis_test_url()`, and both disposition tables (#2768's unpinned-message item).
 - [ ] `REDIS_DB_POSITIONAL_INDEX` is pinned to `inspect.signature(redis.Redis.__init__)` by a test, and `tests/db_derivation_guard.py` still imports no `redis`.
-- [ ] The module docstring carries a **What this guard still cannot see** section naming all four residual gaps and `REDIS_CONSTRUCTORS` (#2768's disclosure item).
+- [ ] The module docstring carries a **What this guard still cannot see** section naming all six residual gaps and `REDIS_CONSTRUCTORS` (#2768's disclosure item).
 - [ ] Each of the six fixes is mutation-checked individually: revert that hunk alone, its own test goes red, restore, re-measure. A whole-file revert is not accepted as evidence.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -683,6 +688,7 @@ number.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `REDIS_DB_POSITIONAL_INDEX = 2` as a module-level constant with a comment naming its pin test.
+- Suppress `ast.Starred` at the index explicitly; add `redis.Redis("h", 6379, *rest)` and the `StrictRedis` mirror as rows asserting zero candidates, and record the suppression as residual gap 5.
 - In `scan_source`, after the `node.keywords` loop, add a positional leg scoped to `Redis`/`StrictRedis` by terminal name, guarded on `len(node.args) > REDIS_DB_POSITIONAL_INDEX`, emitting only when no `db=` keyword is present on the same call.
 - Judge the value through `_is_claim_call` / `_resolve_one_hop` / `_first_pool_db`, sharing the keyword leg's judgment rather than duplicating it.
 - Emit `kind="db-positional"` and update the `Candidate.kind` contract comment.
@@ -708,15 +714,17 @@ number.
 - **Task ID**: `build-fixture-leg`
 - **Depends On**: `capture-red`
 - **Validates**: `tests/unit/test_db_derivation_guard.py` (accept rows `direct-fixture-parameter` and `url-fixture-parameter`; refusal rows for the four spike-4 probes and the spike-6 route-2 shadowing shape)
-- **Informed By**: spike-4 (route 1's reserved-identifier property is sound), spike-5, **spike-6 (route 2's leg launders today, so it is not a reference implementation to copy)**
+- **Informed By**: spike-4 (route 1's reserved-identifier property is sound), spike-5, spike-6 (route 2's leg launders today, so it is not a reference implementation to copy), **spike-7 (an absence check on `_LocalBindings` is not a parameter check; it flips ten measured red shapes green)**
 - **Assigned To**: `guard-builder`
 - **Agent Type**: builder
 - **Parallel**: false
 - Land fixes 3 and 3b in **one commit**. They are one condition applied to two routes, and shipping either alone leaves the guard asymmetric.
-- Route 1: in the `isinstance(value, ast.Name)` branch, accept **before** `_resolve_one_hop` when `value.id in CLAIM_FIXTURE_NAMES` **and** `value.id not in bindings.get(enclosing_fn, {})`, detail `"claim-API fixture parameter"`.
-- Route 2: add the identical `not in bindings.get(enclosing_fn, {})` condition to the existing `arg.id in CLAIM_URL_NAMES` leg. Route 2 has no `enclosing_fn` lookup today; thread it in exactly as route 1 does.
-- Do **not** accept on the identifier alone on either route. That is the copy-the-hole failure mode; `redis_test_url = "redis://localhost:6379/9"` must go red.
-- Add all four spike-4 probes plus the spike-6 shadowing probe as standing refusal tests, and the genuine-fixture-parameter accept for both routes.
+- Write the two helpers first, with their own unit tests, before wiring either route: `_parameter_names_without_defaults(fn)` and `_rebound_names(fn)`, per fix 3's legs 2 and 3. Then expose one shared predicate both routes call, so the condition exists once.
+- Route 1: in the `isinstance(value, ast.Name)` branch, accept **before** `_resolve_one_hop` when `value.id in CLAIM_FIXTURE_NAMES` **and** the shared predicate holds, detail `"claim-API fixture parameter"`.
+- Route 2: apply the same predicate to the existing `arg.id in CLAIM_URL_NAMES` leg, with `CLAIM_URL_NAMES` as the sanctioned set. Route 2 has no `enclosing_fn` lookup today; thread it in exactly as route 1 does.
+- Do **not** write the condition as `value.id not in bindings.get(enclosing_fn, {})`. It reads like the right check and is not one: `_LocalBindings` sees only `Assign`/`AnnAssign` inside a function, so absence from it is satisfied by a default argument, a module-level assignment, a `for` target, a walrus, a `with ... as`, a comprehension target, an `except ... as`, an `import ... as`, and a nested `def` — every one of them red today. This is the copy-the-hole failure mode arriving through the fix written to prevent it.
+- Do **not** accept on the identifier alone on either route either. `redis_test_url = "redis://localhost:6379/9"` must go red.
+- Add all eight route-1 shadow probes, both route-2 shadow probes, and the genuine-fixture-parameter accept for both routes in all four parameter spellings, as standing tests.
 - Update the `CLAIM_FIXTURE_NAMES` docstring so its "mirrors ... exactly" claim becomes true, and note in `CLAIM_URL_NAMES`'s comment that the leg is gated on the name being unshadowed.
 
 ### 5. Per-kind violation messages
