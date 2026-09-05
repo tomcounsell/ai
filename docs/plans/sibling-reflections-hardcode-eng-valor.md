@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3072
 last_comment_id: 5505275340
+revision_applied: true
+revision_applied_at: 2026-09-05T13:19:15Z
 ---
 
 # Sibling reflections route Telegram alerts to a hardcoded "Eng: Valor"
@@ -64,7 +66,14 @@ The comment also fixes the closing condition: a clean repo-wide grep sweep, cove
 **Notes — the drift that matters:**
 
 1. **The issue undercounts the sweep.** A fifth argv site carries the literal outside `reflections/`: `scripts/memory_consolidation.py:352`. The issue's stated exit criterion is "a clean grep sweep for the literal, not an enumerated site list", and that sweep fails today with `memory_consolidation` still present. See No-Gos for the disposition.
-2. **The archived #2754 plan's anti-criterion is already stale.** It asserts six non-`docs_auditor` files carry the literal, naming `scripts/nightly_regression_tests.py` among them. That file carries no `valor-telegram` invocation today. The real count on `67d714662` is five: the four reflections plus `scripts/memory_consolidation.py`.
+2. **The archived #2754 plan's anti-criterion is already stale, and the two sweeps have different baselines.** The archived plan asserts six non-`docs_auditor` files carry the literal, naming `scripts/nightly_regression_tests.py` among them. Re-verified on `da6e5789a`: that file carries no `TELEGRAM_CHAT` constant, no `Eng: Valor` literal, and no `valor-telegram` reference at all — it is not a site, and lane #3170's concurrent edits to it are therefore irrelevant to this work. This plan touches it not at all.
+
+   The two sweeps this plan uses count differently, and the earlier draft conflated them:
+
+   - **Argv adjacency** (`git grep -n '"--chat", "Eng: Valor"' -- '*.py'`) — **five** sites today: `reflections/expectation_reconciler.py:181`, `reflections/sdlc_progress.py:792`, `reflections/sentry_triage.py:701`, `reflections/stall_advisory.py:459`, `scripts/memory_consolidation.py:352`.
+   - **Bare literal outside tests and prompt text** (`git grep -lF '"Eng: Valor"' -- '*.py' | grep -v '^tests/' | grep -v '^reflections/agents/'`) — **six** paths today: those same five plus `reflections/docs_auditor.py`, whose `FALLBACK_ENG_CHAT = "Eng: Valor"` at line 44 already carries the bare literal. That sixth site is #2754's merged narrowing, pre-existing and deliberate; this plan relocates it rather than introducing it.
+
+   Six files today, one after — measured, not asserted. Success Criterion 2 uses the six-file baseline.
 3. **`sentry_triage`'s `load_local_projects()` call is not what the issue thinks it is.** It appears at line 913, inside the Class-C filing branch, and exists only to map a Sentry project slug to a `working_directory` for `gh issue create`. It has no bearing on the notification at line 1034, which is a single cross-project digest. Corrected in the Solution.
 
 ## Prior Art
@@ -185,9 +194,9 @@ Not applicable — no prior fix has been attempted at these four sites. #2754 de
 
 ## Appetite
 
-**Medium.** Five source files, one lifted helper, and a test-fixture sweep across five test modules.
+**Medium.** Five source files, one lifted helper, and a test-fixture sweep across four test modules.
 
-What justifies Medium rather than Small: the arity change to four sender functions breaks roughly 25 monkeypatch sites that bind 1-argument lambdas, and the `_resolve_notify_chat` lift touches a module that merged three days ago with 248 lines of fresh tests. What holds it back from Large: no new abstraction is being invented — `resolve_eng_group` and the `_resolve_notify_chat` ladder both exist and both have passing tests to copy from.
+What justifies Medium rather than Small is the lift, not the fixture sweep. Moving `_resolve_notify_chat` out of a module that merged three days ago with 248 lines of fresh tests — and doing it without editing one line of those tests — is the hard part, and it lands on a file two other open lanes (#2743, #3050) intend to edit. The fixture sweep itself is small: only two of the five sender signatures change arity, and Test Impact enumerates seven concrete sites, three of which are NO-CHANGE-EXPECTED verifications rather than edits. What holds it back from Large: no new abstraction is being invented — `resolve_eng_group` and the `_resolve_notify_chat` ladder both exist and both have passing tests to copy from.
 
 If this exceeds the appetite, the fall-back scope is Flow A only (`expectation_reconciler`, `sdlc_progress`) — the two sites where alerts genuinely misroute — leaving the host-machine digests for a follow-up. That is a legitimate cut because Flow B's current behavior is right by accident rather than wrong.
 
