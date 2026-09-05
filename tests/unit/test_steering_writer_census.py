@@ -153,12 +153,22 @@ class TestWriterCensus:
 
 # ── Materialize-before-sort census ────────────────────────────────────────────
 
+# The steering ladder (running/active, then pending, then completed with a live
+# re-check) lives in ``bridge/answer_routing.py::resolve_answer_target`` since
+# #3080 and sorts every selection through this module-level helper. The walker
+# counts a ``_newest_first(<name>)`` call as a created_at sort of ``<name>`` so
+# the list(...) binding check still lands on the call site; the helper's own
+# body is pinned by ``test_newest_first_helper_sorts_by_created_at``.
+NEWEST_FIRST_HELPER = "_newest_first"
+
 # (relative path, enclosing function, sorted name, minimum sort calls).
 # Each entry is a selection a Room is derived from.
 SORT_SITES = [
-    ("bridge/telegram_bridge.py", "handler", "sessions", 2),
-    ("bridge/telegram_bridge.py", "handler", "pending_sessions", 1),
-    ("bridge/telegram_bridge.py", "handler", "_live", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "sessions", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "pending_sessions", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "live", 1),
+    # The bridge's re-check that a resolved target is still live before acking.
+    ("bridge/telegram_bridge.py", "handler", "sessions", 1),
     ("bridge/telegram_bridge.py", "edit_handler", "sessions", 1),
     ("bridge/telegram_bridge.py", "edit_handler", "edit_sessions", 1),
     ("agent/health_check.py", "watchdog_hook", "sessions", 1),
@@ -192,12 +202,25 @@ def _functions(tree: ast.Module) -> dict[str, list[ast.AST]]:
 
 
 def _created_at_sorts(fn: ast.AST) -> list[tuple[str, int]]:
-    """``(sorted_name, lineno)`` for every ``<name>.sort(key=... created_at ...)``."""
+    """``(sorted_name, lineno)`` for every created_at sort of a name in ``fn``.
+
+    Two shapes count: a direct ``<name>.sort(key=... created_at ...)``, and a
+    ``_newest_first(<name>)`` call, which is the ladder's sort hoisted into a
+    helper (``bridge/answer_routing.py``).
+    """
     hits: list[tuple[str, int]] = []
     for node in _own_nodes(fn):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        if (
+            isinstance(func, ast.Name)
+            and func.id == NEWEST_FIRST_HELPER
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+        ):
+            hits.append((node.args[0].id, node.lineno))
+            continue
         if not (isinstance(func, ast.Attribute) and func.attr == "sort"):
             continue
         if not isinstance(func.value, ast.Name):
@@ -209,6 +232,12 @@ def _created_at_sorts(fn: ast.AST) -> list[tuple[str, int]]:
             continue
         hits.append((func.value.id, node.lineno))
     return hits
+
+
+def _parameters(fn: ast.AST) -> set[str]:
+    args = fn.args
+    named = (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg)
+    return {a.arg for a in named if a is not None}
 
 
 def _binding_before(fn: ast.AST, name: str, lineno: int) -> ast.expr | None:
@@ -231,11 +260,19 @@ def _is_list_call(value: ast.expr | None) -> bool:
 
 
 def _unmaterialized_sorts(tree: ast.Module) -> list[str]:
-    """Sorted names whose nearest binding is not a ``list(...)`` call."""
+    """Sorted names whose nearest binding is not a ``list(...)`` call.
+
+    ``_newest_first`` sorts its own parameter; materialization is its callers'
+    job and every ``_newest_first(<name>)`` call site is checked in their
+    place, so that one parameter sort is the only one exempt here.
+    """
     bad: list[str] = []
     for fn_name, fns in _functions(tree).items():
         for fn in fns:
+            params = _parameters(fn)
             for name, lineno in _created_at_sorts(fn):
+                if fn_name == NEWEST_FIRST_HELPER and name in params:
+                    continue
                 if not _is_list_call(_binding_before(fn, name, lineno)):
                     bad.append(f"{fn_name}:{name}:{lineno}")
     return bad
@@ -291,10 +328,62 @@ class TestRoomDerivationSortCensus:
         )
         assert _unmaterialized_sorts(ast.parse(good_src)) == []
 
+    def test_sort_census_sees_through_the_newest_first_helper(self):
+        """Self-check for the hoisted shape: ``_newest_first(name)`` counts as a
+        sort of ``name`` and is held to the same list(...) binding rule, while
+        the helper's own parameter sort is the one exemption."""
+        bad_src = (
+            "def _newest_first(sessions):\n"
+            "    sessions.sort(key=lambda s: (s.created_at is not None, s.created_at),"
+            " reverse=True)\n"
+            "    return sessions\n"
+            "def f(session_id):\n"
+            "    sessions = AgentSession.query.filter(session_id=session_id)\n"
+            "    return _newest_first(sessions)[0]\n"
+        )
+        assert _unmaterialized_sorts(ast.parse(bad_src)) == ["f:sessions:6"]
+
+        good_src = bad_src.replace(
+            "sessions = AgentSession.query.filter(session_id=session_id)",
+            "sessions = list(AgentSession.query.filter(session_id=session_id))",
+        )
+        assert _unmaterialized_sorts(ast.parse(good_src)) == []
+
+        # A parameter sort anywhere else is still unproven and still rejected.
+        other_helper = bad_src.replace("_newest_first", "_other_helper")
+        assert "_other_helper:sessions:2" in _unmaterialized_sorts(ast.parse(other_helper))
+
+    def test_newest_first_helper_sorts_by_created_at(self):
+        """The helper the census sees through must really be the ladder's sort:
+        a direct created_at sort of its parameter, newest first."""
+        tree = ast.parse((REPO_ROOT / "bridge/answer_routing.py").read_text())
+        fns = _functions(tree).get(NEWEST_FIRST_HELPER)
+        assert fns and len(fns) == 1, f"{NEWEST_FIRST_HELPER!r} must be defined exactly once"
+        fn = fns[0]
+        (param,) = _parameters(fn)
+        direct_sorts = [
+            node
+            for node in _own_nodes(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "sort"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == param
+        ]
+        assert len(direct_sorts) == 1, f"{NEWEST_FIRST_HELPER} must sort {param!r} exactly once"
+        (call,) = direct_sorts
+        key = next((kw.value for kw in call.keywords if kw.arg == "key"), None)
+        assert key is not None and "created_at" in ast.dump(key)
+        reverse = next((kw.value for kw in call.keywords if kw.arg == "reverse"), None)
+        assert isinstance(reverse, ast.Constant) and reverse.value is True, (
+            "the ladder derives a Room from index 0, so the sort must be newest-first"
+        )
+
     def test_no_unmaterialized_created_at_sort_in_the_touched_modules(self):
-        """Repo-wide backstop over the three modules this release edits."""
+        """Repo-wide backstop over the modules that derive a Room from a sort."""
         for rel in (
             "bridge/telegram_bridge.py",
+            "bridge/answer_routing.py",
             "agent/health_check.py",
             "agent/session_executor.py",
         ):
