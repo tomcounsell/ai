@@ -185,7 +185,7 @@ deleted one did. Both flows start at the same place.
 
 | Liveness field | Reaches `output_summary`? | Where |
 |---|---|---|
-| `slug` | Yes | `f"docs-auditor: zero-diff ({slug})"`, `f"docs-auditor skipped ({slug}): {reason}"` |
+| `slug` | **Partial** | Carried verbatim on the zero-diff and PR-cap paths (`f"docs-auditor: zero-diff ({slug})"`, `f"docs-auditor skipped ({slug}): {reason}"`). The created-PR summary (`:2718-2723`) carries no slug even though `_write_liveness(slug, "ok", ...)` at `:2695` did; it is recoverable from the PR URL in the same string. The dirty-tree and no-candidates paths passed only the literal placeholders `(dirty)` and `(no-candidates)`, which their summary prose already states in words |
 | `status` | Yes, as prose | every summary string names its outcome ("skipped: dirty_tree", "zero-diff", "N files touched ... PR=") |
 | `pr_url` | Yes | `f"..., PR={pr_url}"` on the created-PR return |
 | `files_touched` | Yes | `f"docs-auditor: {len(files_touched)} files touched, ..."` |
@@ -343,11 +343,26 @@ the mock is gone, because the test three lines up already asserts
 carry the claim. The class docstring at `:1322-1328` and the comment at `:1960` both name
 "Redis liveness" as an operator surface and need their wording corrected in the same pass.
 
-**4. Orphaned-key sweep.** `scripts/update/migrations.py` already carries a direct
-precedent, `_migrate_clear_orphaned_warn_state_key` (`:1174`), written for the same shape
-of problem: a key nothing emits or clears any more. Add
-`_migrate_clear_docs_audit_liveness_keys`, register it in the `MIGRATIONS` dict, delete
-the two keys through a plain redis client, return `None` unconditionally, and log rather
+**4. Orphaned-key sweep.** Two separate precedents, because no single existing migration
+covers both halves of this one.
+
+*Fail-soft shape* comes from `_migrate_clear_orphaned_warn_state_key`
+(`scripts/update/migrations.py:1174-1200`): try/except, log the exception, `return None`
+unconditionally. Note what that function does **not** demonstrate — it never touches
+Redis. It calls `warn_state.should_emit(_ORPHANED_WARN_KEY, "", project_dir)`, which pops
+a key from `data/update_warn_state.json`. Copy its shape, not its mechanism.
+
+*Redis connection* comes from `reflections/docs_auditor.py:183`, where `_get_redis()`
+returns `POPOTO_REDIS_DB` via a lazy import. Reach it the way
+`_migrate_backfill_job_last_active_scores` (`:1115`) reaches `models.job`:
+`sys.path.insert(0, str(project_dir))` followed by the import inside the try block.
+Confirm during the build that the import resolves with no circular import once the two
+constants are deleted. **Hard-code the two key strings** in the migration
+(`"docs_audit:last_completed_run_ts"`, `"docs_audit:last_completed_run_summary"`) rather
+than importing the constants, which this change removes.
+
+Add `_migrate_clear_docs_audit_liveness_keys`, register it in the `MIGRATIONS` dict, delete
+the two keys, return `None` unconditionally, and log rather
 than raise on failure. These are not Popoto-managed keys, so the ORM rule does not apply
 and `instance.delete()` has nothing to operate on; the raw-Redis guard is a Bash
 PreToolUse hook and does not fire on Python source. Do the sweep through the migration,
@@ -476,11 +491,23 @@ count, an optional withheld note, and an optional Telegram-suppression note. App
 vault clause at the end makes it the first thing lost, so the field this plan is trying to
 preserve is exactly the field truncation would drop.
 
-**Mitigation:** Measure during the build. Construct the worst realistic case (long slug,
-withheld note present, Telegram suppressed, a real PR URL) and assert the rendered length.
-If it clears 500 comfortably, keep the clause at the end for readability. If it does not,
-move the clause ahead of `PR={pr_url}` so truncation costs the recoverable datum. Either
-way, pin the decision with a test that asserts the clause survives a worst-case summary.
+**Mitigation:** Measured at plan time, not deferred. The worst realistic case (42 files,
+137 fixes, withheld note present, Telegram suppressed with the full repo path, a real
+six-digit PR URL) renders at **195 characters**, and **227** with the 32-character vault
+clause — about 273 characters of headroom. The clause stays at the end of the string.
+
+**No reorder fallback.** An earlier draft of this plan proposed moving the clause ahead of
+`PR={pr_url}` if the budget were tight. That branch is deleted, for two reasons. It is
+unnecessary given the measurement above, and it would collide with an existing invariant:
+`test_step9_suppression_reaches_summary_before_pr_url`
+(`tests/unit/test_docs_auditor_substrate.py:1762`) asserts
+`result["summary"].index("suppressed") < result["summary"].index("PR=")` at `:1787`.
+Inserting anything between `{suppressed_note}` and `, PR=` risks displacing
+`suppressed_note` past `PR=` and breaking that assertion. Do not add a conditional
+reorder no test would exercise.
+
+Pin the budget with one test that builds a worst-case created-PR summary and asserts both
+that the vault clause survives and that the length stays under 500.
 
 ### Risk 2: Deleting the mock patches lets the real Redis writer run in tests
 
@@ -615,19 +642,33 @@ No agent integration required. This removes an internal function and its Redis w
       `0`-versus-absent distinction that is the bullet's actual point.
 - [ ] `:717-737` (`## Operational Cheatsheet`): delete the two `redis-cli GET` lines and
       their comment block. Replace with a pointer to the reflections dashboard modal.
-- [ ] `:738-750` (`## Tests`): the sentence naming `TestWriteLivenessVaultParam` and the
-      "4-arg/5-arg positional contract" must go, replaced by the new
-      `TestLivenessDeadCodeRemoved` class.
+- [ ] `:738-765` (`## Tests`): the sentence naming `TestWriteLivenessVaultParam` and the
+      "4-arg/5-arg positional contract" (`:747`) must go, replaced by the new
+      `TestLivenessDeadCodeRemoved` class. **The cluster runs to `:765`, not `:750`**:
+      `:762` describes `TestWithheldBlocksStaleClose` as "a bare-name withhold reaching
+      the PR body, Telegram, and liveness". That sentence names the deleted surface and a
+      test this plan renames to drop `_and_liveness` (Test Impact bullet 2). It uses the
+      bare word `liveness`, so neither of this file's literal-string Verification greps
+      (`_write_liveness`, `last_completed_run`) can see it. Reword it to drop "and
+      liveness".
 
 `docs/features/vault-drift-audit.md`:
 
 - [ ] `:156-196` (`## Liveness signal`): the entire section is built on
-      `_write_liveness`, including a verbatim copy of its signature and the
-      `redis-cli GET` at `:195`. Rewrite it around the summary-string clause. Keep the
-      section's real content, which is the three-way distinction between "detector ran,
-      found zero drift" (`0`), "the mapping is silently broken" (absent), and "vault
-      unresolvable" (`0` plus a log warning); that distinction survives the move and is
-      the reason the clause must emit on `0`.
+      `_write_liveness`, including a verbatim copy of its signature (`:163-172`), the
+      four-call-site positional-contract rationale (`:174-181`), and the `redis-cli GET`
+      at `:195`. Rewrite it around the summary-string clause, and rename the section since
+      "liveness" is the deleted surface's name — `## Narratives-compared signal` or
+      similar. Keep the section's real content, the three-way distinction, but **restate
+      its middle arm correctly**: the source text defines "the mapping is silently broken"
+      as *key absent entirely, from a call site that never ran the vault comparison*
+      (`:184-186`), which is a per-call-site fact and never a `None` return. In the new
+      wording the three arms are: "detector ran and compared N narratives" (clause reads
+      `N`), "the run never reached the created-PR path so no count was reported" (clause
+      absent from the summary entirely), and "vault unresolvable" (clause reads `0`, paired
+      with the `docs_audit: vault root resolution failed` / `no knowledge_base mapping`
+      warning in the logs). Do not describe any arm as a `None` return;
+      `_run_vault_drift_detection` is `-> int` and cannot produce one.
 
 - [ ] `docs/features/README.md`: check whether either file's index row summary mentions
       the liveness keys; update if so, leave alone if not.
