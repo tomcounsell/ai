@@ -596,28 +596,44 @@ logging.basicConfig(
 # bridge.*, tools.*, etc.) inherit it automatically. Without this, only
 # the bridge.telegram_bridge module logger would write to bridge.log.
 root_logger = logging.getLogger()
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_DIR / "bridge.log",
-    maxBytes=10 * 1024 * 1024,  # 10MB per file
-    backupCount=5,
-)
-file_handler.setLevel(logging.DEBUG)
-# Use JSON formatter for structured logging (parseable by log aggregation tools)
-# Falls back to plain text if the module can't be imported
-try:
-    from bridge.log_format import StructuredJsonFormatter
+# Never build or attach the production file handler inside a pytest process
+# (#2854). This module-scope setup runs on import, so any test importing this
+# module (directly or transitively) was routing every logger's records into
+# logs/bridge.log, including test fixtures' deliberate failure-branch ERRORs,
+# which then read as daily production failures. "pytest" is in sys.modules
+# during collection and test phases alike; PYTEST_CURRENT_TEST is exported by
+# pytest into the process environment, so a bridge subprocess spawned BY a
+# test inherits it and also skips the handler (a test-spawned bridge should
+# not write the operator's production log). Only a process started outside
+# any pytest run — neither "pytest" in sys.modules nor PYTEST_CURRENT_TEST in
+# its environment — attaches it, which is the intended production behavior.
+# Constructing the handler is also skipped so a test run never even creates
+# the file.
+_UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
+if not _UNDER_PYTEST:
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "bridge.log",
+        maxBytes=10 * 1024 * 1024,  # 10MB per file
+        backupCount=5,
+    )
+    file_handler.setLevel(logging.DEBUG)
+    # Use JSON formatter for structured logging (parseable by log aggregation
+    # tools); falls back to plain text if the module can't be imported
+    try:
+        from bridge.log_format import StructuredJsonFormatter
 
-    file_handler.setFormatter(StructuredJsonFormatter())
-except ImportError:
-    file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
-file_handler.addFilter(InternalDebugFilter())
-# Guard against double-import adding the handler twice (e.g. __main__ + bridge.telegram_bridge)
-if not any(
-    isinstance(h, logging.handlers.RotatingFileHandler)
-    and getattr(h, "baseFilename", None) == str(LOG_DIR / "bridge.log")
-    for h in root_logger.handlers
-):
-    root_logger.addHandler(file_handler)
+        file_handler.setFormatter(StructuredJsonFormatter())
+    except ImportError:
+        file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
+    file_handler.addFilter(InternalDebugFilter())
+    # Guard against double-import adding the handler twice
+    # (e.g. __main__ + bridge.telegram_bridge)
+    if not any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        and getattr(h, "baseFilename", None) == str(LOG_DIR / "bridge.log")
+        for h in root_logger.handlers
+    ):
+        root_logger.addHandler(file_handler)
 
 # Module logger for this file. It inherits the root logger's file handler,
 # so we only need to set its level to DEBUG for verbose local output.

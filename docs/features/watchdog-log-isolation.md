@@ -133,3 +133,42 @@ No behavioral change was made to recovery, escalation, health-check, or
 rotation logic — `LOG_MAX_SIZE`, `LOG_MAX_BACKUPS`, `LOG_BACKUP_HARD_CAP`, and
 `SELF_EXCLUDED_FILES` in `scripts/log_rotate.py` are untouched, and rotation
 settings (`maxBytes`/`backupCount`) are unchanged on both watchdogs.
+
+## A second instance of this bug class, solved a different way (#2854)
+
+`bridge/telegram_bridge.py` attaches its own `RotatingFileHandler` for
+`logs/bridge.log` to the root logger at **module scope** — exactly the
+pattern this doc's invariant forbids. It was not moved behind an
+`if __name__ == "__main__":` guard like the three modules above. The reason
+is `telegram_bridge.py`'s doc-comment: it keeps backward-compatible
+re-exports so `agent_catchup`, `telegram_relay`, `email_bridge`,
+`answer_routing`, and `routing` can all `import bridge.telegram_bridge` and
+use its symbols without ever running the module as `__main__` — there is no
+single entry point where "configure logging now" can live the way there is
+for a watchdog script.
+
+The sanctioned alternative for this shape is a **pytest-presence guard**
+rather than an entry-point relocation:
+
+```python
+_UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
+if not _UNDER_PYTEST:
+    file_handler = logging.handlers.RotatingFileHandler(...)
+    ...
+```
+
+`"pytest" in sys.modules` catches the direct case: any pytest process that
+imports the module, at collection or test time. `PYTEST_CURRENT_TEST` is
+exported into the process environment by pytest for the duration of each
+test and is inherited by any subprocess a test spawns, so a bridge process
+started *by* a test also skips the handler — the desired behavior, since a
+test-spawned bridge should not write the operator's production log. Only a
+process started outside any pytest run (neither condition true) attaches it.
+The regression guard is `tests/unit/test_no_production_log_handlers.py`,
+paired with a companion subprocess probe (mirroring this file's `_run_probe`
+pattern) that pins the production side stays attached when neither
+condition holds.
+
+Use the entry-point-guard pattern from the rest of this doc when a module
+has one true entry point; use the `_UNDER_PYTEST` pattern when a module is
+imported for its symbols from many call sites with no single `__main__`.
