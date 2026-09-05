@@ -331,6 +331,7 @@ disclosed as such rather than slipped in.
 - Emit **only when no `db=` keyword is present on the same call**. `Redis("h", 6379, 7, db=8)` is a `TypeError` at runtime and cannot be a live site; emitting twice for it would produce a duplicate violation for an unrunnable line and muddy the message.
 - Judge the value through the same helpers as the keyword leg (`_is_claim_call`, `_resolve_one_hop`, `_first_pool_db`), so a positional `claim_test_db()` is accepted and a positional literal is flagged with its `pool_db` set. Sharing the judgment is the point: a separate judgment path would drift.
 - New `kind`: `"db-positional"`.
+- **`ast.Starred` at the index yields no candidate.** `redis.Redis("h", 6379, *rest)` parses with `node.args[2]` an `ast.Starred`, and it passes the length guard, so the branch is genuinely reachable — unlike `redis.Redis(*args)`, whose single argument short-circuits on `len(node.args) > REDIS_DB_POSITIONAL_INDEX` and therefore proves nothing about it. Without an explicit `isinstance(..., ast.Starred)` check the value falls through to the generic `else` and produces `ok=False`, `detail="value is not a call to claim_test_db()/claim_scratch_test_db()"`, `expr="*rest"`: a spurious violation with a nonsense expression, not a crash. Suppress it, and pay for the suppression in fix 5's disclosure — a `db` arriving inside a starred unpack is now a named residual gap. Both `redis.Redis("h", 6379, *rest)` and the `StrictRedis` mirror get their own Verification rows asserting zero candidates, because a branch whose only evidence is a case that cannot reach it has no evidence.
 
 **Fix 2: `url=` keyword (route 2).** Replace the `and node.args` gate with a
 resolution step that yields the URL argument from either position:
@@ -341,32 +342,53 @@ call leg, the fixture-parameter leg, `_url_db`, `pool_db`) is untouched, and the
 `kind` stays `"from-url"` because the shape being reported is identical.
 
 **Fix 3: direct fixture parameter (route 1).** In the `isinstance(value, ast.Name)`
-branch, accept before resolving when the name is sanctioned **and unshadowed**:
+branch, accept before resolving when the name is sanctioned **and is genuinely a
+parameter of the enclosing function**, with detail `"claim-API fixture parameter"`.
 
-```
-value.id in CLAIM_FIXTURE_NAMES and value.id not in bindings.get(enclosing_fn, {})
-```
+The condition is **positive**, and this is the whole of the design. A negative
+formulation — "sanctioned and absent from `_LocalBindings`" — was the plan's
+first draft and spike-7 refuted it. `_LocalBindings` visits only `ast.Assign` and
+`ast.AnnAssign`, and `visit_Assign` is gated on `if self._stack:`, so absence
+from its dict does not mean "is a parameter". It means "is not a plain local
+assignment inside a function", which ten measured laundering shapes also satisfy.
+Accepting on absence would have flipped every one of them from red to green,
+including the `scratch_test_db=7` default argument this plan's own Success
+Criteria require to stay red.
 
-with detail `"claim-API fixture parameter"`. Both halves are required. The
-reserved-identifier half is what keeps `test_db = 7; db=test_db` red (spike-4).
-The no-local-binding half is what keeps `scratch_test_db = 7; db=scratch_test_db`
-red, and it is not optional: accepting on the identifier alone would turn a
-currently-red laundering shape green. `_LocalBindings` already records exactly
-this fact (it visits `Assign` and `AnnAssign` and stores per-enclosing-function),
-so the check is a dict lookup, not new machinery. A name that is a genuine
-function parameter has no entry and passes; a name with any local assignment has
-one and is refused.
+The accept therefore requires all three:
+
+1. `value.id in CLAIM_FIXTURE_NAMES` — the reserved-identifier property that keeps `test_db = 7; db=test_db` red (spike-4). Never widen this to arbitrary identifiers; that is what comment 5277517215 forbids.
+2. `value.id` is a parameter of `enclosing_fn` **with no default supplying it**. Check `args.posonlyargs`, `args.args`, and `args.kwonlyargs` by `.arg`. Exclude `vararg` and `kwarg`: `*args` is a tuple and `**kw` a dict, neither is ever a db. Defaults align right-to-left, so `args.defaults` covers the last `len(args.defaults)` entries of `posonlyargs + args`; `kwonlyargs` pairs positionally with `kw_defaults`, where a `None` entry means no default. That is an index computation, not a name lookup.
+3. `value.id` is not rebound anywhere in the function body, by **any** binding form: `Assign`, `AnnAssign`, `AugAssign`, `For`/`AsyncFor` targets, `NamedExpr`, `With`/`AsyncWith` `optional_vars`, comprehension targets, `except ... as`, `import ... as`, nested `def`/`class`, and `global`/`nonlocal`. A nested function or lambda is not descended into; its own scope cannot rebind the outer name without a `nonlocal`, which is caught directly.
+
+Leg 3 is why leg 2 alone is insufficient: `def t(scratch_test_db): scratch_test_db += 1; Redis(db=scratch_test_db)` has the name in `args` and must still be refused.
+
+Implement legs 2 and 3 as two small module-level helpers,
+`_parameter_names_without_defaults(fn)` and `_rebound_names(fn)`, both pure-AST
+and both testable in isolation. Do **not** extend `_LocalBindings` to cover the
+extra binding forms: its one-hop `name -> value` map is consumed by
+`_resolve_one_hop`, which needs the bound *value*, and widening it would change
+that leg's behavior as a side effect. The new helpers answer a different
+question ("was this name bound at all?") and stay separate.
 
 This is comment 5277517215's "function parameter with no local rebinding"
-condition, implemented literally.
+condition, implemented as what it says rather than as a proxy for it.
+Spike-7 prototyped it over 17 cases with zero mismatches.
 
 **Fix 3b: the same check on route 2 (new, found at plan time).** Route 2's
-existing `isinstance(arg, ast.Name) and arg.id in CLAIM_URL_NAMES` leg does not
-consult `_LocalBindings`, so `redis_test_url = "redis://localhost:6379/9";
-from_url(redis_test_url)` is accepted today (spike-6). Apply the identical
-`not in bindings.get(enclosing_fn, {})` condition there. Route 2 currently needs
-no `enclosing_fn` lookup, so the call must be threaded in exactly as route 1
-already does it.
+existing `isinstance(arg, ast.Name) and arg.id in CLAIM_URL_NAMES` leg performs
+no shadowing check at all, so both `redis_test_url = "redis://localhost:6379/9";
+from_url(redis_test_url)` (spike-6) and
+`def t(redis_test_url="redis://localhost:6379/9"): from_url(redis_test_url)`
+(spike-7) are accepted today. Apply the identical three-part condition there,
+substituting `CLAIM_URL_NAMES` for `CLAIM_FIXTURE_NAMES`. Route 2 currently
+performs no `enclosing_fn` lookup, so the call must be threaded in exactly as
+route 1 already does it.
+
+Both routes call the same two helpers. A single accept predicate — call it
+`_is_unshadowed_fixture_parameter(name, sanctioned_names, enclosing_fn)` — shared
+by both routes is preferable to two copies, for the same reason fix 1 shares the
+keyword leg's value judgment: two copies of a safety condition drift.
 
 Fix 3 and fix 3b are one idea applied twice, and they should land in one commit
 with the laundering probes for both routes. Doing fix 3 alone would leave the
@@ -389,6 +411,8 @@ each residual gap in one place:
 2. A `db` passed positionally to a constructor alias outside `REDIS_CONSTRUCTORS` (new with fix 1, and the honest cost of its callee scoping).
 3. A `db` computed inside a helper the guard cannot see through, more than one binding hop from the call site.
 4. `_matches` disposition matching is per-file-per-expression and kind-agnostic, so one `ALLOWLIST` entry can cover the same expression across kinds. Bounded by the db-0-only invariant and by `apply_dispositions`'s refusal to let `ALLOWLIST` cover any candidate with a `pool_db`.
+5. A `db` arriving inside a starred unpack at the positional index (`redis.Redis("h", 6379, *rest)`) yields no candidate. The positional leg suppresses `ast.Starred` deliberately rather than reporting `*rest` as a derived db, so the contents of `rest` are unexamined. This is the direct cost of fix 1's Starred suppression and is the positional mirror of gap 1's opaque `**` splat.
+6. Route 2 carries **no one-hop alias leg**. Route 1 resolves `d = claim_test_db(); redis.Redis(db=d)` through `_resolve_one_hop` and accepts it; route 2's only accept legs are a direct `ast.Call` to a `CLAIM_URL_NAMES` name and an unshadowed bare parameter, so `url = redis_test_url(); redis.Redis.from_url(url)` is reported as a violation with detail `"URL is not redis_test_url() and its db cannot be determined"`. That is a **documented false positive**, not a hole: the failure direction is loud, an author who hits it can inline the call or write a disposition, and closing it means giving route 2 its own `_resolve_one_hop` call — real scope this plan has not budgeted. Measured at HEAD during the critique revision: one violation for the route-2 alias against zero for the route-1 control. Disclosing it is what the plan's own countermeasure asks for; see Rabbit Holes for why it is not closed here.
 
 `REDIS_CONSTRUCTORS` is named there as the residual permit list it is, which is
 #2768's second folded-in item.
