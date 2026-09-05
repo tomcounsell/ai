@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -876,35 +876,35 @@ agent-invocation integration test to add.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/scheduled-disk-reclaim.md` — the fail-open/fail-closed
+- [x] Update `docs/features/scheduled-disk-reclaim.md` — the fail-open/fail-closed
       explanation at `:127`–`:133` and the touched-files list at `:173` are correct today
       and describe a per-lane probe. Document the batch probe, the lazy snapshot, and the
       fresh re-probe before removal, keeping the fail-closed rationale as the reason the
       re-probe exists.
-- [ ] Update `docs/features/session-isolation.md:226` — "scans `AgentSession.query.all()`
+- [x] Update `docs/features/session-isolation.md:226` — "scans `AgentSession.query.all()`
       for live sessions" becomes the indexed non-terminal query. The surrounding
       segment-aware-containment description stays exactly as written; it is still the
       matcher, and saying so explicitly is the point.
-- [ ] No new file in `docs/features/`, so no new row in `docs/features/README.md`. Both
+- [x] No new file in `docs/features/`, so no new row in `docs/features/README.md`. Both
       features are already indexed there.
 
 ### External Documentation Site
 Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
-- [ ] Rewrite the `_scan_worktree_sessions` docstring: it currently says "Walks the
+- [x] Rewrite the `_scan_worktree_sessions` docstring: it currently says "Walks the
       AgentSession table", which stops being true. State the indexed query, and state why
       the Python terminal-status check survives it (Decision 2) so nobody deletes it as
       dead code later.
-- [ ] Docstring on `_fetch_live_sessions` stating that the `list(...)` is load-bearing:
+- [x] Docstring on `_fetch_live_sessions` stating that the `list(...)` is load-bearing:
       `filter()` returns a lazy `QueryBuilder` that re-queries on every iteration and issues
       no Redis command itself, so removing the `list()` would both reintroduce the per-lane
       amplification and move the Redis failure outside this function's `except` (Decision 0).
       Without that sentence the wrapper reads as noise and the next reader deletes it.
-- [ ] Docstring on `worktree_busy_probe_many` covering the contract, the fan-out of a fetch
+- [x] Docstring on `worktree_busy_probe_many` covering the contract, the fan-out of a fetch
       error to every requested slug, the never-raises guarantee (Decision 6), and the fact
       that it shares one matcher with the single-slug path.
-- [ ] A comment at the `sweep_worktrees` map read naming why the default is
+- [x] A comment at the `sweep_worktrees` map read naming why the default is
       `("error", "not_probed")` and not `("clear", "")` (Risk 4).
 
 ## Success Criteria
