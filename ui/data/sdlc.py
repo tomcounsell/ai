@@ -822,8 +822,8 @@ def _safe_float(val) -> float | None:
     if isinstance(val, datetime.datetime):
         if val.tzinfo is None:
             # This helper's contract spans int/float/str sources too (below),
-            # not only popoto-decoded datetimes, so a naive value can still
-            # arrive from a non-popoto producer; read it as UTC.
+            # so a tzinfo-less value can still arrive from a producer that
+            # is not popoto at all; read it as UTC.
             val = val.replace(tzinfo=datetime.UTC)
         return val.timestamp()
     if isinstance(val, int | float):
