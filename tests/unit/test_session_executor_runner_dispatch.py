@@ -842,7 +842,7 @@ class TestReactTransportExecutorGuards:
         # re-read filters on status="running", so agent_session stays None.
 
         mock_redis = MagicMock()
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = mock_redis
 
         async def _null_send(*args, **kwargs):
@@ -877,7 +877,7 @@ class TestReactTransportExecutorGuards:
         session.save(update_fields=["status"])
 
         mock_redis = MagicMock()
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = mock_redis
 
         async def _null_send(*args, **kwargs):

@@ -155,7 +155,7 @@ class TestEmailHealthAlerts:
             "email:auth_failed": "1700000000.0:AUTHENTICATIONFAILED",
         }.get(key)
 
-        with patch("redis.Redis.from_url", return_value=mock_r):
+        with patch("ui.app._get_redis", return_value=mock_r):
             response = client.get("/health")
 
         assert response.status_code == 200
@@ -172,7 +172,7 @@ class TestEmailHealthAlerts:
             "email:resolver_unavailable": "1700000000.0:<msg-1@example.com>",
         }.get(key)
 
-        with patch("redis.Redis.from_url", return_value=mock_r):
+        with patch("ui.app._get_redis", return_value=mock_r):
             response = client.get("/health")
 
         assert response.status_code == 200
@@ -187,7 +187,7 @@ class TestEmailHealthAlerts:
         mock_r = MagicMock()
         mock_r.get.return_value = None
 
-        with patch("redis.Redis.from_url", return_value=mock_r):
+        with patch("ui.app._get_redis", return_value=mock_r):
             response = client.get("/health")
 
         assert response.status_code == 200
@@ -203,7 +203,7 @@ class TestEmailHealthAlerts:
             "email:auth_failed": "1700000000.0:AUTHENTICATIONFAILED",
         }.get(key)
 
-        with patch("redis.Redis.from_url", return_value=mock_r):
+        with patch("ui.app._get_redis", return_value=mock_r):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200

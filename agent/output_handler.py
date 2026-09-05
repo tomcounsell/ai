@@ -481,22 +481,18 @@ class TelegramRelayOutputHandler:
     # TTL applied to each outbox key (seconds). Matches tools/send_message.py.
     OUTBOX_TTL = 3600
 
-    def __init__(
-        self,
-        redis_url: str | None = None,
-        file_handler: FileOutputHandler | None = None,
-    ):
-        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    def __init__(self, file_handler: FileOutputHandler | None = None):
         self._file_handler = file_handler
-        self._redis = None  # Lazy connection
+        # An explicitly assigned client wins; otherwise the shared accessor.
+        self._redis = None
 
     def _get_redis(self):
-        """Return a Redis connection, creating one lazily on first use."""
-        if self._redis is None:
-            import redis
+        """The shared text Redis client (see utils/redis_client.py)."""
+        if self._redis is not None:
+            return self._redis
+        from utils.redis_client import text_redis
 
-            self._redis = redis.Redis.from_url(self._redis_url, decode_responses=True)
-        return self._redis
+        return text_redis()
 
     @staticmethod
     def _deliverable_telegram_peer(chat_id: Any) -> bool:

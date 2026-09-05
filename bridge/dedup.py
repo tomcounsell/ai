@@ -123,13 +123,10 @@ _LAST_EVENT_TTL_SECONDS = 2592000  # 30 days
 
 
 def _get_redis():
-    """Return a decode_responses Redis client for the freeform observability key."""
-    import os
+    """The shared text Redis client for the freeform (non-Popoto) keys below."""
+    from utils.redis_client import text_redis
 
-    import redis
-
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 # --- Per-message atomic producer claim (issue #1817, workstream B1) ----------

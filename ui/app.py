@@ -25,6 +25,14 @@ from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHO
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
 from utils.utc import utc_now
 
+
+def _get_redis():
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
+
+    return text_redis()
+
+
 logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).parent
@@ -454,14 +462,9 @@ def create_app() -> FastAPI:
         Fail-quiet — never blocks the health payload.
         """
         try:
-            import redis as redis_lib
-
             from config.machine import get_machine_project_keys
 
-            r = redis_lib.Redis.from_url(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-            )
+            r = _get_redis()
             total = 0
             for project_key in get_machine_project_keys():
                 val = r.get(f"{project_key}:session-health:slot_reclaims")
@@ -502,14 +505,9 @@ def create_app() -> FastAPI:
         try:
             import socket
 
-            import redis as redis_lib
-
             from config.machine import get_machine_project_keys
 
-            r = redis_lib.Redis.from_url(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-            )
+            r = _get_redis()
             host = socket.gethostname()
 
             raw_leases = r.get(f"worker:slot:leases:{host}")
@@ -728,14 +726,7 @@ def create_app() -> FastAPI:
         alert_detail: str | None = None
         age_s: int | None = None
         try:
-            import os
-
-            import redis as redis_lib
-
-            r = redis_lib.Redis.from_url(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-            )
+            r = _get_redis()
             auth_failed = r.get("email:auth_failed")
             resolver_unavailable = r.get("email:resolver_unavailable")
             if auth_failed:
