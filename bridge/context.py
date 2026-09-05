@@ -8,13 +8,6 @@ import subprocess
 from pathlib import Path
 
 from telethon import TelegramClient
-from telethon.tl.types import (
-    MessageMediaContact,
-    MessageMediaDice,
-    MessageMediaGeo,
-    MessageMediaPoll,
-    MessageMediaWebPage,
-)
 
 # Reuse the canonical tool-log filter from bridge.response (single source of truth).
 # See docs/features/bridge-response-improvements.md and issue #1359.
@@ -384,22 +377,6 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 # Reply Chain Management
 # =============================================================================
 
-# Telethon media kinds that are never a downloadable attachment. Telegram sets
-# MessageMediaWebPage on any plain-text message that gets a link preview, and
-# Message.file/.photo/.document fall back to the web preview's photo/document
-# for that case too — so neither `msg.media` nor `msg.file` truthiness alone
-# distinguishes "has an attachment" from "has a link preview". Polls, geo
-# pins, contacts, and dice hit the same non-file-media shape. Excluding these
-# up front keeps ordinary link messages from rendering a spurious
-# "[unreadable attachment]" marker (see PR #3146 review).
-_NON_FILE_MEDIA_TYPES = (
-    MessageMediaWebPage,
-    MessageMediaPoll,
-    MessageMediaGeo,
-    MessageMediaContact,
-    MessageMediaDice,
-)
-
 
 def _media_descriptor(
     kind: str,
@@ -436,22 +413,26 @@ async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
     Never raises: any failure logs at warning and degrades to an
     "unreadable" descriptor so the chain walk continues past this hop.
     """
-    media = getattr(msg, "media", None)
-    if isinstance(media, _NON_FILE_MEDIA_TYPES):
-        # Checked before the file/media truthiness test below: Telethon's
-        # Message.file (and .photo/.document) fall back to the web preview's
-        # own photo/document for MessageMediaWebPage, so a truthy msg.file
-        # cannot be trusted to rule these out on its own.
-        return None
-    if not (getattr(msg, "file", None) or media):
+    if not getattr(msg, "media", None):
         return None
 
     try:
+        # Classifier gate (PR #3146 review, round 2): get_media_type is
+        # non-None exactly for the Photo/Document set the intake download
+        # path can resolve, so a descriptor exists only when a file could
+        # ever have been downloaded. Everything else — link previews (whose
+        # msg.file falls back to the web preview's own photo/document),
+        # polls, geo pins static or live, venues, contacts, dice, stories,
+        # and every future Telethon media kind — fails closed with no
+        # descriptor, instead of rendering a false "[unreadable attachment]"
+        # marker for a file that never existed.
         media_type = get_media_type(msg)
+        if media_type is None:
+            return None
         filename = getattr(getattr(msg, "file", None), "name", None)
         if not filename:
             # Photos genuinely have no filename — synthesize a stable label.
-            filename = f"{media_type or 'media'}-{msg.id}"
+            filename = f"{media_type}-{msg.id}"
 
         # Lazy import: models.telegram pulls in Popoto/Redis, which this
         # module must not require at import time (same shape as _cache_walk_root).
@@ -510,6 +491,7 @@ async def fetch_reply_chain(
     chat_id: int,
     message_id: int,
     max_depth: int = 20,
+    resolve_media: bool = True,
 ) -> list[dict]:
     """
     Fetch the entire reply chain for a message.
@@ -522,6 +504,9 @@ async def fetch_reply_chain(
         chat_id: Chat ID to fetch from
         message_id: Starting message ID (the one being replied to)
         max_depth: Maximum number of messages to fetch in the chain
+        resolve_media: when False, skip per-hop media descriptor resolution
+            (and its Redis lookups) entirely — for callers that consume only
+            sender/message_id, like the session-routing walk
 
     Returns:
         List of message dicts with 'sender', 'content', 'message_id', 'date',
@@ -551,7 +536,7 @@ async def fetch_reply_chain(
 
             # Never raises — a resolution failure degrades this hop to an
             # "unreadable" descriptor instead of reaching the loop-tail break.
-            media = await _resolve_media_descriptor(msg, chat_id)
+            media = await _resolve_media_descriptor(msg, chat_id) if resolve_media else None
 
             chain.append(
                 {
@@ -625,8 +610,13 @@ def format_reply_chain(chain: list[dict]) -> str:
         # whole line.
         if sender == "Valor":
             content = filter_tool_logs(content)
-            if not content and not media:
-                continue
+
+        # Any hop with no text and no descriptor renders nothing: a bare
+        # "Sender:" label carries no information. Covers Valor hops whose
+        # text filtered away and caption-less non-file media (a poll or geo
+        # share) whose descriptor is deliberately absent (PR #3146 review).
+        if not content and not media:
+            continue
 
         # Valor's messages are already summarized — include in full
         # so resumed sessions have complete context of what was sent.
@@ -764,7 +754,11 @@ async def resolve_root_session_id(
             f"[session-root] cache miss for msg_id={reply_to_msg_id}, "
             f"falling back to Telegram API chain walk"
         )
-        chain = await fetch_reply_chain(client, chat_id, reply_to_msg_id)
+        # resolve_media=False: this walk consumes only sender/message_id, so
+        # paying per-hop Redis descriptor resolution here would add
+        # Redis-health-bounded latency to session routing for data nothing
+        # reads (PR #3146 review).
+        chain = await fetch_reply_chain(client, chat_id, reply_to_msg_id, resolve_media=False)
         # Chain is chronological (oldest first). Find the first non-Valor message.
         for entry in chain:
             if entry.get("sender") != "Valor":

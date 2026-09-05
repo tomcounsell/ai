@@ -946,7 +946,7 @@ class TestResolveRootSessionId:
         mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
 
         # API chain: returns a chain with root human message at msg_id=8800
-        async def mock_fetch_reply_chain(client, cid, mid, max_depth=20):
+        async def mock_fetch_reply_chain(client, cid, mid, max_depth=20, resolve_media=True):
             return [
                 {"sender": "Bob", "content": "hello", "message_id": 8800, "date": None},
                 {"sender": "Valor", "content": "hi", "message_id": 8801, "date": None},
@@ -2509,6 +2509,19 @@ class _MediaFakeFile:
         self.name = name
 
 
+def _media_fake_document(filename: str = "report.pdf"):
+    """A genuine MessageMediaDocument the resolver's classifier gate accepts
+    (PR #3146 review round 2): get_media_type is the descriptor gate, so a
+    bare object() no longer reads as an attachment."""
+    from types import SimpleNamespace
+
+    from telethon.tl.types import DocumentAttributeFilename, MessageMediaDocument
+
+    media = MessageMediaDocument.__new__(MessageMediaDocument)
+    media.document = SimpleNamespace(attributes=[DocumentAttributeFilename(file_name=filename)])
+    return media
+
+
 class _MediaFakeSender:
     first_name = "Hazem"
 
@@ -2544,7 +2557,7 @@ def _media_chain_msgs(depth: int) -> list[_MediaFakeMsg]:
             i,
             text=f"hop {i}: short caption for this attachment",
             reply_to=i - 1 if i > 1 else None,
-            media=object(),
+            media=_media_fake_document(),
             file=_MediaFakeFile(f"file_{i}.pdf"),
         )
         for i in range(1, depth + 1)
@@ -2675,7 +2688,10 @@ class TestReplyChainMessageTextDelivery:
         return _MediaFakeClient(
             [
                 _MediaFakeMsg(
-                    1, text="", media=object(), file=_MediaFakeFile("recommendation.pdf")
+                    1,
+                    text="",
+                    media=_media_fake_document(),
+                    file=_MediaFakeFile("recommendation.pdf"),
                 ),
                 _MediaFakeMsg(
                     2,

@@ -605,6 +605,19 @@ class _FakeSender:
     first_name = "Hazem"
 
 
+def _document_media(filename: str = "report.pdf"):
+    """A genuine MessageMediaDocument that get_media_type classifies as
+    "document" — the resolver's gate is the repo's own classifier (PR #3146
+    review round 2), so descriptor tests must use media it accepts."""
+    from types import SimpleNamespace
+
+    from telethon.tl.types import DocumentAttributeFilename, MessageMediaDocument
+
+    media = MessageMediaDocument.__new__(MessageMediaDocument)
+    media.document = SimpleNamespace(attributes=[DocumentAttributeFilename(file_name=filename)])
+    return media
+
+
 class _FakeChainMsg:
     """Minimal Telethon Message stand-in for the resolver and the chain walk."""
 
@@ -675,7 +688,7 @@ class TestResolveMediaDescriptor:
     async def test_missing_record_is_unreadable_no_record(self, chain_chat_id):
         from bridge.context import _resolve_media_descriptor
 
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "no_record"
@@ -688,7 +701,7 @@ class TestResolveMediaDescriptor:
         from bridge.context import _resolve_media_descriptor
 
         _save_telegram_record(chain_chat_id, 10, media_download_error="timeout after 120s")
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "download_error: timeout after 120s"
@@ -697,7 +710,7 @@ class TestResolveMediaDescriptor:
         from bridge.context import _resolve_media_descriptor
 
         _save_telegram_record(chain_chat_id, 10, media_local_path=None)
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "no_path_recorded"
@@ -706,7 +719,7 @@ class TestResolveMediaDescriptor:
         from bridge.context import _resolve_media_descriptor
 
         _save_telegram_record(chain_chat_id, 10, media_local_path="   ")
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "no_path_recorded"
@@ -717,7 +730,7 @@ class TestResolveMediaDescriptor:
         # /etc/hosts exists and is readable — outside data/media it must
         # still never be rendered as a resolved path.
         _save_telegram_record(chain_chat_id, 10, media_local_path="/etc/hosts")
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "invalid_path"
@@ -731,7 +744,7 @@ class TestResolveMediaDescriptor:
 
         ghost = MEDIA_DIR / f"test2732_ghost_{uuid.uuid4().hex}.pdf"
         _save_telegram_record(chain_chat_id, 10, media_local_path=str(ghost))
-        msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
         assert descriptor["kind"] == "unreadable"
         assert descriptor["reason"] == "file_missing"
@@ -746,7 +759,7 @@ class TestResolveMediaDescriptor:
         real.write_bytes(b"%PDF test")
         try:
             _save_telegram_record(chain_chat_id, 10, media_local_path=str(real))
-            msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+            msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
             descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
             assert descriptor["kind"] == "resolved"
             assert descriptor["filename"] == "report.pdf"
@@ -768,15 +781,70 @@ class TestResolveMediaDescriptor:
             "photos have no filename — the synthetic {media_type}-{message_id} label must apply"
         )
 
-    async def test_unknown_media_type_still_yields_descriptor(self, chain_chat_id):
+    async def test_unknown_extension_document_still_yields_descriptor(self, chain_chat_id):
         from bridge.context import _resolve_media_descriptor
 
-        # get_media_type returns None for a non-Telethon media object; the
-        # descriptor must degrade to a generic label rather than crash.
-        msg = _FakeChainMsg(7, media=object(), file=_FakeFile(None))
+        # A genuine document with an extension no classifier bucket knows is
+        # still a downloadable file: it classifies as "document" and must
+        # yield a descriptor rather than vanish.
+        msg = _FakeChainMsg(7, media=_document_media("data.xyz9"), file=_FakeFile(None))
         descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
-        assert descriptor["media_type"] is None
-        assert descriptor["filename"] == "media-7"
+        assert descriptor["media_type"] == "document"
+        assert descriptor["filename"] == "document-7"
+
+    @pytest.mark.parametrize(
+        "type_name",
+        [
+            "MessageMediaGeoLive",
+            "MessageMediaVenue",
+            "MessageMediaGame",
+            "MessageMediaInvoice",
+            "MessageMediaPoll",
+            "MessageMediaGeo",
+            "MessageMediaContact",
+            "MessageMediaDice",
+            "MessageMediaWebPage",
+        ],
+    )
+    async def test_non_file_media_yields_no_descriptor(self, chain_chat_id, type_name):
+        """Regression (PR #3146 review round 2): every non-file media kind —
+        current and future — must fail closed at the classifier gate. A
+        record with has_media=True and no path exists (the production intake
+        shape), so a fail-open gate would render a false
+        "[unreadable attachment ... no_path_recorded]" marker."""
+        from telethon.tl import types as tl_types
+
+        from bridge.context import _resolve_media_descriptor
+
+        media_cls = getattr(tl_types, type_name)
+        _save_telegram_record(chain_chat_id, 11)
+        msg = _FakeChainMsg(11, media=media_cls.__new__(media_cls))
+        assert await _resolve_media_descriptor(msg, chain_chat_id) is None, (
+            f"{type_name} is not a downloadable attachment and must yield no descriptor"
+        )
+
+    async def test_live_location_hop_renders_no_false_marker(self, chain_chat_id):
+        """End to end: a caption-less live-location hop renders neither a
+        false unreadable marker nor a bare 'Hazem:' label — the hop simply
+        does not appear (PR #3146 review round 2, blocker + nit)."""
+        from telethon.tl import types as tl_types
+
+        from bridge.context import fetch_reply_chain, format_reply_chain
+
+        geolive = tl_types.MessageMediaGeoLive.__new__(tl_types.MessageMediaGeoLive)
+        _save_telegram_record(chain_chat_id, 1)
+        msgs = [
+            _FakeChainMsg(1, text="", media=geolive),
+            _FakeChainMsg(2, text="on my way", reply_to=1),
+        ]
+        chain = await fetch_reply_chain(_FakeChainClient(msgs), chain_chat_id, 2)
+        formatted = format_reply_chain(chain)
+        assert "unreadable" not in formatted
+        assert "no_path_recorded" not in formatted
+        hazem_lines = [line for line in formatted.splitlines() if line.startswith("Hazem")]
+        assert hazem_lines == ["Hazem: on my way"], (
+            "the caption-less excluded hop must render nothing, not a bare label"
+        )
 
     async def test_link_preview_message_yields_no_descriptor(self, chain_chat_id):
         """Regression (PR #3146 review): MessageMediaWebPage is set on any
@@ -812,7 +880,7 @@ class TestResolveMediaDescriptor:
         other_file.write_bytes(b"%PDF other tenant")
         try:
             _save_telegram_record(other_chat, 10, media_local_path=str(other_file))
-            msg = _FakeChainMsg(10, media=object(), file=_FakeFile("report.pdf"))
+            msg = _FakeChainMsg(10, media=_document_media(), file=_FakeFile("report.pdf"))
             descriptor = await _resolve_media_descriptor(msg, chain_chat_id)
             assert descriptor["kind"] == "unreadable"
             assert descriptor["reason"] == "no_record"
@@ -834,7 +902,7 @@ class TestResolveMediaDescriptor:
 
         from bridge.context import _resolve_media_descriptor
 
-        msg = _FakeChainMsg(99, media=object(), file=_FakeFile("report.pdf"))
+        msg = _FakeChainMsg(99, media=_document_media(), file=_FakeFile("report.pdf"))
         with (
             patch("bridge.context.get_media_type", side_effect=RuntimeError("boom")),
             caplog.at_level(logging.WARNING, logger="bridge.context"),
@@ -859,7 +927,7 @@ class TestFetchReplyChainMediaFailurePath:
         from bridge.context import fetch_reply_chain
 
         msgs = [
-            _FakeChainMsg(1, text="", media=object(), file=_FakeFile("doc.pdf")),
+            _FakeChainMsg(1, text="", media=_document_media(), file=_FakeFile("doc.pdf")),
             _FakeChainMsg(2, text="middle reply", reply_to=1),
             _FakeChainMsg(3, text="latest reply", reply_to=2),
         ]
@@ -894,7 +962,9 @@ class TestFetchReplyChainMediaFailurePath:
         try:
             _save_telegram_record(chain_chat_id, 1, media_local_path=str(real))
             msgs = [
-                _FakeChainMsg(1, text="", media=object(), file=_FakeFile("recommendation.pdf")),
+                _FakeChainMsg(
+                    1, text="", media=_document_media(), file=_FakeFile("recommendation.pdf")
+                ),
                 _FakeChainMsg(2, text="brushes over many details", reply_to=1),
                 _FakeChainMsg(3, text="valor can help flesh this out", reply_to=2),
             ]
@@ -905,3 +975,52 @@ class TestFetchReplyChainMediaFailurePath:
             assert "[media]" not in formatted
         finally:
             real.unlink(missing_ok=True)
+
+
+class TestResolveMediaFlag:
+    """PR #3146 review, tech debt: the session-routing walk must not pay
+    per-hop Redis descriptor resolution for data it never reads."""
+
+    async def test_resolve_media_false_skips_descriptor_resolution(self, chain_chat_id):
+        from unittest.mock import AsyncMock, patch
+
+        from bridge.context import fetch_reply_chain
+
+        msgs = [
+            _FakeChainMsg(1, text="root", media=_document_media()),
+            _FakeChainMsg(2, text="reply", reply_to=1),
+        ]
+        spy = AsyncMock(return_value=None)
+        with patch("bridge.context._resolve_media_descriptor", spy):
+            chain = await fetch_reply_chain(
+                _FakeChainClient(msgs), chain_chat_id, 2, resolve_media=False
+            )
+        assert spy.await_count == 0, "resolve_media=False must perform zero descriptor lookups"
+        assert len(chain) == 2
+        assert all(entry["media"] is None for entry in chain)
+
+    async def test_session_routing_walk_passes_resolve_media_false(self):
+        from unittest.mock import AsyncMock, patch
+
+        from bridge.context import resolve_root_session_id
+
+        recorded = {}
+
+        async def _fake_fetch(client, chat_id, message_id, max_depth=20, resolve_media=True):
+            recorded["resolve_media"] = resolve_media
+            return [
+                {"sender": "Hazem", "content": "root", "message_id": 5, "date": None, "media": None}
+            ]
+
+        with (
+            patch("bridge.context._get_cached_root", AsyncMock(return_value=None)),
+            patch("bridge.context._cache_walk_root", AsyncMock(return_value=None)),
+            patch("bridge.context.fetch_reply_chain", _fake_fetch),
+            patch("bridge.context._set_cached_root", AsyncMock()),
+        ):
+            session_id = await resolve_root_session_id(object(), 123, 9, "valor")
+
+        assert recorded["resolve_media"] is False, (
+            "the Step 2 API fallback consumes only sender/message_id and must skip media"
+        )
+        assert session_id == "tg_valor_123_5"
