@@ -179,15 +179,71 @@ Not applicable — no prior fix has been attempted at these four sites. #2754 de
 
 ## Appetite
 
-<!-- TODO -->
+**Medium.** Five source files, one lifted helper, and a test-fixture sweep across five test modules.
+
+What justifies Medium rather than Small: the arity change to four sender functions breaks roughly 25 monkeypatch sites that bind 1-argument lambdas, and the `_resolve_notify_chat` lift touches a module that merged three days ago with 248 lines of fresh tests. What holds it back from Large: no new abstraction is being invented — `resolve_eng_group` and the `_resolve_notify_chat` ladder both exist and both have passing tests to copy from.
+
+If this exceeds the appetite, the fall-back scope is Flow A only (`expectation_reconciler`, `sdlc_progress`) — the two sites where alerts genuinely misroute — leaving the host-machine digests for a follow-up. That is a legitimate cut because Flow B's current behavior is right by accident rather than wrong.
 
 ## Prerequisites
 
-<!-- TODO -->
+- **#2754 / PR #3077 — landed** (merged 2026-09-02, merge commit `974be653`). Provides `reflections/utilities.py::resolve_eng_group` and the `reflections/docs_auditor.py::_resolve_notify_chat` ladder this plan lifts. Verified present at `67d714662`.
+
+No other prerequisite. `python scripts/check_prerequisites.py docs/plans/sibling-reflections-hardcode-eng-valor.md` should report clean.
 
 ## Solution
 
-<!-- TODO -->
+Two entry points in `reflections/utilities.py`, because recon (spike-2) showed the four callers are not one shape.
+
+### 1. `send_eng_telegram(project, message, *, logger_prefix) -> bool`
+
+For callers that hold a project dict.
+
+```
+resolved = resolve_eng_group(project)
+if resolved is None:
+    log.warning("%s: no Eng: group for project %s; Telegram alert suppressed",
+                logger_prefix, project.get("slug", "?"))
+    return False                       # NO subprocess is invoked
+_, chat_id = resolved
+subprocess.run(["valor-telegram", "send", "--chat", str(chat_id), message], ...)
+return True
+```
+
+Takes the **dict**, not a `project_key` — `resolve_eng_group` scans `project["telegram"]["groups"]`, and every call site already holds the dict (spike-1). A key-based signature would force a redundant `load_local_projects()` scan per send.
+
+Returns `True` when a destination resolved and a send was *attempted* — including a swallowed `FileNotFoundError` / `TimeoutExpired` / non-zero exit. `False` means and only means "nothing resolved, nothing was sent". This is the same contract `docs_auditor._send_telegram_notification` already publishes, and preserving it is what lets callers write an accurate suppression notice.
+
+`logger_prefix` keeps each module's existing log vocabulary (`"expectation_reconciler"`, `"sdlc_progress"`, …) so log greps and any alerting built on them survive.
+
+### 2. `resolve_host_eng_chat() -> str | None` and `send_host_eng_telegram(message, *, logger_prefix) -> bool`
+
+For callers with no project in scope — the fleet-wide digests.
+
+`resolve_host_eng_chat()` is `docs_auditor._resolve_notify_chat` **lifted verbatim** and generalized from `repo_root: Path` to defaulting on `reflections.utilities.PROJECT_ROOT`, keeping every rung and every comment:
+
+1. Match the repo root against a `projects.json` entry's `working_directory`.
+2. On a match, return `str(chat_id)` from that project's `Eng:` group.
+3. On no match or no configured group, return `FALLBACK_ENG_CHAT` **only when** the root is this very checkout. Never for a foreign repo.
+4. Swallow, log, and fall through to rung 3 on any exception.
+
+`docs_auditor._resolve_notify_chat(repo_root)` then becomes a thin delegation to the lifted function with an explicit `repo_root` argument, and `FALLBACK_ENG_CHAT` moves to `utilities.py`. `docs_auditor` keeps a re-export binding so `tests/unit/test_docs_auditor_substrate.py`'s existing patches of `docs_auditor.PROJECT_ROOT` and its 8 `TestTelegramChatRouting` cases keep passing unchanged. If they do not pass unchanged, the lift is wrong.
+
+### 3. Per-module wiring
+
+| Module | Change |
+|---|---|
+| `expectation_reconciler` | `_escalate_once(job_id, eid, message)` → `_escalate_once(project, job_id, eid, message)`. Update the three call sites (444, 480, 506) inside `_reconcile_project`, which already holds `project`. Body calls `send_eng_telegram(project, message, logger_prefix="expectation_reconciler")`. |
+| `sdlc_progress` | `_send_alert(message)` → `_send_alert(project, message)`. `_escalate_once` already takes `project=project_key` (a *string*); add a `project_dict` keyword and thread it from `_check_project_stalls`, which holds it. Body calls `send_eng_telegram`. |
+| `sentry_triage` | `_send_telegram_notification(message)` keeps its arity; body swaps to `send_host_eng_telegram(message, logger_prefix="sentry_triage")`. |
+| `stall_advisory` | `_send_alert(message)` keeps its arity; body swaps to `send_host_eng_telegram(message, logger_prefix="stall_advisory")`. |
+| `scripts/memory_consolidation.py:352` | Swaps to `send_host_eng_telegram`. Its `check=True` / `CalledProcessError` → `_write_contradiction_log` fallback must be preserved: the helper swallows errors and returns `True`, so the script needs the return value to decide whether to write the fallback log. Treat a `False` return as "bridge unreachable" and write the log. |
+
+Only two of the five sender signatures change arity. That is a deliberate consequence of spike-2 and it cuts the test-fixture sweep roughly in half.
+
+### 4. Suppression must be visible
+
+Both `expectation_reconciler._escalate_once` and `sdlc_progress._escalate_once` currently return a truthy value meaning "the human was told". After this change that claim can be false. Each must thread the helper's `False` into the reflection's `findings` list — e.g. `f"alert-suppressed: no Eng: group for {project_key}"` — so it reaches the `summary` the scheduler persists. `docs_auditor` set this precedent in PR #3077 and it is the whole mitigation for the behavior boundary named in Architectural Impact.
 
 ## Failure Path Test Strategy
 
