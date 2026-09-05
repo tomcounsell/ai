@@ -335,7 +335,7 @@ exit, bucketing every node `inconclusive`.
 |------|---------|
 | `scripts/nightly_regression_tests.py` | Main script: acquires the run lock, runs the default collection through `scripts/pytest-clean.sh`, validates run integrity, computes the failure delta or re-baselines on a collection change, files or comments on findings via the tracker, runs the TTFT gate, saves state. Notifies nothing |
 | `com.valor.nightly-tests.plist` | launchd plist template with `__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__` placeholders |
-| `scripts/install_nightly_tests.sh` | Install script: refuses to install from a lane worktree, fails closed when the projects config is unreadable or the host role is undeterminable, worker-role gated (`has_worker_role()` — any machine owning a project, Telegram-independent), substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on a machine owning no project |
+| `scripts/install_nightly_tests.sh` | Install script, **install-only**: refuses to install from a lane worktree, does nothing when the projects config is unreadable or the host role is undeterminable, worker-role gated (`owns_a_project()` — any machine owning a project, Telegram-independent, verdict carried by a printed `ROLE:OWNS` token), substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21). It never removes a plist; the uninstall line it prints on success is the removal path (#2905) |
 | `data/nightly_tests.lock` | Advisory `flock` lock file preventing overlapping runs (gitignored) — see `docs/features/nightly-triage-dispatch.md` |
 | `data/nightly_tests_last_run.json` | Delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `collection`, `head_commit`, `dispatched_nodes`, `dispatched_session_id`, `seeded_nodes` (carried forward on every run), `cascade_issues` (signature → issue number, see below), and — on a re-baseline night only — `seed_collection`, `seed_size`, `min_expected_collected` (gitignored) |
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
@@ -410,13 +410,18 @@ failure does, even when the total count is flat.
 
 **Worker-role gating, not bridge-role** — Running the test suite requires a
 checkout and a worker, not a Telegram bridge. `install_nightly_tests.sh`
-includes a `has_worker_role()` function (the same fix issue #1379 applied to
-`install_reflection_worker.sh`) that qualifies any machine owning at least one
-project, regardless of whether that project has Telegram configured, and
-removes any stale plist on a machine owning none. A worktree refusal runs
-first: the plist is machine-global and hardcodes an absolute `PROJECT_DIR`, so
-installing from a lane worktree would aim the fleet's detector at a directory
-merge cleanup deletes.
+gates on `owns_a_project()` (the same fix issue #1379 applied to
+`install_reflection_worker.sh`), which qualifies any machine owning at least
+one project, regardless of whether that project has Telegram configured. The
+gate is **install-only**: on any other outcome (owns nothing, unreadable
+config, undeterminable identity, interpreter failure) it does nothing and
+leaves any existing plist alone. Removal stays a human step because it must
+be certain of a negative from inputs that can be indeterminate, and
+`projects.json` carries no fleet registry that could prove a non-match is
+meaningful (#2905). A worktree refusal runs first: the plist is
+machine-global and hardcodes an absolute `PROJECT_DIR`, so installing from a
+lane worktree would aim the fleet's detector at a directory merge cleanup
+deletes.
 
 **Run-integrity guard, not returncode-only trust** — A run that could not
 execute (test-DB slot exhaustion, a wedged xdist controller) was measured,
