@@ -31,7 +31,7 @@ The other two, `sentry_triage` and `stall_advisory`, aggregate across every proj
 
 **Current behavior:** every one of these four alerts is addressed to the literal string `Eng: Valor`, regardless of which project the reflection is acting on and regardless of what `projects.json` says.
 
-**Desired outcome:** each sender resolves its destination from configuration — a numeric `chat_id` for the project whose work provoked the alert — and declines to send, loudly, when no destination resolves. The literal survives in exactly one place: `reflections/docs_auditor.py`'s deliberately narrowed `FALLBACK_ENG_CHAT`.
+**Desired outcome:** each sender resolves its destination from configuration — a numeric `chat_id` for the project whose work provoked the alert — and declines to send, loudly, when no destination resolves. The literal survives in exactly one place: `reflections/utilities.py`'s deliberately narrowed `FALLBACK_ENG_CHAT`, relocated intact from `docs_auditor`.
 
 ## Freshness Check
 
@@ -246,7 +246,41 @@ For callers with no project in scope — the fleet-wide digests.
 3. On no match or no configured group, return `FALLBACK_ENG_CHAT` **only when** the root is this very checkout. Never for a foreign repo.
 4. Swallow, log, and fall through to rung 3 on any exception.
 
-`docs_auditor._resolve_notify_chat(repo_root)` then becomes a thin delegation to the lifted function with an explicit `repo_root` argument, and `FALLBACK_ENG_CHAT` moves to `utilities.py`. `docs_auditor` keeps a re-export binding so `tests/unit/test_docs_auditor_substrate.py`'s existing patches of `docs_auditor.PROJECT_ROOT` and its 8 `TestTelegramChatRouting` cases keep passing unchanged. If they do not pass unchanged, the lift is wrong.
+**Two seams are injectable, and that is what makes the lift safe.** The signature is:
+
+```python
+def resolve_host_eng_chat(
+    repo_root: Path | None = None,
+    *,
+    load_projects: Callable[[], list[dict]] | None = None,
+    project_root: Path | None = None,
+) -> str | None:
+    loader = load_projects or load_local_projects      # utilities' own binding
+    anchor = project_root or PROJECT_ROOT              # utilities' own binding
+    target = (repo_root or anchor).resolve()
+    ...
+```
+
+and `docs_auditor._resolve_notify_chat(repo_root)` delegates by passing **its own module-level bindings** through, read at call time:
+
+```python
+def _resolve_notify_chat(repo_root: Path) -> str | None:
+    return resolve_host_eng_chat(
+        repo_root, load_projects=load_local_projects, project_root=PROJECT_ROOT
+    )
+```
+
+This is the whole answer to the critique's blocker, and the reason it works is mechanical: `unittest.mock.patch` rebinds a name inside the target module's `__dict__` only — it does not follow the object into another module's globals. A bare `load_local_projects()` call inside `utilities` would resolve against `utilities.__dict__` and the docs_auditor-scoped patch would sail past it. Reading `load_local_projects` in the *delegation body*, which lives in `docs_auditor`, resolves against `docs_auditor.__dict__` at call time, so the patch lands on the value actually used.
+
+Verified against the test file on `da6e5789a`, not assumed: all 8 `TestTelegramChatRouting` cases (`tests/unit/test_docs_auditor_substrate.py:1554-1730`) patch exactly two docs_auditor-scoped names — `reflections.docs_auditor.load_local_projects` and `reflections.docs_auditor.subprocess.run`. The `subprocess.run` patch is unaffected: only the *resolver* moves; `_send_telegram_notification` and its `subprocess.run` call stay in `docs_auditor`. The `load_local_projects` patch is carried by the injection above. No case patches `docs_auditor.resolve_eng_group` or `docs_auditor.FALLBACK_ENG_CHAT`.
+
+`project_root` closes a second, latent seam that no current test exercises but that the lift would otherwise shift silently. Nine tests in that module patch `reflections.docs_auditor.PROJECT_ROOT` (lines 291-1535, 1747-2005); every one of them either never reaches the resolver or patches `_send_telegram_notification` wholesale, so none would fail today. But rung 3's `target == PROJECT_ROOT.resolve()` guard currently reads *docs_auditor's* `PROJECT_ROOT`, and after an uninjected lift it would read *utilities'*. The two are the same path today (both `Path(__file__).parent.parent` from `reflections/`), so the divergence appears only under a patch — which is exactly the kind of trap that surfaces six months later as an unexplainable test. One keyword closes it.
+
+`FALLBACK_ENG_CHAT` moves to `utilities.py`. `docs_auditor` keeps a re-export binding (`from reflections.utilities import FALLBACK_ENG_CHAT`) so any external reader of `docs_auditor.FALLBACK_ENG_CHAT` still resolves, and so the module's own docstring reference at line 1569 stays honest.
+
+**The docs_auditor diff is bounded to three hunks, deliberately** — see the coordination note in Risks. (i) the import line gains `resolve_host_eng_chat` and `FALLBACK_ENG_CHAT`; (ii) line 44's constant assignment is deleted; (iii) the `_resolve_notify_chat` body (currently lines ~1552-1600) collapses to the three-line delegation above, keeping a one-line docstring that points at the new owner. Nothing else in that 2000-line file is touched.
+
+If the 8 cases do not pass unchanged, the lift is wrong. Run them immediately after Task 2 and before any other code exists.
 
 ### 3. Per-module wiring
 
