@@ -41,10 +41,13 @@ downstream.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema-first classification (plan #2000 Task 2.3)
@@ -72,9 +75,48 @@ PM_TURN_JSON_SCHEMA: dict[str, Any] = {
         # The runner treats a whitespace-only value as absent (no keyword
         # matching of the free-text ``message``).
         "blocked_reason": {"type": "string"},
+        # ``ask_coverage`` (issue #3027, plan promise-gate-recorded-obligations
+        # Task 1) forces the PM to enumerate the human ask's clauses and their
+        # dispositions on every turn, so a dropped clause becomes visible
+        # instead of structurally undetectable. Each entry is
+        # ``{item, disposition, evidence}`` where ``disposition`` is one of
+        # ``delivered`` | ``blocked`` | ``declined`` | ``not_started``.
+        # ``evidence`` is a free-text artifact reference (a commit, a PR URL,
+        # a file path) and is REQUIRED (non-empty) when ``disposition`` is
+        # ``delivered`` — a bare completion claim naming no artifact is
+        # treated as invalid structured output by
+        # :func:`validate_structured_route` and routes to the regex fallback.
+        # Deliberately **optional / not in ``required``** in this phase
+        # (two-phase rollout, phase A): tightening to required is a separate
+        # follow-up (#3035), gated on the ``SCHEMA_ROUTING_FALLBACK_METRIC``
+        # staying flat over a soak window. No JSON Schema ``if/then``
+        # conditional-required is used here — CLI draft coverage for it is
+        # unverified; the ``delivered``-requires-``evidence`` rule is
+        # enforced entirely in Python (see ``_normalize_ask_coverage``
+        # below). ``route: "continue"`` turns address no human, so an absent
+        # or empty ``ask_coverage`` is always valid there.
+        "ask_coverage": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string"},
+                    "disposition": {
+                        "type": "string",
+                        "enum": ["delivered", "blocked", "declined", "not_started"],
+                    },
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
     },
     "required": ["route", "message"],
 }
+
+# The valid ``ask_coverage[].disposition`` vocabulary — kept in sync with the
+# schema's enum above. A single source of truth for the Python-side
+# normalization since the schema string is not importable as a set.
+ASK_COVERAGE_DISPOSITIONS = ("delivered", "blocked", "declined", "not_started")
 
 # Analytics metric names for the schema-routing fallback-rate alert (plan
 # #2000 Task 2.3 "Schema routing" — a healthy schema path is ~0%; a
@@ -136,6 +178,12 @@ class ClassificationResult:
     # convention carries no such slot, so the runner must source it defensively
     # (``getattr(classification, "blocked_reason", None)``).
     blocked_reason: str | None = None
+    # ``ask_coverage`` (issue #3027): the schema's optional per-clause
+    # disposition array, normalized by :func:`_normalize_ask_coverage`.
+    # Always ``[]`` on a regex-fallback result — the prefix-token convention
+    # carries no such slot — so the runner must source it defensively
+    # (``getattr(classification, "ask_coverage", [])``).
+    ask_coverage: list[dict[str, str]] = field(default_factory=list)
 
 
 def validate_structured_route(structured: dict[str, Any] | None) -> ClassificationResult | None:
@@ -171,6 +219,12 @@ def validate_structured_route(structured: dict[str, Any] | None) -> Classificati
     first_line = next((line for line in message.splitlines() if line.strip()), "")
     raw_blocked = structured.get("blocked_reason")
     blocked_reason = raw_blocked if isinstance(raw_blocked, str) and raw_blocked.strip() else None
+    ask_coverage, ask_coverage_ok = _normalize_ask_coverage(structured.get("ask_coverage"))
+    if not ask_coverage_ok:
+        # A `delivered` clause with no evidence is a bare completion claim —
+        # the whole structured turn is treated as invalid, same as a missing
+        # `route`, so the caller falls back to the regex classifier.
+        return None
     return ClassificationResult(
         destination=route,  # type: ignore[arg-type]
         payload=payload,
@@ -178,7 +232,62 @@ def validate_structured_route(structured: dict[str, Any] | None) -> Classificati
         raw_first_line=first_line,
         file_paths=file_paths,
         blocked_reason=blocked_reason,
+        ask_coverage=ask_coverage,
     )
+
+
+def _normalize_ask_coverage(raw: Any) -> tuple[list[dict[str, str]], bool]:
+    """Normalize + validate the optional ``ask_coverage`` array.
+
+    Returns ``(normalized, ok)``. ``ok=False`` means the structured output as
+    a WHOLE must be treated as invalid (the caller falls back to the regex
+    classifier) — reserved for the single hard-invalidating violation: a
+    ``delivered`` clause with empty/whitespace-only ``evidence``, which is
+    what makes a bare completion claim naming no artifact structurally
+    unshippable.
+
+    Everything else degrades gracefully rather than failing the whole turn:
+    a non-list value is treated as absent (``[]``); a malformed entry, an
+    entry with a whitespace-only ``item``, or an entry with an unrecognized
+    ``disposition`` is dropped with a warning. Absent or ``[]`` is always
+    valid — ``route: "continue"`` turns address no human, so nothing to
+    cover is the common case there.
+    """
+    if raw is None:
+        return [], True
+    if not isinstance(raw, list):
+        logger.warning("[router] ask_coverage is not a list, treating as absent: %r", raw)
+        return [], True
+
+    normalized: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.warning("[router] ask_coverage entry is not an object, dropping: %r", entry)
+            continue
+
+        item = entry.get("item")
+        if not isinstance(item, str) or not item.strip():
+            logger.warning(
+                "[router] ask_coverage entry has empty/missing item, dropping: %r", entry
+            )
+            continue
+
+        disposition = entry.get("disposition")
+        if disposition not in ASK_COVERAGE_DISPOSITIONS:
+            logger.warning(
+                "[router] ask_coverage entry has invalid disposition, dropping: %r", entry
+            )
+            continue
+
+        raw_evidence = entry.get("evidence")
+        evidence = raw_evidence if isinstance(raw_evidence, str) else ""
+
+        if disposition == "delivered" and not evidence.strip():
+            return [], False
+
+        normalized.append({"item": item.strip(), "disposition": disposition, "evidence": evidence})
+
+    return normalized, True
 
 
 def classify_pm_prefix(pm_text: str) -> ClassificationResult:

@@ -918,11 +918,19 @@ class EmailOutputHandler:
 
         # Drafter-at-the-handler. Fail open: any exception in the drafter must
         # not block the email send.
+        # NOTE: pinned use_llm=False (temporary). Email has no bounce path —
+        # there is no `needs_self_draft`/self-draft-steering wiring on this
+        # transport (see `EmailOutputHandler.send` below) — so a `block` verdict
+        # cannot alter delivery: `draft.text` is simply empty and this call
+        # site falls through to the raw `text` unchanged. Paying an LLM
+        # round-trip for a verdict the transport cannot act on is cost
+        # without enforcement. Lifting this pin requires wiring the bounce
+        # first; tracked in #3124.
         body_text = text
         try:
             from bridge.message_drafter import draft_message
 
-            draft = await draft_message(text, session=session, medium="email")
+            draft = await draft_message(text, session=session, medium="email", use_llm=False)
             if draft.text:
                 body_text = draft.text
         except Exception as e:

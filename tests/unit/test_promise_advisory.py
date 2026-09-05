@@ -173,24 +173,91 @@ class TestZeroWrites:
 
 
 class TestPromiseOverride:
-    def test_recorded_open_inbound_expectation_overrides_the_gate(self, scratch_session_with_job):
+    @pytest.mark.asyncio
+    async def test_recorded_open_inbound_expectation_overrides_the_gate(
+        self, scratch_session_with_job
+    ):
         """The PM stood by the obligation: an open inbound expectation on
         the bound Job turns the drafter gate's block into an allow on
         resend. The override is JOB-scoped by design — any open inbound
-        expectation on the bound Job clears the gate until discharge."""
+        expectation on the bound Job clears the gate until discharge.
+
+        Runs with the default ``use_llm=False`` (heuristic-only) — the
+        override logic itself is judgment-layer-agnostic (Task 5, #3027):
+        it acts on whatever verdict the judgment layer produced, so the
+        heuristic-only case is sufficient to prove the override ordering."""
         from bridge.message_drafter import _evaluate_drafter_promise
 
         session, job = scratch_session_with_job
         deferral = "I'll report back once the deploy finishes."
         # Without a recorded expectation: blocked.
-        assert _evaluate_drafter_promise(deferral, medium="telegram", session=session).action == (
-            "block"
-        )
+        verdict = await _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        assert verdict.action == "block"
 
         job.add_expectation("Report back once the deploy finishes")
         assert promise_override_active(session)
         # With the expectation recorded: allowed through, with the audit reason.
-        verdict = _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        verdict = await _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        assert verdict.action == "allow"
+        assert verdict.reason == "promise_recorded_override"
+
+    @pytest.mark.asyncio
+    async def test_incident_a_blocks_on_main_path_then_clears_via_override(
+        self, monkeypatch, scratch_session_with_job
+    ):
+        """R1 discriminator on the main (``use_llm=True``) path: an
+        LLM-sourced block is cleared by a recorded inbound expectation
+        exactly as a heuristic-sourced one is.
+
+        The LLM layer is monkeypatched to a fixed BLOCK. What this test
+        owns is the override wiring on the main path, and that logic is
+        deterministic; the live-model verdict is not. Left un-mocked, the
+        second call depends on a real Haiku round-trip completing inside
+        ``RTR_SDK_TIMEOUT``, and on timeout the gate falls open to the
+        heuristic (correct, fail-open-on-infrastructure) and returns
+        ``no_promise_detected`` instead of ``promise_recorded_override``.
+
+        Re-measured on this branch at ``24d0f22db``, n=12 calls on this
+        exact fixture: the model blocked 11/11 of the calls it answered
+        (``forward_deferral`` every time), and 1/12 exceeded
+        ``RTR_SDK_TIMEOUT`` and fell through to the heuristic, returning
+        ``allow``. So the verdict is not the flaky part -- the round-trip
+        completing is. This test makes two such calls, so it carried
+        roughly twice that per-call risk of reddening for a reason that
+        says nothing about the override wiring it exists to assert.
+
+        Real-API coverage of the same discriminator is not lost, it lives
+        where an API-dependent assertion belongs:
+        ``tests/integration/test_promise_gate_real_api.py::test_forward_deferral_with_recorded_expectation_allows_real_api``,
+        which is marked ``integration`` and skipped without an API key.
+        """
+        import bridge.promise_gate as promise_gate
+        from bridge.message_drafter import _evaluate_drafter_promise
+        from bridge.promise_gate import PromiseVerdict
+
+        async def _fake_block(text):
+            return PromiseVerdict(
+                action="block",
+                reason="Forward-deferral without verifiable scheduled-delivery reference",
+                class_="forward_deferral",
+            )
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _fake_block)
+
+        session, job = scratch_session_with_job
+        incident_a_text = "Say the word and I'll re-run that same dispatch."
+
+        verdict = await _evaluate_drafter_promise(
+            incident_a_text, medium="telegram", session=session, use_llm=True
+        )
+        assert verdict.action == "block"
+        assert verdict.class_ == "forward_deferral"
+
+        job.add_expectation("re-run that same dispatch")
+        assert promise_override_active(session)
+        verdict = await _evaluate_drafter_promise(
+            incident_a_text, medium="telegram", session=session, use_llm=True
+        )
         assert verdict.action == "allow"
         assert verdict.reason == "promise_recorded_override"
 

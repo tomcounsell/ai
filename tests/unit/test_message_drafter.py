@@ -10,6 +10,7 @@ from bridge.message_drafter import (
     MessageDraft,
     _compose_structured_draft,
     _derive_context_summary,
+    _evaluate_drafter_promise,
     _get_status_emoji,
     _parse_draft_and_questions,
     convert_local_paths_to_attachments,
@@ -166,37 +167,46 @@ class TestDeriveContextSummary:
 
 
 class TestDraftMessage:
-    """Tests for the main draft_message function (pass-through + validation)."""
+    """Tests for the main draft_message function (pass-through + validation).
+
+    Every case pins ``use_llm=False``. These assert composition, file
+    attachment and pass-through, never gate judgment, and ``draft_message``
+    now defaults to ``use_llm=True`` — so without the pin each case makes a
+    live Haiku call and the class goes red on any input the regex cannot
+    match (a 4000-char run of ``x`` flaked exactly this way). Real-API
+    coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
+    """
 
     @pytest.mark.asyncio
     async def test_short_response_passes_through_verbatim(self):
         """Non-SDLC responses under 200 chars pass through verbatim."""
         short_text = "Done. Committed abc1234."
-        result = await draft_message(short_text)
+        result = await draft_message(short_text, use_llm=False)
         assert result.text == short_text
 
     @pytest.mark.asyncio
     async def test_short_response_has_no_was_drafted(self):
         """MessageDraft no longer has was_drafted field."""
         short_text = "Done."
-        result = await draft_message(short_text)
+        result = await draft_message(short_text, use_llm=False)
         assert not hasattr(result, "was_drafted")
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
-        result = await draft_message("")
+        result = await draft_message("", use_llm=False)
         assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_none_response(self):
-        result = await draft_message(None)
+        result = await draft_message(None, use_llm=False)
         assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_long_response_composed_deterministically(self):
         """Responses >=200 chars go through deterministic composition."""
         long_text = "Done and committed. " * 30  # 600 chars
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # text is non-empty (composition succeeded)
         assert result.text
 
@@ -205,7 +215,7 @@ class TestDraftMessage:
         """Responses over FILE_ATTACH_THRESHOLD get a full output file."""
         long_text = "Output line.\n" * 500
 
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
 
         assert result.full_output_file is not None
         assert result.full_output_file.exists()
@@ -219,7 +229,7 @@ class TestDraftMessage:
     async def test_overlength_still_delivers(self):
         """Over-length responses still deliver (no needs_self_draft) — just attach file."""
         long_text = "x" * 4000  # Over 3000 threshold
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # needs_self_draft is NOT set for over-length (file is attached instead)
         assert result.needs_self_draft is False
         assert result.full_output_file is not None
@@ -229,14 +239,14 @@ class TestDraftMessage:
     async def test_mid_length_response_no_file(self):
         """Responses between 200 and FILE_ATTACH_THRESHOLD: no file."""
         text = "x" * 2000  # Over 200, under 3000
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.full_output_file is None
 
     @pytest.mark.asyncio
     async def test_context_summary_populated_for_long_response(self):
         """context_summary is set for responses that go through composition."""
         long_text = "Fixed the drafter refactoring to remove LLM calls. " * 10
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
         # context_summary should be derived deterministically
         assert result.context_summary is not None
         assert isinstance(result.context_summary, str)
@@ -245,7 +255,7 @@ class TestDraftMessage:
     async def test_open_questions_none_for_no_questions(self):
         """open_questions is None when no ## Open Questions section exists."""
         text = "Fixed the bug and committed abc1234. All tests passing. " * 10
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.open_questions is None
 
     @pytest.mark.asyncio
@@ -257,7 +267,7 @@ class TestDraftMessage:
             "- Should we merge to main or wait for design review?\n"
             "- Is the confidence threshold of 0.80 acceptable?\n"
         )
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
         assert result.open_questions is not None
         assert "merge" in result.open_questions.lower() or "design" in result.open_questions.lower()
 
@@ -291,7 +301,7 @@ class TestDraftMessage:
         assert "?" not in text
         assert "```" not in text
 
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
 
         assert result.needs_self_draft is True
         assert result.text == ""
@@ -303,7 +313,7 @@ class TestDraftMessage:
         """A short-output message with NO violation still returns verbatim
         pass-through with needs_self_draft=False (control case for the above)."""
         text = "Done."
-        result = await draft_message(text)
+        result = await draft_message(text, use_llm=False)
 
         assert result.needs_self_draft is False
         assert result.text == text
@@ -320,7 +330,7 @@ class TestDraftMessage:
         )
         assert len(long_text) >= 200  # force the main composition path
 
-        result = await draft_message(long_text)
+        result = await draft_message(long_text, use_llm=False)
 
         assert result.needs_self_draft is True
         assert result.text == ""
@@ -678,6 +688,13 @@ class TestQuestionFabricationPrevention:
 
     The drafter must NEVER fabricate questions from declarative statements.
     Only explicit questions (from ## Open Questions sections) populate open_questions.
+
+    Every case pins ``use_llm=False``. These assert open-question extraction
+    from raw text, never gate judgment, and ``draft_message`` now defaults to
+    ``use_llm=True`` — so without the pin, any input at or above 200 chars
+    makes a live Haiku call and the class goes red or flaky on whatever verdict
+    the model returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     @pytest.mark.asyncio
@@ -690,7 +707,7 @@ class TestQuestionFabricationPrevention:
             "Both changes are straightforward — modifying the classifier prompt "
             "and the auto-continue handler. No questions at this time. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # No ## Open Questions section → open_questions must be None
         assert result.open_questions is None
@@ -706,7 +723,7 @@ class TestQuestionFabricationPrevention:
             "## Open Questions\n"
             "- Should we use exponential backoff or fixed intervals?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         assert "exponential backoff" in result.open_questions
@@ -719,7 +736,7 @@ class TestQuestionFabricationPrevention:
             "will add index to users table, will run load test. "
             "No explicit questions for the human at this point. " * 5
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is None
         assert "\n---\n" not in result.text
@@ -866,6 +883,13 @@ class TestExpectationsRecallParity:
     The drafter must NEVER fabricate questions from declarative statements.
     open_questions must be None (not "", not any other falsy value) when no
     ## Open Questions section is present.
+
+    Every case pins ``use_llm=False``. These assert open-question extraction,
+    never gate judgment, and ``draft_message`` now defaults to ``use_llm=True``
+    — so without the pin, any input at or above 200 chars makes a live Haiku
+    call and the class goes red or flaky on whatever verdict the model
+    returns. Real-API coverage of the gate lives in
+    ``tests/integration/test_promise_gate_real_api.py``.
     """
 
     @pytest.mark.asyncio
@@ -877,7 +901,7 @@ class TestExpectationsRecallParity:
             "- Should we use exponential backoff or fixed 5s intervals?\n"
             "- Is the 0.80 confidence threshold acceptable for prod?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         assert (
@@ -893,7 +917,7 @@ class TestExpectationsRecallParity:
             "The session lock cleanup now runs on startup. "
             "All 135 tests pass. Committed def5678 and pushed to session/auth-fix. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # No ## Open Questions section → no open_questions
         assert result.open_questions is None
@@ -909,7 +933,7 @@ class TestExpectationsRecallParity:
             "Updated the session scheduler. Cleaned up 3 orphaned sessions. "
             "No pending questions at this time. " * 5
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # Must be exactly None, not an empty string or empty list
         assert result.open_questions is None
@@ -925,7 +949,7 @@ class TestExpectationsRecallParity:
             "The current implementation uses Redis anyway. "
             "Completed the analysis. Will proceed with Redis. " * 3
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         # Questions embedded in declarative prose must not be extracted
         assert result.open_questions is None
@@ -940,7 +964,7 @@ class TestExpectationsRecallParity:
             "- Do we need a migration script for existing records?\n"
             "- Is the 48h TTL on steering keys acceptable?\n"
         )
-        result = await draft_message(agent_output)
+        result = await draft_message(agent_output, use_llm=False)
 
         assert result.open_questions is not None
         # All three questions should appear in some form
@@ -1436,9 +1460,49 @@ class TestShortOutputPromiseGate:
         assert result.text == INCIDENT_FORWARD_DEFERRAL
 
     @pytest.mark.asyncio
-    async def test_full_path_promise_block_still_promotes(self):
+    async def test_kill_switch_disabled_path_writes_distinct_audit_source(self, monkeypatch):
+        """The disabled-path audit entry must be greppable by source on the
+        drafter route the same way ``evaluate_promise_async`` is on the CLI
+        route (``source="promise_gate_disabled"``) -- not share the string the
+        enabled heuristic path writes, or an incident grep for the disabled
+        state silently misses this entire route."""
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        captured = {}
+
+        def _capture_audit(text, verdict, *, transport, session_id, source):
+            captured["source"] = source
+
+        monkeypatch.setattr(
+            "bridge.promise_gate._write_promise_audit",
+            _capture_audit,
+        )
+
+        await _evaluate_drafter_promise(INCIDENT_FORWARD_DEFERRAL, medium="telegram", use_llm=True)
+
+        assert captured["source"] == "promise_gate_drafter_disabled"
+
+    @pytest.mark.asyncio
+    async def test_full_path_promise_block_still_promotes(self, monkeypatch):
         """The full (composed) path's empty-promise promotion survives the
-        shared-helper refactor: a long promise-bearing reply is still promoted."""
+        shared-helper refactor: a long promise-bearing reply is still
+        promoted. The LLM layer is monkeypatched deterministic (same
+        target/idiom as TestMainPathLLMWiring below) to keep the verdict
+        deterministic without a live call, rather than pinning
+        ``use_llm=False`` — this test exercises the main (composed) path's
+        LLM-primary wiring, not the heuristic-only short path."""
+        import bridge.promise_gate as promise_gate
+        from bridge.promise_gate import PromiseVerdict
+
+        async def _fake_block(text):
+            return PromiseVerdict(
+                action="block",
+                reason="Forward-deferral without verifiable scheduled-delivery reference",
+                class_="forward_deferral",
+            )
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _fake_block)
+
         long_text = (
             "Thanks for flagging that — good catch on the newsletter section. "
             "The tab layout needs a fair bit of rework before the card reads cleanly "
@@ -1451,3 +1515,145 @@ class TestShortOutputPromiseGate:
 
         assert result.needs_self_draft is True
         assert result.text == ""
+
+
+class TestMainPathLLMWiring:
+    """Task 5 (#3027): the main (composed) path's promise gate defaults to
+    use_llm=True; the short-output path and any use_llm=False caller (the
+    Stop hook, Risk 1a) must never reach the LLM helper regardless."""
+
+    @pytest.mark.asyncio
+    async def test_short_path_issues_zero_llm_calls(self, monkeypatch):
+        """The short-output path is heuristic-only unconditionally — proven
+        by making the raw LLM call explode if it is ever invoked."""
+        import bridge.promise_gate as promise_gate
+
+        async def _explode(text):
+            raise AssertionError("short path must not call the promise-gate LLM")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
+
+        text = "Done. The newsletter card is live on the Newsletters tab."
+        assert len(text) < 200
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is False
+        assert result.text == text
+
+    @pytest.mark.asyncio
+    async def test_stop_hook_call_shape_issues_zero_llm_calls(self, monkeypatch):
+        """Regression guard for Risk 1a / the 126-of-131 SIGKILL incident
+        (docs/features/memory-hook-performance.md): the exact call shape
+        agent/hooks/stop.py:147 uses — ``draft_message(text, medium=medium,
+        use_llm=False)`` — on text long/SDLC-shaped enough to take the main
+        (composed) path must still never reach the LLM helper."""
+        import bridge.promise_gate as promise_gate
+
+        async def _explode(text):
+            raise AssertionError("use_llm=False caller must not call the promise-gate LLM")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text, medium="telegram", use_llm=False)
+
+        # Heuristic still catches the forward-deferral — use_llm=False only
+        # disables the LLM layer, not the gate itself.
+        assert result.needs_self_draft is True
+
+    @pytest.mark.asyncio
+    async def test_main_path_llm_exception_falls_through_to_heuristic(self, monkeypatch):
+        """A non-timeout SDK exception on the main path (network error,
+        malformed response, etc.) must fall open to the heuristic — never
+        raise out of draft_message and never silently ship an unvetted
+        draft."""
+        import bridge.promise_gate as promise_gate
+
+        async def _raise(text):
+            raise RuntimeError("simulated SDK failure")
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _raise)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text)
+
+        # Heuristic fallthrough still catches the forward-deferral.
+        assert result.needs_self_draft is True
+
+    @pytest.mark.asyncio
+    async def test_main_path_llm_timeout_falls_through_to_heuristic(self, monkeypatch):
+        """An ``anthropic.APITimeoutError`` on the main path falls through
+        to the heuristic exactly like any other LLM failure — the drafter
+        never blocks delivery on an infrastructure timeout."""
+        import httpx
+
+        import bridge.promise_gate as promise_gate
+
+        async def _timeout(text):
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            raise promise_gate.anthropic.APITimeoutError(request=request)
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _timeout)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text)
+
+        assert result.needs_self_draft is True
+
+
+class TestPollQuestionHeuristicGate:
+    """No-Go 5 (#3027): send_poll bypasses draft_message entirely, so
+    validate_poll_question is the only honesty check a poll question gets.
+    Heuristic only — no LLM call, no latency cost."""
+
+    def test_completion_claim_poll_question_flagged(self):
+        """The heuristic is pure regex (no new patterns added — mechanical
+        broadening is explicitly rejected elsewhere in promise_gate.py), so
+        this uses phrasing that actually matches an existing forward-deferral
+        pattern rather than a semantically-completion-shaped sentence a
+        regex can't see."""
+        from bridge.message_drafter import validate_poll_question
+
+        question = "I'll come back with the results — proceed to stage?"
+        violations = validate_poll_question(question)
+        assert any(v.rule == "poll_question_promise" for v in violations)
+
+    def test_ordinary_interrogative_not_flagged(self):
+        from bridge.message_drafter import validate_poll_question
+
+        question = "Should we deploy to staging now or wait for review?"
+        violations = validate_poll_question(question)
+        assert not any(v.rule == "poll_question_promise" for v in violations)
+
+    def test_kill_switch_disables_poll_check(self, monkeypatch):
+        """PROMISE_GATE_ENABLED=false must disable the poll-question honesty
+        check too, not just the drafter's main/short paths — the doc's
+        'process-wide' kill-switch claim otherwise has a silent exception."""
+        from bridge.message_drafter import validate_poll_question
+
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        question = "I'll come back with the results — proceed to stage?"
+        violations = validate_poll_question(question)
+        assert not any(v.rule == "poll_question_promise" for v in violations)

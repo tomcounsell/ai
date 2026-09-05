@@ -1,37 +1,42 @@
-"""Locking gate for PM evidence-bearing progress updates (#2664).
+"""Locking gate for PM evidence-bearing progress updates (#2664 / #3027).
 
-The fix for #2664 is entirely instructional: the promise gate is correct and
-stays byte-for-byte unchanged. What changed is that the PM role doc now teaches
-*when* it may speak mid-flight and *how* to phrase it, and the persona ethos now
-distinguishes a banned promise from an allowed statement of observed fact.
+The original #2664 fix taught the PM a phrasebook of measured-safe phrasings
+against the promise gate. #3027 deletes that phrasebook: it trained the PM to
+hunt for wording that clears the gate (e.g. asking permission it does not
+need, "say the word and I'll re-run that"), and it was measured against a
+gate that never ran on the PM's actual delivery path. Grading grammar can
+only ever be satisfied by better grammar — so the fix is not a better table,
+it is a different discriminator entirely: whether the obligation behind a
+forward-looking statement is *durably recorded* (a Job inbound expectation,
+a `schedule_id`, or a PR URL), not how the sentence is phrased.
 
-Two things are locked here.
+Deleting the phrasebook carelessly trades over-claiming for silence, which is
+the worse failure (the original symptom this section exists to prevent). So
+the honest core — say only what is already true, stated as present fact —
+must survive verbatim into the replacement.
+
+Three things are locked here.
 
 1. **Prompt-text anchors** (following ``test_resume_reverification.py``): the
-   guidance is text loaded into every headless PM turn, so a CI gate is the only
-   thing that keeps an edit from silently deleting it.
+   guidance is text loaded into every headless PM turn, so a CI gate is the
+   only thing that keeps an edit from silently deleting it.
 
-2. **Promise-gate fallback characterization**: the phrasings the role doc teaches
-   must survive the *deterministic* heuristic branch
-   (``_evaluate_promise_heuristic``), which is what actually decides the verdict
-   whenever the LLM is unavailable (no API key, SDK exception, timeout). Without
-   this, someone tightening ``_FORWARD_DEFERRAL_PATTERNS`` with an innocuous-looking
-   ``\\bstill\\s+running\\b`` would start blocking the exact sentences the role doc
-   tells the PM to send, and only on the fallback path, which is the hardest
-   place to notice a regression.
+2. **No phrasing-workaround language survives.** The deleted phrasebook's
+   measured-verdict table and "two ways to stay on the allowed side" list
+   must not reappear under any name.
 
-Deliberately NOT asserted: the live-LLM verdict. The LLM layer was measured
-directly against these phrasings on 2026-08-08 (see the table in
-``.claude/commands/roles/prime-pm-role.md``). Every phrasing this file locks was
-stable at 8/8 there, but two facts make an LLM assertion the wrong instrument:
-
-- ``"dev opened PR #102 (14 files) - still running tests."`` (the phrasing the
-  issue's own table records as a clean allow) measured 6/8 allow, i.e. flaky. It
-  is locked here as an ANTI-example: the role doc steers away from it.
-- The heuristic and the LLM genuinely disagree in the other direction too:
-  ``"Still working on this."`` is blocked 8/8 by the LLM but ALLOWED by the
-  heuristic, because no regex covers it. So "bare reassurance blocks" is not a
-  property of the deterministic layer and cannot honestly be asserted as one.
+3. **Promise-gate fallback characterization**: illustrative phrasings that
+   mirror what the rewritten section teaches (present fact, no forward
+   clause) must still clear the *deterministic* heuristic branch
+   (``_evaluate_promise_heuristic``), which is what actually decides the
+   verdict whenever the LLM is unavailable (no API key, SDK exception,
+   timeout). Without this, someone tightening ``_FORWARD_DEFERRAL_PATTERNS``
+   with an innocuous-looking ``\\bstill\\s+running\\b`` would start blocking
+   the exact shape of sentence the role doc tells the PM to send, and only on
+   the fallback path, which is the hardest place to notice a regression. An
+   explicit forward-deferral ("I'll report back...") must still block on that
+   same deterministic path — evidence never rescues it, only a recorded
+   obligation does, and the heuristic itself has no notion of "recorded".
 
 Failure-path strategy: every read asserts the file exists and is non-empty
 BEFORE inspecting content, so a missing or truncated file fails loudly rather
@@ -52,22 +57,35 @@ WORK_PATTERNS_PATH = REPO_ROOT / "config" / "personas" / "segments" / "work-patt
 
 PM_SECTION_HEADER = "# Progress updates when the work overruns the ask"
 
-# The two shapes the role doc teaches as safe. Both must clear the deterministic
-# fallback branch.
+# Illustrative phrasings mirroring what the rewritten section teaches: present
+# fact, no forward-looking clause. These are not required to appear verbatim
+# in the prompt (the old phrasebook's literal-example table is gone by
+# design) — they characterize the *shape* of message the guidance produces,
+# and must keep clearing the deterministic fallback branch.
 TAUGHT_ALLOWED = [
-    # Shape 1: present fact, no forward-looking clause, no artifact needed.
+    # Present fact, no forward-looking clause, no artifact needed.
     "Scope check: what read as a one-line config change is 14 files across "
     "tools/ and config/. That is why this is taking a while.",
-    # Shape 1 with an artifact, still no forward clause.
+    # Present fact with an artifact, still no forward clause.
     "This turned out bigger than the ask implied: dev rewrote 14 files across "
     "tools/ and config/ and opened PR #102.",
-    # Shape 2: work in flight, rescued by a full PR URL.
+    # Work in flight, named via a full PR URL rather than a bare number.
     "dev opened PR https://github.com/example/repo/pull/102 (14 files), still running tests.",
 ]
 
-# Explicit forward-deferral the role doc routes to ``expectation-add`` instead. The
-# heuristic must keep catching this on the fallback path.
+# Explicit forward-deferral the role doc routes to `expectation-add` instead
+# of wording around. The heuristic must keep catching this on the fallback
+# path regardless of how much evidence accompanies it.
 TAUGHT_BLOCKED = "dev opened PR #102. I'll report back when tests finish."
+
+# Strings that belonged to the deleted #2664 phrasebook. None of these may
+# reappear in the rewritten section under any name.
+PHRASING_WORKAROUND_STRINGS = [
+    "two ways to stay on the allowed side",
+    "measured against the live gate",
+    "8/8",
+    "unreliable, 6/8 allow",
+]
 
 
 def _read_nonempty(path: Path) -> str:
@@ -79,7 +97,8 @@ def _read_nonempty(path: Path) -> str:
 
 
 class TestPMRoleGuidance:
-    """The PM role doc must carry the four things #2664 asks it to teach."""
+    """The PM role doc must carry what #3027 asks it to teach, and none of
+    what it asks removed."""
 
     def test_section_exists(self):
         text = _read_nonempty(PM_ROLE_PATH)
@@ -115,36 +134,74 @@ class TestPMRoleGuidance:
             "licence to spawn a second dev."
         )
 
-    def test_requires_evidence_with_both_a_passing_and_a_blocked_example(self):
+    def test_present_fact_norm_survives(self):
         text = _read_nonempty(PM_ROLE_PATH)
-        assert "Still working on this." in text, (
-            "The role doc must show a concrete BLOCKED example so the PM can "
-            "recognise the shape it must avoid."
+        assert "say only what is already true" in text, (
+            "The literal present-fact reporting norm must survive the phrasebook "
+            "deletion verbatim — it is the honest core of the deleted section, "
+            "and losing it trades over-claiming for silence, the worse failure."
         )
-        # The doc renders paths and URLs in backticks; the gate sees plain text.
-        # Compare on a backtick-stripped view so markdown emphasis alone never
-        # breaks the doc/test agreement this test exists to enforce.
-        plain = text.replace("`", "")
-        for allowed in TAUGHT_ALLOWED:
-            head = allowed.split(".")[0]
-            assert head in plain, (
-                f"The role doc must show the passing example beginning {head!r}. "
-                "The test locks the same strings the doc teaches; if you reword the "
-                "doc, update TAUGHT_ALLOWED here so the two stay in agreement."
-            )
 
     def test_names_the_actual_discriminator(self):
+        text = _read_nonempty(PM_ROLE_PATH)
+        low = text.lower()
+        assert "recorded" in low and "not how it is phrased" in low, (
+            "The role doc must state the real discriminator: whether the "
+            "obligation is durably recorded, NOT how the sentence is phrased. "
+            "Teaching 'find better wording' reproduces the evasion #3027 removes."
+        )
+        for anchor in ("expectation-add", "schedule_id", "pr url"):
+            assert anchor in low, (
+                f"The role doc must name {anchor!r} as one of the durable "
+                "recording mechanisms behind an honest forward-looking statement."
+            )
+
+    def test_teaches_dispatch_you_can_execute_you_execute(self):
         low = _read_nonempty(PM_ROLE_PATH).lower()
-        assert "not the presence of evidence" in low, (
-            "The role doc must state the measured rule: the gate keys on a "
-            "forward-looking clause, NOT on the presence of evidence. Teaching "
-            "'just add evidence' produces messages that block."
+        assert "a dispatch you can execute, you execute" in low, (
+            "The role doc must state the rule directly: work the PM can already "
+            "re-dispatch within its own turn, it dispatches, rather than asking "
+            "the human's permission for a call it does not need permission for."
         )
-        assert "pull/" in low, (
-            "The role doc must tell the PM to cite a full PR URL rather than a bare "
-            "#N. The URL is the only autonomous-delivery reference both gate "
-            "layers recognise."
+        assert "say the word" in low, (
+            "The role doc must name the specific evasion phrasing being removed "
+            "('say the word and I'll re-run that') so it reads as banned, not as "
+            "an example of good practice."
         )
+
+    def test_expectation_add_is_the_one_way_to_commit(self):
+        low = _read_nonempty(PM_ROLE_PATH).lower()
+        assert "expectation-add" in low and "one way to commit" in low, (
+            "The role doc must state that `expectation-add` is the ONE way to "
+            "commit to a follow-up — recording on the Job, not phrasing in the "
+            "message, is what makes a promise durable."
+        )
+
+    def test_teaches_ask_coverage_authoring(self):
+        text = _read_nonempty(PM_ROLE_PATH)
+        low = text.lower()
+        assert "ask_coverage" in text, (
+            "The role doc must teach how to author `ask_coverage` on the structured route output."
+        )
+        for disposition in ("delivered", "blocked", "declined", "not_started"):
+            assert disposition in low, (
+                f"The role doc must name the {disposition!r} disposition as one "
+                "every clause of the human's ask must be assigned."
+            )
+        assert "evidence" in low, (
+            "The role doc must state that a `delivered` disposition requires "
+            "evidence naming the concrete artifact."
+        )
+
+    def test_no_phrasing_workaround_language_survives(self):
+        low = _read_nonempty(PM_ROLE_PATH).lower()
+        for banned in PHRASING_WORKAROUND_STRINGS:
+            assert banned not in low, (
+                f"The deleted phrasebook content {banned!r} must not reappear in "
+                "prime-pm-role.md. #3027 deletes the phrasebook because it "
+                "taught wording workarounds against the gate, not because it was "
+                "misplaced — bringing any of it back reintroduces that training."
+            )
 
 
 class TestWorkPatternsScopeClarification:
@@ -175,23 +232,25 @@ class TestWorkPatternsScopeClarification:
 
 
 class TestPromiseGateFallbackAllowsTaughtPhrasings:
-    """Characterization: the deterministic branch must not block what we teach.
+    """Characterization: the deterministic branch must not block the shape of
+    message the rewritten section teaches.
 
-    This is the regression guard the acceptance criteria asked for, retargeted at
-    the layer where a deterministic assertion is actually truthful.
+    This is the prompt-to-gate lock #3027 preserves: it stops a future
+    ``_FORWARD_DEFERRAL_PATTERNS`` tightening from silently starting to block
+    a present-fact, no-forward-clause message on the fallback path.
     """
 
     @pytest.mark.parametrize("message", TAUGHT_ALLOWED)
     def test_taught_phrasing_clears_the_heuristic(self, message):
         verdict = _evaluate_promise_heuristic(message)
         assert verdict.action == "allow", (
-            "The promise-gate fallback branch now blocks a phrasing that "
-            "prime-pm-role.md instructs the PM to send:\n"
+            "The promise-gate fallback branch now blocks a phrasing shape "
+            "prime-pm-role.md teaches the PM to send:\n"
             f"  message: {message}\n"
             f"  verdict: {verdict.action} ({verdict.class_}: {verdict.reason})\n"
-            "Either revert the pattern change or update the role doc's taught "
-            "phrasings to match. Silently diverging leaves the PM emitting "
-            "messages that die on the fallback path."
+            "Either revert the pattern change or update the role doc's guidance "
+            "to match. Silently diverging leaves the PM emitting messages that "
+            "die on the fallback path."
         )
 
     def test_explicit_forward_deferral_still_blocks(self):
@@ -199,22 +258,7 @@ class TestPromiseGateFallbackAllowsTaughtPhrasings:
         assert verdict.action == "block", (
             "The heuristic must keep catching an explicit 'I'll report back' even "
             "when substantive evidence is present. Evidence does not rescue a "
-            "forward-deferral, only a scheduled-delivery reference does."
+            "forward-deferral, only a recorded obligation does — and the "
+            "deterministic heuristic has no notion of 'recorded', by design."
         )
         assert verdict.class_ == "forward_deferral"
-
-    def test_bare_pr_number_with_ongoing_clause_is_not_taught(self):
-        """The issue's flagship example measured 6/8 allow against the LLM.
-
-        It is excluded from TAUGHT_ALLOWED on purpose. This test pins that
-        exclusion so a future edit cannot quietly promote a coin-flip phrasing
-        into the role doc's recommended set.
-        """
-        flaky = "dev opened PR #102 (14 files) - still running tests."
-        assert flaky not in TAUGHT_ALLOWED
-        role_text = _read_nonempty(PM_ROLE_PATH)
-        assert "unreliable, 6/8 allow" in role_text, (
-            "The role doc must keep recording that the bare-#N + ongoing-clause "
-            "phrasing is unreliable, so nobody re-derives it as a good example "
-            "from the issue's original table."
-        )

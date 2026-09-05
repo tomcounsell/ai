@@ -159,7 +159,7 @@ Feature documentation for the Valor AI system. Each document describes an implem
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Redis state for atomicity and queries. | Shipped |
 | [Popoto Version-Floor Guard](popoto-version-floor-guard.md) | Fail-closed interlock refusing to rebuild Popoto indexes when the running interpreter's popoto is below the `pyproject.toml` floor. | Shipped |
 | [Post-Compact Re-Grounding](post-compact-regrounding.md) | Short re-grounding nudge after context compaction: re-read the plan, check SDLC stage progress, review PROGRESS.md and the task list. | Shipped |
-| [Promise Gate](promise-gate.md) | Honesty gate that blocks empty forward-deferral / behavioral-change promises across the four CLI send paths plus the worker drafter; `PROMISE_GATE_ENABLED` kill switch. | Shipped |
+| [Promise Gate](promise-gate.md) | Honesty gate keyed on whether an obligation is durably recorded (Job inbound expectation, `schedule_id`, or PR URL), not on sentence grammar; LLM-primary on the drafter's main path and the CLI send paths, regex-heuristic-only on the short/Stop-hook/poll/terminal-flush routes; `PROMISE_GATE_ENABLED` kill switch. | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in the plan template with a soft validator for async code. | Shipped |
 | [Raw-Redis Guard](raw-redis-guard.md) | PreToolUse Bash validator enforcing ORM-only access to Popoto-managed keys, with an other-repo exemption and an executable-context gate. | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention. | Shipped |

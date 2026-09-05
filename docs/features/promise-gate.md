@@ -38,30 +38,34 @@ the originating chat, at T) and returns a `schedule_id=<hex>` that matches
 ALLOWs the forward promise. The recovery template names this primitive as
 option `(c)`.
 
-## Where it sits
+## Where it sits — path coverage table
 
 The gate runs at every send-path call site that writes to the Redis
-outbox:
+outbox. Every route is gated, but not every route pays for an LLM call —
+the judgment layer used is a deliberate per-route choice, not an oversight:
 
-| Send path | Gate state |
-|---|---|
-| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated via `_evaluate_drafter_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path; `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
-| Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | **Gated** via `_gate_terminal_promise`: a promise-flagged deferred draft is substituted with an honest fallback (never suppressed, never delivered verbatim); audits with `source="terminal_flush"` |
-| `tools/send_message.py` (telegram or email) | **Gated** |
-| `tools/valor_telegram.py send` | **Gated** |
-| `tools/valor_email.py cmd_send` | **Gated** |
+| Route | Entry point | Judgment layer | Audit source(s) | Why this layer |
+|---|---|---|---|---|
+| Drafter short path (raw output < 200 chars, no SDLC session, no artifacts, no `?`, no fenced code) | `draft_message`'s early return → `_evaluate_drafter_promise(..., use_llm=False)` | Heuristic only (regex `_evaluate_promise_heuristic`) — **zero LLM calls, test-enforced** | `promise_gate_drafter` | Bounds per-message latency on brief replies; short replies are the highest-risk population for empty promises (#2421), so the gate has to be free to run on every one of them |
+| Drafter main path (everything else) | `draft_message`'s main return → `_evaluate_drafter_promise(..., use_llm=True)` | LLM-primary (`_evaluate_promise_llm_or_heuristic`), regex fail-closed-only fallback | `promise_gate_drafter_llm` / `promise_gate_drafter_heuristic` / `promise_gate_drafter_timeout` | The composed, longer reply is where forward-deferral prose actually lives (the Incident A class); the real caller is `agent/output_handler.py`, defaulting `use_llm=True` |
+| Email outbound (`bridge/email_bridge.py::EmailOutputHandler.send`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | Email has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the call site only reads `draft.text` and there is no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring on this transport, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so the call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
+| Stop hook (`agent/hooks/stop.py`) | Explicit `draft_message(..., use_llm=False)` | Heuristic only, forced regardless of message length | `promise_gate_drafter` (same sources as the short path) | Runs inline on the Stop hook's 10-second harness-wall critical path; an inline LLM round-trip there repeats the documented 126/131 SIGKILL incident (`docs/features/memory-hook-performance.md`) — the fix was "detach, don't bound," not "add a timeout around a Haiku call" |
+| Poll questions (`TelegramRelayOutputHandler.send_poll`) | `validate_poll_question` → `_evaluate_promise_heuristic` directly | Heuristic only | none (surfaced as a non-blocking `Violation(rule="poll_question_promise")`, not a full gate call) | Poll questions reach Telegram without ever calling `draft_message`, so they would otherwise ship with zero honesty checking; a poll question is a structured artifact, not a prose reply worth an LLM round-trip. Residual (no LLM backstop) tracked in #3094 |
+| Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | `agent/session_health._gate_terminal_promise` | Heuristic only — **the one known-uncovered route**: it never reaches the LLM layer | `terminal_flush` | No live agent exists at flush time to consume an LLM-derived revise-or-override advisory; there is nobody left to self-draft a rewrite, so the heuristic backstop is what actually ships the substitution. Residual (no LLM backstop) tracked in #3094 |
+| CLI senders — `tools/send_message.py`, `tools/valor_telegram.py send`, `tools/valor_email.py cmd_send` | `cli_check_or_exit` → `evaluate_promise` (sync wrapper over `evaluate_promise_async`) | LLM-primary, regex fail-closed-only fallback | `promise_gate_llm` / `promise_gate_heuristic` / `promise_gate_timeout` / `promise_gate_disabled` / `promise_gate_cli_exception` | Same LLM-first contract as the drafter main path, reached through the sync CLI wrapper instead of an `await` |
 
 The gate is implemented in [`bridge/promise_gate.py`](../../bridge/promise_gate.py).
 Each CLI tool calls `cli_check_or_exit(text, transport, session_id)`
-immediately before its Redis `rpush`. The drafter calls `_evaluate_drafter_promise`
-(a shared helper in `bridge/message_drafter.py` that runs
-`bridge.promise_gate._evaluate_promise_heuristic` on the exact text about to
-ship — the verbatim `raw_response` on the short path, the narration-stripped
-text on the full path — honors `PROMISE_GATE_ENABLED`, and writes a
-`source="promise_gate_drafter"` audit entry) as part of the pass-through
-validation flow — no Haiku call, no double-charge.
-`evaluate_promise` still accepts an optional `classifier_verdict` parameter
-(kept for backward compatibility) but the drafter does not populate it.
+immediately before its Redis `rpush`. The drafter calls the shared
+`_evaluate_drafter_promise` helper in `bridge/message_drafter.py`, which
+evaluates the exact text about to ship (the verbatim `raw_response` on the
+short path, the narration-stripped text on the main path), honors
+`PROMISE_GATE_ENABLED`, applies the Job-scoped override check
+(`promise_override_active`), and writes the audit entry — see the table
+above for which judgment layer runs on which route.
+`evaluate_promise`/`evaluate_promise_async` still accept an optional
+`classifier_verdict` parameter (kept for backward compatibility) but the
+drafter does not populate it.
 
 ### Terminal flush
 
@@ -79,7 +83,12 @@ nothing about whether the session's work finished, because a block verdict
 carries no such information (#3135; the substitution design itself is still
 open there). Suppression is not used, because it reintroduces the swallowed-reply
 class. The gate is fail-open for delivery: an evaluation error delivers the
-original text rather than swallowing the reply.
+original text rather than swallowing the reply. This route always evaluates
+via the regex heuristic — it never reaches the LLM layer the drafter's main
+path now uses, because there is no agent left to consume an LLM-derived
+revise-or-override advisory. The measurement tool (below) tracks this route's
+audit rows separately so a latency or false-positive regression here is
+never averaged away by the LLM-covered routes.
 
 ## Advisory flow: revise-or-override
 
@@ -124,11 +133,33 @@ failure). The heuristic does NOT override an LLM `ALLOW`.
 
 ### What the gate actually keys on
 
-Measured directly against the live LLM layer. The discriminator is **the
-presence of a forward-looking clause, not the presence of evidence.**
-Adding a file count, a commit hash, or a bare `#102` does not rescue "still
-running", "is on it", or "I'll report back"; only a URL-shaped
-autonomous-delivery reference does.
+The discriminator is **whether the obligation is durably recorded**, not
+whether the sentence is grammatically forward-looking. "I'll come back with
+X" and "still working on this" are treated identically by the underlying
+question the gate asks: *is there a record, findable on the next turn, that
+something other than this ending session will deliver on this?* The gate
+recognizes exactly three such records:
+
+1. **A Job inbound expectation** — `python -m tools.job_tool
+   expectation-add --direction inbound`, resolved through
+   `promise_override_active`/`job_for_session`. Job-scoped, not
+   per-message: any open inbound expectation on the bound Job clears the
+   gate for every outbound on that Job until discharge.
+2. **A `schedule_id`** from `python -m tools.agent_session_scheduler
+   checkin` — a queued, autonomous-delivery mechanism the
+   `_SCHEDULED_DELIVERY_PATTERNS` regex recognizes directly in text.
+3. **A PR URL** (`https://github.com/.../pull/N`) — a durable artifact
+   anyone can check without the originating session still being alive.
+
+Absent one of these three, both judgment layers treat a forward-looking
+claim as unfulfillable regardless of how much substantive content rides
+alongside it — a file count, a commit hash, or a bare `#102` issue mention
+is not a recorded obligation and does not rescue "still running", "is on
+it", or "I'll report back". Only a URL-shaped or session/schedule-shaped
+autonomous-delivery reference does, because only those are checkable after
+the session ends.
+
+Measured directly against the live LLM layer:
 
 | Phrasing | LLM verdict |
 |---|---|
@@ -144,16 +175,18 @@ Two consequences worth knowing before you touch either layer:
 
 - **A sender cannot make a mid-flight report pass by piling on
   evidence.** The supported shapes are (a) state only what is already
-  true, with no forward clause, or (b) cite a full PR URL. Callers that
-  legitimately need to defer record the promise on the bound Job
-  instead (see the advisory flow above). `.claude/commands/roles/prime-pm-role.md`
+  true, with no forward clause, (b) cite a full PR URL, or (c) record the
+  obligation on the bound Job or via a scheduled check-in. Callers that
+  legitimately need to defer record the promise instead of rephrasing
+  around it (see the advisory flow above). `.claude/commands/roles/prime-pm-role.md`
   teaches this to the PM.
 - **The two layers genuinely disagree, and that is by design.**
   "Still working on this." is blocked 8/8 by the LLM but *allowed* by
   the heuristic, because no regex covers it. The heuristic is a narrow
-  fail-closed backstop for the phrases it does match, never a
-  reimplementation of the LLM's judgment. Do not write a test that
-  asserts LLM-equivalent behavior from `_evaluate_promise_heuristic`,
+  fail-closed backstop for the phrases it does match — never a
+  reimplementation of the LLM's judgment, and never asked to generalize
+  past the obligation-recorded discriminator above. Do not write a test
+  that asserts LLM-equivalent behavior from `_evaluate_promise_heuristic`,
   and do not write one that asserts an LLM verdict for a phrasing that
   measured below 8/8.
 
@@ -213,8 +246,10 @@ The anti-leak is enforced by tests in
 `PROMISE_GATE_ENABLED=false` disables the gate process-wide. Set it
 in `~/Desktop/Valor/.env` or in your shell startup, then restart the
 relevant service (bridge, worker). Subsequent gate calls return
-ALLOW unconditionally and log `source="promise_gate_disabled"` to
-the audit JSONL so the disabled state remains observable.
+ALLOW unconditionally and log the disabled state to the audit JSONL
+so it remains observable: `source="promise_gate_disabled"` on the CLI
+path, `source="promise_gate_drafter_disabled"` on the drafter path.
+Grep for `_disabled` to catch both.
 
 This is the **only** escape hatch. It is not advertised in the
 recovery template, not exposed as a per-call flag, and is intended
@@ -260,22 +295,42 @@ via the `_write_promise_audit` helper. The entry shape:
   "class_": "forward_deferral",
   "transport": "telegram",
   "session_id": "real-session-abc",
-  "source": "promise_gate_llm"
+  "source": "promise_gate_llm",
+  "elapsed_ms": 812.4,
+  "queue_wait_ms": 3.1
 }
 ```
+
+`class_` is optional in the verdict tool schema (only `action` and `reason`
+are required) — a real Haiku call can return `action="block"` with
+`class_=None`. Never assert on `class_` in a test; assert on `action` (and,
+where relevant, on `reason`'s text). `elapsed_ms`/`queue_wait_ms` are present
+whenever the call actually reached the LLM-attempt code path (any of the
+`llm`/`heuristic`/`timeout` suffixes below, on both the CLI and drafter
+namespaces); they are omitted on the kill-switch and classifier-delegation
+short-circuits, which never call the LLM and have nothing to time.
 
 The `source` discriminator takes one of:
 
 | Source | When |
 |--------|------|
-| `promise_gate_llm` | LLM Haiku call returned a parseable verdict |
-| `promise_gate_heuristic` | LLM unavailable / parse failure → fell through to regex |
-| `promise_gate_timeout` | LLM SDK 3-second timeout fired |
-| `promise_gate_disabled` | Kill switch was on |
+| `promise_gate_llm` | CLI path (`evaluate_promise`/`evaluate_promise_async`): LLM Haiku call returned a parseable verdict |
+| `promise_gate_heuristic` | CLI path: LLM unavailable / parse failure → fell through to regex |
+| `promise_gate_timeout` | CLI path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
+| `promise_gate_disabled` | CLI path: kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter does not populate this) |
-| `promise_gate_drafter` | Drafter-path decision (`_evaluate_drafter_promise`, both length regimes); on the kill-switch it records `action="allow" / reason="gate_disabled"` under this same source |
-| `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`); a block means the honest fallback was substituted |
+| `promise_gate_drafter` | Drafter short path (`use_llm=False`, the <200-char early return, the Stop hook's forced-heuristic call, and the email outbound path's pinned `use_llm=False` main-path call, see `EmailOutputHandler.send`) |
+| `promise_gate_drafter_disabled` | Drafter path: kill switch was on (any length) — records `action="allow" / reason="gate_disabled"`. Distinct from `promise_gate_drafter` so the disabled state is greppable by source on this route, mirroring `promise_gate_disabled` on the CLI path |
+| `promise_gate_drafter_llm` | Drafter main path (`use_llm=True`): LLM Haiku call returned a parseable verdict |
+| `promise_gate_drafter_heuristic` | Drafter main path: LLM unavailable / parse failure → fell through to regex |
+| `promise_gate_drafter_timeout` | Drafter main path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
+| `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`, heuristic-only); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
+
+Roughly 40 rows written before this instrumentation existed carry no `kind`
+field at all (and no `elapsed_ms`/`queue_wait_ms`); every reader of this
+JSONL — including the measurement tool below — must tolerate that shape
+rather than assuming `kind` is always present.
 
 Empty-input calls (empty / whitespace-only / `None` text) write **no**
 audit entry. Every other branch writes one.
@@ -313,13 +368,33 @@ documented as a follow-up).
 
 ## Latency budget
 
-* p50 < 500ms
-* p99 < 3s
+* LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling 2026-09-03, set
+  at roughly 1.5x the p50/p99 of 1619ms/2463ms that the ruling was
+  computed against, to leave headroom for Anthropic API variance
+  without hiding a genuine regression; provisional/tunable, re-derive
+  from post-merge audit JSONL). The current measurement over the
+  `promise_gate_drafter_llm` bucket (n=592 LLM-path rows, out of 1690
+  promise-gate rows total) is p50 ~1637ms / p99 ~2482ms, comfortably
+  inside this budget.
+* Zero-LLM short path (<200 chars, non-SDLC, no artifacts): p50 ~= 0ms,
+  unchanged by the ruling above.
 
-The SDK-level 3-second timeout is enforced via the RTR-correct
-pattern: `async with semaphore_slot(): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:`.
-Coroutine-level timeouts (`asyncio.wait_for`) are forbidden — they
+The SDK-level 3-second timeout is a separate per-call bound, not the
+latency budget itself, and is enforced via the RTR-correct
+pattern: `async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
+anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as client:`.
+`max_retries=0` is load-bearing: the SDK default (`DEFAULT_MAX_RETRIES = 2`)
+retries client-side timeouts, which would silently turn the 3s worst
+case into ~3 attempts plus backoff (~10s) on this call's inline
+delivery path. The semaphore acquire itself is bounded by the same
+timeout — a caller that cannot get a slot within `RTR_SDK_TIMEOUT` raises
+`TimeoutError` rather than queuing indefinitely, and that wait is measured
+as `queue_wait_ms` on the audit row, separately from the LLM call's own
+`elapsed_ms`. This is
+not a coroutine-level timeout around the API call itself (which stays
+forbidden — see below); it only bounds how long a call waits for a
+semaphore slot, so it does not reintroduce the #1055 hazard. Coroutine-level
+timeouts (`asyncio.wait_for`) around the API call are forbidden — they
 leak httpx connections under cancellation.
 
 `RTR_SDK_TIMEOUT` is **imported** from `bridge.read_the_room` rather
@@ -369,7 +444,15 @@ under tests.
 * [`tests/unit/test_message_drafter.py`](../../tests/unit/test_message_drafter.py) —
   `TestShortOutputPromiseGate` covers the short-output reachability fix with the
   exact 172-char incident text, the benign false-positive guard, and the
-  kill-switch contract.
+  kill-switch contract. `TestMainPathLLMWiring` proves the short path issues
+  zero LLM calls, that the Stop hook's `use_llm=False` call shape issues zero
+  LLM calls, and the main path's LLM-exception/timeout fallthrough to the
+  heuristic. `TestPollQuestionHeuristicGate` covers the poll-question honesty
+  check (`validate_poll_question` → heuristic, non-blocking `Violation`).
+* [`tests/unit/test_promise_advisory.py`](../../tests/unit/test_promise_advisory.py) —
+  `TestPromiseOverride` covers the Job-scoped `promise_recorded_override`
+  path against both the heuristic and a real LLM call (Incident A text),
+  plus the discharged-expectation non-override case.
 * [`tests/unit/test_deferred_self_draft_completed.py`](../../tests/unit/test_deferred_self_draft_completed.py) —
   `TestTerminalFlushPromiseGate` covers the terminal-flush substitution,
   `source="terminal_flush"` audit, kill switch, and the guard that the
@@ -381,6 +464,57 @@ under tests.
   `valor_telegram/test_valor_telegram_rtr.py`, `test_valor_email.py` — each adds a
   `--help` anti-leak test asserting the help output never advertises
   the bypass syntax.
+* [`tests/integration/test_promise_gate_real_api.py`](../../tests/integration/test_promise_gate_real_api.py) —
+  real Anthropic API calls (skipped without `ANTHROPIC_API_KEY`). Asserts
+  `action`/`reason`/audit-record shape only, never `class_` — `class_` is
+  optional in the verdict tool schema, so a real Haiku call can legitimately
+  return `action="block"` with `class_=None` (#3016). Covers the
+  forward-deferral BLOCK case, the honest-completion ALLOW case, and the
+  Job-scoped override case: an identical forward-looking message with a
+  recorded open inbound expectation on the bound Job passes as
+  `promise_recorded_override`.
+
+## Phase-4 measurement tool
+
+[`tools/promise_gate_measurement.py`](../../tools/promise_gate_measurement.py)
+samples `logs/classification_audit.jsonl` and an optional file of sampled
+`ask_coverage` schema objects (issue #3027's PM-turn schema field — see
+[Message Drafter](message-drafter.md)), and reports:
+
+* **Latency percentiles (p50/p95/p99) grouped by audit `source` AND
+  `transport`.** A single blended latency number is dominated by whichever
+  calling surface sends the most traffic (PM-turn/SDLC scenarios in
+  practice) and does not characterize general outbound traffic — the
+  per-(source, transport) breakdown is required to see whether, say, the
+  terminal-flush route or email transport has a distinct latency profile.
+* **Queue-wait percentiles (p50/p95/p99)**, grouped the same way and reported
+  alongside the latency bucket for each (source, transport) pair. This is
+  `queue_wait_ms` — time spent waiting on the `semaphore_slot` — split out
+  from `elapsed_ms` (API round-trip time), which is the number the #3035
+  phase-4 decision needs to distinguish "too many callers queued on the
+  semaphore" from "the API itself is slow".
+* **Contradiction flags** — an `ask_coverage` disposition (`delivered` /
+  `blocked` / `declined` / `not_started`) contradicted by its own `evidence`
+  text (e.g. `delivered` paired with evidence that reads as a failure/negative
+  outcome), or a `delivered` entry with empty evidence that should have been
+  invalidated upstream by `_normalize_ask_coverage` but wasn't.
+
+It tolerates the ~40 legacy audit rows written before the `kind` field
+existed (treated as `kind="promise_gate"` for grouping purposes) and rows
+missing `elapsed_ms`/`queue_wait_ms` (each field excluded from its own
+percentile math independently, never treated as zero).
+
+```bash
+python -m tools.promise_gate_measurement \
+  --audit-log logs/classification_audit.jsonl \
+  --ask-coverage-file <path-to-sampled-ask_coverage.jsonl>   # optional
+```
+
+Run `python -m tools.promise_gate_measurement --help` for the full flag
+list. This tool's output is the **recorded entry criterion** for the
+deferred phase-4 decision tracked in #3035 (embargoed until 2026-09-10) —
+that issue does not re-derive its own measurement approach; it reads this
+tool's report.
 
 ## Operations
 
@@ -394,8 +528,9 @@ echo 'PROMISE_GATE_ENABLED=false' >> ~/Desktop/Valor/.env
 ./scripts/valor-service.sh restart
 ```
 
-Watch the audit JSONL to confirm gate calls are now logging
-`source="promise_gate_disabled"`:
+Watch the audit JSONL to confirm gate calls are now logging the disabled
+state — `source="promise_gate_disabled"` on the CLI path,
+`source="promise_gate_drafter_disabled"` on the drafter path:
 
 ```bash
 tail -f logs/classification_audit.jsonl | grep promise_gate
