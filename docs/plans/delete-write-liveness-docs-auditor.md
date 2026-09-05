@@ -224,8 +224,9 @@ sidestep it.
 **Team:** Solo dev, plus a reviewer
 
 **Interactions:**
-- PM check-ins: 0 (scope is fully determined by the recon; the one judgment call is
-  recorded as an Open Question with a recommended default so the build is never blocked)
+- PM check-ins: 0 (scope is fully determined by the recon; the one judgment call — where
+  `vault_narratives_compared` lands — is now *decided in the plan text*, argued in
+  Technical Approach item 1, rather than left as an Open Question for a human to answer)
 - Review rounds: 1
 
 The deletion itself is mechanical. The cost is in not losing anything on the way out:
@@ -700,6 +701,9 @@ No agent integration required. This removes an internal function and its Redis w
       created-PR summary measures under the scheduler's 500-character truncation (195
       characters today, 227 with the clause).
 - [ ] `TestLivenessDeadCodeRemoved` exists and fails if any of the three symbols returns.
+- [ ] The replacement surface is demonstrated, not assumed: a seeded `Reflection` whose
+      `output_summary` is the new created-PR string renders the vault clause in the
+      reflections modal partial, and `modal_content.html:59`'s render guard is unchanged.
 - [ ] The two behavioral assertions that the withheld count reaches a durable surface
       still exist, now asserting on `result["summary"]` rather than a mock's kwargs.
 - [ ] `docs/features/docs-auditor.md` and `docs/features/vault-drift-audit.md` contain
@@ -736,7 +740,8 @@ confirm the deletion is total.
 - **Validator (deletion completeness)**
   - Name: `liveness-validator`
   - Role: prove the symbols are gone, the archives are untouched, the vault count reaches
-    the summary on `0`, and the truncation budget holds
+    the summary on `0`, the truncation budget holds, and the clause actually renders in
+    the dashboard modal the plan's whole premise rests on
   - Agent Type: validator
   - Resume: true
 
@@ -818,62 +823,82 @@ confirm the deletion is total.
 - **Parallel**: false
 - Run every row of the Verification table.
 - Confirm `git diff --stat -- docs/archive/` is empty.
-- Confirm the vault clause renders on a `0` count by driving the created-PR path, not by
-  reading the code.
+- Confirm the vault clause reaches `result["summary"]` on a `0` count by driving the
+  created-PR path, not by reading the code.
+
+### 6. Prove the replacement surface actually renders
+
+- **Task ID**: validate-dashboard-render
+- **Depends On**: build-delete-liveness, build-tests
+- **Validates**: `ui/templates/reflections/_partials/modal_content.html`
+- **Informed By**: Data Flow (Channel B, steps 2-6)
+- **Assigned To**: liveness-validator
+- **Agent Type**: validator
+- **Parallel**: false
+
+Every other check in this plan stops at `result["summary"]` — a grep, a string
+containment, or a `git diff --stat`. None of them reaches the template layer, yet the
+entire justification for the deletion is that an operator now reads this on the dashboard.
+Demonstrate the end-to-end claim once instead of assuming it:
+
+- Seed a `Reflection` through the ORM (never raw Redis) with a recognizable `test-`
+  prefixed key, calling `mark_completed(duration, output_summary=<the new created-PR
+  summary string, vault count 0>)`.
+- Render the modal partial for that record and assert the output contains
+  `vault 0 narratives compared`, which proves the render guard
+  `{% if r.last_run_summary and r.last_run_summary.output_summary %}`
+  (`modal_content.html:59`) passes and the string survives to HTML.
+- Confirm that guard is byte-identical to its pre-change state; this work must not touch
+  it.
+- Delete the seeded record through the ORM afterward, scoped by that `test-` key.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Function gone | `grep -rc '_write_liveness' reflections/` | match count == 0 |
-| Constants gone | `grep -rc 'REDIS_LAST_COMPLETED' reflections/` | match count == 0 |
-| Keys gone from code | `grep -rn 'last_completed_run' reflections/ ui/ agent/ models/ \| wc -l` | match count == 0 |
-| No test references survive | `grep -c '_write_liveness\|REDIS_LAST_COMPLETED' tests/unit/test_docs_auditor_substrate.py` | match count == 0 |
-| Deletion guard exists | `grep -c 'class TestLivenessDeadCodeRemoved' tests/unit/test_docs_auditor_substrate.py` | output > 0 |
-| Vault count rehomed | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | output > 0 |
-| Withheld count still asserted behaviorally | `grep -c 'fix(es) withheld" in result\["summary"\]' tests/unit/test_docs_auditor_substrate.py` | output > 0 |
-| Docs clean (docs-auditor) | `grep -c '_write_liveness\|last_completed_run' docs/features/docs-auditor.md` | match count == 0 |
-| Docs clean (vault-drift) | `grep -c '_write_liveness\|last_completed_run' docs/features/vault-drift-audit.md` | match count == 0 |
-| Archives untouched | `git diff --stat origin/main -- docs/archive/ \| wc -l` | match count == 0 |
-| Migration registered | `grep -c 'clear_docs_audit_liveness_keys' scripts/update/migrations.py` | output > 0 |
+| Function gone | `grep -rn '_write_liveness' reflections/ \| wc -l` | `0` |
+| Constants gone | `grep -rn 'REDIS_LAST_COMPLETED' reflections/ \| wc -l` | `0` |
+| Keys gone from code | `grep -rn 'last_completed_run' reflections/ ui/ agent/ models/ \| wc -l` | `0` |
+| No test references survive | `grep -n '_write_liveness\|REDIS_LAST_COMPLETED' tests/unit/test_docs_auditor_substrate.py \| wc -l` | `0` |
+| Deletion guard exists | `grep -c 'class TestLivenessDeadCodeRemoved' tests/unit/test_docs_auditor_substrate.py` | `1` |
+| Vault count rehomed | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | `> 0` |
+| Clause is unconditional | `grep -n 'vault_narratives_compared is not None' reflections/docs_auditor.py \| wc -l` | `0` |
+| Withheld count still asserted behaviorally | `grep -c 'fix(es) withheld" in result\["summary"\]' tests/unit/test_docs_auditor_substrate.py` | `> 0` |
+| Docs clean (literal symbols) | `grep -rn '_write_liveness\|last_completed_run' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| wc -l` | `0` |
+| Docs clean (bare word) | `grep -rni 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| wc -l` | `0` |
+| Archives untouched | `git diff --stat origin/main -- docs/archive/ \| wc -l` | `0` |
+| Migration registered | `grep -c 'clear_docs_audit_liveness_keys' scripts/update/migrations.py` | `> 0` |
+| Dashboard renders the clause | see task `validate-dashboard-render` below | modal partial HTML contains `vault 0 narratives compared` |
 | Auditor tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
+Every zero-expectation row is written as `grep ... | wc -l` rather than `grep -c`.
+`grep -c` **exits 1 when the count is zero**, so a validator that gates on exit status
+reads a passing check as a failure; and `grep -rc PATTERN dir/` prints one `file:count`
+line per file in the tree instead of a single number. The `wc -l` form exits 0 and prints
+one number in both cases.
+
 ## Critique Results
 
-War room, FULL depth: Risk & Robustness, Scope & Value, History & Consistency, plus automated structural validation.
+War room, FULL depth: Risk & Robustness, Scope & Value, History & Consistency, plus
+automated structural validation. Verdict: NEEDS REVISION (1 blocker, 6 concerns, 1 nit).
+
+**Revision pass applied 2026-09-05.** Every finding was re-verified against
+`reflections/docs_auditor.py`, `scripts/update/migrations.py`,
+`tests/unit/test_docs_auditor_substrate.py`, and both feature docs before being acted on;
+all eight held. The truncation measurement the blocker and Risk 1 both turn on was taken
+rather than estimated: 195 characters worst-case, 227 with the clause, against a
+500-character budget. The Open Questions section is gone — its single question is now
+decided in Technical Approach item 1.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Structural check | The plan's `None` arm for the vault clause is unreachable in production. `_run_vault_drift_detection` is annotated `-> int` at `reflections/docs_auditor.py:2370` and returns `0` on every path: `return 0` when `_resolve_vault_root` yields None (:2384-2385), `return compared` (an int) on success, and `return 0` from its `except Exception` (:2399-2400). So `vault_narratives_compared` at `:2460` is always an int and never `None`. Four sections prescribe the opposite: Failure Path Test Strategy says "the created-PR path when `_run_vault_drift_detection` returns `None`"; Test Impact orders a new "absent-when-None" test; Success Criteria requires "emitted on `0` and omitted on `None`"; Documentation tells the documentarian to keep a three-way distinction whose "absent" arm the source doc actually defines as "key absent entirely, from a call site that never ran the vault comparison" (`docs/features/vault-drift-audit.md:184-186`), meaning a different call site, never a `None` return. A builder following this literally patches the function to return `None` against its own annotation and ships a dead `is not None` guard, adding dead code inside a dead-code-deletion PR. | pending | The real distinction to preserve is per-call-site, not per-value: today all four non-PR call sites pass no vault count at all, and the created-PR site always passes an int, so the key is always present on the PR path. The faithful replacement is therefore unconditional: append the clause to the created-PR summary string with no `is not None` guard, and leave the other four summary strings without it. Rewrite Success Criteria to "the created-PR summary always carries the vault count, including when it is 0; no other summary string carries it", replace the "absent-when-None" test with one asserting the clause is absent from the zero-diff and no-candidates summaries, and reword `vault-drift-audit.md`'s three-way distinction so "the mapping is silently broken" maps to "the run never reached the created-PR path", not to a `None` return. |
-| CONCERN | History & Consistency, Structural check | The `## Tests` documentation cluster is bounded at `docs/features/docs-auditor.md:738-750`, but a stale reference survives at `:762`: `TestWithheldBlocksStaleClose` is described as "a bare-name withhold reaching the PR body, Telegram, and liveness". That sentence describes the surface being deleted and a test the plan renames to drop `_and_liveness` (Test Impact bullet 2), yet it falls outside all seven enumerated clusters. Both Verification rows for this file grep only `_write_liveness` and `last_completed_run`, neither of which appears on that line, so the checks report clean while the stale sentence survives. This is exactly the residue Risk 4 exists to prevent, escaping through Risk 4's own mitigation. | pending | Extend the `## Tests` cluster range to `:738-765` and reword `:762` to drop "and liveness". Add a Verification row `grep -c 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md` expecting 0, since the existing literal-string greps are provably blind to the bare word. |
-| CONCERN | Risk & Robustness | Technical Approach item 4 cites `_migrate_clear_orphaned_warn_state_key` (`scripts/update/migrations.py:1174-1200`) as "a direct precedent, written for the same shape of problem", but that function never touches Redis. It calls `warn_state.should_emit(_ORPHANED_WARN_KEY, "", project_dir)`, which pops a key from `data/update_warn_state.json`. The precedent settles the fail-soft shape but not how `migrations.py` obtains a Redis connection, which is the part the build actually has to invent. | pending | `reflections/docs_auditor._get_redis()` exists at `reflections/docs_auditor.py:183` and is the natural source, reached the way `_migrate_backfill_job_last_active_scores` reaches `models.job`: `sys.path.insert(0, str(project_dir))` then import inside the try block. Confirm the import resolves with no circular import after the constants are deleted, and hard-code the two key strings in the migration rather than importing the constants, which this change removes. Keep the precedent's fail-soft shape: wrap in try/except, log, and `return None` unconditionally. |
-| CONCERN | Risk & Robustness | Risk 1's fallback, "the clause moves ahead of `PR={pr_url}`", collides with an existing invariant test the plan never names: `test_step9_suppression_reaches_summary_before_pr_url` (`tests/unit/test_docs_auditor_substrate.py:1762`) asserts `result["summary"].index("suppressed") < result["summary"].index("PR=")` at `:1787`. Reordering the string to buy truncation headroom can displace `suppressed_note` past `PR=` and break that assertion, and the Test Impact list does not include it. | pending | The fallback is very likely unnecessary: a worst-realistic created-PR summary (long slug, withheld note, Telegram suppressed, real PR URL) measures about 194 characters, so the roughly 35-character clause leaves about 270 characters of headroom against the 500-character truncation at `agent/reflection_scheduler.py:648`. Measure it in the build and, if it clears, delete the reorder fallback from Risk 1 rather than leaving a hazardous unexercised branch. If the reorder is ever taken, insert the clause after `{withheld_note}{suppressed_note}` and before `, PR=`, and add `test_step9_suppression_reaches_summary_before_pr_url` to the Test Impact list. |
-| CONCERN | Scope & Value | The plan's whole justification is that operators now read this information on the dashboard, but every Success Criterion, Verification row, and validator task is a grep, a `result["summary"]` string containment, or `git diff --stat`. Nothing reaches the template layer the premise depends on. Task 5 asks the validator to "Confirm the vault clause renders on a `0` count by driving the created-PR path", which still stops at the returned dict. | pending | The render guard `{% if r.last_run_summary and r.last_run_summary.output_summary %}` at `ui/templates/reflections/_partials/modal_content.html:59` is untouched by this change and exercised by nothing in Test Impact. Add one validator task that seeds a `Reflection` through the ORM with `mark_completed(duration, output_summary=<the new PR summary>)` and asserts the rendered modal partial contains the vault clause, so the end-to-end claim is demonstrated once rather than assumed. |
-| CONCERN | Scope & Value | Open Question 1 self-selects Option (a), adding a new user-visible clause to an operator-facing string, under an appetite that declares "PM check-ins: 0". The plan frames the choice as forced by `ruff` F841, but F841 only requires the local at `:2460` to be consumed: `_ = _run_vault_drift_detection(project_key)` clears it with zero behavioral change, which is Option (b). The constraint forces a resolution, not this one. The BLOCKER above weakens Option (a)'s stated rationale further, since the `0`-versus-absent argument it rests on does not describe real behavior. | pending | Re-argue Option (a) on the surviving ground rather than the `None` distinction: the count still distinguishes "detector ran and compared N narratives" from "detector ran and compared 0", which is the observability guarantee PR #2096 argued for and the only one at stake. If that argument holds, keep (a) and say so explicitly in Technical Approach item 1; if it does not, take (b) and delete the `vault_narratives_compared` rows from Data Flow, Test Impact, and Success Criteria in the same pass. Either way the answer belongs in the plan text before build, not in an Open Question. |
-| CONCERN | Structural check | The Data Flow field-coverage table, whose stated purpose is "to prove the replacement channel carries everything the deleted one did", marks `slug` as "Yes" citing the zero-diff and PR-cap summary strings. The created-PR path carries no slug: its summary is `f"docs-auditor: {len(files_touched)} files touched, {fixes} fixes{withheld_note}{suppressed_note}, PR={pr_url}"` (`reflections/docs_auditor.py:2718-2723`), while `_write_liveness(slug, "ok", ...)` at `:2695-2702` carried the real doc slug. Two of five paths carry it, and the one that loses real information is marked covered without qualification. | pending | The datum is recoverable from the PR URL, so this is an accuracy fix to the table, not a scope change. Change the `slug` row to "Partial: on the zero-diff and PR-cap paths; on the created-PR path it is recoverable from the PR URL, and the dirty-tree and no-candidates paths carried only the literal placeholders `(dirty)` and `(no-candidates)` that their summary prose already states". If the build instead decides the created-PR slug is worth keeping, add it to that summary string in the same edit as the vault clause. |
-| NIT | Structural check | Six Verification rows read `grep -c ...` with an Expected of "match count == 0". `grep -c` exits 1 when the count is zero, so a validator or wrapper that gates on exit status reads every one of those rows as a failure. Separately, the first three rows use `grep -rc PATTERN reflections/`, which prints one `file:count` line per file in the tree rather than a single number. | pending |  |
-
-## Open Questions
-
-One question, with a recommended default so the build is never blocked on an answer.
-
-1. **Where does `vault_narratives_compared` land?** It is the one field the liveness
-   payload carries that no summary string does, and deleting `_write_liveness` orphans its
-   local variable, so the build must choose. Three options:
-
-   a. **Append it to the created-PR summary string** (recommended, and what this plan is
-      written around). Preserves the `0`-versus-absent distinction #2084 built the field
-      for, keeps today's asymmetry exactly, costs about 35 characters against a
-      500-character budget.
-
-   b. **Drop it.** Call `_run_vault_drift_detection(project_key)` for its side effect
-      (issue filing) and discard the return. Simplest diff, and it deletes an
-      observability guarantee a prior plan argued for across a full critique round. Cheap
-      now, expensive the day the vault mapping silently breaks.
-
-   c. **Thread it into all four post-vault summary strings.** More useful than (a), and a
-      behavioral widening this issue did not ask for. Belongs in its own issue.
-
-   Proceeding on (a) unless told otherwise.
+| BLOCKER | Structural check | The plan's `None` arm for the vault clause is unreachable in production. `_run_vault_drift_detection` is annotated `-> int` at `reflections/docs_auditor.py:2370` and returns `0` on every path: `return 0` when `_resolve_vault_root` yields None (:2384-2385), `return compared` (an int) on success, and `return 0` from its `except Exception` (:2399-2400). So `vault_narratives_compared` at `:2460` is always an int and never `None`. Four sections prescribe the opposite: Failure Path Test Strategy says "the created-PR path when `_run_vault_drift_detection` returns `None`"; Test Impact orders a new "absent-when-None" test; Success Criteria requires "emitted on `0` and omitted on `None`"; Documentation tells the documentarian to keep a three-way distinction whose "absent" arm the source doc actually defines as "key absent entirely, from a call site that never ran the vault comparison" (`docs/features/vault-drift-audit.md:184-186`), meaning a different call site, never a `None` return. A builder following this literally patches the function to return `None` against its own annotation and ships a dead `is not None` guard, adding dead code inside a dead-code-deletion PR. | **revised** — Technical Approach item 1 | The real distinction to preserve is per-call-site, not per-value: today all four non-PR call sites pass no vault count at all, and the created-PR site always passes an int, so the key is always present on the PR path. The faithful replacement is therefore unconditional: append the clause to the created-PR summary string with no `is not None` guard, and leave the other four summary strings without it. Rewrite Success Criteria to "the created-PR summary always carries the vault count, including when it is 0; no other summary string carries it", replace the "absent-when-None" test with one asserting the clause is absent from the zero-diff and no-candidates summaries, and reword `vault-drift-audit.md`'s three-way distinction so "the mapping is silently broken" maps to "the run never reached the created-PR path", not to a `None` return. |
+| CONCERN | History & Consistency, Structural check | The `## Tests` documentation cluster is bounded at `docs/features/docs-auditor.md:738-750`, but a stale reference survives at `:762`: `TestWithheldBlocksStaleClose` is described as "a bare-name withhold reaching the PR body, Telegram, and liveness". That sentence describes the surface being deleted and a test the plan renames to drop `_and_liveness` (Test Impact bullet 2), yet it falls outside all seven enumerated clusters. Both Verification rows for this file grep only `_write_liveness` and `last_completed_run`, neither of which appears on that line, so the checks report clean while the stale sentence survives. This is exactly the residue Risk 4 exists to prevent, escaping through Risk 4's own mitigation. | **revised** — Documentation `## Tests` cluster | Extend the `## Tests` cluster range to `:738-765` and reword `:762` to drop "and liveness". Add a Verification row `grep -c 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md` expecting 0, since the existing literal-string greps are provably blind to the bare word. |
+| CONCERN | Risk & Robustness | Technical Approach item 4 cites `_migrate_clear_orphaned_warn_state_key` (`scripts/update/migrations.py:1174-1200`) as "a direct precedent, written for the same shape of problem", but that function never touches Redis. It calls `warn_state.should_emit(_ORPHANED_WARN_KEY, "", project_dir)`, which pops a key from `data/update_warn_state.json`. The precedent settles the fail-soft shape but not how `migrations.py` obtains a Redis connection, which is the part the build actually has to invent. | **revised** — Technical Approach item 4 | `reflections/docs_auditor._get_redis()` exists at `reflections/docs_auditor.py:183` and is the natural source, reached the way `_migrate_backfill_job_last_active_scores` reaches `models.job`: `sys.path.insert(0, str(project_dir))` then import inside the try block. Confirm the import resolves with no circular import after the constants are deleted, and hard-code the two key strings in the migration rather than importing the constants, which this change removes. Keep the precedent's fail-soft shape: wrap in try/except, log, and `return None` unconditionally. |
+| CONCERN | Risk & Robustness | Risk 1's fallback, "the clause moves ahead of `PR={pr_url}`", collides with an existing invariant test the plan never names: `test_step9_suppression_reaches_summary_before_pr_url` (`tests/unit/test_docs_auditor_substrate.py:1762`) asserts `result["summary"].index("suppressed") < result["summary"].index("PR=")` at `:1787`. Reordering the string to buy truncation headroom can displace `suppressed_note` past `PR=` and break that assertion, and the Test Impact list does not include it. | **revised** — Risk 1 + Test Impact | The fallback is very likely unnecessary: a worst-realistic created-PR summary (long slug, withheld note, Telegram suppressed, real PR URL) measures about 194 characters, so the roughly 35-character clause leaves about 270 characters of headroom against the 500-character truncation at `agent/reflection_scheduler.py:648`. Measure it in the build and, if it clears, delete the reorder fallback from Risk 1 rather than leaving a hazardous unexercised branch. If the reorder is ever taken, insert the clause after `{withheld_note}{suppressed_note}` and before `, PR=`, and add `test_step9_suppression_reaches_summary_before_pr_url` to the Test Impact list. |
+| CONCERN | Scope & Value | The plan's whole justification is that operators now read this information on the dashboard, but every Success Criterion, Verification row, and validator task is a grep, a `result["summary"]` string containment, or `git diff --stat`. Nothing reaches the template layer the premise depends on. Task 5 asks the validator to "Confirm the vault clause renders on a `0` count by driving the created-PR path", which still stops at the returned dict. | **revised** — new task `validate-dashboard-render` | The render guard `{% if r.last_run_summary and r.last_run_summary.output_summary %}` at `ui/templates/reflections/_partials/modal_content.html:59` is untouched by this change and exercised by nothing in Test Impact. Add one validator task that seeds a `Reflection` through the ORM with `mark_completed(duration, output_summary=<the new PR summary>)` and asserts the rendered modal partial contains the vault clause, so the end-to-end claim is demonstrated once rather than assumed. |
+| CONCERN | Scope & Value | Open Question 1 self-selects Option (a), adding a new user-visible clause to an operator-facing string, under an appetite that declares "PM check-ins: 0". The plan frames the choice as forced by `ruff` F841, but F841 only requires the local at `:2460` to be consumed: `_ = _run_vault_drift_detection(project_key)` clears it with zero behavioral change, which is Option (b). The constraint forces a resolution, not this one. The BLOCKER above weakens Option (a)'s stated rationale further, since the `0`-versus-absent argument it rests on does not describe real behavior. | **revised** — Technical Approach item 1 + Appetite | Re-argue Option (a) on the surviving ground rather than the `None` distinction: the count still distinguishes "detector ran and compared N narratives" from "detector ran and compared 0", which is the observability guarantee PR #2096 argued for and the only one at stake. If that argument holds, keep (a) and say so explicitly in Technical Approach item 1; if it does not, take (b) and delete the `vault_narratives_compared` rows from Data Flow, Test Impact, and Success Criteria in the same pass. Either way the answer belongs in the plan text before build, not in an Open Question. |
+| CONCERN | Structural check | The Data Flow field-coverage table, whose stated purpose is "to prove the replacement channel carries everything the deleted one did", marks `slug` as "Yes" citing the zero-diff and PR-cap summary strings. The created-PR path carries no slug: its summary is `f"docs-auditor: {len(files_touched)} files touched, {fixes} fixes{withheld_note}{suppressed_note}, PR={pr_url}"` (`reflections/docs_auditor.py:2718-2723`), while `_write_liveness(slug, "ok", ...)` at `:2695-2702` carried the real doc slug. Two of five paths carry it, and the one that loses real information is marked covered without qualification. | **revised** — Data Flow `slug` row | The datum is recoverable from the PR URL, so this is an accuracy fix to the table, not a scope change. Change the `slug` row to "Partial: on the zero-diff and PR-cap paths; on the created-PR path it is recoverable from the PR URL, and the dirty-tree and no-candidates paths carried only the literal placeholders `(dirty)` and `(no-candidates)` that their summary prose already states". If the build instead decides the created-PR slug is worth keeping, add it to that summary string in the same edit as the vault clause. |
+| NIT | Structural check | Six Verification rows read `grep -c ...` with an Expected of "match count == 0". `grep -c` exits 1 when the count is zero, so a validator or wrapper that gates on exit status reads every one of those rows as a failure. Separately, the first three rows use `grep -rc PATTERN reflections/`, which prints one `file:count` line per file in the tree rather than a single number. | **revised** — Verification table |  |
