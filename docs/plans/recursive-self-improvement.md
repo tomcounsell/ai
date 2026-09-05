@@ -184,7 +184,7 @@ Delivery is staged as six lanes (see Step by Step Tasks). Lanes 1 and 2 (retire 
 |-------------|---------------|---------|
 | Redis reachable through Popoto | `.venv/bin/python -c "from popoto.redis_db import POPOTO_REDIS_DB as r; assert r.ping()"` | Control journal, records, projections |
 | `gh` authenticated | `gh auth status` | Issue lifecycle adapter, child-issue filing |
-| Interpreter on pin | `.venv/bin/python -m tools.doctor` | Worktree venvs for candidate lanes |
+| Interpreter on pin | `.venv/bin/python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); assert sys.version.startswith(pin), (pin, sys.version)"` | Worktree venvs for candidate lanes inherit the pinned interpreter |
 | `OPENROUTER_API_KEY` present | `.venv/bin/python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('OPENROUTER_API_KEY')"` | Cross-vendor judge in evaluation |
 
 Run via `python scripts/check_prerequisites.py docs/plans/recursive-self-improvement.md`.
