@@ -304,6 +304,48 @@ class TestReadTheRoomWiring:
         assert payload["reply_to"] == 555
         assert "text" not in payload
 
+    def test_rtr_failure_falls_open(self):
+        """RTR raising must not block delivery (Path A fail-open contract,
+        `agent/output_handler.py:1144`).
+
+        RTR runs on every eligible Path A send after #2733 (READ_THE_ROOM_ENABLED
+        removed), so this outer guard moved from theoretical to hot. Mirrors
+        the Path B equivalent, `test_valor_telegram_rtr.py::test_rtr_failure_falls_open`.
+
+        Mutation-proven: converting the `except Exception as rtr_err:` at
+        `agent/output_handler.py:1144` into a bare `raise` makes this test
+        fail with the injected RuntimeError instead of the assertions below
+        (confirmed by hand while writing this test, then reverted).
+        """
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        # Delivery proceeded with the original text -- RTR's failure never
+        # reached the outbox write.
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == "x" * 250
+        assert payload.get("type") != "reaction"
+
     def test_steering_deferred_path_skips_rtr(self):
         """RTR must not run when delivery is deferred to self-draft steering
         (the steering_deferred return at line 250 happens before RTR).

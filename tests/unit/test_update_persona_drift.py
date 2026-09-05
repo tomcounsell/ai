@@ -11,23 +11,25 @@ Verifies:
   - Template absent → no warning, no error
   - Both absent → no warning, no error
   - IOError reading file → warning appended, no crash
-  - Default repo template path resolves to the real PM persona file
+  - Default repo template path resolves to the real engineer persona file
   - The teammate pair (added for issue #2733) gets the same coverage, plus
     ``check_all_persona_drift`` aggregation across both pairs
 """
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from scripts.update import run as run_module
 from scripts.update.persona_drift import (
     DEFAULT_TEMPLATE_REL,
     PERSONA_OVERLAY_PAIRS,
     TEAMMATE_TEMPLATE_REL,
     PersonaOverlayPair,
     check_all_persona_drift,
-    check_pm_persona_drift,
+    check_persona_drift,
 )
 
 
@@ -58,7 +60,7 @@ def test_identical_files_no_warning(tmp_path):
     content = "# PM Persona\n\nYou are a PM.\n"
     project_dir, overlay = _setup(tmp_path, content, content)
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+    warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert warnings == []
 
@@ -71,10 +73,10 @@ def test_one_line_difference_produces_warning(tmp_path):
         "# PM Persona\n\nYou are a senior PM.\n",
     )
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+    warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
-    assert "PM persona overlay drift" in warnings[0]
+    assert "engineer persona overlay drift" in warnings[0]
     # Unified diff counts the removed line AND the added line → 2 diff_lines
     assert "2 lines differ" in warnings[0]
 
@@ -87,7 +89,7 @@ def test_line_count_reflects_actual_diff(tmp_path):
         "line1\nchanged2\nchanged3\n",
     )
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+    warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     # 2 removed + 2 added = 4 diff lines
@@ -98,7 +100,7 @@ def test_private_overlay_absent_no_warning(tmp_path):
     """When the private overlay does not exist, no warning is emitted (fresh machine)."""
     project_dir, _ = _setup(tmp_path, "# PM Persona\n", None)
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent.md")
+    warnings = check_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent.md")
 
     assert warnings == []
 
@@ -107,7 +109,7 @@ def test_template_absent_no_warning(tmp_path):
     """When the repo template does not exist, no warning is emitted."""
     project_dir, overlay = _setup(tmp_path, None, "# PM Persona\n")
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+    warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert warnings == []
 
@@ -117,7 +119,7 @@ def test_both_absent_no_warning(tmp_path):
     project_dir = tmp_path / "repo"
     project_dir.mkdir()
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent-overlay.md")
+    warnings = check_persona_drift(project_dir, overlay_path=tmp_path / "nonexistent-overlay.md")
 
     assert warnings == []
 
@@ -134,7 +136,7 @@ def test_ioerror_reading_file_appends_warning_no_crash(tmp_path):
         return original_read_text(self, *args, **kwargs)
 
     with patch.object(Path, "read_text", failing_read_text):
-        warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+        warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     assert "WARNING" in warnings[0] or "drift check failed" in warnings[0]
@@ -144,7 +146,7 @@ def test_warning_contains_diff_command(tmp_path):
     """Warning message should include a diff command operators can run."""
     project_dir, overlay = _setup(tmp_path, "original content\n", "changed content\n")
 
-    warnings = check_pm_persona_drift(project_dir, overlay_path=overlay)
+    warnings = check_persona_drift(project_dir, overlay_path=overlay)
 
     assert len(warnings) == 1
     assert "diff" in warnings[0]
@@ -188,7 +190,7 @@ def test_teammate_overlay_absent_no_warning(tmp_path):
         tmp_path, "# Teammate Persona\n", None, template_rel=TEAMMATE_TEMPLATE_REL
     )
 
-    warnings = check_pm_persona_drift(
+    warnings = check_persona_drift(
         project_dir,
         template_rel=TEAMMATE_TEMPLATE_REL,
         overlay_path=tmp_path / "nonexistent-teammate.md",
@@ -209,7 +211,7 @@ def test_teammate_overlay_drift_produces_labeled_warning(tmp_path):
         template_rel=TEAMMATE_TEMPLATE_REL,
     )
 
-    warnings = check_pm_persona_drift(
+    warnings = check_persona_drift(
         project_dir,
         template_rel=TEAMMATE_TEMPLATE_REL,
         overlay_path=overlay,
@@ -240,7 +242,7 @@ def test_teammate_template_unreadable_warns_not_raises(tmp_path):
         return original_read_text(self, *args, **kwargs)
 
     with patch.object(Path, "read_text", failing_read_text):
-        warnings = check_pm_persona_drift(
+        warnings = check_persona_drift(
             project_dir,
             template_rel=TEAMMATE_TEMPLATE_REL,
             overlay_path=overlay,
@@ -288,3 +290,77 @@ def test_check_all_persona_drift_aggregates_both_pairs(tmp_path):
     assert len(warnings) == 2
     assert any("engineer persona overlay drift" in w for w in warnings)
     assert any("teammate persona overlay drift" in w for w in warnings)
+
+
+# === Wiring: does run_update actually call check_all_persona_drift? ============
+#
+# do-pr-review Tech Debt 2 (#2733 PATCH round): every test above exercises the
+# real persona_drift functions directly, but none of them observes what
+# scripts/update/run.py:2187 actually calls. Mutation-proven by the reviewer:
+# reverting that line to `persona_drift.check_pm_persona_drift(project_dir)`
+# (the pre-#2733 single-persona call) left every test in this file green,
+# because none of them import or execute run.py's Step 4.10 statement.
+#
+# The block is lifted out of run_update by AST -- following
+# test_update_human_gated_routing.py's idiom -- and executed against a mock
+# persona_drift module, so a caller that reverts to the old function is
+# observed directly rather than inferred from a string match in the source.
+
+
+def _persona_wiring_statement() -> ast.stmt:
+    """The `_persona_warnings = persona_drift.check_all_persona_drift(...)`
+    statement inside `run_update`.
+
+    Located by its assignment target (the name `_persona_warnings`), not by
+    line number or by matching the literal call text -- so this test still
+    finds the statement, and fails, if a mutation swaps which function on
+    `persona_drift` gets called.
+    """
+    source = Path(run_module.__file__).read_text()
+    tree = ast.parse(source)
+    fn = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_update"),
+        None,
+    )
+    assert fn is not None, "run_update not found as a top-level sync def in run.py"
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_persona_warnings"
+        ):
+            return node
+    raise AssertionError("`_persona_warnings = ...` assignment not found in run_update")
+
+
+class TestPersonaDriftWiring:
+    def test_run_update_calls_check_all_persona_drift(self, tmp_path):
+        """The Step 4.10 wiring line calls the fleet-wide aggregator, not the
+        single-pair function directly.
+
+        Mutation check performed by hand while writing this test: reverting
+        `scripts/update/run.py`'s statement to
+        `persona_drift.check_pm_persona_drift(project_dir)` (the call this
+        function replaced) or to `persona_drift.check_persona_drift(project_dir)`
+        (today's single-pair function, called directly instead of through the
+        aggregator) both make `check_all_persona_drift.assert_called_once_with`
+        below fail -- this test does not pass for the wrong reason.
+        """
+        stmt = _persona_wiring_statement()
+
+        mock_persona_drift = MagicMock()
+        mock_persona_drift.check_all_persona_drift.return_value = []
+        # Also stubbed so a mutated call site (calling the single-pair
+        # function directly) executes without AttributeError instead of
+        # masking itself as an unrelated failure.
+        mock_persona_drift.check_persona_drift.return_value = []
+
+        namespace = dict(vars(run_module))
+        namespace["persona_drift"] = mock_persona_drift
+        namespace["project_dir"] = tmp_path
+
+        exec(compile(ast.Module(body=[stmt], type_ignores=[]), "<block>", "exec"), namespace)
+
+        mock_persona_drift.check_all_persona_drift.assert_called_once_with(tmp_path)
+        mock_persona_drift.check_persona_drift.assert_not_called()

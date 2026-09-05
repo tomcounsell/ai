@@ -74,7 +74,7 @@ Bridge code does *not* validate on its own startup — that would crash the live
 
 ### Persona overlay drift check
 
-Step 4.10 of `scripts/update/run.py` compares each in-repo persona template against its private per-machine vault overlay, for every pair in `scripts/update/persona_drift.py::PERSONA_OVERLAY_PAIRS` — currently `engineer` (`config/personas/engineer.md` vs. `~/Desktop/Valor/personas/engineer.md`) and `teammate` (`config/personas/teammate.md` vs. `~/Desktop/Valor/personas/teammate.md`, added for issue #2733 after a private `teammate.md` stub was found silently shadowing the repo-maintained overlay). `run.py` calls `persona_drift.check_all_persona_drift`, which loops the pair list and aggregates warnings; the per-pair logic lives in `check_pm_persona_drift` so tests exercise the real helper.
+Step 4.10 of `scripts/update/run.py` compares each in-repo persona template against its private per-machine vault overlay, for every pair in `scripts/update/persona_drift.py::PERSONA_OVERLAY_PAIRS` — currently `engineer` (`config/personas/engineer.md` vs. `~/Desktop/Valor/personas/engineer.md`) and `teammate` (`config/personas/teammate.md` vs. `~/Desktop/Valor/personas/teammate.md`, added for issue #2733 after a private `teammate.md` stub was found silently shadowing the repo-maintained overlay). `run.py` calls `persona_drift.check_all_persona_drift`, which loops the pair list and aggregates warnings; the per-pair logic lives in `check_persona_drift` so tests exercise the real helper.
 
 The check is **surface only**: it never auto-merges, never mutates files, and never raises (any unexpected error becomes a warning). Behavior:
 

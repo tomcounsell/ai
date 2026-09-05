@@ -6,8 +6,8 @@ surface — it never auto-merges, never mutates files, and never raises (any
 unexpected error becomes a warning).
 
 Covers two persona pairs (see ``PERSONA_OVERLAY_PAIRS``): ``engineer``
-(the original PM/engineer check) and ``teammate`` (added for issue #2733,
-after a private ``teammate.md`` stub was found silently shadowing the
+(the original check) and ``teammate`` (added for issue #2733, after a
+private ``teammate.md`` stub was found silently shadowing the
 repo-maintained overlay — this is the fleet-wide mechanism that surfaces
 that shadow on any other machine instead of it loading silently).
 
@@ -45,12 +45,12 @@ PERSONA_OVERLAY_PAIRS: list[PersonaOverlayPair] = [
 ]
 
 
-def check_pm_persona_drift(
+def check_persona_drift(
     project_dir: Path,
     *,
     template_rel: Path = DEFAULT_TEMPLATE_REL,
     overlay_path: Path | None = None,
-    persona_name: str = "PM",
+    persona_name: str = "engineer",
 ) -> list[str]:
     """Return warnings produced by a persona overlay drift check.
 
@@ -66,9 +66,12 @@ def check_pm_persona_drift(
         Absolute path to the private vault overlay. Defaults to
         ``~/Desktop/Valor/personas/engineer.md``.
     persona_name:
-        Human-readable label used in the warning text (e.g. ``"PM"`` or
+        Human-readable label used in the warning text (e.g. ``"engineer"`` or
         ``"teammate"``), so a warning about one persona is never mistaken
-        for another.
+        for another. Defaults to ``"engineer"`` to match this function's own
+        default ``template_rel``/``overlay_path`` pair, which is the
+        engineer overlay -- the same label ``PERSONA_OVERLAY_PAIRS`` uses for
+        that pair.
 
     Returns
     -------
@@ -126,7 +129,7 @@ def check_all_persona_drift(project_dir: Path) -> list[str]:
     warnings: list[str] = []
     for pair in PERSONA_OVERLAY_PAIRS:
         warnings.extend(
-            check_pm_persona_drift(
+            check_persona_drift(
                 project_dir,
                 template_rel=pair.template_rel,
                 overlay_path=pair.overlay_path,
