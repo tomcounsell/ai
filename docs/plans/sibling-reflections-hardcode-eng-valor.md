@@ -108,15 +108,74 @@ All four verifiable assumptions were resolved inline by code-read against `67d71
 
 ## Data Flow
 
-<!-- TODO -->
+Two distinct flows reach the same broken argv. They are the reason this plan builds two entry points rather than one helper.
+
+**Flow A — per-project escalation (`expectation_reconciler`, `sdlc_progress`):**
+
+```
+reflection scheduler
+  └─ run_expectation_reconciliation() / run_sdlc_progress_check()
+       └─ run_per_project_audit(body, name=...)          reflections/utilities.py:118
+            └─ load_local_projects()                      → [{slug, working_directory, telegram:{groups:{...}}, ...}]
+                 └─ for project in projects:
+                      └─ body(project)                    _reconcile_project / _check_project_stalls
+                           ├─ project_key = project["slug"]
+                           └─ ...ladder... → _escalate_once(...)
+                                └─ subprocess.run(["valor-telegram","send","--chat","Eng: Valor", msg])
+                                                          ^^^^^^^^^^^^  project identity discarded here
+```
+
+The project dict travels the whole way and is dropped at the last frame. The `[{project_key}]` prefix already baked into the message body is the surviving trace of it.
+
+**Flow B — host-machine digest (`sentry_triage`, `stall_advisory`):**
+
+```
+reflection scheduler
+  └─ run_sentry_triage()                                  no per-project iteration for the digest
+       ├─ _fetch_unresolved_issues(...)                   → issues across every Sentry project
+       ├─ _classify_issue(...) → classified[A..E]
+       ├─ (Class-C branch only) load_local_projects() → proj_wd, for `gh issue create` cwd
+       └─ _send_telegram_notification("\n".join(tg_lines))   sentry_triage.py:1034
+            └─ subprocess.run([... "--chat","Eng: Valor", msg])
+
+  └─ run_stall_advisory(params)                            never calls load_local_projects()
+       ├─ AgentSession.query.filter(status__in=_RUNNING_PROBE_STATUSES)   global, all projects
+       └─ if telegram_enabled and findings: _send_alert(msg)   stall_advisory.py:223
+            └─ subprocess.run([... "--chat","Eng: Valor", msg])
+```
+
+No project dict is ever in scope at the send. The digest describes the *fleet*, so its correct destination is the engineer group of the checkout running the reflection.
+
+**Target flow (both):**
+
+```
+caller ─┬─ holds a project dict ──► send_eng_telegram(project, message, logger_prefix=...)
+        │                              └─ resolve_eng_group(project) → (name, chat_id) | None
+        │                                   ├─ None  → log warning, return False, NO subprocess
+        │                                   └─ (…,id)→ subprocess.run([... "--chat", str(chat_id), msg]) → True
+        │
+        └─ holds no project ──────► send_host_eng_telegram(message, logger_prefix=...)
+                                       └─ resolve_host_eng_chat() → str | None
+                                            ├─ match PROJECT_ROOT against a project's working_directory
+                                            ├─ resolve_eng_group(that project) → str(chat_id)
+                                            └─ else FALLBACK_ENG_CHAT ("Eng: Valor") — this checkout only
+```
+
+The critical transformation is `int → str(chat_id)` before it enters argv, never `group_name`. A name re-enters `valor-telegram`'s ambiguity-tolerant `resolve_chat` cascade; an id cannot. This is the same rule `docs_auditor._resolve_notify_chat` documents in its docstring, and it must not be softened here.
 
 ## Why Previous Fixes Failed
 
-<!-- TODO -->
+Not applicable — no prior fix has been attempted at these four sites. #2754 deliberately scoped itself to `docs_auditor` and named this sweep as its own No-Go; that is a scoping decision, not a failed fix.
 
 ## Architectural Impact
 
-<!-- TODO -->
+**Consolidating, not expanding.** After this change `reflections/utilities.py` owns the single "how does a reflection page an engineer" rule, and five modules consume it instead of each asserting a destination. `resolve_eng_group` already lives there and is already consumed by `docs_auditor` and `sdlc_upvote_lanes`; the send-side wrapper is the missing half.
+
+**One deliberate duplication is retired.** `docs_auditor._resolve_notify_chat`'s `PROJECT_ROOT`-narrowed fallback is exactly the host-machine rule that `sentry_triage` and `stall_advisory` need. Rather than copy it a third time, this plan **lifts** it into `reflections/utilities.py::resolve_host_eng_chat()` and has `docs_auditor` delegate. That keeps the fallback's narrowing — and its "do not simplify this into an unconditional default" reasoning — in one place. It also means the #2754 tests keep passing against a thinner `_resolve_notify_chat`, which is the cheapest possible regression check on the lift.
+
+**No new module, no new dependency, no new config key.** The change is confined to `reflections/` plus one script, and every fact it consumes (`projects.json` `telegram.groups.<Eng: X>.chat_id`) already exists and is already read by two callers.
+
+**A behavior boundary moves.** Today an alert always goes somewhere. After this change an alert can be *suppressed* when nothing resolves. That is the correct trade — paging the wrong humans is worse than paging none, and #2754 already made the same call for `docs_auditor` — but it means "no Telegram message arrived" stops being proof that nothing was wrong. The mitigation is that every suppression logs at `warning` with the project key and reaches the reflection's `summary` field, which is the only thing the scheduler persists.
 
 ## Appetite
 
