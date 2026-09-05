@@ -61,37 +61,37 @@ the issue on 2026-09-05.
 | `REDIS_LAST_COMPLETED_TS_KEY` / `_SUMMARY_KEY` definitions | `reflections/docs_auditor.py:136-137` | Holds, verbatim |
 | `_write_liveness` definition | `reflections/docs_auditor.py:2153` | Holds |
 | Two `r.set` calls, no `r.get` | `:2178`, `:2189`; no reader repo-wide | Holds |
-| "its four call sites" | `:2450`, `:2465`, `:2493`, `:2573`, `:2695` | **Drifted — five, not four.** `:2493` is the PR-cap / open-PR guard #2739 added |
+| "its four call sites" | `:2450`, `:2465`, `:2493`, `:2573`, `:2695` | **Drifted: five, not four.** `:2493` is the PR-cap / open-PR guard #2739 added |
 | `models/reflection.py:186`, `:221` | `mark_completed(output_summary=...)` param at `:186`, stored at `:221` | Holds, exact |
 | `ui/data/reflections.py:139`, `:286` | `last_run_summary` dict at `:139`, `output_summary` at `:286` | Holds, exact |
-| Fixed 4-arg signature | `:2153-2160` now takes six params | **Drifted** — `vault_narratives_compared` (#2096) and `fixes_withheld` (#2782) |
+| Fixed 4-arg signature | `:2153-2160` now takes six params | **Drifted**: `vault_narratives_compared` (#2096) and `fixes_withheld` (#2782) |
 
 **Cited sibling issues/PRs re-checked:**
 
-- **#2739** — CLOSED 2026-08-28 via PR #2887 (`7ccd27d5d`). The prerequisite this issue
+- **#2739**: CLOSED 2026-08-28 via PR #2887 (`7ccd27d5d`). The prerequisite this issue
   names. Verified in code, not assumed: see the Data Flow section for the full chain.
-- **#2782** — MERGED 2026-08-13 (`ffbae5b1d`). Added `fixes_withheld` to the liveness
+- **#2782**: MERGED 2026-08-13 (`ffbae5b1d`). Added `fixes_withheld` to the liveness
   payload after this issue was filed, which is why the issue's signature description is
   stale.
-- **#2741** — CLOSED 2026-08-18 via PR #2842 (`a9205b065`). Deleted the rename channel
+- **#2741**: CLOSED 2026-08-18 via PR #2842 (`a9205b065`). Deleted the rename channel
   from the same module. Not a dependency; a directly reusable precedent for how this repo
   lands a dead-code deletion.
-- **#2834** — CLOSED, folded into #2739's lane.
+- **#2834**: CLOSED, folded into #2739's lane.
 
 **Commits on main since the issue was filed (touching referenced files):**
 
-- `7ccd27d5d` fix(docs-auditor): review-gate every write (#2739, #2834) — **changed the
-  premise**. Added a fifth `_write_liveness` call site, rewrote the rotation's outcome
+- `7ccd27d5d` fix(docs-auditor): review-gate every write (#2739, #2834). **Changed the
+  premise.** Added a fifth `_write_liveness` call site, rewrote the rotation's outcome
   vocabulary so four of five post-lock returns report `"skipped"`, and added the
   `modal_content.html` render of `output_summary` that makes the dashboard a real reader.
 - `ffbae5b1d` fix(docs-auditor): migration-context hatch and bare-path existence
-  invariant (#2782) — **partially opposes**. Threaded `fixes_withheld` into the liveness
+  invariant (#2782). **Partially opposes.** Threaded `fixes_withheld` into the liveness
   payload and wrote the "only durable, queryable surface" docstring. That claim is what
   this plan retires.
 - `a9205b065` (#2741), `45d0961f9` (#2728), `15023ee97`, `5eaa74230`, `6c68f29ab`,
-  `974be6532` — touched the same module elsewhere; none touch `_write_liveness` or its
+  `974be6532`: touched the same module elsewhere; none touch `_write_liveness` or its
   keys.
-- `90a319df7`, `974e8d4c9`/`974eb8d4c` — scheduler changes; neither touches the
+- `90a319df7`, `974e8d4c9`/`974eb8d4c`: scheduler changes; neither touches the
   `mark_completed(output_summary=...)` call at `:644-648`.
 
 **Active plans in `docs/plans/` overlapping this area:** none. No plan under
@@ -117,27 +117,27 @@ liveness payload carried also reaches `output_summary`, which is why
 
 ## Prior Art
 
-- **PR #2842 / #2741** — "chore(#2741): delete the docs-auditor rename channel". Deleted
+- **PR #2842 / #2741**: "chore(#2741): delete the docs-auditor rename channel". Deleted
   six symbols and a module-level global from this exact file, and pinned the removal with
   a grep-assertion test class. The closest precedent available; this plan copies its
   shape, including the `TestVaultDeadCodeRemoved`-style guard class already living at
   `tests/unit/test_docs_auditor_substrate.py:3093`.
-- **PR #2887 / #2739** — "review-gate every write, report broken .md links". The
+- **PR #2887 / #2739**: "review-gate every write, report broken .md links". The
   prerequisite. Built the `output_summary` channel end to end and explicitly deferred this
   deletion, recording the re-argument requirement quoted in the Freshness Check.
-- **PR #2782** — "migration-context hatch and bare-path existence invariant". Added
+- **PR #2782**: "migration-context hatch and bare-path existence invariant". Added
   `fixes_withheld` to the liveness payload. Its two test assertions
   (`liveness.call_args.kwargs["fixes_withheld"]`) are the only behavioral coverage that
   the withheld count reaches a durable surface, so they must be re-pointed rather than
   deleted.
-- **PR #2096 / #2084** — "Integrate the work-vault knowledge base". Added
+- **PR #2096 / #2084**: "Integrate the work-vault knowledge base". Added
   `vault_narratives_compared` and the `## Liveness signal` section of
   `docs/features/vault-drift-audit.md`. Its stated goal, making "detector ran, found zero
   drift" distinguishable from "the mapping is silently broken", is a real requirement that
   outlives the channel it was built on.
-- **PR #1253 / #1247** — "Consolidate docs hygiene: unified auditor substrate". Introduced
+- **PR #1253 / #1247**: "Consolidate docs hygiene: unified auditor substrate". Introduced
   `_write_liveness` in the first place, as a Phase-2 answer to critique finding O1: "No
-  liveness signal during Phase 2 — how does PM know the reflection is actually running?"
+  liveness signal during Phase 2. How does PM know the reflection is actually running?"
   The dashboard now answers that question directly.
 
 No prior attempt to delete this function exists. Nothing to analyze under "Why Previous
@@ -154,7 +154,7 @@ names exactly this case ("refactoring internal code") as the skip condition.
 The point of this section is to prove the replacement channel carries everything the
 deleted one did. Both flows start at the same place.
 
-**Channel A — the one being deleted:**
+**Channel A, the one being deleted:**
 
 1. **Entry point**: `run_docs_auditor()` reaches one of five post-lock returns.
 2. **`_write_liveness(...)`** (`reflections/docs_auditor.py:2153`) builds a dict of
@@ -165,7 +165,7 @@ deleted one did. Both flows start at the same place.
 4. **Output**: nothing. A human types `redis-cli GET` on the right machine, or the value
    is never seen. Failures are swallowed into `logger.warning`.
 
-**Channel B — the one that stays:**
+**Channel B, the one that stays:**
 
 1. **Entry point**: the same five returns, each carrying a `"summary"` string.
 2. **`agent/reflection_scheduler.py:644-648`**: `summary_str = result.get("summary")`,
@@ -297,9 +297,9 @@ threading step actually landed.
 **3. Test re-pointing, not test deletion.** Two assertions currently prove the withheld
 count reaches a durable surface:
 
-- `tests/unit/test_docs_auditor_substrate.py:1443` —
+- `tests/unit/test_docs_auditor_substrate.py:1443`,
   `assert liveness.call_args.kwargs["fixes_withheld"] == 1`
-- `:1525` — `assert liveness.call_args.kwargs["fixes_withheld"] == 2`
+- `:1525`, `assert liveness.call_args.kwargs["fixes_withheld"] == 2`
 
 Both become assertions on the returned summary, which is where the count now lives via
 `withheld_note`:
@@ -347,10 +347,10 @@ was written before #2782 and #2739 added the rest.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `vault_narratives_compared is None` — the created-PR path when
+- [ ] `vault_narratives_compared is None`: the created-PR path when
       `_run_vault_drift_detection` returns `None`. Assert the clause is absent from the
       summary and the run still reports `"ok"`.
-- [ ] `vault_narratives_compared == 0` — assert the clause is present and reads `0`. This
+- [ ] `vault_narratives_compared == 0`: assert the clause is present and reads `0`. This
       is the case the whole field exists for and the one an "if the value is truthy" bug
       would silently break.
 - [ ] Empty `summary` reaching the scheduler is out of scope: every return path builds a
@@ -375,29 +375,29 @@ All in `tests/unit/test_docs_auditor_substrate.py`.
       `test_four_arg_call_omits_vault_count`, `test_five_arg_call_includes_vault_count`,
       `test_five_arg_zero_is_emitted`, `test_withheld_count_absent_when_zero`,
       `test_withheld_count_emitted_when_nonzero`,
-      `test_withheld_is_trailing_and_preserves_positional_contract`) — **DELETE** the whole
+      `test_withheld_is_trailing_and_preserves_positional_contract`). **DELETE** the whole
       class. Every test targets a function that will not exist.
 - [ ] `TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
-      (`:1358`, patch at `:1433`, assertion at `:1443`) — **UPDATE**: drop the
+      (`:1358`, patch at `:1433`, assertion at `:1443`). **UPDATE**: drop the
       `_write_liveness` patch, replace the kwargs assertion with
       `assert "1 fix(es) withheld" in result["summary"]`, and rename the test to drop
       `_and_liveness`. Its class docstring (`:1322-1328`) also names Redis liveness as one
       of three surfaces and must be reworded.
-- [ ] The zero-diff withheld test (patch at `:1512`, assertion at `:1525`) — **UPDATE**:
+- [ ] The zero-diff withheld test (patch at `:1512`, assertion at `:1525`). **UPDATE**:
       same treatment, asserting `"2 fix(es) withheld"` in the summary.
 - [ ] Bare `patch("reflections.docs_auditor._write_liveness")` context lines at `:1471`,
-      `:1541`, `:1754`, `:1781` — **UPDATE**: delete the lines. Nothing asserts on them;
+      `:1541`, `:1754`, `:1781`. **UPDATE**: delete the lines. Nothing asserts on them;
       they exist only to stop the real function reaching Redis.
-- [ ] `TestHoistedPRGuards._run` helper (patch at `:2061`, mock exported at `:2069`) —
+- [ ] `TestHoistedPRGuards._run` helper (patch at `:2061`, mock exported at `:2069`).
       **UPDATE**: remove the patch and the `"liveness"` entry from the returned mock dict.
 - [ ] `TestHoistedPRGuards::test_guard_still_stamps_the_rotation_hash_for_the_picked_doc`
-      (`:2105`) — **UPDATE**: delete the
+      (`:2105`). **UPDATE**: delete the
       `assert mocks["liveness"].call_args.args[1] == "skipped"` line. The
       `result["status"] == "skipped"` assertion in the sibling test already covers the
       claim, and the rotation-hash assertion on the line above is what this test is for.
-- [ ] Comment at `:1960` referencing `_write_liveness(..., "skipped", ...)` — **UPDATE**:
+- [ ] Comment at `:1960` referencing `_write_liveness(..., "skipped", ...)`. **UPDATE**:
       reword to cite the returned status instead.
-- [ ] **NEW** `TestLivenessDeadCodeRemoved` — modeled on `TestVaultDeadCodeRemoved`
+- [ ] **NEW** `TestLivenessDeadCodeRemoved`, modeled on `TestVaultDeadCodeRemoved`
       (`:3093`): assert `not hasattr(docs_auditor, "_write_liveness")`,
       `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_TS_KEY")`, and
       `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_SUMMARY_KEY")`. This is what stops
@@ -496,7 +496,7 @@ idempotent.
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every relevant item is in scope for this plan.
+Nothing deferred. Every relevant item is in scope for this plan.
 
 The deletion, the `vault_narratives_compared` rehoming, all seven test patch sites, both
 feature docs, and the orphaned-key migration land together. Splitting any of them out
@@ -519,12 +519,12 @@ The `/update` skill needs one addition: a migration that sweeps the two orphaned
 keys.
 
 - **New migration**: `_migrate_clear_docs_audit_liveness_keys` in
-  `scripts/update/migrations.py`, registered in the `MIGRATIONS` dict (required —
+  `scripts/update/migrations.py`, registered in the `MIGRATIONS` dict (required;
   `run_pending_migrations()` iterates that dict and an unregistered function never runs).
   Idempotent by construction: deleting an absent key is a no-op. Returns `None`
   unconditionally and logs on failure, following
   `_migrate_clear_orphaned_warn_state_key` (`:1174-1199`), whose docstring records the
-  reasoning — a bookkeeping cleanup must never fail `/update`, and a silently swallowed
+  reasoning: a bookkeeping cleanup must never fail `/update`, and a silently swallowed
   exception would never retry because `run_pending_migrations` records a `None` return as
   permanently completed.
 - **No new dependencies or config files** to propagate. No `.env` key, no
@@ -539,7 +539,7 @@ keys.
 
 ## Agent Integration
 
-No agent integration required — this removes an internal function and its Redis writes.
+No agent integration required. This removes an internal function and its Redis writes.
 
 - **No new CLI entry point.** `pyproject.toml [project.scripts]` is untouched;
   `_write_liveness` was never reachable from a `valor-*` binary.
@@ -556,34 +556,34 @@ No agent integration required — this removes an internal function and its Redi
 
 ### Feature Documentation
 
-`docs/features/docs-auditor.md` — five clusters, verified on `67d714662`:
+`docs/features/docs-auditor.md`, five clusters, verified on `67d714662`:
 
-- [ ] `:374-379` — the withheld-count paragraph passes the count "to `_write_liveness` as
+- [ ] `:374-379`: the withheld-count paragraph passes the count "to `_write_liveness` as
       a keyword `fixes_withheld`, emitted into the Redis summary only when non-zero".
       Rewrite so the durable surfaces are the GitHub issue and the dashboard's rendered
       `output_summary`, with the withheld count reaching the latter through the summary
       string's `withheld_note`.
-- [ ] `:405-412` — the outcome-vocabulary paragraph justifies each `"skipped"` return by
+- [ ] `:405-412`: the outcome-vocabulary paragraph justifies each `"skipped"` return by
       "matching each one's own `_write_liveness(..., "skipped", ...)` call". The
       justification has to stand on the returned status alone.
-- [ ] `:559-581` (`## Rotation State`, the section the issue names) — no direct
+- [ ] `:559-581` (`## Rotation State`, the section the issue names): no direct
       `_write_liveness` mention, but it is the section that frames what state the rotation
       persists. Add the one sentence this issue asks for: run outcomes reach the operator
       through the reflection's `output_summary`, not through a `docs_audit:` key.
-- [ ] `:582-596` (`## Locking`) — remove the two `docs_audit:last_completed_run_*` lines
+- [ ] `:582-596` (`## Locking`): remove the two `docs_audit:last_completed_run_*` lines
       from the key listing. The remaining four entries are all real locks and state.
-- [ ] `:668-678` — the `vault_narratives_compared` bullet describes the "explicit optional
+- [ ] `:668-678`: the `vault_narratives_compared` bullet describes the "explicit optional
       5th parameter" threading. Rewrite to describe the summary-string clause, keeping the
       `0`-versus-absent distinction that is the bullet's actual point.
-- [ ] `:717-737` (`## Operational Cheatsheet`) — delete the two `redis-cli GET` lines and
+- [ ] `:717-737` (`## Operational Cheatsheet`): delete the two `redis-cli GET` lines and
       their comment block. Replace with a pointer to the reflections dashboard modal.
-- [ ] `:738-750` (`## Tests`) — the sentence naming `TestWriteLivenessVaultParam` and the
+- [ ] `:738-750` (`## Tests`): the sentence naming `TestWriteLivenessVaultParam` and the
       "4-arg/5-arg positional contract" must go, replaced by the new
       `TestLivenessDeadCodeRemoved` class.
 
 `docs/features/vault-drift-audit.md`:
 
-- [ ] `:156-196` (`## Liveness signal`) — the entire section is built on
+- [ ] `:156-196` (`## Liveness signal`): the entire section is built on
       `_write_liveness`, including a verbatim copy of its signature and the
       `redis-cli GET` at `:195`. Rewrite it around the summary-string clause. Keep the
       section's real content, which is the three-way distinction between "detector ran,
@@ -591,7 +591,7 @@ No agent integration required — this removes an internal function and its Redi
       unresolvable" (`0` plus a log warning); that distinction survives the move and is
       the reason the clause must emit on `0`.
 
-- [ ] `docs/features/README.md` — check whether either file's index row summary mentions
+- [ ] `docs/features/README.md`: check whether either file's index row summary mentions
       the liveness keys; update if so, leave alone if not.
 
 ### External Documentation Site
@@ -602,12 +602,12 @@ No agent integration required — this removes an internal function and its Redi
 
 ### Inline Documentation
 
-- [ ] `reflections/docs_auditor.py:132` — the `# Redis key namespace for state/locks/
+- [ ] `reflections/docs_auditor.py:132`: the `# Redis key namespace for state/locks/
       liveness.` comment loses its "liveness" clause with the constants.
-- [ ] `reflections/docs_auditor.py:2688-2691` — the "11. Liveness signal" step comment
+- [ ] `reflections/docs_auditor.py:2688-2691`: the "11. Liveness signal" step comment
       above the created-PR call site is deleted with the call, but its explanation of why
       the vault count is threaded from this one site belongs on the new summary clause.
-- [ ] `tests/unit/test_docs_auditor_substrate.py:1322-1328`, `:1960` — class docstring and
+- [ ] `tests/unit/test_docs_auditor_substrate.py:1322-1328`, `:1960`: class docstring and
       comment naming Redis liveness as an operator surface.
 
 ## Success Criteria
@@ -679,7 +679,7 @@ confirm the deletion is total.
   `PR={pr_url}` if the budget is tight.
 - Delete `_write_liveness` (`:2153-2192`) and the two constants (`:136-137`); trim the
   "liveness" clause from the `:132` comment.
-- Run `python -m ruff check reflections/docs_auditor.py` — an F841 on
+- Run `python -m ruff check reflections/docs_auditor.py`. An F841 on
   `vault_narratives_compared` at `:2460` means the rehoming step did not land.
 
 ### 2. Repair and extend the tests
