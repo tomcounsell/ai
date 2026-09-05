@@ -909,13 +909,13 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ## Success Criteria
 
-- [ ] `_scan_worktree_sessions` issues an indexed `status__in` query; `AgentSession.query.all()`
+- [x] `_scan_worktree_sessions` issues an indexed `status__in` query; `AgentSession.query.all()`
       no longer appears in `agent/worktree_manager.py`.
-- [ ] The query result is **materialized** — `_fetch_live_sessions` returns a `list`, and the
+- [x] The query result is **materialized** — `_fetch_live_sessions` returns a `list`, and the
       `list(...)` sits inside the `try` that produces `query_failed:{Type}` (Decision 0).
-- [ ] The `working_dir` segment-prefix matcher is byte-for-byte the predicate it is today;
+- [x] The `working_dir` segment-prefix matcher is byte-for-byte the predicate it is today;
       no `filter(slug=` appears in `agent/worktree_manager.py`.
-- [ ] A sweep over N lanes performs **one batch session query, materialized once**, plus,
+- [x] A sweep over N lanes performs **one batch session query, materialized once**, plus,
       **on the `apply=True` path**, **one fresh single-slug re-probe per lane actually
       removed** (Decision 4), and **zero of both** when every lane is filtered out above
       guard 5. Measured by counting iterations of the fetched rows, not `filter()` calls, and
@@ -923,30 +923,30 @@ Not applicable — this repo has no Sphinx/MkDocs site.
       `apply=True`. Under `apply=False` the expected re-probe count is **zero** regardless of
       `len(sweep.removed)`, because the dry-run branch returns at
       `tools/disk_reclaim.py:437`–`:440` before `cleanup_after_merge` and deletes nothing.
-- [ ] The re-measured saving is recorded, not assumed: the one-materialization test's
+- [x] The re-measured saving is recorded, not assumed: the one-materialization test's
       counter is the measurement, and Task 6 additionally reports the observed
       materialization count from a real `python -m tools.disk_reclaim --json` dry run. The
       plan's justification is a millisecond figure, so something must re-measure it after
       the change rather than only confirming the query's shape.
-- [ ] `worktree_busy_check` returns `None` for both clear and error; `worktree_busy_probe`
+- [x] `worktree_busy_check` returns `None` for both clear and error; `worktree_busy_probe`
       returns `clear`/`busy`/`error`; a batch fetch failure yields `error` for every
       requested slug.
-- [ ] `worktree_busy_probe_many` and N single-slug probes agree on identical fixture rows
+- [x] `worktree_busy_probe_many` and N single-slug probes agree on identical fixture rows
       across all three states.
-- [ ] The three stale-monkeypatch tests in `tests/unit/test_disk_reclaim.py` exercise the
+- [x] The three stale-monkeypatch tests in `tests/unit/test_disk_reclaim.py` exercise the
       new guard path, proven by mutation: forcing the batch probe to return clear makes
       `test_busy_check_error_also_blocks_removal` fail.
-- [ ] `grep -n 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+- [x] `grep -n 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
       returns nothing, and each of the five predicate tests named in Test Impact turns red
       under a mutation of the predicate it asserts (terminal-status skip removed,
       segment-aware containment replaced with substring containment, falsy `working_dir`
       back-filled with the lane path) rather than passing vacuously against an empty
       `MagicMock` sequence.
-- [ ] The per-row matching `except` branch has a test — it had none before this change, and
+- [x] The per-row matching `except` branch has a test — it had none before this change, and
       Task 1 refactors the loop it lives in.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions apply — no expected-failure markers exist in
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions apply — no expected-failure markers exist in
       `tests/unit/test_disk_reclaim.py` or `tests/unit/worktree_manager/` (verified at plan time).
 
 ## Team Orchestration
