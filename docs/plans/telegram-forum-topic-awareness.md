@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -118,7 +118,7 @@ lose topic identity like everything else.
 
 1. **Entry point**: Telethon `events.NewMessage` → `bridge/telegram_bridge.py` intake (live) or the three recovery scanners (backfill).
 2. **Topic resolution (new)**: shared helper reads `message.reply_to` → `(topic_id, is_topic_root_reply)`; General/non-forum → `topic_id=None`.
-3. **Storage**: `TelegramMessage` gains `topic_id` (nullable); `AgentSession` carries topic via existing extra-context/session fields (see Open Questions).
+3. **Storage**: `TelegramMessage` gains `topic_id` (nullable); `AgentSession` carries topic via existing extra-context/session fields (topic-as-context per owner ruling; never part of the session key).
 4. **Session keying**: `bridge/routing.py` continuation branch treats a top-level topic message as fresh; `bridge/context.py` walk terminates before crossing a topic root; root cache entries versioned or keyed to survive the semantics change.
 5. **Agent context**: topic id + best-effort name rendered into the session's context block so the agent can state which topic it is in; optional configured subdirectory hint rides along as advisory text.
 6. **Output**: replies inherit topic via `reply_to` (unchanged); unsolicited sends resolve `default_topic_id` from `projects.json` group config → relay sends `reply_to=topic_id` (omit for General/none).
@@ -138,7 +138,7 @@ lose topic identity like everything else.
 **Team:** Solo dev, PM (owner rulings on session granularity + mapping semantics)
 
 **Interactions:**
-- PM check-ins: 1-2 (Open Questions below; empirical-confirmation scheduling)
+- PM check-ins: settled — all five plan questions ruled by the owner on 2026-09-05 (see Owner Rulings)
 - Review rounds: 1-2
 
 ## Prerequisites
@@ -157,7 +157,7 @@ No other prerequisites — all remaining work is code + unit tests with syntheti
 - **Capture + storage**: `TelegramMessage.topic_id`; populated by live intake and the three recovery scanners through the shared helper; Popoto migration registered in `MIGRATIONS`.
 - **Keying correction**: continuation branch and chain walk treat top-level topic messages as fresh sessions; walk never crosses a topic root; root-cache hygiene for the semantics change.
 - **Context rendering**: topic id + best-effort name (GetForumTopics, cached, fail-soft to id-only) in the agent's context; optional advisory subdirectory hint from config.
-- **Outbound default topic**: `default_topic_id` per group in `projects.json`; producers of unsolicited sends resolve it; relay guard maps General/none to a plain send; reply-inside-topic uses raw `InputReplyToMessage` where both ids are known.
+- **Outbound default topic**: `default_topic_id` per group in `projects.json`; ALL producers of unsolicited sends resolve it — PM briefings, `tools/send_message.py`, and poll sends (#3080 surface, included per owner ruling: same one-line producer resolution); relay guard maps General/none to a plain send; reply-inside-topic uses raw `InputReplyToMessage` where both ids are known.
 
 ### Flow
 
@@ -166,10 +166,10 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 ### Technical Approach
 
 - Topic id resolution: `header = message.reply_to; topic_id = header.reply_to_top_id or (header.reply_to_msg_id if header.forum_topic else None)`; `is_top_level = header.forum_topic and header.reply_to_top_id is None`. Non-forum and General yield `topic_id=None`.
-- Session granularity stays per-conversation (recommended; see Open Question 1): topic id is context + storage, NOT part of the session key. The keying fix is purely "stop mistaking topic roots for replies".
+- Session granularity stays per-conversation (owner ruling, 2026-09-05): topic id is context + storage, NOT part of the session key. The keying fix is purely "stop mistaking topic roots for replies".
 - Root cache: key the cached roots under a bumped namespace (or include a semantics version) so pre-fix cached collapses cannot serve post-fix lookups.
 - Name resolution: lazy `channels.GetForumTopics` from the bridge (never a second client), cached in Redis via ORM model or reuse of an existing cache pattern, always fail-soft to id-only.
-- Config: `projects.json` group entry gains optional `default_topic_id` (int) and optional `topics: {name: subdir}` advisory map; `bridge/config_validation.py` accepts-and-validates both, absent keys keep today's behavior exactly.
+- Config: `projects.json` group entry gains optional `default_topic_id` (int) and optional `topics: {id: subdir}` advisory map, keyed by topic **id** (owner-ratified default: ids survive admin renames; names-as-keys was considered and rejected because it needs `GetForumTopics` resolution and breaks silently on rename). `bridge/config_validation.py` accepts-and-validates both, absent keys keep today's behavior exactly.
 - Env plumbing for agent-invoked sends: sessions created from a topic export `TELEGRAM_TOPIC_ID` beside `TELEGRAM_REPLY_TO`; `tools/send_message.py` uses it when `TELEGRAM_REPLY_TO` is unset.
 
 ## Failure Path Test Strategy
@@ -197,9 +197,9 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 ## Rabbit Holes
 
 - **Backfilling topic ids onto historical TelegramMessage rows** — the migration adds the field; it does NOT re-read Telegram history. Old rows stay `topic_id=None`.
-- **Topic-scoped write enforcement** — mapping a topic to a subdirectory is advisory context in this plan; building permission enforcement around it is a separate design (see Open Question 3).
+- **Topic-scoped write enforcement** — mapping a topic to a subdirectory is advisory context in this plan (owner ruling, 2026-09-05); building permission enforcement around it is a separate design that would start as its own issue.
 - **A general topics-admin surface** (create/rename/list topics from the agent) — out of scope entirely.
-- **Rebuilding session granularity** — resist folding topic id into the session key "while we're here"; that changes UX for every non-forum chat and is exactly the both-defensible fork Open Question 1 gives the owner.
+- **Rebuilding session granularity** — resist folding topic id into the session key "while we're here"; that changes UX for every non-forum chat, and the owner ruled for topic-as-context (2026-09-05).
 
 ## Risks
 
@@ -306,7 +306,7 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 - **Validates**: tests/unit/test_reply_delivery.py + new relay cases
 - **Informed By**: spike-2 (reply_to suffices; General omit rule)
 - **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: true (with build-keying only if file sets stay disjoint; otherwise serialize after it)
-- Config keys + validation posture, producer resolution, relay General-guard, `TELEGRAM_TOPIC_ID`.
+- Config keys + validation posture, producer resolution (PM briefings, send_message, poll sends), relay General-guard, `TELEGRAM_TOPIC_ID`.
 
 ### 4. Context rendering + name resolution
 - **Task ID**: build-context
@@ -328,7 +328,7 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 
 ### 7. Live verification on a bridge host [EXTERNAL constraint]
 - **Task ID**: verify-live
-- **Depends On**: build-capture (can precede keying rollout; see Risk 1)
+- **Depends On**: build-capture (can precede keying rollout; see Risk 1). Owner ruling 2026-09-05: runs DURING BUILD, before the keying change merges — never deferred to post-deploy.
 - **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: true
 - On a bridge-owning machine: post a top-level message in a non-General Cyndra topic; inspect stored `TelegramMessage` header capture and resulting session id; confirm the forum flag on the group. Record results in the PR.
 
@@ -347,7 +347,7 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 | Resolver exists with truth table | `grep -c "reply_to_top_id" bridge/` -r | output > 0 |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
-| No topic in session key (anti-criterion, Open Q1 default) | `grep -rn "topic" bridge/context.py \| grep -c "session_id = f"` | match count == 0 |
+| No topic in session key (anti-criterion, owner ruling) | `grep -rn "topic" bridge/context.py \| grep -c "session_id = f"` | match count == 0 |
 | General topic omit rule | `grep -rn "GENERAL_TOPIC_ID\|== 1" bridge/telegram_relay.py \| head -1` | output contains 1 |
 | fetch_reply_chain untouched (No-Go #2732) | `git diff main -- bridge/context.py \| grep -c "def fetch_reply_chain"` | match count == 0 |
 
@@ -359,10 +359,12 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 
 ---
 
-## Open Questions
+## Owner Rulings (2026-09-05, via /ask-me)
 
-1. **Session granularity for forums**: keep per-conversation sessions with topic as context only (recommended: preserves non-forum UX, smallest change, collapse fixed at the branch), or fold `topic_id` into the session key so each topic is one session? The issue calls both defensible; the recommendation above is the plan's default pending your ruling.
-2. **`projects.json` config shape**: is `default_topic_id: int` plus an optional advisory `topics: {name: subdir}` map per group entry acceptable, given the file is private and hand-edited across the fleet? Any preference for names-as-keys vs ids-as-keys (names need GetForumTopics resolution and can be renamed by Telegram admins)?
-3. **Subdirectory mapping semantics**: advisory context only (plan default), or should a topic's mapping constrain the Eng session's working scope (a much bigger enforcement design)?
-4. **Poll sends** (#3080 surface): should polls also honor `default_topic_id` in this plan, or stay General until the poll umbrella (#3095) picks it up? Plan default: include them — it is the same one-line producer resolution.
-5. **Scheduling the live verification**: Task 7 needs a bridge-owning machine (Cowboy/Captain/Bald). Run it during build (recommended, before the keying change merges), or accept documented-API-only confidence and verify post-deploy?
+All five plan questions are settled; the sections above already incorporate them.
+
+1. **Session granularity**: topic as context only. Sessions stay per-conversation; topic id is captured, stored, rendered, and used for outbound targeting, never folded into the session key.
+2. **Config shape**: `default_topic_id: int` plus optional advisory `topics: {id: subdir}` map, keyed by topic **id**. Ids survive admin renames; names-as-keys was rejected for the rename hazard and the extra `GetForumTopics` resolution it would require.
+3. **Mapping semantics**: advisory context only. Enforcement (topic mapping constraining a session's writable scope) is out of scope and would start as its own issue.
+4. **Poll sends**: included. The #3080 poll surface resolves `default_topic_id` like every other unsolicited-send producer.
+5. **Live verification**: during build, before the keying change merges. Task 7 executes from a bridge-owning machine (Cowboy/Captain/Bald); this planning host runs no bridge and cannot run it.
