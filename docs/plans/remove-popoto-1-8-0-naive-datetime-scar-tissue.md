@@ -69,11 +69,65 @@ declares.
 
 ## Prior Art
 
-_placeholder_
+| Ref | State | Relevance |
+|---|---|---|
+| [#2833](https://github.com/tomcounsell/ai/pull/2833) (closes #2636) | MERGED 2026-08-18 | Shipped the `Job.save()` UTC-reattach, the `repair_indexes` renormalize call, and the `backfill_job_last_active_scores` migration, against `popoto>=1.8.0`. This plan removes the first two and keeps the third. |
+| [#2848](https://github.com/tomcounsell/ai/issues/2848) | CLOSED 2026-09-05 | Made `renormalize_last_active_scores` cursored and pipelined (SSCAN + two pipelines per chunk). That work stays; only the `repair_indexes` caller goes. |
+| [#2083](https://github.com/tomcounsell/ai/issues/2083) | CLOSED 2026-07-17 | The sibling audit that removed popoto-1.8.0 descriptor-pollution scar tissue. Same shape, disjoint code. Its precedent: delete the compensation and the tests that pinned it, keep the property test. |
+| [#777](https://github.com/tomcounsell/ai/issues/777) | CLOSED 2026-04-07 | The original ~7h-inflated-duration bug from a naive datetime in `_to_timestamp`. Motivated the inline guards. |
+| [#1645](https://github.com/tomcounsell/ai/issues/1645) / [#1653](https://github.com/tomcounsell/ai/issues/1653) | CLOSED 2026-06 | The `auto_now` producer bug and its upstream fix (popoto 1.7.1, popoto#421). Established `utils.utc.to_unix_ts` as the single read-path coercer. |
+| popoto#519, popoto#521 (1.8.2) | Released 2026-08-07 | Score became a pure function of the stored value; aware values round-trip aware. **This, not 1.9.0, is what killed the reattach** — see Spike Results. |
+| popoto#537 (1.9.0) | Installed | Legacy offset-free rows decode as aware UTC. |
+
+**No prior failed fix.** The override worked as designed for the version it targeted; the dependency
+moved underneath it. This is a retirement, not a repair, so the template's *Why Previous Fixes Failed*
+section is omitted.
 
 ## Research
 
-_placeholder_
+The authoritative source here is the installed dependency itself, read directly, rather than the web:
+popoto is a first-party library and its source in `.venv/lib/python3.14/site-packages/popoto/` is the
+exact code this repo runs.
+
+**Primary reads (installed popoto 1.9.0):**
+
+- `popoto/fields/sorted_field_mixin.py:387-396` — `convert_to_numeric` for `field.type is datetime`:
+  ```python
+  if field_value.tzinfo is None:
+      return field_value.replace(tzinfo=datetime.timezone.utc).timestamp()
+  return field_value.timestamp()
+  ```
+  The comment cites popoto#519/#521 directly: "A score has to be a pure function of the stored value."
+- `popoto/models/encoding.py:105-162` — `_decode_datetime`. A legacy offset-free string is stamped
+  `tzinfo=utc` (popoto#537); anything else parses through `fromisoformat`. The docstring states the
+  key point for us: "`SortedFieldMixin.convert_to_numeric` has treated a naive value as UTC when
+  deriving a score since #519 ... A legacy row therefore scored identically before and after this
+  change."
+- `popoto/fields/constants.py:38-40` — `POPOTO_DATETIME_KEY_LEGACY` is the only kill switch that
+  restores naive decoding of legacy rows. Confirmed unset anywhere in this repo.
+
+**Web search** — query: *"removing defensive naive datetime tzinfo guards after library upgrade
+Python risks Postel's law tolerance withdrawal"*. One finding is load-bearing for the
+session-health decision below:
+
+> Deleting the check outright is only safe if the upgraded library is genuinely your *sole* inbound
+> source of datetimes — which is rarely true once other third-party packages, deserialization paths,
+> and `strptime` calls are in play.
+> — [Ten Python datetime pitfalls](https://dev.arie.bovenberg.net/blog/python-datetime-pitfalls/),
+> [Python.org: How can I enforce aware datetime objects?](https://discuss.python.org/t/how-can-i-enforce-aware-datetime-objects/15004)
+
+The complementary caution from the robustness-principle literature is that *silent* tolerance is the
+expensive kind: a receiver that quietly coerces bad input removes the feedback that would have fixed
+the producer ([Robustness principle](https://en.wikipedia.org/wiki/Robustness_principle),
+[The Harmful Consequences of the Robustness Principle](https://lobste.rs/s/enszyj/harmful_consequences_robustness)).
+
+**How this informs the approach.** It splits the session-health/pickup sites cleanly in two. A
+coercer whose declared contract is wider than popoto (it also accepts `float` and ISO strings) keeps
+its naive branch, because popoto is demonstrably not its sole inbound source. A bare inline
+`x if x.tzinfo else x.replace(tzinfo=UTC)` sitting one line after an `isinstance(x, datetime)` check
+on a value read straight off an `AgentSession` field has exactly one inbound source, and it is a
+fourth copy of a coercion the module already names — which is the duplication
+`docs/features/utc-timestamps.md` explicitly forbids for new code. Those go.
 
 ## Spike Results
 
