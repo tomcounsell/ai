@@ -496,35 +496,269 @@ idempotent.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+Nothing deferred — every relevant item is in scope for this plan.
+
+The deletion, the `vault_narratives_compared` rehoming, all seven test patch sites, both
+feature docs, and the orphaned-key migration land together. Splitting any of them out
+would leave exactly the half-migration this issue exists to close.
+
+Two boundaries are worth stating so they are not mistaken for deferrals:
+
+- **`docs/archive/plans-completed/` stays byte-identical.** Those files are the historical
+  record of decisions made when `_write_liveness` was live; editing them would falsify
+  the record rather than update documentation. This is a permanent rule, not a
+  postponement.
+- **The other four summary strings keep their current `vault_narratives_compared`
+  behavior** (they never carried it and still will not). Preserving today's asymmetry is
+  the scope boundary, not a task put off until later. The Rabbit Holes section explains
+  why widening it would be a different issue with a different argument.
 
 ## Update System
 
-_placeholder_
+The `/update` skill needs one addition: a migration that sweeps the two orphaned Redis
+keys.
+
+- **New migration**: `_migrate_clear_docs_audit_liveness_keys` in
+  `scripts/update/migrations.py`, registered in the `MIGRATIONS` dict (required —
+  `run_pending_migrations()` iterates that dict and an unregistered function never runs).
+  Idempotent by construction: deleting an absent key is a no-op. Returns `None`
+  unconditionally and logs on failure, following
+  `_migrate_clear_orphaned_warn_state_key` (`:1174-1199`), whose docstring records the
+  reasoning — a bookkeeping cleanup must never fail `/update`, and a silently swallowed
+  exception would never retry because `run_pending_migrations` records a `None` return as
+  permanently completed.
+- **No new dependencies or config files** to propagate. No `.env` key, no
+  `projects.json` field, no `config/reflections.yaml` change: the `docs-auditor`
+  reflection entry is unaffected because its callable name and return shape are unchanged.
+- **No migration steps for existing installations** beyond the sweep above. A machine
+  running old code and new keys, or new code and old keys, behaves identically in both
+  directions since nothing reads them.
+- **Service restart**: none required by this change on its own. `reflections/` is loaded
+  by the worker, so a machine picks the change up on its next `/update`-driven restart in
+  the ordinary way.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required — this removes an internal function and its Redis writes.
+
+- **No new CLI entry point.** `pyproject.toml [project.scripts]` is untouched;
+  `_write_liveness` was never reachable from a `valor-*` binary.
+- **The bridge does not import it.** `bridge/telegram_bridge.py` has no reference to
+  `reflections.docs_auditor`; the rotation reaches the agent through the reflection
+  scheduler in the worker, and that path is unchanged.
+- **The agent-facing surface improves slightly and needs no wiring.** The information the
+  deleted keys carried already reaches the agent through the `Reflection` model, which the
+  dashboard and any `Reflection.query` read share. Nothing new to expose.
+- **No integration test needed** for a capability nothing gained. The unit tests in
+  `tests/unit/test_docs_auditor_substrate.py` cover the full change.
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+
+`docs/features/docs-auditor.md` — five clusters, verified on `67d714662`:
+
+- [ ] `:374-379` — the withheld-count paragraph passes the count "to `_write_liveness` as
+      a keyword `fixes_withheld`, emitted into the Redis summary only when non-zero".
+      Rewrite so the durable surfaces are the GitHub issue and the dashboard's rendered
+      `output_summary`, with the withheld count reaching the latter through the summary
+      string's `withheld_note`.
+- [ ] `:405-412` — the outcome-vocabulary paragraph justifies each `"skipped"` return by
+      "matching each one's own `_write_liveness(..., "skipped", ...)` call". The
+      justification has to stand on the returned status alone.
+- [ ] `:559-581` (`## Rotation State`, the section the issue names) — no direct
+      `_write_liveness` mention, but it is the section that frames what state the rotation
+      persists. Add the one sentence this issue asks for: run outcomes reach the operator
+      through the reflection's `output_summary`, not through a `docs_audit:` key.
+- [ ] `:582-596` (`## Locking`) — remove the two `docs_audit:last_completed_run_*` lines
+      from the key listing. The remaining four entries are all real locks and state.
+- [ ] `:668-678` — the `vault_narratives_compared` bullet describes the "explicit optional
+      5th parameter" threading. Rewrite to describe the summary-string clause, keeping the
+      `0`-versus-absent distinction that is the bullet's actual point.
+- [ ] `:717-737` (`## Operational Cheatsheet`) — delete the two `redis-cli GET` lines and
+      their comment block. Replace with a pointer to the reflections dashboard modal.
+- [ ] `:738-750` (`## Tests`) — the sentence naming `TestWriteLivenessVaultParam` and the
+      "4-arg/5-arg positional contract" must go, replaced by the new
+      `TestLivenessDeadCodeRemoved` class.
+
+`docs/features/vault-drift-audit.md`:
+
+- [ ] `:156-196` (`## Liveness signal`) — the entire section is built on
+      `_write_liveness`, including a verbatim copy of its signature and the
+      `redis-cli GET` at `:195`. Rewrite it around the summary-string clause. Keep the
+      section's real content, which is the three-way distinction between "detector ran,
+      found zero drift" (`0`), "the mapping is silently broken" (absent), and "vault
+      unresolvable" (`0` plus a log warning); that distinction survives the move and is
+      the reason the clause must emit on `0`.
+
+- [ ] `docs/features/README.md` — check whether either file's index row summary mentions
+      the liveness keys; update if so, leave alone if not.
+
+### External Documentation Site
+
+- [ ] Check `site/` for any page describing the docs-auditor's Redis surface. The
+      vault↔site drift detector compares vault narratives against site pages, so a stale
+      site page here would be a finding the auditor files against itself.
+
+### Inline Documentation
+
+- [ ] `reflections/docs_auditor.py:132` — the `# Redis key namespace for state/locks/
+      liveness.` comment loses its "liveness" clause with the constants.
+- [ ] `reflections/docs_auditor.py:2688-2691` — the "11. Liveness signal" step comment
+      above the created-PR call site is deleted with the call, but its explanation of why
+      the vault count is threaded from this one site belongs on the new summary clause.
+- [ ] `tests/unit/test_docs_auditor_substrate.py:1322-1328`, `:1960` — class docstring and
+      comment naming Redis liveness as an operator surface.
 
 ## Success Criteria
 
-_placeholder_
+- [ ] `_write_liveness`, `REDIS_LAST_COMPLETED_TS_KEY`, and
+      `REDIS_LAST_COMPLETED_SUMMARY_KEY` do not exist anywhere in `reflections/`.
+- [ ] All five call sites are gone; `run_docs_auditor` still returns the same five
+      `status` values on the same five paths.
+- [ ] The created-PR summary string carries the vault count, emitted on `0` and omitted on
+      `None`, and survives the scheduler's 500-character truncation in a worst-case
+      summary.
+- [ ] `TestLivenessDeadCodeRemoved` exists and fails if any of the three symbols returns.
+- [ ] The two behavioral assertions that the withheld count reaches a durable surface
+      still exist, now asserting on `result["summary"]` rather than a mock's kwargs.
+- [ ] `docs/features/docs-auditor.md` and `docs/features/vault-drift-audit.md` contain
+      zero occurrences of `_write_liveness` and `last_completed_run`.
+- [ ] `docs/archive/plans-completed/` is byte-identical to its pre-change state.
+- [ ] `scripts/update/migrations.py` carries a registered, idempotent sweep of the two
+      keys.
+- [ ] Tests pass (`/do-test`), specifically
+      `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py`.
+- [ ] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
-_placeholder_
+Small appetite, one file cluster, one reviewer. The lead deploys a single builder for the
+code-plus-test change, a documentarian for the two feature docs, and a validator to
+confirm the deletion is total.
+
+### Team Members
+
+- **Builder (deletion)**
+  - Name: `liveness-deleter`
+  - Role: delete the function, constants, and five call sites; rehome
+    `vault_narratives_compared`; repair all seven test sites; add the deletion-guard class;
+    add the `/update` migration
+  - Agent Type: builder
+  - Resume: true
+
+- **Documentarian (feature docs)**
+  - Name: `liveness-documentarian`
+  - Role: the six reference clusters across `docs-auditor.md` and `vault-drift-audit.md`
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Validator (deletion completeness)**
+  - Name: `liveness-validator`
+  - Role: prove the symbols are gone, the archives are untouched, the vault count reaches
+    the summary on `0`, and the truncation budget holds
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. Delete the channel and rehome the vault count
+
+- **Task ID**: build-delete-liveness
+- **Depends On**: none
+- **Validates**: `tests/unit/test_docs_auditor_substrate.py`
+- **Informed By**: Data Flow (field-coverage table), Technical Approach items 1 and 2
+- **Assigned To**: liveness-deleter
+- **Agent Type**: builder
+- **Parallel**: false
+- Delete the five `_write_liveness(...)` call sites at `reflections/docs_auditor.py:2450`,
+  `:2465`, `:2493`, `:2573`, `:2695`, and the "11. Liveness signal" comment above the last.
+- Append the vault clause to the created-PR summary string, emitting on `0` and omitting
+  on `None`. Measure the worst-case summary length against the scheduler's 500-character
+  truncation and record the number in the PR description; reorder the clause ahead of
+  `PR={pr_url}` if the budget is tight.
+- Delete `_write_liveness` (`:2153-2192`) and the two constants (`:136-137`); trim the
+  "liveness" clause from the `:132` comment.
+- Run `python -m ruff check reflections/docs_auditor.py` — an F841 on
+  `vault_narratives_compared` at `:2460` means the rehoming step did not land.
+
+### 2. Repair and extend the tests
+
+- **Task ID**: build-tests
+- **Depends On**: build-delete-liveness
+- **Validates**: `tests/unit/test_docs_auditor_substrate.py`
+- **Informed By**: Test Impact (all eight bullets)
+- **Assigned To**: liveness-deleter
+- **Agent Type**: builder
+- **Parallel**: false
+- Delete `TestWriteLivenessVaultParam` (`:3042-3091`) in full.
+- Re-point the two withheld assertions (`:1443`, `:1525`) at `result["summary"]`; drop the
+  now-redundant `:2105` liveness assertion; remove all seven `patch(...)` lines and the
+  `"liveness"` entry in `TestHoistedPRGuards._run`'s mock dict.
+- Reword the class docstring at `:1322-1328`, the test name ending `_and_liveness`, and the
+  comment at `:1960`.
+- Add `TestLivenessDeadCodeRemoved` (three `hasattr` assertions) beside
+  `TestVaultDeadCodeRemoved` at `:3093`.
+- Add the two vault-clause tests: present-and-zero, absent-when-None.
+- Run `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py`.
+
+### 3. Add the orphaned-key migration
+
+- **Task ID**: build-migration
+- **Depends On**: build-delete-liveness
+- **Validates**: `scripts/update/migrations.py`
+- **Informed By**: Technical Approach item 4
+- **Assigned To**: liveness-deleter
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `_migrate_clear_docs_audit_liveness_keys` modeled on
+  `_migrate_clear_orphaned_warn_state_key` (`:1174`): delete both keys, return `None`
+  unconditionally, log on failure.
+- Register it in the `MIGRATIONS` dict with a one-line description.
+- Do the sweep through the migration only. No ad-hoc `redis-cli DEL` from a shell.
+
+### 4. Cascade the feature docs
+
+- **Task ID**: document-feature
+- **Depends On**: build-delete-liveness, build-tests, build-migration
+- **Assigned To**: liveness-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Work the six clusters enumerated in the Documentation section.
+- Rewrite `vault-drift-audit.md`'s `## Liveness signal` around the summary clause, keeping
+  the three-way `0`/absent/unresolvable distinction intact.
+- Touch nothing under `docs/archive/`.
+
+### 5. Final validation
+
+- **Task ID**: validate-all
+- **Depends On**: build-delete-liveness, build-tests, build-migration, document-feature
+- **Assigned To**: liveness-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table.
+- Confirm `git diff --stat -- docs/archive/` is empty.
+- Confirm the vault clause renders on a `0` count by driving the created-PR path, not by
+  reading the code.
 
 ## Verification
 
-_placeholder_
+| Check | Command | Expected |
+|-------|---------|----------|
+| Function gone | `grep -rc '_write_liveness' reflections/` | match count == 0 |
+| Constants gone | `grep -rc 'REDIS_LAST_COMPLETED' reflections/` | match count == 0 |
+| Keys gone from code | `grep -rn 'last_completed_run' reflections/ ui/ agent/ models/ \| wc -l` | match count == 0 |
+| No test references survive | `grep -c '_write_liveness\|REDIS_LAST_COMPLETED' tests/unit/test_docs_auditor_substrate.py` | match count == 0 |
+| Deletion guard exists | `grep -c 'class TestLivenessDeadCodeRemoved' tests/unit/test_docs_auditor_substrate.py` | output > 0 |
+| Vault count rehomed | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | output > 0 |
+| Withheld count still asserted behaviorally | `grep -c 'fix(es) withheld" in result\["summary"\]' tests/unit/test_docs_auditor_substrate.py` | output > 0 |
+| Docs clean (docs-auditor) | `grep -c '_write_liveness\|last_completed_run' docs/features/docs-auditor.md` | match count == 0 |
+| Docs clean (vault-drift) | `grep -c '_write_liveness\|last_completed_run' docs/features/vault-drift-audit.md` | match count == 0 |
+| Archives untouched | `git diff --stat origin/main -- docs/archive/ \| wc -l` | match count == 0 |
+| Migration registered | `grep -c 'clear_docs_audit_liveness_keys' scripts/update/migrations.py` | output > 0 |
+| Auditor tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
@@ -532,4 +766,23 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+One question, with a recommended default so the build is never blocked on an answer.
+
+1. **Where does `vault_narratives_compared` land?** It is the one field the liveness
+   payload carries that no summary string does, and deleting `_write_liveness` orphans its
+   local variable, so the build must choose. Three options:
+
+   a. **Append it to the created-PR summary string** (recommended, and what this plan is
+      written around). Preserves the `0`-versus-absent distinction #2084 built the field
+      for, keeps today's asymmetry exactly, costs about 35 characters against a
+      500-character budget.
+
+   b. **Drop it.** Call `_run_vault_drift_detection(project_key)` for its side effect
+      (issue filing) and discard the return. Simplest diff, and it deletes an
+      observability guarantee a prior plan argued for across a full critique round. Cheap
+      now, expensive the day the vault mapping silently breaks.
+
+   c. **Thread it into all four post-vault summary strings.** More useful than (a), and a
+      behavioral widening this issue did not ask for. Belongs in its own issue.
+
+   Proceeding on (a) unless told otherwise.

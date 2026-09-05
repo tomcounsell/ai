@@ -779,4 +779,25 @@ python -m ruff format --check
 
 ## Open Questions
 
-_placeholder_
+1. **The session-health decision is a third option, not one of the issue's two.** The issue offered
+   (a) remove the one-liners and their comments, or (b) keep the naive branch only inside the
+   general-purpose coercers and remove the one-liners. This plan takes (b)'s *keep* list and routes
+   the six one-liner sites through `_ts` rather than deleting them, so the two existing naive tests
+   stay green unedited and no tolerance is silently withdrawn. Is that acceptable, or do you want the
+   stricter (a) with the two tests deleted?
+
+2. **Follow-up issue for the other seven modules?** The issue's Dropped bucket says to file one "if
+   the plan's decision on session-health guards is remove". The decision here is *consolidate*, not
+   remove, which arguably makes the follow-up more attractive (there is now a stated pattern to apply)
+   and less urgent (nothing is being withdrawn). File it, or leave it?
+
+3. **`_ts` versus `utils.utc.to_unix_ts` at the six rewritten sites.** The plan uses the module-local
+   `_ts` to keep the diff small. `docs/features/utc-timestamps.md` names `to_unix_ts` as the single
+   source of truth and lists `agent/session_health._ts` among three older helpers "intentionally left
+   untouched". Keep `_ts`, or fold it into `to_unix_ts` as part of this chore?
+
+4. **Anything worth keeping as a canary?** The plan removes all three redundant layers and relies on
+   popoto plus the existing version-floor guard. An alternative is to keep a cheap assertion somewhere
+   that a freshly reloaded `Job.last_active_at` is aware, as an early warning if the dependency ever
+   regresses. `TestScorePurity::test_resave_after_reload_keeps_the_score_a_utc_epoch` already asserts
+   `reloaded.last_active_at.tzinfo is UTC`, so arguably the canary exists. Agree, or want more?

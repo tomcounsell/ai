@@ -679,7 +679,37 @@ corrupt each other's measurements in both directions.
 
 ## Verification
 
-_placeholder_
+Every row below was executed against unmodified `main` at `67d714662` while
+writing this plan. The three defect rows are **red today** (`POSITIONAL 0`,
+`STRICT 0`, `URLKW 0`, `FIXTURE 1`) and the invariant rows are green. That
+recorded red state is the paper trail: a fix that cannot be shown flipping these
+exact rows has not been demonstrated.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Positional db on Redis goes red | `python -c "from tests.db_derivation_guard import scan_source as s; print('POSITIONAL', len(s('import redis\ndef t():\n    redis.Redis(\"h\", 6379, 7)\n','x.py').violations))"` | output contains POSITIONAL 1 |
+| Positional db on StrictRedis goes red | `python -c "from tests.db_derivation_guard import scan_source as s; print('STRICT', len(s('import redis\ndef t():\n    redis.StrictRedis(\"h\", 6379, 7)\n','x.py').violations))"` | output contains STRICT 1 |
+| Positional claim call is accepted | `python -c "from tests.db_derivation_guard import scan_source as s; print('POSCLAIM', len(s('import redis\nfrom tests.db_claim import claim_test_db\ndef t():\n    redis.Redis(\"h\", 6379, claim_test_db())\n','x.py').violations))"` | output contains POSCLAIM 0 |
+| Keyword url on from_url goes red | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLKW', len(s('import redis\ndef t():\n    redis.Redis.from_url(url=\"redis://localhost:6379/9\")\n','x.py').violations))"` | output contains URLKW 1 |
+| Keyword url names the right db | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLDB', [c.pool_db for c in s('import redis\ndef t():\n    redis.Redis.from_url(url=\"redis://localhost:6379/9\")\n','x.py').violations])"` | output contains URLDB [9] |
+| Keyword sanctioned url is accepted | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLOK', len(s('import redis\nfrom tests.db_claim import redis_test_url\ndef t():\n    redis.Redis.from_url(url=redis_test_url())\n','x.py').violations))"` | output contains URLOK 0 |
+| Direct fixture parameter is accepted | `python -c "from tests.db_derivation_guard import scan_source as s; print('FIXTURE', len(s('import redis\ndef t(scratch_test_db):\n    redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains FIXTURE 0 |
+| Rebound sanctioned name stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LAUNDER1', len(s('import redis\ndef t():\n    scratch_test_db = 7\n    redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LAUNDER1 1 |
+| Ordinary local stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LAUNDER2', len(s('import redis\ndef t():\n    test_db = 7\n    redis.Redis(db=test_db)\n','x.py').violations))"` | output contains LAUNDER2 1 |
+| Positional message is not mislabeled as from_url | `python -c "from tests.db_derivation_guard import scan_source as s, format_violation as f; v=s('import redis\ndef t():\n    redis.Redis(\"h\", 6379, 7)\n','x.py').violations; print(f(v[0]) if v else 'NOVIOLATION')"` | output contains takes db=7 |
+| Every kind names the remedial API | `python -c "from tests.db_derivation_guard import Candidate, format_violation as f; print('REMEDY', all(all(x in f(Candidate(path='x.py',lineno=1,kind=k,expr='7',callee='Redis',ok=False,detail='d',pool_db=7)) for x in ('claim_test_db()','redis_test_url()','ALLOWLIST','DEFERRED')) for k in ('db-kwarg','from-url','db-positional')))"` | output contains REMEDY True |
+| Short and starred calls raise nothing | `python -c "from tests.db_derivation_guard import scan_source as s; print('EDGE', len(s('import redis\ndef t(args):\n    redis.Redis()\n    redis.Redis(\"h\")\n    redis.Redis(\"h\", 6379)\n    redis.Redis(*args)\n','x.py').candidates))"` | output contains EDGE 0 |
+| Live tree has no undispositioned violation | `python -c "from tests.db_derivation_guard import scan_tree, apply_dispositions as a; r,_=a(scan_tree()); print('UNDISP', len(r))"` | output contains UNDISP 0 |
+| Live tree has no stale disposition entry | `python -c "from tests.db_derivation_guard import scan_tree, apply_dispositions as a; _,s=a(scan_tree()); print('STALE', len(s))"` | output contains STALE 0 |
+| Disposition tables satisfy their own rules | `python -c "from tests.db_derivation_guard import check_dispositions; print('DISP', check_dispositions())"` | output contains DISP [] |
+| Positional index still names db in redis-py | `python -c "import inspect, redis; from tests.db_derivation_guard import REDIS_DB_POSITIONAL_INDEX as i; print('SIGPIN', list(inspect.signature(redis.Redis.__init__).parameters)[i+1])"` | output contains SIGPIN db |
+| Scanner imports no redis | `grep -c "^import redis\|^from redis" tests/db_derivation_guard.py` | match count == 0 |
+| Residual gaps are disclosed in the module docstring | `python -c "import tests.db_derivation_guard as g; print('DISCLOSE', 'What this guard still cannot see' in (g.__doc__ or '') and 'REDIS_CONSTRUCTORS' in (g.__doc__ or ''))"` | output contains DISCLOSE True |
+| Candidate kind contract comment lists all three | `grep -c "db-kwarg.*from-url.*db-positional" tests/db_derivation_guard.py` | output contains 1 |
+| No xfail markers to convert | `grep -rn "pytest.mark.xfail\|pytest.xfail(" tests/` | exit code 1 |
+| Guard suite passes | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -q -n0` | exit code 0 |
+| Lint clean | `python -m ruff check tests/db_derivation_guard.py tests/unit/test_db_derivation_guard.py` | exit code 0 |
+| Format clean | `python -m ruff format --check tests/db_derivation_guard.py tests/unit/test_db_derivation_guard.py` | exit code 0 |
 
 ## Critique Results
 
@@ -689,4 +719,8 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+1. **Is fix 3 (the direct fixture-parameter leg) in scope?** It is not in the issue body. It surfaced from a plan-time probe: `redis.Redis(db=scratch_test_db)` is refused while `divergent_db = scratch_test_db; redis.Redis(db=divergent_db)` is accepted, so the obvious spelling is the one that fails. Live exposure is zero. The case for including it is that it is one `if` on the same route as fix 1, and it makes `CLAIM_FIXTURE_NAMES`'s existing "mirrors ... exactly" docstring claim true instead of leaving a false claim in a safety guard. The case against is that widening an accept in a guard is the direction that fails silently, and comment 5277517215 warns specifically about this leg. If dropped, the docstring sentence must be corrected in the same pass. **Default if unanswered: include it, with the four laundering probes landing in the same commit as the accept.**
+
+2. **Should the positional leg emit for a call that also passes `db=` explicitly?** `Redis("h", 6379, 7, db=8)` is a `TypeError` at runtime and cannot be a live site. The plan suppresses the positional candidate when a `db=` keyword is present, so the call yields one violation rather than two. The alternative is to emit both and let the author see every derived db on the line. **Default if unanswered: suppress, on the grounds that a duplicate violation on an unrunnable line is noise.**
+
+3. **Is a `docs/features/` page wanted for this guard?** The plan argues no: the module docstring is deliberately the source of truth, and a second description of a 740-line self-documenting guard is a drift risk this module's own history warns about. If the answer is yes, it changes the Documentation section and adds a documentarian task. **Default if unanswered: no feature doc, docstring only.**
