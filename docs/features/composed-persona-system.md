@@ -130,9 +130,20 @@ surface because that's the parameter name it ties through to
 ## Byte stability
 
 The Anthropic prompt cache is byte-keyed: a one-character drift in the
-~74K-char engineer prompt prefix evicts the cached entry and pushes eng-session
+~46K-char engineer prompt prefix evicts the cached entry and pushes eng-session
 TTFT from < 90s (warm) to 15-20min (cold). The composer preserves the
 byte-stable prefix invariant for the production WORKER cells.
+
+### The 50k WORKER budget (#3069)
+
+The repo-only WORKER composition is budgeted under 50,000 chars, enforced two
+ways: `tests/unit/test_compose_system_prompt.py::test_worker_cell_under_cache_budget`
+gates growth at PR time against the deterministic repo-only composition, and
+`compose_system_prompt` logs a WARNING at compose time when the full prompt
+(including any machine-local vault overlay) exceeds the budget
+(`agent/sdk_client.py:1003`). A machine carrying an untrimmed private overlay
+at `~/Desktop/Valor/personas/` sees the warning until that human-owned file is
+trimmed to match the #3069 diet.
 
 ### One baseline, guarding the repo's contribution
 
