@@ -784,8 +784,20 @@ class Job(Model):
         finally:
             cls._repair_lock.release()
 
+    # Rows per pipeline in :meth:`renormalize_last_active_scores`. Sized on the
+    # mechanism, never on a measured population: each batch is one HMGET
+    # pipeline (three small fields per row) plus one ZSCORE pipeline, so 500
+    # bounds both the reply payload and the per-batch memory at a few tens of
+    # kilobytes regardless of how many Jobs exist. It also serves as the SSCAN
+    # COUNT hint; SSCAN treats COUNT as advisory (a small, listpack-encoded set
+    # comes back whole), so members are re-chunked client-side to this size
+    # before any pipeline is built.
+    _RENORMALIZE_BATCH_SIZE = 500
+
     @classmethod
-    def renormalize_last_active_scores(cls) -> tuple[int, int]:
+    def renormalize_last_active_scores(
+        cls, *, batch_size: int = _RENORMALIZE_BATCH_SIZE
+    ) -> tuple[int, int]:
         """Sweep every recency score back to the pure UTC epoch its hash implies.
 
         The single shared implementation behind two callers:
@@ -801,66 +813,155 @@ class Job(Model):
           ``scripts/popoto_index_cleanup.run_cleanup``) would re-skew every
           score the migration repaired.
 
-        For each Job the stored score in its Room partition (key **derived**
-        via ``SortedField.get_sortedset_db_key``, never hand-built) is
-        compared against ``utils.utc.to_unix_ts(job.last_active_at)``; a row
-        outside a 1-second tolerance is re-read fresh and repaired with the
-        structural clobber-proof idiom
-        ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
-        write that can never touch ``goal``/``status``, and one that names the
-        field so the :meth:`save` tz-reattach fires. **Instant-preserving**:
-        each row keeps its own stored instant; no constant timestamp is ever
-        stamped (spike-4 tie-break hazard). A Job whose partition member is
-        absent, or whose instant is unreadable, is skipped — partition
-        membership belongs to the rebuild, not this sweep. Idempotent (a
-        repaired score is inside tolerance next pass) and per-row failure
-        tolerant (one bad row logs and the sweep continues).
+        Cursored and pipelined (issue #2848). The class set is walked with
+        ``SSCAN`` and re-chunked into ``batch_size`` rows. Each chunk costs
+        two round trips: one pipeline of ``HMGET id room_id last_active_at``
+        (decoded with popoto's own hash decoder, so no Job is hydrated) and
+        one pipeline of ``ZSCORE`` against each row's Room partition (key
+        **derived** via ``SortedField.get_sortedset_db_key``, never
+        hand-built). Startup cost is therefore ``O(N / batch_size)`` round
+        trips with per-batch memory independent of ``N``; Job is immortal
+        (no ``Meta.ttl``), so that bound is what keeps a growing population
+        off the worker-start critical path. ``SSCAN`` may hand back a member
+        twice if the set is rewritten mid-walk; the sweep is idempotent, so a
+        repeat costs one extra comparison and can only inflate ``scanned``.
 
-        Scale note: because :meth:`repair_indexes` calls this after every
-        rebuild, the uncursored full-population pass here is a
-        per-worker-startup commitment against an immortal, unboundedly
-        growing model (via ``scripts/popoto_index_cleanup.run_cleanup``) —
-        not a one-shot migration cost. At the measured population (92 Jobs) that
-        is negligible; past roughly 10,000 Jobs the full hydrate + one
-        ``zscore`` round trip per row needs pipelining or a cursor. Tracked as
-        issue #2848 so the ceiling surfaces on its own rather than only here.
+        A row whose score sits outside a 1-second tolerance is re-read fresh
+        and repaired with the structural clobber-proof idiom
+        ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
+        write that can never touch ``goal``/``status``, and one that names
+        the field so the :meth:`save` tz-reattach fires. Repairs are the only
+        per-row writes and the only per-row round trips. **Instant-
+        preserving**: each row keeps its own stored instant; no constant
+        timestamp is ever stamped (spike-4 tie-break hazard). A Job whose
+        partition member is absent, or whose instant is unreadable, is
+        skipped — partition membership belongs to the rebuild, not this
+        sweep. Idempotent (a repaired score is inside tolerance next pass)
+        and failure tolerant at two grains: one bad row logs and the chunk
+        continues; one failed pipeline logs and the walk continues with the
+        next chunk.
 
         Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
-        the return when the enumeration itself fails (Redis down, popoto
-        decode blow-up) — the guard logs a WARNING and swallows the error so
+        the return when the enumeration itself fails before any row is seen
+        (Redis down) — the guard logs a WARNING and swallows the error so
         :meth:`repair_indexes` still reaches
-        :meth:`backfill_open_expectations_index`.
+        :meth:`backfill_open_expectations_index`. An ``SSCAN`` failure part
+        way through returns the counts accumulated so far.
         """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        class_set_key = cls._meta.db_class_set_key.redis_key
+        scanned = 0
+        repaired = 0
+        cursor = 0
+        while True:
+            try:
+                cursor, members = POPOTO_REDIS_DB.sscan(
+                    class_set_key, cursor=cursor, count=batch_size
+                )
+            except Exception as e:  # noqa: BLE001 — maintenance path never raises
+                logger.warning(
+                    "[job] score renormalization SKIPPED -- enumeration failed "
+                    "after %d row(s) %s: %s",
+                    scanned,
+                    type(e).__name__,
+                    e,
+                )
+                return (scanned, repaired)
+            keys = [m.decode() if isinstance(m, bytes) else str(m) for m in members]
+            for start in range(0, len(keys), batch_size):
+                chunk_scanned, chunk_repaired = cls._renormalize_score_chunk(
+                    keys[start : start + batch_size]
+                )
+                scanned += chunk_scanned
+                repaired += chunk_repaired
+            if cursor == 0:
+                break
+        logger.info(
+            "[job] renormalized recency scores across %d Job(s), %d repaired",
+            scanned,
+            repaired,
+        )
+        return (scanned, repaired)
+
+    _RENORMALIZE_FIELDS = ("id", "room_id", "last_active_at")
+
+    @classmethod
+    def _renormalize_score_chunk(cls, keys: list[str]) -> tuple[int, int]:
+        """One batch of :meth:`renormalize_last_active_scores`: two pipelines, then repairs.
+
+        Reads only the three fields the comparison needs, decoded through
+        popoto's ``decode_popoto_model_hashmap(fields_only=True)`` so the
+        bytes on the wire mean exactly what a hydrated Job would carry. A key
+        whose hash is gone (class-set member outliving its row) decodes to
+        nothing and is skipped; the rebuild owns class-set hygiene.
+
+        Returns ``(scanned, repaired)`` for this chunk. A failed pipeline
+        returns ``(0, 0)`` after a WARNING so the caller moves on.
+        """
+        from popoto.models.encoding import decode_popoto_model_hashmap
         from popoto.redis_db import POPOTO_REDIS_DB
 
         from utils.utc import to_unix_ts
 
-        # Maintenance path never raises: an enumeration failure (Redis down,
-        # popoto decode blow-up) logs and returns (0, 0) so repair_indexes
-        # still reaches backfill_open_expectations_index().
+        field_names = list(cls._RENORMALIZE_FIELDS)
         try:
-            jobs = list(cls.query.filter())
-        except Exception as e:  # noqa: BLE001 — maintenance path never raises
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for key in keys:
+                pipe.hmget(key, field_names)
+            raw_rows = pipe.execute()
+        except Exception as e:  # noqa: BLE001 — one failed batch never stops the sweep
             logger.warning(
-                "[job] score renormalization SKIPPED -- enumeration failed %s: %s",
+                "[job] score renormalization SKIP batch of %d -- hmget pipeline %s: %s",
+                len(keys),
                 type(e).__name__,
                 e,
             )
             return (0, 0)
-        logger.info("[job] renormalizing recency scores across %d Job(s)", len(jobs))
-        repaired = 0
-        for job in jobs:
-            try:
+
+        rows: list[tuple[str, dict]] = []
+        for key, values in zip(keys, raw_rows, strict=True):
+            redis_hash = {
+                name.encode(): value
+                for name, value in zip(field_names, values, strict=True)
+                if value is not None
+            }
+            decoded = decode_popoto_model_hashmap(cls, redis_hash, fields_only=True)
+            if not decoded:
+                continue
+            fields = {(k.decode() if isinstance(k, bytes) else k): v for k, v in decoded.items()}
+            if fields.get("room_id") is None or fields.get("id") is None:
+                continue
+            rows.append((key, fields))
+        if not rows:
+            return (0, 0)
+
+        try:
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for key, fields in rows:
                 partition_key = SortedField.get_sortedset_db_key(
-                    cls, "last_active_at", job.room_id
+                    cls, "last_active_at", fields["room_id"]
                 ).redis_key
-                score = POPOTO_REDIS_DB.zscore(partition_key, job.db_key.redis_key)
-                expected = to_unix_ts(job.last_active_at)
+                pipe.zscore(partition_key, key)
+            scores = pipe.execute()
+        except Exception as e:  # noqa: BLE001 — one failed batch never stops the sweep
+            logger.warning(
+                "[job] score renormalization SKIP batch of %d -- zscore pipeline %s: %s",
+                len(rows),
+                type(e).__name__,
+                e,
+            )
+            return (0, 0)
+
+        repaired = 0
+        for (key, fields), score in zip(rows, scores, strict=True):
+            try:
+                expected = to_unix_ts(fields.get("last_active_at"))
                 if score is None or expected is None:
                     continue
-                if abs(score - expected) <= 1.0:
+                if abs(float(score) - expected) <= 1.0:
                     continue
-                fresh = cls.query.get(id=job.id, room_id=job.room_id)
+                fresh = cls.query.get(id=fields["id"], room_id=fields["room_id"])
                 if fresh is None:
                     continue
                 fresh.save(update_fields=["last_active_at"])
@@ -868,11 +969,11 @@ class Job(Model):
             except Exception as e:  # noqa: BLE001 — one bad row never stops the sweep
                 logger.warning(
                     "[job] score renormalization SKIP job=%s -- %s: %s",
-                    getattr(job, "job_id", "?"),
+                    fields.get("id", "?"),
                     type(e).__name__,
                     e,
                 )
-        return (len(jobs), repaired)
+        return (len(rows), repaired)
 
     @classmethod
     def backfill_open_expectations_index(cls) -> int:

@@ -1186,11 +1186,13 @@ class TestGuardedRepair:
         backfill_open_expectations_index()."""
         import logging
 
+        from popoto.redis_db import POPOTO_REDIS_DB
+
         def boom(*args, **kwargs):
             raise ConnectionError("redis is unhappy")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(Job.query, "filter", boom)
+            mp.setattr(POPOTO_REDIS_DB, "sscan", boom)
             with caplog.at_level(logging.WARNING, logger="models.job"):
                 assert Job.renormalize_last_active_scores() == (0, 0)
         # The guard's WARNING proves (0, 0) came from the failure branch, not
@@ -1212,7 +1214,7 @@ class TestGuardedRepair:
 
         def failing_renormalize():
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(Job.query, "filter", boom)
+                mp.setattr(POPOTO_REDIS_DB, "sscan", boom)
                 return real_renormalize()
 
         backfill_calls = []
@@ -1230,6 +1232,140 @@ class TestGuardedRepair:
         assert backfill_calls == [True]
         reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
         assert reloaded.has_open_expectations is True
+
+
+class TestRenormalizeBatching:
+    """#2848: the score sweep is cursored and pipelined.
+
+    Seeded under a ``test-`` room id (ORM cleanup via ``scratch_room_id``).
+    Round trips are measured by counting pipeline executes and by forbidding
+    the per-row ``zscore`` the old pass issued, so a regression back to one
+    round trip per Job goes red rather than merely slow.
+    """
+
+    @staticmethod
+    def _count_pipeline_executes(monkeypatch):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        executes = []
+        real_pipeline = POPOTO_REDIS_DB.pipeline
+
+        def counting_pipeline(*args, **kwargs):
+            pipe = real_pipeline(*args, **kwargs)
+            real_execute = pipe.execute
+
+            def counting_execute(*a, **k):
+                result = real_execute(*a, **k)
+                executes.append(len(result))
+                return result
+
+            pipe.execute = counting_execute
+            return pipe
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", counting_pipeline)
+        return executes
+
+    def test_no_per_row_zscore_and_two_pipelines_per_chunk(self, scratch_room_id, monkeypatch):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        for n in range(7):
+            Job.mint(scratch_room_id, f"healthy {n}")
+
+        def forbidden_zscore(*args, **kwargs):
+            raise AssertionError("per-row ZSCORE round trip issued by the sweep")
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "zscore", forbidden_zscore)
+        executes = self._count_pipeline_executes(monkeypatch)
+
+        scanned, repaired = Job.renormalize_last_active_scores(batch_size=3)
+
+        assert scanned >= 7
+        assert repaired == 0
+        # Every pipeline is bounded by the chunk size, and a healthy sweep
+        # issues exactly two per chunk (HMGET, then ZSCORE): no repair writes.
+        assert executes, "the sweep must go through pipelines"
+        assert max(executes) <= 3
+        chunks = -(-scanned // 3)
+        assert len(executes) == 2 * chunks
+
+    def test_skew_is_repaired_across_chunk_boundaries(self, scratch_room_id):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from utils.utc import to_unix_ts
+
+        jobs = [Job.mint(scratch_room_id, f"row {n}") for n in range(5)]
+        partition = _partition_key(scratch_room_id)
+        skewed = [jobs[0], jobs[4]]  # first and last: different chunks at batch_size=2
+        for job in skewed:
+            member = job.db_key.redis_key
+            true_score = POPOTO_REDIS_DB.zscore(partition, member)
+            POPOTO_REDIS_DB.zadd(partition, {member: true_score - UTC_PLUS_7_REBUILD_SKEW_SECONDS})
+
+        scanned, repaired = Job.renormalize_last_active_scores(batch_size=2)
+
+        assert scanned >= 5
+        assert repaired == 2
+        for job in jobs:
+            fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+            assert POPOTO_REDIS_DB.zscore(partition, job.db_key.redis_key) == pytest.approx(
+                to_unix_ts(fresh.last_active_at), abs=1.0
+            )
+        # Idempotent: the second pass costs reads alone.
+        assert Job.renormalize_last_active_scores(batch_size=2)[1] == 0
+
+    def test_class_set_member_without_a_hash_is_skipped(self, scratch_room_id, caplog):
+        """A class-set pointer whose hash is gone decodes to nothing; the
+        sweep skips it without raising and still repairs its neighbours."""
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        job = Job.mint(scratch_room_id, "survivor")
+        class_set_key = Job._meta.db_class_set_key.redis_key
+        ghost = f"Job:test-ghost-{uuid.uuid4().hex[:8]}:{scratch_room_id}"
+        POPOTO_REDIS_DB.sadd(class_set_key, ghost)
+        try:
+            with caplog.at_level(logging.WARNING, logger="models.job"):
+                scanned, _repaired = Job.renormalize_last_active_scores(batch_size=2)
+            assert scanned >= 1
+            assert "SKIP" not in caplog.text
+            assert Job.query.get(id=job.id, room_id=scratch_room_id) is not None
+        finally:
+            POPOTO_REDIS_DB.srem(class_set_key, ghost)
+
+    def test_one_failed_hmget_pipeline_skips_that_chunk_only(
+        self, scratch_room_id, monkeypatch, caplog
+    ):
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        for n in range(4):
+            Job.mint(scratch_room_id, f"row {n}")
+
+        real_pipeline = POPOTO_REDIS_DB.pipeline
+        calls = {"n": 0}
+
+        def flaky_pipeline(*args, **kwargs):
+            pipe = real_pipeline(*args, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                real_execute = pipe.execute
+
+                def failing_execute(*a, **k):
+                    real_execute(*a, **k)
+                    raise ConnectionError("first hmget pipeline lost")
+
+                pipe.execute = failing_execute
+            return pipe
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", flaky_pipeline)
+        with caplog.at_level(logging.WARNING, logger="models.job"):
+            scanned, _repaired = Job.renormalize_last_active_scores(batch_size=2)
+
+        assert "SKIP batch of 2 -- hmget pipeline ConnectionError" in caplog.text
+        # The first chunk (2 rows) was dropped; the remaining chunk(s) were swept.
+        assert scanned >= 2
 
 
 class TestDriftCoverage:

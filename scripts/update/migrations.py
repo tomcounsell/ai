@@ -1140,9 +1140,10 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     share this Redis, and re-running on every machine's ``/update`` is safe
     and expected; each pass only rewrites rows whose score still disagrees
     with their own hash (e.g. re-skewed by a peer still on pre-override code).
-    Single unbounded pass, no cursor — DECIDED on the measured population
-    (92 Jobs / 0.03s full hydrate, 2026-08-17); the total count is logged
-    each run.
+    The pass is cursored (``SSCAN`` over the class set) and pipelined per
+    chunk (#2848), so its cost is round trips proportional to the population
+    divided by ``Job._RENORMALIZE_BATCH_SIZE`` with per-chunk memory
+    independent of the population; the total count is logged each run.
 
     Returns None on success; an error string only if the import/call path
     itself fails. An enumeration failure *inside* the sweep (e.g. Redis
