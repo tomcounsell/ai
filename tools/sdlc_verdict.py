@@ -987,7 +987,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
-            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+            "Required for this state-mutating subcommand, but a resumed turn that lost "
+            "its run_id may omit it: identity is re-established from the "
+            "environment (.sdlc-run / active_run_id / a live supervisor; issue "
+            "#2144). A foreign live lease is never adopted. Refuses with "
+            "RUN_ID_REQUIRED only when that heal finds nothing to write under: no "
+            "--issue-number, a foreign live lease, or a finished pipeline."
         ),
     )
     rec.set_defaults(func=_cli_record, requires_run_id=True)
@@ -1055,7 +1060,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
-            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+            "Required for this state-mutating subcommand, but a resumed turn that lost "
+            "its run_id may omit it: identity is re-established from the "
+            "environment (.sdlc-run / active_run_id / a live supervisor; issue "
+            "#2144). A foreign live lease is never adopted. Refuses with "
+            "RUN_ID_REQUIRED only when that heal finds nothing to write under: no "
+            "--issue-number, a foreign live lease, or a finished pipeline."
         ),
     )
     fin.set_defaults(func=_cli_finalize, requires_run_id=True)
