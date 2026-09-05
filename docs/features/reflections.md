@@ -61,7 +61,7 @@ reflections:
 
 `config/reflections.yaml` is a **gitignored real-file copy** of `~/Desktop/Valor/reflections.yaml` (vault-synced) — a hand-edit to it, or even to a checked-out machine's local copy, never ships via git history and gets clobbered by the next vault→config sync. A reflection that must ship with a feature's code (rather than be registered by hand on each machine after the fact) instead registers itself through a small idempotent helper in `scripts/update/reflection_register.py`, invoked as a step inside `scripts/update/run.py`.
 
-Each registration function (`register_crash_recovery`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next config reload.
+Each registration function (`register_crash_recovery`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next tick; see [Registry Reload](#registry-reload) below.
 
 This is the mechanism behind the current registrations:
 
@@ -72,6 +72,29 @@ This is the mechanism behind the current registrations:
 The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`).
 
 A reflection that an operator is expected to add by hand on a per-machine basis (most of the registry) still just lives in the YAML directly — this mechanism is reserved for reflections that must be live on every machine as a consequence of merging code, with no separate manual step.
+
+### Registry Reload
+
+`ReflectionScheduler.tick()` begins with `reload_if_changed()` (#3029). It
+stats the file the current entries came from and compares `(st_mtime_ns,
+st_size)` to the values recorded at load; a difference reloads the registry, a
+registry that was absent at load is re-resolved each tick so the install-time
+copy is picked up when it materializes. This is the only path by which the
+routine `/update` cron cycle reaches the live scheduler: that cycle migrates
+`config/reflections.yaml` at Step 1.659 and refreshes it from the vault in
+`sync_reflections_yaml`, and restarts only the worker and the bridge.
+`install_reflection_worker` cycles `com.valor.reflection-worker` on `--full`
+updates alone.
+
+A changed file is validated before it replaces anything: every function-type
+entry's `callable` must import. A rewrite that fails that check is logged once
+and refused, and the previously loaded entries stay in force until the file
+changes again. That is what keeps the reload from re-opening the window the
+Step 4.65 probe closes for the install path: an unmigrated vault copy that
+iCloud materializes mid-cycle can be copied over the probed bytes, but the
+scheduler will not load it. Startup has no prior set to fall back to, so
+`load()` itself stays unvalidated; `verify_registry_without_shim.py` is the
+gate there.
 
 ### Schedule Grammar
 

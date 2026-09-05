@@ -768,6 +768,36 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     )
 
 
+def _registry_signature(path: Path) -> tuple[int, int] | None:
+    """``(st_mtime_ns, st_size)`` of the registry file, or None when it is absent.
+
+    A single ``stat()``; never opens the file, so it is safe under the same
+    launchd constraints ``load_registry`` documents.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _unresolvable_callables(entries: list[ReflectionEntry]) -> list[str]:
+    """Names of function-type entries whose ``callable`` does not resolve.
+
+    Each failure reads ``name (dotted.path: error)``. Agent-type entries carry
+    a prompt rather than a callable and are never listed.
+    """
+    failures: list[str] = []
+    for entry in entries:
+        if entry.execution_type != "function":
+            continue
+        try:
+            _resolve_callable(entry.callable)
+        except Exception as e:
+            failures.append(f"{entry.name} ({entry.callable}: {e})")
+    return failures
+
+
 class ReflectionScheduler:
     """Lightweight scheduler that checks reflections registry and enqueues due work.
 
@@ -781,10 +811,79 @@ class ReflectionScheduler:
         self._entries: list[ReflectionEntry] = []
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._started = False
+        # The file the current entries came from and its (mtime_ns, size) at
+        # that moment; ``reload_if_changed`` compares against these each tick.
+        self._loaded_path: Path | None = None
+        self._loaded_signature: tuple[int, int] | None = None
 
     def load(self) -> None:
-        """Load/reload the registry from disk."""
-        self._entries = load_registry(self._registry_path)
+        """Load the registry from disk, unconditionally."""
+        path = self._registry_path or _resolve_registry_path()
+        self._entries = load_registry(path)
+        self._loaded_path = path
+        self._loaded_signature = _registry_signature(path)
+
+    def reload_if_changed(self) -> bool:
+        """Reload the registry when the file it was loaded from has changed (#3029).
+
+        Called at the top of every tick. The routine ``/update`` cron cycle
+        rewrites ``config/reflections.yaml`` (Step 1.659 migrates callables,
+        ``sync_reflections_yaml`` refreshes it from the vault) and restarts
+        nothing: only a ``--full`` update cycles ``com.valor.reflection-worker``.
+        Without this, the live scheduler keeps whatever it read at process
+        start. After #2875 deleted the ``agent.sustainability`` shim that meant
+        a pre-migration process raised ``ImportError`` on every tick of every
+        reflection until something happened to restart it.
+
+        Change detection is one ``stat()`` on the loaded path: ``(st_mtime_ns,
+        st_size)``. A registry that was absent at load time is re-resolved each
+        tick so it is picked up when the install-time copy materializes.
+
+        A changed file is validated before it replaces anything: every
+        function-type entry's callable must resolve. A rewrite whose callables
+        do not import (an unmigrated vault copy that iCloud materialized
+        mid-cycle and ``sync_reflections_yaml`` copied over the probed bytes)
+        is logged and refused, and the previously loaded entries stay in force
+        until the file changes again. That keeps the reload from re-opening
+        the ordering hole the Step 4.65 probe closes for the install path.
+        Startup has no prior set to keep, so ``load()`` stays unvalidated.
+
+        Returns True when the entries were replaced. A scheduler that never
+        called ``load()`` tracks no file and is left alone: callers that inject
+        ``_entries`` directly own them.
+        """
+        if self._loaded_path is None:
+            return False
+        path = self._loaded_path
+        if not path.exists():
+            path = self._registry_path or _resolve_registry_path()
+        signature = _registry_signature(path)
+        if path == self._loaded_path and signature == self._loaded_signature:
+            return False
+
+        candidate = load_registry(path)
+        # Record the signature before validating so a refused rewrite is not
+        # re-validated (and re-logged) on every tick until the next change.
+        self._loaded_path = path
+        self._loaded_signature = signature
+
+        unresolvable = _unresolvable_callables(candidate)
+        if unresolvable:
+            logger.error(
+                "[reflection] Registry %s changed but %d callable(s) do not resolve; "
+                "keeping the %d previously loaded reflection(s): %s",
+                path,
+                len(unresolvable),
+                len(self._entries),
+                "; ".join(unresolvable),
+            )
+            return False
+
+        self._entries = candidate
+        logger.info(
+            "[reflection] Registry %s changed, reloaded %d reflection(s)", path, len(candidate)
+        )
+        return True
 
     async def tick(self) -> int:
         """Run one scheduler tick: check all reflections and enqueue due ones.
@@ -792,6 +891,11 @@ class ReflectionScheduler:
         Returns:
             Number of reflections enqueued this tick.
         """
+        try:
+            self.reload_if_changed()
+        except Exception as e:
+            logger.error("[reflection] Registry reload check failed: %s", e, exc_info=True)
+
         now = time.time()
         enqueued = 0
         # Count of function-type reflections dispatched this tick.  We cap at

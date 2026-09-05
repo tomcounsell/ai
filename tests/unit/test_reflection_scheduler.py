@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -720,6 +721,122 @@ class TestReflectionScheduler:
 
 
 # === Registry File Integrity Tests ===
+
+
+class TestRegistryReload:
+    """``reload_if_changed`` (#3029): the live scheduler follows the registry file."""
+
+    GOOD = "agent.reflection_scheduler._get_memory_rss"
+    STALE = "agent.sustainability.circuit_health_gate"
+
+    @staticmethod
+    def _write(path: Path, callables: dict[str, str], bump: int) -> None:
+        body = ["reflections:"]
+        for name, dotted in callables.items():
+            body += [
+                f"  - name: {name}",
+                "    description: reload test",
+                "    every: 60s",
+                "    priority: low",
+                "    execution_type: function",
+                f'    callable: "{dotted}"',
+                "    enabled: true",
+            ]
+        path.write_text("\n".join(body) + "\n")
+        # Force a distinct mtime so the change is visible on filesystems with
+        # coarse timestamp resolution, whatever the two writes' wall-clock gap.
+        base = 1_700_000_000 + bump * 10
+        os.utime(path, ns=(base * 1_000_000_000, base * 1_000_000_000))
+
+    def test_unchanged_registry_is_not_reloaded(self, tmp_path, monkeypatch):
+        registry = tmp_path / "reflections.yaml"
+        self._write(registry, {"alpha": self.GOOD}, bump=1)
+        scheduler = ReflectionScheduler(registry_path=registry)
+        scheduler.load()
+
+        calls: list[Path] = []
+        real = reflection_scheduler.load_registry
+        monkeypatch.setattr(
+            reflection_scheduler,
+            "load_registry",
+            lambda path=None: calls.append(path) or real(path),
+        )
+
+        assert scheduler.reload_if_changed() is False
+        assert calls == []
+        assert [e.name for e in scheduler._entries] == ["alpha"]
+
+    def test_changed_registry_is_reloaded(self, tmp_path):
+        registry = tmp_path / "reflections.yaml"
+        self._write(registry, {"alpha": self.GOOD}, bump=1)
+        scheduler = ReflectionScheduler(registry_path=registry)
+        scheduler.load()
+        assert [e.name for e in scheduler._entries] == ["alpha"]
+
+        self._write(registry, {"alpha": self.GOOD, "beta": self.GOOD}, bump=2)
+
+        assert scheduler.reload_if_changed() is True
+        assert [e.name for e in scheduler._entries] == ["alpha", "beta"]
+
+    def test_rewrite_with_unresolvable_callables_is_refused(self, tmp_path, caplog):
+        """The ordering trap from #3029: a rewrite whose callables do not import
+        must not replace a working set. The old entries stay until the file
+        changes again, and the refusal is logged once, not on every tick."""
+        registry = tmp_path / "reflections.yaml"
+        self._write(registry, {"alpha": self.GOOD}, bump=1)
+        scheduler = ReflectionScheduler(registry_path=registry)
+        scheduler.load()
+
+        self._write(registry, {"alpha": self.STALE}, bump=2)
+        with caplog.at_level(logging.ERROR, logger="agent.reflection_scheduler"):
+            assert scheduler.reload_if_changed() is False
+            assert scheduler.reload_if_changed() is False
+        assert [e.callable for e in scheduler._entries] == [self.GOOD]
+        refusals = [r for r in caplog.records if "do not resolve" in r.getMessage()]
+        assert len(refusals) == 1
+        assert self.STALE in refusals[0].getMessage()
+
+        # The next good rewrite is taken.
+        self._write(registry, {"alpha": self.GOOD, "gamma": self.GOOD}, bump=3)
+        assert scheduler.reload_if_changed() is True
+        assert [e.name for e in scheduler._entries] == ["alpha", "gamma"]
+
+    def test_registry_absent_at_start_is_picked_up_when_it_appears(self, tmp_path):
+        registry = tmp_path / "reflections.yaml"
+        scheduler = ReflectionScheduler(registry_path=registry)
+        scheduler.load()
+        assert scheduler._entries == []
+        assert scheduler.reload_if_changed() is False
+
+        self._write(registry, {"alpha": self.GOOD}, bump=1)
+        assert scheduler.reload_if_changed() is True
+        assert [e.name for e in scheduler._entries] == ["alpha"]
+
+    @pytest.mark.asyncio
+    async def test_tick_reloads_before_evaluating_entries(self, tmp_path):
+        """The reload runs inside the tick loop itself: a scheduler that was
+        started before the registry changed ticks the new set."""
+        registry = tmp_path / "reflections.yaml"
+        self._write(registry, {"alpha": self.GOOD}, bump=1)
+        scheduler = ReflectionScheduler(registry_path=registry)
+        scheduler.load()
+        self._write(registry, {"alpha": self.GOOD, "beta": self.GOOD}, bump=2)
+
+        seen: list[str] = []
+        with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
+
+            def _get_or_create(name, **kwargs):
+                seen.append(name)
+                state = MagicMock()
+                state.ran_at = time.time()
+                state.last_status = "success"
+                state.is_paused.return_value = False
+                return state
+
+            mock_reflection.get_or_create.side_effect = _get_or_create
+            await scheduler.tick()
+
+        assert seen == ["alpha", "beta"]
 
 
 class TestRegistryIntegrity:
