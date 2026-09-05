@@ -26,6 +26,8 @@ Users may also invoke directly:
 - `do-patch "review blocker: race condition in session lock"`
 - `do-patch` (no args — reads most recent failure from context)
 
+**A third patch loop on the same issue means the diagnosis is wrong.** Two fixes that both failed to clear the same failure are evidence the root cause was misidentified, so a third fix aims at the same wrong target. Stop patching and re-examine the diagnosis: re-run the Trace & Verify protocol (Step 1) from the original symptom rather than from the latest error, treating the two prior fixes as evidence that narrows where the real cause lives. Report the revised diagnosis before making another edit. If the trace lands outside the scope this skill can touch, report stuck per Step 5.
+
 ## Variables
 
 PATCH_ARG: $ARGUMENTS
@@ -268,6 +270,13 @@ Recommendation:
 
 This requires human review or a different approach. Escalating.
 ```
+
+**A stuck report hands off to `/zoom-out`.** The cap firing means the same failure survived
+`ITERATION_CAP` fixes, and the re-diagnosis demanded above ("A third patch loop on the same issue
+means the diagnosis is wrong") did not clear it either. Invoke `/zoom-out` before escalating and
+append its strategic summary and recommended next focus to the stuck report under a `Zoom-out:`
+heading. Do not start another fix on the strength of that recommendation. This skill is done at the
+cap; the human or the SDLC router decides what comes next.
 
 ## Lint Discipline
 

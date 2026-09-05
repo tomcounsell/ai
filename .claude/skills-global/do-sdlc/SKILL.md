@@ -1,6 +1,6 @@
 ---
 name: do-sdlc
-description: "Supervise a full SDLC pipeline run to merge in a local Claude Code session. Triggered by 'do-sdlc', 'run the full pipeline', 'ship this issue end to end', 'supervise the sdlc'. Also the home of the single-stage router contract that /sdlc (in this repo) executes."
+description: "Supervises a full SDLC pipeline run to merge in a local Claude Code session, and defines the single-stage router contract that /sdlc executes. Asked for directly or assigned by a PM session."
 context: fork
 ---
 
@@ -256,6 +256,13 @@ Guards are evaluated in the **pinned `GUARDS` list order** `[T, G1, G2, G3, G4, 
 **G4 is universal** — every stage, including DOCS and MERGE. Repeated dispatches without state
 change WILL trip it. G4 also precedes G8, so a persistently false artifact claim is re-dispatched
 silently at first and escalates via the G4 cap rather than blocking on the first mismatch.
+
+**G4 escalation hands off to `/zoom-out`.** A G4 block means the same stage was dispatched three
+times without state change, which is exactly the condition `/zoom-out` exists to break: one problem
+that has survived several failed approaches. When `next-skill` returns a `blocked` decision with
+`guard_id: "G4"`, invoke `/zoom-out` before surfacing the block, and carry its strategic summary and
+recommended next focus into the report (Step 4 case 3, Step 5a). Hard Rule 3 still holds: the block
+stands, and the human decides whether to act on that recommendation.
 
 **G5 applies to CRITIQUE only**, not REVIEW — review verdicts legitimately change on unchanged
 diffs (CI flips, new comments). G4 handles REVIEW non-determinism instead.

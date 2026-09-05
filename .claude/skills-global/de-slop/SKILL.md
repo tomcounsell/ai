@@ -1,6 +1,7 @@
 ---
 name: de-slop
-description: "Pre-publish editorial gate for external-audience content: removes AI-writing tells and blocks hollow drafts. Use on documents, presentations, emails, posts, or web copy once a first draft exists. Triggered by 'de-slop this', 'editorial pass', 'humanize this', 'remove the AI tells', or invoked as a mandatory gate by email, do-presentation, linkedin, and x-com."
+description: >
+  Editorial gate for external-audience drafts: strips AI-writing tells and blocks hollow copy. Use when a document, presentation, email, post, or web copy has a first draft and is about to leave the building, and on "send this", "publish this", or "post this". Also invoked as a mandatory gate by email, do-presentation, linkedin, and x-com.
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash
 argument-hint: "[draft-file-path]"
 user-invocable: true

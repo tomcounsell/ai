@@ -388,7 +388,17 @@ Output the final report in this format:
 - **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
 - **NEEDS REVISION** — {N} blockers must be resolved before build.
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
+
+## Most Critical Unvalidated Assumption
+
+- **Assumption**: {the single assumption that, if false, would most invalidate this plan}
+- **Confidence**: {1-5}
+- **Validation action**: {one concrete action that would settle it: a spike, a research query, a prototype, or a measurement}
 ```
+
+This block is emitted on **every** verdict, including READY TO BUILD (no concerns). It answers a different question than the two outputs around it: the verdict says whether the plan can proceed, the findings say what is wrong with the plan as written, and this block names the one premise the plan rests on that nobody has checked yet. Emit all three; this block replaces neither.
+
+Name exactly one assumption, drawn from the plan's own premises (a spike result the critics doubted, an unspiked assumption, a dependency on external behavior). Score it 1-5, where 5 means direct evidence in the plan settles it and 1 means nothing in the plan supports it. When the critics surfaced no candidate, name the plan's largest load-bearing premise anyway and score it honestly. A plan with zero unvalidated assumptions is rare enough to be worth saying outright.
 
 ### Step 5.5: Finalize — record the verdict (mandatory, self-contained)
 

@@ -1,6 +1,7 @@
 ---
 name: do-investigation-issue
-description: "Post a GitHub investigation issue for an unverified finding, gap, or anomaly. Use when an audit or research surfaces something suspicious, or an observed behavior is unexpected but unconfirmed."
+description: >
+  Posts a GitHub investigation issue for an unverified finding. Use when an audit, a code review, or a piece of research surfaces something suspicious, anomalous, or unexpected that is not yet confirmed enough to file as a bug: an unexplained log pattern, a result that contradicts the code, behavior that differs from the docs.
 allowed-tools: Bash, Read
 argument-hint: "<component> — <brief finding>"
 ---

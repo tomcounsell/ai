@@ -8,14 +8,22 @@ Full design: [`docs/features/telegram-poll-questions.md`](../../docs/features/te
 
 ## Which branch you are on
 
-**Interactive local session** (a terminal Claude Code session) → nothing changes. Use
+These map onto the three contexts in the global body's Channel Probe.
+
+**Context 1, interactive local session** (a terminal Claude Code session) → nothing changes. Use
 `AskUserQuestion` exactly as the generic body describes. It prompts, you get an answer.
 
-**Headless bridge session** (`TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID` are both set) →
-`AskUserQuestion` never prompts here. Do this instead, **in this order**:
+**Context 2, headless bridge session** (`TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID` are both set) →
+this repo's asynchronous human channel is a **native Telegram poll**. `AskUserQuestion` never
+prompts here. Do this instead, **in this order**:
 
 1. Call `valor-ask-poll` via Bash.
 2. Then call `AskUserQuestion` as the turn's **final act**.
+
+**Context 3, subagent** (you were spawned via the Agent tool by another agent) → there is no
+channel. `valor-ask-poll` would post a poll into a chat nobody is watching on your behalf, and
+`AskUserQuestion` would hang the tree. Do neither. Carry the question up in your final report and
+let the parent, which does hold a channel, decide whether to run this skill for real.
 
 ## Step 2 is not a redundant double-ask — do not remove it
 
@@ -33,9 +41,34 @@ and it very likely answers its own question by guessing — which defeats the en
 Under `claude -p` step 2 does not prompt anyone. It fires the edge and ends the turn. That
 is the whole reason it is there.
 
-(The second half of that mechanism is `agent/output_router.py`'s `pause_open_question`
-branch, which stops the nudge loop re-enqueuing the session while a poll of its own is
-outstanding. You do not have to do anything for it — it reads the poll registry itself.)
+## The other half: the nudge loop stops re-enqueuing you
+
+You do nothing to activate this. It is written down here so you do not go hunting for a way
+to hold the turn open, and so nobody deletes the machinery as dead weight.
+
+`valor-ask-poll` writes an unanswered row into the poll registry (`bridge/poll_registry.py`)
+naming your `session_id`. At the end of your turn the executor reads that registry via
+`session_has_open_poll(session_id)` (thread-offloaded, fail-quiet) and passes the result into
+`determine_delivery_action()` in `agent/output_router.py` as `has_open_question`. That
+function stays pure and performs no I/O of its own.
+
+When the flag is true, `determine_delivery_action()` returns `"pause_open_question"`: your
+output is delivered and the session is **not** re-enqueued with `NUDGE_MESSAGE`. The branch
+sits after the terminal-status, `completion_sent`, post-compaction, watchdog, rate-limit,
+empty-output and nudge-cap guards, and immediately ahead of the unconditional `eng` + `sdlc`
+`"nudge_continue"` line, which is the only thing it overrides. Without it, an sdlc eng session
+that asks anything at all, poll or plain prose, is nudged straight past its own question and
+answers it by guessing.
+
+Both the open index and the pending index count as open, so the window between
+`valor-ask-poll` enqueuing the payload and the relay actually sending it is covered.
+
+The pause is released when the registry row is closed, which happens on a poll tap **or** on a
+typed reply into the session. Nothing releases it on a timer.
+
+Details: [`docs/features/telegram-poll-questions.md`](../../docs/features/telegram-poll-questions.md)
+and the `pause_open_question` section of
+[`docs/features/eng-session-architecture.md`](../../docs/features/eng-session-architecture.md).
 
 ## Invocation
 

@@ -116,6 +116,8 @@ LOOK FOR:
 - Missing failure modes — what happens when the happy path breaks?
 - Components taking on too many responsibilities (3+ roles merged into one)
 - Dependencies on external behavior that isn't contractually guaranteed
+- Unfalsifiable premises: what would it take to prove this wrong? An assumption with no stated disproof is one nobody can check.
+- No early failure signal: what's the earliest you could know this is failing? Flag a plan whose first evidence of a wrong approach arrives only after the whole build lands.
 
 **Sub-section: Adversary (Edge Cases & Race Conditions)**
 LOOK FOR:

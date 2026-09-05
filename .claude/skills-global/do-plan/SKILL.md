@@ -183,6 +183,12 @@ Gather relevant external context before planning. This surfaces current document
    or cross-process data flows, identify timing hazards. For each: specify what data/state must
    be established before dependent operations read it, and how the implementation prevents races.
    Skip if the change is purely synchronous and single-threaded.
+10. **Vocabulary check** - While roughing out the solution, watch for naming trouble in the terms
+   the plan is about to fix into code: one name doing two jobs, or the same concept called
+   different things across the modules the blast radius touched. When either shows up, invoke
+   `/ontologies` for the affected terms before writing the plan, and cite the resulting
+   `ONTOLOGIES.md` entries in the **Solution** section so the builder names the concept once and
+   names it right. Skip if no such conflict surfaced.
 
 ### Phase 1.5: Spike Resolution
 
@@ -197,9 +203,11 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
    - **Agent Type**: Explore (code-read), general-purpose (web-research), builder in worktree (prototype)
    - **Time cap**: 5 minutes agent time
    - **Result**: [filled after spike completes]
-   - **Confidence**: [high | medium | low]
+   - **Confidence**: [1-5]
    - **Impact if false**: [what changes in the plan]
    ```
+
+   **Confidence is a 1-5 rating**, where 5 means the spike settled the assumption on direct evidence and 1 means the spike barely moved it. **Any assumption scoring below 3 must be probed further before it leaves this phase**: run a follow-up spike, read the code path directly, or narrow the assumption until it clears (scores 3 or higher) or collapses (the plan changes per **Impact if false**). An assumption still below 3 after probing is unresolved, and belongs in Open Questions via step 7 with its score attached.
 3. **Dispatch spikes in parallel** - Use the P-Thread pattern (parallel Agent sub-agents) to run all spikes concurrently
 4. **Appetite limits**:
    - Small appetite: max 2 spikes

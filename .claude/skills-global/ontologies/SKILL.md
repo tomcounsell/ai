@@ -1,6 +1,7 @@
 ---
 name: ontologies
-description: "Build or update a project's domain vocabulary in ONTOLOGIES.md. Triggered by 'ontologies', 'build vocabulary', 'name things', 'define terms', or establishing precise domain language."
+description: >
+  Builds or updates a project's domain vocabulary in ONTOLOGIES.md. Use when one name is doing two jobs, when the same concept is called different things in different modules, when a new bounded context appears, before naming a new module, class, or API field, and when a plan or review turns on what a term actually means.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
@@ -25,7 +26,7 @@ Build and maintain an `ONTOLOGIES.md` at the repo root — a canonical domain vo
 
 2. **Identify the term(s) to clarify.** If invoked with no argument, ask: "What term or concept should we add to the ontology?" Wait for the answer.
 
-3. **Run the interview loop via /grill-me.** Tell the user: "Running /grill-me on this term to surface the definition precisely." Ask one question at a time:
+3. **Run the interview loop.** Ask one question at a time, waiting for each answer before choosing the next:
    - "What does this concept represent in the domain — not in code?"
    - "What is an example of this in production?"
    - "What is it NOT — what would a confused person mistake it for?"

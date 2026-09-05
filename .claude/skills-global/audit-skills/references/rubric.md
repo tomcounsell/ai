@@ -54,7 +54,18 @@ one place so model releases update one table, not sixty rationales.
 **5. Efficiency.** Estimate tokens pulled into context per invocation (body + eagerly
 loaded sub-files; line count × ~10 tokens/line is sufficient to rank). Flag bodies that
 instruct unconditional reads of every sub-file (defeats progressive disclosure) and
-descriptions doing documentation work (>200 chars).
+descriptions doing documentation work (>350 chars).
+
+The description budget is generous on purpose. A skill the model must select without ever
+being named by the user has to carry both halves of the settled grammar:
+`[Third-person statement of what the skill does]. Use when [observable conditions, most
+important first].` Target 250–350 chars, hard cap 1024 (Anthropic's limit), key use case
+first because the listing truncates from the end. Judge a description on whether it earns
+its length: a 300-char description that routes correctly beats a 120-char one that misses.
+Two things are always waste. Rhetorical tails ("Even if nobody says X, this is the skill to
+use") add characters and no routing signal. And on a skill carrying
+`disable-model-invocation: true`, the entire description is dead text: it never enters model
+context, so it should be a short menu label with no trigger prose at all.
 
 ## Dispositions
 

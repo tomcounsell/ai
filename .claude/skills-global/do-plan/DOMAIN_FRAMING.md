@@ -20,6 +20,13 @@ elsewhere; those are cross-referenced instead:
 Use the tag literally in the task (e.g. `Domain: async`) so `/do-build` knows to
 inject the rules and reviewers know what to check.
 
+**Naming trouble is a handoff, not a domain tag.** If picking the tag surfaces a
+term doing two jobs, or the same concept named differently in two of the modules
+the task spans, no `Domain:` rule below fixes that. Invoke `/ontologies` for the
+affected terms and paste the resulting `ONTOLOGIES.md` definitions into the
+task's "Your assignment" alongside the domain rules, so every builder on the plan
+uses one name for one concept.
+
 ---
 
 ## `Domain: async` — concurrency / event loop

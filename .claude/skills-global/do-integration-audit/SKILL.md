@@ -141,6 +141,8 @@ Other systems that reference this feature use inconsistent or ambiguous names fo
 **Severity**: WARNING
 **Verification**: Search outside the feature's directory for references to it — foreign keys, import aliases, config prefixes, log messages, URL path segments. Check that these external references use a consistent name derived from the feature's own terminology. Flag divergences, especially in database columns and foreign keys where inconsistency becomes permanent.
 
+**Naming-drift findings hand off to `/ontologies`.** A finding from check 10 or check 11 means the repo has one concept carrying more than one name, with nothing canonical to settle which name wins. After the report is written (this skill still modifies no source files), invoke `/ontologies` for each drifted concept so the canonical term lands in `ONTOLOGIES.md`, and cite that entry in the finding. The report then tells the human which name is authoritative, not just that the names disagree.
+
 ### 12. missing-error-boundary
 The feature integrates with the application but has no error handling at the boundary. Exceptions propagate from feature internals to the caller, potentially crashing the parent context (a web request, a CLI command, a background job). Well-integrated features catch their own errors at the boundary and return structured errors or degrade gracefully.
 **Severity**: INFO

@@ -41,30 +41,37 @@ Creates Claude Code skills and subagents from scratch, following canonical patte
 
 ## Description field rules
 
-The `description` field in frontmatter is what Claude uses to decide whether to load a skill. It must be written carefully.
+The `description` field in frontmatter is what Claude uses to decide whether to load a skill. It is the only part of a skill that ships in every session, so it must be written carefully.
 
-**Format**: Third person, trigger-oriented. Start with "Use when..." not "This skill...".
+**Grammar** (both halves are required; Anthropic's field spec asks for what the Skill does *and* when to use it):
 
-**Structure**: `Use when [primary trigger]. Also use when [secondary triggers]. Handles [capability list].`
+```
+[Third-person statement of what the skill does]. Use when [observable conditions, most important first].
+```
+
+Put the key use case first. The skill listing truncates from the end, so whatever is parked last is the first thing to disappear.
 
 **Examples**:
-- Good: `Use when creating a new Claude Code skill directory and SKILL.md. Also use when the user says 'create a skill'. Handles both shared and project-specific skills.`
-- Bad: `This skill helps create new skills for Claude Code.`
-- Bad: `A tool for making skills.`
+- Good: `Creates a Claude Code skill or subagent from canonical patterns: names it, scopes it global or project-only, structures it for progressive disclosure, and registers it. Use when creating a skill, subagent, or slash command, or when capturing a repeatable session workflow as a reusable skill.`
+- Bad: `Use when creating a skill. Also use when the user says 'create a skill'.` All conditions, never says what you get.
+- Bad: `This skill helps create new skills for Claude Code.` First person about itself, no triggers.
+- Bad: `A tool for making skills.` Neither half.
 
 **Rules**:
-1. Must describe WHEN to use the skill, not WHAT it is
-2. Include natural language phrases users might say (e.g., "create a skill", "add a command")
-3. Written in third person — Claude reads this to decide if the skill matches
-4. Max 1024 characters (hard limit from spec)
-5. Aim for under 200 characters to stay within the 2% context budget across all skills
+1. Say what the skill does *and* when to use it. A description that opens with "Use when" and never states what the skill produces gives the router something to match but nothing to expect.
+2. Write the conditions as things observable in the session, not as user phrasings alone. Include natural language a user might say ("create a skill", "add a command") as part of the conditions, not instead of them.
+3. Third person throughout. Claude reads this to decide whether the skill matches.
+4. Target 250–350 characters. Max 1024 (hard limit from spec). The default Claude Code skill listing gets 1% of the context window across all skills combined, so length spent here has to earn its keep in routing accuracy.
+5. Skip rhetorical tails. "Even if nobody says X, this is the skill to use" costs characters and adds no routing signal.
+6. Keep documentation out of it. Capability lists, flag tables, and procedure belong in the body.
+7. **Exception, `disable-model-invocation: true`**: that description never enters model context at all. Only the `/slash-command` menu shows it. Write a short human-facing label (well under 200 chars) with no trigger prose; "Use when..." there is written for a reader who will never see it.
 
 ## Field constraints
 
 | Field | Required | Constraints |
 |-------|----------|-------------|
 | `name` | Yes | Must match directory name. Lowercase, hyphenated. |
-| `description` | Yes | Max 1024 chars. Third person, trigger-oriented ("Use when..."). |
+| `description` | Yes | Max 1024 chars, target 250–350. Third person: what it does, then "Use when [conditions]". |
 | `allowed-tools` | No | Comma-separated tool names. Restricts which tools the skill can use. Omit to allow all. |
 | `hooks` | No | YAML block defining validation hooks that run on Stop events. |
 | `disable-model-invocation` | No | Set `true` to prevent Claude from auto-triggering. Use for infrastructure skills (setup, update). |
@@ -107,8 +114,10 @@ If a skill is not being discovered or loaded:
 
 - **Monolithic SKILL.md**: Do not put everything in one file. Extract templates, examples, and reference material into sub-files loaded conditionally.
 - **Vague descriptions**: "A useful skill for doing things" will never match. Be specific about triggers.
-- **First-person descriptions**: "I help create skills" is wrong. Use "Use when creating skills."
+- **First-person descriptions**: "I help create skills" is wrong. Write third person: "Creates skills from canonical patterns. Use when..."
+- **Trigger-only descriptions**: "Use when creating a skill. Triggered by 'new skill'." states the conditions and never says what the skill produces. Lead with the what.
 - **Missing trigger phrases**: If users say "make a command" but the description only says "create a skill", it will not match. Include synonyms.
+- **Trigger prose on a `disable-model-invocation` skill**: the model never reads that description. Trigger phrasing there is text written for nobody.
 - **Hardcoded paths**: Use relative paths for sub-file references so skills work in both project and personal scope.
 - **Over-permissive allowed-tools**: Only list tools the skill actually needs. Fewer tools = smaller attack surface.
 - **Skipping progressive disclosure**: A 600-line SKILL.md that loads every time wastes context tokens. Split it.

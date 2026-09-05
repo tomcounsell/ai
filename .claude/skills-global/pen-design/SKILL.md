@@ -1,7 +1,7 @@
 ---
 name: pen-design
 description: >
-  Create high-quality visual designs — websites, app screens, dashboards, slides, marketing materials, social media graphics — using the pen.dev CLI tool. Use this skill whenever the user wants to create, generate, or visualize any kind of UI design, mockup, wireframe, layout, webpage, app screen, presentation slide, poster, banner, or marketing asset. Also use it when the user says things like "design me a...", "make a visual for...", "create a mockup of...", "what would X look like?", or wants to turn an idea into a visual. Even if the user doesn't mention "pen.dev" or "design tool" explicitly — if they want something visual created, this is the skill to use. Also covers working with existing .pen files via the Pen MCP server (mcp__pen__*) — see the Local Addendum for MCP, save, and schema gotchas.
+  Generates and edits .pen design files through the pen.dev CLI or the Pen MCP server, then exports them as PNG, JPEG, WebP, or PDF. Use when a .pen file is being created, iterated on, or exported, when the user names pen.dev or the Pen desktop app, or when a project keeps its designs as .pen sources.
 ---
 
 # pen.dev Design
@@ -86,7 +86,7 @@ Use `@latest` for the newest publish, or pin (e.g. `@0.3.0`) for a reproducible 
 - **Again** if the user says they upgraded the CLI, or if behavior doesn't match this doc (flags, auth, timing).
 - **Not** before every single command — once per session is enough unless something changed or errors suggest a version mismatch.
 
-When refreshing from upstream, replace everything ABOVE the "Local Addendum" marker below and keep the addendum intact.
+When refreshing from upstream, replace everything ABOVE the "Local Addendum" marker below and keep the addendum intact. Keep the local YAML frontmatter too. Its description is deliberately narrowed to pen.dev and `.pen` work so it stops competing with `frontend-design` for general UI requests, and upstream's broader wording would undo that.
 
 ## Creating a Design
 

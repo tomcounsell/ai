@@ -1,6 +1,7 @@
 ---
 name: zoom-out
-description: "Course-correct mid-session and reassess priorities. Triggered by 'zoom out', 'step back', 'reassess', 'am I on track', 'am I solving the right problem', or checking work against real goals."
+description: >
+  Course-corrects mid-session, reassessing current work and priorities against the real goal. Use when the same problem has survived several failed approaches, when scope has drifted from what was originally requested, before another attempt at something that keeps breaking, or when a long session has produced no verified progress.
 allowed-tools: Read, Bash
 ---
 

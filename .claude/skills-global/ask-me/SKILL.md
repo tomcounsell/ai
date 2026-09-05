@@ -1,12 +1,24 @@
 ---
 name: ask-me
-description: "Interview the user to get unblocked after deep work, one question at a time. Triggered by 'ask me', 'I need your input', 'interview me to unblock this', or when only the human can answer."
+description: "Interview the human one question at a time, after your own research and spikes failed. Triggered by 'ask me', 'I need your input', 'interview me to unblock this', or when only the human can answer."
 allowed-tools: Read, Grep, Glob, Bash, AskUserQuestion
 ---
 
 # Skill: /ask-me
 
 If `.claude/skill-context/ask-me.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+## Channel Probe
+
+Work out which of three contexts you are running in BEFORE you compose a single question. The right move differs in each, and getting it wrong either wastes the question or stalls an entire agent tree.
+
+**1. Interactive session, human at the terminal.** You are the top-level session and no repo context file declares otherwise. `AskUserQuestion` reaches the human directly. Run the skill as written below.
+
+**2. Headless or worker session whose output routes through an asynchronous human channel declared by the repo context file.** A human is reachable, but on their own schedule and through that channel rather than through `AskUserQuestion` alone. Follow the context file's declared procedure exactly, including any step that reads as redundant (it is load-bearing, and the file says why). Then end the turn and wait for the answer. Never proceed on a guess while a question is outstanding.
+
+**3. Subagent, spawned via the Agent tool.** No human channel exists. `AskUserQuestion` is not excluded from a subagent's tool list, so you CAN call it, and calling it blocks the whole tree on a prompt nobody will ever see. **Do not ask.** Pick the most defensible option, proceed under it, and put the question in your final report: the question itself, the assumption you ran with, and what changes if that assumption is wrong. Your parent holds the channel and the standing to escalate. That call is theirs.
+
+Telling context 3 from context 1: a subagent is handed its task by another agent rather than by a person, its instructions describe a final report to a parent, and no human conversation precedes its work. When you genuinely cannot tell, assume 3. An unnecessary line in a report costs a sentence; a blocked tree costs the whole run.
 
 ## Purpose
 You have just done deep work — research, investigation, a planning pass — and surfaced a pile of context and open questions. The user was NOT there for that work and does not share your context. This skill interviews them to get you unblocked: **one open question at a time, carrying only the context that actually matters into each question.**
@@ -23,6 +35,7 @@ Your job is to correctly judge, per question, which case you're in.
 - When the user says "ask me", "interview me", "I need to unblock you", "what do you need from me"
 
 ## When NOT to Use
+- **You have not tried yet.** This is a last resort, not a first one. Research it, read the code, run a spike. Interview the human only about what survives that.
 - The answer is discoverable — read the code, the docs, the git history, the issue first. Never ask what you can find out.
 - There's a sensible default and the choice is low-stakes/reversible — just pick it, note it, and move on. Don't interview for permission you don't need.
 - It's a single yes/no you could resolve with a one-line inline question — just ask it directly.

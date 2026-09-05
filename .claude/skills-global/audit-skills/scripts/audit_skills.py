@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Skills audit: validate SKILL.md files against canonical template standards.
 
-Runs 21 deterministic validation rules over every skills root the repo has
+Runs 23 deterministic validation rules over every skills root the repo has
 (`.claude/skills-global/` and `.claude/skills/`), detects husk directories and
 user-level orphans, and optionally syncs against Anthropic's latest published
 best practices.
@@ -62,9 +62,10 @@ USER_SKILLS_DIR = Path.home() / ".claude" / "skills"
 
 MAX_LINES = 500
 MAX_DESC_LEN = 1024  # Anthropic hard cap
-WARN_DESC_LEN = 200  # doing documentation work beyond this
-TARGET_DESC_LEN = 120  # what a pure trigger costs
-FLEET_DESC_BUDGET = 4000  # ~2% of context for all descriptions combined
+WARN_DESC_LEN = 350  # doing documentation work beyond this
+TARGET_DESC_LEN = 300  # what "what it does + when to use it" costs
+DEAD_DESC_LEN = 200  # a description the model never reads should not exceed this
+FLEET_DESC_BUDGET = 4000  # combined chars for every description in the session listing
 MAX_NAME_LEN = 64
 
 KNOWN_FIELDS = frozenset(
@@ -176,6 +177,25 @@ TRIGGER_PHRASES = re.compile(
     r"(?i)\b(use when|triggered by|also use when|invoke when|"
     r"use for|handles|use this when)\b"
 )
+
+# rule_22: trigger prose written for a reader who never sees it. A skill with
+# `disable-model-invocation: true` keeps its description out of model context
+# entirely, so "when to use me" phrasing there is addressed to nobody.
+DEAD_DESC_SIGNALS: tuple[str, ...] = ("triggered by", "use when", "also '")
+
+# rule_23: openers that state a condition rather than what the skill does. The
+# settled description grammar is "<what it does>. Use when <conditions>." A
+# description that leads with the trigger half never says what it produces.
+TRIGGER_OPENER_RE = re.compile(
+    r"^\s*(?:also\s+)?(?:use\s+(?:this\s+skill\s+|this\s+|it\s+)?(?:when|for|on)\b"
+    r"|invoke\s+(?:this\s+)?when\b"
+    r"|triggered\s+by\b|triggers\s+on\b"
+    r"|run\s+(?:this\s+)?when\b"
+    r"|for\s+when\b)",
+    re.IGNORECASE,
+)
+
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 ARGUMENTS_RE = re.compile(r"\$ARGUMENTS|\$\d+|\$\{ARGUMENTS")
 
@@ -310,8 +330,14 @@ def rule_04_description_trigger(skill_name: str, fm: dict) -> Finding:
 
 
 def rule_05_description_length(skill_name: str, fm: dict) -> Finding:
-    """Description target <=120 chars; WARN above 200 (doing documentation
-    work); the Anthropic hard cap is 1024."""
+    """Description target <=300 chars; WARN above 350 (doing documentation
+    work); the Anthropic hard cap is 1024.
+
+    The window is wide because a model-selected skill has to carry both halves
+    of the settled grammar: a third-person statement of what it does, then the
+    observable conditions that should pull it in. A skill nobody names out loud
+    pays for that space in routing accuracy.
+    """
     desc = fm.get("description", "")
     length = len(str(desc))
     if length > WARN_DESC_LEN:
@@ -623,8 +649,9 @@ def _gather_sub_file_text(skill_dir: Path) -> str:
 
 
 def rule_14_fleet_description_budget(descriptions: dict[str, str]) -> Finding:
-    """All skill descriptions ship in every session's context. The fleet total
-    must stay within FLEET_DESC_BUDGET chars (~2% of context)."""
+    """All skill descriptions ship in every session's context. Claude Code
+    allows the skill listing 1% of the context window; FLEET_DESC_BUDGET is the
+    tighter house budget the fleet total must stay within."""
     total = sum(len(d) for d in descriptions.values())
     if total > FLEET_DESC_BUDGET:
         return Finding(
@@ -939,6 +966,65 @@ def rule_20_user_level_orphans(repo_skill_dirs: dict[str, Path]) -> list[Finding
     return findings
 
 
+def rule_22_dead_description_text(skill_name: str, fm: dict) -> Finding:
+    """A `disable-model-invocation: true` skill keeps its description out of
+    model context: only the slash-command menu ever shows it. Trigger prose and
+    documentation-length text there is written for a reader who never sees it,
+    and it still costs a maintainer's attention every time the file is edited.
+    Such a description should stay a short human-facing label."""
+    if fm.get("disable-model-invocation") is not True:
+        return Finding(skill_name, 22, "PASS", "Model-invocable; description is live text")
+
+    desc = str(fm.get("description", "") or "").strip()
+    if not desc:
+        return Finding(skill_name, 22, "PASS", "No description text to strand")
+
+    lowered = desc.lower()
+    problems = []
+    if len(desc) > DEAD_DESC_LEN:
+        problems.append(f"length {len(desc)} exceeds {DEAD_DESC_LEN}")
+    signals = [s for s in DEAD_DESC_SIGNALS if s in lowered]
+    if signals:
+        problems.append("trigger prose (" + ", ".join(repr(s) for s in signals) + ")")
+
+    if problems:
+        return Finding(
+            skill_name,
+            22,
+            "WARN",
+            "Description never enters model context (disable-model-invocation: true) "
+            f"yet reads as if it will: {'; '.join(problems)}. Cut it to a short label",
+        )
+    return Finding(skill_name, 22, "PASS", f"Description is a short label ({len(desc)} chars)")
+
+
+def rule_23_missing_what_clause(skill_name: str, fm: dict) -> Finding:
+    """The settled grammar is `<what the skill does>. Use when <conditions>.`
+    Both halves are required: Anthropic's field spec asks for what the Skill
+    does *and* when to use it. A description that opens on the trigger half
+    tells the router what to match but never what it gets, and the listing
+    truncates from the end, so a what-clause parked last can vanish entirely."""
+    desc = str(fm.get("description", "") or "").strip()
+    if not desc:
+        return Finding(skill_name, 23, "PASS", "No description (rule 4 owns this)")
+    if fm.get("disable-model-invocation") is True:
+        return Finding(skill_name, 23, "PASS", "Not model-selected; grammar does not apply")
+    if not TRIGGER_OPENER_RE.match(desc):
+        return Finding(skill_name, 23, "PASS", "Description leads with what the skill does")
+
+    # Leads with a condition. Does any later sentence say what the skill does?
+    tail = [
+        s for s in SENTENCE_SPLIT_RE.split(desc)[1:] if s.strip() and not TRIGGER_OPENER_RE.match(s)
+    ]
+    detail = (
+        "states only trigger conditions and never what the skill does or produces"
+        if not tail
+        else "opens on the trigger half; the statement of what it does belongs first "
+        "(the listing truncates from the end)"
+    )
+    return Finding(skill_name, 23, "WARN", f"Description {detail}")
+
+
 # ---------------------------------------------------------------------------
 # Fix helpers
 # ---------------------------------------------------------------------------
@@ -1084,6 +1170,8 @@ def audit_skill(
         rule_15_asset_rot(dir_name, body, skill_dir),
         rule_16_junk_files(dir_name, skill_dir, tracked_files),
         rule_18_unreferenced_sub_files(dir_name, body, skill_dir),
+        rule_22_dead_description_text(dir_name, fm),
+        rule_23_missing_what_clause(dir_name, fm),
     ]
     for f in per_skill:
         f.dir = f.dir or dir_label

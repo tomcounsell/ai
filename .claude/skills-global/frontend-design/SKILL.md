@@ -1,6 +1,7 @@
 ---
 name: frontend-design
-description: "Create distinctive frontend interfaces that avoid generic AI aesthetics. Use when building web components, pages, artifacts, posters, or applications."
+description: >
+  Designs frontend interfaces with a committed aesthetic point of view instead of generic AI defaults. Use when building or restyling any UI surface: web pages, components, dashboards, landing pages, forms, empty states, artifacts, or whole applications. Covers typography, color, layout, motion, and UX copy.
 ---
 
 Produce production-grade frontend interfaces with a committed, distinctive aesthetic point of view. Success: an interface that makes someone ask "who made this?" — never "which AI made this?". The code must work, the details must be meticulous, and every choice must read as intentional.
@@ -15,6 +16,23 @@ Before writing code, decide:
 - **Differentiation**: the one thing someone will remember.
 
 Bold maximalism and refined minimalism both work. Intentionality is the standard, not intensity.
+
+## Plan, review, then build
+
+Work in two passes, and open no code file during the first.
+
+**Pass 1: the plan.** Write a compact token system, short enough to take in at a glance.
+
+- **Color**: 4 to 6 named hex values for the base palette.
+- **Type**: the typefaces and the role each one plays.
+- **Layout**: the layout concept as one-sentence prose plus an ASCII wireframe. Sketch two or three and compare them. State the alignment: left, centered, or justified.
+- **Principles**: what makes this page specific to this brief.
+
+**Pass 2: review the plan against the brief.** Ask of every part: would a similar prompt for a different product land in the same place? Work that similar prompt through and see. Anything that arrives at the same answer is a default rather than a decision, so revise it and say what changed and why. Write code only once the plan survives this pass, and then follow the revised plan.
+
+Where the brief pins down a visual direction, follow it exactly. The brief's own words win, including when it asks for one of the looks named under the slop test below. Where the brief leaves an axis free, spend that freedom on something other than the default.
+
+While writing the code, watch CSS selector specificity. Type-based selectors (`.section`) and element-based ones (`.cta`) cancel each other out easily, most often on the padding and margin between sections.
 
 ## Craft guidance
 
@@ -55,6 +73,18 @@ Every word earns its place.
 ## The AI slop test
 
 Before delivering, ask: if you told someone "AI made this," would they believe it immediately? If yes, find which fingerprint gave it away — the tells named above are the fingerprints of 2024-2025 AI output — and redesign that element.
+
+### Current slop calibration
+
+Generated design right now clusters around five looks. Each is legitimate for some brief, so a match is a signal to re-check the reasoning rather than a ban.
+
+1. Warm cream background (near #F4F1EA), high-contrast serif display, terracotta or warm-clay accent. Often near #D97757, Anthropic's own Claude-interaction accent, so on a user's brief it reads as a tell.
+2. Near-black background carrying a single bright acid-green or vermilion accent.
+3. Broadsheet layout: hairline rules, zero border-radius, dense newspaper columns.
+4. The SaaS-card kit: content chopped into identical rounded cards, one border-radius on everything regardless of hierarchy, the same soft grey shadow (rgba(0,0,0,.1)) under each, gradient washes as decoration.
+5. Template chrome that appears whatever the subject: a tracked-out ALL-CAPS eyebrow above every heading, meta strings joined with middle dots ("A · B · C"), labels built as "WORD — fragment" with a spaced em dash, tinted near-black (#0B0B0B, #111) standing in for black, a monospace face for small data labels, a "→" appended to link and button text.
+
+These are defaults that appear regardless of subject. Recalibrate the list as the clusters move.
 
 ## Implementation principles
 

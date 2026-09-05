@@ -167,6 +167,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "do-oop-audit"),
     ("skills", "pthread"),
     ("skills", "tdd"),
+    # Retired: grill-me was never invoked as a standalone skill. Its content was
+    # transplanted into the SDLC planning stages that actually run (do-plan spike
+    # confidence scoring, do-plan-critique's Skeptic lens and report block,
+    # do-patch's third-loop re-diagnosis trigger).
+    ("skills", "grill-me"),
     # Renamed: sdlc/validate_commit_message.py -> sdlc/validate_commit_message_sdlc.py
     # to disambiguate from validators/validate_commit_message.py, a different
     # check under a colliding name (co-author/empty-message vs code-to-main

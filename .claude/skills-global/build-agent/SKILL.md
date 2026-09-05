@@ -1,6 +1,7 @@
 ---
 name: build-agent
 description: Stage, launch, grade, and schedule a Claude Managed Agent (CMA) from a build-sheet. Triggered by 'build the agent', 'launch this agent', 'deploy a managed agent', or as /imagine-agent's handoff.
+disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 argument-hint: "[path/to/build-sheet.json or agent-slug]"
 ---
@@ -17,7 +18,9 @@ and stands up a live **Claude Managed Agent** in the client's Anthropic account:
 launch the agent → run a graded outcome → iterate → schedule it on cron. The agent is scoped to a
 repo (cloned into the session) and keeps running in the client's Console after this session ends.
 
-This is the technical half of the pair. The non-technical client interview lives in `/imagine-agent`.
+When no build-sheet is present, this skill runs its own interview (see **Standalone interview** below),
+so it works end to end on its own. `/imagine-agent` is an optional upstream step that handles the
+non-technical client interview and hands off a build-sheet. It is not installed on every machine.
 
 ## When to load sub-files
 

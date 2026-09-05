@@ -2,7 +2,9 @@
 
 `deepen`, `observability`, and `tdd` were pruned (issue #2337) as never-dispatched
 skills from the original 6-skill batch (#1319); they are intentionally absent from
-this list.
+this list. `grill-me` was pruned on the same grounds, its content transplanted into
+the SDLC planning stages (do-plan spike confidence, do-plan-critique's Skeptic lens
+and report, do-patch's re-diagnosis trigger) where it actually runs.
 """
 
 import re
@@ -15,7 +17,6 @@ SKILLS_GLOBAL_DIR = REPO_ROOT / ".claude" / "skills-global"
 
 NEW_SKILLS = [
     "ontologies",
-    "grill-me",
     "zoom-out",
 ]
 

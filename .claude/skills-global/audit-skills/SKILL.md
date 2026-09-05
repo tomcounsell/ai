@@ -17,8 +17,11 @@ optional **architecture pass** (`--arch`; model judgment against a fixed rubric)
 
 A skill costs context in three places, each with different economics:
 
-1. **Description** — ships in *every* session, used or not. The fleet total is the scarcest
-   resource here: budget 4,000 chars (~2% of context), per-skill target ≤120.
+1. **Description** — ships in *every* session, used or not. Claude Code allows the skill
+   listing 1% of the context window; the fleet total is the scarcest resource here, held to
+   a tighter house budget of 4,000 chars, per-skill target ≤300. A skill carrying
+   `disable-model-invocation: true` is the exception: its description never enters model
+   context at all, so it should read as a short menu label, not as trigger prose.
 2. **Body (SKILL.md)** — loads once per invocation. Only what every invocation needs. Cap 500 lines.
 3. **Sub-files** — load on demand. Reference tables, edge cases, templates live here.
 
@@ -43,14 +46,22 @@ means default behavior.
 | `--no-sync` | Skip best-practices sync (fast, offline) |
 | `--apply` / `--update-skills` / `--force-refresh` | Best-practices sync controls (see below) |
 
-## Layer 1 — deterministic lint (21 rules)
+## Layer 1 — deterministic lint (23 rules)
 
 **Structure (1–3, 9, 11–12):** line count ≤500 · frontmatter parses · name valid + matches
 dir · sub-file links resolve · only known fields · `argument-hint` when `$ARGUMENTS` used.
 
-**Descriptions (4–5, 10, 14, 17):** trigger phrase present · length ≤200 (target ≤120,
-hard cap 1024) · no duplicate descriptions · fleet total within the 4,000-char budget ·
-no near-duplicate trigger surfaces (word-overlap collision detection).
+**Descriptions (4–5, 10, 14, 17, 22–23):** trigger phrase present · length ≤350 (target
+≤300, hard cap 1024) · no duplicate descriptions · fleet total within the 4,000-char
+budget · no near-duplicate trigger surfaces (word-overlap collision detection) · no dead
+description text (rule 22: a `disable-model-invocation: true` skill whose description runs
+past 200 chars or carries trigger prose is writing for a reader who never sees it) · both
+halves of the grammar present (rule 23: a description opening on "Use when" states the
+conditions but never what the skill does, and the listing truncates from the end).
+
+The settled description grammar, enforced by rules 4, 5, and 23 together:
+`[Third-person statement of what the skill does]. Use when [observable conditions, most
+important first].` Target 250–350 chars, key use case first.
 
 **Classification (6–8):** infra skills carry `disable-model-invocation` · background
 reference skills carry `user-invocable: false` · fork skills carry `context: fork`.

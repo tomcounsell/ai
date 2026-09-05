@@ -1,6 +1,7 @@
 ---
 name: do-design-audit
-description: "Audit a web UI against premium design criteria. Use when evaluating design quality, or on 'review this design', 'check the UI', 'audit this page', 'scan the interface', or a URL for design feedback."
+description: >
+  Audits a web UI against premium design criteria. Use after any UI surface is built or substantially changed (a new page, a redesigned view, a reworked component or layout), and when someone asks to review a design, check the UI, scan an interface, or hands over a URL for feedback.
 allowed-tools: mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_list_tabs, mcp__byob__browser_wait_for
 context: fork
 ---
