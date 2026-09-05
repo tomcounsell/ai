@@ -446,28 +446,51 @@ because it, AC5, and the issue's Solution Sketch were all scoped to the two `age
 
 **Scope of the AC5 widening, measured.** A repo-wide
 `git grep -niE "[Pp]opoto.{0,40}(strips|drops|omits).{0,30}(tzinfo|timezone)" -- '*.py'` returns
-**17 sites: 9 in production, 8 in tests**. Eight of the nine production sites sit in modules this
-plan's No-Gos explicitly defer (`agent/session_runner/liveness.py:69`,
+**17 sites: 9 in production, 8 in tests**. Eight of the nine production sites are named in this
+plan's No-Gos as deferred (`agent/session_runner/liveness.py:69`,
 `models/agent_session.py:1089` and `:2569`, `reflections/pm_briefings/daily_log.py:380`,
 `scripts/update/run.py:494`, `tools/agent_session_scheduler.py:47`, `tools/session_progress.py:201`,
-`utils/utc.py:44`). AC5 therefore widens to **three files** — the two `agent/` files plus
+`utils/utc.py:44`) — the No-Gos bullet enumerates all eight explicitly, so no site is deferred by
+silent omission. AC5 therefore widens to **three files** — the two `agent/` files plus
 `ui/data/sdlc.py` — not repo-wide; a repo-wide criterion would be unsatisfiable without breaking the
 No-Gos. The remaining sixteen sites are the concrete scope of the follow-up in Open Question 1, which
 now has a measured size rather than a hand-wave.
 
 **`scripts/update/migrations.py:1116-1155`** — rewrite `_migrate_backfill_job_last_active_scores`'s
-docstring. It currently opens "popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
-`Job.save()` UTC-reattach override shipped...". The migration's *purpose* is historical and stays
-accurate as history; say so in the past tense and drop the claim that `repair_indexes` re-runs the
-sweep after every rebuild. Do not touch the function body or its `MIGRATIONS` entry.
+docstring. **The whole docstring is in scope, not just its opening paragraphs.** Two passages state
+the retired claim, and an edit that stops at :1141 leaves the second one intact and false:
+
+- **:1117-1138** — opens "popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
+  `Job.save()` UTC-reattach override shipped...", and at :1126-1132 names the sweep as "also run by
+  `Job.repair_indexes()` ... after every `rebuild_indexes()`". The migration's *purpose* is
+  historical and stays accurate as history; say so in the past tense, and drop the
+  `repair_indexes`-runs-it-too clause.
+- **:1148-1154** — the fail-open paragraph. It concedes that a pass whose `SSCAN` failed logs a
+  0-scanned run, returns None, and is recorded applied, then says "the `Job.repair_indexes` sweep,
+  run at worker startup via `scripts/popoto_index_cleanup.run_cleanup`, is the retry/backstop that
+  eventually repairs the scores". After this change nothing re-runs the sweep on a schedule, and an
+  applied migration is never re-run, so that machine has no automatic recovery. Rewrite the sentence
+  to name the honest recovery path: a **manual** re-run of `Job.renormalize_last_active_scores()`
+  (the classmethod survives, per the No-Gos), invoked directly on the affected machine. Keep the
+  concession itself — the fail-open behavior is unchanged; only its named backstop is.
+
+Do not touch the function body, its `MIGRATIONS` entry, or `data/migrations_completed.json`.
 
 **Docs** — three files, all describing the same dead mechanism:
 
-- `docs/features/durability-model.md` **lines 79-108** (heading `### last_active_at score purity
-  (Job.save())`). *Note: the issue cites 82-106; the passage is at 79-108 on `67d714662`.* Rename the
-  heading (it names a method that will not exist), replace the reattach paragraph with popoto's own
-  contract, and delete the final paragraph's renormalize-after-rebuild rationale while keeping the
-  migration's description.
+- `docs/features/durability-model.md` — **two passages**, not one.
+  - **Lines 79-108** (heading `### last_active_at score purity (Job.save())`). *Note: the issue cites
+    82-106; the passage is at 79-108 on `67d714662`.* Rename the heading (it names a method that will
+    not exist), replace the reattach paragraph with popoto's own contract, and delete the final
+    paragraph's renormalize-after-rebuild rationale while keeping the migration's description.
+  - **Lines 271-283**, inside the clobber-proof-idiom paragraph, ending "Index self-heal for those
+    fields is owned exclusively by the two sanctioned sweeps — `backfill_open_expectations_index()`
+    and `renormalize_last_active_scores()` — not by any lifecycle transition." That symmetry breaks:
+    reword :281-283 to state the asymmetry. `has_open_expectations` self-heal is owned by
+    `backfill_open_expectations_index()`, still called from every `repair_indexes()`;
+    `last_active_at` skew was healed once fleet-wide by the completed
+    `backfill_job_last_active_scores` migration and has no recurring caller. Neither field is healed
+    by a lifecycle transition, which is the sentence's original point and stays true.
 - `docs/features/popoto-index-hygiene.md` **line 40** — the paragraph opening "`Job.repair_indexes()`
   carries one extra step the other guarded paths do not". After this change it carries no extra step.
   Delete the renormalize description from that paragraph. **This file is not named in the issue's
@@ -684,10 +707,16 @@ Carried from the issue's Downstream constraints and Dropped bucket, plus two the
 - **`bridge/poll_reconcile.py` and `bridge/poll_registry.py` stay untouched.** Their `tzinfo is None`
   guards parse ISO strings the bridge writes itself with `datetime.now(UTC).isoformat()` through a
   plain Redis `SET`, never through popoto. The 1.9.0 rationale does not reach them.
-- **The other seven modules carrying the same guard stay untouched**:
-  `agent/session_runner/liveness.py`, `agent/agent_session_queue.py`,
-  `monitoring/session_watchdog.py`, `monitoring/bridge_watchdog.py`, `reflections/crash_recovery.py`,
-  `models/agent_session.py`, `utils/utc.py`. Deliberately deferred to keep this chore small.
+- **Every other module carrying the same guard stays untouched.** Deliberately deferred to keep this
+  chore small. Two overlapping sets, both out of scope:
+  - Modules whose guard carries a popoto-attributing comment (the eight production sites the
+    Technical Approach measurement counts, minus the one `ui/data/sdlc.py` site this plan fixes):
+    `agent/session_runner/liveness.py`, `models/agent_session.py` (two sites),
+    `reflections/pm_briefings/daily_log.py`, `scripts/update/run.py`,
+    `tools/agent_session_scheduler.py`, `tools/session_progress.py`, `utils/utc.py`.
+  - Modules with the same `tzinfo is None` coercion but no popoto attribution:
+    `agent/agent_session_queue.py`, `monitoring/session_watchdog.py`,
+    `monitoring/bridge_watchdog.py`, `reflections/crash_recovery.py`.
 - **`utils.utc.to_unix_ts` keeps its naive branch** regardless of anything decided here. It is the
   documented general read-path coercer and its contract spans floats, ISO strings, and datetimes from
   every source, not just popoto.
@@ -740,12 +769,16 @@ Carried from the issue's Downstream constraints and Dropped bucket, plus two the
 Three feature docs currently describe the removed mechanism as current behavior. All three are
 updates, not new files, so no `docs/features/README.md` index entry is needed.
 
-- [ ] Update `docs/features/durability-model.md` (lines 79-108): rename the
+- [ ] Update `docs/features/durability-model.md` (lines 79-108 **and lines 271-283**): rename the
       `### last_active_at score purity (Job.save())` heading, which names a method that will no longer
       exist. Replace the reattach paragraph with popoto's own contract (`convert_to_numeric`
       normalizes naive → UTC since popoto#519/1.8.2; `_decode_datetime` returns aware UTC since
       popoto#537/1.9.0). Keep the `backfill_job_last_active_scores` migration description; delete the
-      closing renormalize-after-rebuild rationale.
+      closing renormalize-after-rebuild rationale. Separately, at **271-283**, reword the
+      "Index self-heal for those fields is owned exclusively by the two sanctioned sweeps" sentence
+      into the asymmetry it becomes: `backfill_open_expectations_index()` is still called from every
+      `repair_indexes()`; `renormalize_last_active_scores()` has no recurring caller after this
+      change, having healed `last_active_at` skew once fleet-wide via the completed migration.
 - [ ] Update `docs/features/popoto-index-hygiene.md` (line 40): delete the "one extra step the other
       guarded paths do not" paragraph's renormalize content — after this change `Job.repair_indexes()`
       carries no extra step. Keep the cross-link to the durability model, retargeted at the renamed
@@ -755,7 +788,8 @@ updates, not new files, so no `docs/features/README.md` index entry is needed.
       leans on — but its rationale changes from "popoto deserialization can return naive datetimes" to
       the sources that genuinely still can (ISO strings, floats, non-popoto producers). Line 94's
       "ai pins `popoto>=1.8.0`" becomes `popoto>=1.9.0`.
-- [ ] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`) and `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`.
+- [ ] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`).
+- [ ] Update `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`'s docstring over its **full span, lines 1116-1155** — both the opening 1.8.0 narrative (:1117-1138, including the "also run by `Job.repair_indexes()` after every `rebuild_indexes()`" clause at :1126-1132) **and** the fail-open paragraph at **:1148-1154**, whose named retry/backstop is the `repair_indexes` sweep this change deletes. The replacement backstop is a manual re-run of `Job.renormalize_last_active_scores()`. Function body, `MIGRATIONS` entry, and `data/migrations_completed.json` untouched.
 - [ ] Update the two inline comments the critique surfaced, both comment-only with no code change: `ui/data/sdlc.py:824-825` (`_safe_float`'s "Popoto strips timezone on serialize/deserialize") and `tests/unit/test_migrate_job_expectations.py:135-142` (`test_is_idempotent`'s save-spy rationale, which cites the deleted renormalize sweep as ongoing behavior).
 - [ ] Verify no feature doc is left dangling: `git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/` returns nothing describing the removed code as current.
 
@@ -883,6 +917,10 @@ git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/featu
 git grep -n -i "popoto.*\(strip\|drop\|omit\|naive\)" agent/session_health.py agent/session_pickup.py ui/data/sdlc.py
 git grep -n "renormalize" docs/features/popoto-index-hygiene.md
 git grep -n "renormalize\|repair_indexes" tests/unit/test_migrate_job_expectations.py   # expect: no output
+
+# Same term set the ## Documentation completeness check uses, over the same paths.
+# Every surviving hit must read as past-tense history, never as current behavior.
+git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/
 
 # AC2: the override is gone and the sweep call with it
 git grep -n "def save" models/job.py            # expect: no output
