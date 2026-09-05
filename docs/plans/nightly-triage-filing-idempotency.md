@@ -350,13 +350,13 @@ New coverage to add (not modifications):
 
 **Impact:** A defense that exists in the prompt and not in behavior is worse than no defense — it invites the next investigator to conclude the hole is covered.
 
-**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded dispositions before dispatch; a second asserts the prompt contains the ledger's absolute path and the append-before-next-node instruction. Neither test can pass on the other's work.
+**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded entries before dispatch; a second asserts the prompt contains the ledger's absolute path and the append-before-next-node instruction. Neither test can pass on the other's work.
 
 ### Risk 3: The prompt regresses to "search" in a later edit
 
 **Impact:** This is the fourth pass at this bug and prompt wording has drifted before — `8524e765b` hardened the script and left the prompt saying "search", which is precisely how we got here.
 
-**Mitigation:** A verification anti-criterion greps the module's prompt-building region for `--search` and `gh search` and requires zero matches, so a reintroduction fails the gate rather than reaching a nightly run. The prohibition in the prompt text carries its reason inline (#2960–#2999) so a future editor sees the cost before softening it.
+**Mitigation:** Verification row 5 renders all three prompts and requires zero case-insensitive matches for `--search`, `gh search`, `search all`, `search open`, so a reintroduction in any of the three fails the gate rather than reaching a nightly run. Its measured pre-fix value is 3 — one hit per prompt — which is both the proof it bites and a measurement of how wide the hole was. `ISSUE_LOOKUP_INSTRUCTION` makes the three prompts share one string, so the drift the row guards against now requires editing a constant that three call sites read from. The prohibition carries its reason inline (#2960–#2999, `8524e765b`) so a future editor sees the cost before softening it, and Verification row 9 stops that editor from deleting the module's legitimate `--search` rationale in order to satisfy row 5.
 
 ### Risk 4: The ledger write breaks `--dry-run`
 
@@ -379,7 +379,7 @@ New coverage to add (not modifications):
 
 **Trigger:** The 2026-08-24 evidence shows two filers live at once (#2971 / #2982–#2989 interleaving the 20:40 wave). If two sessions ever resolve to the same slug, both read-modify-write the same JSON and a lost update drops one session's `filed` entries — the ledger then under-reports and a replay re-files.
 
-**Data prerequisite:** The ledger must exist and hold the seeded dispositions before any session starts appending.
+**Data prerequisite:** The ledger must exist and hold the seeded entries before any session starts appending.
 
 **State prerequisite:** One writer per slug at a time.
 
@@ -431,11 +431,11 @@ One thing worth stating because it is easy to assume otherwise: **no service res
 
 No new agent-facing surface is required — but this work *is* agent integration in the plain sense, and the wiring already exists in a form worth naming precisely, because "add a CLI entry point" would be the wrong instinct here.
 
-The triage agent is reached through exactly one channel: `maybe_dispatch_triage_session` shells out to `tools.valor_session create --role eng --slug ... --message <prompt>` (line 2347 onward). **The prompt string is the entire interface.** Everything this plan gives the agent — the REST command, the pre-resolved dispositions, the ledger path — travels as prompt text through that one argument. There is nothing to register in `pyproject.toml [project.scripts]`, nothing to add to `.mcp.json`, and no new import for `bridge/telegram_bridge.py`.
+The triage agent is reached through exactly one channel: `maybe_dispatch_triage_session` shells out to `tools.valor_session create --role eng --slug ... --message <prompt>`. **The prompt string is the entire interface** — and it is fed by three different builders, which is why hardening one of them left two thirds of the surface unchanged. Everything this plan gives the agent — the REST command, the pre-resolved dispositions, the ledger path — travels as prompt text through that one argument. There is nothing to register in `pyproject.toml [project.scripts]`, nothing to add to `.mcp.json`, and no new import for `bridge/telegram_bridge.py`.
 
 The agent already has the two capabilities it needs: `Bash` (to run `gh issue list` and `gh issue create`) and `Read`/`Write` (for the ledger). Both are standard for an `eng` role session. No permission change.
 
-Integration coverage: the existing tests assert the dispatch subprocess argv shape (`TestMaybeDispatchTriageSession`, lines 1489–1513). New assertions extend that to the message content — that the argv's `--message` value carries the ledger's absolute path and the literal `gh issue list --state all`. That is the honest integration test available here; end-to-end confirmation that a live agent obeys the prompt requires the nightly host and is recorded as an `[EXTERNAL]` No-Go.
+Integration coverage: the existing tests assert the dispatch subprocess argv shape (`TestMaybeDispatchTriageSession`; located by name, since the line numbers have drifted). New assertions extend that to the message content — that the argv's `--message` value carries the ledger's absolute path and the literal `gh issue list --state all` on a real dispatch, and neither on a dry run. That is the honest integration test available here; end-to-end confirmation that a live agent obeys the prompt requires the nightly host and is recorded as an `[EXTERNAL]` No-Go.
 
 ## Documentation
 
