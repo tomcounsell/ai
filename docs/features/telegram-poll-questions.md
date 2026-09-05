@@ -250,6 +250,17 @@ Both call the same idempotent `translate_poll_vote`, so adding the fast path can
 second behavior. Making `GetPollResultsRequest` reconciliation the guaranteed mechanism buys
 restart-survivability and tolerance of a dropped update for free.
 
+**Rate limits propagate; nothing else does (#3095).** A `FloodWaitError` from any
+inbound-path Telegram RPC — the adoption scan (`_find_already_sent_poll` /
+`adopt_orphaned_polls`), `GetPollResultsRequest`, or the poll close in
+`_dispatch_answer` — re-raises past the blanket handlers so `poll_reconcile_loop`'s
+backoff branch actually slows the loop while Telegram is asking the account to
+stop. The `events.Raw` fast path's own handler logs it and drops the latency win,
+which is the right price for a path that is only a latency win. Every other
+exception keeps its degrade-in-place behavior: warn and continue, or release the
+claim (only when the side effect has not landed) so the next tick retries.
+`tests/unit/test_poll_reconcile.py` pins both directions at each site.
+
 `poll_update_observed` is logged from inside the Raw handler on every `UpdateMessagePoll`. That is
 how the un-gated question — *does the push update reach a user account at all?* — gets answered in
 production, rather than by opening a second updates-enabled client on the bridge's auth key, which

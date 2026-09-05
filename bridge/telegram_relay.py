@@ -1109,6 +1109,12 @@ async def _find_already_sent_poll(telegram_client, chat_id, poll_id_hint: str):
             _index, prefix = decode_option(getattr(answers[0], "option", None))
             if correlation_matches(prefix, poll_id_hint):
                 matches.append((msg.id, poll.id))
+    except FloodWaitError:
+        # #3095: propagate so the caller's backoff actually runs — process_outbox's
+        # FloodWaitError handler on the send path, poll_reconcile_loop's on the
+        # adoption path. Swallowing it here kept both rescanning at full cadence
+        # while Telegram was asking the account to stop.
+        raise
     except Exception as e:  # noqa: BLE001 — a scan failure must not block the send
         logger.warning("Relay: poll lookup scan failed for hint %s: %s", poll_id_hint, e)
         return None
