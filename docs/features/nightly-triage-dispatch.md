@@ -44,9 +44,13 @@ three behaviors layered around that base run:
 1. **Run lock** — prevents two overlapping launchd invocations from both running the
    suite and both filing against the same window.
 2. **Triage dispatch** — spins up an Eng session to investigate failures that have not
-   been triaged before and file a GitHub issue, deduped per node so a failure that
-   already has an issue open against it gets a recurrence comment instead of a second
-   issue (see the base doc's "Comment-over-create" decision).
+   been triaged before and file a GitHub issue, deduped per node against BOTH the open
+   and closed sets: an open issue gets a recurrence comment instead of a second issue,
+   and a title closed `NOT_PLANNED` (by its most recent closure) is commented on and
+   never re-filed, while one closed `COMPLETED` re-files because failing again after a
+   fix is new information. The triage prompt states the same open-and-closed rule so
+   the pre-flight and the agent's instructions cannot drift (see the base doc's
+   "Comment-over-create" decision and issue #3075).
 
 ## Run Lock (Race 1)
 
