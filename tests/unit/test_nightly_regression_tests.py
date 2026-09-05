@@ -2479,3 +2479,187 @@ class TestClosedIssueDedup:
 
         monkeypatch.setattr(nrt.subprocess, "run", fake_run)
         assert nrt.closed_issue_dispositions() is None
+
+
+def _setup_failed(nodeid: str, worker: str, line: str) -> dict:
+    """A pytest-json-report entry shaped like a real SETUP-phase failure."""
+    return {
+        "nodeid": nodeid,
+        "outcome": "error",
+        "setup": {
+            "outcome": "failed",
+            "longrepr": f"[{worker}] darwin -- Python 3.14.3\n{line}",
+        },
+    }
+
+
+class TestReviewFindings3142:
+    """Regression pins for the #3142 review round (blocker + tech debt)."""
+
+    def _dispatch(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map, prev=None):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
+        commented: list[int] = []
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+        )
+        filed: list[list[str]] = []
+
+        def fake_dispatch(ns, **kw):
+            if not ns:
+                return None
+            filed.append(list(ns))
+            return "sess-1"
+
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
+        outcome = nrt.dispatch_findings(
+            report, nodes, prev or {}, run_at="2026-09-05T03:00:00Z", head_commit="cafe1234"
+        )
+        return outcome, commented, filed
+
+    def test_duplicate_closed_titles_resolve_to_newest_closure(self, monkeypatch, tmp_path):
+        """The FIRST row per title (newest-created) wins, never the oldest.
+
+        The #3142 review blocker: last-write-wins over gh's newest-first
+        listing resolved six live nightly nodes to their oldest COMPLETED
+        closure, re-filing nodes whose newest closure was NOT_PLANNED.
+        """
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        class FakeResult:
+            returncode = 0
+            stdout = (
+                '[{"number": 3112, "title": "Nightly regression: a::t", '
+                '"stateReason": "NOT_PLANNED"},'
+                ' {"number": 2919, "title": "Nightly regression: a::t", '
+                '"stateReason": "COMPLETED"},'
+                ' {"number": 2917, "title": "Nightly regression: a::t", '
+                '"stateReason": "COMPLETED"}]'
+            )
+            stderr = ""
+
+        monkeypatch.setattr(nrt.subprocess, "run", lambda argv, **kw: FakeResult())
+        closed_map = nrt.closed_issue_dispositions()
+        assert closed_map == {"Nightly regression: a::t": (3112, "NOT_PLANNED")}
+        to_file, closed_matches = nrt.partition_closed_matches(["a::t"], closed_map)
+        assert to_file == []
+        assert closed_matches == [("a::t", 3112, "NOT_PLANNED")]
+
+    def test_saturated_closed_window_logs_a_warning(self, monkeypatch, tmp_path):
+        log_file = tmp_path / "nightly.log"
+        monkeypatch.setattr(nrt, "LOG_FILE", log_file)
+        monkeypatch.setattr(nrt, "CLOSED_ISSUE_LIST_LIMIT", 2)
+
+        class FakeResult:
+            returncode = 0
+            stdout = (
+                '[{"number": 2, "title": "t1", "stateReason": "COMPLETED"},'
+                ' {"number": 1, "title": "t2", "stateReason": "COMPLETED"}]'
+            )
+            stderr = ""
+
+        monkeypatch.setattr(nrt.subprocess, "run", lambda argv, **kw: FakeResult())
+        assert nrt.closed_issue_dispositions() is not None
+        assert "saturated" in log_file.read_text()
+
+    def test_assert_diff_embedding_network_string_is_not_environmental(self):
+        """A formatter regression comparing against 'Connection refused...' files."""
+        test = _body_failed(
+            "t.py::a",
+            "gw0",
+            "E   AssertionError: assert 'wrong output' == 'Connection refused by upstream'",
+        )
+        assert not nrt.is_environmental_failure(test)
+
+    def test_raised_connection_error_in_setup_is_environmental(self):
+        test = _setup_failed(
+            "t.py::a", "gw0", "E   ConnectionRefusedError: [Errno 61] Connection refused"
+        )
+        assert nrt.is_environmental_failure(test)
+
+    def test_environmental_setup_storm_files_nothing(self, monkeypatch, tmp_path):
+        """A >=3-node network setup storm is excluded BEFORE cascade grouping.
+
+        The #3142 formal-review blocker: grouped environmental setup errors
+        were collapsed into a cascade umbrella and filed as a code regression.
+        """
+        nodes = [f"t.py::storm{i}" for i in range(3)]
+        report = {
+            "tests": [
+                _setup_failed(n, "gw3", "E   ConnectionRefusedError: [Errno 61] Connection refused")
+                for n in nodes
+            ]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
+        )
+        assert sorted(outcome.environmental) == sorted(nodes)
+        assert filed == []
+        assert commented == []
+        assert outcome.issues_filed == 0
+
+    def test_end_to_end_replay_dispatch_shapes(self, monkeypatch, tmp_path):
+        """One dispatch_findings call over a 16-node constructed report.
+
+        In-suite replay per issue #3075 AC 1: setup storm collapses to one
+        umbrella, five same-line body failures to another, environmental nodes
+        file nothing, an open issue and a NOT_PLANNED closure get comments,
+        and only a COMPLETED closure re-files.
+        """
+        storm = [f"t.py::fd{i}" for i in range(6)]
+        body = [f"t.py::typeerr{i}" for i in range(5)]
+        env = ["t.py::dns0", "t.py::dns1"]
+        node_open = "t.py::already_open"
+        node_np = "t.py::consolidated"
+        node_done = "t.py::fixed_regressed"
+        nodes = storm + body + env + [node_open, node_np, node_done]
+        assert len(nodes) == 16
+        report = {
+            "tests": [
+                *[
+                    _setup_failed(n, "gw2", "E   OSError: [Errno 24] Too many open files")
+                    for n in storm
+                ],
+                *[
+                    _body_failed(
+                        n,
+                        "gw1",
+                        "E   TypeError: run_typed() got an unexpected keyword 'temperature'",
+                    )
+                    for n in body
+                ],
+                *[
+                    _body_failed(n, "gw0", "E   socket.gaierror: [Errno 8] nodename nor servname")
+                    for n in env
+                ],
+                _body_failed(node_open, "gw0", "E   ValueError: open case"),
+                _body_failed(node_np, "gw0", "E   ValueError: consolidated case"),
+                _body_failed(node_done, "gw0", "E   ValueError: regressed case"),
+            ]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=report,
+            open_map={f"Nightly regression: {node_open}": 500},
+            closed_map={
+                f"Nightly regression: {node_np}": (501, "NOT_PLANNED"),
+                f"Nightly regression: {node_done}": (502, "COMPLETED"),
+            },
+        )
+        assert sorted(outcome.environmental) == sorted(env)
+        cascade_dispatches = [f for f in filed if f[0].startswith("cascade:")]
+        assert len(cascade_dispatches) == 2
+        assert [node_done] in filed
+        assert len(filed) == 3
+        assert sorted(commented) == [500, 501]
+        assert outcome.issues_filed == 3
+        assert outcome.comments_posted == 2
+
+    def test_epilogue_is_single_sourced(self):
+        node_comment = nrt.closed_recurrence_comment(
+            "a::t", "NOT_PLANNED", run_at="R", head_commit="H"
+        )
+        assert nrt.closed_epilogue("NOT_PLANNED") in node_comment
