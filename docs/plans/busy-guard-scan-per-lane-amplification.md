@@ -1165,35 +1165,47 @@ into the PR description. Two of them need a specific injection rather than an ob
 ## Critique Results
 
 War room, FULL depth (Risk & Robustness, Scope & Value, History & Consistency) plus automated
-structural checks. **Round 3** (re-critique after the round-2 concern-closing revision `94b05645c`),
-run 2026-09-05 against `origin/main` at `32062a16079f4e28d25826018de382ee16bd616d`; the plan's
-baseline `491a88624` is an ancestor and none of the files this plan cites changed between the two.
-Mode: independent roster (3 critics). Verdict: **READY TO BUILD (with concerns)**
-(0 blockers, 1 concern, 0 nits).
+structural checks. **Round 4** (re-critique after the round-3 concern-closing revision `6c667b9ed`),
+run 2026-09-05 against `origin/main` at `6c667b9edb87844364c9e20975f789ab77a96e87`.
+Mode: independent roster (3 critics). Verdict: **READY TO BUILD (no concerns)**
+(0 blockers, 0 concerns, 1 nit).
 
-All four round-2 findings were independently re-verified as genuinely landed in the plan body rather
-than only claimed in this table, and none is re-raised. (1) The `probe count == len(sweep.removed)`
-invariant now carries the `apply=True` qualifier in every place it is restated — Decision 4's closing
-paragraph, Data Flow step 6, Success Criterion 4, both Test Impact probe-count bullets, Task 2,
-Task 3, and Task 6 — with the `apply=False` counterpart stated as zero; confirmed against
-`tools/disk_reclaim.py:437`–`:440` (the dry-run `continue`) and `:443` (`cleanup_after_merge`), and
-against `tests/unit/test_disk_reclaim.py:147`–`:150`, which asserts `sweep.removed == ["lane"]` with
-zero cleanup calls under `apply=False`. (2) The Prerequisites "Reachable Redis" row now materializes
-with `list(...)`; re-measured here — it exits 0 against the live server and raises
-`ConnectionError: Error 61 connecting to 127.0.0.1:6399` under `REDIS_URL=redis://127.0.0.1:6399/9`,
-while the unmaterialized control exits silently under the identical environment. (3) The false
-"already imported" claim is corrected in both Architectural Impact and Update System; confirmed
-against `agent/worktree_manager.py:490`–`:492`, which imports only `AgentSession` and
-`TERMINAL_STATUSES`. (4) Risk 5's arithmetic now reads 341 (`903 - 562`), and the companion 946
-(`1508 - 562`) also holds. Structural checks pass on every leg: all four repo-mandated sections are
-substantive, tasks 1–6 have no numbering gaps and no invalid or circular `Depends On` references,
-every cited path exists, both prerequisites pass live (popoto 1.9.0), the 17 `query.all` sites and
-the `all_clear` fixture line `:66` match the test file exactly, the `xfail` anti-criterion holds
-(grep exit 1), and no No-Go or Rabbit Hole appears as planned work.
+The single round-3 concern is closed, and the closure was verified in the plan text and against
+the current file rather than taken from the revision's own report. Task 1's first bullet now scopes
+`_fetch_live_sessions`'s deferred import to `AgentSession` / `NON_TERMINAL_STATUSES` — "the two names
+the fetch itself needs" — and adds the paragraph forbidding the wrong fix (widening the pinned
+`(rows, error_reason)` return shape to carry the constant back). Task 1's second bullet keeps
+`from models.session_lifecycle import TERMINAL_STATUSES` in `_scan_worktree_sessions` itself,
+**unconditionally**, outside the `if sessions is None:` branch and inside the same `try` that yields
+`model_import_failed:{Type}`, with the fail-open-inversion reason spelled out. Both bullets were
+traced against the live file: the import `try` sits at `agent/worktree_manager.py:490`–`:492`, the
+`status in TERMINAL_STATUSES` reference at `:513` inside the per-row `try` opened at `:508`, whose
+`except Exception` / `logger.debug` / `continue` sits at `:539`–`:541` ahead of the
+`return ("clear", "", "")` at `:543` — so the swallowed-`NameError` fail-open inversion the concern
+described is genuinely prevented on both the `sessions=None` and the injected `sessions=` paths.
+The Failure Path Test Strategy model-import bullet now states the same split, both sites raising the
+same `model_import_failed:{Type}` with the assertion text unchanged and only the patch target moving.
+The revision (23 insertions, 4 deletions, plan doc only) introduced nothing new that is wrong: it adds
+no component, no abstraction, and no responsibility, and changes no skip-reason string, return shape,
+or failure posture.
 
-One concern is new to this round. It is not a product of the round-2 revision — it is pre-existing
-Task 1 text that rounds 1 and 2 both passed over — and it does not change the design.
+Structural checks pass on every leg. All four repo-mandated sections are substantive; tasks 1-6 have no
+numbering gaps and no invalid or circular `Depends On` references; every cited path exists; both
+prerequisites pass live (popoto 1.9.0 installed, the materialized Redis probe exits 0); the 17
+`query.all` sites in `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` match the plan's
+enumerated line numbers exactly, as do the `all_clear` fixture at `tests/unit/test_disk_reclaim.py:66`,
+`test_removes_lane_when_every_guard_clears` at `:138`, and `test_dry_run_never_calls_cleanup` at
+`:147`-`:150`; the `xfail` anti-criterion holds (grep exit 1); and no No-Go or Rabbit Hole appears as
+planned work. Every external citation spot-checked this round holds at the current head:
+`models/session_lifecycle.py:65`/`:72`/`:109`, `models/agent_session.py:160`/`:1389`/`:1931`,
+`tools/agent_session_scheduler.py:434`-`:435`, `tools/valor_session.py:753`,
+`agent/session_executor.py:1314`, `agent/worktree_manager.py:1007`/`:1696`, `tools/disk_reclaim.py:50`,
+`:415`, `:437`-`:440`, `:443`, and `pyproject.toml:21`.
+
+One nit remains, converged on by two critics and noted-and-declined by the third. It is residue from the
+closure rather than a defect in it: two rationale passages describe the pre-split shape of an import the
+task list now splits. It changes no build instruction and no conclusion, so it does not gate the build.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (independently re-derived against the current file) | Task 1 gives `_fetch_live_sessions()` "the deferred import of `AgentSession` / `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES`", and the Failure Path Test Strategy confirms the block moves wholesale ("re-assert after the refactor moves the import into `_fetch_live_sessions`"). The same task then says to leave the matching loop, "including `if status in TERMINAL_STATUSES: continue`", untouched. Read literally those two instructions conflict: an import inside `_fetch_live_sessions` binds a local name in that function's frame only, so `TERMINAL_STATUSES` would be unbound in `_scan_worktree_sessions` on **both** call paths — the `sessions=None` path and the injected `sessions=` batch path, which never calls `_fetch_live_sessions` at all. Verified against the current file: the reference sits at `agent/worktree_manager.py:513`, inside the per-row `try` opened at `:508`, whose `except Exception` at `:539`–`:541` logs at DEBUG and `continue`s, and the function then returns `("clear", "", "")` at `:543`. So the resulting `NameError` is swallowed per row and every scan collapses to `clear` — a silent fail-**open** inversion of the fail-closed probe, which is the one posture this plan's own Problem statement requires to hold "bit for bit, including on every new code path the change introduces." Non-blocking because the plan's existing busy-asserting tests turn red on the first run rather than letting it ship, but the task text should not require the builder to rediscover this. | Task 1 (import bullet and the "leave the matching loop untouched" bullet) | Keep an unconditional `from models.session_lifecycle import TERMINAL_STATUSES` inside `_scan_worktree_sessions` itself, outside the `if sessions is None:` branch so it binds on the injected path too, mirroring the unconditional import at `agent/worktree_manager.py:491`–`:492` today. Do not thread the name back through `_fetch_live_sessions`'s return tuple: that widens `(rows, error_reason)` — a shape Task 1, the Solution's Key Elements, and Success Criterion 2 all state explicitly — purely to carry a constant. The duplicate import is the cheap, local answer, and it keeps `_fetch_live_sessions` as "the single place that decides what 'live session' means at the Redis boundary" without also making it the owner of the matcher's vocabulary. State in Task 1 that `_fetch_live_sessions` owning the `NON_TERMINAL_STATUSES` import does not remove `TERMINAL_STATUSES` from `_scan_worktree_sessions`, so Decision 2's surviving Python check keeps its name in scope. |
+| NIT | History & Consistency, Risk & Robustness (Scope & Value noted it and declined to raise it) | Architectural Impact's "New dependencies" bullet (plan `:334`-`:338`) and the Update System opening (`:830`-`:834`) still describe Task 1 as adding one name to the single existing deferred-import block inside `_scan_worktree_sessions`. Task 1 now splits that block instead: `AgentSession` and `NON_TERMINAL_STATUSES` move into a new `try` in `_fetch_live_sessions`, while `_scan_worktree_sessions`'s block at `agent/worktree_manager.py:490`-`:492` keeps `TERMINAL_STATUSES` alone. Both passages are rationale prose, not the "## Step by Step Tasks" a builder executes, and the "no new dependency" conclusion each draws holds either way, so nothing shipped can be wrong because of them. | n/a — nit, not blocking | Optional wording fix if either passage is edited for another reason: say the block splits across two functions, mirroring the Failure Path Test Strategy's phrasing, rather than that a name is added to the existing block. |
