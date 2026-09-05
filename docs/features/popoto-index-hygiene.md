@@ -43,7 +43,7 @@ Each model is processed independently — one model failure does not abort the s
 
 ## The two-part `_GUARDED_ELSEWHERE` contract
 
-Listing a model in `_GUARDED_ELSEWHERE` is only half of registering it. The frozenset removes the model from the generic sweep; `_run_guarded_repairs()`'s `guarded_repairs` registry is what puts its own repair path back on the schedule. A model in the first and absent from the second receives **no index hygiene at all**. `Job` is registered in the `guarded_repairs` registry; `Room` is too.
+Listing a model in `_GUARDED_ELSEWHERE` is only half of registering it. The frozenset removes the model from the generic sweep; `_run_guarded_repairs()`'s `guarded_repairs` registry is what puts its own repair path back on the schedule. A model in the first, absent from the second, and lacking any other caller receives **no index hygiene at all**. `Job` is registered in the `guarded_repairs` registry; `Room` is too.
 
 `AgentSession` is the one deliberate absence from the registry, and it is safe because it has two other production callers (worker Step 2 and the hourly `agent-session-cleanup` reflection). Any new entry in the frozenset needs either a registry entry here or a named caller elsewhere.
 

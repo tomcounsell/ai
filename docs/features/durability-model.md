@@ -246,9 +246,14 @@ registered in `_run_guarded_repairs()` so that repair path actually runs, and
 carry a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py` so the
 generic `rebuild_indexes()` sweep skips them instead; both register a
 `ModelDriftSpec` in `agent/index_drift.py` (drift detection never silently
-narrows). Listing a model in `_GUARDED_ELSEWHERE` without registering it in
-`_run_guarded_repairs()` leaves it with no index hygiene at all — the gap
-that produced #2640. `Job` carries two IndexedFields, both low-cardinality:
+narrows). A `_GUARDED_ELSEWHERE` entry needs either a registry entry in
+`_run_guarded_repairs()` or a named caller elsewhere. `Room` and `Job` take
+the registry route. `AgentSession` takes the other: its guarded
+`repair_indexes()` runs from worker Step 2
+(`session_health.cleanup_corrupted_agent_sessions`) and from the hourly
+`agent-session-cleanup` reflection. `Job` once sat in the frozenset with
+neither, the gap that produced #2640. `Job` carries two IndexedFields, both
+low-cardinality:
 `status` (active/at-rest) and the derived boolean `has_open_expectations`
 (Schema Gate Amendment 2, #2708); no index holds a pid, uuid, or timestamp. The
 reply index is a plain string KV — no hash, no class set, no secondary index —

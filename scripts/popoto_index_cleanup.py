@@ -53,10 +53,11 @@ _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
 # path or carry a written proof it cannot produce an identity-less hash
 # (Risk 2 of docs/plans/durability-room-job-agentrun.md).
 #
-# Listing a model here is only HALF the contract: it removes the model from
-# the generic sweep, so the guarded path must also be registered in
-# ``_run_guarded_repairs()`` below or the model gets no hygiene at all. Job
-# was listed here and never registered there, which is issue #2640.
+# Listing a model here is HALF the contract: it removes the model from the
+# generic sweep. The other half is a caller for the guarded path, either a
+# registry entry in ``_run_guarded_repairs()`` below (Room, Job) or a named
+# caller elsewhere (AgentSession, per the paragraph above). Job was listed
+# here with neither, which is issue #2640.
 _GUARDED_ELSEWHERE = frozenset({"AgentSession", "Room", "Job"})
 
 
@@ -298,14 +299,16 @@ def _run_rebuild_with_timeout(model_class):
 def _run_guarded_repairs() -> dict:
     """Invoke each guarded model's OWN repair path (never the raw rebuild).
 
-    Every name in ``_GUARDED_ELSEWHERE`` must appear either here or in the
-    docstring below with a stated reason — an entry that is excluded from the
-    generic sweep AND unregistered here receives no index hygiene at all
-    (issue #2640, which is exactly what happened to ``Job``).
+    Every name in ``_GUARDED_ELSEWHERE`` needs either an entry in the
+    ``guarded_repairs`` registry below or a named caller elsewhere, with that
+    caller recorded in this docstring. Room and Job take the registry route;
+    AgentSession takes the other. Job once sat in the frozenset with neither,
+    which is issue #2640.
 
-    AgentSession is deliberately absent: its A1-guarded ``repair_indexes()``
-    already runs unconditionally from worker Step 2 and the hourly
-    ``agent-session-cleanup`` reflection — a third invocation here would add
+    AgentSession is deliberately absent from the registry: its A1-guarded
+    ``repair_indexes()`` already runs unconditionally from worker Step 2
+    (``session_health.cleanup_corrupted_agent_sessions``) and from the hourly
+    ``agent-session-cleanup`` reflection. A third invocation here would add
     nothing.
 
     Room and Job have no other caller, so this sweep is their cadence, and it
