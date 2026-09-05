@@ -202,7 +202,7 @@ def test_resolver_query_guard_degrades_to_no_signal(ledger_factory, monkeypatch)
 def wire_predicate(monkeypatch):
     """Stub the gh/substrate seams and record which issue groups (b)/(c) see.
 
-    Returns the list that ``_check_docs_stage``/``_check_verdict_freshness``
+    Returns the list that ``_check_stage_markers``/``_check_verdict_freshness``
     record their ``issue_number`` argument into.
     """
 
@@ -228,7 +228,7 @@ def wire_predicate(monkeypatch):
         monkeypatch.setattr(mp, "_substrate_present", lambda root: substrate)
         monkeypatch.setattr(mp, "_gh_pr_view", _fake_pr_view)
         monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: target_repo)
-        monkeypatch.setattr(mp, "_check_docs_stage", _fake_docs)
+        monkeypatch.setattr(mp, "_check_stage_markers", _fake_docs)
         monkeypatch.setattr(mp, "_check_verdict_freshness", _fake_verdict)
         return recorded_issues
 
@@ -671,10 +671,11 @@ def test_derive_slug_no_slug_refs():
 def test_docs_stage_slash_bearing_head_ref_emits_honest_no_slug_refusal(monkeypatch):
     """Regression pin for #2891: a non-session/ head ref must refuse with the
     generic "no usable slug" message, never probe a nested docs/features path."""
-    monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": {"DOCS": "ready"}})
     failed: list[str] = []
     notes: list[str] = []
-    mp._check_docs_stage(990033, "fix/router-blocked-on-conflict", REPO_ROOT, failed, notes)
+    mp._check_docs_marker(
+        {"DOCS": "ready"}, "fix/router-blocked-on-conflict", REPO_ROOT, failed, notes
+    )
     assert len(failed) == 1
     assert "no usable slug for the docs/features fallback" in failed[0]
     assert "docs/features/fix/router-blocked-on-conflict.md absent" not in failed[0]

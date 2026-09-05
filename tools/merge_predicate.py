@@ -19,12 +19,18 @@ Four check groups:
   never-dispatched PLAN/CRITIQUE stages as ``skipped`` first, which lets the
   DOCS marker's predecessor backfill run (issue #2577). See
   ``docs/features/off-pipeline-merge-path.md``.
-- **Group (c) — REVIEW verdict freshness** (substrate-present only): a recorded
-  verdict must exist, contain APPROVED (case-insensitive), and be FRESH against
-  the PR's latest commit — via the ``REVIEW_CONTEXT head_sha=`` trailer when
-  present, else by comparing the verdict's ``recorded_at`` timestamp to the
-  latest commit's committer date. A bare ``"APPROVED" in text`` check is
-  explicitly insufficient (#2003 critique BLOCKER 2).
+- **Group (c) — REVIEW completion and verdict freshness** (substrate-present
+  only): ``stages.REVIEW == completed`` is required (#3132) — the marker
+  ``sdlc-tool verdict finalize`` writes beside the verdict, so a verdict with a
+  pending or empty REVIEW marker is a review that never finalized and refuses
+  by name; ``in_progress`` refuses as a review still running. The marker has
+  no out-of-ledger artifact to degrade to, so unlike group (b) there is no
+  fallback. Then a recorded verdict must exist, contain APPROVED
+  (case-insensitive), and be FRESH against the PR's latest commit — via the
+  ``REVIEW_CONTEXT head_sha=`` trailer when present, else by comparing the
+  verdict's ``recorded_at`` timestamp to the latest commit's committer date.
+  A bare ``"APPROVED" in text`` check is explicitly insufficient (#2003
+  critique BLOCKER 2).
 - **Group (d) — single-owner MERGE lease** (substrate-present, ``run_id``
   supplied only): the merge actor's ``run_id`` must hold the current per-issue
   SDLC lease. This refuses the Race 2 fork/lineage that never held the lease
@@ -502,22 +508,65 @@ def _check_pr_state(
     return pr, issue_number
 
 
-def _check_docs_stage(
+def _check_stage_markers(
     issue_number: int,
     head_ref: str,
     repo_root: Path,
     failed: list[str],
     notes: list[str],
 ) -> None:
-    """Group (b): DOCS stage gate (substrate-present only). Fail-closed on errors."""
+    """Stage-marker legs of groups (b) and (c), substrate-present only.
+
+    One ``stage-query`` read serves both markers. Fail-closed on any error: a
+    substrate-present repo whose ledger cannot be read never passes either leg.
+    """
     try:
         payload = _run_stage_query(issue_number, repo_root)
     except Exception as exc:
-        failed.append(f"DOCS stage state unavailable (stage-query failed: {exc})")
+        failed.append(f"REVIEW and DOCS stage state unavailable (stage-query failed: {exc})")
         return
 
     stages = payload.get("stages")
-    docs_status = (stages or {}).get("DOCS", "") if isinstance(stages, dict) else ""
+    if not isinstance(stages, dict):
+        stages = {}
+    _check_review_marker(stages, failed)
+    _check_docs_marker(stages, head_ref, repo_root, failed, notes)
+
+
+def _check_review_marker(stages: dict, failed: list[str]) -> None:
+    """Group (c) marker leg: ``stages.REVIEW`` must read ``completed`` (#3132).
+
+    ``sdlc-tool verdict finalize`` records the verdict AND writes this marker
+    on the APPROVED path, so a verdict with no completed REVIEW marker is a
+    review that never finalized: a bare ``verdict set``, a finalize that
+    crashed between its two writes, or a marker backfilled after the fact.
+    The marker and the verdict live on the same durable ``PipelineLedger``,
+    so there is no artifact outside the ledger to degrade to the way group (b)
+    degrades to ``docs/features/{slug}.md``; every non-completed status is a
+    named refusal that points at the one command that repairs it.
+    """
+    review_status = stages.get("REVIEW", "")
+    if review_status == "completed":
+        return
+    if review_status == "in_progress":
+        failed.append("REVIEW stage in_progress")
+        return
+    shown = review_status or "<empty>"
+    failed.append(
+        f"REVIEW stage marker not completed (status={shown}); a recorded verdict alone"
+        " does not complete REVIEW, re-run `sdlc-tool verdict finalize`"
+    )
+
+
+def _check_docs_marker(
+    stages: dict,
+    head_ref: str,
+    repo_root: Path,
+    failed: list[str],
+    notes: list[str],
+) -> None:
+    """Group (b): DOCS stage gate on an already-read ``stages`` mapping."""
+    docs_status = stages.get("DOCS", "")
     if docs_status == "completed":
         return
     if docs_status == "in_progress":
@@ -552,7 +601,8 @@ def _check_verdict_freshness(
     failed: list[str],
     notes: list[str],
 ) -> None:
-    """Group (c): recorded REVIEW verdict must be APPROVED and SHA/date fresh.
+    """Group (c) verdict leg: the recorded REVIEW verdict must be APPROVED and
+    SHA/date fresh. The marker leg lives in ``_check_review_marker``.
 
     Substrate-present only. Fail-closed on any evaluation error — a stale
     APPROVED verdict predating the PR head commit fails (#2003 BLOCKER 2).
@@ -754,7 +804,7 @@ def evaluate_merge_predicate(
                     "substrate checks not evaluated: issue number unresolvable from PR state"
                 )
             else:
-                _check_docs_stage(effective_issue, head_ref, root, failed, notes)
+                _check_stage_markers(effective_issue, head_ref, root, failed, notes)
                 _check_verdict_freshness(pr_number, effective_issue, root, failed, notes)
                 # Group (d): single-owner MERGE lease gate (issue #2026, WS1).
                 # Keyed on the same SDLC-tracked issue as groups (b)/(c) — the

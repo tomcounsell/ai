@@ -38,7 +38,15 @@ generic steps as follows:
     unfinished" signal); `pending`/empty stages degrade
     to a `docs/features/{slug}.md` existence check, slug derived from the PR
     head ref (main/master/HEAD/empty → no usable slug → FAIL).
-  - **(c) REVIEW verdict freshness**: a recorded verdict must
+  - **(c) REVIEW completion and verdict freshness**: `stages.REVIEW ==
+    completed` is required. `sdlc-tool verdict finalize` writes that marker
+    beside the verdict on the APPROVED path, so a verdict whose REVIEW marker
+    reads `pending`/empty is a review that never finalized and fails with
+    `REVIEW stage marker not completed (status=...)`; `in_progress` fails as
+    `REVIEW stage in_progress`. Both marker and verdict live on the same
+    `PipelineLedger`, so this leg has no out-of-ledger fallback the way (b)
+    has `docs/features/{slug}.md`; the repair is re-running `finalize`. Then a
+    recorded verdict must
     exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
     latest commit — via the head SHA the verdict attributes to
     (`head_sha_of_record()`: the record's `head_sha` field, else a
@@ -63,8 +71,8 @@ generic steps as follows:
     `single-owner MERGE: merge actor run_id does not hold the issue lease ...`.
 
   `allowed: false` → report every `failed_checks` leg, emit `GATES_FAILED`,
-  and route back (`/do-docs` for the DOCS leg, `/do-pr-review`/`/do-patch` for
-  verdict legs). Do NOT re-implement any of these checks inline in this file —
+  and route back (`/do-docs` for the DOCS leg, `sdlc-tool verdict finalize` for
+  the REVIEW marker leg, `/do-pr-review`/`/do-patch` for verdict legs). Do NOT re-implement any of these checks inline in this file —
   the helper is the single source; the parity test
   (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
   - **Tracked-issue resolution for (b)/(c).** Groups (b) and (c) key

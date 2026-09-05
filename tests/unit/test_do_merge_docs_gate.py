@@ -71,7 +71,7 @@ def substrate_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(
         mp,
         "_run_stage_query",
-        lambda issue, root: {"stages": {"DOCS": "completed"}, "_meta": {}},
+        lambda issue, root: {"stages": {"REVIEW": "completed", "DOCS": "completed"}, "_meta": {}},
     )
     monkeypatch.setattr(mp, "_run_verdict_get", lambda issue, root: _fresh_verdict())
     monkeypatch.setattr(
@@ -113,7 +113,7 @@ def test_in_progress_hard_fails(substrate_repo, monkeypatch):
     monkeypatch.setattr(
         mp,
         "_run_stage_query",
-        lambda issue, root: {"stages": {"DOCS": "in_progress"}, "_meta": {}},
+        lambda issue, root: {"stages": {"REVIEW": "completed", "DOCS": "in_progress"}, "_meta": {}},
     )
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
     assert result.allowed is False
@@ -129,7 +129,7 @@ def test_pending_with_feature_doc_passes_degraded(substrate_repo, monkeypatch):
     monkeypatch.setattr(
         mp,
         "_run_stage_query",
-        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
+        lambda issue, root: {"stages": {"REVIEW": "completed", "DOCS": "pending"}, "_meta": {}},
     )
     _make_feature_doc(substrate_repo, "my-slug")
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
@@ -141,7 +141,7 @@ def test_pending_without_feature_doc_fails(substrate_repo, monkeypatch):
     monkeypatch.setattr(
         mp,
         "_run_stage_query",
-        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
+        lambda issue, root: {"stages": {"REVIEW": "completed", "DOCS": "pending"}, "_meta": {}},
     )
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
     assert result.allowed is False
@@ -153,18 +153,78 @@ def test_pending_without_feature_doc_fails(substrate_repo, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_empty_stages_with_feature_doc_passes_degraded(substrate_repo, monkeypatch):
+def test_empty_stages_with_feature_doc_degrades_docs_leg_only(substrate_repo, monkeypatch):
+    """Empty ``stages`` degrades the DOCS leg to the feature-doc check, which
+    passes with a note. The REVIEW marker leg has no such fallback (#3132), so
+    the predicate as a whole still refuses, naming only that leg."""
     monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": {}, "_meta": {}})
     _make_feature_doc(substrate_repo, "my-slug")
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
-    assert result.allowed is True
-    assert any("degraded" in note for note in result.notes)
+    assert any("DOCS gate degraded pass" in note for note in result.notes)
+    assert result.allowed is False
+    assert result.failed_checks == [
+        "REVIEW stage marker not completed (status=<empty>); a recorded verdict alone"
+        " does not complete REVIEW, re-run `sdlc-tool verdict finalize`"
+    ]
 
 
 def test_empty_stages_without_feature_doc_fails(substrate_repo, monkeypatch):
     monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": {}, "_meta": {}})
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
     assert result.allowed is False
+    assert any("my-slug.md absent" in check for check in result.failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# REVIEW marker leg (#3132): a fresh APPROVED verdict is not enough on its own
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("review_status", ["pending", "ready", None])
+def test_fresh_verdict_with_review_not_completed_refuses(
+    substrate_repo, monkeypatch, review_status
+):
+    """The #2760 backfill shape: DOCS completed, verdict APPROVED and fresh at
+    the PR head, REVIEW marker never written. Before #3132 this passed."""
+    stages = {"DOCS": "completed"}
+    if review_status is not None:
+        stages["REVIEW"] = review_status
+    monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": stages, "_meta": {}})
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    shown = review_status or "<empty>"
+    assert result.failed_checks == [
+        f"REVIEW stage marker not completed (status={shown}); a recorded verdict alone"
+        " does not complete REVIEW, re-run `sdlc-tool verdict finalize`"
+    ]
+    # The verdict leg itself is satisfied: the refusal is the marker, nothing else.
+    assert any("REVIEW verdict fresh" in note for note in result.notes)
+
+
+def test_review_in_progress_refuses_as_still_running(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"REVIEW": "in_progress", "DOCS": "completed"}, "_meta": {}},
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert result.failed_checks == ["REVIEW stage in_progress"]
+
+
+def test_stage_query_runs_once_for_both_marker_legs(substrate_repo, monkeypatch):
+    """One ledger read serves the REVIEW and DOCS marker legs; the gate does
+    not pay for a second ``stage-query`` subprocess."""
+    calls: list[int] = []
+
+    def _once(issue, root):
+        calls.append(issue)
+        return {"stages": {"REVIEW": "completed", "DOCS": "completed"}, "_meta": {}}
+
+    monkeypatch.setattr(mp, "_run_stage_query", _once)
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +237,7 @@ def test_no_usable_slug_fails_without_main_lookup(substrate_repo, monkeypatch):
     monkeypatch.setattr(
         mp,
         "_run_stage_query",
-        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
+        lambda issue, root: {"stages": {"REVIEW": "completed", "DOCS": "pending"}, "_meta": {}},
     )
     _make_feature_doc(substrate_repo, "main")  # must NOT be consulted
     result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
