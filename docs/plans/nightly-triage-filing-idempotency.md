@@ -423,15 +423,149 @@ Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
 
 ## Team Orchestration
 
-_placeholder_
+
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead never builds directly.
+
+Small appetite, one source file: the split is by *concern*, not by file, and the two builders must not both edit `scripts/nightly_regression_tests.py` at once. **`prompt-builder` owns `_build_triage_prompt` and `dispatch-builder` owns `write_triage_ledger`, `maybe_dispatch_triage_session`, and `dispatch_findings`** — a declared function-level ownership split, and they run sequentially rather than in parallel because they share a file. This is deliberate: shared-file builders converging on each other's edits is a known livelock here.
+
+### Team Members
+
+- **Builder (prompt)**
+  - Name: `prompt-builder`
+  - Role: Fix 1 only — rewrite `_build_triage_prompt` to hand over the REST command, accept the disposition keyword argument, and render the pre-resolved block. Owns nothing else in the file.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (dispatch + ledger)**
+  - Name: `dispatch-builder`
+  - Role: Fixes 2 and 3 — `write_triage_ledger`, the disposition dataclass, the `dispatch_findings` handoff, and the ordering of the ledger write against the `dry_run` short-circuit.
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer**
+  - Name: `nightly-test-engineer`
+  - Role: All new coverage and the Test Impact updates. Must mutation-check each new guard: break the behavior, confirm the test goes red, restore.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Documentarian**
+  - Name: `nightly-documentarian`
+  - Role: The four Documentation tasks.
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Validator**
+  - Name: `nightly-validator`
+  - Role: Read-only. Runs every Verification row and reports pass/fail per row with the command output.
+  - Agent Type: validator
+  - Resume: true
+
+### Available Agent Types
+
+Standard Tier 1 roster. No domain framing needed — this is ordinary Python with a subprocess boundary, not async, Redis, or untrusted-input work.
 
 ## Step by Step Tasks
 
-_placeholder_
+
+### 1. Ledger, dispositions, and the dispatch handoff
+- **Task ID**: build-dispatch
+- **Depends On**: none
+- **Validates**: `tests/unit/test_nightly_regression_tests.py`
+- **Informed By**: spike-2 (every node reaching `maybe_dispatch_triage_session` is already known to have no issue in any state), spike-3 (ledger belongs in `data/`, not the lane worktree)
+- **Assigned To**: `dispatch-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Branch from `main`. Confirm with `git merge-base --is-ancestor origin/main HEAD` before the first commit — **not** from `session/nightly-triage-idempotency-3075`.
+- Add a `NodeDisposition` dataclass: `node`, `title`, `disposition`, `resolved_against`, `resolved_at`.
+- Add `write_triage_ledger(slug, dispositions) -> bool` writing `data/nightly-triage-ledger/{slug}.json` with `slug`, `created_at`, `dispositions`, and an empty `filed`. Empty dispositions writes nothing and returns `False`. Catch broadly, `log()` a `WARNING` naming the slug, return `False`; never raise.
+- Add a keyword-only `dispositions` argument to `maybe_dispatch_triage_session`, defaulting to `None`. Call `write_triage_ledger` **after** the `if dry_run:` short-circuit (line 2340) and **before** the `subprocess.run` that creates the session. Pass `dispositions` through to `_build_triage_prompt`.
+- In `dispatch_findings`, build the disposition list from the surviving `single_nodes` after `partition_already_open` and `partition_closed_matches`, and after the issue-budget truncation, so it matches the nodes actually dispatched. Pass it at the call site (line 2664).
+- Docstring the fail-open posture, the deliberate absence of file locking (Race 1), and the dry-run ordering constraint.
+- Commit with explicit paths as soon as the code is coherent; do not hold the file open across the next task.
+
+### 2. The prompt hands over a command
+- **Task ID**: build-prompt
+- **Depends On**: build-dispatch
+- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestBuildTriagePrompt`
+- **Informed By**: spike-1 (`--state all` returns all four fields, ~1s; `stateReason` is `""` for open issues)
+- **Assigned To**: `prompt-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Pull `build-dispatch`'s commit first. Edit only `_build_triage_prompt`.
+- Replace "search ALL issues — open AND closed — for the EXACT title given" with the literal `gh issue list --state all --json number,title,state,stateReason --limit 200`, run **once for the whole node list** and filtered locally per exact title.
+- Add the prohibition explicitly: do not use `gh search`, `gh issue list --search`, or the search API; that index lags issue creation by minutes and is how #2960–#2999 happened.
+- Add the `stateReason` note: it is `""` for open issues, so branch on `state` first.
+- Keep the open / `NOT_PLANNED` / `COMPLETED` decision prose unchanged in meaning.
+- Render the pre-resolved block per node when `dispositions` is provided, zipped `strict=True` against the node list; degrade to the plain prompt when it is `None` or empty.
+- Append the ledger paragraph: the absolute path, read it first every turn, skip any node already in `filed`, append `{number, title, node}` immediately after each `gh issue create` and before the next node.
+- Docstring the REST-over-search rationale citing #2960–#2999 and `8524e765b`.
+
+### 3. Tests
+- **Task ID**: build-tests
+- **Depends On**: build-prompt
+- **Validates**: `tests/unit/test_nightly_regression_tests.py`
+- **Assigned To**: `nightly-test-engineer`
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Apply every Test Impact disposition, including the nine-stub audit — change only stubs that actually bind positionally.
+- Add `TestWriteTriageLedger`, extend `TestBuildTriagePrompt`, extend the `TestDispatchFindings` and dry-run cases per Test Impact.
+- **Mutation-check each new guard individually**: break the behavior it claims to protect, confirm that specific test goes red, restore, re-measure. A guard that stays green under its own mutation reaches no code and must be rewritten, not kept.
+- Record the mutation results in the PR description.
+
+### 4. Validate build and tests
+- **Task ID**: validate-code
+- **Depends On**: build-tests
+- **Assigned To**: `nightly-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q`, `python -m ruff check`, `python -m ruff format --check`.
+- Run the structural Verification rows and report each with its output.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-code
+- **Assigned To**: `nightly-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Execute the four Documentation tasks.
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-dispatch, build-prompt, build-tests, validate-code, document-feature
+- **Assigned To**: `nightly-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row and every Success Criterion; report pass/fail with evidence per line.
 
 ## Verification
 
-_placeholder_
+
+Structural rows use `inspect.getsource` rather than line-scoped `sed`, so they survive the line drift this module sees constantly (four of this plan's own citations drifted between recon and drafting). Every command below was executed against `feebe32aa` while drafting; the "Red today" column is the measured pre-fix result, which is the red-state proof that these rows bite.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Unit tests pass | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
+| Format clean | `python -m ruff format --check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
+| Prompt hands over the REST command | `python -c "import sys; sys.path.insert(0,'scripts'); import inspect, nightly_regression_tests as n; print(inspect.getsource(n._build_triage_prompt).count('gh issue list --state all'))"` | output > 0 |
+| Prompt never names the lagging search (anti-criterion) | `python -c "import sys; sys.path.insert(0,'scripts'); import inspect, nightly_regression_tests as n; s=inspect.getsource(n._build_triage_prompt); print(s.count('--search')+s.count('gh search')+s.count('search ALL'))"` | match count == 0 |
+| Prompt warns about the open-issue `stateReason` | `python -c "import sys; sys.path.insert(0,'scripts'); import inspect, nightly_regression_tests as n; print(inspect.getsource(n._build_triage_prompt).count('stateReason'))"` | output > 0 |
+| Ledger helper exists | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int(callable(n.write_triage_ledger)))"` | output contains 1 |
+| Ledger write follows the dry-run short-circuit (anti-criterion) | `python -c "import sys; sys.path.insert(0,'scripts'); import inspect, nightly_regression_tests as n; s=inspect.getsource(n.maybe_dispatch_triage_session); print(int(s.index('write_triage_ledger') < s.index('return DRY_RUN_SESSION_ID')))"` | match count == 0 |
+| Dispositions cross the dispatch boundary | `python -c "import sys; sys.path.insert(0,'scripts'); import inspect, nightly_regression_tests as n; print(inspect.getsource(n.dispatch_findings).count('dispositions'))"` | output > 0 |
+| Named ledger tests exist and pass | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q -k "TestWriteTriageLedger or TestBuildTriagePrompt"` | exit code 0 |
+| Branch is rooted on main (not the stale #3075 lane) | `git merge-base --is-ancestor origin/main HEAD; echo $?` | output contains 0 |
+
+**Red-state proof measured at `feebe32aa` before any change:**
+
+| Row | Pre-fix result | Verdict |
+|-----|----------------|---------|
+| Prompt hands over the REST command | `0` | FAIL (needs > 0) — row bites |
+| Prompt never names the lagging search | `1` (from `search ALL`) | FAIL (needs 0) — anti-criterion bites |
+| Prompt warns about `stateReason` | `0` | FAIL (needs > 0) — row bites |
+| Ledger helper exists | `AttributeError` | FAIL — row bites |
+
+Each of the four structural rows fails against current `main`, so none of them can pass vacuously. The `git merge-base` row was verified to exit 0 on a `main`-rooted checkout and non-zero on `session/nightly-triage-idempotency-3075`.
 
 ## Critique Results
 
@@ -441,4 +575,9 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+
+1. **The ledger lives in `data/nightly-triage-ledger/{slug}.json`, not "under the lane worktree" as the issue specifies.** Reasoning in spike-3: `.worktrees/{slug}/` is a git checkout, so a ledger there pollutes the agent's own `git status`, and it is destroyed on lane teardown — a replay after teardown would find nothing. `data/` is already this script's state home, is gitignored, survives teardown, and is reachable by absolute path from inside a worktree. The slug-keyed filename preserves the "session-local" property the issue was reaching for. **Confirm this deviation is acceptable, or say the word and it moves to the worktree.**
+
+2. **`--limit 200` for the agent's confirmation read is taken from the issue verbatim and is narrower than the script's own `CLOSED_ISSUE_LIST_LIMIT = 4000`.** Risk 1 argues this is fine *because* fix 2 makes the script's wide read the authority and the agent's read only a check for issues created since. If you would rather the agent's read match the script's window, that is a one-token change with roughly 40 REST calls of cost per dispatch instead of 2.
+
+3. **Should a ledger write failure block the dispatch instead of logging and continuing?** The plan chooses fail-open, matching `open_issues()` returning `None` and the module's stated posture that a silent night during a real regression is the worse harm. The opposite reading — that a dispatch without its replay defense should not go out at all — is defensible given this bug has now recurred four times. Fail-open is the default unless you say otherwise.
