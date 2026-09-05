@@ -84,7 +84,7 @@ decision:
   is available (age unknown) the block is omitted and the pass runs
   snapshot-only.
 
-## Enablement decision
+## Group chats only
 
 RTR is a **group-chat** feature. A DM always deserves a reply — suppressing one
 to leave a silent reaction would read as the bot ignoring the person — so RTR
@@ -92,7 +92,7 @@ to leave a silent reaction would read as the bot ignoring the person — so RTR
 (`is_group_chat`: groups/supergroups/channels are negative, user DMs positive;
 an unclassifiable id is treated as non-group and short-circuits to `send`).
 
-That predicate is now **public and shared**. It was renamed from the private
+That predicate is **public and shared**. It was renamed from the private
 `_is_group_chat` for [Telegram Poll Questions](telegram-poll-questions.md)
 (#2701), whose eligibility gate `bridge/poll_gating.py` needs the same
 group-vs-DM discrimination, and it **stays in this module** — a generic Telegram
@@ -102,28 +102,46 @@ later invites a second, drifting copy. Poll gating imports it; RTR behavior is
 unchanged. There is no `_is_group_chat` back-compat alias: two live names is the
 drift the single definition exists to prevent.
 
-The master `READ_THE_ROOM_ENABLED` flag is **off by default**. The mechanism
-(staleness signal + no-anchor reaction target) ships group-scoped behind the
-existing kill switch. **Flip criterion:** sample `rtr.suppressed`
-`session_events` in a low-stakes group for a day; if genuinely on-topic
-mentions are not being suppressed (false-suppression rate is low) and no human
-reports a missed reply, flip `READ_THE_ROOM_ENABLED` in production. The kill
-switch is the same flag set back to `false`.
+RTR runs **unconditionally** on every eligible send — there is no env-var kill
+switch. See [Operations](#operations) below for how a wrong verdict is caught
+and recovered without one.
+
+### Short-output threshold: a stated decision, not an inherited default
+
+The `len(draft_text) < SHORT_OUTPUT_THRESHOLD` bypass (200 chars, below) shares
+its bound with `bridge/context_recall.py`'s outbound prefilter
+(`CONTEXT_RECALL_PREFILTER_MAX_CHARS = 200`), which looks like the same call
+made twice but is not: the two bounds gate different mechanisms answering
+different questions at different costs. Context-recall's prefilter is a *shape*
+gate for one narrow failure — a short PM message that asks the human to
+re-identify something the conversation already named. RTR's bypass avoids
+paying a `TelegramMessage` snapshot fetch plus a Haiku round trip on the
+delivery hot path, in precisely the band where the drafter itself already
+skipped composition. Lowering or removing it would put every one-line
+acknowledgment through a paid call on the send path.
+
+The band is not uncovered even without RTR: `CONTEXT_RECALL_OUTBOUND_ENABLED`
+defaults `true` and is live, and `bridge/promise_gate.py` gates the short path
+as of #2421. Short outbound messages already pass two guards; RTR's bypass
+skips only the third and most expensive one. The threshold stays unchanged
+until real `rtr.bypassed reason="short_output"` counts exist to tune against —
+before this change RTR had never run, so any new number here would replace one
+unmeasured guess with another.
 
 ## Bypass conditions (no Haiku call)
 
 RTR short-circuits to `send` without calling Haiku in any of:
 
-* `READ_THE_ROOM_ENABLED` env var is unset/false (default — see enablement
-  decision above).
 * `draft_text` is empty / whitespace-only.
 * `chat_id` is `None` (file-only delivery, etc.).
 * `chat_id` is a DM (positive id) or unclassifiable — RTR only room-reads group
   chats.
 * `len(draft_text) < SHORT_OUTPUT_THRESHOLD` — aligns with the drafter's
   bypass band (200 chars) so we don't pay RTR latency in the same range
-  the drafter already skipped.
-* `session.sdlc_slug` is set — emits a `rtr.bypassed` event so SDLC
+  the drafter already skipped. This check runs **before** the SDLC bypass
+  below, so a short SDLC `delivery_text` returns here with
+  `reason="short_output"` and never emits `rtr.bypassed` — see Observability.
+* `session.is_sdlc` is true — emits a `rtr.bypassed` event so SDLC
   pipeline status messages are observable but never blocked.
 * The fetched snapshot is empty — no room to read.
 
@@ -173,20 +191,27 @@ Event types:
 | `rtr.bypassed` | RTR short-circuited (currently emitted only for SDLC sessions). |
 | `rtr.failed` | RTR raised an exception; fell open to `send`. |
 
+`rtr.bypassed` **undercounts** real SDLC bypasses: the short-output check
+(`len(draft_text) < SHORT_OUTPUT_THRESHOLD`) runs before the SDLC check in the
+short-circuit ladder, so any SDLC `delivery_text` under 200 chars returns
+`reason="short_output"` and never reaches the branch that emits
+`rtr.bypassed`. Both branches return `send` — this is an observability gap,
+not a behavior regression — but a low `rtr.bypassed` count is not evidence the
+SDLC bypass repair failed.
+
 Inspect via `valor-session inspect --id <session_id>` or
 `/dashboard.json`.
 
 ## Coverage (Path A + Path B)
 
 RTR runs on **two** independent message paths into the Telegram outbox.
-Both share the same public `read_the_room()` entry point, the same
-`READ_THE_ROOM_ENABLED` machine-wide gate, and the same fail-open
-semantics. They differ only in *who is invoking the path* and therefore
-in the gating logic that decides whether to call RTR at all.
+Both share the same public `read_the_room()` entry point and the same
+fail-open semantics. They differ only in *who is invoking the path* and
+therefore in the gating logic that decides whether to call RTR at all.
 
 | Path | Entry point | Default behavior |
 |------|-------------|------------------|
-| **Path A** | `agent/output_handler.py::TelegramRelayOutputHandler.send` (the worker's drafter→outbox flow) | Always agent-driven. RTR runs whenever `READ_THE_ROOM_ENABLED=true`. |
+| **Path A** | `agent/output_handler.py::TelegramRelayOutputHandler.send` (the worker's drafter→outbox flow) | Always agent-driven. RTR always runs (subject to the bypass conditions above). |
 | **Path B** | `tools/valor_telegram.py::cmd_send` (the `valor-telegram send` CLI registered in `pyproject.toml`) | RTR runs only for agent-invoked sends; human-invoked sends bypass RTR by default. |
 
 ### Caller-type gate (Path B only)
@@ -207,11 +232,11 @@ exits non-zero with a usage error).
 
 | Caller | `VALOR_SESSION_ID` | Flag | RTR runs? |
 |--------|--------------------|------|-----------|
-| Worker drafter (Path A) | (n/a) | (n/a) | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
-| Agent Bash → `valor-telegram send` (Path B) | set | none | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
+| Worker drafter (Path A) | (n/a) | (n/a) | **Yes.** |
+| Agent Bash → `valor-telegram send` (Path B) | set | none | **Yes.** |
 | Agent Bash → `valor-telegram send` (Path B) | set | `--no-read-the-room` | **No**. |
 | Human shell → `valor-telegram send` (Path B) | unset | none | **No**. |
-| Human shell → `valor-telegram send` (Path B) | unset | `--read-the-room` | **Yes** when `READ_THE_ROOM_ENABLED=true`. |
+| Human shell → `valor-telegram send` (Path B) | unset | `--read-the-room` | **Yes.** |
 | Human shell with inherited env (sub-shell, `tmux`, `claude --resume`) | set (inherited) | none | **Yes** (false positive). Use `--no-read-the-room` to opt out. |
 
 ### Activation diagnostic (Path B)
@@ -242,26 +267,40 @@ outbound message, which is always agent-authored by definition.
 One Haiku call per outbound Path A message that survives all bypass
 conditions. At 50–100 outbound messages/day this is roughly $0.10/month
 at Haiku rates. The `rtr.bypassed` event count makes the bypass rate
-observable; if RTR is firing on >90% of sends, the heuristic is wrong.
+observable (see the undercount note in Observability); if RTR is firing
+on >90% of sends, the heuristic is wrong.
 
-## Rollout
+RTR shares the process-wide `semaphore_slot()` (default 5 concurrent slots)
+with router classification and memory extraction. Running unconditionally
+moves RTR from zero acquisitions to one per eligible send, raising that
+pool's baseline occupancy. The fail-open path already returns `send` on
+`APITimeoutError`, so contention degrades to added latency, not to
+non-delivery — but a second caller added to the same pool compounds it.
 
-1. Land the code with `READ_THE_ROOM_ENABLED=false` (default). DMs are excluded
-   unconditionally; only group chats are ever room-read.
-2. Flip the flag in `~/Desktop/Valor/.env` on the dev/test machine first.
-3. Watch a low-stakes **group** chat for one day; sample `session_events` for
-   `rtr.suppressed` messages (including `stale_trigger`) and judge the
-   false-suppression rate.
-4. If false-suppression rate > 10%, tighten the system prompt, raise the
-   suppression bar, or raise `RTR_STALE_TRIGGER_SECONDS`. Otherwise flip the
-   flag in production. The kill switch is the same flag set back to `false`.
+## Operations
+
+There is no kill switch — a wrong verdict is recovered by a revert commit and
+a deploy, not a flag flip. This makes `rtr.*` `session_events` the primary
+safety mechanism from the first send, not a monitoring nicety:
+
+* **Watch `rtr.suppressed`** (including `reason="stale_trigger"`) for a
+  false-suppression rate: a human getting only a 👀 reaction and no answer to
+  a message that deserved one. Silent non-delivery is RTR's failure mode, so
+  this is the signal that catches it.
+* **Watch `rtr.bypassed`** to confirm the SDLC bypass is firing — remembering
+  it undercounts (see Observability above), so a low count alone does not
+  mean the bypass is broken.
+* **On a wrong suppress:** the deterministic no-anchor fallthrough
+  (`reason="no_reaction_target"`) bounds the worst case — a suppressed
+  message with nowhere to react still gets sent. A wrong suppress *with* an
+  anchor is recovered by a prompt change or a revert, not by disabling RTR.
 
 ## Adjacent layers
 
 **Drafter Redundancy Suppression** (`bridge/redundancy_filter.py`) runs before RTR in the Path A funnel, but only for SDLC sessions. It uses deterministic bigram-Jaccard similarity (no LLM call) to suppress near-verbatim PM status repeats within a configurable time window. When it suppresses, RTR is not called (early return). When it passes, RTR runs as normal.
 
 The two layers compose cleanly:
-- SDLC sessions: redundancy filter first → RTR after (though RTR's SDLC bypass means RTR is effectively a no-op for SDLC sessions today).
+- SDLC sessions: redundancy filter first → RTR after, where RTR's SDLC bypass makes RTR effectively a no-op for SDLC sessions (the bypass now actually fires; see Bypass conditions above).
 - Non-SDLC sessions: redundancy filter skipped → RTR runs.
 
 See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) for full details.

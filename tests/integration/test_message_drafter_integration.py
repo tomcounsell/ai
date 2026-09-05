@@ -35,7 +35,6 @@ async def test_local_file_path_incident_deferred_via_self_draft_steering():
     mock_session.session_id = "test-incident-1955"
     mock_session.session_type = "eng"
     mock_session.sdlc_stage = None
-    mock_session.sdlc_slug = None
     mock_session.has_pm_messages = MagicMock(return_value=False)
     mock_session.get_parent_session = MagicMock(return_value=None)
     mock_session.is_sdlc = False
@@ -124,12 +123,11 @@ def rtr_handler_setup(monkeypatch):
     """Common fixture for RTR-on integration tests.
 
     Yields ``(handler, mock_redis, mock_session)``. The drafter is patched
-    to bypass cleanly so ``delivery_text == text``. The RTR env-var flag is
-    set to true. Snapshots are short-circuited via a non-empty stub so the
-    Haiku call is reached -- we then patch ``read_the_room`` itself per-test
-    to inject the verdict we want.
+    to bypass cleanly so ``delivery_text == text``. RTR runs unconditionally
+    (no env-var gate). Snapshots are short-circuited via a non-empty stub so
+    the Haiku call is reached -- we then patch ``read_the_room`` itself
+    per-test to inject the verdict we want.
     """
-    monkeypatch.setenv("READ_THE_ROOM_ENABLED", "true")
     from agent.output_handler import TelegramRelayOutputHandler
     from bridge.message_drafter import MessageDraft
 
@@ -144,7 +142,6 @@ def rtr_handler_setup(monkeypatch):
     mock_session.session_id = "abc"
     mock_session.session_type = "teammate"
     mock_session.sdlc_stage = None
-    mock_session.sdlc_slug = None
     mock_session.has_pm_messages = MagicMock(return_value=False)
     mock_session.get_parent_session = MagicMock(return_value=None)
     mock_session.is_sdlc = False

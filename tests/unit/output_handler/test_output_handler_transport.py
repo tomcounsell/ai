@@ -353,35 +353,24 @@ class TestTransportAwareRouting:
 
         suppress_verdict = RoomVerdict(action="suppress", reason="testing", revised_text=None)
 
-        # Set the env flag so RTR would otherwise run.
-        import os as _os
-
-        old_rtr = _os.environ.get("READ_THE_ROOM_ENABLED")
-        _os.environ["READ_THE_ROOM_ENABLED"] = "1"
-        try:
-            with (
-                patch(
-                    "bridge.message_drafter.draft_message",
-                    AsyncMock(side_effect=RuntimeError("skip drafter")),
-                ),
-                patch(
-                    "bridge.read_the_room.read_the_room",
-                    AsyncMock(return_value=suppress_verdict),
-                ),
-            ):
-                asyncio.run(
-                    handler.send(
-                        chat_id="customer@example.com",
-                        text="Body that would normally be RTR-suppressed.",
-                        reply_to_msg_id=42,  # truthy so the RTR suppress would fire
-                        session=session,
-                    )
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=RuntimeError("skip drafter")),
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=suppress_verdict),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="customer@example.com",
+                    text="Body that would normally be RTR-suppressed.",
+                    reply_to_msg_id=42,  # truthy so the RTR suppress would fire
+                    session=session,
                 )
-        finally:
-            if old_rtr is None:
-                _os.environ.pop("READ_THE_ROOM_ENABLED", None)
-            else:
-                _os.environ["READ_THE_ROOM_ENABLED"] = old_rtr
+            )
 
         # Per the unified-handler contract: when RTR suppresses on an email
         # session, the payload is dropped entirely. Email has no reaction

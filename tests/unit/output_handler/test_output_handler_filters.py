@@ -43,10 +43,9 @@ class TestReadTheRoomWiring:
         s.session_id = kwargs.get("session_id", "abc")
         s.session_type = kwargs.get("session_type", "teammate")
         s.sdlc_stage = None
-        s.sdlc_slug = kwargs.get("sdlc_slug", None)
         s.has_pm_messages = MagicMock(return_value=False)
         s.get_parent_session = MagicMock(return_value=None)
-        s.is_sdlc = False
+        s.is_sdlc = kwargs.get("is_sdlc", False)
         s.session_events = None
         s.telegram_message_id = kwargs.get("telegram_message_id", None)
         return s
@@ -305,6 +304,48 @@ class TestReadTheRoomWiring:
         assert payload["reply_to"] == 555
         assert "text" not in payload
 
+    def test_rtr_failure_falls_open(self):
+        """RTR raising must not block delivery (Path A fail-open contract,
+        `agent/output_handler.py:1144`).
+
+        RTR runs unconditionally on every eligible Path A send (#2733), so this
+        outer guard moved from theoretical to hot. Mirrors the Path B
+        equivalent, `test_valor_telegram_rtr.py::test_rtr_failure_falls_open`.
+
+        Mutation-proven: converting the `except Exception as rtr_err:` at
+        `agent/output_handler.py:1144` into a bare `raise` makes this test
+        fail with the injected RuntimeError instead of the assertions below
+        (confirmed by hand while writing this test, then reverted).
+        """
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        # Delivery proceeded with the original text -- RTR's failure never
+        # reached the outbox write.
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == "x" * 250
+        assert payload.get("type") != "reaction"
+
     def test_steering_deferred_path_skips_rtr(self):
         """RTR must not run when delivery is deferred to self-draft steering
         (the steering_deferred return at line 250 happens before RTR).
@@ -337,39 +378,6 @@ class TestReadTheRoomWiring:
 
         # No outbox write because steering deferred.
         mock_r.rpush.assert_not_called()
-
-    def test_rtr_disabled_makes_no_redis_writes_beyond_normal(self):
-        """With READ_THE_ROOM_ENABLED=false, the RTR call returns send and
-        delivery proceeds exactly as if RTR didn't exist."""
-        import os
-
-        # Note: read_the_room reads the env var at call time. With the flag
-        # off, it short-circuits without calling Haiku and without emitting
-        # a session_events entry.
-        old = os.environ.get("READ_THE_ROOM_ENABLED")
-        os.environ["READ_THE_ROOM_ENABLED"] = "false"
-        try:
-            mock_r = self._mock_redis()
-            handler = self._make_handler(mock_r)
-            session = self._make_session()
-
-            with patch(
-                "bridge.message_drafter.draft_message",
-                AsyncMock(side_effect=self._bypass_drafter),
-            ):
-                asyncio.run(handler.send("-100123", "x" * 250, 42, session=session))
-
-            mock_r.rpush.assert_called_once()
-            payload = json.loads(mock_r.rpush.call_args[0][1])
-            assert payload.get("type") != "reaction"
-            assert payload["text"] == "x" * 250
-            # No RTR events because the short-circuit path emits nothing.
-            assert not (session.session_events or [])
-        finally:
-            if old is None:
-                os.environ.pop("READ_THE_ROOM_ENABLED", None)
-            else:
-                os.environ["READ_THE_ROOM_ENABLED"] = old
 
 
 class TestRedundancyFilterWiring:

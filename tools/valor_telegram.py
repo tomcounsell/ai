@@ -739,8 +739,7 @@ def _should_run_rtr(args: argparse.Namespace) -> bool:
     (session.session_id, injected for every harness subprocess -- issue
     #2190). Humans typing ``valor-telegram send`` in a fresh terminal do not
     have it set, so RTR skips by default for human invocations and runs by
-    default for agent invocations (subject to the ``READ_THE_ROOM_ENABLED``
-    machine-wide gate inside ``read_the_room()`` itself).
+    default for agent invocations.
 
     Note: env vars inherit across nested shells, ``tmux``, and
     ``claude --resume`` started from inside an existing session. The
@@ -897,11 +896,10 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     # ── Read-the-Room pre-send pass for Path B (issue #1203) ──
     # Mirrors PR #1204 / commit 531e8f4e (Path A in agent/output_handler.py
-    # lines 361-455). Gated by:
-    #   1. _should_run_rtr(args): caller-type gate — agent vs. human (see
-    #      VALOR_SESSION_ID auto-detection + --read-the-room/--no-read-the-room).
-    #   2. READ_THE_ROOM_ENABLED env var (read fresh inside read_the_room()).
-    # Fail-open: any error path falls through to the original text rpush.
+    # lines 361-455). Gated by _should_run_rtr(args): caller-type gate —
+    # agent vs. human (see VALOR_SESSION_ID auto-detection +
+    # --read-the-room/--no-read-the-room). Fail-open: any error path falls
+    # through to the original text rpush.
     rtr_should_send = True  # default: rpush the original (possibly trimmed) text
     rtr_suppress_reaction: dict | None = None  # optional suppress-with-anchor reaction payload
     rtr_suppressed_reason: str | None = None  # set when fully suppressed (no rpush)
@@ -1450,10 +1448,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Issue #1203: Read-the-Room (RTR) pre-send pass for Path B.
     # Default behavior (no flag): RTR auto-runs for agent-invoked sends
-    # (VALOR_SESSION_ID env var set) when READ_THE_ROOM_ENABLED=true; human
-    # invocations bypass RTR. Use --read-the-room to force RTR on for human
-    # invocations or --no-read-the-room to opt out from inside an agent
-    # session. Mutually exclusive (argparse rejects both at parse time).
+    # (VALOR_SESSION_ID env var set); human invocations bypass RTR. Use
+    # --read-the-room to force RTR on for human invocations or
+    # --no-read-the-room to opt out from inside an agent session. Mutually
+    # exclusive (argparse rejects both at parse time).
     rtr_group = send_parser.add_mutually_exclusive_group()
     rtr_group.add_argument(
         "--read-the-room",

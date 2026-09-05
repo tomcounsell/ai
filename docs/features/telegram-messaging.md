@@ -266,9 +266,9 @@ default — the human authored the message intentionally and shouldn't be
 second-guessed by Haiku.
 
 Caller-type detection uses `VALOR_SESSION_ID` (the canonical agent-
-context env var the worker injects). When set + non-empty, RTR runs
-(subject to the `READ_THE_ROOM_ENABLED` machine-wide gate). When unset,
-RTR skips. Two flags override the auto-detection (mutually exclusive):
+context env var the worker injects). When set + non-empty, RTR runs.
+When unset, RTR skips. Two flags override the auto-detection (mutually
+exclusive):
 
 - `--read-the-room` forces RTR on (e.g., a human wants the conservative
   guard for an ad-hoc send).

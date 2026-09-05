@@ -180,7 +180,7 @@ The engineer persona overlay is loaded by `load_persona_prompt("engineer")` and 
 - Stale `subagent_type="dev-session"` dispatch strings — eng sessions are now created via `python -m tools.valor_session create --role eng`, not the Agent tool, so any lingering dev-session dispatch in the overlay is flagged for removal.
 - Missing the `Mode 3` parallel-orchestrator playbook.
 
-The `/update` drift check that compares the in-repo template against the private overlay is `scripts/update/persona_drift.py` (`check_pm_persona_drift`, name retained for historical reasons), targeting `config/personas/engineer.md` vs `~/Desktop/Valor/personas/engineer.md`.
+The `/update` drift check that compares each in-repo template against its private overlay is `scripts/update/persona_drift.py` (`check_persona_drift`, aggregated across personas by `check_all_persona_drift`), targeting `config/personas/engineer.md` vs `~/Desktop/Valor/personas/engineer.md` and `config/personas/teammate.md` vs `~/Desktop/Valor/personas/teammate.md`.
 
 ## Hook Cleanup (Phase 5)
 

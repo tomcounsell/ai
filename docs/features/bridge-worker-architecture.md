@@ -49,7 +49,7 @@ TelegramRelayOutputHandler.send() (agent/output_handler.py)
     │   no drafter, no filters, no outbox (there is no human audience)
     ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
     ↓ [SDLC sessions] runs bridge.redundancy_filter.should_suppress (bigram-Jaccard duplicate guard; suppress → 👀 reaction + return)
-    ↓ [All sessions] runs bridge.read_the_room.read_the_room (verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
+    ↓ [All sessions] runs bridge.read_the_room.read_the_room (verdict: send|trim|suppress; runs unconditionally)
     ↓ writes JSON payload to the transport-appropriate Redis outbox:
     │     transport == "telegram" → telegram:outbox:{session_id}
     │     transport == "email"    → email:outbox:{session_id}
