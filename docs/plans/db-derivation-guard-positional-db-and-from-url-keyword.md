@@ -147,27 +147,117 @@ disclosure rather than pretending one already exists.
 
 ## Spike Results
 
-_placeholder_
+All five spikes were run as `code-read` / local-prototype probes against
+`67d714662` in a scratch interpreter. No repo edits, nothing committed. Every
+one is reproducible by pasting its snippet into `.venv/bin/python`.
+
+### spike-1: Do both holes still reproduce, and is the scanner alive on the input?
+- **Assumption**: "The two gaps described in the issue are still present in shipped source."
+- **Method**: prototype (drive `scan_source` on five snippets, three defective and two controls)
+- **Finding**: Confirmed. The three defective shapes yield 0 candidates each; both controls yield 1 candidate with correct `pool_db`. The controls are load-bearing: without them, three zeros are equally consistent with "the scanner is broken on synthetic input".
+- **Confidence**: high
+- **Impact on plan**: The premise holds; no rescope needed. The control-pairing discipline carries into the Verification table, where each new red row is paired with the already-passing mirror it is modeled on.
+
+### spike-2: Is `db` really positional index 2, and is that index safe to hardcode?
+- **Assumption**: "`db` is the third positional parameter of `redis.Redis.__init__`."
+- **Method**: code-read (`inspect.signature`) plus web-research
+- **Finding**: Confirmed for `redis-py 7.4.0`: `(self, host, port, db, password, ...)`, and `redis.StrictRedis is redis.Redis`. But redis-py has reshuffled argument conventions before (redis/redis-py#510), so the index is a fact about the *installed library*, not a permanent truth.
+- **Confidence**: high
+- **Impact on plan**: Decisive. The scanner keeps `node.args[2]` as a module-level named constant and stays a pure-AST module with no `redis` import; a **test** imports `redis`, reads `inspect.signature(redis.Redis.__init__)`, and asserts the constant still names the `db` parameter. A future signature reshuffle then goes red instead of silently reopening the hole. Hardcoding the 2 without that test would reproduce this guard's own founding failure mode one level up.
+
+### spike-3: Does adding a third `kind` break `format_violation`?
+- **Assumption**: "A new candidate kind flows through the reporting path unchanged."
+- **Method**: prototype (construct a `Candidate(kind="db-positional", expr="7", callee="Redis")` and format it)
+- **Finding**: **Refuted.** `format_violation` is a two-way branch: `db-kwarg` or *else* `from_url(...)`. The probe printed `tests/x.py:3: from_url(7)` for a positional `Redis` site. Any new kind is silently mislabeled as a `from_url` violation.
+- **Confidence**: high
+- **Impact on plan**: `format_violation` must gain an explicit branch per kind, and the `else` fallback must stop being an implicit `from_url`. This dovetails with #2768's folded-in item that no criterion pins the remedial message content: the message assertions land in the same task.
+
+### spike-4: Does the shipped `CLAIM_FIXTURE_NAMES` leg launder a pool slot?
+- **Assumption**: "Comment 5277517215's laundering warning describes a live defect."
+- **Method**: prototype (four probes through `scan_source`)
+- **Finding**: **Refuted as a current defect, retained as a constraint.** `scratch_test_db = 7`, `test_db = 7`, and a `scratch_test_db=7` default argument each go red. The leg is sound because the sanctioned identifier is the reserved `scratch_test_db`, not an ordinary local. The warning correctly forbids widening the leg to arbitrary identifiers.
+- **Confidence**: high
+- **Impact on plan**: No laundering fix is needed, which removes the largest speculative chunk of scope. The four probes are added to the test file as standing anti-regression rows so the next widening attempt is caught.
+
+### spike-5: Is the direct fixture-parameter refusal real, and is the tree clean?
+- **Assumption**: "Route 1 accepts `db=scratch_test_db` used directly, as its docstring implies."
+- **Method**: prototype (`scan_source` on the direct form and the alias form; then `apply_dispositions(scan_tree())`)
+- **Finding**: **Refuted.** Direct use returns `ok=False, "'scratch_test_db' has no local binding in the enclosing function"`; the alias hop returns `ok=True`. The tree itself is clean (23 candidates, 7 violations, 0 undispositioned, 0 stale), so this is a false positive with zero live exposure, not a red suite.
+- **Confidence**: high
+- **Impact on plan**: Adds a third fix to scope, deliberately. It is one leg on the same route as fix 1, it makes an existing docstring claim true instead of leaving it false, and leaving it would ship a guard whose next author hits a false positive on the most obvious correct spelling. Flagged in Open Questions since it is not in the issue body.
 
 ## Data Flow
 
-_placeholder_
+The guard is a single-process static scan with no I/O beyond reading `.py`
+files. The flow below is the path a single call site takes from source text to
+a failed assertion, annotated with where each of the three defects sits.
+
+1. **Entry point**: `tests/unit/test_db_derivation_guard.py::test_no_test_derives_its_own_redis_db` calls `scan_tree()`.
+2. **`scan_tree`**: walks `tests/**/*.py`, reads each file, calls `scan_source(source, rel_path)`. A `SyntaxError` propagates deliberately.
+3. **`scan_source`**: `ast.parse` → `_parent_map` → `_LocalBindings().visit` → `ast.walk`, filtering to `ast.Call`, and resolving `callee = _terminal_name(node.func)`.
+4. **Route 1** (`for kw in node.keywords`): splat leg (`kw.arg is None`) → `_splat_candidate`; `db=` leg → value judged by `_is_claim_call` / `_resolve_one_hop` / `_first_pool_db`. **Defect 1 lives here**: `node.args` is never consulted, so a positional `db` never enters this stage. **Defect 3 lives here**: an `ast.Name` that is a sanctioned fixture parameter is sent straight to `_resolve_one_hop`, which finds no local binding and refuses it.
+5. **Route 2** (`if callee == "from_url" and node.args`): `node.args[0]` judged by `CLAIM_URL_NAMES` (two legs, `ast.Call` and bare `ast.Name`) or `_url_db`. **Defect 2 lives here**: the `and node.args` gate drops the whole call when `url` arrived by keyword.
+6. **`ScanResult.candidates`** accumulates; `.violations` is the `ok=False` subset.
+7. **`apply_dispositions`**: matches each violation against `ALLOWLIST + DEFERRED` by `_matches` (path plus `ast.unparse` of the expression, **not** kind), refusing any `ALLOWLIST` cover for a candidate whose `pool_db` is set. Returns `(undispositioned, stale)`.
+8. **`format_violation`**: renders each undispositioned violation. **Spike-3's defect lives here**: the two-way `kind` branch mislabels anything that is not `db-kwarg` as a `from_url` site.
+9. **Output**: the assertion message in the failing test, read by the author who wrote the offending line.
+
+The three fixes all land between steps 4 and 5, and one message repair lands at
+step 8. Nothing upstream of step 3 or downstream of step 9 changes.
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| #2117 | Fixed one cross-process db collision at the site that flaked | Point fix at a single call site. The next site was written in a shape the fix did not cover. |
+| #2606 | Repaired shared-state leaks, added a db-claim guard | Enumerated the *accepted* constructor names. Anything unenumerated passed silently, so #2628 found the suite still rotating. |
+| #2624 / #2628 / PR #2683 | Enforced test-DB ownership; added `CLAIM_FIXTURE_NAMES` and the `_resolve_one_hop` alias leg | Correct as far as it went, but added only the alias-hop leg for the sanctioned fixture and not the direct-use leg, while writing a docstring claiming it mirrored route 2 "exactly". That gap is defect 3 in this plan. |
+| #2655 / PR #2700 | Inverted the polarity: judge every `db=` value, callee-agnostic | Replaced an enumeration of callee *names* with an enumeration of argument-passing *syntax*, and did not enumerate the mirror of each route it wrote. Route 1 reads keywords and not positionals; route 2 reads positionals and not keywords. Defects 1 and 2. |
+| #2768 | Filed the positional half independently, from the late plan critique | Never implemented. Closed as a duplicate of #2764 four minutes after PR #2700 merged, folding two additions in by comment. Being closed-as-duplicate is exactly how those two additions came within one prior-art search of vanishing. |
+
+**Root cause pattern.** Every round has closed the hole it could see and left the
+symmetric hole it could not. The recurring mechanism is not carelessness about
+Redis; it is that each fix enumerates one axis and treats the enumeration as
+exhaustive. #2700's own docstring is candid that enumerating accepted shapes was
+what let the defect recur, then enumerates argument syntax without pairing each
+route with its mirror. The countermeasure this plan adopts is narrow and
+checkable: **for every route, state in the code which argument positions it
+reads, and pin the mirror shape with a demonstrated-red test.** Where an
+enumeration genuinely cannot be avoided (the callee scoping on the positional
+leg and the splat leg), disclose it in prose next to the code, so the next
+author inherits a known boundary rather than an assumed guarantee.
 
 ## Architectural Impact
 
-_placeholder_
+- **New dependencies**: none in the scanner. `tests/db_derivation_guard.py` stays a pure-AST module importing only stdlib plus `tests.db_claim._TEST_DB_POOL_MAX`. The test file gains an `import redis` and an `import inspect` for the signature-pin assertion (spike-2); `redis` is already a hard dependency of the suite.
+- **Interface changes**: `Candidate.kind` gains a third value, `"db-positional"`. Its docstring comment (`# "db-kwarg" | "from-url"`) is part of the contract and must be updated with it. `format_violation` gains an explicit per-kind branch. `scan_source` returns candidates for three previously-silent shapes; no signature changes anywhere.
+- **Coupling**: unchanged for the scanner. It rises slightly in the test file, which now knows about `redis.Redis.__init__`'s parameter order. That coupling is the point: it is the tripwire that converts a future redis-py reshuffle from a silent hole into a red test.
+- **Data ownership**: unchanged. No Popoto model, no Redis write, no schema. The Popoto migration requirement in `docs/sdlc/do-plan.md` does not apply.
+- **Reversibility**: high. Every change is additive within two files and revertable by a single `git revert`. The one irreversible-feeling risk is the opposite of a rollback problem: if the new legs produce false positives on the live tree the suite goes red immediately and loudly, which is the desired failure direction.
 
 ## Appetite
 
-_placeholder_
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0 (scope is fully specified by the issue plus the two items folded in from #2768; the one judgment call is in Open Questions)
+- Review rounds: 1
+
+Two files, no runtime code, no deploy surface, no live call sites to convert.
+The work is small in edits and demanding in evidence: this guard's entire value
+is that it fires, so every new leg needs a demonstrated-red test and every
+existing green needs to stay green. Budget the time in proving the tests bite,
+not in writing the AST branches.
 
 ## Prerequisites
 
-_placeholder_
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `redis` importable with a readable `Redis.__init__` signature | `python -c "import inspect, redis; assert list(inspect.signature(redis.Redis.__init__).parameters)[3] == 'db'"` | The positional index the new leg reads, and the pin test that guards it |
+| Guard module imports and the tree is clean | `python -c "from tests.db_derivation_guard import scan_tree, apply_dispositions; r,s=apply_dispositions(scan_tree()); assert not r and not s"` | Establishes the green baseline the fix must preserve |
+| Claim-pool ceiling importable | `python -c "from tests.db_claim import _TEST_DB_POOL_MAX; assert _TEST_DB_POOL_MAX >= 1"` | `_first_pool_db` bounds depend on it |
 
 ## Solution
 
