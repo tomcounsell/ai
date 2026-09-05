@@ -41,6 +41,7 @@ Known limitation
 ``ps -o args=`` returns one string per process, so argv is recovered by
 splitting on whitespace. A service whose interpreter or script path contains a
 space would not match. No path in this repo's launchd plists contains one.
+``-ww`` is passed so the command line is never truncated to terminal width.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def list_processes() -> list[tuple[int, list[str]]]:
     """
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,args="],
+            ["ps", "-axww", "-o", "pid=,args="],
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT_SECONDS,
@@ -103,9 +104,7 @@ def _runs_module(argv: list[str], module: str) -> bool:
     """True when argv carries an adjacent ``-m <module>`` pair.
 
     Token equality, not prefix: ``python -m workerfoo`` does not satisfy
-    ``module="worker"``. Requiring the pair also means a ``-c`` payload that
-    merely mentions the module name never matches, because the payload is a
-    single token that is the value of ``-c``.
+    ``module="worker"``.
     """
     for index in range(1, len(argv) - 1):
         if argv[index] == "-m" and argv[index + 1] == module:
@@ -113,22 +112,30 @@ def _runs_module(argv: list[str], module: str) -> bool:
     return False
 
 
+def _interpreter_argv(argv: list[str]) -> list[str]:
+    """Argv truncated at ``-c``, i.e. the part Python itself interprets.
+
+    ``python -c <source> [args...]`` hands everything from ``<source>`` onward
+    to the program: the source is not a path and the trailing args are not
+    interpreter options. Scanning them is how a ``ps | grep``-style probe
+    mistakes ``python -c "print('bridge/telegram_bridge.py')"`` for the bridge.
+    Truncating once, here, keeps the module and script matchers consistent —
+    neither can be fooled by a ``-c`` payload.
+    """
+    try:
+        return argv[: argv.index("-c")]
+    except ValueError:
+        return argv
+
+
 def _runs_script(argv: list[str], script_suffix: str) -> bool:
     """True when some argument is a path equal to or ending in ``script_suffix``.
 
-    ``argv[0]`` is excluded so the interpreter path itself can never match.
-    The token immediately after ``-c`` is skipped: it is source code, not a
-    path, so ``python -c "print('bridge/telegram_bridge.py')"`` is not the
-    bridge.
+    ``argv[0]`` is excluded so the interpreter path itself can never match —
+    load-bearing, because the framework interpreter path ends in path segments
+    a suffix probe could otherwise match.
     """
-    skip_next = False
     for token in argv[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-        if token == "-c":
-            skip_next = True
-            continue
         if token == script_suffix or token.endswith("/" + script_suffix):
             return True
     return False
@@ -157,9 +164,10 @@ def find_python_service_pids(
     for pid, argv in list_processes():
         if not _is_python_interpreter(argv[0]):
             continue
-        if module is not None and _runs_module(argv, module):
+        scan = _interpreter_argv(argv)
+        if module is not None and _runs_module(scan, module):
             pids.append(pid)
             continue
-        if script_suffix is not None and _runs_script(argv, script_suffix):
+        if script_suffix is not None and _runs_script(scan, script_suffix):
             pids.append(pid)
     return sorted(pids)

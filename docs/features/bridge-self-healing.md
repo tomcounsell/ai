@@ -63,7 +63,7 @@ site). See [Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data
 `scripts/log_rotate.py` counterpart.
 
 **Health Checks**:
-- Process running (`pgrep -f telegram_bridge.py`)
+- Process running — `is_bridge_running()` calls `tools.process_lookup.find_python_service_pids(script_suffix="bridge/telegram_bridge.py")` (#3164), not `pgrep`: BSD `pgrep` on macOS excludes the calling process and all of its ancestors from the match list unless `-a` is passed, which is not a portable fix (`-a` means "print the full command line" on Linux/procps). This lookup is ancestor-safe, so a bridge-hosted caller (an agent session) sees its own ancestor bridge correctly.
 - Logs fresh (written within 5 minutes)
 - No crash pattern detected
 - Zombie process detection (claude/pyright processes idle > 2 hours)
@@ -88,6 +88,8 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 | 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (the bridge always catches up missed messages on startup — see below) |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to `_recovery_exhausted()`, which logs `CRITICAL` and records `log_crash("Recovery exhausted")` |
+
+Levels 2-4's "Kill stale" step calls `kill_stale_processes()`, which deliberately stays on `pgrep -f telegram_bridge.py` rather than the ancestor-safe `tools.process_lookup` lookup used by the health check above (#3164). It SIGKILLs every match, so `pgrep`'s exclusion of the caller's own ancestors is load-bearing here, not a bug: an ancestor-safe lookup in this `os.kill` path would let a bridge-descended caller (an agent session) kill its own live ancestor bridge. Do not convert this call site.
 
 `recovery_level` has no level 5. Two independent signals are computed alongside `recovery_level`, both on `HealthStatus`:
 
@@ -453,6 +455,8 @@ A worker process can appear alive (PID exists, launchd does not restart it) but 
 | Worker PID absent | `down` | **Active recovery via 4-level escalation** — see below |
 | ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5** — see below |
 
+Both "Worker PID absent" above and the L2 verify step below resolve the PID via `_get_worker_pid()`, which calls `tools.process_lookup.find_python_service_pids(module="worker", script_suffix="worker/__main__.py")` — an ancestor-safe lookup, not `pgrep` (#3164).
+
 **Stale-heartbeat threshold:** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable. The ≥6× multiplier is the false-positive guard: the heartbeat is written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, so thread-pool exhaustion cannot starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy).
 
 **Heartbeat thread isolation:** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started at worker startup and is stopped via `_heartbeat_stop_event` on worker shutdown. The only way the heartbeat can go stale is if the worker process itself is hung.
@@ -496,7 +500,7 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 | Level | Trigger | Action |
 |-------|---------|--------|
 | L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
-| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
+| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then `_verify_worker_alive()` polls `_get_worker_pid()` (the ancestor-safe lookup, not `pgrep`) for up to `VERIFY_GRACE_SECONDS`. On success, clear counter. |
 | L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the case where the service was registered via `launchctl load`, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
 | L3 | L2/L2.5 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
 | L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Reason string includes `bootstrap+kickstart+enable all failed` when L2.5 was attempted, otherwise `kickstart+enable both failed`. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
@@ -549,6 +553,8 @@ Four coordinated pieces verify that the running processes actually execute the p
 | `stale` | beacon belongs to the current image AND that relevant-range log is non-empty |
 | `unknown` | beacon missing/malformed, no PID, `process_start_ts` unavailable, an orphaned beacon (`beacon_ts <= process_start_ts`), or `boot_sha` unresolvable by git |
 
+"No PID" is the result of a PID *lookup*, not a fact about the process. `get_bridge_pid()`/`get_worker_pid()`/`get_email_pid()` (`scripts/update/service.py`) resolve via `tools.process_lookup.find_python_service_pids()`, an ancestor-safe lookup (#3164): BSD `pgrep` on macOS excludes the calling process and all of its ancestors from its match list, so a `python -m scripts.update.verify_release` invocation running as a bridge-hosted agent session previously could not see its own ancestor bridge and classified a healthy, correctly-beaconed bridge as `unknown` before the beacon was ever read (`_classify_process()` short-circuits to `unknown` as soon as `pid is None`). This lookup fixes that specific false `unknown`; it does not change the classifier's other `unknown` conditions.
+
 Staleness is positive-only and scoped to each process's own relevant path set (bridge: `bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml`; worker: `worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`), the same sets the restart gates diff, so classifier and restart gate agree by construction. A raw `boot_sha == HEAD` comparison is never used: docs-only or plan-migration commits advance HEAD past a healthy, correctly-un-restarted process, and a literal-equality check would false-fail on the majority of this repo's commit stream. `unknown` never fails a run and never triggers a restart. Only a positive, confirmed staleness escalates.
 
 **Bridge kickstart in `remote-update.sh`**: After the pull and the worker kickstart, the shell computes `NEED_BRIDGE_RESTART` from a `BEFORE_SHA..AFTER_SHA` diff of the bridge-relevant paths, gated on the bridge plist being installed on this machine (`[ -f "$BRIDGE_DST" ]`; a skills-only machine has no bridge plist and skips the block entirely). When true, it runs `launchctl kickstart -k {prefix}.bridge` as the **last** thing the script does. This is safe because the bridge holds no agent sessions (the worker is the sole session executor) and its Telethon `catch_up=True` scan backfills anything missed during the brief restart. It is the last act because the kickstart SIGKILLs the whole bridge launchd job, including `handle_update_command` and the `remote-update.sh` child it spawned, since they share the job's process group. Nothing in the shell runs after a successful kickstart. Both worker and bridge kickstart failures surface as a distinct `RESTART FAILED` line and a non-zero terminal exit (`RESTART_FAILED || VERIFY_FAILED`).
@@ -557,7 +563,7 @@ Staleness is positive-only and scoped to each process's own relevant path set (b
 
 Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "$LOCK_DIR"`), because the `trap cleanup_lock EXIT` that normally releases it never fires on SIGKILL. Without the explicit release, every bridge-relevant update would orphan the lock for up to 600 seconds, and any retry or the next cron cycle in that window would hit the "already running" skip branch with no pull and no verify.
 
-**Terminal verify runs every cycle**: `python -m scripts.update.verify_release` (`scripts/update/verify_release.py`) is the shell's terminal step on every invocation, including no-op cron cycles with no new commits. This re-classifies a starved or never-restarted process instead of only checking right after a restart. It is scoped to the worker only (`--skip-bridge`) when a bridge restart is queued this cycle, since the about-to-restart bridge is not escalated as stale. It takes a `--since <epoch>` restart moment and polls (bounded, 15 attempts x 2 seconds) for the worker beacon to freshen past it before classifying, because a `kickstart -k` returns before the freshly-spawned process has written its own beacon, so an immediate read would otherwise see the pre-restart beacon and misclassify `unknown`. Exit code 1 on any positive staleness, 0 otherwise (`unknown` prints a warning but does not fail the run).
+**Terminal verify runs every cycle**: `python -m scripts.update.verify_release` (`scripts/update/verify_release.py`) is the shell's terminal step on every invocation, including no-op cron cycles with no new commits. This re-classifies a starved or never-restarted process instead of only checking right after a restart. It is scoped to the worker only (`--skip-bridge`) when a bridge restart is queued this cycle, since the about-to-restart bridge is not escalated as stale. It takes a `--since <epoch>` restart moment and polls (bounded, 15 attempts x 2 seconds) for the worker beacon to freshen past it before classifying, because a `kickstart -k` returns before the freshly-spawned process has written its own beacon, so an immediate read would otherwise see the pre-restart beacon and misclassify `unknown`. Exit code 1 on any positive staleness, 0 otherwise (`unknown` prints a warning but does not fail the run). Because the PID lookup underneath (`get_bridge_pid()`/`get_worker_pid()`) is ancestor-safe (#3164), a cron-launched (launchd-parented) invocation and a bridge- or worker-hosted agent-session invocation now observe the same PID for the same live process. Before that fix these two caller contexts diverged: the cron path saw the PID and the bridge-hosted session path did not, because the session's own ancestor chain includes the bridge it is probing.
 
 **Report path splits on whether the bridge restarts this cycle** (the survivable-channel design: a bridge kickstart kills the process that ran `/update`, so it cannot always be the reporter):
 
@@ -879,6 +885,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 | `monitoring/bridge_watchdog.py` | External health monitor (bridge process); includes `assess_update_flow()` and wedged-update-loop recovery |
 | `bridge/liveness.py` | Liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()`, `record_missed_recovery()`, `get_last_missed_recovery()` |
 | `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
+| `tools/process_lookup.py` | Ancestor-safe Python service PID lookup (`list_processes()`, `find_python_service_pids()`), used by `is_bridge_running()`, `_get_worker_pid()`, and `scripts/update/service.py`'s PID getters. Not used by `kill_stale_processes()` (see Component 3) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
