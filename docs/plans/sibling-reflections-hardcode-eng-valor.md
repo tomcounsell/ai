@@ -417,4 +417,8 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 
 ## Open Questions
 
-<!-- TODO -->
+1. **Is `scripts/memory_consolidation.py:352` in scope?** The issue enumerates four reflections but sets the exit criterion as "a clean grep sweep for the literal". That sweep fails while this fifth argv site stands. This plan includes it (one call-site swap plus preserving the `CalledProcessError` → contradiction-log fallback). Confirm, or cut it and soften the criterion to the four named files.
+
+2. **Should the two host-machine digests suppress, or keep the narrowed fallback?** `sentry_triage` and `stall_advisory` have no project in scope, so this plan routes them through `resolve_host_eng_chat`, which falls back to the `Eng: Valor` literal when the root is *this checkout*. That preserves today's behavior on the production machine. The stricter reading of the issue — "resolve → send by numeric `chat_id` → skip-and-warn when unresolvable" with no fallback — would make the digests go silent on any machine whose `projects.json` lacks a populated `Eng:` group. Preserving the fallback is the conservative call and matches #2754; confirm that is what is wanted.
+
+3. **Does the suppression finding need to reach Telegram some other way?** When resolution fails there is by definition no chat to tell. The finding lands in the reflection's `summary` (which the scheduler persists) and in the warning log. If a suppressed page needs to escalate somewhere a human actually watches, that is a separate mechanism and a separate issue — say so and it stays out.
