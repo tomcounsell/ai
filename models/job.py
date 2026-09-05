@@ -139,55 +139,6 @@ class Job(Model):
     # string "False", which is truthy.
     has_open_expectations = IndexedField(type=bool, default=False)
 
-    # -- Persistence --------------------------------------------------------
-
-    def save(
-        self,
-        pipeline=None,
-        ignore_errors: bool = False,
-        skip_auto_now: bool = False,
-        update_fields: list | None = None,
-        migrate_key: bool = False,
-        **kwargs,
-    ):
-        """Re-attach UTC to a naive ``last_active_at`` before persisting.
-
-        popoto 1.8.0 decodes a stored datetime without tzinfo, so a reloaded
-        Job carries a naive ``last_active_at``; the next save would compute the
-        SortedField score as ``naive.timestamp()`` — local time, skewed from the
-        stored hash value by the host's UTC offset. Every write funnels through
-        here, so this one re-attach makes every score a pure UTC epoch.
-
-        **Instant-preserving, not a re-stamp.** It attaches the tzinfo the value
-        already meant and never assigns ``_now()``: re-stamping would refresh
-        recency on every unrelated write, resurrecting idle Jobs and defeating
-        rest-by-age.  Idempotent — an aware value is left untouched.
-
-        The reattach is gated on the field being in scope. A scoped save that
-        excludes ``last_active_at`` (``backfill_open_expectations_index``'s
-        ``save(update_fields=["has_open_expectations"])``, whose docstring
-        guarantees it never writes recency) must not touch the SortedField score
-        path at all; a scoped save that *names* the field still reattaches.
-
-        The signature mirrors popoto 1.8.0's ``Model.save`` exactly (rather
-        than ``*args``) so a caller passing ``update_fields`` positionally is
-        still captured by the guard — a splat signature would let a positional
-        ``update_fields`` slip past the keyword check and only surface as a
-        ``TypeError`` at the ``super().save`` delegation.
-        """
-        if update_fields is None or "last_active_at" in update_fields:
-            value = self.last_active_at
-            if isinstance(value, datetime) and value.tzinfo is None:
-                self.last_active_at = value.replace(tzinfo=UTC)
-        return super().save(
-            pipeline=pipeline,
-            ignore_errors=ignore_errors,
-            skip_auto_now=skip_auto_now,
-            update_fields=update_fields,
-            migrate_key=migrate_key,
-            **kwargs,
-        )
-
     # -- Identity -----------------------------------------------------------
 
     @property
@@ -767,18 +718,6 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
-            # rebuild_indexes() re-scores every row via field.on_save on
-            # naive-decoded instances — naive.timestamp() is local time, and
-            # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
-            # host the rebuild itself re-skews every recency score. Sweep the
-            # scores back so the maintenance path is score-preserving.
-            scanned, renormalized = cls.renormalize_last_active_scores()
-            if renormalized:
-                logger.info(
-                    "[job] re-normalized %d of %d recency score(s) after the index rebuild",
-                    renormalized,
-                    scanned,
-                )
             cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
