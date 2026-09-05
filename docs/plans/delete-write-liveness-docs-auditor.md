@@ -281,13 +281,40 @@ f"docs-auditor: {n} files touched, {k} fixes{withheld_note}{suppressed_note}, "
 f"PR={pr_url}; vault {vault_narratives_compared} narratives compared"
 ```
 
-The clause must be emitted when the value is `0` and omitted only when it is `None`,
-because `0` versus absent is the exact distinction #2084 built the field to preserve. The
-500-character truncation in `agent/reflection_scheduler.py:648` is a live constraint: the
-PR summary is the longest of the five and gains roughly 35 characters. Measure the
-worst-case realistic string during the build and confirm it stays under 500 with the new
-clause; if it does not, the clause moves ahead of `PR={pr_url}` so a truncation loses the
-URL (recoverable from GitHub) rather than the count (recoverable from nowhere).
+**The clause is unconditional. Write no `is not None` guard.**
+`_run_vault_drift_detection` is annotated `-> int` (`reflections/docs_auditor.py:2370`)
+and returns an `int` on every path: `return 0` when `_resolve_vault_root` yields `None`
+(`:2384-2385`), `return compared` on success (`:2396`), and `return 0` from its
+`except Exception` (`:2399-2400`). The local at `:2460` is therefore never `None`, and a
+guard against a value that cannot occur would ship dead code inside a dead-code-deletion
+PR. A builder must not "fix" this by making the function return `None`; its annotation is
+correct and stays.
+
+The distinction #2084 built the field to preserve is real, but it is **per-call-site, not
+per-value**. Today the created-PR call site always passes an int (so the
+`vault_narratives_compared` key is always present in that payload) and the other four call
+sites pass nothing (so the key is always absent in theirs). The faithful replacement keeps
+exactly that shape: the created-PR summary always carries the clause, including when the
+count is `0`; the other four summary strings never carry it.
+
+**Why the clause is worth adding at all** (this settles the choice rather than deferring
+it to a human): with the clause, `; vault 0 narratives compared` on a created-PR run is
+observably different from `; vault 137 narratives compared`. That is the observability
+guarantee PR #2096 argued for — "detector ran and compared N narratives" versus "detector
+ran and compared none, so the vault mapping may be silently broken" — and it is the only
+one actually at stake. Discarding the return with `_ = _run_vault_drift_detection(...)`
+would also clear `ruff`'s F841 with a smaller diff, so the lint rule forces *a* resolution
+and not *this* one; the argument above is what picks this one. The build proceeds on it
+with no PM check-in.
+
+**Truncation budget: measured, not assumed.** `agent/reflection_scheduler.py:648`
+truncates `output_summary` to 500 characters. A worst-realistic created-PR summary (42
+files, 137 fixes, withheld note present, Telegram suppressed with the full repo path, a
+real six-digit PR URL) measures **195 characters**, and **227** with the 32-character
+vault clause appended — roughly 273 characters of headroom. The clause therefore stays at
+the end of the string, and there is no reordering fallback. Re-measure once during the
+build to confirm the number, then move on; do not introduce a conditional reorder branch
+that no test would ever exercise. See Risk 1.
 
 **2. Deletion order.** Delete the five call sites first, then the function, then the
 constants. `ruff check` after each step turns the orphaned `vault_narratives_compared`
@@ -347,12 +374,14 @@ was written before #2782 and #2739 added the rest.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `vault_narratives_compared is None`: the created-PR path when
-      `_run_vault_drift_detection` returns `None`. Assert the clause is absent from the
-      summary and the run still reports `"ok"`.
-- [ ] `vault_narratives_compared == 0`: assert the clause is present and reads `0`. This
-      is the case the whole field exists for and the one an "if the value is truthy" bug
-      would silently break.
+- [ ] `vault_narratives_compared == 0` on the created-PR path: assert the clause is
+      present and reads `0`. This is the case the whole field exists for and the one an
+      "if the value is truthy" bug would silently break.
+- [ ] The clause is **absent** from the zero-diff and no-candidates summaries, which
+      never carried the count and still must not. This is the per-call-site half of the
+      distinction (Technical Approach item 1); there is no `None`-valued case to test,
+      because `_run_vault_drift_detection` is `-> int` and returns `0` on every path
+      (`:2384`, `:2396`, `:2399-2400`).
 - [ ] Empty `summary` reaching the scheduler is out of scope: every return path builds a
       non-empty f-string, and the scheduler's `if summary_str else None` guard
       (`:648`) already handles a falsy value.
@@ -402,8 +431,17 @@ All in `tests/unit/test_docs_auditor_substrate.py`.
       `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_TS_KEY")`, and
       `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_SUMMARY_KEY")`. This is what stops
       a future revert from silently reintroducing the channel.
-- [ ] **NEW** two tests for the `vault_narratives_compared` clause: present-and-zero, and
-      absent-when-None, both driving the created-PR path.
+- [ ] **NEW** two tests for the `vault_narratives_compared` clause: (1) present-and-zero
+      on the created-PR path, asserting the summary contains `vault 0 narratives
+      compared`; (2) absent on the zero-diff and no-candidates paths, asserting `"vault"`
+      does not appear in either summary. There is no `None`-valued case: the detector is
+      `-> int` on every path.
+- [ ] `TestStep9Suppression::test_step9_suppression_reaches_summary_before_pr_url`
+      (`:1762`, assertion at `:1787`, patch at `:1781`). **UPDATE**: drop the
+      `_write_liveness` patch line only. Its ordering invariant
+      (`summary.index("suppressed") < summary.index("PR=")`) is why the vault clause is
+      appended after `PR={pr_url}` and never reordered ahead of it; leave the assertion
+      untouched and do not let a truncation-headroom edit displace `suppressed_note`.
 
 No test outside this file references `_write_liveness` or either constant.
 
@@ -616,9 +654,10 @@ No agent integration required. This removes an internal function and its Redis w
       `REDIS_LAST_COMPLETED_SUMMARY_KEY` do not exist anywhere in `reflections/`.
 - [ ] All five call sites are gone; `run_docs_auditor` still returns the same five
       `status` values on the same five paths.
-- [ ] The created-PR summary string carries the vault count, emitted on `0` and omitted on
-      `None`, and survives the scheduler's 500-character truncation in a worst-case
-      summary.
+- [ ] The created-PR summary always carries the vault count, including when it is `0`,
+      with no `is not None` guard; no other summary string carries it. The worst-case
+      created-PR summary measures under the scheduler's 500-character truncation (195
+      characters today, 227 with the clause).
 - [ ] `TestLivenessDeadCodeRemoved` exists and fails if any of the three symbols returns.
 - [ ] The two behavioral assertions that the withheld count reaches a durable surface
       still exist, now asserting on `result["summary"]` rather than a mock's kwargs.
