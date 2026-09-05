@@ -74,9 +74,24 @@ to #3076.
   first error line looks network-shaped (DNS, TLS, refused/reset, connect
   errors) — an assertion failure in any phase disqualifies it, so a regression
   whose assert-diff merely mentions a network string still files. Environmental
-  nodes file nothing and are deliberately never recorded as dispatched, so they
-  re-evaluate every night; the escalation gap for a persistent
-  environmental-looking failure is tracked in #3163
+  nodes file nothing new and are not recorded as dispatched, so they re-evaluate
+  every night. Two escalation paths (issue #3163) keep that from being terminal
+  silence: the state file carries `environmental_streaks`, a per-node count of
+  consecutive environmental nights, and a node that reaches
+  `NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS` (default 3; `0` disables) is handed
+  back to the ordinary filing path, where open/closed dedup, cascade grouping
+  and the issue budget apply to it like any other node; and an environmental
+  node whose exact title is already open gets one recurrence comment naming
+  the classification and the streak length, and is recorded so it is
+  suppressed afterwards like any other commented node. The streak map is
+  rebuilt each night from tonight's classifications, so a node that passes,
+  fails for a code-level reason, or gets filed drops out and its count resets
+- The closed-issue dedup read pulls `CLOSED_ISSUE_LIST_LIMIT = 4000` rows under
+  its own `CLOSED_ISSUE_LIST_TIMEOUT_SECONDS`, sized past the repo's whole
+  closed set so every closure is visible to dedup; the read stays on the REST
+  path rather than a title-scoped `--search`, whose index lag is the exact
+  window dedup has to be right in. Saturating the window now logs a WARNING,
+  because it means the repo has outgrown the limit
 - **Comments instead of filing a twin.** Open AND closed issues are read once
   via `gh issue list` (the REST path, not the index-lagged `--search`)
   immediately before dispatch. A finding with an open issue gets a recurrence
@@ -108,7 +123,8 @@ a human is expected to notice; the log is the full record.
 | Newly-confirmed failure, issue already open | Recurrence comment on the existing issue | same line, with `M > 0` |
 | Newly-confirmed failure, exact title closed `NOT_PLANNED` (newest closure) | Recurrence comment on the closed issue; never re-filed | same line, with `M > 0` |
 | Newly-confirmed failure, exact title closed `COMPLETED` (newest closure) | New issue — failing again after a fix is new information | `Tracker: N issue(s) filed ...` |
-| Environmental failure (every failing phase network-shaped) | Nothing; unrecorded, re-evaluates nightly (escalation gap: #3163) | environmental exclusion logged, surfaced in the run summary |
+| Environmental failure (every failing phase network-shaped) | Nothing new; unrecorded, re-evaluates nightly. Exact title already open: one recurrence comment, then recorded | environmental exclusion logged with the night count, surfaced in the run summary |
+| Environmental failure for `NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS` consecutive nights | Ordinary filing path (issue #3163) | `... escalated to ordinary filing (#3163)` |
 | Issue budget exhausted | Nothing; the finding stays unrecorded and retries next run | `Issue budget reached: deferring ...` |
 | Collection errors, no newly-confirmed failures | Nothing | `Collection error ({new_errors} errors)` |
 | TTFT regression | Nothing | `TTFT regression: {detail}` |

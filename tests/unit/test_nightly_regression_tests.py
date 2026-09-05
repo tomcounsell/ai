@@ -2629,6 +2629,125 @@ class TestReviewFindings3142:
         }
         assert not nrt.is_environmental_failure(test)
 
+    def test_environmental_streak_persists_and_stays_excluded_below_threshold(
+        self, monkeypatch, tmp_path
+    ):
+        env_node = "tests/integration/test_net.py::test_fetch"
+        report = {
+            "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node],
+            report=report,
+            open_map={},
+            closed_map={},
+            prev={"environmental_streaks": {env_node: 1}},
+        )
+        assert filed == []
+        assert commented == []
+        assert outcome.environmental == [env_node]
+        assert outcome.escalated == []
+        assert outcome.environmental_streaks == {env_node: 2}
+        assert env_node not in outcome.recorded
+
+    def test_environmental_streak_escalates_to_ordinary_filing_on_night_three(
+        self, monkeypatch, tmp_path
+    ):
+        """#3163 gap 1: a persistent environmental-looking failure is a code bug
+        until proven otherwise. Night three files it through the normal path."""
+        env_node = "tests/integration/test_net.py::test_fetch"
+        report = {
+            "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node],
+            report=report,
+            open_map={},
+            closed_map={},
+            prev={"environmental_streaks": {env_node: 2}},
+        )
+        assert filed == [[env_node]]
+        assert outcome.escalated == [env_node]
+        assert outcome.environmental == []
+        assert outcome.environmental_streaks == {env_node: 3}
+        assert env_node in outcome.recorded
+
+    def test_environmental_streak_resets_when_tonight_is_not_environmental(
+        self, monkeypatch, tmp_path
+    ):
+        env_node = "tests/integration/test_net.py::test_fetch"
+        gone_node = "tests/integration/test_net.py::test_gone"
+        report = {"tests": [_body_failed(env_node, "gw0", "E   AssertionError: 3 != 4")]}
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node],
+            report=report,
+            open_map={},
+            closed_map={},
+            prev={"environmental_streaks": {env_node: 2, gone_node: 5}},
+        )
+        assert filed == [[env_node]]
+        assert outcome.environmental_streaks == {}
+
+    def test_environmental_escalation_knob_zero_disables(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS", "0")
+        env_node = "tests/integration/test_net.py::test_fetch"
+        report = {
+            "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node],
+            report=report,
+            open_map={},
+            closed_map={},
+            prev={"environmental_streaks": {env_node: 40}},
+        )
+        assert filed == []
+        assert outcome.environmental == [env_node]
+        assert outcome.environmental_streaks == {env_node: 41}
+
+    def test_environmental_node_with_open_issue_gets_one_recurrence_comment(
+        self, monkeypatch, tmp_path
+    ):
+        """#3163 gap 1b: the exclusion used to run before the open-issue
+        partition, so a tracked node got no recurrence comment while it looked
+        environmental. It now gets one and is recorded, so tomorrow's dispatch
+        set suppresses it like any other commented node."""
+        env_node = "tests/integration/test_net.py::test_fetch"
+        report = {
+            "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
+        }
+        outcome, commented, filed = self._dispatch(
+            monkeypatch,
+            tmp_path,
+            nodes=[env_node],
+            report=report,
+            open_map={f"Nightly regression: {env_node}": 777},
+            closed_map={},
+        )
+        assert filed == []
+        assert commented == [777]
+        assert outcome.comments_posted == 1
+        assert outcome.recorded == [env_node]
+        assert outcome.environmental == [env_node]
+        assert outcome.environmental_streaks == {env_node: 1}
+        assert "1 consecutive night so far" in nrt.environmental_epilogue(1)
+        assert "3 consecutive nights so far" in nrt.environmental_epilogue(3)
+
+    def test_environmental_streaks_reader_ignores_garbage_shapes(self):
+        assert nrt.environmental_streaks({}) == {}
+        assert nrt.environmental_streaks({"environmental_streaks": "nope"}) == {}
+        assert nrt.environmental_streaks(
+            {"environmental_streaks": {"a::t": 2, "b::t": 0, "c::t": "3", 4: 1}}
+        ) == {"a::t": 2}
+
     def test_environmental_setup_storm_files_nothing(self, monkeypatch, tmp_path):
         """A >=3-node network setup storm is excluded BEFORE cascade grouping.
 

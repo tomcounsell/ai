@@ -330,11 +330,24 @@ OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 # a node whose exact-title issue was closed as a duplicate was re-reported as
 # "previously untriaged" forever, because dedup consulted open issues only).
 # `gh issue list` orders newest-CREATED first, not most-recently-updated, so
-# an old issue closed recently can sit outside this window, and the repo
-# already holds more closed issues than the limit. closed_issue_dispositions()
-# logs a warning when the read saturates the window so the truncation is
-# visible instead of silent.
-CLOSED_ISSUE_LIST_LIMIT = 1000
+# an old issue closed recently can sit outside this window. The window is
+# sized past the repo's whole closed set (about 1900 at #3163) so every
+# closure is visible; `gh` pages the REST endpoint 100 rows at a time, so the
+# read is ~40 calls once a night, bounded by its own timeout below. Scoping
+# with `--search` was the alternative and was rejected: the search index lags
+# creation by minutes, the exact window in which dedup has to be right.
+# closed_issue_dispositions() logs when the read saturates the window, which
+# now means the repo has outgrown it and the limit needs raising.
+CLOSED_ISSUE_LIST_LIMIT = 4000
+CLOSED_ISSUE_LIST_TIMEOUT_SECONDS = 180
+
+# Consecutive nights a node may classify environmental before it is treated as
+# an ordinary failure and filed (#3163). A genuine outage clears in a night or
+# two; a code bug that raises network errors (a wrong-port config, a
+# `pytest.raises(ConnectionRefusedError)` regressing to DID-NOT-RAISE) looks
+# environmental every night indefinitely. Env: NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS;
+# 0 disables escalation.
+ENVIRONMENTAL_ESCALATE_NIGHTS_DEFAULT = 3
 
 # Posting one recurrence comment. Bounded on the same rule as the list read
 # above; a comment that cannot be posted is logged and the finding is left
@@ -1613,9 +1626,12 @@ def is_environmental_failure(test: dict) -> bool:
     classified environmental is logged and excluded from filing — no issue, no
     umbrella (the exclusion runs before cascade grouping) — and deliberately
     NOT recorded as dispatched, so it re-evaluates every night and starts
-    filing again the moment its failure stops looking environmental. That
-    non-recording also means a persistently environmental-looking code bug is
-    silenced to log lines with no escalation path — tracked in #3163.
+    filing again the moment its failure stops looking environmental. Two
+    escalation paths keep that from being terminal silence (#3163): a node
+    that stays environmental for ``NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS``
+    consecutive nights is filed as an ordinary failure
+    (:func:`partition_environmental`), and a node that already has an open
+    exact-title issue gets one recurrence comment naming the classification.
     """
     saw_environmental = False
     for phase in ("setup", "call", "teardown"):
@@ -1629,6 +1645,71 @@ def is_environmental_failure(test: dict) -> bool:
         else:
             return False
     return saw_environmental
+
+
+def environmental_streaks(prev: dict) -> dict[str, int]:
+    """The per-node consecutive-environmental-night counts the prior run left.
+
+    Rebuilt from scratch every night by :func:`partition_environmental`, so a
+    node that is absent tonight (passing, failing for a code-level reason, or
+    already filed) drops out and its count resets. Garbage shapes read as
+    empty rather than crashing the run.
+    """
+    raw = prev.get("environmental_streaks")
+    if not isinstance(raw, dict):
+        return {}
+    streaks: dict[str, int] = {}
+    for node, count in raw.items():
+        if isinstance(node, str) and isinstance(count, int) and count > 0:
+            streaks[node] = count
+    return streaks
+
+
+def partition_environmental(
+    nodes: list[str], tests_by_id: dict[str, dict], prev: dict
+) -> tuple[list[str], list[str], dict[str, int]]:
+    """Split ``nodes`` into ``(environmental, escalated, streaks)`` (#3163).
+
+    ``environmental`` is tonight's network-shaped set that stays excluded from
+    filing; ``escalated`` is the subset that has now looked environmental for
+    ``NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS`` consecutive nights (default
+    :data:`ENVIRONMENTAL_ESCALATE_NIGHTS_DEFAULT`; 0 disables) and is handed
+    back to the ordinary filing path, where open/closed dedup, cascade grouping
+    and the issue budget apply to it like any other node; ``streaks`` is the map
+    to persist for tomorrow, holding tonight's counts only.
+
+    Counting tonight as night one, a threshold of 3 files on the third
+    consecutive environmental night. Once filed the node is recorded as
+    dispatched and leaves ``compute_dispatch_set``'s output, so it drops out of
+    the streak map and cannot escalate twice for one continuous failure.
+    """
+    escalate_after = resolve_int_knob(
+        "NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS", ENVIRONMENTAL_ESCALATE_NIGHTS_DEFAULT
+    )
+    prior = environmental_streaks(prev)
+    environmental: list[str] = []
+    escalated: list[str] = []
+    streaks: dict[str, int] = {}
+    for node in nodes:
+        if not is_environmental_failure(tests_by_id.get(node) or {}):
+            continue
+        streak = prior.get(node, 0) + 1
+        streaks[node] = streak
+        if escalate_after > 0 and streak >= escalate_after:
+            escalated.append(node)
+        else:
+            environmental.append(node)
+    return environmental, escalated, streaks
+
+
+def environmental_epilogue(streak: int) -> str:
+    """Trailer for a recurrence comment on a node that classified environmental."""
+    nights = "night" if streak == 1 else "nights"
+    return (
+        f"Classified environmental tonight (network-layer failure text in every failing "
+        f"phase), {streak} consecutive {nights} so far. Filed nowhere new; this comment "
+        "is the recurrence record because the issue is already open."
+    )
 
 
 def cascade_title(message: str) -> str:
@@ -1911,7 +1992,7 @@ def open_issues(
 def closed_issue_dispositions(
     *,
     limit: int = CLOSED_ISSUE_LIST_LIMIT,
-    timeout: int = OPEN_ISSUE_LIST_TIMEOUT_SECONDS,
+    timeout: int = CLOSED_ISSUE_LIST_TIMEOUT_SECONDS,
 ) -> dict[str, tuple[int, str]] | None:
     """Map ``title -> (number, state_reason)`` for closed issues, or ``None``.
 
@@ -1963,14 +2044,14 @@ def closed_issue_dispositions(
     try:
         rows = json.loads(result.stdout)
         if len(rows) >= limit:
-            # INFO, not WARNING: at this repo's size (~1888 closed issues vs
-            # the 1000-row window) saturation is the steady state, so an
-            # alarm-grade line every night is noise. Scoping or widening the
-            # window is tracked in #3163.
+            # The window is sized past the whole closed set (#3163), so
+            # saturation means the repo has outgrown it: closures older than
+            # the window are invisible to dedup until CLOSED_ISSUE_LIST_LIMIT
+            # is raised.
             log(
-                f"INFO: closed-issue dedup window saturated ({len(rows)} rows at the "
-                f"{limit} limit) — closures older than the window are "
-                "invisible to dedup and may re-file (#3163)"
+                f"WARNING: closed-issue dedup window saturated ({len(rows)} rows at the "
+                f"{limit} limit) — raise CLOSED_ISSUE_LIST_LIMIT; closures older than "
+                "the window are invisible to dedup and may re-file"
             )
         # The authoritative disposition for a duplicated title is its newest
         # CLOSURE (max closedAt), not its newest-created row: creation order
@@ -2314,10 +2395,17 @@ class DispatchOutcome:
     issues_filed: int = 0
     comments_posted: int = 0
     # Nodes classified environmental (network-layer failure text) and filed
-    # nowhere. Deliberately never merged into ``recorded``: an environmental
-    # node re-evaluates every night and files normally the moment its failure
-    # stops looking environmental.
+    # nowhere new. Not merged into ``recorded`` unless the node already had an
+    # open exact-title issue and received its one recurrence comment: an
+    # environmental node otherwise re-evaluates every night and files normally
+    # the moment its failure stops looking environmental.
     environmental: list[str] = field(default_factory=list)
+    # Environmental-looking nodes that crossed the consecutive-night threshold
+    # and went through the ordinary filing path this run (#3163).
+    escalated: list[str] = field(default_factory=list)
+    # Tonight's consecutive-environmental-night counts, persisted by the caller
+    # so tomorrow's :func:`partition_environmental` can continue them.
+    environmental_streaks: dict[str, int] = field(default_factory=dict)
 
 
 def carry_cascade_issues(
@@ -2402,15 +2490,19 @@ def dispatch_findings(
     # before cascade grouping can collapse it into a code-regression umbrella
     # (#3142 review blocker: the grouped case is the most likely real-world
     # environmental shape).
-    environmental = [
-        n for n in dispatch_nodes if is_environmental_failure(tests_by_id.get(n) or {})
-    ]
+    environmental, escalated, streaks = partition_environmental(dispatch_nodes, tests_by_id, prev)
     if environmental:
         env_set = set(environmental)
         dispatch_nodes = [n for n in dispatch_nodes if n not in env_set]
         log(
             f"{len(environmental)} node(s) classified ENVIRONMENTAL (network-layer "
-            "failure text) — no issue filed, re-evaluated next run: " + ", ".join(environmental)
+            "failure text) — no issue filed, re-evaluated next run: "
+            + ", ".join(f"{n} (night {streaks[n]})" for n in environmental)
+        )
+    if escalated:
+        log(
+            f"{len(escalated)} node(s) ENVIRONMENTAL for {min(streaks[n] for n in escalated)}+ "
+            "consecutive nights — escalated to ordinary filing (#3163): " + ", ".join(escalated)
         )
 
     cascades, single_nodes = group_setup_error_cascades(report, dispatch_nodes)
@@ -2427,8 +2519,11 @@ def dispatch_findings(
             f"one finding, not {len(cascade['nodes'])}: {cascade['title']}"
         )
 
-    open_issue_map = open_issues() if dispatch_nodes else None
-    if dispatch_nodes and open_issue_map is None:
+    # The open set is read when anything failed, environmental nodes
+    # included: an environmental node with an open exact-title issue gets its
+    # recurrence comment below. A clean night still shells out to nothing.
+    open_issue_map = open_issues() if (dispatch_nodes or environmental) else None
+    if (dispatch_nodes or environmental) and open_issue_map is None:
         log("Dedup disabled for this run (open issues unreadable) — failing open")
     closed_issue_map = closed_issue_dispositions() if dispatch_nodes else None
     if dispatch_nodes and closed_issue_map is None:
@@ -2438,7 +2533,30 @@ def dispatch_findings(
         recorded=[],
         cascade_issues=carry_cascade_issues(prev.get("cascade_issues") or {}, open_issue_map),
         environmental=environmental,
+        escalated=escalated,
+        environmental_streaks=streaks,
     )
+
+    # An environmental node whose exact title is already open is a recurrence
+    # of a tracked finding, whatever tonight's failure text looks like. One
+    # comment, and the node is recorded so it is suppressed like any other
+    # commented node while it keeps failing (#3163).
+    if environmental and open_issue_map is not None:
+        _, env_open = partition_already_open(environmental, open_issue_map)
+        for node, number in env_open:
+            body = (
+                node_recurrence_comment(node, run_at=run_at, head_commit=head_commit)
+                + "\n\n"
+                + environmental_epilogue(streaks[node])
+            )
+            if comment_on_issue(number, body, dry_run=dry_run):
+                outcome.comments_posted += 1
+                outcome.recorded.append(node)
+        if env_open:
+            log(
+                f"{len(env_open)} environmental node(s) already have an open issue — "
+                "commented the recurrence: " + ", ".join(n for n, _ in env_open)
+            )
 
     max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
     issue_budget = max_issues
@@ -2668,6 +2786,7 @@ def _handle_integrity_trip(
     state = dict(prev)
     state["dispatched_nodes"] = sorted(prior_dispatched(prev) | set(outcome.recorded))
     state["cascade_issues"] = outcome.cascade_issues
+    state["environmental_streaks"] = outcome.environmental_streaks
     save_last_run(state)
     log(f"Dispatch records merged into {LAST_RUN_FILE} (baseline left untouched)")
     return 1
@@ -2856,13 +2975,15 @@ def main() -> int:
         )
         just_dispatched = outcome.recorded
         current["cascade_issues"] = outcome.cascade_issues
+        current["environmental_streaks"] = outcome.environmental_streaks
         if outcome.session_id is not None:
             triage_session_id = outcome.session_id
             current["dispatched_session_id"] = outcome.session_id
         log(
             f"Tracker: {outcome.issues_filed} issue(s) filed, "
             f"{outcome.comments_posted} recurrence comment(s) posted, "
-            f"{len(outcome.environmental)} node(s) excluded as environmental"
+            f"{len(outcome.environmental)} node(s) excluded as environmental, "
+            f"{len(outcome.escalated)} escalated after consecutive environmental nights"
         )
 
     # Carry the seed's umbrella coverage forward on EVERY run, not just seed
