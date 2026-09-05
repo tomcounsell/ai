@@ -8,7 +8,7 @@ Automated cleanup of orphaned Popoto index entries, plus Popoto-model backing fo
 
 ## AgentSession Meta.ttl
 
-`AgentSession` declares `class Meta: ttl = 7776000` (90 days), matching the `cleanup_expired(max_age_days=90)` threshold. Popoto resets TTL on every `save()` call, so active sessions never expire — only truly abandoned sessions are cleaned up automatically at the Redis level.
+`AgentSession` declares `Meta.ttl = int(settings.timeouts.agent_session_retain_ttl_s)` (30 days). The retention policy is that session rows live until explicitly deleted: `cleanup_corrupted_agent_sessions` calls `AgentSession.refresh_ttl()` on every healthy row it visits, so the TTL is a backstop for rows the sweep cannot reach. See [AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md#metattl-the-keepalive-is-the-retention-policy).
 
 ## Diagnostic Refactor
 

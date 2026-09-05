@@ -403,10 +403,10 @@ deferred, not aged out.** Every popoto `save()` re-issues `EXPIRE`, so the
 30-day TTL backstop only fires on a record nothing writes for 30 days — and
 `cleanup_corrupted_agent_sessions` holds every healthy row's TTL at that
 ceiling on each pass. It does so without writing any field value: a targeted
-`EXPIRE` via `AgentSession.refresh_ttl()`, not a whole-row re-save. Letting
-the expiry activate is a separate retention-policy decision. A deferred row
-therefore keeps its stale fields until a later run of the migration finds it
-terminal.
+`EXPIRE` via `AgentSession.refresh_ttl()`, not a whole-row re-save. That is
+the retention policy: session rows live until explicitly deleted. A deferred
+row therefore keeps its stale fields until a later run of the migration finds
+it terminal.
 
 Registered in `scripts/update/migrations.py` under the `schema_diet_fields`
 key, and again under `schema_diet_fields_v2` so every machine re-runs it once

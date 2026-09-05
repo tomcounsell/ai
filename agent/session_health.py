@@ -6003,11 +6003,14 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
                     is_corrupt = True
 
         # Keepalive: hold Meta.ttl at the ceiling without writing any field.
+        # AgentSession rows live until something deletes them explicitly; the
+        # 30-day Meta.ttl is a backstop for rows this sweep never sees, and
+        # this call is what keeps it from firing on the live population.
         # Deliberately a SEPARATE statement AFTER classification, in its own
         # try/except that never touches is_corrupt — folding this into the
         # classification try/except above would turn a transient Redis fault
         # into a bulk delete of live session rows (the positive-classification
-        # branch below routes straight to session.delete()). See #2698.
+        # branch below routes straight to session.delete()).
         if not is_corrupt:
             try:
                 session.refresh_ttl()

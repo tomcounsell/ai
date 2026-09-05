@@ -56,10 +56,10 @@ Safety properties:
   ``is_ledger=True`` SDLC anchors, whose run-lock bind writes them on every
   stage dispatch while their pipeline is open. That bind is a two-field
   partial save since #2660, which is enough: popoto re-issues ``EXPIRE`` on
-  the ``update_fields`` path too. The cleanup pass above holds every healthy record's TTL at
-  the ceiling too, but deliberately and without a field write, via
-  ``AgentSession.refresh_ttl()`` (issue #2698 owns the decision to stop). A
-  deferred row therefore keeps its stale fields until a later run finds it
+  the ``update_fields`` path too. The cleanup pass above holds every healthy
+  record's TTL at the ceiling too, deliberately and without a field write, via
+  ``AgentSession.refresh_ttl()``: session rows live until explicitly deleted.
+  A deferred row therefore keeps its stale fields until a later run finds it
   terminal.
 - **TTL note**: the atomic rewrite refreshes the record's ``Meta.ttl`` (30-day
   backstop) -- acceptable for a one-time migration; stale terminal sessions

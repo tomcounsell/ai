@@ -660,15 +660,15 @@ class AgentSession(Model):
         # 30 days — hard backstop for retain_for_resume BUILD sessions.
         # Sourced from settings so it's .env-overridable (issue #1968 Task 5).
         #
-        # Measured trap (#2698): this TTL has never actually fired. The
-        # corruption sweep (agent/session_health.py::cleanup_corrupted_agent_
-        # sessions) used to full-save() every hydrated row as a validation
-        # probe, and every save() resets a key's TTL to this ceiling — so the
-        # clock was reset on every worker start, every /update, and every
-        # hourly agent-session-cleanup tick, forever. AgentSession.refresh_ttl()
-        # now holds it there deliberately, via a targeted EXPIRE instead of an
-        # incidental full save. #2698 owns the decision to stop calling it and
-        # let the 30-day expiry actually activate.
+        # Retention policy: AgentSession rows live until explicitly deleted.
+        # The corruption sweep (agent/session_health.py::cleanup_corrupted_
+        # agent_sessions) calls AgentSession.refresh_ttl() on every healthy
+        # row it visits, a targeted EXPIRE that holds this ceiling in place,
+        # so the TTL only ever fires on a row the sweep cannot reach. The
+        # sweep runs on every worker start, every /update, and every hourly
+        # agent-session-cleanup tick. Deleting that call would activate a
+        # 30-day expiry with no archive backstop (restore_if_empty() only
+        # rehydrates on a cold start against an empty keyspace).
         #
         # Dropping this attribute does NOT clear TTLs already stamped on
         # existing keys — measured: a key retained its decaying TTL (595s)
@@ -1023,9 +1023,10 @@ class AgentSession(Model):
     def refresh_ttl(self) -> bool:
         """Hold this row's ``Meta.ttl`` at the ceiling without writing any field.
 
-        #2698 placeholder. The corruption sweep used to do this incidentally,
-        as a side effect of its save() probe, so ``Meta.ttl`` has never fired.
-        Deleting this call activates a 30-day expiry on every session row.
+        The retention policy is that session rows live until explicitly
+        deleted. The corruption sweep calls this once per healthy row, so
+        ``Meta.ttl`` acts only as a backstop for rows the sweep cannot reach.
+        Deleting the call site activates a 30-day expiry on every session row.
 
         Uses ``self.db_key.redis_key``, never ``self._redis_key``: the latter
         is ``None`` on query-hydrated rows (``Model.__init__`` only populates
