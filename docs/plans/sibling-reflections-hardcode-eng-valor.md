@@ -187,9 +187,13 @@ If this exceeds the appetite, the fall-back scope is Flow A only (`expectation_r
 
 ## Prerequisites
 
-- **#2754 / PR #3077 — landed** (merged 2026-09-02, merge commit `974be653`). Provides `reflections/utilities.py::resolve_eng_group` and the `reflections/docs_auditor.py::_resolve_notify_chat` ladder this plan lifts. Verified present at `67d714662`.
+**#2754 / PR #3077 — landed** (merged 2026-09-02, merge commit `974be653`). Provides `reflections/utilities.py::resolve_eng_group` and the `reflections/docs_auditor.py::_resolve_notify_chat` ladder this plan lifts. Verified present at `67d714662`. No other prerequisite.
 
-No other prerequisite. `python scripts/check_prerequisites.py docs/plans/sibling-reflections-hardcode-eng-valor.md` should report clean.
+| Requirement | Check Command | Purpose |
+|---|---|---|
+| `resolve_eng_group` exists | `git grep -q "def resolve_eng_group" reflections/utilities.py` | The project-dict resolver this plan's `send_eng_telegram` wraps |
+| `_resolve_notify_chat` exists | `git grep -q "def _resolve_notify_chat" reflections/docs_auditor.py` | The host-machine ladder this plan lifts into `resolve_host_eng_chat` |
+| `#2754` is closed | `bash -c 'test "$(gh issue view 2754 --json state -q .state)" = CLOSED'` | The severance condition: this sweep waits on the parent fix |
 
 ## Solution
 

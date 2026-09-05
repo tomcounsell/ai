@@ -357,15 +357,66 @@ The one agent-facing surface in this subsystem is the sibling `validate_no_destr
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+
+- [ ] Update `docs/features/session-isolation.md` — the "Auto-WIP-commit before teardown" subsection at line 254 describes the mechanism as an unconditional four-step sequence. Add the refusal conditions, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain. The line-307 table row for `agent/worktree_manager.py` also needs the guard named.
+- [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the guard in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
+- [ ] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
+
+### External Documentation Site
+
+Not applicable — this repo has no Sphinx/MkDocs site.
+
+### Inline Documentation
+
+- [ ] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and `git add -A`, and state the ordering constraint (before staging) with the reason.
+- [ ] Add a comment at the guard site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
+- [ ] Docstring the two new `PerformanceSettings` fields as provisional, matching the `max_content_filename_bytes` precedent immediately above them.
 
 ## Success Criteria
 
-_placeholder_
+- [ ] `preserve_uncommitted_worktree_changes` refuses and returns `{"preserved": False, "refused": ...}` for a worktree missing a directory tracked at HEAD, writing no commit and no ref.
+- [ ] It refuses when a majority of tracked files are absent from disk and the absolute floor is met, even when untracked artifacts would have produced insertions under `git add -A` (the incident's actual shape).
+- [ ] It still preserves every legitimately dirty tree the existing suite covers: tracked edits, staged edits, untracked-only, and large deletions accompanied by real work.
+- [ ] The worktree index is unmodified after a refusal (`git diff --cached --name-only` empty), proving the guard runs before `git add -A`.
+- [ ] Both producers are covered by the one change: `_cleanup_stale_worktree` (`:948`) and `remove_worktree` (`:1660`).
+- [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, with a fallback to the directory name on detached HEAD.
+- [ ] A refusal logs at ERROR under `[worktree-wip-refused-wipe]` with slug, reason, and counts; a guard-computation failure logs at WARNING and falls through to today's behavior.
+- [ ] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
+- [ ] Documentation updated (`/do-docs`)
+- [ ] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
+- [ ] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
 
 ## Team Orchestration
 
-_placeholder_
+The lead agent orchestrates and never builds directly.
+
+### Team Members
+
+- **Builder (guard)**
+  - Name: `guard-builder`
+  - Role: the wipe-refusal guard and the ref-slug fix inside `preserve_uncommitted_worktree_changes`, plus the two `PerformanceSettings` fields
+  - Agent Type: builder
+  - Domain: concurrency (paste the async/concurrency rules from `DOMAIN_FRAMING.md` — the guard operates on a directory another process may be actively deleting)
+  - Resume: true
+
+- **Test engineer (regression)**
+  - Name: `wipe-test-engineer`
+  - Role: the eight new tests in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`, including the fixture worktree whose tracked files are deleted on disk
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `guard-validator`
+  - Role: verifies the guard cannot be bypassed, that the index is untouched on refusal, and that every pre-existing test in the file still passes unmodified except the one flagged UPDATE
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `session-isolation-doc`
+  - Role: `docs/features/session-isolation.md` and the docstring rewrite
+  - Agent Type: documentarian
+  - Resume: true
 
 ## Step by Step Tasks
 
