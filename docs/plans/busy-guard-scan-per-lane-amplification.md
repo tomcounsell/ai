@@ -748,8 +748,10 @@ so they can run in parallel without the shared-worktree livelock.
 - **Parallel**: true
 - **Owns exclusively**: `tools/disk_reclaim.py`
 - In `sweep_worktrees`, replace the per-lane `worktree_busy_probe` at guard 5 with a read
-  from a lazily-built map (built on first read, over every directory child that could still
-  reach guard 5).
+  from a map built lazily on first read. Build it over every directory child of
+  `.worktrees/` except the `PROTECTED_WORKTREE_SLUGS` entries — a superset of the lanes that
+  will actually reach guard 5, which is correct and costs nothing extra because the fetch is
+  one query regardless of how many slugs are classified against it.
 - Read it as `busy_map.get(slug, ("error", "not_probed"))`. Never default to clear.
 - Immediately before `cleanup_after_merge`, call the single-slug `worktree_busy_probe` once
   more and skip on `busy`/`error` using the existing `live_session:` / `busy_check_error:`
