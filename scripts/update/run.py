@@ -53,6 +53,7 @@ from scripts.update import (  # noqa: E402
     warn_state,
     zshenv_sync,
 )
+from tools.process_lookup import is_own_ancestor  # noqa: E402
 
 
 @dataclass
@@ -737,6 +738,9 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     the staleness the verify already computed and fix it in the same run.
 
     Sequence (parity with ``install_worker``'s #2141 drain gate):
+    0. Self-ancestry guard — if the running worker is an ancestor of THIS
+       process, DEFER (#3164). ``kickstart -k`` would SIGKILL the update run
+       itself; the launchd-parented cron restarts it instead.
     1. Drain — wait for in-flight sessions to finish. If they don't drain in
        the window, DEFER (return ``"deferred"``): never kill a live PM turn;
        the 30-min cron will restart the worker on its next tick.
@@ -748,6 +752,28 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     Returns one of ``"healed"`` | ``"deferred"`` | ``"failed"``. Never raises.
     """
     import time as _time
+
+    # 0. Never restart the worker this process is running inside (#3164).
+    #
+    # `service.get_worker_pid` is ancestor-safe now, so a `/update` run hosted
+    # by the worker gets back its own parent's PID — and `kickstart -k` SIGKILLs
+    # that process group, taking the run down mid-flight and leaving the verify
+    # unfinished. `pgrep`'s ancestor exclusion used to make this unreachable by
+    # accident; it is now an explicit decision. DEFER: the 30-min update cron
+    # runs from launchd, is not a worker descendant, and restarts it cleanly.
+    #
+    # Ordered ahead of the drain gate deliberately. Draining is a bounded but
+    # multi-minute wait, and the answer here does not depend on it.
+    worker_pid = service.get_worker_pid()
+    if worker_pid is not None and is_own_ancestor(worker_pid):
+        log(
+            f"self-heal: worker pid {worker_pid} is an ancestor of this update run — "
+            "DEFERRING restart (a kickstart would kill this process); "
+            "the update cron will restart it from launchd next cycle",
+            v,
+            always=True,
+        )
+        return "deferred"
 
     # 1. Drain before restart (#2141). Drain-probe errors fail open (restart).
     try:
@@ -824,15 +850,15 @@ def run_release_verify(
                 )
             elif outcome == "deferred":
                 log(
-                    "worker self-heal: restart DEFERRED (sessions in flight did not drain) — "
-                    "the 30-min update cron will restart the worker next cycle",
+                    "worker self-heal: restart DEFERRED — the 30-min update cron will "
+                    "restart the worker next cycle (reason logged above: sessions in "
+                    "flight, or the worker is this run's own ancestor)",
                     v,
                     always=True,
                 )
                 _append_warning(
                     result,
-                    "worker stale; self-heal restart deferred (sessions in flight) — "
-                    "cron will retry next update cycle",
+                    "worker stale; self-heal restart deferred — cron will retry next update cycle",
                 )
                 # A deferral is not a failure: drop the worker from alert
                 # consideration so it neither hard-fails nor Sentry-alerts.

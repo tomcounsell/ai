@@ -21,10 +21,12 @@ Passing ``-a`` is not the fix: on Linux/procps ``-a`` means "print the full
 command line", so the flag silently changes meaning off macOS.
 
 ``ps`` has no ancestor filter, so a descendant sees its own ancestors. This
-module reads the process table with ``ps`` and matches the **tokenised**
-command line rather than a substring, which also removes the ``ps | grep``
-family of false positives: a shell whose argv merely mentions
-``telegram_bridge.py`` is never mistaken for the bridge.
+module reads the process table with ``ps`` and parses each command line as a
+**CPython invocation** — interpreter, then its own ``-m`` module or its own
+script position — rather than scanning it for a substring. That is what keeps
+``python -m ruff check bridge/telegram_bridge.py`` from being reported as the
+bridge: the path is there, but as a program argument, not as what the process
+is running.
 
 Not for use in kill paths
 -------------------------
@@ -32,8 +34,12 @@ Not for use in kill paths
 ``monitoring/bridge_watchdog.py::kill_stale_processes`` deliberately stays on
 ``pgrep``. There, ancestor exclusion is load-bearing rather than a bug: an
 ancestor-safe lookup feeding ``os.kill(pid, 9)`` would let a bridge-descended
-caller SIGKILL its own live ancestor bridge. Do not wire this module into any
-signalling path.
+caller SIGKILL its own live ancestor bridge.
+
+Where a signalling or restart path does need a PID from here, it must gate on
+:func:`is_own_ancestor` first. ``pgrep`` made caller-fratricide unreachable by
+accident; with an ancestor-safe lookup it becomes a decision the caller is
+responsible for making explicitly.
 
 Known limitation
 ----------------
@@ -49,7 +55,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-__all__ = ["find_python_service_pids", "list_processes"]
+__all__ = ["find_python_service_pids", "is_own_ancestor", "list_processes"]
 
 # Bounded so a wedged `ps` can never hang a watchdog tick or an update run.
 _PS_TIMEOUT_SECONDS = 10
@@ -100,44 +106,96 @@ def _is_python_interpreter(argv0: str) -> bool:
     return os.path.basename(argv0).lower().startswith("python")
 
 
-def _runs_module(argv: list[str], module: str) -> bool:
-    """True when argv carries an adjacent ``-m <module>`` pair.
+# Interpreter options that consume the FOLLOWING argv token as their value.
+# `-c` and `-m` also consume it, but they additionally terminate option parsing,
+# so they are handled separately in `_parse_python_invocation`.
+_VALUE_OPTIONS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 
-    Token equality, not prefix: ``python -m workerfoo`` does not satisfy
-    ``module="worker"``.
+
+def _parse_python_invocation(argv: list[str]) -> tuple[str | None, str | None]:
+    """Return ``(module, script_path)`` for a ``python ...`` command line.
+
+    Models the CPython CLI grammar — ``python [options] [-c cmd | -m mod |
+    script] [args...]`` — rather than scanning the whole argv for a token that
+    happens to look right. That distinction is the whole point: a scan of every
+    token reports ``python -m ruff check bridge/telegram_bridge.py`` as the
+    bridge and ``python -m pytest tests/ -m worker`` as the worker, because the
+    path and the ``-m`` pair are present as *program arguments*. Only the
+    interpreter's own ``-m`` and its own script position identify what the
+    process is actually running.
+
+    Exactly one of the two results is ever non-None:
+
+    - ``python -m worker`` → ``("worker", None)``
+    - ``python /abs/path/worker/__main__.py`` → ``(None, "/abs/path/worker/__main__.py")``
+    - ``python -c "..."`` → ``(None, None)`` — a ``-c`` payload is source code,
+      and everything after it belongs to the program.
+    - ``python`` (REPL) → ``(None, None)``
     """
-    for index in range(1, len(argv) - 1):
-        if argv[index] == "-m" and argv[index + 1] == module:
-            return True
-    return False
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "-m":
+            return (argv[index + 1] if index + 1 < len(argv) else None), None
+        if token == "-c":
+            return None, None
+        if token in _VALUE_OPTIONS:
+            index += 2
+            continue
+        if token == "-":
+            return None, None  # stdin
+        if token.startswith("-"):
+            index += 1  # a bundled short-flag cluster such as `-EsSu`
+            continue
+        return None, token  # first non-option token is the script path
+    return None, None
 
 
-def _interpreter_argv(argv: list[str]) -> list[str]:
-    """Argv truncated at ``-c``, i.e. the part Python itself interprets.
+def _script_matches(script: str | None, script_suffix: str) -> bool:
+    """True when ``script`` is a path equal to or ending in ``script_suffix``."""
+    if script is None:
+        return False
+    return script == script_suffix or script.endswith("/" + script_suffix)
 
-    ``python -c <source> [args...]`` hands everything from ``<source>`` onward
-    to the program: the source is not a path and the trailing args are not
-    interpreter options. Scanning them is how a ``ps | grep``-style probe
-    mistakes ``python -c "print('bridge/telegram_bridge.py')"`` for the bridge.
-    Truncating once, here, keeps the module and script matchers consistent —
-    neither can be fooled by a ``-c`` payload.
-    """
+
+def _parent_pid(pid: int) -> int | None:
+    """Return the parent PID of ``pid``, or None when it cannot be read."""
     try:
-        return argv[: argv.index("-c")]
-    except ValueError:
-        return argv
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_SECONDS,
+        )
+    except Exception:  # swallow-ok: an unreadable parent breaks the walk safely
+        return None
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip()
+    return int(token) if token.isdigit() else None
 
 
-def _runs_script(argv: list[str], script_suffix: str) -> bool:
-    """True when some argument is a path equal to or ending in ``script_suffix``.
+def is_own_ancestor(pid: int) -> bool:
+    """True when ``pid`` is this process, or any ancestor of this process.
 
-    ``argv[0]`` is excluded so the interpreter path itself can never match —
-    load-bearing, because the framework interpreter path ends in path segments
-    a suffix probe could otherwise match.
+    The guard for restart/signal paths. An ancestor-safe lookup can now hand a
+    caller the PID of the very service that spawned it, so any code that would
+    then restart or signal that PID has to check first — otherwise an agent
+    session running ``/update`` can kill the worker or bridge it is running
+    inside, taking itself down mid-operation. ``pgrep`` used to make that
+    unreachable by accident; it is now a decision the caller must make.
+
+    Conservative on failure: an unreadable process tree returns False, i.e. no
+    suppression, because a spurious True would silently disable a legitimate
+    recovery restart. The walk is bounded so a cycle cannot hang it.
     """
-    for token in argv[1:]:
-        if token == script_suffix or token.endswith("/" + script_suffix):
+    current: int | None = os.getpid()
+    for _ in range(64):  # bounded: the real chain is a handful of levels deep
+        if current is None or current <= 1:
+            return False
+        if current == pid:
             return True
+        current = _parent_pid(current)
     return False
 
 
@@ -164,10 +222,10 @@ def find_python_service_pids(
     for pid, argv in list_processes():
         if not _is_python_interpreter(argv[0]):
             continue
-        scan = _interpreter_argv(argv)
-        if module is not None and _runs_module(scan, module):
+        found_module, found_script = _parse_python_invocation(argv)
+        if module is not None and found_module == module:
             pids.append(pid)
             continue
-        if script_suffix is not None and _runs_script(scan, script_suffix):
+        if script_suffix is not None and _script_matches(found_script, script_suffix):
             pids.append(pid)
     return sorted(pids)

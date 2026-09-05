@@ -182,12 +182,13 @@ def _get_worker_pid() -> int | None:
     Ancestor-safe by construction (#3164): ``pgrep`` hides the caller's own
     ancestors, and a false ``None`` here drives active ``kickstart -k``
     escalation against a healthy worker (the #1331 failure mode).
+
+    Unguarded, like the other ``find_python_service_pids`` call sites
+    (``scripts/update/service.py``, ``ui/app.py``): the helper never raises and
+    returns ``[]`` when the process table cannot be read.
     """
-    try:
-        pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
-        return pids[0] if pids else None
-    except Exception:  # noqa: S110 -- an unreadable process table means "not found"
-        return None
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    return pids[0] if pids else None
 
 
 def _heartbeat_age() -> float | None:

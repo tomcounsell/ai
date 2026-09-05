@@ -414,7 +414,7 @@ All log files have rotation configured to prevent unbounded growth. Two mechanis
 
 The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the reflection registry. It must run as an external launchd service because it monitors the bridge process itself -- running it inside the process it monitors defeats its purpose.
 
-When the watchdog detects that the bridge process is not running (via `pgrep`), it calls `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` to record the event. This captures SIGKILL and OOM kills that leave no traceback.
+When the watchdog detects that the bridge process is not running (via `is_bridge_running()`, an ancestor-safe process-table lookup rather than `pgrep`), it calls `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` to record the event. This captures SIGKILL and OOM kills that leave no traceback.
 
 ## reflections/ Package
 

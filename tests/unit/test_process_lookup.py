@@ -7,15 +7,20 @@ see the bridge: ``scripts/update/service.py::get_bridge_pid`` returned ``None``
 and release verify classified a healthy, freshly-beaconed bridge as ``unknown``.
 
 ``tools.process_lookup`` reads the whole process table with
-``ps -axww -o pid=,args=`` (``ps`` has no ancestor filter) and matches the
-**tokenised** argv rather than a substring. These tests pin both halves of that
-contract:
+``ps -axww -o pid=,args=`` (``ps`` has no ancestor filter) and parses each
+command line as a **CPython invocation** — the interpreter's own ``-m`` module
+or its own script position — rather than scanning the argv for a token that
+looks right. These tests pin every half of that contract:
 
-* the matcher, driven entirely by synthetic ``ps`` output so the assertions are
-  host-independent — every realistic launch shape resolves, and every decoy that
-  merely *mentions* a service path does not;
-* the failure paths, all of which must degrade to ``[]`` rather than raise or
-  guess a wrong PID, so callers land in their existing "not running" branch.
+* the CLI grammar in ``_parse_python_invocation``, both directly and through the
+  public matcher: every realistic launch shape resolves, and every decoy that
+  merely *mentions* a service path or a ``-m`` pair as a **program argument**
+  does not;
+* ``is_own_ancestor``, the guard restart/signal callers must gate on now that an
+  ancestor-safe lookup can hand them the PID of their own parent service;
+* the failure paths, all of which must degrade to ``[]`` / ``False`` rather than
+  raise or guess a wrong PID, so callers land in their existing "not running"
+  branch.
 
 Two live tests at the bottom exercise the real host process table. Both skip
 cleanly when the bridge is absent or when the test process is not one of its
@@ -137,6 +142,61 @@ def test_script_launch_shape_resolves(monkeypatch):
     assert process_lookup.find_python_service_pids(script_suffix=WORKER_SUFFIX) == [77001]
 
 
+def test_relative_script_path_matches_by_equality(monkeypatch):
+    """A relative start (`python bridge/telegram_bridge.py` from the repo root).
+
+    Exercises the ``script == script_suffix`` equality branch rather than the
+    ``endswith("/" + suffix)`` one: there is no leading directory to strip, so a
+    suffix-only match would miss the repo's own documented manual start.
+    """
+    fake_ps(monkeypatch, [f"  61001 /Users/valorengels/src/ai/.venv/bin/python3 {BRIDGE_SUFFIX}"])
+
+    assert process_lookup.find_python_service_pids(script_suffix=BRIDGE_SUFFIX) == [61001]
+
+
+@pytest.mark.parametrize(
+    ("line", "why"),
+    [
+        (
+            "  62001 /usr/bin/python3 -u -m worker",
+            "a simple short flag before -m is skipped, not read as the script",
+        ),
+        (
+            "  62002 /usr/bin/python3 -Esu -m worker",
+            "a bundled short-flag cluster is one token and is skipped whole",
+        ),
+        (
+            "  62003 /usr/bin/python3 -W ignore -m worker",
+            "-W consumes its value, so `ignore` is not mistaken for the script",
+        ),
+        (
+            "  62004 /usr/bin/python3 -X importtime -m worker",
+            "-X consumes its value, so `importtime` is not mistaken for the script",
+        ),
+        (
+            "  62005 /usr/bin/python3 --check-hash-based-pycs always -m worker",
+            "the long value-option consumes its value too",
+        ),
+    ],
+)
+def test_interpreter_options_before_dash_m_still_resolve(monkeypatch, line, why):
+    """Options preceding ``-m`` must not hide the module (false NEGATIVE guard)."""
+    fake_ps(monkeypatch, [line])
+
+    pid = int(line.split()[0])
+    assert process_lookup.find_python_service_pids(module="worker") == [pid], why
+
+
+def test_value_option_before_a_script_path_still_resolves(monkeypatch):
+    """`python -X importtime /abs/.../worker/__main__.py` resolves via script_suffix."""
+    fake_ps(
+        monkeypatch,
+        ["  62006 /usr/bin/python3 -X importtime /Users/valorengels/src/ai/worker/__main__.py"],
+    )
+
+    assert process_lookup.find_python_service_pids(script_suffix=WORKER_SUFFIX) == [62006]
+
+
 def test_both_selectors_are_an_or_without_double_counting(monkeypatch):
     """Supplying module AND script_suffix matches either shape, once per PID."""
     fake_ps(
@@ -205,7 +265,11 @@ def test_garbage_line_beside_valid_line_still_resolves(monkeypatch):
         ),
         (
             "  55003 /usr/bin/python3 -c import x;print('bridge/telegram_bridge.py')",
-            "the token after -c is source code, not a path, and is skipped",
+            "-c terminates option parsing: the payload is source, not a script path",
+        ),
+        (
+            "  55006 /usr/bin/python3 -m ruff check bridge/telegram_bridge.py",
+            "the bridge path is ruff's argument; the module being run is `ruff`",
         ),
         (
             "  55004 /Users/valorengels/venvs/bridge/telegram_bridge.py/bin/python3 -m http.server",
@@ -235,6 +299,195 @@ def test_module_match_is_token_equality_not_prefix(monkeypatch):
     fake_ps(monkeypatch, [f"  55005 {FRAMEWORK_PYTHON} -m workerfoo"])
 
     assert process_lookup.find_python_service_pids(module="worker") == []
+
+
+@pytest.mark.parametrize(
+    ("line", "why"),
+    [
+        (
+            "  56001 /usr/bin/python3 -m pytest tests/unit/x.py --foo worker/__main__.py",
+            "worker/__main__.py is pytest's argument, not the interpreter's script",
+        ),
+        (
+            # The one shape the old `pgrep -f "python -m worker"` got RIGHT and a
+            # naive whole-argv scan got wrong: `-m worker` here is pytest's marker
+            # expression, and the two tokens are not even adjacent to `python`.
+            "  56002 /usr/bin/python3 -m pytest tests/ -m worker",
+            "the second -m is pytest's marker expression; the module run is `pytest`",
+        ),
+        (
+            "  56003 /usr/bin/python3 -m pytest -m worker and not slow tests/unit",
+            "a multi-token marker expression is still pytest's argument",
+        ),
+    ],
+)
+def test_pytest_arguments_are_not_the_worker(monkeypatch, line, why):
+    """A test run that merely *mentions* the worker must never read as the worker.
+
+    Every one of these is a live process on this machine during a test sweep;
+    matching one would let a caller restart a healthy worker — or, worse, decide
+    a dead one is alive.
+    """
+    fake_ps(monkeypatch, [line])
+
+    assert (
+        process_lookup.find_python_service_pids(module="worker", script_suffix=WORKER_SUFFIX) == []
+    ), why
+
+
+@pytest.mark.parametrize(
+    ("line", "why"),
+    [
+        (
+            "  57001 /usr/bin/python3 -c from worker import main; main()",
+            "a -c payload naming the module is source code, not `python -m worker`",
+        ),
+        (
+            # `python -c 'print(sys.argv)' -m worker` is a legal command line: -c
+            # ends option parsing, so `-m worker` is the *program's* own argv.
+            "  57002 /usr/bin/python3 -c print(sys.argv) -m worker",
+            "-c truncates the parse; a later -m pair belongs to the program",
+        ),
+    ],
+)
+def test_dash_c_truncates_against_a_module_selector(monkeypatch, line, why):
+    fake_ps(monkeypatch, [line])
+
+    assert process_lookup.find_python_service_pids(module="worker") == [], why
+
+
+@pytest.mark.parametrize(
+    ("line", "why"),
+    [
+        ("  58001 /usr/bin/python3", "a bare REPL has no module and no script"),
+        ("  58002 /usr/bin/python3 -", "`-` reads the program from stdin"),
+        ("  58003 /usr/bin/python3 -m", "a dangling -m has no module token to read"),
+        ("  58004 /usr/bin/python3 -u -I", "options only, never a module or script"),
+    ],
+)
+def test_argv_without_a_program_matches_nothing_and_does_not_raise(monkeypatch, line, why):
+    """Truncated argvs are an index-guard hazard; they must yield [], never raise."""
+    fake_ps(monkeypatch, [line])
+
+    assert (
+        process_lookup.find_python_service_pids(module="worker", script_suffix=WORKER_SUFFIX) == []
+    ), why
+
+
+# ---------------------------------------------------------------------------
+# _parse_python_invocation: the CPython CLI grammar, asserted directly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # -- the module form -------------------------------------------------
+        (["python", "-m", "worker"], ("worker", None)),
+        (["python", "-u", "-m", "worker"], ("worker", None)),
+        (["python", "-Esu", "-m", "worker"], ("worker", None)),
+        (["python", "-W", "ignore", "-m", "worker"], ("worker", None)),
+        (["python", "-X", "importtime", "-m", "worker"], ("worker", None)),
+        (["python", "--check-hash-based-pycs", "always", "-m", "worker"], ("worker", None)),
+        # `-m` ends option parsing: pytest's own `-m worker` marker never wins.
+        (["python", "-m", "pytest", "tests/", "-m", "worker"], ("pytest", None)),
+        (["python", "-m", "ruff", "check", "bridge/telegram_bridge.py"], ("ruff", None)),
+        # -- the script form -------------------------------------------------
+        (["python", "worker/__main__.py"], (None, "worker/__main__.py")),
+        (["python", "-u", "/abs/worker/__main__.py"], (None, "/abs/worker/__main__.py")),
+        (
+            ["python", "-X", "importtime", "/abs/worker/__main__.py"],
+            (None, "/abs/worker/__main__.py"),
+        ),
+        # A script's own arguments never re-open option parsing.
+        (["python", "script.py", "-m", "worker"], (None, "script.py")),
+        # An option that takes a value consumes the NEXT token unconditionally,
+        # exactly as CPython does — here `-m` is -W's filter, and `worker` the script.
+        (["python", "-W", "-m", "worker"], (None, "worker")),
+        # -- no program at all ------------------------------------------------
+        (["python"], (None, None)),
+        (["python", "-"], (None, None)),
+        (["python", "-m"], (None, None)),
+        (["python", "-u", "-I"], (None, None)),
+        (["python", "-c", "import", "worker"], (None, None)),
+        (["python", "-c", "print(sys.argv)", "-m", "worker"], (None, None)),
+    ],
+)
+def test_parse_python_invocation(argv, expected):
+    """At most one of (module, script) is ever non-None, per the CPython grammar."""
+    parsed = process_lookup._parse_python_invocation(argv)
+
+    assert parsed == expected
+    assert None in parsed, "module and script are mutually exclusive"
+
+
+# ---------------------------------------------------------------------------
+# _parent_pid / is_own_ancestor: the guard restart paths must gate on
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lines", "returncode", "expected"),
+    [
+        (["  4242"], 0, 4242),
+        (["  4242"], 1, None),  # `ps -p` on a dead pid
+        (["not-a-number"], 0, None),
+        ([], 0, None),  # empty stdout
+    ],
+    ids=["ppid", "nonzero-exit", "garbage", "empty"],
+)
+def test_parent_pid_reads_ppid_or_degrades_to_none(monkeypatch, lines, returncode, expected):
+    fake_ps(monkeypatch, lines, returncode=returncode)
+
+    assert process_lookup._parent_pid(1234) == expected
+
+
+def test_parent_pid_returns_none_when_ps_raises(monkeypatch):
+    def _raise(cmd, **kwargs):
+        raise OSError("ps: cannot fork")
+
+    monkeypatch.setattr(process_lookup.subprocess, "run", _raise)
+
+    assert process_lookup._parent_pid(1234) is None
+
+
+def test_is_own_ancestor_true_for_self():
+    """The walk starts at ``os.getpid()``, so this process is its own ancestor."""
+    assert process_lookup.is_own_ancestor(os.getpid()) is True
+
+
+def test_is_own_ancestor_true_for_parent():
+    """One real hop up the live process tree — the case the guard exists for."""
+    assert process_lookup.is_own_ancestor(os.getppid()) is True
+
+
+def test_is_own_ancestor_false_for_init():
+    """The walk stops at pid <= 1, so launchd never reads as an ancestor.
+
+    A True here would suppress every restart on the machine.
+    """
+    assert process_lookup.is_own_ancestor(1) is False
+
+
+def test_is_own_ancestor_false_when_the_tree_is_unreadable(monkeypatch):
+    """Conservative on failure: no suppression, so a real recovery restart still runs."""
+    monkeypatch.setattr(process_lookup, "_parent_pid", lambda pid: None)
+
+    assert process_lookup.is_own_ancestor(999_999) is False
+
+
+def test_is_own_ancestor_terminates_on_a_parent_cycle(monkeypatch):
+    """A cycle in the reported tree must exhaust the bound, not hang the caller."""
+    seen: list[int] = []
+
+    def _cycle(pid: int) -> int:
+        seen.append(pid)
+        return 777  # always the same pid: the walk never reaches 1
+
+    monkeypatch.setattr(process_lookup, "_parent_pid", _cycle)
+
+    assert process_lookup.is_own_ancestor(999_999) is False
+    assert len(seen) <= 64, "the walk must be bounded"
 
 
 # ---------------------------------------------------------------------------
