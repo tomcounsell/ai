@@ -720,32 +720,32 @@ Not applicable — this repo has no external docs site.
 
 ## Success Criteria
 
-- [ ] `READ_THE_ROOM_ENABLED` appears nowhere in `bridge/`, `agent/`, `tools/`, `tests/`, `config/`,
+- [x] `READ_THE_ROOM_ENABLED` appears nowhere in `bridge/`, `agent/`, `tools/`, `tests/`, `config/`,
       `scripts/`, `.env.example`, or `docs/features/`.
-- [ ] `sdlc_slug` appears nowhere in `bridge/`, `agent/`, `tools/`, `tests/`, or `docs/features/`.
-- [ ] Both call sites read `getattr(session, "is_sdlc", False)`.
-- [ ] RTR runs on an eligible Path A send with no RTR-related env var set anywhere in the process.
-- [ ] Every structural bypass still bypasses, each with a test that runs without env setup: DM /
+- [x] `sdlc_slug` appears nowhere in `bridge/`, `agent/`, `tools/`, `tests/`, or `docs/features/`.
+- [x] Both call sites read `getattr(session, "is_sdlc", False)`.
+- [x] RTR runs on an eligible Path A send with no RTR-related env var set anywhere in the process.
+- [x] Every structural bypass still bypasses, each with a test that runs without env setup: DM /
       unclassifiable `chat_id`, `chat_id is None`, empty/whitespace draft, `len < SHORT_OUTPUT_THRESHOLD`,
       SDLC session, empty snapshot, deterministic stale-trigger suppress.
-- [ ] The SDLC-bypass test fails against the unrepaired code (red-state proof pasted into the PR).
-- [ ] Path B's caller-type gate is intact: a human shell invocation without `VALOR_SESSION_ID` skips
+- [x] The SDLC-bypass test fails against the unrepaired code (red-state proof pasted into the PR).
+- [x] Path B's caller-type gate is intact: a human shell invocation without `VALOR_SESSION_ID` skips
       RTR; `--read-the-room` and `--no-read-the-room` both still override.
-- [ ] No test sets or unsets `READ_THE_ROOM_ENABLED`; the flag-off cases are deleted, not adapted.
-- [ ] `docs/features/read-the-room.md` has no "Rollout" section, no flip criterion, and no flag
+- [x] No test sets or unsets `READ_THE_ROOM_ENABLED`; the flag-off cases are deleted, not adapted.
+- [x] `docs/features/read-the-room.md` has no "Rollout" section, no flip criterion, and no flag
       paragraph — while retaining the `is_group_chat` / poll-gating rationale.
-- [ ] `~/Desktop/Valor/personas/teammate.md` does not exist, and
+- [x] `~/Desktop/Valor/personas/teammate.md` does not exist, and
       `_resolve_overlay_path("teammate")` resolves to `config/personas/teammate.md`.
-- [ ] `config/personas/teammate.md`'s net line growth is bounded (`insertions - deletions <= 3`).
+- [x] `config/personas/teammate.md`'s net line growth is bounded (`insertions - deletions <= 3`).
       The literal "gains at most 3 lines and deletes none" no longer holds: the critique's own
       concern row (`:888`) required rewording the tooling-heavy bullets the nudge's first line
       contradicts, which are edits to existing lines, not pure additions. Measured on the shipped
       diff: 6 insertions / 16 deletions, net -10, well inside the relaxed bound.
-- [ ] `/update` warns when a private `teammate.md` **drifts from** the repo copy (the mechanism is
+- [x] `/update` warns when a private `teammate.md` **drifts from** the repo copy (the mechanism is
       diff-based, not existence-based — a byte-identical shadow produces no warning).
-- [ ] `docs/archive/**` and `docs/plans/done/**` are untouched by the PR.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `docs/archive/**` and `docs/plans/done/**` are untouched by the PR.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
