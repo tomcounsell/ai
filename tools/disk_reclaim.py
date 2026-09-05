@@ -361,6 +361,7 @@ def sweep_worktrees(
         cleanup_after_merge,
         merged_via_tree,
         worktree_busy_probe,
+        worktree_busy_probe_many,
     )
 
     sweep = Sweep(category="worktrees")
@@ -378,8 +379,17 @@ def sweep_worktrees(
         return sweep
 
     cutoff = time.time() - (min_age_days * 86400)
+    children = sorted(worktrees_root.iterdir())
 
-    for child in sorted(worktrees_root.iterdir()):
+    # Batch busy map, built lazily on first need: one session query for the
+    # whole sweep instead of one per lane that reaches this guard. Queried
+    # over every non-protected lane (a superset of the lanes that will
+    # actually reach guard 5) -- correct, and free, because the underlying
+    # fetch is one query regardless of how many slugs are classified against
+    # it. An all-`too_young` sweep never builds this and pays zero queries.
+    busy_map: dict[str, tuple[str, str]] | None = None
+
+    for child in children:
         if not child.is_dir():
             continue
         slug = child.name
@@ -412,7 +422,14 @@ def sweep_worktrees(
             sweep.skip(slug, f"live_process:{live_pid}")
             continue
 
-        state, detail = worktree_busy_probe(repo_root, slug)
+        if busy_map is None:
+            candidate_slugs = [
+                c.name for c in children if c.is_dir() and c.name not in PROTECTED_WORKTREE_SLUGS
+            ]
+            busy_map = worktree_busy_probe_many(repo_root, candidate_slugs)
+        # Never default a missing slug to "clear" -- a lookup bug must read
+        # as an unanswerable question, not as a silent all-clear.
+        state, detail = busy_map.get(slug, ("error", "not_probed"))
         if state == "error":
             sweep.skip(slug, f"busy_check_error:{detail}")
             continue
@@ -437,6 +454,22 @@ def sweep_worktrees(
         if not apply:
             sweep.removed.append(slug)
             sweep.freed_bytes += size
+            continue
+
+        # Fresh, single-slug, fail-closed re-probe immediately before
+        # authorizing removal. The batch snapshot above can be seconds to
+        # minutes stale by the time a lane reaches here -- everything the
+        # sweep does per remaining lane after it (_tree_stats, git status,
+        # merged_via_tree) sits inside that window -- so the read that
+        # actually authorizes deletion is never older than the guard right
+        # below it. Skipped on the apply=False path above: dry run deletes
+        # nothing, so there is no TOCTOU window here to close.
+        state, detail = worktree_busy_probe(repo_root, slug)
+        if state == "error":
+            sweep.skip(slug, f"busy_check_error:{detail}")
+            continue
+        if state == "busy":
+            sweep.skip(slug, f"live_session:{detail}")
             continue
 
         try:
