@@ -131,7 +131,77 @@ fourth copy of a coercion the module already names — which is the duplication
 
 ## Spike Results
 
-_placeholder_
+Two spikes, both resolved during planning. Small appetite caps at two.
+
+### spike-1: Is a `SortedField(type=datetime)` score a pure UTC epoch even for a *naive* in-memory value?
+
+- **Assumption**: "The `Job.save()` reattach is load-bearing for score purity, so removing it is only
+  safe once every writer is proven to assign an aware value."
+- **Method**: code-read + in-memory prototype (no Redis, no test-DB claim needed).
+- **Result**: **The assumption is false.** Ran `SortedFieldMixin.convert_to_numeric` directly under
+  `TZ=Asia/Bangkok` (UTC+7) against the installed popoto 1.9.0:
+
+  | input | score |
+  |---|---|
+  | `datetime(2026,9,5,5,0,0, tzinfo=UTC)` | `1788584400.0` |
+  | same value with `tzinfo=None` | `1788584400.0` |
+  | `naive.timestamp()` (what a skew would produce) | `1788559200.0` (7h off) |
+
+  popoto normalizes naive → UTC *inside* the score function
+  (`sorted_field_mixin.py:394-395`), and has done so since popoto#519 / 1.8.2. The score is a pure
+  function of the instant whatever the tzinfo. The reattach cannot affect any score.
+- **Confidence**: **high** — empirical, against the exact installed artifact, on a non-UTC TZ.
+- **Impact if false**: would have forced a proof that all three `last_active_at` writers are aware
+  before removal. Done anyway as a belt-and-braces read (see Data Flow): all three are `_now()`.
+
+### spike-2: Do `agent/session_health.py` or `agent/session_pickup.py` contain comments attributing the naive guards to popoto?
+
+- **Assumption**: "Those two files carry comments saying popoto strips/drops/omits tzinfo, which must
+  be corrected" (issue Solution Sketch, acceptance criterion 5).
+- **Method**: code-read — `grep -i` for popoto + strip/drop/omit/naive across both files, then a
+  ±12-line `popoto` window around each of the nine `tzinfo` sites.
+- **Result**: **Zero hits.** No guard in either file mentions popoto at all. Acceptance criterion 5 is
+  already satisfied on main.
+- **Confidence**: **high** — the probe is as wide as the claim (both files, every guard site, all four
+  verbs plus a proximity window).
+- **Impact if true (it was false)**: would have added a docs-correction pass to those two files. It
+  does not; the remaining decision there is code-only, which is why it is stated explicitly below
+  rather than assumed.
+
+### The keep-or-remove decision (acceptance criterion 6)
+
+**Decision: keep the coercion, delete the duplication — route the inline one-liners through the
+named helper each module already has.** This is neither of the issue's two options verbatim; it is
+option (b) with the one-liner sites rewritten rather than deleted, and it is chosen because deleting
+them outright is a *silent* tolerance withdrawal whose only witnesses are tests.
+
+| Site | Disposition | Why |
+|---|---|---|
+| `session_health.py:400-408` `_ts` | **Keep the naive branch** | Contract is wider than popoto: it accepts `datetime`, `int`, `float`. Named, single-purpose, documented. |
+| `session_health.py:719-736` `_at_rest_coerce_ts` | **Keep** | Extends `_ts` with ISO-8601 **strings** from `session_events`, which popoto never produced. Sole inbound source is provably not popoto. |
+| `session_pickup.py:38-58` `is_scheduled_eligible` | **Keep** | Handles `int | float` as well as `datetime`; docstring declares it shared with the check-in primitive's tests (#2139). |
+| `session_pickup.py:382-389`, `:595-602` `_ensure_tz` (two copies) | **Keep** | Handles `None`, `int`, `float`, `datetime`. Same reasoning. |
+| `session_health.py:6305-6313` `_session_is_alive` | **Keep** | Has an explicit `else: age = time.time() - float(hb)` float leg — heterogeneous by construction. |
+| `session_health.py:658` `last_at_aware` | **Rewrite through `_ts`** | Bare inline copy; `_ts(last_at)` is already called eleven lines above in the same function. |
+| `session_health.py:1614` `started_aware` | **Rewrite through `_ts`** | Bare inline copy behind an `isinstance(started_ref, datetime)` check. |
+| `session_health.py:1750` `ts_aware` | **Rewrite through `_ts`** | Same. |
+| `session_health.py:1770` `hb_aware` | **Rewrite through `_ts`** | Same. |
+| `session_health.py:1805` `started_aware` | **Rewrite through `_ts`** | Same. |
+| `session_health.py:1852` `_hb_own_aware` | **Rewrite through `_ts`** | Same. |
+
+**Why not option (a), delete outright.** Two tests
+(`test_check_tool_timeout_handles_naive_datetime`, `test_check_tool_timeout_naive_stale_pair_skipped`)
+feed a naive datetime through a `SimpleNamespace` and assert UTC handling. Under option (a) they must
+be deleted and `datetime.now(tz=UTC) - naive` raises `TypeError` at line 658 for any caller that ever
+supplies a non-popoto row. The tolerance is real and cheap; only the *fourth copy of it* is scar
+tissue. Routing through `_ts` deletes six duplications, keeps both tests green with no edit, and
+lands the module on the convention `docs/features/utc-timestamps.md` already states: "New code must
+import `to_unix_ts` rather than add a fourth copy."
+
+**Why not `utils.utc.to_unix_ts` directly at these six sites.** `_ts` is `session_health.py`'s own
+name for the same coercion and is already imported-free (module-local). Swapping six call sites to
+the shared helper is a wider refactor than this chore, and the issue's Dropped bucket explicitly
+defers the module-by-module consolidation. `_ts` stays; a follow-up may fold it into `to_unix_ts`.
 
 ## Data Flow
 
