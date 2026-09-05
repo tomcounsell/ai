@@ -524,7 +524,7 @@ The lead agent orchestrates and never builds directly.
 | Regression tests exist | `grep -c 'def test_missing_tracked_directory_refuses\|def test_majority_of_tracked_files_deleted_refuses\|def test_wipe_with_untracked_artifacts_still_refuses\|def test_index_untouched_on_refusal' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | output > 0 |
 | Anti-criterion — no hardcoded top-level directory list in the guard | `grep -c '"tests/", *"bridge/"\|tests/.*bridge/.*agent/.*config/' agent/worktree_manager.py` | match count == 0 |
 | Anti-criterion — the rejected insertions-ratio predicate is absent | `grep -c 'diff --cached --numstat\|--shortstat' agent/worktree_manager.py` | match count == 0 |
-| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `git diff --name-only origin/main...HEAD -- bridge/ monitoring/ \| wc -l` | output contains 0 |
+| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `git diff --name-only origin/main...HEAD -- bridge/ monitoring/ \| grep -c .` | match count == 0 |
 | No stale xfails in scope | `grep -rn 'xfail' tests/unit/worktree_manager/` | exit code 1 |
 
 ## Critique Results
