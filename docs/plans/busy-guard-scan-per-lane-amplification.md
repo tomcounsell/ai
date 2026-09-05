@@ -318,31 +318,258 @@ the investigation that says what **not** to build; the build itself is a couple 
 
 ## Prerequisites
 
-_placeholder_
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| popoto >= 1.9.0 | `python -c "import popoto; assert tuple(int(x) for x in popoto.__version__.split('.')[:2]) >= (1, 9), popoto.__version__"` | `status__in` set-union lookups, and the single-hydration fix from #2639 that every timing in this plan assumes |
+| Reachable Redis | `python -c "from models.agent_session import AgentSession; AgentSession.query.filter(status='pending')"` | The scan under change queries it; a build that cannot reach Redis cannot validate the change |
 
 ## Solution
 
-_placeholder_
+### Key Elements
+
+- **`_fetch_live_sessions()`** (new, private, `agent/worktree_manager.py`): performs the
+  one deferred import and the one indexed query, and returns `(rows, error_reason)`. It is
+  the single place that decides what "live session" means at the Redis boundary.
+- **`_scan_worktree_sessions(..., *, sessions=None)`** (modified): when `sessions` is
+  `None` it fetches; when given a list it matches against that list. The matcher — path
+  normalization, segment-prefix containment, the terminal-status check, first-match-wins —
+  is not touched and is not duplicated.
+- **`worktree_busy_probe_many(repo_root, slugs)`** (new, public): fetches once, then calls
+  the existing matcher per slug against those rows. Returns `{slug: (state, detail)}` with
+  the same tri-state each single-slug probe would have produced. A fetch failure yields
+  `("error", reason)` for **every** requested slug.
+- **`sweep_worktrees`** (modified): builds the batch map lazily on first need, reads each
+  lane's verdict from it, and re-probes fresh, single-slug, immediately before handing a
+  lane to `cleanup_after_merge`.
+
+### Flow
+
+`sweep_worktrees` iterates lanes → guards 1–4 unchanged (a `too_young` lane still costs
+zero queries) → **first lane to reach guard 5** builds the batch map (one query) →
+**every later lane** reads its verdict from the map → a lane that clears all five guards
+plus `open_pr` and `unmerged` → **fresh single-slug probe** → `cleanup_after_merge`.
+
+### Technical Approach
+
+**Decision 1 — narrow on `status`, never on `slug`.** The issue proposes an indexed `slug`
+lookup. spike-1 found a live counterexample: `tools/agent_session_scheduler.py:434-435`
+writes a child session whose `working_dir` is the parent's worktree and whose `slug` is
+`None`, so `filter(slug=lane)` would silently miss it and report a busy lane clear. That is
+a correctness regression in the fail-closed reaper, which is the one caller that must never
+guess. `status__in=NON_TERMINAL_STATUSES` gets the indexed lookup the issue wants while
+leaving the `working_dir` predicate exactly as it is — it is a push-down of a filter the
+Python loop *already performs*, so by construction it cannot change which sessions are
+considered.
+
+**Decision 2 — keep the Python `status not in TERMINAL_STATUSES` check.** It looks
+redundant after the indexed query and it is not (spike-4): an unknown status value is
+non-terminal under the current check and absent from the index union, so deleting the
+Python check would silently flip that case from fail-closed to fail-open. One set
+membership test per surviving row is not a cost worth arguing about.
+
+**Decision 3 — inject rows rather than write a second matcher.** `worktree_busy_probe_many`
+does not re-implement containment matching; it calls `_scan_worktree_sessions` with
+`sessions=` pre-populated. One matcher, so batch and single-slug results cannot drift apart
+as either is maintained. The per-slug cost drops to a Python pass over an in-memory list.
+
+**Decision 4 — re-probe fresh before removal.** A sweep over dozens of lanes runs `gh`,
+`_tree_stats`, and `git status` per lane, so the batch snapshot can be minutes stale by the
+time a lane is actually deleted. `remove_worktree` does call `worktree_busy_check`, but that
+wrapper is fail-**open** — it catches a session that started mid-sweep only while Redis is
+healthy, and reads a Redis outage as clear. The fail-closed guarantee the sweep is
+responsible for therefore needs a fresh fail-closed read at the decision point. It costs one
+query for each lane actually being removed (0–3 in the measured run), against the N it
+removes from the filtering pass.
+
+**Decision 5 — lazy, not eager.** Building the map at sweep start would make an all-
+`too_young` sweep pay one query where it currently pays zero. Building it on first need
+preserves that zero and still collapses everything above it to one.
+
+**Explicitly preserved postures.** `worktree_busy_check` keeps returning `None` for both
+`clear` and `error`. `worktree_busy_probe` keeps returning `clear`/`busy`/`error`. Every
+new exception path — the deferred import, the indexed query, the batch fetch — lands on
+`("error", …)` exactly like the paths it replaces, and the batch fetch failure fans that
+error out to every requested slug rather than defaulting any of them to clear.
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+
+The touched scope contains four handlers. All four are `except Exception` with a
+`logger.warning`/`logger.debug` and a defined return, not silent swallows — and each needs
+a test asserting the observable outcome, not just the log.
+
+- [ ] Deferred model import fails → `("error", "model_import_failed:{Type}", "")`, WARNING
+      logged. Already covered at
+      `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py:204`; re-assert
+      after the refactor moves it into `_fetch_live_sessions`.
+- [ ] Indexed query raises → `("error", "query_failed:{Type}", "")`, WARNING logged.
+      Covered at `:212`; must keep passing against `filter(status__in=…)` rather than `all()`.
+- [ ] Per-row matching raises (a row with an unreadable attribute) → the row is skipped at
+      DEBUG and the scan continues. Covered at `:227`.
+- [ ] **New:** batch fetch raises → `worktree_busy_probe_many` returns `("error", …)` for
+      **every** requested slug, and the sweep skips every one of them as
+      `busy_check_error:`. The batch path is the new way for a Redis outage to reach the
+      reaper, and it is the one that must not default any lane to clear.
+
+### Empty/Invalid Input Handling
+
+- [ ] `worktree_busy_probe_many(repo_root, [])` returns `{}` and issues **no** query.
+- [ ] A slug absent from the map (caller asks for a lane it did not request) must not
+      KeyError into a silent clear — `sweep_worktrees` reads with an explicit default that
+      is `("error", "not_probed")`, never `("clear", "")`.
+- [ ] Rows with `working_dir` empty/None are skipped, as today (`:483`). Rows with a
+      relative `working_dir` (e.g. `".worktrees/sdlc-1218"`) still resolve against
+      `repo_root` — pinned at `:102`.
+- [ ] `status` empty or None → row skipped, as today.
+
+### Error State Rendering
+
+- [ ] The sweep's user-visible output is its `skipped` reasons. Assert the exact strings
+      survive: `busy_check_error:{detail}` and `live_session:{detail}`. A silent behavior
+      change here would show up as a lane quietly reaped instead of reported.
+- [ ] `worktree_busy_check` must still return `None` on `error` — the fail-open posture is
+      user-visible as "interactive removal proceeds during a Redis hiccup", and flipping it
+      would break interactive and post-merge cleanup.
 
 ## Test Impact
 
-_placeholder_
+The three `test_disk_reclaim.py` cases below `monkeypatch.setattr(wm, "worktree_busy_probe", …)`.
+Once `sweep_worktrees` consults `worktree_busy_probe_many` at guard 5, patching only the
+single-slug function leaves those tests **passing vacuously** — patching a function the code
+under test no longer calls at that point. This is the highest-risk item in the change: three
+green tests that have stopped reaching the guard they claim to cover.
+
+- [ ] `tests/unit/test_disk_reclaim.py::test_skips_lane_with_live_session` — UPDATE: patch
+      `worktree_busy_probe_many` to return `{"lane": ("busy", "sess-1")}`; keep asserting
+      `live_session:sess-1`.
+- [ ] `tests/unit/test_disk_reclaim.py::test_busy_check_error_also_blocks_removal` — UPDATE:
+      patch the batch function to fan `("error", "query_failed:ConnectionError")` across
+      every slug; keep asserting `busy_check_error:query_failed:ConnectionError` and
+      `sweep.removed == []`. This is the load-bearing fail-closed test; it must exercise the
+      new path, not the retired one.
+- [ ] `tests/unit/test_disk_reclaim.py::all_clear` fixture (`:66`) — UPDATE: stub both
+      `worktree_busy_probe_many` (clear for every slug) and `worktree_busy_probe` (clear),
+      since the happy path now crosses both the batch map and the pre-removal re-probe.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` (`TestScanWorktreeSessions`,
+      `:204`–`:236`) — UPDATE: these patch `models.agent_session.AgentSession` wholesale, so
+      they survive the query change, but the two error cases must be re-pointed at
+      `filter(status__in=…)` instead of `all()` or they will assert against a call that no
+      longer happens.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py::TestWorktreeBusyCheck`
+      / `TestWorktreeBusyProbe` (`:38`–`:195`) — UPDATE mechanically (same `AgentSession`
+      patch, `filter` instead of `all`); their assertions are the fail-open/fail-closed
+      contract and must not change meaning by one character.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py:146` — no change:
+      patches `worktree_busy_check` by object, unaffected.
+
+**New tests** (not "impact", but required by the above):
+
+- [ ] `worktree_busy_probe_many` agrees with N single-slug `worktree_busy_probe` calls over
+      the same fixture rows, for clear / busy / error — the anti-drift test for Decision 3.
+- [ ] The sweep performs **exactly one** batch fetch across many lanes (call counter on the
+      query), and **zero** when every lane is `too_young` (Decision 5).
+- [ ] A lane that reads clear in the snapshot and busy at the re-probe is **not** removed
+      (Decision 4).
 
 ## Rabbit Holes
 
-_placeholder_
+- **Indexing `working_dir`.** The predicate is segment-prefix containment, which a Redis
+  exact-match index cannot answer; making it indexable means normalizing lane identity into
+  a new field and backfilling it. That is a schema migration and an ongoing invariant to
+  police, for a query measured at 7 ms. Not worth it at this appetite.
+- **Making `slug` and `working_dir` agree everywhere.** The obvious "fix" for spike-1 is to
+  pass `slug=parent_session.slug` at `tools/agent_session_scheduler.py:439` and then narrow
+  on the indexed `slug`. Do not. A slug is not decoration — it drives worker routing
+  (`_eng_stage_is_worktree_compatible`), branch resolution, and worktree provisioning, so
+  stamping one on scheduled children changes scheduling behavior far outside this issue.
+- **Chasing the synthetic-slug blind spot.** A slugless eng session gets `dev-{aid[:8]}`
+  synthesized at `agent/session_executor.py:1314` as a **local variable** that is never
+  written back, and the executor never persists the worktree it resolves either — so such a
+  session is invisible to the `working_dir` predicate *and* to a `slug=` predicate alike.
+  Real, pre-existing, unchanged by this plan, and already backstopped by
+  `_worktree_has_live_process` at guard 4. Filed separately rather than fixed here.
+- **Turning the whole sweep into one pass over a session index.** Tempting after building
+  the batch map; it would entangle this change with `open_pr_branches` and `merged_via_tree`,
+  both of which are `gh`/`git` bound and dominate the sweep's wall clock far more than Redis
+  does. The scan is not the sweep's bottleneck and this plan should not pretend otherwise.
+- **Reviving the "73 scans a night" framing.** The Freshness Check measured 2 probes per
+  sweep on this checkout. Building to the issue's stated magnitude means over-engineering
+  for a number that was never true.
 
 ## Risks
 
-_placeholder_
+### Risk 1: The three `test_disk_reclaim.py` monkeypatches go stale and pass vacuously
+**Impact:** The fail-closed guarantee for the unattended reaper loses its test coverage
+while the suite stays green. This is the exact failure mode that lets a Redis outage delete
+every merged lane, and it would ship undetected.
+**Mitigation:** Listed first in Test Impact with explicit dispositions. Verified by
+mutation, not by a green run: break `worktree_busy_probe_many` to return `("clear", "")`
+unconditionally and confirm `test_busy_check_error_also_blocks_removal` **fails**. A test
+that stays green under that mutation is not testing anything.
+
+### Risk 2: `status__in` and `not in TERMINAL_STATUSES` diverge on an unknown status
+**Impact:** A status value outside `ALL_STATUSES` would be treated as busy today
+(fail-closed) and as clear after an index-only narrowing (fail-open) — a live worktree
+deleted under a running session.
+**Mitigation:** Decision 2 keeps the Python `not in TERMINAL_STATUSES` check after the
+indexed query, so the fail-closed reading survives for any status the index union misses.
+Pinned by a test that feeds a row with a fabricated status and asserts `busy`.
+
+### Risk 3: The batch snapshot is stale by the time a lane is removed
+**Impact:** A session that starts inside a lane mid-sweep is missed, and the lane is
+deleted under it — the macOS cwd-vanished wedge that #1246/#1357 exist to prevent.
+**Mitigation:** Decision 4's fresh single-slug re-probe immediately before
+`cleanup_after_merge`, plus the two guards already inside `remove_worktree`
+(`worktree_busy_check` and `_worktree_has_live_process`). Pinned by a test where the
+snapshot says clear and the re-probe says busy.
+
+### Risk 4: A lane missing from the batch map defaults to clear
+**Impact:** A `KeyError`-avoiding `.get(slug, ("clear", ""))` would turn a lookup bug into
+a silent deletion — the single most dangerous line this change could contain.
+**Mitigation:** The default is `("error", "not_probed")`, never `("clear", "")`, and an
+anti-criterion in Verification greps for a clear-valued default on the map read.
+
+### Risk 5: Merge conflict with #3167 in `agent/worktree_manager.py`
+**Impact:** Both lanes edit the same module.
+**Mitigation:** Disjoint functions — #3167 works in `preserve_uncommitted_worktree_changes`,
+this plan in `_scan_worktree_sessions` / `worktree_busy_*`, several hundred lines apart. A
+textual conflict is resolvable by inspection; there is no semantic overlap to reason about.
 
 ## Race Conditions
 
-_placeholder_
+### Race 1: Session starts in a lane between the batch snapshot and the removal
+**Location:** `tools/disk_reclaim.py::sweep_worktrees`, between the lazy
+`worktree_busy_probe_many` call and the `cleanup_after_merge` call.
+**Trigger:** The sweep snapshots session state, then spends seconds-to-minutes running
+`_tree_stats`, `git status`, `gh pr list`, and `merged_via_tree` across the remaining lanes.
+A session is created with `working_dir` inside an already-snapshotted lane during that window.
+**Data prerequisite:** The `AgentSession` row must be visible to the query *before* the
+verdict that authorizes removal is read.
+**State prerequisite:** The lane must not be deleted while any process holds a cwd inside it.
+**Mitigation:** Re-read at the decision point (Decision 4) — a fresh fail-closed
+single-slug probe immediately before `cleanup_after_merge`, so the authorizing read is
+never older than the guards below it. `remove_worktree`'s own `worktree_busy_check` and
+`_worktree_has_live_process` remain as the second and third lines.
+
+### Race 2: Session created between the re-probe and `rmtree`
+**Location:** `agent/worktree_manager.py::remove_worktree`, inherited unchanged.
+**Trigger:** The classic TOCTOU already documented at
+`docs/archive/plans-completed/sdlc-1357.md:206`.
+**Data prerequisite / State prerequisite:** as Race 1.
+**Mitigation:** Unchanged by this plan and deliberately so. The window shrinks (the
+authorizing read moves *closer* to the removal than it is today) and no new window opens.
+Called out here so a reviewer can confirm the change does not widen it.
+
+### Race 3: Concurrent sweeps on one machine
+**Location:** `sweep_worktrees`.
+**Trigger:** A manual `python -m tools.disk_reclaim --apply` alongside the daily reflection.
+**Data prerequisite:** none — the sweep is read-only until `cleanup_after_merge`.
+**State prerequisite:** Two sweeps must not both decide to remove the same lane.
+**Mitigation:** Unchanged. Each sweep's map is process-local and derived from the same
+Redis state; the loser of a double removal gets a `cleanup_declined:` from
+`cleanup_after_merge`, exactly as today. This plan introduces no shared or cached state
+across processes.
 
 ## No-Gos (Out of Scope)
 
