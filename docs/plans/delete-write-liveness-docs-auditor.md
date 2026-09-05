@@ -246,27 +246,253 @@ One code prerequisite, already satisfied and verified rather than assumed:
 
 ## Solution
 
-_placeholder_
+### Key Elements
+
+- **`_write_liveness` and its two constants**: deleted outright, along with all five call
+  sites. No deprecation shim, no commented-out body, no "kept for reference" block.
+- **`vault_narratives_compared`**: appended to the created-PR summary string so the count
+  keeps reaching a surface. This is the only behavioral change in the plan; everything
+  else is subtraction.
+- **`tests/unit/test_docs_auditor_substrate.py`**: seven `patch(...)` sites removed, two
+  behavioral assertions re-pointed at `result["summary"]`, the six-test
+  `TestWriteLivenessVaultParam` class deleted, and a deletion-guard test added in the
+  shape `TestVaultDeadCodeRemoved` already established in this file.
+- **Two feature docs**: every paragraph describing the Redis liveness surface removed or
+  rewritten, including the whole `## Liveness signal` section of `vault-drift-audit.md`
+  and the two `redis-cli GET` lines in the operational cheatsheet.
+- **One `/update` migration**: a one-shot sweep of the two orphaned keys, so a machine
+  that ran the auditor before this change does not keep two values nothing writes.
+
+### Flow
+
+Rotation run finishes → `run_docs_auditor` returns `{"status", "findings", "summary"}` →
+scheduler stores `summary` as `output_summary` → reflections dashboard modal shows "Last
+run summary" → operator reads the outcome without touching Redis.
+
+### Technical Approach
+
+**1. Where `vault_narratives_compared` goes.** Today it reaches only the created-PR
+`_write_liveness` call (`:2695-2702`); the no-candidates and zero-diff paths compute it at
+`:2460` and pass nothing. The faithful move is to append it to that same one summary
+string, preserving today's asymmetry exactly rather than quietly widening the signal:
+
+```
+f"docs-auditor: {n} files touched, {k} fixes{withheld_note}{suppressed_note}, "
+f"PR={pr_url}; vault {vault_narratives_compared} narratives compared"
+```
+
+The clause must be emitted when the value is `0` and omitted only when it is `None`,
+because `0` versus absent is the exact distinction #2084 built the field to preserve. The
+500-character truncation in `agent/reflection_scheduler.py:648` is a live constraint: the
+PR summary is the longest of the five and gains roughly 35 characters. Measure the
+worst-case realistic string during the build and confirm it stays under 500 with the new
+clause; if it does not, the clause moves ahead of `PR={pr_url}` so a truncation loses the
+URL (recoverable from GitHub) rather than the count (recoverable from nowhere).
+
+**2. Deletion order.** Delete the five call sites first, then the function, then the
+constants. `ruff check` after each step turns the orphaned `vault_narratives_compared`
+local into an F841 that names the exact line, which is a cheap correctness check that the
+threading step actually landed.
+
+**3. Test re-pointing, not test deletion.** Two assertions currently prove the withheld
+count reaches a durable surface:
+
+- `tests/unit/test_docs_auditor_substrate.py:1443` —
+  `assert liveness.call_args.kwargs["fixes_withheld"] == 1`
+- `:1525` — `assert liveness.call_args.kwargs["fixes_withheld"] == 2`
+
+Both become assertions on the returned summary, which is where the count now lives via
+`withheld_note`:
+
+```python
+assert "1 fix(es) withheld" in result["summary"]
+```
+
+That is a stronger test than the one it replaces: it exercises the real string an operator
+reads instead of a mock's kwargs. `:2105`
+(`assert mocks["liveness"].call_args.args[1] == "skipped"`) is genuinely redundant once
+the mock is gone, because the test three lines up already asserts
+`result["status"] == "skipped"` from the same run; delete it and let the status assertion
+carry the claim. The class docstring at `:1322-1328` and the comment at `:1960` both name
+"Redis liveness" as an operator surface and need their wording corrected in the same pass.
+
+**4. Orphaned-key sweep.** `scripts/update/migrations.py` already carries a direct
+precedent, `_migrate_clear_orphaned_warn_state_key` (`:1174`), written for the same shape
+of problem: a key nothing emits or clears any more. Add
+`_migrate_clear_docs_audit_liveness_keys`, register it in the `MIGRATIONS` dict, delete
+the two keys through a plain redis client, return `None` unconditionally, and log rather
+than raise on failure. These are not Popoto-managed keys, so the ORM rule does not apply
+and `instance.delete()` has nothing to operate on; the raw-Redis guard is a Bash
+PreToolUse hook and does not fire on Python source. Do the sweep through the migration,
+never an ad-hoc `redis-cli DEL` from a build agent's shell.
+
+**5. Docs.** Six reference clusters across two files, enumerated in the Documentation
+section. The `## Rotation State` section the issue names is only one of them; the issue
+was written before #2782 and #2739 added the rest.
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+
+- [x] The one handler in scope is `_write_liveness`'s own
+      `except Exception as e: logger.warning(...)` (`:2191-2192`). It is deleted with the
+      function, so its coverage obligation disappears rather than needing a new test. No
+      handler is added by this work.
+- [ ] Confirm no other `except` block in `run_docs_auditor` changes behavior. The outer
+      `except Exception` at `:2726` converts any raise into `{"status": "error"}`; the
+      summary-string change must not be able to raise. Assert this: the new clause
+      interpolates an `int | None` into an f-string, which cannot raise, but a test that
+      drives the created-PR path with `_run_vault_drift_detection` returning `0` and
+      asserts `result["status"] == "ok"` proves it rather than reasoning about it.
+
+### Empty/Invalid Input Handling
+
+- [ ] `vault_narratives_compared is None` — the created-PR path when
+      `_run_vault_drift_detection` returns `None`. Assert the clause is absent from the
+      summary and the run still reports `"ok"`.
+- [ ] `vault_narratives_compared == 0` — assert the clause is present and reads `0`. This
+      is the case the whole field exists for and the one an "if the value is truthy" bug
+      would silently break.
+- [ ] Empty `summary` reaching the scheduler is out of scope: every return path builds a
+      non-empty f-string, and the scheduler's `if summary_str else None` guard
+      (`:648`) already handles a falsy value.
+
+### Error State Rendering
+
+- [ ] The user-visible surface is the reflections dashboard modal. Its render is guarded
+      by `{% if r.last_run_summary and r.last_run_summary.output_summary %}`
+      (`modal_content.html:59`), so a missing summary renders nothing rather than erroring.
+      No change needed; verify the guard is untouched.
+- [ ] The `"error"` return path (`:2726`) carries its own summary and is unaffected by
+      this work. Confirm by test that an exception inside the rotation still produces a
+      summary string the scheduler can forward.
 
 ## Test Impact
 
-_placeholder_
+All in `tests/unit/test_docs_auditor_substrate.py`.
+
+- [ ] `TestWriteLivenessVaultParam` (`:3042-3091`, six tests: `_summary` helper,
+      `test_four_arg_call_omits_vault_count`, `test_five_arg_call_includes_vault_count`,
+      `test_five_arg_zero_is_emitted`, `test_withheld_count_absent_when_zero`,
+      `test_withheld_count_emitted_when_nonzero`,
+      `test_withheld_is_trailing_and_preserves_positional_contract`) — **DELETE** the whole
+      class. Every test targets a function that will not exist.
+- [ ] `TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
+      (`:1358`, patch at `:1433`, assertion at `:1443`) — **UPDATE**: drop the
+      `_write_liveness` patch, replace the kwargs assertion with
+      `assert "1 fix(es) withheld" in result["summary"]`, and rename the test to drop
+      `_and_liveness`. Its class docstring (`:1322-1328`) also names Redis liveness as one
+      of three surfaces and must be reworded.
+- [ ] The zero-diff withheld test (patch at `:1512`, assertion at `:1525`) — **UPDATE**:
+      same treatment, asserting `"2 fix(es) withheld"` in the summary.
+- [ ] Bare `patch("reflections.docs_auditor._write_liveness")` context lines at `:1471`,
+      `:1541`, `:1754`, `:1781` — **UPDATE**: delete the lines. Nothing asserts on them;
+      they exist only to stop the real function reaching Redis.
+- [ ] `TestHoistedPRGuards._run` helper (patch at `:2061`, mock exported at `:2069`) —
+      **UPDATE**: remove the patch and the `"liveness"` entry from the returned mock dict.
+- [ ] `TestHoistedPRGuards::test_guard_still_stamps_the_rotation_hash_for_the_picked_doc`
+      (`:2105`) — **UPDATE**: delete the
+      `assert mocks["liveness"].call_args.args[1] == "skipped"` line. The
+      `result["status"] == "skipped"` assertion in the sibling test already covers the
+      claim, and the rotation-hash assertion on the line above is what this test is for.
+- [ ] Comment at `:1960` referencing `_write_liveness(..., "skipped", ...)` — **UPDATE**:
+      reword to cite the returned status instead.
+- [ ] **NEW** `TestLivenessDeadCodeRemoved` — modeled on `TestVaultDeadCodeRemoved`
+      (`:3093`): assert `not hasattr(docs_auditor, "_write_liveness")`,
+      `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_TS_KEY")`, and
+      `not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_SUMMARY_KEY")`. This is what stops
+      a future revert from silently reintroducing the channel.
+- [ ] **NEW** two tests for the `vault_narratives_compared` clause: present-and-zero, and
+      absent-when-None, both driving the created-PR path.
+
+No test outside this file references `_write_liveness` or either constant.
 
 ## Rabbit Holes
 
-_placeholder_
+- **Widening `vault_narratives_compared` to the other summary strings.** The no-candidates
+  and zero-diff paths compute the count and today throw it away. Adding it there is a
+  behavioral improvement, arguably a correct one, and it is not this issue. Preserve the
+  existing asymmetry; if the wider signal is wanted, it deserves its own issue with its own
+  argument.
+- **Auditing the other 22 reflections for private side channels.** Tempting once you
+  notice the docs-auditor was the only one with one. Out of scope and probably empty.
+- **Rewriting the rotation's outcome vocabulary.** `run_docs_auditor` has five
+  `"status": "ok"`/`"skipped"` returns whose semantics #2739 litigated across four review
+  rounds. This plan touches one summary string and zero status values. Do not reopen it.
+- **Making `redis-cli` inspection work some other way.** The point is that no such
+  inspection is needed. Do not replace two keys with one key, a TTL, or a `docs_audit:`
+  hash field.
+- **Chasing the archived plans.** `docs/archive/plans-completed/sdlc-1247.md`,
+  `vault-site-integration.md`, and `docs-auditor-review-gate.md` carry 30-plus references
+  to `_write_liveness` and the two keys. Archives are historical records of what was true
+  when they were written. Leave every one of them alone.
+- **A deprecation window.** There is no external consumer to warn. Delete in one commit.
 
 ## Risks
 
-_placeholder_
+### Risk 1: The 500-character truncation silently eats the new clause
+
+**Impact:** `agent/reflection_scheduler.py:648` truncates `output_summary` to 500
+characters. The created-PR summary already interpolates a PR URL, a file count, a fix
+count, an optional withheld note, and an optional Telegram-suppression note. Appending the
+vault clause at the end makes it the first thing lost, so the field this plan is trying to
+preserve is exactly the field truncation would drop.
+
+**Mitigation:** Measure during the build. Construct the worst realistic case (long slug,
+withheld note present, Telegram suppressed, a real PR URL) and assert the rendered length.
+If it clears 500 comfortably, keep the clause at the end for readability. If it does not,
+move the clause ahead of `PR={pr_url}` so truncation costs the recoverable datum. Either
+way, pin the decision with a test that asserts the clause survives a worst-case summary.
+
+### Risk 2: Deleting the mock patches lets the real Redis writer run in tests
+
+**Impact:** Four of the seven `patch("reflections.docs_auditor._write_liveness")` lines
+exist purely to keep the real function away from Redis during a `run_docs_auditor` test.
+Deleting the function makes them unnecessary, but deleting the patch lines while leaving a
+call site behind would send test writes to whatever Redis the suite resolves.
+
+**Mitigation:** Order the work function-first, patches-second: once `_write_liveness` does
+not exist, `patch(...)` on it raises `AttributeError` and every stale patch line fails
+loudly rather than silently. The failure mode is a red test, not a production write. The
+suite also runs under a claimed test DB (`pytest_configure` exports `REDIS_URL`
+process-wide), so even a leak lands off production.
+
+### Risk 3: Orphaned keys outlive the code on machines that never run `/update`
+
+**Impact:** Two valueless keys persist in a machine's Redis. Cosmetic, but it is exactly
+the residue Principle 1 exists to prevent, and a future operator finding
+`docs_audit:last_completed_run_summary` with a months-old timestamp would reasonably
+conclude the auditor had stopped running.
+
+**Mitigation:** The `/update` migration sweeps them, recorded once in
+`data/migrations_completed.json`. It returns `None` unconditionally so a bookkeeping
+cleanup can never fail `/update`, following `_migrate_clear_orphaned_warn_state_key`'s
+documented rationale.
+
+### Risk 4: The build treats "delete the docs section" as "delete the Rotation State section"
+
+**Impact:** The issue names only `## Rotation State`. Following it literally leaves five
+other reference clusters, including a whole `## Liveness signal` section in
+`vault-drift-audit.md` describing a function that no longer exists. That is precisely the
+"historical artifact in docs" Principle 1 forbids, and the docs-auditor itself would file
+an issue about it.
+
+**Mitigation:** The Documentation section below enumerates all six clusters by file and
+line. The Verification table greps both files for zero occurrences of `_write_liveness`
+and `last_completed_run`.
 
 ## Race Conditions
 
-_placeholder_
+No race conditions identified. The work deletes two `r.set` calls and adds no concurrent
+access. `run_docs_auditor` already serializes itself behind `docs_audit:running:global`
+(SETNX, 1h TTL) and the deleted writes were the last operations before a return, read by
+nobody. The summary string is built and returned synchronously inside the same function
+call the scheduler awaits.
+
+One ordering fact worth stating so it is not mistaken for a race: the two orphaned keys
+may still hold values while a machine runs post-deletion code but pre-migration `/update`.
+That window is benign because nothing reads them in either state, and the migration is
+idempotent.
 
 ## No-Gos (Out of Scope)
 
