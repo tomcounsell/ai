@@ -422,11 +422,65 @@ sweep after every rebuild. Do not touch the function body or its `MIGRATIONS` en
 
 ## Failure Path Test Strategy
 
-_placeholder_
+This is a removal, so the failure paths that matter are the ones the removed code used to cover.
+Each is either still covered by a survivor or explicitly conceded.
+
+### Exception Handling Coverage
+
+- **`renormalize_last_active_scores` fail-open contract** (broken `SSCAN` returns `(0, 0)` and logs a
+  WARNING rather than raising). Still exercised — the migration is still a caller, and the first half
+  of `test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs` tests the classmethod
+  directly. Only the `repair_indexes`-reached-backfill half needs rework (see Test Impact).
+- **`repair_indexes` reaches `backfill_open_expectations_index`** after the rebuild. Currently proved
+  only as a side effect of the failing-renormalize test. After the sweep call is gone that proof is
+  vacuous, so the assertion must be re-anchored to a real hazard: leg 1/leg 2 or the rebuild raising.
+- **`_ts` receiving a non-datetime.** Unchanged; `_ts` keeps its `None` and `int | float` legs.
+
+### Empty/Invalid Input Handling
+
+- **Naive datetime into `_check_tool_timeout` and `_has_progress`.** The whole point of routing
+  through `_ts` rather than deleting the one-liners: `test_check_tool_timeout_handles_naive_datetime`
+  and `test_check_tool_timeout_naive_stale_pair_skipped` must pass **unedited** after the rewrite.
+  If either needs a change, the rewrite was wrong. Treat that as the build's tripwire.
+- **A Job whose partition member is absent / instant unreadable.** Skipped by the sweep; behavior
+  unchanged, still covered by `TestRenormalizeBatching`.
+
+### Error State Rendering
+
+No user-facing surface changes. The only log line that disappears is
+`[job] re-normalized %d of %d recency score(s) after the index rebuild`, which fired only when the
+sweep repaired something — i.e. never, on popoto ≥ 1.8.2. Nothing greps for it
+(`git grep "re-normalized"` before deleting, to confirm).
+
+### Mutation check (required before the review round closes)
+
+Every guard this plan touches is a deletion, so a green suite proves little on its own. For each
+survivor below, mutate and confirm the suite goes red:
+
+| Guard | Mutation | Expected failure |
+|---|---|---|
+| `_ts` naive branch | delete `val = val.replace(tzinfo=UTC)` | `test_check_tool_timeout_handles_naive_datetime` raises `TypeError` |
+| `TestScorePurity` | make `_now()` return `datetime.now()` (naive local) | score assertions still pass (proves popoto, not us, owns purity) |
+| `repair_indexes` backfill reach | delete `cls.backfill_open_expectations_index()` | the re-anchored test fails |
 
 ## Test Impact
 
-_placeholder_
+**Five test bodies are affected, not the three the issue's Solution Sketch names.** The two extra were
+found by reading `TestScorePurity` and `TestGuardedRepair` in full during planning.
+
+- [ ] `tests/unit/test_job_model.py::TestScorePurity::test_reattach_preserves_the_instant_and_is_idempotent` (line 1019) — **DELETE**: tests only the override's instant-preserving/idempotent behavior.
+- [ ] `tests/unit/test_job_model.py::TestScorePurity::test_scoped_save_naming_the_field_still_reattaches` (line 1048) — **DELETE**: asserts `job.last_active_at.tzinfo is UTC` after a scoped save, which is the override's sole observable effect.
+- [ ] `tests/unit/test_job_model.py::TestScorePurity::test_scoped_save_excluding_the_field_leaves_the_score_untouched` (line 1033) — **UPDATE**: stays green (popoto, not the override, is what leaves an out-of-scope field alone), but its docstring says "The override must honor that scope" and its assertion message says "the guard let an out-of-scope write through". Both name code that will not exist. Rewrite to pin the popoto contract: a field-scoped save touches no other field's index. **Not named in the issue.**
+- [ ] `tests/unit/test_job_model.py::TestGuardedRepair::test_repair_renormalizes_scores_the_rebuild_skewed` (line 1146) — **DELETE**: monkeypatches `rebuild_indexes` to inject a UTC+07 skew and asserts `repair_indexes` sweeps it back. With the sweep call gone the behavior is gone.
+- [ ] `tests/unit/test_job_model.py::TestGuardedRepair::test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs` (line 1184) — **REPLACE**: two halves. Half one (the classmethod returns `(0, 0)` and logs on a broken `SSCAN`) stays valuable and unedited — the migration is still a caller. Half two monkeypatches `Job.renormalize_last_active_scores` to fail and asserts `repair_indexes` still reaches `backfill_open_expectations_index`; once `repair_indexes` never calls it, the patched function is never invoked and the test passes while reaching none of the code it claims to cover. Split the file: keep half one as its own test; re-anchor the backfill-reachability assertion to a hazard `repair_indexes` still has. **Not named in the issue — this is the one that would otherwise ship as a silently vacuous test.**
+- [ ] `tests/unit/test_job_model.py::TestScorePurity` class docstring (line 982) — **VERIFY**: already updated by `8c1a36ad1` to cite popoto 1.9.0. No edit expected; confirm it reads correctly once its two sibling tests are gone.
+- [ ] `tests/unit/test_job_model.py::TestRenormalizeBatching` (lines 1239-1372) — **KEEP UNCHANGED**: exercises the classmethod directly, which the migration still calls.
+- [ ] `tests/unit/test_migrations.py` (lines 371-431) — **KEEP UNCHANGED**: `_migrate_backfill_job_last_active_scores` and its `MIGRATIONS` registration are untouched. Run it to confirm.
+- [ ] `tests/unit/test_session_health_tool_timeout.py::test_check_tool_timeout_handles_naive_datetime` (line 177) and `::test_check_tool_timeout_naive_stale_pair_skipped` (line 301) — **KEEP UNCHANGED, as the tripwire**: the `_ts` routing is chosen precisely so these need no edit. If the build finds itself editing either one, the approach drifted toward option (a) and the decision in Spike Results was not followed.
+- [ ] `tests/unit/session_runner/test_liveness.py::test_naive_datetime_treated_as_utc` — **KEEP UNCHANGED**: covers `agent/session_runner/liveness.py`, which is out of scope (No-Gos).
+
+No new tests are added. `TestScorePurity`'s surviving two tests are the regression net: they pin the
+*score*, which is the property that matters and the one popoto guarantees.
 
 ## Rabbit Holes
 
