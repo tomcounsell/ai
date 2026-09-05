@@ -401,25 +401,26 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 Three of the issue's five Next Steps bullets were completed during planning rather than deferred, and are recorded where they belong:
 
-- The **ordering question** in `_cleanup_stale_worktree` is answered, not deferred. Within a single pass the ordering is already correct: preserve runs at `agent/worktree_manager.py:948`, before that pass's own `git worktree remove --force`. The "preserve running against a tree a previous pass already gutted" hypothesis is a *cross-pass* concern, which is Race 1 in the Race Conditions section and is what the guard detects. No code change is needed for ordering.
+- The **ordering question** in `_cleanup_stale_worktree` is answered, not deferred. Within a single pass the ordering is already correct: preserve runs at `agent/worktree_manager.py:972`, before that pass's own `git worktree remove --force`. The "preserve running against a tree a previous pass already gutted" hypothesis is a *cross-pass* concern, which is Race 1 in the Race Conditions section and is what the check detects. No code change is needed for ordering.
 - The **`refs/session-wip/*` audit** is done: `git for-each-ref refs/session-wip/` returns zero refs on this machine. Nothing to audit, nothing to ship.
-- The **sharper "missing tracked directory" variant** is not an alternative to evaluate later — it is the primary guard in this plan, and spike-2 removed the need for the hardcoded directory list the issue proposed.
+- The **sharper "missing tracked directory" variant** is not an alternative to evaluate later — it is the *only* signal this plan ships, and spike-2 removed the need for the hardcoded directory list the issue proposed.
 
 Genuinely out of scope:
 
+- The **proportional "majority of tracked files gone" guard** and its two `PerformanceSettings` tunables, cut during the revision pass. Rationale and the HEAD-based recipe for whoever adds it later are in **Rabbit Holes**.
 - [SEPARATE-SLUG #3166] The bridge SIGTERM restart loop that amplified one latent race into nine teardown passes in seventeen minutes. Filed and open as its own reliability investigation with its own evidence. This plan's guard is correct with or without it, and touching bridge restart or watchdog code from this lane would put an unrelated subsystem into a worktree-teardown PR.
 
 ## Update System
 
-No update system changes required. The guard is a code-path change inside a module every machine already runs; `/update`'s `git pull` plus `uv sync` propagates it with no new dependency, no new config file, and no migration step. The two settings fields have working defaults, so an installation that never sets `PERFORMANCE__WIPE_REFUSAL_*` gets the intended behavior.
+No update system changes required. This is a code-path change inside a module every machine already runs; `/update`'s `git pull` plus `uv sync` propagates it with no new dependency, no new config file, and no migration step.
 
-No `.env.example` entry is needed: these are tunables with in-code defaults, not credentials, and they live on a pydantic settings group whose nested `PERFORMANCE__` prefix is already wired.
+No `.env.example` entry is needed either. The revision pass dropped the two `PerformanceSettings` tunables, so this change introduces **no configuration surface at all** — no settings field, no env key, nothing for an installation to set or fail to set.
 
 ## Agent Integration
 
 No agent integration required — this is a bridge-internal change.
 
-`preserve_uncommitted_worktree_changes` is called only from within `agent/worktree_manager.py` (lines 948 and 1660) on teardown paths the bridge and worker drive automatically. There is no CLI entry point to add to `pyproject.toml [project.scripts]`, no MCP tool to register, and nothing for the agent to invoke. The agent's relationship to this code is as a *subject* of it, not a caller: its worktree is what gets torn down.
+`preserve_uncommitted_worktree_changes` is called only from within `agent/worktree_manager.py` (lines 972 and 1762) on teardown paths the bridge and worker drive automatically. There is no CLI entry point to add to `pyproject.toml [project.scripts]`, no MCP tool to register, and nothing for the agent to invoke. The agent's relationship to this code is as a *subject* of it, not a caller: its worktree is what gets torn down.
 
 The one agent-facing surface in this subsystem is the sibling `validate_no_destructive_git_in_worktree.py` PreToolUse hook, and it is explicitly out of scope (see Rabbit Holes).
 
@@ -427,8 +428,10 @@ The one agent-facing surface in this subsystem is the sibling `validate_no_destr
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md` — the "Auto-WIP-commit before teardown" subsection at line 254 describes the mechanism as an unconditional four-step sequence. Add the refusal conditions, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain. The line-307 table row for `agent/worktree_manager.py` also needs the guard named.
-- [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the guard in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
+- [ ] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
+- [ ] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1518-1527`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
+- [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
+- [ ] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
 - [ ] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
 
 ### External Documentation Site
@@ -437,21 +440,25 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
 
-- [ ] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and `git add -A`, and state the ordering constraint (before staging) with the reason.
-- [ ] Add a comment at the guard site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
-- [ ] Docstring the two new `PerformanceSettings` fields as provisional, matching the `max_content_filename_bytes` precedent immediately above them.
+- [ ] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and staging, describe both wipe branches (additive-only commit vs. no commit at all), and state the ordering constraint (before staging) with the reason.
+- [ ] Update the docstring's Returns block for the `refused` key and the two wipe shapes.
+- [ ] Add a comment at the check site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
+- [ ] Add a comment on the staging call recording that `git add` spells NUL-separated pathspecs `--pathspec-file-nul` and rejects `-z`, and that `git add -A` must never be used on the wipe path because it restages the deletions.
+- [ ] No `config/settings.py` docstring work — the revision dropped both fields.
 
 ## Success Criteria
 
-- [ ] `preserve_uncommitted_worktree_changes` refuses and returns `{"preserved": False, "refused": ...}` for a worktree missing a directory tracked at HEAD, writing no commit and no ref.
-- [ ] It refuses when a majority of tracked files are absent from disk and the absolute floor is met, even when untracked artifacts would have produced insertions under `git add -A` (the incident's actual shape).
-- [ ] It still preserves every legitimately dirty tree the existing suite covers: tracked edits, staged edits, untracked-only, and large deletions accompanied by real work.
-- [ ] The worktree index is unmodified after a refusal (`git diff --cached --name-only` empty), proving the guard runs before `git add -A`.
-- [ ] Both producers are covered by the one change: `_cleanup_stale_worktree` (`:948`) and `remove_worktree` (`:1660`).
-- [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, with a fallback to the directory name on detached HEAD.
-- [ ] A refusal logs at ERROR under `[worktree-wip-refused-wipe]` with slug, reason, and counts; a guard-computation failure logs at WARNING and falls through to today's behavior.
+- [ ] On a worktree missing a directory tracked at HEAD **with no other uncommitted work**, `preserve_uncommitted_worktree_changes` writes no commit and no ref, leaves the branch head unmoved, and returns `{"preserved": False, "refused": "missing-tracked-dirs", ...}`.
+- [ ] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
+- [ ] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
+- [ ] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
+- [ ] The worktree index is unmodified after the pure-wipe case (`git diff --cached --name-only` empty), proving the check runs before staging.
+- [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:972`) and `remove_worktree` (`:1762`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
+- [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
+- [ ] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts; a check-computation failure logs at WARNING under `[worktree-wip-guard-failed]` and falls through to today's behavior.
+- [ ] The change adds no settings field and no env key.
 - [ ] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
-- [ ] Documentation updated (`/do-docs`)
+- [ ] Documentation updated (`/do-docs`), including the `refs/stash` correction in `docs/features/session-isolation.md`.
 - [ ] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
 - [ ] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
 
