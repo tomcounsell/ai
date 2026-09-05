@@ -380,7 +380,7 @@ Two pre-existing orderings are worth naming so the change does not disturb them:
 ## No-Gos (Out of Scope)
 
 - **Prompt-text references to the chat name.** `reflections/agents/circuit_health_gate.py:64,75` and `reflections/agents/system_health_digest.py:7,137` name `'Eng: Valor'` inside LLM prompt strings, not argv. Different fix shape, explicitly excluded by the issue. They are single-quoted, so they also sit outside any double-quoted grep sweep.
-- **`docs_auditor`'s surviving literal.** `FALLBACK_ENG_CHAT = "Eng: Valor"` (moving to `utilities.py`) and the docstring mention at `docs_auditor.py:1569` are #2754's deliberate narrowing. Any "clean grep" success criterion must exempt the named constant and its docstring, or it will demand undoing a merged fix. The criterion this plan uses is the **argv adjacency** `"--chat", "Eng: Valor"`, not the bare literal — see Success Criteria.
+- **Deleting the narrowed fallback.** `FALLBACK_ENG_CHAT = "Eng: Valor"` relocates from `docs_auditor.py:44` to `utilities.py`; it is not removed. It plus the docstring mention at `docs_auditor.py:1569` are #2754's deliberate narrowing, and the supervisor has confirmed (Open Question 2) that it is the model to generalize rather than a defect. Any "clean grep" success criterion must exempt that one named constant, or it will demand undoing a merged fix and silencing the two host-machine digests on the production machine. The two criteria this plan uses are the **argv adjacency** `"--chat", "Eng: Valor"` and the absence of any *per-module* chat-name constant — see Success Criteria 1 and 2.
 - **Per-project `sentry_triage` digests** and **per-project `stall_advisory`**. Named in Rabbit Holes; both are reflection redesigns.
 - **`valor-telegram`'s chat-resolution cascade.** Untouched.
 - **Bridge inbound routing and persona resolution.** `bridge/routing.py`, `_resolve_persona`, and the `Eng:` prefix convention they share with `resolve_eng_group` stay as they are.
@@ -487,17 +487,19 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 
 ## Open Questions
 
-*Status is `Ready` in the sense that the plan is complete and the build sequence is unambiguous. Question 2 below is a live design decision that the critique stage should adjudicate — it changes one success criterion, not the shape of the work.*
+*All three are answered. Nothing here blocks the build.*
 
+1. ~~**Is `scripts/memory_consolidation.py:352` in scope?**~~ **Answered** by issue comment `5505275340`: the four-site list is "illustrative, not exhaustive" and the closing condition is the grep sweep. It is in scope, and the plan includes it. The comment's second site, `scripts/nightly_regression_tests.py:105`, no longer exists — re-verified on `da6e5789a`, that file carries no `TELEGRAM_CHAT` constant, no `Eng: Valor` literal, and no `valor-telegram` reference. Lane #3170 is editing that file for unrelated reasons; this plan does not touch it and expects no rebase against it.
 
-1. ~~**Is `scripts/memory_consolidation.py:352` in scope?**~~ **Answered** by issue comment `5505275340`: the four-site list is "illustrative, not exhaustive" and the closing condition is the grep sweep. It is in scope, and the plan includes it. The comment's second site, `scripts/nightly_regression_tests.py:105`, no longer exists — verified in the Freshness Check. No supervisor input needed.
+2. ~~**Should the two host-machine digests suppress, or keep the narrowed fallback?**~~ **Answered by the supervisor: keep the fallback.**
 
-2. **Should the two host-machine digests suppress, or keep the narrowed fallback?** This is now the load-bearing question, because it also decides Success Criterion 2. `sentry_triage` and `stall_advisory` have no project in scope, so this plan routes them through `resolve_host_eng_chat`, which falls back to the `Eng: Valor` literal when the root is *this checkout*. That preserves today's behavior on the production machine. The stricter reading of the issue — "resolve → send by numeric `chat_id` → skip-and-warn when unresolvable" with no fallback — would make the digests go silent on any machine whose `projects.json` lacks a populated `Eng:` group. Preserving the fallback is the conservative call and matches #2754.
+   `FALLBACK_ENG_CHAT` is #2754's model to generalize, not a defect to remove. It survives as exactly one named constant, relocated into the shared helper `reflections/utilities.py` with the `PROJECT_ROOT` narrowing intact, so `sentry_triage` and `stall_advisory` keep paging on the production machine instead of going silent there. Dropping it would revert part of merged PR #3077 to satisfy a grep, which is the wrong trade.
 
-   The cost of preserving it: `FALLBACK_ENG_CHAT = "Eng: Valor"` survives in `reflections/utilities.py`, so the sweep in issue comment `5505275340` — which explicitly asks for the bare literal *as a module constant* — cannot reach zero. The two answers are a package deal:
-   - **Keep the fallback** (this plan's default): one literal survives, in one named constant, with #2754's narrowing intact. Criterion 2 expects exactly one path.
-   - **Drop it**: the sweep reaches zero, and `sentry_triage` / `stall_advisory` go silent on any machine whose `projects.json` lacks a populated `Eng:` group — including, today, this one. It would also mean reverting part of PR #3077.
+   The closing sweep is therefore defined as two commands, and neither expects zero occurrences of the string in the tree:
 
-   Confirm which.
+   - **(a) argv adjacency** — `git grep -n '"--chat", "Eng: Valor"' -- '*.py'` returns nothing, anywhere in the repo. Five sites today.
+   - **(b) the bare literal as a per-module constant** — no module outside `reflections/utilities.py` declares its own chat-name constant. Measured on `da6e5789a`, `reflections/docs_auditor.py:44`'s `FALLBACK_ENG_CHAT` is the only such constant in the tree (`git grep -nE "^[A-Z_]+ *= *[\"']Eng: " -- '*.py'`), and the lift relocates it. The older `TELEGRAM_CHAT`-style constant the issue comment cited in `scripts/` is already gone.
 
-3. **Does the suppression finding need to reach Telegram some other way?** When resolution fails there is by definition no chat to tell. The finding lands in the reflection's `summary` (which the scheduler persists) and in the warning log. If a suppressed page needs to escalate somewhere a human actually watches, that is a separate mechanism and a separate issue — say so and it stays out.
+   Both sweeps exclude `tests/`, `reflections/agents/` prompt text, and that single named fallback. Success Criterion 2 and the Verification table now carry the byte-identical form of (b).
+
+3. ~~**Does the suppression finding need to reach Telegram some other way?**~~ **Answered: out of scope, deliberately.** When resolution fails there is by definition no chat to tell. The finding lands in the reflection's `summary` — which the scheduler persists — and in a `warning` log line naming the project. If a suppressed page needs to escalate somewhere a human actually watches, that is a separate mechanism with its own design questions (where does it go, what stops it from becoming the same hardcoded destination this issue exists to remove), and it belongs in its own issue. It stays out of this lane and no task here implements it.
