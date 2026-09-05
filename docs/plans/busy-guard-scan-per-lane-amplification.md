@@ -138,12 +138,23 @@ night" is not.
   irrelevant to the query path.
 - `8c1a36ad1` *Bump popoto floor to 1.9.0* (2026-09-05) — **changes the constant factor**,
   see #2639 above.
+- `55ad9ac89` *Stale-branch sweep reaps nightly-triage worktrees and sees checked-out
+  branches* (#3162, closed 2026-09-05T12:52:41Z) — **+102 lines in
+  `agent/worktree_manager.py`**, adding `reap_idle_worktree()` at `:1007` as a third
+  worktree-removal entry point. It shifted every citation in that file and is the reason
+  the baseline above moved. It touches neither `_scan_worktree_sessions` nor
+  `worktree_busy_*`: `reap_idle_worktree` refuses on a non-empty `git status --porcelain`
+  and never consults an `AgentSession` row, so it is a baseline fact for this plan, not a
+  code overlap and not a concurrent editor. Verified as an ancestor of `491a88624`.
 
-**Active plans in `docs/plans/` overlapping this area:** none.
-`docs/plans/auto-preserve-teardown-half-deleted-worktree.md` (#3167) is the nearest
-neighbour — same file, `preserve_uncommitted_worktree_changes` — and contains zero
-references to `worktree_busy_*`, `_scan_worktree_sessions`, or `disk_reclaim`. Disjoint
-functions in one module; a merge conflict is possible, a semantic conflict is not.
+**Active plans in `docs/plans/` overlapping this area:** one.
+`docs/plans/auto-preserve-teardown-half-deleted-worktree.md` (#3167, OPEN) is the nearest
+neighbour and edits two regions of `agent/worktree_manager.py`:
+`preserve_uncommitted_worktree_changes` (`:1508`) and `_cleanup_stale_worktree` (`:903`,
+where it fixes a slug/branch mismatch in the same edit). Neither region references
+`worktree_busy_*`, `_scan_worktree_sessions`, or `disk_reclaim`, and neither is reachable
+from them. Disjoint functions in one module; a merge conflict is possible, a semantic
+conflict is not. See Risk 5.
 
 **Notes:** No line numbers drifted. The bug is still present and still worth fixing;
 its magnitude is smaller and its shape is different from the issue's description, and
@@ -208,16 +219,16 @@ Four spikes ran against live Redis on this checkout, read-only, through the ORM.
   counterexample.** `tools/agent_session_scheduler.py:434-435` creates a child session
   with `working_dir = parent_session.working_dir` — which is `.worktrees/{parent_slug}/`
   whenever the parent is a lane session — and its `AgentSession.create(...)` call at
-  `:439` passes **no `slug=` argument at all**, so the child row has `slug=None`. A
+  `:440`–`:457` passes **no `slug=` argument at all**, so the child row has `slug=None`. A
   `filter(slug=lane)` lookup misses that row entirely and reports the lane clear while a
   scheduled child session is queued to run inside it. `AgentSession.create_child()`
-  (`models/agent_session.py:1939`) likewise takes `slug: str | None = None`.
+  (`models/agent_session.py:1931`) likewise takes `slug: str | None = None`.
 - **Confidence**: high. `grep -rn '\.working_dir *=' --include='*.py'` over non-test code
   returns exactly one hit (`agent/session_runner/role_driver.py:198`, a driver attribute,
   not a session row), so `working_dir` is written once at creation and never migrated —
   making the creation sites an exhaustive enumeration. `tools/valor_session.py` is the
   well-behaved counter-example: it derives `working_dir` from the slug
-  (`working_dir = str(get_or_create_worktree(repo_root, slug))`, `:750`) and its tests
+  (`wt_path = get_or_create_worktree(repo_root, slug)` then `working_dir = str(wt_path)`, `:753`–`:754`) and its tests
   pin that `--parent` re-derives `working_dir` rather than copying the parent's.
 - **Impact on plan**: **decisive.** The issue's headline suggestion — "the natural shape
   is an indexed lookup" on `slug` — is rejected. It is a silent correctness regression in
@@ -236,6 +247,12 @@ Four spikes ran against live Redis on this checkout, read-only, through the ORM.
 - **Confidence**: high
 - **Impact on plan**: this is the query rewrite. It is a strict push-down of a filter the
   Python loop already performs, so it cannot change which sessions are considered.
+- **Re-measured during the revision pass**: `filter()` returns
+  `popoto.models.query.QueryBuilder`, not a list. Building it costs 0.007 ms and issues no
+  Redis command; the first `list()` costs 10.0 ms, a second `list()` of the same builder
+  costs 8.6 ms and yields distinct objects, and re-iterating the materialized list costs
+  0.0013 ms across three passes. This is what forced Decision 0 — see it for the full
+  consequence.
 
 ### spike-3: What is the measured cost, and where is the real amplification?
 - **Assumption**: "The daily sweep costs 73 full scans."
@@ -247,6 +264,10 @@ Four spikes ran against live Redis on this checkout, read-only, through the ORM.
   eliminates nothing.
 - **Confidence**: high for the numbers; the ratio is a property of one machine at one
   moment, not a constant.
+- **Impact on plan (revision)**: the hoist's saving is real only once the rows are
+  materialized. Measured: N passes over a bare `QueryBuilder` cost ~8–10 ms each; N passes
+  over the materialized list cost ~0.0004 ms each. Without Decision 0 the hoist saves
+  nothing and the plan's own "one fetch" test cannot tell.
 - **Impact on plan**: this is why the fix is **two independent parts, not one**. The
   `status__in` narrowing pays off only in proportion to the terminal:non-terminal ratio,
   which this plan does not control and measured at its worst case. Hoisting the scan out
@@ -289,18 +310,19 @@ Steps 2–4 repeat, from scratch, for every lane that reaches guard 5.
    `too_young` lane still costs nothing.
 2. **First lane to reach guard 5** triggers `worktree_busy_probe_many(repo_root, slugs)`
    once. Result memoized for the sweep.
-3. **`AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES)`** hydrates only
-   non-terminal rows. One query for the whole sweep.
-4. **One pass** over those rows assigns each to the lane containing its `working_dir`,
-   building `{slug: (state, detail)}` — same normalization, same segment-prefix match, one
-   pass instead of N.
+3. **`list(AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES))`** hydrates only
+   non-terminal rows, once, into a plain list. One Redis round trip for the whole sweep;
+   the `list()` is what makes that true (Decision 0).
+4. **One pass per slug over that in-memory list** assigns each row to the lane containing
+   its `working_dir`, building `{slug: (state, detail)}` — same normalization, same
+   segment-prefix match, N cheap Python passes instead of N Redis queries.
 5. **Each lane** reads its verdict from the map.
 6. **Re-probe at the decision point**: a lane that survives all guards and is about to be
    handed to `cleanup_after_merge` gets a fresh single-slug `worktree_busy_probe` call
    first. Typically 0–3 lanes per sweep.
 7. **Output**: identical tri-state per lane.
 
-Interactive callers (`remove_worktree` at `:1594` via `worktree_busy_check`) are untouched
+Interactive callers (`remove_worktree` at `:1696` via `worktree_busy_check`) are untouched
 except that their single scan is now index-narrowed.
 
 ## Architectural Impact
@@ -346,16 +368,20 @@ the investigation that says what **not** to build; the build itself is a couple 
 ### Key Elements
 
 - **`_fetch_live_sessions()`** (new, private, `agent/worktree_manager.py`): performs the
-  one deferred import and the one indexed query, and returns `(rows, error_reason)`. It is
-  the single place that decides what "live session" means at the Redis boundary.
+  one deferred import and the one indexed query, **materializes it with `list(...)`**, and
+  returns `(rows, error_reason)` where `rows` is a plain `list`. It is the single place
+  that decides what "live session" means at the Redis boundary, and the single place where
+  Redis is actually touched. The `list()` is load-bearing, not stylistic — see Decision 0.
 - **`_scan_worktree_sessions(..., *, sessions=None)`** (modified): when `sessions` is
   `None` it fetches; when given a list it matches against that list. The matcher — path
   normalization, segment-prefix containment, the terminal-status check, first-match-wins —
   is not touched and is not duplicated.
-- **`worktree_busy_probe_many(repo_root, slugs)`** (new, public): fetches once, then calls
-  the existing matcher per slug against those rows. Returns `{slug: (state, detail)}` with
-  the same tri-state each single-slug probe would have produced. A fetch failure yields
-  `("error", reason)` for **every** requested slug.
+- **`worktree_busy_probe_many(repo_root, slugs)`** (new, public): fetches once into a
+  materialized list, then calls the existing matcher per slug against that same list.
+  Returns `{slug: (state, detail)}` with the same tri-state each single-slug probe would
+  have produced. A fetch failure yields `("error", reason)` for **every** requested slug.
+  It never raises: every Redis touch happens inside `_fetch_live_sessions`'s `try`, and
+  the per-row matching keeps its own `try` (Decision 6).
 - **`sweep_worktrees`** (modified): builds the batch map lazily on first need, reads each
   lane's verdict from it, and re-probes fresh, single-slug, immediately before handing a
   lane to `cleanup_after_merge`.
@@ -368,6 +394,33 @@ zero queries) → **first lane to reach guard 5** builds the batch map (one quer
 plus `open_pr` and `unmerged` → **fresh single-slug probe** → `cleanup_after_merge`.
 
 ### Technical Approach
+
+**Decision 0 — materialize the query with `list()`, inside the `try`.** This is the
+decision the whole hoist rests on, and getting it wrong would have shipped a change that
+looks correct, tests green, and saves nothing. `AgentSession.query.filter(...)` returns a
+lazy `popoto.models.query.QueryBuilder`, not a list. Two consequences, both measured on
+this checkout at `491a88624`:
+
+- **`QueryBuilder.__iter__` re-executes the whole query on every pass.** Constructing the
+  builder costs 0.007 ms; the first `list()` costs 10.0 ms; a second `list()` of the same
+  builder costs another 8.6 ms and yields distinct objects. Re-iterating an already
+  materialized list costs 0.0013 ms for three passes. So handing a bare builder to
+  `worktree_busy_probe_many` and looping N slugs over it pays **N full Redis queries** —
+  exactly the amplification this plan exists to delete, reintroduced one layer down.
+- **`filter()` never touches Redis, so a `try` around it alone catches nothing.** The
+  connection error surfaces during iteration. If iteration happens outside
+  `_fetch_live_sessions`, the exception escapes `_scan_worktree_sessions` entirely (the
+  per-row `try` inside the matching loop only wraps the body, not the `for` header's own
+  `__next__`), reaches `sweep_worktrees` at `tools/disk_reclaim.py:415` where there is no
+  `except`, and aborts the whole sweep with a traceback instead of producing
+  `busy_check_error:`. The fail-closed posture would be replaced by a crash.
+
+Therefore: `rows = list(AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES)))`
+**inside** the existing `try`, mirroring `models/agent_session.py:1389`
+(`rows = list(cls.query.filter(status=status))`), which is the established shape in this
+codebase for exactly this reason. The "one fetch per sweep" test must count
+**materializations** — Redis round trips, or iterations of a list-wrapping spy — never
+`filter()` calls, or it cannot detect this class of bug at all.
 
 **Decision 1 — narrow on `status`, never on `slug`.** The issue proposes an indexed `slug`
 lookup. spike-1 found a live counterexample: `tools/agent_session_scheduler.py:434-435`
@@ -390,18 +443,58 @@ does not re-implement containment matching; it calls `_scan_worktree_sessions` w
 `sessions=` pre-populated. One matcher, so batch and single-slug results cannot drift apart
 as either is maintained. The per-slug cost drops to a Python pass over an in-memory list.
 
-**Decision 4 — re-probe fresh before removal.** A sweep over dozens of lanes runs `gh`,
-`_tree_stats`, and `git status` per lane, so the batch snapshot can be minutes stale by the
-time a lane is actually deleted. `remove_worktree` does call `worktree_busy_check`, but that
-wrapper is fail-**open** — it catches a session that started mid-sweep only while Redis is
-healthy, and reads a Redis outage as clear. The fail-closed guarantee the sweep is
-responsible for therefore needs a fresh fail-closed read at the decision point. It costs one
-query for each lane actually being removed (0–3 in the measured run), against the N it
-removes from the filtering pass.
+**Decision 4 — re-probe fresh before removal. Settled: the re-probe stays.** (This was
+Open Question 2; the critique required it resolved before build, because the test
+dispositions depend on whether the sweep ends with one busy-check call site or two. It
+does end with two.)
+
+The argument that settles it is that the hoist itself widens a window the current code
+keeps narrow. Today the probe runs at guard 5 and only `merged_via_tree` — one `git`
+call — separates it from `cleanup_after_merge` for that lane. After the hoist, the
+authorizing read is taken once for the whole sweep, and everything the sweep then does for
+every remaining lane (`_tree_stats`, `git status`, `merged_via_tree`) sits inside the
+window. Dropping the re-probe would therefore trade a real safety property for query cost,
+which inverts the priority a fail-closed reaper is built on.
+
+`remove_worktree` does call `worktree_busy_check`, but that wrapper is fail-**open**: it
+catches a session that started mid-sweep only while Redis is healthy, and reads a Redis
+outage as clear. So without the re-probe the sequence "lane reads clear at guard 5 → a
+session starts in it → Redis goes down → lane is deleted under the session" has no guard
+that stops it, and that is precisely the macOS cwd-vanished wedge #1246/#1357 exist to
+prevent.
+
+Cost: one query for each lane actually being removed — 0 to 3 in the measured run —
+against the N it removes from the filtering pass. The re-probe also lands *later* in the
+guard chain than today's probe does (after `merged_via_tree` rather than before), so the
+authorizing read moves closer to the deletion than it is on `main`. Success Criterion 3 and
+the Verification table are worded to this two-call-site shape, and the `all_clear` fixture
+at `tests/unit/test_disk_reclaim.py:66` stubs both functions.
 
 **Decision 5 — lazy, not eager.** Building the map at sweep start would make an all-
 `too_young` sweep pay one query where it currently pays zero. Building it on first need
 preserves that zero and still collapses everything above it to one.
+
+**Decision 6 — `worktree_busy_probe_many` never raises.** `sweep_worktrees` has no `except`
+around guard 5 (`tools/disk_reclaim.py:415`) and this plan does not add one, because the
+right place for the guarantee is the callee: every Redis touch lives inside
+`_fetch_live_sessions`'s `try` (Decision 0), and the per-row matching keeps the `try` it
+has today. An exception that escaped the batch probe would abort the entire sweep rather
+than skip one lane, so "returns `("error", …)` for every slug" is a contract, stated in the
+docstring and pinned by a test that makes the fetch raise and asserts the sweep completes
+with every lane skipped as `busy_check_error:`.
+
+**Decision 7 — ship at the corrected magnitude.** (This was Open Question 1.) The
+Freshness Check measured 2 probes per sweep on this checkout, not the 73 the issue
+describes, and a present-day cost near 14 ms/day. That is not on its own worth an
+engineering pass. What settles it in favour of shipping is the shape of the growth: a lane
+that reaches guard 5 and is then skipped as `unmerged` is never removed, so it reaches the
+probe again every night, forever. The multiplier is the count of aged unmerged lanes, and
+that set only accumulates. Fixing it now costs a Small appetite; the alternative is to
+close #2712 as "measured, not worth it" and re-file it when the number is embarrassing.
+The plan also carries a real correctness dividend independent of cost — Decision 0 records
+a lazy-`QueryBuilder` trap that this codebase can hit anywhere `filter()` is passed around,
+and the mutation work in Task 3 repairs five busy-guard tests that are one refactor away
+from passing vacuously.
 
 **Explicitly preserved postures.** `worktree_busy_check` keeps returning `None` for both
 `clear` and `error`. `worktree_busy_probe` keeps returning `clear`/`busy`/`error`. Every
@@ -497,7 +590,7 @@ green tests that have stopped reaching the guard they claim to cover.
   a new field and backfilling it. That is a schema migration and an ongoing invariant to
   police, for a query measured at 7 ms. Not worth it at this appetite.
 - **Making `slug` and `working_dir` agree everywhere.** The obvious "fix" for spike-1 is to
-  pass `slug=parent_session.slug` at `tools/agent_session_scheduler.py:439` and then narrow
+  pass `slug=parent_session.slug` at `tools/agent_session_scheduler.py:440` and then narrow
   on the indexed `slug`. Do not. A slug is not decoration — it drives worker routing
   (`_eng_stage_is_worktree_compatible`), branch resolution, and worktree provisioning, so
   stamping one on scheduled children changes scheduling behavior far outside this issue.
