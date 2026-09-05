@@ -17,7 +17,9 @@ either alone is sufficient:
 2. The pid is registered as the launchd worker — via the
    ``worker:registered_pid:*`` heartbeat keys on production Redis (db=0,
    written by ``agent.session_health.register_worker_pid``) and/or a live
-   ``pgrep -f "python -m worker"``.
+   worker found in the host process table via
+   ``tools.process_lookup.find_python_service_pids`` (ancestor-safe; see
+   #3164 for why ``pgrep`` cannot be used here).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from tests.db_claim import subprocess_env
+from tools.process_lookup import find_python_service_pids
 
 # A command line for the launchd worker joins to `<python> -m worker`. Require
 # BOTH a python-ish executable AND the `-m worker` token so an unrelated
@@ -58,21 +60,17 @@ def _pid_cmdline(pid: int) -> str:
         return ""
 
 
-def _pgrep_worker_pids() -> set[int]:
-    """PIDs whose command line matches ``python -m worker`` (host-level)."""
+def _host_worker_pids() -> set[int]:
+    """PIDs of live worker processes, read from the host process table.
+
+    Ancestor-safe (#3164). This used to run ``pgrep -f "python -m worker"``,
+    which on macOS excludes the caller's own ancestors — and a pytest process
+    started inside a worker-hosted agent session IS a descendant of the
+    launchd worker. That made this signal silently empty in exactly the
+    situation the guard exists for (#2146 / #2147).
+    """
     try:
-        out = subprocess.run(
-            ["pgrep", "-f", "python -m worker"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            # `pgrep` cannot import popoto and does not need REDIS_URL. The env
-            # is here because the isolation guard's argv heuristic matches the
-            # word "python" inside the *pattern* string; passing it is cheaper
-            # and less brittle than an allowlist entry.
-            env=subprocess_env(),
-        )
-        return {int(tok) for tok in out.stdout.split() if tok.strip().isdigit()}
+        return set(find_python_service_pids(module="worker", script_suffix="worker/__main__.py"))
     except Exception:
         return set()
 
@@ -116,8 +114,8 @@ def _registered_worker_pids() -> set[int]:
 
 
 def live_worker_pids() -> set[int]:
-    """Union of host-level (pgrep) and registered (Redis db=0) live worker PIDs."""
-    return _pgrep_worker_pids() | _registered_worker_pids()
+    """Union of host-level (process table) and registered (Redis db=0) worker PIDs."""
+    return _host_worker_pids() | _registered_worker_pids()
 
 
 def assert_not_live_worker(pid) -> None:

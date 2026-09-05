@@ -715,14 +715,12 @@ def create_app() -> FastAPI:
         both keys are cleared by the bridge on the first successful poll/resolve
         after the outage.
         """
-        import subprocess
+        from tools.process_lookup import find_python_service_pids
 
-        proc_running = bool(
-            subprocess.run(
-                ["pgrep", "-f", "bridge.email_bridge"],
-                capture_output=True,
-            ).stdout.strip()
-        )
+        # Ancestor-safe lookup rather than `pgrep` (#3164): pgrep hides the
+        # caller's own ancestors, so a bridge-hosted UI reads a live service
+        # as down.
+        proc_running = bool(find_python_service_pids(module="bridge.email_bridge"))
 
         alert: str | None = None
         alert_detail: str | None = None
