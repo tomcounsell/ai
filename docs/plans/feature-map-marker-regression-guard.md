@@ -636,15 +636,205 @@ consequence of being a plain script rather than an integration point that needs 
 
 ## Team Orchestration
 
-_placeholder_
+Small surface, one builder, one reviewer who is explicitly tasked with mutation-checking rather
+than reading. The mutation check is the whole point of this work, so it does not get folded into a
+general review pass.
+
+### Team Members
+
+- **Builder (guard)**
+  - Name: `marker-guard-builder`
+  - Role: extract `resolve_marker`, write `tests/marker_map.py`, the guard test, the two
+    `FEATURE_MAP` additions, and the workflow.
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (mutation)**
+  - Name: `marker-guard-mutator`
+  - Role: prove each rule bites. For R1, R2, and R3 separately, introduce a violation, confirm the
+    guard reports it with the right path and reason, restore, confirm green. Then confirm the
+    stale-exemption assertion by deleting a violation without its baseline entry.
+  - Agent Type: validator
+  - Resume: true
+
+- **Validator (no-regression)**
+  - Name: `marker-parity-validator`
+  - Role: prove marker assignment did not change except for the one intended file. Compare
+    `--report` output against the same report generated from `f3594dd23`.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `marker-guard-documentarian`
+  - Role: `docs/features/feature-map-marker-guard.md`, the features index row, and the
+    `tests/README.md` split-procedure rewrite.
+  - Agent Type: documentarian
+  - Resume: true
+
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. Extract marker resolution into `tests/marker_map.py`
+
+- **Task ID**: build-marker-map
+- **Depends On**: none
+- **Validates**: `tests/unit/test_feature_map_markers.py` (create)
+- **Informed By**: spike-1 (ordering is the primary mechanism), spike-4 (`resolve_marker` must
+  return the matched key, not only the marker)
+- **Assigned To**: `marker-guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `tests/marker_map.py` holding `FEATURE_MAP` moved verbatim from `tests/conftest.py:1106`,
+  `KNOWN_ROOT_DIRS`, and `resolve_marker(basename) -> tuple[str | None, str | None]` returning the
+  marker and the key that matched.
+- Standard library only. No `pytest` import, no `tools.*` import, nothing that pulls in the venv.
+- Add the two measured `FEATURE_MAP` entries: `"reflections": "reflections"` immediately before
+  `"reflection"`, and `"youtube": "tools"` immediately before `"transcript"`.
+- Rewrite `pytest_collection_modifyitems` in `tests/conftest.py` to import and call
+  `resolve_marker`. Delete the inlined loop; do not leave it commented out.
+
+### 2. Implement the audit rules and the baseline
+
+- **Task ID**: build-audit
+- **Depends On**: build-marker-map
+- **Validates**: `tests/unit/test_feature_map_markers.py` (create)
+- **Informed By**: spike-2 (presence rules are not viable, 552 unmarked files), spike-3 (R1 and R2
+  and the 21-entry baseline), spike-4 (R3 and the 3 genuine fragment matches)
+- **Assigned To**: `marker-guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `iter_test_files()` enumerating from `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`
+  with `check=True`, raising when the result is empty.
+- Implement R1, R2, and R3 as separate functions each returning a list of violations carrying
+  path, resolved marker, expected marker, matched key, and which rule fired.
+- Add `KNOWN_MISTAGS: dict[str, str]` and `EXEMPT_DIRS: dict[str, str]`, path-keyed, every value a
+  prose reason. Populate `KNOWN_MISTAGS` with the 24 measured paths. Nothing keyed by line number,
+  index, or ordinal.
+- Add the two bracketing assertions: no violation outside the baseline, and no baseline entry
+  without a corresponding violation.
+- Add a `__main__` block with `--audit`, `--report` (`path<TAB>marker` per line, `NONE` for
+  unmarked), and `--count`, exiting non-zero on violations.
+
+### 3. Write the guard test and its self-mutation proof
+
+- **Task ID**: build-guard-test
+- **Depends On**: build-audit
+- **Validates**: `tests/unit/test_feature_map_markers.py` (create)
+- **Informed By**: the repo's standing rule that a green test often reaches no code at all
+- **Assigned To**: `marker-guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `tests/unit/test_feature_map_markers.py` calling the audit and asserting no violations,
+  with a failure message listing each path, marker, expected marker, and key, sorted, plus the
+  three remediation options.
+- Add `test_audit_reports_a_synthetic_mistag`, which runs the rule functions over a synthetic file
+  list containing a deliberately mistagged path and asserts the violation comes back with the
+  right path, rule, and key. One case per rule.
+- Add the vacuity tests: empty `FEATURE_MAP` raises, empty file enumeration raises,
+  `resolve_marker("")` returns `(None, None)`.
+- Add the stale-exemption test: a `KNOWN_MISTAGS` entry with no matching violation fails.
+
+### 4. Add the CI workflow
+
+- **Task ID**: build-workflow
+- **Depends On**: build-audit
+- **Validates**: `.github/workflows/feature-map-guard.yml` (create)
+- **Informed By**: the Freshness Check finding that no workflow in this repo runs any test
+- **Assigned To**: `marker-guard-builder`
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `.github/workflows/feature-map-guard.yml`, `on: pull_request`, ubuntu-latest,
+  `actions/checkout@v4` with full history not required, `actions/setup-python@v5` pinned to the
+  interpreter in `.python-version`, one step running `python tests/marker_map.py --audit`.
+- No `pip install`, no secrets, no services. If the step needs a dependency, the module is wrong.
+- Hold this task if the Open Question is answered "no workflow"; the guard still runs as a unit test.
+
+### 5. Mutation-check every rule
+
+- **Task ID**: validate-mutation
+- **Depends On**: build-guard-test, build-workflow
+- **Assigned To**: `marker-guard-mutator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Work in a worktree the builder is not editing; concurrent edits corrupt a mutation run in both
+  directions.
+- For R1: rename a file inside `tests/unit/worktree_manager/` to a basename that resolves
+  elsewhere. Confirm red, capture output, restore, confirm green.
+- For R2: rename a file inside `tests/unit/output_handler/` so it alone picks up a marker. Confirm
+  red, capture, restore, confirm green.
+- For R3: add a temporary `FEATURE_MAP` key that matches a fragment of an existing basename.
+  Confirm red, capture, restore, confirm green.
+- For the stale-exemption assertion: fix one baseline file without removing its entry. Confirm red,
+  restore, confirm green.
+- Report the four transcripts verbatim for the PR body. A rule that stays green under its own
+  mutation is a finding, not a formality.
+
+### 6. Prove no marker was lost
+
+- **Task ID**: validate-parity
+- **Depends On**: build-marker-map
+- **Assigned To**: `marker-parity-validator`
+- **Agent Type**: validator
+- **Parallel**: true
+- Generate `--report` on the branch. Generate the equivalent report from `f3594dd23` by replaying
+  the old algorithm over the same file list.
+- Diff them. The only permitted difference is `tests/unit/test_youtube_transcription.py` moving
+  from `messaging` to `tools`. Any other line is a blocker.
+- Independently confirm via `pytest --collect-only -q -m <marker>` counts for every marker in
+  `FEATURE_MAP`, before and after.
+
+### 7. Documentation
+
+- **Task ID**: document-feature
+- **Depends On**: validate-mutation, validate-parity
+- **Assigned To**: `marker-guard-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Write `docs/features/feature-map-marker-guard.md` and add its row to `docs/features/README.md`
+  in sort order.
+- Rewrite the `tests/README.md` split procedure (around lines 495 to 566) to call the audit instead
+  of instructing a manual check, and add both worked examples: the ordering collision
+  (`worktree_manager` after `config`) and the fragment match (`config` inside `configured`).
+- Update the `tests/README.md` line naming `tests/conftest.py` as the home of `FEATURE_MAP`.
+
+### 8. Final validation
+
+- **Task ID**: validate-all
+- **Depends On**: build-marker-map, build-audit, build-guard-test, build-workflow,
+  validate-mutation, validate-parity, document-feature
+- **Assigned To**: `marker-parity-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table and report each result.
+- Run the full `scripts/pytest-clean.sh tests/unit/ -q`, not a targeted subset.
+- Confirm every Success Criterion, including that the four mutation transcripts are in the PR body.
+
 
 ## Verification
 
-_placeholder_
+| Check | Command | Expected |
+|-------|---------|----------|
+| Guard test passes | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q` | exit code 0 |
+| Audit runs on a bare interpreter | `python tests/marker_map.py --audit` | exit code 0 |
+| Audit population is non-empty | `python tests/marker_map.py --count` | output > 800 |
+| Audit module is standard library only | `python -c "import ast,sys; m=ast.parse(open('tests/marker_map.py').read()); mods={a.name.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.Import) for a in n.names} \| {n.module.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.ImportFrom) and n.module}; assert mods <= set(sys.stdlib_module_names), sorted(mods)"` | exit code 0 |
+| Every exemption is a tracked path | `python -c "import subprocess; from tests.marker_map import KNOWN_MISTAGS, EXEMPT_DIRS; tracked=set(subprocess.run(['git','ls-files'],capture_output=True,text=True).stdout.split()); bad=[k for k in KNOWN_MISTAGS if k not in tracked]; assert not bad, bad"` | exit code 0 |
+| Every exemption carries a reason | `python -c "from tests.marker_map import KNOWN_MISTAGS, EXEMPT_DIRS; bad=[k for k,v in list(KNOWN_MISTAGS.items())+list(EXEMPT_DIRS.items()) if not isinstance(v,str) or len(v.strip())<20]; assert not bad, bad"` | exit code 0 |
+| No line-number keying (anti-criterion) | `grep -crE '\b(lineno\|line_number\|line_no)\b' tests/marker_map.py tests/unit/test_feature_map_markers.py` | match count == 0 |
+| Resolution has one implementation (anti-criterion) | `grep -c 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py` | match count == 0 |
+| Resolver was not made directory-authoritative (anti-criterion) | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_pm_briefings_builder.py')[0] is None"` | exit code 0 |
+| Baseline did not grow (anti-criterion) | `python -c "from tests.marker_map import KNOWN_MISTAGS; assert len(KNOWN_MISTAGS) <= 24, len(KNOWN_MISTAGS)"` | exit code 0 |
+| youtube test retagged to tools | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_youtube_transcription.py')[0] == 'tools'"` | exit code 0 |
+| No marker lost | `python tests/marker_map.py --report \| grep -vc 'NONE$'` | output > 281 |
+| Workflow gates pull requests | `python -c "import yaml; d=yaml.safe_load(open('.github/workflows/feature-map-guard.yml')); trig=d.get(True) or d.get('on'); assert 'pull_request' in trig, trig"` | exit code 0 |
+| Feature doc exists | `test -f docs/features/feature-map-marker-guard.md` | exit code 0 |
+| Feature doc indexed | `grep -c 'feature-map-marker-guard' docs/features/README.md` | output > 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Full unit suite green | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
+
+Note on the workflow row: GitHub Actions' `on:` key is parsed by PyYAML as the boolean `True`, not
+the string `"on"`. The check reads both so it cannot pass vacuously on a `None` lookup.
+
 
 ## Critique Results
 
@@ -654,4 +844,14 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+1. **Should this land a GitHub Actions workflow?** The issue's fourth acceptance criterion says the
+   guard must run in CI on every PR. This repo has exactly one workflow
+   (`.github/workflows/claude.yml`) and it only reacts to `@claude` mentions; nothing runs pytest
+   in CI, and neither git hook runs tests either. The plan proposes a small
+   `pull_request` workflow that runs one standard-library script in seconds with no venv, no
+   secrets, and no services, because that is the only reading under which the criterion is
+   literally true. The alternative is to treat the SDLC TEST stage as "CI" and ship the guard as an
+   ordinary unit test only. Both are defensible; the first adds a GitHub Actions surface to a repo
+   that has deliberately kept testing local. **Recommendation: add the workflow**, precisely because
+   it costs nothing to run and needs no dependencies. Answer this before task 4.
+
