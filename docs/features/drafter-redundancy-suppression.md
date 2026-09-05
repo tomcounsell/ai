@@ -145,7 +145,7 @@ TelegramRelayOutputHandler.send
   │   → suppress? queue 👀 reaction and return
   │   → send?    fall through ↓
   │
-  ├─ [All sessions] RTR (bridge/read_the_room.py) — opt-in
+  ├─ [All sessions] RTR (bridge/read_the_room.py) — unconditional
   │   → suppress? queue 👀 reaction and return
   │   → trim?     swap delivery_text and fall through ↓
   │   → send?     fall through ↓
@@ -153,11 +153,10 @@ TelegramRelayOutputHandler.send
   └─ Telegram outbox rpush → record_recent_sent_draft
 ```
 
-RTR's SDLC-session bypass (`bridge/read_the_room.py:400`) is structurally
-present but currently a no-op (the `sdlc_slug` attribute it reads does not
-exist on `AgentSession`). The redundancy filter intentionally does not rely on
-that bypass — it scopes itself via `session.is_sdlc`, the real property at
-`models/agent_session.py:1612`.
+RTR's SDLC-session bypass (`bridge/read_the_room.py:533`) reads
+`session.is_sdlc`, the same real property at `models/agent_session.py:2271`
+the redundancy filter above scopes itself on. Both now depend on the actual
+model property rather than a phantom field.
 
 ## `recent_sent_drafts` field
 

@@ -108,7 +108,7 @@ Self-draft budget exhaustion is also safe. `SELF_DRAFT_MAX_ATTEMPTS` is 2, and o
 
 ## Configuration
 
-Four keys in `.env.example`, with **no `config/settings.py` field** — matching the `READ_THE_ROOM_ENABLED` and `DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED` precedents. The two switches are read fresh from the environment on every call rather than cached at import, so either can be flipped without a process restart.
+Four keys in `.env.example`, with **no `config/settings.py` field** — matching the `DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED` precedent. The two switches are read fresh from the environment on every call rather than cached at import, so either can be flipped without a process restart.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -131,7 +131,7 @@ All four must also be added to the vault `~/Desktop/Valor/.env`, or `check_env_c
 
 - Making the PM automatically read history. This feature raises a flag and hands over the command.
 - Inbound classification for email. The intake classifier has no email caller.
-- Enabling `READ_THE_ROOM_ENABLED` or changing its DM exclusion.
+- Changing Read-the-Room's DM exclusion.
 
 ## Files
 
