@@ -193,7 +193,7 @@ One Python file, one test file, one doc. No new dependencies, no migration, no s
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `gh` authenticated | `gh auth status` | The prompt's `gh issue list --state all` read and the plan's own verification both need a working `gh`. |
-| Repo venv on the pinned interpreter | `python -m tools.doctor` | `scripts/pytest-clean.sh` aborts on an off-pin venv; a worktree without one blocks the pre-commit lint hook. |
+| Repo venv on the pinned interpreter | `python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); v='.'.join(map(str,sys.version_info[:2])); assert v==pin or pin.startswith(v)"` | `scripts/pytest-clean.sh` aborts on an off-pin venv. Scoped to the invoking venv deliberately: `python -m tools.doctor` reports the whole machine and fails on unrelated state (a stale sibling worktree, a stopped bridge, free disk), none of which blocks this work. |
 
 ## Solution
 
@@ -362,7 +362,6 @@ New coverage to add (not modifications):
 - [SEPARATE-SLUG #3161] **Diagnosing the replay mechanism itself** — reading `logs/worker.log`, `valor-session telemetry`, and `session_events` for `0_1787603653699` to establish which requeue leg produced three fresh contexts at ~300s spacing. Requires the machine that ran `com.valor.nightly-tests` on 2026-08-24; this one is worker-only with `data/nightly-tests-disabled` present, and `valor-session inspect --id 0_1787603653699` reports not found. #3161 is open and holds this.
 - [SEPARATE-SLUG #3161] **Preventing two triage filers from running simultaneously** — the #2971 / #2982–#2989 interleave is a second live filer with a different node list from a different working tree, not a replay. Cross-machine dedup already rests on live REST reads and no evidence says it is currently failing. Belongs with the same investigation.
 - [EXTERNAL] **Verifying the fix against a real nightly run** — the nightly is disabled on this machine (`data/nightly-tests-disabled`) and enabling it on the host that runs `com.valor.nightly-tests` is an operator action on a machine the agent cannot reach. Unit coverage plus `--dry-run` is what this plan can establish; the first real confirmation is the next night on that host.
-- **Pruning stale ledger files.** Growth is bounded by distinct failure sets, not by nights (Risk 5), so there is nothing to prune yet. Not deferred to a follow-up — judged unnecessary, and the reasoning is recorded so it is a decision rather than an omission.
 
 ## Update System
 
