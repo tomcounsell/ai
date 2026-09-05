@@ -119,7 +119,25 @@ Two spikes ran against a throwaway git repo with a linked worktree, simulating t
 - **Method**: prototype
 - **Finding**: `git ls-files --deleted -z` returns exactly the tracked-and-absent set, and `git ls-files -z` the full tracked set. Both are plumbing, both NUL-delimited, neither mutates the index, and neither has porcelain's rename/quoting ambiguity.
 - **Confidence**: high
-- **Impact on plan**: the proportional guard is two `ls-files` calls and a division. No porcelain parsing anywhere in the guard.
+- **Impact on plan**: the deleted-file set is available as plumbing, with no porcelain parsing anywhere. (The proportional guard this spike was run for is no longer shipping — see spike-6 — but the same `ls-files --deleted -z` set is what the additive-only preserve filters against.)
+
+### spike-5: Can preserve keep coexisting real work while refusing to commit the deletions?
+
+- **Assumption**: "A wipe detection has to be all-or-nothing: either commit the tree as-is or commit nothing." (The first draft of this plan assumed exactly this, and it is what the critique's first blocker rejected.)
+- **Method**: prototype — the *mixed* shape the first draft never modelled: one tracked top-level directory gone from disk **plus** genuine edits elsewhere.
+- **Finding**: **No, it does not have to be all-or-nothing, and git has the exact primitive.** Fixture: `agent/ bridge/ docs/ tests/` tracked at HEAD, `docs/` removed from disk, `tests/f1.py` edited, `tests/f4.py` added untracked. First, the critique's reproduction confirmed: `ls-tree --name-only -d HEAD` lists `docs`, which is absent on disk, so the structural check fires; deleted=3 against tracked=12 is 25%, so a proportional check stays silent; and under the first draft's plain refusal the edit and the new file are destroyed by the force-remove that follows. Then the fix: `git ls-files --modified --others --exclude-standard -z` minus the `git ls-files --deleted -z` set yields exactly `{tests/f1.py, tests/f4.py}`. Staging that set and committing produced `2 files changed, 2 insertions(+)` with **zero deletions**, `docs/` still tracked at the new HEAD, and the three ` D docs/*` entries still sitting unstaged in the working tree where the force-remove discards them.
+- **Confidence**: high — run end to end on git 2.50.1 (Apple Git-155), including the commit and the resulting diffstat.
+- **Impact on plan**: this replaces the refusal with a **downgrade to additive-only preserve**, and it is the central design change of this revision. Two mechanical corrections the run surfaced, both of which would have cost a builder a debugging round:
+  - **`git add` has no `-z`.** The critique's suggested `git add --pathspec-from-file=- -z --` exits non-zero with ``error: unknown switch `z` ``. The correct flag is `--pathspec-file-nul`. Verified both ways.
+  - **An empty candidate set must short-circuit.** `git add --pathspec-from-file=<empty> --pathspec-file-nul --` exits 0 and stages nothing (printing an `addEmptyPathspec` hint), after which `git commit` fails with "nothing to commit" and the outer handler would log a spurious `[worktree-wip-preserve-failed]`. On a pure wipe the candidate set *is* empty, which is the common case, so the code must test the set and return before staging.
+
+### spike-6: Does the proportional guard survive a partially-staged wipe?
+
+- **Assumption**: "`git ls-files --deleted` is a stable signal for 'tracked files gone from disk'." (Raised as a concern by the critique.)
+- **Method**: prototype
+- **Finding**: **No — the index blinds it.** With `docs/` (3 of 12 tracked files) removed from disk, `ls-files --deleted`=3 and `ls-files`=12. After a bare `git add -A` — reachable today, because `add -A` succeeds and the subsequent `commit` can fail — the same tree gives `ls-files --deleted`=**0** and `ls-files`=**9**. The proportional guard cannot fire. The structural signal is unaffected: `ls-tree --name-only -d HEAD` still lists all four directories, because it reads HEAD rather than the index. The staged deletions are recoverable via `git diff --cached --diff-filter=D --name-only HEAD` (returns 3) and the true tracked count via `git ls-tree -r --name-only HEAD` (returns 12).
+- **Confidence**: high
+- **Impact on plan**: the proportional guard is **dropped from this change** rather than repaired. It was declared secondary yet carried the change's only two tunables, its only new config and env surface, and two of its eight tests, while its target case (a partial wipe leaving every tracked top-level directory present) has never been observed and the reported incident is caught by the structural check alone. This spike is recorded so that if a real partial wipe ever justifies adding it, whoever does so reads HEAD (`ls-tree -r`, `diff --cached --diff-filter=D`) instead of the index — see **Rabbit Holes**.
 
 ## Data Flow
 
@@ -127,25 +145,27 @@ Two paths reach the producer. Both end in the same unguarded commit.
 
 **Path A — stale worktree found while creating a new one** (the path the issue names)
 
-1. **Entry point**: `create_worktree(repo_root, slug)` — `agent/worktree_manager.py:1295`. Called on session start / revival.
-2. `worktree_dir.exists()` is False, so creation proceeds. `_find_worktree_for_branch(repo_root, "session/{slug}")` finds the branch checked out at some *other* `.worktrees/` path (line 1318).
-3. `_cleanup_stale_worktree(repo_root, branch_name, existing_wt)` — line 1323.
-4. Path-containment guard (line 918) passes: the path is under `.worktrees/`. Directory exists, so the force-remove branch is taken.
-5. `stale_slug = wt.name`; `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` — line 948.
+1. **Entry point**: `create_worktree(repo_root, slug)` — `agent/worktree_manager.py:1370`. Called on session start / revival.
+2. `worktree_dir.exists()` is False, so creation proceeds. `_find_worktree_for_branch(repo_root, "session/{slug}")` finds the branch checked out at some *other* `.worktrees/` path.
+3. `_cleanup_stale_worktree(repo_root, branch_name, existing_wt)` — line 1425.
+4. Path-containment guard (line 942) passes: the path is under `.worktrees/`. Directory exists, so the force-remove branch is taken.
+5. `stale_slug = wt.name`; `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` — line 972.
 6. **The gap**: `git status --porcelain` in a gutted `wt` returns a long list of ` D` lines. Non-empty, so the clean-tree early return does not fire. `git add -A` stages every deletion. `git commit --no-verify --no-gpg-sign` writes it — **onto whatever branch `wt` has checked out**, which is `session/{slug}`, not `session/{stale_slug}`.
 7. `git -C {repo_root} update-ref refs/session-wip/{stale_slug} {sha}` — the ref is filed under the *directory name*, the commit landed on a *different branch*. Recovery pointer and recovered content disagree.
 8. **Output**: `git worktree remove --force` proceeds. The wipe is now the head of a live session branch, and the durable ref points at it.
 
 **Path B — ordinary teardown** (unnamed in the issue, equally exposed)
 
-1. **Entry point**: `remove_worktree(repo_root, slug)` — line 1551. Called from `post_merge_cleanup` (line 2010) and from session teardown.
+1. **Entry point**: `remove_worktree(repo_root, slug)` — line 1653. Called from `cleanup_after_merge` and from session teardown.
 2. Refuse-busy guard (#1357) and live-process guard pass, or `force=True` overrides them.
-3. `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` — line 1660. Same unguarded body, same outcome. Here slug and branch do agree.
+3. `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` — line 1762. Same unguarded body, same outcome. Here slug and branch do agree.
 4. **Output**: same wipe commit, same ref.
 
-**Where the guard goes**: step 6 in Path A is step 3 in Path B — the identical function body. Putting the refusal inside `preserve_uncommitted_worktree_changes`, between the `status` read and `git add -A`, covers both paths with one change and leaves every caller's contract unchanged (the function already returns `{"preserved": False, "errors": [...]}` and is documented as never raising into teardown).
+**Path C — the idle-lane reaper** (`reap_idle_worktree`, `agent/worktree_manager.py:1007`, added by `55ad9ac89` for #3162) **does not reach the producer and needs no change.** It refuses on a non-empty `git status --porcelain` before any other work, so a half-deleted tree reads as dirty, the lane is kept, and preserve is never called. Its docstring says so explicitly and `TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins it. Named here so a reader auditing the module's teardown surface does not have to rediscover it.
 
-**Where the deletions came from** is deliberately *not* on this path. Whatever gutted the tree — a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback at line 978, a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory — the observable at step 6 is identical and the refusal is correct against all three.
+**Where the guard goes**: step 6 in Path A is step 3 in Path B — the identical function body. Putting the check inside `preserve_uncommitted_worktree_changes`, between the `status` read and the staging step, covers both live paths with one change and leaves every caller's contract unchanged (the function already returns `{"preserved": False, "errors": [...]}` and is documented as never raising into teardown).
+
+**Where the deletions came from** is deliberately *not* on this path. Whatever gutted the tree — a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback at line 1001, a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory — the observable at step 6 is identical and the response is correct against all three.
 
 ## Why Previous Fixes Failed
 
@@ -157,7 +177,7 @@ Two paths reach the producer. Both end in the same unguarded commit.
 
 **Root cause pattern:** every guard in this subsystem answers "is there something here?" and none answers "is what's here plausible?". `status --porcelain` non-empty, `merge-base --is-ancestor` passing, `merged_via_tree` false — each is a presence check, and a wipe satisfies all three. The fix is the first shape-of-the-change check on the path.
 
-**A correction to the issue's own diagnosis.** The Diagnostic Output section attributes the `bridge boot → WIP commit` correlation to `cleanup_stale_branches`. That function (`agent/session_revival.py:193`) lists `session/*` branches, checks their age against `max_age_hours`, and calls `safe_delete_branch`. It never touches a worktree and never reaches preserve. The correlation is real; the mechanism named for it is not. The only caller of `_cleanup_stale_worktree` is `create_worktree` at line 1323 — so what a bridge boot does is *create* worktrees, and it is the stale-worktree recovery inside creation (Path A above) that reaches the producer. Anyone building from the issue's stated mechanism would have instrumented the wrong function.
+**A correction to the issue's own diagnosis.** The Diagnostic Output section attributes the `bridge boot → WIP commit` correlation to `cleanup_stale_branches`. That function (`agent/session_revival.py:198`) lists `session/*` branches, checks their age against `max_age_hours`, and calls `safe_delete_branch`. It never touches a worktree and never reaches preserve. The correlation is real; the mechanism named for it is not. The only caller of `_cleanup_stale_worktree` is `create_worktree` at line 1425 — so what a bridge boot does is *create* worktrees, and it is the stale-worktree recovery inside creation (Path A above) that reaches the producer. Anyone building from the issue's stated mechanism would have instrumented the wrong function.
 
 ## Architectural Impact
 
