@@ -91,6 +91,22 @@ Two spikes ran against a throwaway git repo with a linked worktree, simulating t
 - **Confidence**: high
 - **Impact on plan**: Both guards ship, and the structural one is primary. A worktree missing a directory that HEAD tracks is *definitionally* not "uncommitted work" — no ratio, no threshold, no env var, no false-positive story to argue about. The ratio guard becomes the secondary net for partial wipes that leave every top-level directory nominally present (a `rm -rf` interrupted inside one subtree, for instance), and it is the only one of the two that carries a tunable constant.
 
+### spike-3: Would the issue's proposed insertions-ratio predicate have caught the reported incident?
+
+- **Assumption**: "Refusing when staged deletions overwhelm staged insertions (the Next Steps bullet) is a sound predicate."
+- **Method**: prototype — reproduce the incident's *shape*, not just a bare wipe: tracked directories deleted from disk **and** untracked build artifacts present, which is what a real lane worktree looks like.
+- **Finding**: **No — it would not have fired.** With five untracked artifacts under `.venv/lib/` alongside nine deleted tracked files, `git add -A` followed by `git diff --cached --shortstat` reported `14 files changed, 5 insertions(+), 9 deletions(-)`. The insertions are real and come entirely from staging untracked junk. This is exactly the reported commit's signature: 902,840 deletions arrived **with 223,142 insertions**, which no "insertions are a negligible fraction" test treats as a wipe.
+- **Confidence**: high — the incident's own numbers are the confirming evidence, and the reproduction shows the mechanism that produces them.
+- **Impact on plan**: the insertions-ratio predicate is rejected outright. The proportional guard counts *files gone from disk* against *files tracked in the index* (`git ls-files --deleted -z` vs `git ls-files -z`), which is unaffected by whatever untracked artifacts the lane left behind. Verified in the same repo: 9 deleted against 16 tracked = 56%, over the 50% threshold, refuse. Control cases behave: restoring one directory dropped the count to 6, and a fully clean worktree reported 0 deleted and 0 dirty entries.
+
+### spike-4: Is there a NUL-safe primitive for "tracked but missing from disk"?
+
+- **Assumption**: "Counting deleted files requires parsing `git status --porcelain`, with its rename two-path entries and quoting rules."
+- **Method**: prototype
+- **Finding**: `git ls-files --deleted -z` returns exactly the tracked-and-absent set, and `git ls-files -z` the full tracked set. Both are plumbing, both NUL-delimited, neither mutates the index, and neither has porcelain's rename/quoting ambiguity.
+- **Confidence**: high
+- **Impact on plan**: the proportional guard is two `ls-files` calls and a division. No porcelain parsing anywhere in the guard.
+
 ## Data Flow
 
 Two paths reach the producer. Both end in the same unguarded commit.
