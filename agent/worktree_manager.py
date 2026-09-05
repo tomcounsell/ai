@@ -524,12 +524,19 @@ def _scan_worktree_sessions(
     injected-``sessions=`` path never calls ``_fetch_live_sessions`` and so
     would otherwise leave ``TERMINAL_STATUSES`` unbound in this frame.
 
-    The Python ``status not in TERMINAL_STATUSES`` check below is kept even
-    though the indexed query above already narrows on ``status``: they are
-    not the same predicate. A status value outside the known enum is
-    non-terminal under this check (fail-closed) but absent from the index
-    union (fail-open), so deleting this check would silently flip that case
-    from fail-closed to fail-open the moment an unrecognized status appears.
+    Narrowing on the index accepts a fail-open reading for any status outside
+    ``ALL_STATUSES``: such a row is absent from the ``status__in`` union, so it
+    is never fetched and the lane reads clear. That trade is deliberate --
+    spike 4 found no live out-of-enum values and no write site for one outside
+    ``models/session_lifecycle.py``, whose setter rejects unknown statuses --
+    and it is settled at the query, not here. The Python
+    ``status not in TERMINAL_STATUSES`` check below therefore cannot exclude a
+    row on either shipped path: ``TERMINAL_STATUSES`` and
+    ``NON_TERMINAL_STATUSES`` are disjoint, so every fetched row passes it by
+    construction, and ``worktree_busy_probe_many`` injects index-filtered rows
+    too. It is kept because it is cheap and it is the correct predicate for a
+    caller that injects rows of its own -- the only path that can present an
+    out-of-enum status -- not because it is what holds the fail-closed line.
 
     Path comparison normalizes both sides via ``os.path.normpath`` (no symlink
     resolution) then matches the worktree's path components segment-by-segment

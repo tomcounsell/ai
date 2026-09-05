@@ -271,13 +271,13 @@ class TestScanWorktreeSessions:
         assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == ("clear", "", "")
 
     def test_unknown_status_value_reads_busy(self):
-        """A status outside ALL_STATUSES must stay fail-closed (Risk 2, spike-4).
+        """An injected out-of-enum status stays fail-closed (Risk 2, spike-4).
 
-        It is non-terminal under the surviving Python check but absent from
-        the index union that produced ``sessions``, so this exercises the
-        Python `` not in TERMINAL_STATUSES`` check directly rather than the
-        index — the row is handed in via ``sessions=`` as if the index had
-        already (correctly, for a real deployment) returned it.
+        The index union cannot return such a row, so this is the one path
+        where the surviving Python ``not in TERMINAL_STATUSES`` check can
+        still exclude something: a caller handing rows in via ``sessions=``.
+        The out-of-enum status read on the fetching path is fail-open by
+        accepted trade, settled at the query, and is not what this asserts.
         """
         rows = [
             _make_session(

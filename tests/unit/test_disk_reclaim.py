@@ -367,8 +367,10 @@ def _multi_lane_repo(tmp_path, names):
 
 def test_reprobe_call_count_equals_removed_count_under_apply_true(repo, all_clear, monkeypatch):
     """Decision 4: the fresh single-slug re-probe fires once per lane
-    actually removed under `apply=True`, driven through the real
-    `worktree_busy_probe` (wrapped only to count, not to change behavior).
+    actually removed under `apply=True`. The counter wraps whatever the
+    `all_clear` fixture installed at `wm.worktree_busy_probe` (a clear-returning
+    stub), purely to count calls -- it does not change behavior. What this
+    pins is the real call site and its count, not the probe implementation.
     """
     import agent.worktree_manager as wm
 

@@ -138,10 +138,15 @@ posture differs.
 
 `_scan_worktree_sessions` no longer hydrates the whole `AgentSession` table.
 `_fetch_live_sessions()` issues one indexed, materialized query —
-`AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES)` — and the Python
-loop still drops any row whose status is unrecognized as non-terminal, so an
-enum value the index doesn't know about still reads busy rather than
-silently clearing. `worktree_busy_probe_many(repo_root, slugs)` fetches once
+`AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES)`. Narrowing on the
+index accepts a fail-open reading for any status outside `ALL_STATUSES`: such a
+row is never fetched, so its lane reads clear. The trade is deliberate — no live
+out-of-enum value exists and the only status write site
+(`models/session_lifecycle.py`) rejects unknown values — and it is settled at the
+query. The Python `status not in TERMINAL_STATUSES` check that follows cannot
+exclude a fetched row (the two status sets are disjoint); it is retained as the
+correct predicate for a caller that injects rows of its own.
+`worktree_busy_probe_many(repo_root, slugs)` fetches once
 and matches every candidate slug against that one in-memory list through the
 same segment-aware containment matcher the single-slug wrappers use, so batch
 and single-slug results cannot drift apart.

@@ -288,10 +288,16 @@ Four spikes ran against live Redis on this checkout, read-only, through the ORM.
   `grep -rn '\.status *= *"'` finds no direct AgentSession status write outside
   `models/session_lifecycle.py` (the three hits are `models/job.py`, a different model).
 - **Confidence**: high
-- **Impact on plan**: the Python `status not in TERMINAL_STATUSES` check is **kept** after
-  the indexed query rather than deleted as now-redundant. It costs one set membership test
-  per surviving row and it is the thing that keeps the fail-closed posture honest if the
-  enum ever grows. Risk 2 and a dedicated test cover it.
+- **Impact on plan**: the narrowing accepts a **fail-open** reading for any status outside
+  `ALL_STATUSES` — such a row is never fetched, so its lane reads clear. That is settled at
+  the query, and no surviving Python check can undo it, because `TERMINAL_STATUSES` and
+  `NON_TERMINAL_STATUSES` are disjoint and every fetched row passes `not in
+  TERMINAL_STATUSES` by construction. The trade is accepted on this spike's evidence: no
+  live out-of-enum value, and no status write site outside `models/session_lifecycle.py`,
+  whose setter rejects unknown values. The Python check is **kept** anyway — one set
+  membership test, and it is the correct predicate for the one path that can present an
+  out-of-enum status, a caller injecting rows via `sessions=`. Risk 2 and a dedicated test
+  cover that path.
 
 ## Data Flow
 
@@ -439,11 +445,12 @@ leaving the `working_dir` predicate exactly as it is — it is a push-down of a 
 Python loop *already performs*, so by construction it cannot change which sessions are
 considered.
 
-**Decision 2 — keep the Python `status not in TERMINAL_STATUSES` check.** It looks
-redundant after the indexed query and it is not (spike-4): an unknown status value is
-non-terminal under the current check and absent from the index union, so deleting the
-Python check would silently flip that case from fail-closed to fail-open. One set
-membership test per surviving row is not a cost worth arguing about.
+**Decision 2 — keep the Python `status not in TERMINAL_STATUSES` check, and record what it
+does and does not buy.** It cannot exclude a fetched row: the two status sets are disjoint,
+so every row the index returns passes it. The fail-open reading of an out-of-enum status is
+accepted at the query on spike-4's evidence, not prevented here. The check is kept because
+it is one set membership test and it is the correct predicate for a caller that injects its
+own rows via `sessions=` — the only path that can present an out-of-enum status.
 
 **Decision 3 — inject rows rather than write a second matcher.** `worktree_busy_probe_many`
 does not re-implement containment matching; it calls `_scan_worktree_sessions` with
@@ -728,9 +735,11 @@ fetch fails.
 **Impact:** A status value outside `ALL_STATUSES` would be treated as busy today
 (fail-closed) and as clear after an index-only narrowing (fail-open) — a live worktree
 deleted under a running session.
-**Mitigation:** Decision 2 keeps the Python `not in TERMINAL_STATUSES` check after the
-indexed query, so the fail-closed reading survives for any status the index union misses.
-Pinned by a test that feeds a row with a fabricated status and asserts `busy`.
+**Mitigation:** Accepted, not prevented (spike-4): no live out-of-enum value exists and the
+only status write site rejects unknown values. Decision 2 keeps the Python `not in
+TERMINAL_STATUSES` check, which holds the fail-closed reading on the one path that can still
+present such a row — a caller injecting rows via `sessions=`. Pinned by a test that feeds an
+injected row with a fabricated status and asserts `busy`.
 
 ### Risk 3: The batch snapshot is stale by the time a lane is removed
 **Impact:** A session that starts inside a lane mid-sweep is missed, and the lane is
@@ -1141,12 +1150,12 @@ so they can run in parallel without the shared-worktree livelock.
 | Batch probe wired into the sweep | `grep -c 'worktree_busy_probe_many' tools/disk_reclaim.py` | output > 0 |
 | Full scan gone (anti-criterion) | `grep -c 'query\.all()' agent/worktree_manager.py` | match count == 0 |
 | Slug narrowing rejected (anti-criterion, Decision 1) | `grep -c 'filter(slug=' agent/worktree_manager.py` | match count == 0 |
-| No lazy builder crosses a function boundary (anti-criterion, Decision 0) | `python -c "import ast,sys; t=ast.parse(open('agent/worktree_manager.py').read()); f=[n for n in ast.walk(t) if isinstance(n,ast.FunctionDef) and n.name=='_fetch_live_sessions'][0]; print('OK' if any(isinstance(n,ast.Call) and getattr(n.func,'id','')=='list' for n in ast.walk(f)) else 'BAD')"` | output `OK` |
-| No clear-valued default on the map read (anti-criterion, Risk 4; AST so a black-wrapped default cannot slip past) | `python -c "import ast; t=ast.parse(open('tools/disk_reclaim.py').read()); bad=[n.lineno for n in ast.walk(t) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='get' and len(n.args)>=2 and isinstance(n.args[1],ast.Tuple) and n.args[1].elts and isinstance(n.args[1].elts[0],ast.Constant) and n.args[1].elts[0].value=='clear']; print('BAD' if bad else 'OK', bad)"` | output `OK []` |
+| No lazy builder crosses a function boundary (anti-criterion, Decision 0) | `python -c "import ast,sys; t=ast.parse(open('agent/worktree_manager.py').read()); f=[n for n in ast.walk(t) if isinstance(n,ast.FunctionDef) and n.name=='_fetch_live_sessions'][0]; print('OK' if any(isinstance(n,ast.Call) and getattr(n.func,'id','')=='list' for n in ast.walk(f)) else 'BAD')"` | output contains OK |
+| No clear-valued default on the map read (anti-criterion, Risk 4; AST so a black-wrapped default cannot slip past) | `python -c "import ast; t=ast.parse(open('tools/disk_reclaim.py').read()); bad=[n.lineno for n in ast.walk(t) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='get' and len(n.args)>=2 and isinstance(n.args[1],ast.Tuple) and n.args[1].elts and isinstance(n.args[1].elts[0],ast.Constant) and n.args[1].elts[0].value=='clear']; print('BAD' if bad else 'OK', bad)"` | output contains OK [] |
 | Terminal-status check survives (anti-criterion, Decision 2) | `grep -c 'in TERMINAL_STATUSES' agent/worktree_manager.py` | output > 0 |
 | Fail-open wrapper intact | `grep -c 'def worktree_busy_check' agent/worktree_manager.py` | output > 0 |
 | Fail-closed wrapper intact | `grep -c 'def worktree_busy_probe' agent/worktree_manager.py` | output > 0 |
-| Guard order unchanged in the sweep | `sed -n '/^def sweep_worktrees/,/^def [a-z_]/p' tools/disk_reclaim.py \| grep -oE '"protected"\|"too_young"\|"uncommitted_changes"\|live_process:\|busy_check_error:\|live_session:\|"open_pr"\|"unmerged"' \| paste -sd, -` | exactly `"protected","too_young","uncommitted_changes",live_process:,busy_check_error:,live_session:,"open_pr","unmerged"` |
+| Guard order unchanged in the sweep | `sed -n '/^def sweep_worktrees/,/^def [a-z_]/p' tools/disk_reclaim.py \| grep -oE '"protected"\|"too_young"\|"uncommitted_changes"\|live_process:\|busy_check_error:\|live_session:\|"open_pr"\|"unmerged"' \| paste -sd, -` | output contains "protected","too_young","uncommitted_changes",live_process:,busy_check_error:,live_session:,"open_pr","unmerged" |
 | No stale `query.all` mocks left behind (Test Impact completion check) | `grep -c 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` | match count == 0 |
 | No stale xfails in scope | `grep -rn 'xfail' tests/unit/test_disk_reclaim.py tests/unit/worktree_manager/` | exit code 1 |
 
