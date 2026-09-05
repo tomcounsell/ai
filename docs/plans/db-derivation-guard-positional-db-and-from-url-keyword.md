@@ -795,13 +795,22 @@ number.
 
 ## Verification
 
-Every row below was executed against unmodified `main` at `67d714662` while
-writing this plan. The four defect rows are **red today** (`POSITIONAL 0`,
-`STRICT 0`, `URLKW 0`, `FIXTURE 1`, `URLLAUNDER 0`) and the invariant rows are
-green. `URLLAUNDER 0` is the one that matters most: it is shipped code accepting
-a hardcoded pool-slot URL. That
-recorded red state is the paper trail: a fix that cannot be shown flipping these
-exact rows has not been demonstrated.
+Every row below was executed against unmodified `main` — rows present in the
+first draft at `67d714662`, rows added during the critique revision at
+`d2c507ad9`. **Five defects sit behind six red rows today**: `POSITIONAL 0` and
+`STRICT 0` are one defect against two constructor names, then `URLKW 0`,
+`FIXTURE 1`, `URLLAUNDER 0`, and `URLDEFAULT 0`. The last two matter most: they
+are shipped code accepting a hardcoded pool-slot URL, once through a plain local
+and once through a parameter default. That recorded red state is the paper
+trail: a fix that cannot be shown flipping these exact rows has not been
+demonstrated.
+
+Three groups of rows are **invariants rather than defects**, and each exists
+because a plausible implementation would break it silently:
+
+- `LDEFAULT`, `LMODULE`, `LFOR`, `LWALRUS`, `LWITH`, `LAUG`, `LAUNDER1`, `LAUNDER2` are red today and must stay red. The first six are the shapes spike-7 measured the negative binding check flipping to green. They are the executable form of the constraint; before the revision the default-argument case existed only as prose in Success Criteria with no runnable command, and the other five appeared nowhere.
+- `STARRED` and `STARSTRICT` pin fix 1's `ast.Starred` suppression at the one index where the branch is reachable. `EDGE` cannot substitute: its `redis.Redis(*args)` has one argument and short-circuits on the length guard.
+- `URLHOP` paired with `DBHOP` pins residual gap 6 — route 2 has no one-hop alias leg, so the same shape that route 1 accepts is a violation there. The pair is what makes the disclosure checkable: if someone closes the gap, `URLHOP` goes to 0 and the docstring must change with it.
 
 | Check | Command | Expected |
 |-------|---------|----------|
@@ -816,6 +825,17 @@ exact rows has not been demonstrated.
 | Route 2 shadowed sanctioned name goes red | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLLAUNDER', len(s('import redis\ndef t():\n    redis_test_url = \"redis://localhost:6379/9\"\n    redis.Redis.from_url(redis_test_url)\n','x.py').violations))"` | output contains URLLAUNDER 1 |
 | Route 2 genuine fixture parameter stays accepted | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLPARAM', len(s('import redis\ndef t(redis_test_url):\n    redis.Redis.from_url(redis_test_url)\n','x.py').violations))"` | output contains URLPARAM 0 |
 | Ordinary local stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LAUNDER2', len(s('import redis\ndef t():\n    test_db = 7\n    redis.Redis(db=test_db)\n','x.py').violations))"` | output contains LAUNDER2 1 |
+| Default-argument shadow stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LDEFAULT', len(s('import redis\ndef t(scratch_test_db=7):\n    redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LDEFAULT 1 |
+| Module-level shadow stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LMODULE', len(s('import redis\nscratch_test_db = 7\ndef t():\n    redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LMODULE 1 |
+| `for` target shadow stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LFOR', len(s('import redis\ndef t(xs):\n    for scratch_test_db in xs:\n        redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LFOR 1 |
+| Walrus shadow stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LWALRUS', len(s('import redis\ndef t():\n    if (scratch_test_db := 7):\n        redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LWALRUS 1 |
+| `with ... as` shadow stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LWITH', len(s('import redis\ndef t(c):\n    with c as scratch_test_db:\n        redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LWITH 1 |
+| Augmented rebind of a real parameter stays red | `python -c "from tests.db_derivation_guard import scan_source as s; print('LAUG', len(s('import redis\ndef t(scratch_test_db):\n    scratch_test_db += 1\n    redis.Redis(db=scratch_test_db)\n','x.py').violations))"` | output contains LAUG 1 |
+| Route 2 default-argument shadow goes red | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLDEFAULT', len(s('import redis\ndef t(redis_test_url=\"redis://localhost:6379/9\"):\n    redis.Redis.from_url(redis_test_url)\n','x.py').violations))"` | output contains URLDEFAULT 1 |
+| Starred at the db index yields no candidate | `python -c "from tests.db_derivation_guard import scan_source as s; print('STARRED', len(s('import redis\ndef t(rest):\n    redis.Redis(\"h\", 6379, *rest)\n','x.py').candidates))"` | output contains STARRED 0 |
+| Starred at the db index, StrictRedis mirror | `python -c "from tests.db_derivation_guard import scan_source as s; print('STARSTRICT', len(s('import redis\ndef t(rest):\n    redis.StrictRedis(\"h\", 6379, *rest)\n','x.py').candidates))"` | output contains STARSTRICT 0 |
+| Route 2 one-hop alias stays a disclosed false positive | `python -c "from tests.db_derivation_guard import scan_source as s; print('URLHOP', len(s('import redis\nfrom tests.db_claim import redis_test_url\ndef t():\n    url = redis_test_url()\n    redis.Redis.from_url(url)\n','x.py').violations))"` | output contains URLHOP 1 |
+| Route 1 one-hop alias control, for contrast with URLHOP | `python -c "from tests.db_derivation_guard import scan_source as s; print('DBHOP', len(s('import redis\nfrom tests.db_claim import claim_test_db\ndef t():\n    d = claim_test_db()\n    redis.Redis(db=d)\n','x.py').violations))"` | output contains DBHOP 0 |
 | Positional message is not mislabeled as from_url | `python -c "from tests.db_derivation_guard import scan_source as s, format_violation as f; v=s('import redis\ndef t():\n    redis.Redis(\"h\", 6379, 7)\n','x.py').violations; print(f(v[0]) if v else 'NOVIOLATION')"` | output contains takes db=7 |
 | Every kind names the remedial API | `python -c "from tests.db_derivation_guard import Candidate, format_violation as f; print('REMEDY', all(all(x in f(Candidate(path='x.py',lineno=1,kind=k,expr='7',callee='Redis',ok=False,detail='d',pool_db=7)) for x in ('claim_test_db()','redis_test_url()','ALLOWLIST','DEFERRED')) for k in ('db-kwarg','from-url','db-positional')))"` | output contains REMEDY True |
 | Short and starred calls raise nothing | `python -c "from tests.db_derivation_guard import scan_source as s; print('EDGE', len(s('import redis\ndef t(args):\n    redis.Redis()\n    redis.Redis(\"h\")\n    redis.Redis(\"h\", 6379)\n    redis.Redis(*args)\n','x.py').candidates))"` | output contains EDGE 0 |
