@@ -28,32 +28,46 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 ## Freshness Check
 
-**Baseline commit:** `bc42055a4` (`origin/main` at recon time; plan committed on `fd73c0ad1` after a sync)
+**Re-verified at:** `ffda9fc86` (`origin/main`, 2026-09-05, during the post-critique revision pass). Every anchor below was re-derived by symbol against this commit, not copied forward.
 **Issue filed at:** 2026-09-05T03:25:53Z
-**Disposition:** Minor drift
+**Disposition:** Minor drift — one commit landed on the module after filing, shifting every line citation by roughly 100 lines and adding a third worktree-removal entry point. The defect and the fix shape are unchanged.
 
-**File:line references re-verified:**
+**The drift: #3162 closed after this plan's first draft.** Issue #3162 ("worktree-gc: reap stale `nightly-triage-*` branches and worktrees") closed at 2026-09-05T12:52:41Z via `55ad9ac89`, which is an ancestor of the current head. It touches both files this plan reads (`agent/worktree_manager.py` +102 lines, `agent/session_revival.py` +41) and adds `reap_idle_worktree()` — a third worktree-removal entry point in the same module. The first draft of this plan asserted "#3162 still open, no code overlap" and "no commits since filing"; both statements were false at its own head. Corrected here.
 
-- `agent/worktree_manager.py:1406-1500` — the producer, with no check between the `status --porcelain` non-empty test and `git add -A` — **still holds, exact.** `def preserve_uncommitted_worktree_changes` is at line 1406.
-- `agent/worktree_manager.py:940-948` — the `_cleanup_stale_worktree` caller — **still holds, exact.** The `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` call is at line 948, immediately before `git worktree remove --force`.
-- Commits `ba3ea72e9`, `805983e36`, `c004ff37d`, `35c76c461` — **gone.** Not resolvable in this checkout; the reporter's `git reset --hard origin/main` plus `--force-with-lease` recovery removed them. The defect is confirmed by code reading and by spike-1 below, not by re-inspecting those objects. No content was lost in that recovery (the wipe commits held only deletions).
-- `refs/session-wip/*` — **empty.** `git for-each-ref refs/session-wip/` returns zero refs on this machine, so the audit bullet in the issue's Next Steps has nothing to audit here.
+**`reap_idle_worktree` needs no guard, and this is deliberate, not an oversight.** It lives at `agent/worktree_manager.py:1007` and refuses on a non-empty `git status --porcelain` before doing anything else, so it never calls `preserve_uncommitted_worktree_changes` at all. A half-deleted tree reads as maximally dirty there and the lane is kept. Its docstring already reasons about #3167 explicitly ("The clean-tree guard is also what keeps this path clear of issue #3167"), and `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins that behavior. This plan touches neither the function nor that test.
 
-**Second call site the issue did not name (drift found during recon):** `remove_worktree` also calls preserve, at `agent/worktree_manager.py:1660`, before its own `git worktree remove --force`. A fix scoped to `_cleanup_stale_worktree` alone would leave that path exposed. This is why the guard belongs inside the preserve function itself.
+**Anchors re-derived at `ffda9fc86`** (cited here for orientation; task bodies below cite by *symbol*, because line numbers in this module have now drifted twice):
 
-**Cited sibling issues/PRs re-checked:**
+| Symbol | Line | Note |
+|---|---|---|
+| `preserve_uncommitted_worktree_changes` (def) | 1508 | the producer |
+| its `_cleanup_stale_worktree` call site | 972 | Path A, immediately before `git worktree remove --force` |
+| its `remove_worktree` call site | 1762 | Path B |
+| `_cleanup_stale_worktree` (def) | 903 | |
+| path-containment guard (#880) | 942 | |
+| fallback `shutil.rmtree` | 1001 | |
+| `reap_idle_worktree` (def) | 1007 | new in `55ad9ac89`; never reaches preserve |
+| `create_worktree` (def) | 1370 | |
+| its `_cleanup_stale_worktree(...)` call | 1425 | |
+| `cleanup_stale_branches` (`agent/session_revival.py`) | 198 | |
+| `@patch(...preserve_uncommitted_worktree_changes)` in `test_worktree_manager_cleanup.py` | 466, 544 | |
+| `monkeypatch.setattr(wm, "preserve_uncommitted_worktree_changes", ...)` in the same file | 101, 122 | inside `TestReapIdleWorktree`, added by `55ad9ac89` |
+| `VALID_SLUG_RE` | 21 | `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` |
+| `PerformanceSettings` / `max_content_filename_bytes` / its `model_post_init` | 133 / 146 / 160 | `config/settings.py` |
+| `**Why a WIP commit + named ref, not `git stash`.**` paragraph | 263 | `docs/features/session-isolation.md` |
+| the docstring's counter-statement on `refs/stash` | 1518–1527 | `agent/worktree_manager.py` |
 
-- #2137 — closed 2026-07-17. The issue that introduced this function. Its PR #2150 ("Preserve uncommitted worktree work + destructive-git guard") merged the same day. Still the governing design; this plan hardens it rather than replacing it.
-- #3166 (bridge SIGTERM restart loop) — **still open.** Named in the issue as the companion investigation and the amplifier: nine bridge boots in seventeen minutes meant nine teardown passes against live worktrees. Independent of this fix; the guard is correct with or without it.
-- #3162 (worktree-gc: reap stale `nightly-triage-*` branches) — **still open.** Adjacent worktree hygiene, no code overlap with `preserve_uncommitted_worktree_changes`.
+**Claims re-checked and still true:**
 
-**Commits on main since issue was filed (touching referenced files):**
+- The producer still tests only `git status --porcelain` non-emptiness and then runs `git add -A` unconditionally. There is no shape check anywhere between them. The defect is present at `ffda9fc86`.
+- Commits `ba3ea72e9`, `805983e36`, `c004ff37d`, `35c76c461` — **gone.** Not resolvable in this checkout; the reporter's `git reset --hard origin/main` plus `--force-with-lease` recovery removed them. The defect is confirmed by code reading and by the spikes below, not by re-inspecting those objects.
+- `refs/session-wip/*` — **empty.** `git for-each-ref refs/session-wip/` returns zero refs on this machine.
+- **Second call site the issue did not name:** `remove_worktree` also calls preserve before its own force-remove. A fix scoped to `_cleanup_stale_worktree` alone would leave that path exposed, which is why the guard belongs inside the preserve function itself.
+- #2137 — closed 2026-07-17; its PR #2150 introduced this function. Still the governing design; this plan hardens it.
+- #3166 (bridge SIGTERM restart loop) — **still open.** The amplifier, independent of this fix.
+- **Active plans overlapping this area:** none. `grep -l "worktree_manager\|preserve_uncommitted" docs/plans/*.md` matches only this plan.
 
-`git log --since=2026-09-05T03:25:53Z origin/main -- agent/worktree_manager.py agent/session_revival.py` returns nothing. Neither file has moved since filing.
-
-**Active plans in `docs/plans/` overlapping this area:** none. `grep -l "worktree_manager\|preserve_uncommitted" docs/plans/*.md` returns no matches across the fifteen active plans.
-
-**Notes:** The one substantive premise correction is in the issue's "Diagnostic Output" timing paragraph — see **Why Previous Fixes Failed** and the Recon Summary on the issue. `cleanup_stale_branches` is not the mechanism. The bridge-boot correlation is real; the branch sweep is not what reaches preserve.
+**Notes:** The one substantive premise correction to the issue itself is in its "Diagnostic Output" timing paragraph — see **Why Previous Fixes Failed**. `cleanup_stale_branches` is not the mechanism. The bridge-boot correlation is real; the branch sweep is not what reaches preserve.
 
 ## Prior Art
 
