@@ -483,19 +483,21 @@ Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
 
 When this plan is executed, the lead agent orchestrates work using Task tools. The lead never builds directly.
 
-Small appetite, one source file: the split is by *concern*, not by file, and the two builders must not both edit `scripts/nightly_regression_tests.py` at once. **`prompt-builder` owns `_build_triage_prompt` and `dispatch-builder` owns `write_triage_ledger`, `maybe_dispatch_triage_session`, and `dispatch_findings`** — a declared function-level ownership split, and they run sequentially rather than in parallel because they share a file. This is deliberate: shared-file builders converging on each other's edits is a known livelock here.
+Small appetite, one source file: the split is by *concern*, not by file, and the two builders must not both edit `scripts/nightly_regression_tests.py` at once. **`prompt-builder` owns `ISSUE_LOOKUP_INSTRUCTION`, `_build_triage_prompt`, `_build_cascade_prompt`, and the new `_build_seed_prompt`; `dispatch-builder` owns `write_triage_ledger`, `NodeDisposition`, `maybe_dispatch_triage_session`, `dispatch_findings`, and the seed call site in `main()`** — a declared function-level ownership split, and they run sequentially rather than in parallel because they share a file. This is deliberate: shared-file builders converging on each other's edits is a known livelock here.
+
+The one seam between them is `_build_seed_prompt`: `prompt-builder` writes the function, `dispatch-builder` changes `main()` to call it. Because `build-prompt` runs second, `prompt-builder` performs both halves of that move in its own commit and `dispatch-builder` leaves the inline seed string alone. Stated explicitly so neither builder deletes a string the other is still reading.
 
 ### Team Members
 
 - **Builder (prompt)**
   - Name: `prompt-builder`
-  - Role: Fix 1 only — rewrite `_build_triage_prompt` to hand over the REST command, accept the disposition keyword argument, and render the pre-resolved block. Owns nothing else in the file.
+  - Role: Fix 1 across all three prompts — add `ISSUE_LOOKUP_INSTRUCTION`, interpolate it into `_build_triage_prompt` and `_build_cascade_prompt`, extract `_build_seed_prompt` out of `main()` and interpolate it there too, accept the `dispositions` and `ledger_path` keyword arguments on `_build_triage_prompt`, and render the pre-resolved block and the conditional ledger paragraph. Owns nothing else in the file.
   - Agent Type: builder
   - Resume: true
 
 - **Builder (dispatch + ledger)**
   - Name: `dispatch-builder`
-  - Role: Fixes 2 and 3 — `write_triage_ledger`, the disposition dataclass, the `dispatch_findings` handoff, and the ordering of the ledger write against the `dry_run` short-circuit.
+  - Role: Fixes 2 and 3 — `write_triage_ledger`, the `NodeDisposition` dataclass, the `dispatch_findings` handoff for both the per-node and cascade dispatches, threading `ledger_path` from the ledger write into the prompt builder, and the ordering of the ledger write against the `dry_run` short-circuit.
   - Agent Type: builder
   - Resume: true
 
@@ -534,10 +536,11 @@ Standard Tier 1 roster. No domain framing needed — this is ordinary Python wit
 - **Parallel**: false
 - Branch from `main`. Confirm with `git merge-base --is-ancestor origin/main HEAD` before the first commit — **not** from `session/nightly-triage-idempotency-3075`.
 - Add a `NodeDisposition` dataclass: `node`, `title`, `disposition`, `resolved_against`, `resolved_at`.
-- Add `write_triage_ledger(slug, dispositions) -> bool` writing `data/nightly-triage-ledger/{slug}.json` with `slug`, `created_at`, `dispositions`, and an empty `filed`. Empty dispositions writes nothing and returns `False`. Catch broadly, `log()` a `WARNING` naming the slug, return `False`; never raise.
-- Add a keyword-only `dispositions` argument to `maybe_dispatch_triage_session`, defaulting to `None`. Call `write_triage_ledger` **after** the `if dry_run:` short-circuit (line 2340) and **before** the `subprocess.run` that creates the session. Pass `dispositions` through to `_build_triage_prompt`.
-- In `dispatch_findings`, build the disposition list from the surviving `single_nodes` after `partition_already_open` and `partition_closed_matches`, and after the issue-budget truncation, so it matches the nodes actually dispatched. Pass it at the call site (line 2664).
-- Docstring the fail-open posture, the deliberate absence of file locking (Race 1), and the dry-run ordering constraint.
+- Add `write_triage_ledger(slug, entries) -> str | None` writing `data/nightly-triage-ledger/{slug}.json` with `slug`, `created_at`, `entries`, and an empty `filed`. Returns the **absolute path string** on success. Empty entries writes nothing and returns `None`. Catch broadly, `log()` a `WARNING` naming the slug, return `None`; never raise.
+- Add a keyword-only `dispositions` argument to `maybe_dispatch_triage_session`, defaulting to `None`. Call `write_triage_ledger` **after** the `if dry_run:` short-circuit and **before** the `subprocess.run` that creates the session. Thread its return value as `ledger_path` into the prompt builder — this is what makes fix 3 independently revertible (Architectural Impact). For the two `prompt=`-override callers, seed the ledger from the passed prompt's title rather than from `dispositions`.
+- In `dispatch_findings`, build the disposition list from the surviving `single_nodes` after `partition_already_open` and `partition_closed_matches`, and after the issue-budget truncation, so it matches the nodes actually dispatched. Pass it as `dispositions=` at the per-node call site. Do the same at the cascade call site with a one-element list for the umbrella title.
+- Leave the inline baseline-seed string in `main()` untouched — `prompt-builder` moves it in Task 2. Do add the seed's ledger entry plumbing so the seed dispatch also gets a ledger.
+- Docstring the fail-open posture, the deliberate absence of file locking (Race 1), the `str | None` return contract, and the dry-run ordering constraint (without using the bare token `write_triage_ledger` in the docstring — see Documentation).
 - Commit with explicit paths as soon as the code is coherent; do not hold the file open across the next task.
 
 ### 2. The prompt hands over a command
@@ -548,14 +551,16 @@ Standard Tier 1 roster. No domain framing needed — this is ordinary Python wit
 - **Assigned To**: `prompt-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Pull `build-dispatch`'s commit first. Edit only `_build_triage_prompt`.
-- Replace "search ALL issues — open AND closed — for the EXACT title given" with the literal `gh issue list --state all --json number,title,state,stateReason --limit 200`, run **once for the whole node list** and filtered locally per exact title.
-- Add the prohibition explicitly: do not use `gh search`, `gh issue list --search`, or the search API; that index lags issue creation by minutes and is how #2960–#2999 happened.
-- Add the `stateReason` note: it is `""` for open issues, so branch on `state` first.
-- Keep the open / `NOT_PLANNED` / `COMPLETED` decision prose unchanged in meaning.
-- Render the pre-resolved block per node when `dispositions` is provided, zipped `strict=True` against the node list; degrade to the plain prompt when it is `None` or empty.
-- Append the ledger paragraph: the absolute path, read it first every turn, skip any node already in `filed`, append `{number, title, node}` immediately after each `gh issue create` and before the next node.
-- Docstring the REST-over-search rationale citing #2960–#2999 and `8524e765b`.
+- Pull `build-dispatch`'s commit first. Own the three prompt builders and the constant; touch nothing `dispatch-builder` owns except the `main()` line that now calls `_build_seed_prompt`.
+- Add `ISSUE_LOOKUP_INSTRUCTION` at module scope near the `OPEN_ISSUE_LIST_LIMIT` constants: the literal `gh issue list --state all --json number,title,state,stateReason --limit 200` run **once for the whole list** and filtered locally per exact title; the prohibition on GitHub's search index with its reason (#2960–#2999, `8524e765b`); and the note that `stateReason` is `""` on OPEN rows so the agent branches on `state` first.
+- **Wording constraint (non-negotiable):** neither the constant nor any prompt body nor any prompt-builder docstring may contain the literal tokens `--search`, `gh search`, `search ALL`, or `search open`, in any case. Say "GitHub's search index" and "the search API". The Verification anti-criterion scans the rendered prompts case-insensitively for exactly those tokens; spelling the token out inside the prohibition makes the gate unpassable, which is the defect the critique's first blocker named. Leave the module's three pre-existing `--search` mentions (constant comments and `open_issues`' docstring) untouched — they are outside the scanned region.
+- Replace `_build_triage_prompt`'s "search ALL issues — open AND closed — for the EXACT title given" sentence with the constant.
+- Replace `_build_cascade_prompt`'s "Search ALL issues — open AND closed — for the EXACT title below" sentence with the constant.
+- Extract the inline baseline-seed prompt from `main()` into `_build_seed_prompt(seed_title, seeded_nodes) -> str`, replace its "Search open AND closed issues for the EXACT title" sentence with the constant, and change `main()`'s call site to use it. **Reproduce the seed's decision prose verbatim otherwise** — its rule is deliberately stricter than the per-node rule (comment and do NOT re-file whatever the close reason) and extraction must not soften it.
+- Keep every prompt's open / `NOT_PLANNED` / `COMPLETED` decision prose unchanged in meaning.
+- `_build_triage_prompt`: render the pre-resolved block per node when `dispositions` is non-empty, zipped `strict=True` against the node list. Check `if not dispositions:` **first** so `None` and `[]` both degrade to the plain prompt and never reach the zip; only a non-empty wrong-length list raises.
+- Append the ledger paragraph **only when `ledger_path` is non-`None`**: the absolute path, read it first every turn, skip any entry already in `filed`, append `{number, title, node}` immediately after each `gh issue create` and before the next entry. Emit the same paragraph from the cascade and seed builders under the same condition.
+- Docstring each builder with the REST-over-search rationale citing #2960–#2999 and `8524e765b`, and name `ISSUE_LOOKUP_INSTRUCTION` as the shared source.
 
 ### 3. Tests
 - **Task ID**: build-tests
@@ -565,7 +570,7 @@ Standard Tier 1 roster. No domain framing needed — this is ordinary Python wit
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Apply every Test Impact disposition, including the nine-stub audit — change only stubs that actually bind positionally.
-- Add `TestWriteTriageLedger`, extend `TestBuildTriagePrompt`, extend the `TestDispatchFindings` and dry-run cases per Test Impact.
+- Add `TestWriteTriageLedger`, `TestPromptsNeverNameTheSearchIndex` (parametrized over all three rendered prompts), and `TestBuildSeedPrompt`; extend `TestBuildTriagePrompt`, `TestDispatchFindings`, `TestMaybeDispatchTriageSession`, and the dry-run cases per Test Impact.
 - **Mutation-check each new guard individually**: break the behavior it claims to protect, confirm that specific test goes red, restore, re-measure. A guard that stays green under its own mutation reaches no code and must be rewritten, not kept.
 - Record the mutation results in the PR description.
 
@@ -580,11 +585,12 @@ Standard Tier 1 roster. No domain framing needed — this is ordinary Python wit
 
 ### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-code
+- **Depends On**: build-prompt
 - **Assigned To**: `nightly-documentarian`
 - **Agent Type**: documentarian
-- **Parallel**: false
-- Execute the four Documentation tasks.
+- **Parallel**: true — runs concurrently with `build-tests` and `validate-code`. Its file set (`docs/features/*.md`) is disjoint from both builders' and from the test engineer's, so the shared-file constraint that serializes the builders does not apply here. It waits on `build-prompt` only because it documents the shipped prompt shape, not because it contends for anything.
+- **Re-read `docs/features/nightly-triage-dispatch.md` at its current head before editing** — `55ad9ac89` added a "Lane reaping" section after this plan quoted the file.
+- Execute the Documentation tasks.
 
 ### 6. Final validation
 - **Task ID**: validate-all
