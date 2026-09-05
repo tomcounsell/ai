@@ -292,6 +292,8 @@ new behavior, no new dependency, no migration, no schema change. The surface is 
 | `models/job.py` | Delete ~45 lines (`save()` override) + 8 lines (`repair_indexes` sweep call and its comment); rewrite 3 docstring passages |
 | `agent/session_health.py` | 6 two-line rewrites |
 | `tests/unit/test_job_model.py` | Delete 2 tests, rewrite 1 docstring, trim 1 test's second half |
+| `tests/unit/test_migrate_job_expectations.py` | Rewrite 1 comment block (no code change) |
+| `ui/data/sdlc.py` | Rewrite 1 two-line comment (no code change) |
 | `scripts/update/migrations.py` | Rewrite 1 docstring |
 | `docs/features/durability-model.md` | Rewrite 1 subsection |
 | `docs/features/popoto-index-hygiene.md` | Rewrite 1 paragraph |
@@ -480,7 +482,28 @@ Each is either still covered by a survivor or explicitly conceded.
   directly. Only the `repair_indexes`-reached-backfill half needs rework (see Test Impact).
 - **`repair_indexes` reaches `backfill_open_expectations_index`** after the rebuild. Currently proved
   only as a side effect of the failing-renormalize test. After the sweep call is gone that proof is
-  vacuous, so the assertion must be re-anchored to a real hazard: leg 1/leg 2 or the rebuild raising.
+  vacuous, so the assertion must be re-anchored — **as a plain happy-path spy, not to a hazard.**
+
+  *Why no hazard works.* `Job.repair_indexes()` wraps its whole body in a single bare `try:`
+  (`models/job.py:717`) whose only companion is `finally: cls._repair_lock.release()`
+  (`:784-785`) — there is no `except` anywhere between the `try` and
+  `cls.backfill_open_expectations_index()` at `:782`. A raise from leg 1, leg 2, or
+  `cls.rebuild_indexes()` propagates straight out of the function, so none of those three can ever
+  produce the "hazard fired, backfill still ran" scenario. Checked upstream too: popoto's
+  `Model.rebuild_indexes` (`.venv/.../popoto/models/base.py:3147-3327`) contains no `try`/`except` at
+  all — it `continue`s past undecodable rows (`:3266-3267`) and past divergent-key rows
+  (`:3277-3279`), then logs and returns. Skipping is not raising, so no swallowed-failure seam exists
+  there either.
+
+  *The re-anchor to build.* Call `Job.repair_indexes()` on the happy path with
+  `backfill_open_expectations_index` spied (monkeypatched to record its invocation), and assert the
+  spy fired. This is weaker prose but the same strength of evidence for the property Risk 3 cares
+  about: it fails under the plan's own mutation (delete the `cls.backfill_open_expectations_index()`
+  call), which is the only thing the old half-two ever actually proved. *Optional strengthening, if
+  the build wants a partial-failure flavor without an `except`:* plant a row popoto skips (an
+  undecodable hash or a divergent key), confirm `repair_indexes()` returns normally with a reduced
+  rebuilt count, and assert the spy still fired. Do this only if it costs one fixture; the happy-path
+  spy already satisfies the criterion.
 - **`_ts` receiving a non-datetime.** Unchanged; `_ts` keeps its `None` and `int | float` legs.
 
 ### Empty/Invalid Input Handling
@@ -512,14 +535,17 @@ survivor below, mutate and confirm the suite goes red:
 
 ## Test Impact
 
-**Five test bodies are affected, not the three the issue's Solution Sketch names.** The two extra were
-found by reading `TestScorePurity` and `TestGuardedRepair` in full during planning.
+**Six test bodies are affected, not the three the issue's Solution Sketch names.** Two extra were
+found by reading `TestScorePurity` and `TestGuardedRepair` in full during planning; the sixth
+(`test_migrate_job_expectations.py`) was found during the critique pass, in a file the plan had not
+named at all.
 
 - [ ] `tests/unit/test_job_model.py::TestScorePurity::test_reattach_preserves_the_instant_and_is_idempotent` (line 1019) — **DELETE**: tests only the override's instant-preserving/idempotent behavior.
 - [ ] `tests/unit/test_job_model.py::TestScorePurity::test_scoped_save_naming_the_field_still_reattaches` (line 1048) — **DELETE**: asserts `job.last_active_at.tzinfo is UTC` after a scoped save, which is the override's sole observable effect.
 - [ ] `tests/unit/test_job_model.py::TestScorePurity::test_scoped_save_excluding_the_field_leaves_the_score_untouched` (line 1033) — **UPDATE**: stays green (popoto, not the override, is what leaves an out-of-scope field alone), but its docstring says "The override must honor that scope" and its assertion message says "the guard let an out-of-scope write through". Both name code that will not exist. Rewrite to pin the popoto contract: a field-scoped save touches no other field's index. **Not named in the issue.**
 - [ ] `tests/unit/test_job_model.py::TestGuardedRepair::test_repair_renormalizes_scores_the_rebuild_skewed` (line 1146) — **DELETE**: monkeypatches `rebuild_indexes` to inject a UTC+07 skew and asserts `repair_indexes` sweeps it back. With the sweep call gone the behavior is gone.
-- [ ] `tests/unit/test_job_model.py::TestGuardedRepair::test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs` (line 1184) — **REPLACE**: two halves. Half one (the classmethod returns `(0, 0)` and logs on a broken `SSCAN`) stays valuable and unedited — the migration is still a caller. Half two monkeypatches `Job.renormalize_last_active_scores` to fail and asserts `repair_indexes` still reaches `backfill_open_expectations_index`; once `repair_indexes` never calls it, the patched function is never invoked and the test passes while reaching none of the code it claims to cover. Split the file: keep half one as its own test; re-anchor the backfill-reachability assertion to a hazard `repair_indexes` still has. **Not named in the issue — this is the one that would otherwise ship as a silently vacuous test.**
+- [ ] `tests/unit/test_job_model.py::TestGuardedRepair::test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs` (line 1184) — **REPLACE**: two halves. Half one (the classmethod returns `(0, 0)` and logs on a broken `SSCAN`) stays valuable and unedited — the migration is still a caller. Half two monkeypatches `Job.renormalize_last_active_scores` to fail and asserts `repair_indexes` still reaches `backfill_open_expectations_index`; once `repair_indexes` never calls it, the patched function is never invoked and the test passes while reaching none of the code it claims to cover. Split the file: keep half one as its own test; re-anchor half two as a **happy-path spy** on `backfill_open_expectations_index` — there is no hazard to anchor to, because `repair_indexes()` has no `except` between its bare `try:` and the backfill call, and popoto's `rebuild_indexes()` raises rather than swallowing (see Failure Path Test Strategy for the verification). **Not named in the issue — this is the one that would otherwise ship as a silently vacuous test.**
+- [ ] `tests/unit/test_migrate_job_expectations.py::test_is_idempotent` (comment at lines 135-142) — **UPDATE (comment only)**: the block explains the save-spy's tolerance by describing the deleted mechanism as live, ongoing behavior — "the migration closes with `Job.repair_indexes()`, whose rebuild re-skews scores on a non-UTC host and whose renormalize sweep repairs them with that field-scoped save on every pass by design (#2636)". After step 2 that sentence describes code that no longer exists: a Principle 1 violation that ships **green**, because `assert saves == []` (line 156) still holds — no `["last_active_at"]`-scoped save occurs at all once the sweep is gone, so the tolerance the comment justifies is simply never exercised. Drop the `repair_indexes`/renormalize-sweep clause and state what the spy now tolerates (nothing). Leave the `monkeypatch.setattr(Job, "save", ...)` lambda (lines 145-151), its `update_fields == ["last_active_at"]` branch, and the assertion untouched — the lambda's branch is harmless dead tolerance, and rewriting it is a behavior-shaped edit in a file this chore otherwise does not touch. **Found by the critique, not by the plan — the file appears nowhere else in this document.**
 - [ ] `tests/unit/test_job_model.py::TestScorePurity` class docstring (line 982) — **VERIFY**: already updated by `8c1a36ad1` to cite popoto 1.9.0. No edit expected; confirm it reads correctly once its two sibling tests are gone.
 - [ ] `tests/unit/test_job_model.py::TestRenormalizeBatching` (lines 1239-1372) — **KEEP UNCHANGED**: exercises the classmethod directly, which the migration still calls.
 - [ ] `tests/unit/test_migrations.py` (lines 371-431) — **KEEP UNCHANGED**: `_migrate_backfill_job_last_active_scores` and its `MIGRATIONS` registration are untouched. Run it to confirm.
@@ -598,6 +624,13 @@ is popoto's documented and intended consequence.
 only assertion that `repair_indexes` reaches its final step. The Test Impact entry calls for
 re-anchoring, not deleting, and the Failure Path mutation table names the mutation that proves it
 (delete `cls.backfill_open_expectations_index()`, expect red).
+
+The *second* lazy path, which the critique caught: re-anchoring to a hazard that cannot exist.
+`repair_indexes()` has no `except` between its bare `try:` and the backfill call, so leg 1, leg 2,
+and the rebuild all propagate past it. A test that patches one of them to raise and then asserts the
+backfill ran would fail outright, and the natural "fix" is to weaken the assertion until it passes —
+which lands back at a vacuous test by a longer route. The re-anchor is a happy-path spy, named
+explicitly in Failure Path Test Strategy, and the mutation is the whole proof.
 
 ### Risk 4: A line-number-driven edit hits the wrong code in `agent/session_health.py`
 
@@ -719,11 +752,13 @@ The issue's six acceptance criteria, plus three the plan adds from findings the 
 - [ ] `Job.save` is popoto's `Model.save` — no `def save` in `models/job.py` — and `repair_indexes()` no longer calls `renormalize_last_active_scores()`. *(AC2)*
 - [ ] `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` passes. *(AC3)*
 - [ ] The reattach and renormalize-after-rebuild tests are gone, and `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` passes. *(AC4)*
-- [ ] No comment in `agent/session_health.py` or `agent/session_pickup.py` states popoto strips, drops, or omits tzinfo. *(AC5 — already true on main per spike-2; verify it stays true.)*
+- [ ] No comment in `agent/session_health.py`, `agent/session_pickup.py`, **or `ui/data/sdlc.py`** states popoto strips, drops, or omits tzinfo. *(AC5, widened from two files to three. Already true of the two `agent/` files on main per spike-2; `ui/data/sdlc.py:824-825` is a live violation the build fixes. Deliberately not repo-wide — 8 of the 9 production sites live in No-Go modules; see Technical Approach for the measurement.)*
 - [ ] This plan records the keep-or-remove decision for the session-health and pickup guards with reasoning. *(AC6 — see Spike Results, satisfied at plan time.)*
 - [ ] **Added:** `docs/features/popoto-index-hygiene.md` no longer says `Job.repair_indexes()` runs the sweep. *(Third doc, not in the issue.)*
 - [ ] **Added:** `tests/unit/test_session_health_tool_timeout.py`'s two naive tests pass **unedited**. *(Tripwire: an edit there means the approach drifted.)*
-- [ ] **Added:** the backfill-reachability assertion in `TestGuardedRepair` is re-anchored, not deleted, and fails under the mutation in the Failure Path table. *(Prevents shipping a vacuous test.)*
+- [ ] **Added:** the backfill-reachability assertion in `TestGuardedRepair` is re-anchored as a happy-path spy, not deleted, and fails under the mutation in the Failure Path table. *(Prevents shipping a vacuous test.)*
+- [ ] **Added:** all six `X if X.tzinfo else X.replace(tzinfo=UTC)` sites in `agent/session_health.py` are replaced with `_ts(X)`, verified by `git grep -n "tzinfo else" agent/session_health.py` returning no output. *(Key Elements item 5 had no criterion of its own — it was proved only indirectly by the unedited-tests tripwire and a grep buried in the Verification block. The surviving guards inside `_ts`, `_at_rest_coerce_ts`, and `_session_is_alive` all use the `if x.tzinfo is None:` statement form, so the grep is a clean discriminator.)*
+- [ ] **Added:** `tests/unit/test_migrate_job_expectations.py:135-142` no longer describes the deleted renormalize sweep as live behavior, and `scripts/pytest-clean.sh tests/unit/test_migrate_job_expectations.py` passes. *(A stale comment that would otherwise ship green.)*
 
 ## Step by Step Tasks
 
@@ -761,10 +796,18 @@ the change makes true.
   the now-unused `UTC_PLUS_7_REBUILD_SKEW_SECONDS` constant if nothing else references it
   (`git grep` first).
 - Split `test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs`: keep half one
-  (classmethod returns `(0, 0)` and logs on broken `SSCAN`) as its own test; re-anchor half two's
-  backfill-reachability assertion to a hazard `repair_indexes` still has, rather than to a
-  monkeypatched sweep that is no longer called.
+  (classmethod returns `(0, 0)` and logs on broken `SSCAN`) as its own test; rewrite half two as a
+  **happy-path spy** — monkeypatch `Job.backfill_open_expectations_index` to record its invocation,
+  call `Job.repair_indexes()` normally, assert the spy fired. Do **not** anchor it to a raising
+  hazard: `repair_indexes()` has no `except` between its bare `try:` and the backfill call, so leg 1,
+  leg 2, and the rebuild all propagate past it, and popoto's `rebuild_indexes()` skips bad rows
+  rather than swallowing exceptions. If a hazard-flavored variant is attempted and the assertion has
+  to be weakened to make it pass, abandon it and use the spy.
 - `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` — green.
+- Immediately run mutation 2 from the Failure Path table (delete
+  `cls.backfill_open_expectations_index()` in `models/job.py::repair_indexes`) and confirm the
+  re-anchored test goes **red**. A re-anchor that survives its own mutation is the vacuous test
+  wearing a new name; catch it here rather than in review.
 
 ### 4. Collapse the six inline coercions in `agent/session_health.py`
 
