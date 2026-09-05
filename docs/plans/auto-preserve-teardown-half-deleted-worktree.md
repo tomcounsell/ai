@@ -269,15 +269,65 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 ## Rabbit Holes
 
-_placeholder_
+- **Root-causing what gutted the worktree.** Three mechanisms fit the evidence equally well: a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback (`agent/worktree_manager.py:978`), a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory. Distinguishing them means instrumenting a path that fires only under a bridge restart storm, and the answer changes nothing: the guard is correct against all three. Filed as a No-Go, not attempted here.
+- **Fixing the bridge restart loop.** #3166 is the amplifier that turned one latent race into nine teardown passes. It is a separate issue with a separate investigation, and this fix does not wait on it.
+- **Serializing teardown with a lock.** Tempting once you notice the race, and a large change to a module three subsystems call. If the guard proves insufficient in practice, that is the follow-up; it is not the first move.
+- **Building recovery tooling for `refs/session-wip/*`.** There are zero such refs on this machine. Writing a resurrect/inspect CLI for a namespace that is currently empty is speculative work.
+- **Tuning the threshold constants.** They are provisional by declaration and marked so in their descriptions. The structural guard is primary precisely so the numbers do not have to be right on the first try. Arguing about 0.5 versus 0.6 before a single real refusal has been observed is the trap.
+- **Broadening the `validate_no_destructive_git_in_worktree.py` hook.** Different half of the #2137 backstop, agent-facing rather than teardown-facing, and its blocked-shape set was deliberately scoped in that plan's No-Gos. Out of scope.
+- **Auditing `refs/session-wip/*` across the fleet.** The audit is a one-line `git for-each-ref` an operator can run; here it returns zero. It is not a feature and there is nothing to ship for it.
 
 ## Risks
 
-_placeholder_
+### Risk 1: The guard refuses a legitimate large deletion, losing the backstop for real work
+
+**Impact:** A lane doing a genuine mass-deletion refactor — deleting a whole package while the replacement lives in a sibling directory — gets torn down without its uncommitted work preserved. That is the exact loss #2137 was built to prevent, reintroduced from the other side.
+
+**Mitigation:** Three layers. The structural guard fires only when a directory tracked at HEAD is *absent from disk entirely*, which a refactor deleting files inside a package does not produce (the directory survives with its remaining files). The proportional guard requires **both** an absolute floor and a majority of all tracked files gone — no plausible refactor deletes half the repository's tracked files without committing anything. And the refusal is logged at ERROR with a dedicated tag and the full counts, so the case is visible rather than silent. `test_large_deletion_with_real_work_is_preserved` pins the boundary.
+
+### Risk 2: Fail-open on guard-computation failure means a wipe slips through
+
+**Impact:** If `git ls-files` errors or times out at exactly the wrong moment, the guard is bypassed and today's behavior resumes — including the possibility of committing a wipe.
+
+**Mitigation:** Accepted deliberately, with reasoning recorded. This function's hardest contract is that it never raises into teardown and never hangs it; converting a git hiccup into a refusal would trade a rare wipe for a routine loss of the backstop on legitimate work. The failure is logged at WARNING with its own tag so a recurring pattern is visible in the logs, and `test_guard_computation_failure_falls_open_and_warns` makes the choice explicit rather than incidental. Revisit only if the WARNING actually appears in production logs.
+
+### Risk 3: A future refactor moves the guard after `git add -A`
+
+**Impact:** A refusal computed after staging leaves a fully-staged wipe in the worktree index — worse than the status quo, because the next process to touch that worktree commits it without ever running preserve.
+
+**Mitigation:** `test_index_untouched_on_refusal` asserts `git diff --cached --name-only` is empty after a refusal, which fails immediately if the guard moves. A comment at the guard site states the ordering constraint and why it exists.
+
+### Risk 4: Someone "simplifies" the guard back to the insertions-ratio predicate
+
+**Impact:** The predicate the issue originally proposed does not fire on the incident it was written for (spike-3). Reintroducing it would leave the bug fixed on paper and open in fact.
+
+**Mitigation:** `test_wipe_with_untracked_artifacts_still_refuses` reproduces the incident's exact shape — deletions plus untracked artifacts producing real insertions — and fails under that predicate. The Solution section records why it was rejected, with the incident's own numbers.
 
 ## Race Conditions
 
-_placeholder_
+### Race 1: A concurrent teardown pass gutting the worktree while preserve reads it
+
+**Location:** `agent/worktree_manager.py:1406-1500` (preserve), against `:948` and `:1660` (the two force-remove call sites), plus the fallback `shutil.rmtree` at `:978`.
+
+**Trigger:** Two teardown passes target the same `.worktrees/{slug}` concurrently. Pass A's `git worktree remove --force` (or the fallback `rmtree`) begins deleting files; pass B's preserve reads a tree that is now partially gone. The bridge restart loop in #3166 supplied nine such passes in seventeen minutes. This is the leading candidate for what produced the reported commit, though the plan does not depend on it being the right one.
+
+**Data prerequisite:** The guard needs `git ls-files` (reads the index, which lives in `.git/worktrees/{name}/index` and is not touched by a filesystem delete of the working tree) and `git ls-tree HEAD`. Both remain readable while the working tree is being destroyed, which is what makes the guard work at all under this race.
+
+**State prerequisite:** None. The guard makes no assumption about who else is operating on the directory.
+
+**Mitigation:** Not prevented — *detected*. The guard converts an unwinnable ordering problem into a check on observable state: whatever the interleaving, a tree missing directories that HEAD tracks is refused. There is a residual window (the guard reads a still-intact tree, then the deletion completes, then `add -A` runs) which the guard cannot close; closing it needs the lock that the Rabbit Holes section defers. The window is milliseconds against a teardown that is otherwise unguarded for its whole duration, and the guard eliminates the case where preserve is invoked against an *already* gutted tree, which is what the stacked no-op commits in the report demonstrate actually happened.
+
+### Race 2: Repeated preserve passes stacking commits on an already-committed wipe
+
+**Location:** Same.
+
+**Trigger:** Once a wipe is committed, every subsequent preserve pass sees a tree that is clean relative to the new HEAD and either no-ops or commits trivia — which is precisely how the report's three follow-on commits (`805983e36`, `c004ff37d`, `35c76c461`) buried the destructive one.
+
+**Data prerequisite:** None.
+
+**State prerequisite:** The wipe must have been committed for this to be reachable.
+
+**Mitigation:** Eliminated at the source. If the first wipe is never committed, HEAD never moves, and later passes see the same gutted tree and refuse identically. The refusal is idempotent by construction — it reads state and writes nothing — so N passes produce N ERROR logs and zero commits.
 
 ## No-Gos (Out of Scope)
 
