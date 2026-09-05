@@ -223,7 +223,7 @@ The function returns a status dict with `worktree_removed`, `branch_deleted`, `a
 
 ### Worktree Busy Guard (Issue #1357)
 
-`remove_worktree()` enforces a runtime invariant: **a worktree at `.worktrees/{slug}/` is removable only if no non-terminal `AgentSession` references it as `working_dir`**. The guard is implemented by `worktree_busy_check(repo_root, slug)`, which scans `AgentSession.query.all()` for live sessions and matches their `working_dir` against the target worktree path using segment-aware containment (so `.worktrees/sdlc-1218` matches `.worktrees/sdlc-1218/subdir` but not `.worktrees/sdlc-1218-other`).
+`remove_worktree()` enforces a runtime invariant: **a worktree at `.worktrees/{slug}/` is removable only if no non-terminal `AgentSession` references it as `working_dir`**. The guard is implemented by `worktree_busy_check(repo_root, slug)`, which queries `AgentSession.query.filter(status__in=NON_TERMINAL_STATUSES)` — an indexed lookup, not a full-table scan — for live sessions and matches their `working_dir` against the target worktree path using segment-aware containment (so `.worktrees/sdlc-1218` matches `.worktrees/sdlc-1218/subdir` but not `.worktrees/sdlc-1218-other`). `worktree_busy_probe_many()` runs that same query and matcher once for a whole batch of slugs instead of once per slug; see [`docs/features/scheduled-disk-reclaim.md`](scheduled-disk-reclaim.md#the-batch-probe-one-scan-per-sweep-not-one-per-lane).
 
 When the guard fires:
 
