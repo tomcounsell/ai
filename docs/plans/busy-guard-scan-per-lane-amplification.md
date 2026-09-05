@@ -644,9 +644,17 @@ exactly what makes the vacuous set easy to miss on an otherwise-red-then-green r
       `::test_session_with_no_working_dir_skipped` (`:114`),
       `TestWorktreeBusyProbe::test_unrelated_sessions_report_clear` (`:174`),
       `::test_terminal_session_in_lane_reports_clear` (`:183`).
-      Prove they bite with the same mutation discipline Risk 1 prescribes: make the matcher
-      return clear unconditionally and confirm all five turn **red**. A test that stays
-      green under that mutation is reaching no code.
+      Prove they bite with the same mutation discipline Risk 1 prescribes, aimed at the
+      predicate each one actually asserts. All five assert *clear*, so a
+      matcher-returns-clear mutation leaves every one of them green by construction and
+      proves nothing; the mutation has to break the specific rule under test:
+      remove the terminal-status skip → `test_terminal_session_does_not_block` and
+      `test_terminal_session_in_lane_reports_clear` turn **red**; replace segment-aware
+      containment with plain substring containment →
+      `test_substring_near_miss_does_not_block` and `test_unrelated_sessions_report_clear`
+      turn **red**; back-fill a falsy `working_dir` with the lane's own path →
+      `test_session_with_no_working_dir_skipped` turns **red**. A test that stays green
+      under the mutation aimed at its own predicate is reaching no code.
 - [ ] `TestWorktreeBusyCheck` / `TestWorktreeBusyProbe` / `TestScanWorktreeSessions`
       (`:37`–`:236`) — the assertions themselves are the fail-open/fail-closed contract and
       must not change meaning by one character. Only the mock plumbing moves.
@@ -929,8 +937,10 @@ Not applicable — this repo has no Sphinx/MkDocs site.
       new guard path, proven by mutation: forcing the batch probe to return clear makes
       `test_busy_check_error_also_blocks_removal` fail.
 - [ ] `grep -n 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
-      returns nothing, and the five predicate tests named in Test Impact turn red under a
-      matcher-returns-clear mutation rather than passing vacuously against an empty
+      returns nothing, and each of the five predicate tests named in Test Impact turns red
+      under a mutation of the predicate it asserts (terminal-status skip removed,
+      segment-aware containment replaced with substring containment, falsy `working_dir`
+      back-filled with the lane path) rather than passing vacuously against an empty
       `MagicMock` sequence.
 - [ ] The per-row matching `except` branch has a test — it had none before this change, and
       Task 1 refactors the loop it lives in.
@@ -1085,14 +1095,21 @@ so they can run in parallel without the shared-worktree livelock.
   a row that raises on attribute access is skipped and a later busy row still wins; an
   unknown status value reads `busy`; `worktree_busy_probe_many(root, [])` returns `{}` and
   queries nothing.
-- **Mutation-check each guard and re-measure after each change** — three mutations, each
-  re-measured on its own:
+- **Mutation-check each guard and re-measure after each change** — five mutations, each
+  re-measured on its own. Aim each one at the predicate the tests it targets assert; a
+  matcher-returns-clear mutation discriminates only the busy- and error-asserting tests,
+  and leaves every clear-asserting test green by construction:
   1. Force `worktree_busy_probe_many` to return clear unconditionally → both
      `test_busy_check_error_also_blocks_removal` and `test_skips_lane_with_live_session`
      must **fail**.
-  2. Make the matcher return clear unconditionally → all five predicate tests named in Test
-     Impact must **fail**. Any that stays green is reaching no code.
-  3. Delete the `list(` wrapper in `_fetch_live_sessions` → the one-materialization test
+  2. Remove the terminal-status skip → `test_terminal_session_does_not_block` and
+     `test_terminal_session_in_lane_reports_clear` must **fail**.
+  3. Replace segment-aware containment with plain substring containment →
+     `test_substring_near_miss_does_not_block` and `test_unrelated_sessions_report_clear`
+     must **fail**.
+  4. Back-fill a falsy `working_dir` with the lane's own path →
+     `test_session_with_no_working_dir_skipped` must **fail**.
+  5. Delete the `list(` wrapper in `_fetch_live_sessions` → the one-materialization test
      must **fail** with a count of N rather than 1.
   Paste each red output into the PR.
 
@@ -1109,7 +1126,7 @@ so they can run in parallel without the shared-worktree livelock.
   the last one via the AST row, and demonstrated red against the black-wrapped form.
 - Confirm `_fetch_live_sessions` returns a materialized `list` and that the `list(...)` sits
   inside the `try` (Decision 0), and that no `QueryBuilder` crosses a function boundary.
-- Confirm the three mutation runs each reported red for the guards they target.
+- Confirm the five mutation runs each reported red for the guards they target.
 
 ### 5. Documentation
 - **Task ID**: document-feature
