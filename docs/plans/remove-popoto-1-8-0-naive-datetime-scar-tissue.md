@@ -1,7 +1,7 @@
 ---
 title: Remove Job UTC-reattach and 1.8.0-era naive-tzinfo guards
 slug: remove-popoto-1-8-0-naive-datetime-scar-tissue
-status: Ready
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -769,7 +769,7 @@ Carried from the issue's Downstream constraints and Dropped bucket, plus two the
 Three feature docs currently describe the removed mechanism as current behavior. All three are
 updates, not new files, so no `docs/features/README.md` index entry is needed.
 
-- [ ] Update `docs/features/durability-model.md` (lines 79-108 **and lines 271-283**): rename the
+- [x] Update `docs/features/durability-model.md` (lines 79-108 **and lines 271-283**): rename the
       `### last_active_at score purity (Job.save())` heading, which names a method that will no longer
       exist. Replace the reattach paragraph with popoto's own contract (`convert_to_numeric`
       normalizes naive → UTC since popoto#519/1.8.2; `_decode_datetime` returns aware UTC since
@@ -779,19 +779,19 @@ updates, not new files, so no `docs/features/README.md` index entry is needed.
       into the asymmetry it becomes: `backfill_open_expectations_index()` is still called from every
       `repair_indexes()`; `renormalize_last_active_scores()` has no recurring caller after this
       change, having healed `last_active_at` skew once fleet-wide via the completed migration.
-- [ ] Update `docs/features/popoto-index-hygiene.md` (line 40): delete the "one extra step the other
+- [x] Update `docs/features/popoto-index-hygiene.md` (line 40): delete the "one extra step the other
       guarded paths do not" paragraph's renormalize content — after this change `Job.repair_indexes()`
       carries no extra step. Keep the cross-link to the durability model, retargeted at the renamed
       heading.
-- [ ] Update `docs/features/utc-timestamps.md` (lines 87, 94): line 87's instruction to route
+- [x] Update `docs/features/utc-timestamps.md` (lines 87, 94): line 87's instruction to route
       read-path conversions through `utils.utc.to_unix_ts` **stays** — it is the convention this plan
       leans on — but its rationale changes from "popoto deserialization can return naive datetimes" to
       the sources that genuinely still can (ISO strings, floats, non-popoto producers). Line 94's
       "ai pins `popoto>=1.8.0`" becomes `popoto>=1.9.0`.
-- [ ] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`).
-- [ ] Update `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`'s docstring over its **full span, lines 1116-1155** — both the opening 1.8.0 narrative (:1117-1138, including the "also run by `Job.repair_indexes()` after every `rebuild_indexes()`" clause at :1126-1132) **and** the fail-open paragraph at **:1148-1154**, whose named retry/backstop is the `repair_indexes` sweep this change deletes. The replacement backstop is a manual re-run of `Job.renormalize_last_active_scores()`. Function body, `MIGRATIONS` entry, and `data/migrations_completed.json` untouched.
-- [ ] Update the two inline comments the critique surfaced, both comment-only with no code change: `ui/data/sdlc.py:824-825` (`_safe_float`'s "Popoto strips timezone on serialize/deserialize") and `tests/unit/test_migrate_job_expectations.py:135-142` (`test_is_idempotent`'s save-spy rationale, which cites the deleted renormalize sweep as ongoing behavior).
-- [ ] Verify no feature doc is left dangling: `git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/` returns nothing describing the removed code as current.
+- [x] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`).
+- [x] Update `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`'s docstring over its **full span, lines 1116-1155** — both the opening 1.8.0 narrative (:1117-1138, including the "also run by `Job.repair_indexes()` after every `rebuild_indexes()`" clause at :1126-1132) **and** the fail-open paragraph at **:1148-1154**, whose named retry/backstop is the `repair_indexes` sweep this change deletes. The replacement backstop is a manual re-run of `Job.renormalize_last_active_scores()`. Function body, `MIGRATIONS` entry, and `data/migrations_completed.json` untouched.
+- [x] Update the two inline comments the critique surfaced, both comment-only with no code change: `ui/data/sdlc.py:824-825` (`_safe_float`'s "Popoto strips timezone on serialize/deserialize") and `tests/unit/test_migrate_job_expectations.py:135-142` (`test_is_idempotent`'s save-spy rationale, which cites the deleted renormalize sweep as ongoing behavior).
+- [x] Verify no feature doc is left dangling: `git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/` returns nothing describing the removed code as current. *(Re-verified at DOCS stage: remaining hits are either post-change-accurate prose in `durability-model.md`/`popoto-index-hygiene.md`/`migrations.py`/`job.py`, or unrelated features — `agentsession-index-drift-detection.md`, `hybrid-retrieval-eval.md`, `popoto-descriptor-pollution-ledger.md`, `popoto-version-floor-guard.md`, `models/agent_session.py`, `models/session_lifecycle.py`. The two archived-plan hits in `docs/archive/plans-completed/job-recent-for-room-bounded-read.md` are historical record, not current docs.)*
 
 No new feature doc is created — this removes a mechanism rather than adding one, and no
 `docs/infra/` entry is needed (no new dependency, service, external API, or deployment change).
@@ -800,18 +800,18 @@ No new feature doc is created — this removes a mechanism rather than adding on
 
 The issue's six acceptance criteria, plus three the plan adds from findings the issue did not have.
 
-- [ ] `git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/features/utc-timestamps.md` returns no line describing 1.8.0 decoding as current behavior. *(AC1)*
-- [ ] `Job.save` is popoto's `Model.save` — no `def save` in `models/job.py` — and `repair_indexes()` no longer calls `renormalize_last_active_scores()`. *(AC2)*
-- [ ] `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` passes. *(AC3)*
-- [ ] The reattach and renormalize-after-rebuild tests are gone, and `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` passes. *(AC4)*
-- [ ] No comment in `agent/session_health.py`, `agent/session_pickup.py`, **or `ui/data/sdlc.py`** states popoto strips, drops, or omits tzinfo. *(AC5, widened from two files to three. Already true of the two `agent/` files on main per spike-2; `ui/data/sdlc.py:824-825` is a live violation the build fixes. Deliberately not repo-wide — 8 of the 9 production sites live in No-Go modules; see Technical Approach for the measurement.)*
-- [ ] This plan records the keep-or-remove decision for the session-health and pickup guards with reasoning. *(AC6 — see Spike Results, satisfied at plan time.)*
-- [ ] **Added:** `docs/features/popoto-index-hygiene.md` no longer says `Job.repair_indexes()` runs the sweep. *(Third doc, not in the issue.)*
-- [ ] **Added:** `tests/unit/test_session_health_tool_timeout.py`'s two naive tests pass **unedited**. *(Tripwire: an edit there means the approach drifted.)*
-- [ ] **Added:** the backfill-reachability assertion in `TestGuardedRepair` is re-anchored as a happy-path spy, not deleted, and fails under the mutation in the Failure Path table. *(Prevents shipping a vacuous test.)*
-- [ ] **Added:** all six `X if X.tzinfo else X.replace(tzinfo=UTC)` sites in `agent/session_health.py` are replaced with `_ts(X)`, verified by `git grep -n "tzinfo else" agent/session_health.py` returning no output. *(Key Elements item 5 had no criterion of its own — it was proved only indirectly by the unedited-tests tripwire and a grep buried in the Verification block. The surviving guards inside `_ts`, `_at_rest_coerce_ts`, and `_session_is_alive` all use the `if x.tzinfo is None:` statement form, so the grep is a clean discriminator.)*
-- [ ] **Added:** `tests/unit/test_migrate_job_expectations.py:135-142` no longer describes the deleted renormalize sweep as live behavior, and `scripts/pytest-clean.sh tests/unit/test_migrate_job_expectations.py` passes. *(A stale comment that would otherwise ship green.)*
-- [ ] **Added:** no surviving prose names `Job.repair_indexes()` as a caller or backstop of the sweep. `git grep -n "repair_indexes" scripts/update/migrations.py docs/features/durability-model.md docs/features/popoto-index-hygiene.md` shows only statements true after the change — in particular `migrations.py:1148-1154` names a manual `Job.renormalize_last_active_scores()` re-run as the fail-open recovery path, and `durability-model.md:271-283` states the self-heal asymmetry rather than "the two sanctioned sweeps". *(Both passages sat outside the ranges round 1 enumerated and would have shipped green.)*
+- [x] `git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/features/utc-timestamps.md` returns no line describing 1.8.0 decoding as current behavior. *(AC1)*
+- [x] `Job.save` is popoto's `Model.save` — no `def save` in `models/job.py` — and `repair_indexes()` no longer calls `renormalize_last_active_scores()`. *(AC2)*
+- [x] `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` passes. *(AC3)*
+- [x] The reattach and renormalize-after-rebuild tests are gone, and `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py` passes. *(AC4)*
+- [x] No comment in `agent/session_health.py`, `agent/session_pickup.py`, **or `ui/data/sdlc.py`** states popoto strips, drops, or omits tzinfo. *(AC5, widened from two files to three. Already true of the two `agent/` files on main per spike-2; `ui/data/sdlc.py:824-825` is a live violation the build fixes. Deliberately not repo-wide — 8 of the 9 production sites live in No-Go modules; see Technical Approach for the measurement.)*
+- [x] This plan records the keep-or-remove decision for the session-health and pickup guards with reasoning. *(AC6 — see Spike Results, satisfied at plan time.)*
+- [x] **Added:** `docs/features/popoto-index-hygiene.md` no longer says `Job.repair_indexes()` runs the sweep. *(Third doc, not in the issue.)*
+- [x] **Added:** `tests/unit/test_session_health_tool_timeout.py`'s two naive tests pass **unedited**. *(Tripwire: an edit there means the approach drifted.)*
+- [x] **Added:** the backfill-reachability assertion in `TestGuardedRepair` is re-anchored as a happy-path spy, not deleted, and fails under the mutation in the Failure Path table. *(Prevents shipping a vacuous test.)*
+- [x] **Added:** all six `X if X.tzinfo else X.replace(tzinfo=UTC)` sites in `agent/session_health.py` are replaced with `_ts(X)`, verified by `git grep -n "tzinfo else" agent/session_health.py` returning no output. *(Key Elements item 5 had no criterion of its own — it was proved only indirectly by the unedited-tests tripwire and a grep buried in the Verification block. The surviving guards inside `_ts`, `_at_rest_coerce_ts`, and `_session_is_alive` all use the `if x.tzinfo is None:` statement form, so the grep is a clean discriminator.)*
+- [x] **Added:** `tests/unit/test_migrate_job_expectations.py:135-142` no longer describes the deleted renormalize sweep as live behavior, and `scripts/pytest-clean.sh tests/unit/test_migrate_job_expectations.py` passes. *(A stale comment that would otherwise ship green.)*
+- [x] **Added:** no surviving prose names `Job.repair_indexes()` as a caller or backstop of the sweep. `git grep -n "repair_indexes" scripts/update/migrations.py docs/features/durability-model.md docs/features/popoto-index-hygiene.md` shows only statements true after the change — in particular `migrations.py:1148-1154` names a manual `Job.renormalize_last_active_scores()` re-run as the fail-open recovery path, and `durability-model.md:271-283` states the self-heal asymmetry rather than "the two sanctioned sweeps". *(Both passages sat outside the ranges round 1 enumerated and would have shipped green.)*
 
 ## Step by Step Tasks
 

@@ -1115,22 +1115,19 @@ def _migrate_job_promises_to_expectations(project_dir: Path) -> str | None:
 def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     """Repair tz-skewed ``Job.last_active_at`` sorted-set scores (issue #2636).
 
-    popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
-    ``Job.save()`` UTC-reattach override shipped, any re-save of a reloaded Job
-    (``mark_at_rest()``, ``_write_goal_data()``) recomputed its ``$SortF``
-    partition score as ``naive.timestamp()`` — local time, skewed from the
-    correct UTC epoch by the writing host's UTC offset. The hash field stayed
-    correct; only the score drifted. The bounded ``recent_for_room`` read
-    trusts scores, so existing skew must be swept out once per machine.
+    Before popoto#519/1.8.2, a ``SortedField(type=datetime)`` score was
+    computed from the in-memory value's own tzinfo rather than being a pure
+    function of the stored value, so a re-save of a reloaded Job
+    (``mark_at_rest()``, ``_write_goal_data()``) could recompute its
+    ``$SortF`` partition score as ``naive.timestamp()`` — local time, skewed
+    from the correct UTC epoch by the writing host's UTC offset. The hash
+    field stayed correct; only the score drifted. The bounded
+    ``recent_for_room`` read trusts scores, so this one-shot migration swept
+    that historical skew out once per machine.
 
-    The sweep itself is ``Job.renormalize_last_active_scores()`` — the ONE
-    shared implementation, also run by ``Job.repair_indexes()`` (at worker
-    startup via ``scripts/popoto_index_cleanup.run_cleanup``) after every
-    ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
-    naive-decoded instances bypasses the save() override and would otherwise
-    re-skew every score on a non-UTC host). See that classmethod's docstring
-    for the loop contract: derived partition key, 1-second tolerance,
-    fresh re-read, structural clobber-proof
+    The sweep itself is ``Job.renormalize_last_active_scores()``. See that
+    classmethod's docstring for the loop contract: derived partition key,
+    1-second tolerance, fresh re-read, structural clobber-proof
     ``fresh.save(update_fields=["last_active_at"])`` (ORM-only — the only
     write is ``instance.save()``), instant-preserving (never a constant
     stamp, spike-4), absent-member skip, per-row failure tolerance.
@@ -1149,9 +1146,12 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     itself fails. An enumeration failure *inside* the sweep (e.g. Redis
     unreachable) is swallowed by ``renormalize_last_active_scores`` as
     ``(0, 0)``: this migration logs a 0-scanned pass, returns None, and is
-    recorded applied. That is accepted — the ``Job.repair_indexes`` sweep,
-    run at worker startup via ``scripts/popoto_index_cleanup.run_cleanup``,
-    is the retry/backstop that eventually repairs the scores.
+    recorded applied — an applied migration is never re-run. That is
+    accepted; the honest recovery path is a **manual** re-run of
+    ``Job.renormalize_last_active_scores()`` on the affected machine, which
+    assumes popoto is already at or above the ``pyproject.toml`` floor —
+    the repair write goes through the same ``convert_to_numeric`` path, so
+    it cannot converge on a still-downgraded host.
     """
     try:
         import sys

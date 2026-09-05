@@ -821,8 +821,9 @@ def _safe_float(val) -> float | None:
     """
     if isinstance(val, datetime.datetime):
         if val.tzinfo is None:
-            # Popoto strips timezone on serialize/deserialize; all datetimes in this
-            # system are UTC, so re-attach UTC before converting to avoid local-tz offset
+            # This helper's contract spans int/float/str sources too (below),
+            # so a tzinfo-less value can still arrive from a producer that
+            # is not popoto at all; read it as UTC.
             val = val.replace(tzinfo=datetime.UTC)
         return val.timestamp()
     if isinstance(val, int | float):

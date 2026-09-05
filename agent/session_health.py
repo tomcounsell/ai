@@ -637,8 +637,9 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     # first tick after a resume. No anchor at all ⇒ evaluate (legacy fallback,
     # matching #1979); boundary ``last_tool_use_at == anchor`` counts as
     # current-run via ``>=``.
+    last_at_ts = _ts(last_at)
     anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
-    if anchor is not None and _ts(last_at) < anchor:
+    if anchor is not None and last_at_ts < anchor:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
@@ -655,8 +656,7 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         if raised > budget:
             budget = raised
             declared_note = f" (declared {int(capped)}s + {TOOL_TIMEOUT_DECLARED_GRACE_SEC}s grace)"
-    last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
-    age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
+    age = datetime.now(tz=UTC).timestamp() - last_at_ts
     if age <= budget:
         return None
     reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s{declared_note}"
@@ -1611,8 +1611,7 @@ def _never_started_past_grace(
             # Legacy / phantom record — no running_seconds, safe default.
             return False
 
-        started_aware = started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-        running_seconds = (now - started_aware).total_seconds()
+        running_seconds = now.timestamp() - _ts(started_ref)
 
         threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
         return running_seconds > threshold
@@ -1747,8 +1746,7 @@ def _has_progress(entry: AgentSession) -> bool:
     for progress_attr in ("last_tool_use_at", "last_turn_at"):
         ts = getattr(entry, progress_attr, None)
         if isinstance(ts, datetime):
-            ts_aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
-            if (now_utc - ts_aware).total_seconds() < SDK_PROGRESS_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(ts) < SDK_PROGRESS_FRESHNESS_WINDOW:
                 return True
 
     # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed
@@ -1767,8 +1765,7 @@ def _has_progress(entry: AgentSession) -> bool:
     if not sdk_ever_output:
         hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
-            hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
-            if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(hb) < HEARTBEAT_FRESHNESS_WINDOW:
                 # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
                 # fast-path when the session is never-started past grace.
                 # Threads the shared trusted clock (now=now_utc, issue #1905)
@@ -1801,10 +1798,7 @@ def _has_progress(entry: AgentSession) -> bool:
                     # ``created_at`` introduction or phantom record) →
                     # preserve fast-path.
                     return True
-                started_aware = (
-                    started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-                )
-                running_seconds = (now_utc - started_aware).total_seconds()
+                running_seconds = now_utc.timestamp() - _ts(started_ref)
                 if running_seconds < STARTUP_GRACE_SECONDS:
                     # Inside the startup grace window (or clock-skew negative
                     # running_seconds) → preserve fast-path. The
@@ -1849,8 +1843,7 @@ def _has_progress(entry: AgentSession) -> bool:
         _hb_own = getattr(entry, "last_heartbeat_at", None)
         _own_progress_fresh = False
         if isinstance(_hb_own, datetime):
-            _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
-            _hb_age = (now_utc - _hb_own_aware).total_seconds()
+            _hb_age = now_utc.timestamp() - _ts(_hb_own)
             if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
                 _own_progress_fresh = True
         # If heartbeat is stale or absent, fall through — do NOT return True.
