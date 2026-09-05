@@ -308,9 +308,9 @@ class TestReadTheRoomWiring:
         """RTR raising must not block delivery (Path A fail-open contract,
         `agent/output_handler.py:1144`).
 
-        RTR runs on every eligible Path A send after #2733 (READ_THE_ROOM_ENABLED
-        removed), so this outer guard moved from theoretical to hot. Mirrors
-        the Path B equivalent, `test_valor_telegram_rtr.py::test_rtr_failure_falls_open`.
+        RTR runs unconditionally on every eligible Path A send (#2733), so this
+        outer guard moved from theoretical to hot. Mirrors the Path B
+        equivalent, `test_valor_telegram_rtr.py::test_rtr_failure_falls_open`.
 
         Mutation-proven: converting the `except Exception as rtr_err:` at
         `agent/output_handler.py:1144` into a bare `raise` makes this test

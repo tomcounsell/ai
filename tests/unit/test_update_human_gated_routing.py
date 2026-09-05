@@ -69,7 +69,7 @@ def project_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-DRIFT_WARNING = "PM persona overlay drift: 28 lines differ. Run 'diff a b' to review."
+DRIFT_WARNING = "Persona overlay drift: 28 lines differ. Run 'diff a b' to review."
 
 
 class TestPersonaDriftRouting:
@@ -94,7 +94,7 @@ class TestPersonaDriftRouting:
         changed = _run_block(
             block,
             project_dir,
-            _persona_warnings=["PM persona overlay drift: 31 lines differ. Run 'diff a b'."],
+            _persona_warnings=["Persona overlay drift: 31 lines differ. Run 'diff a b'."],
         )
 
         assert len(changed.warnings) == 1

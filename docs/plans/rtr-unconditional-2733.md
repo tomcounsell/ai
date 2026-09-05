@@ -666,52 +666,52 @@ Two agent-visible consequences are worth naming:
 
 ### Feature Documentation
 
-- [ ] `docs/features/read-the-room.md` — DELETE the "Rollout" section (`:247`) entirely.
-- [ ] `docs/features/read-the-room.md` — DELETE the `READ_THE_ROOM_ENABLED` flag paragraph and the
+- [x] `docs/features/read-the-room.md` — DELETE the "Rollout" section (`:247`) entirely.
+- [x] `docs/features/read-the-room.md` — DELETE the `READ_THE_ROOM_ENABLED` flag paragraph and the
       flip criterion from "Enablement decision" (`:105-112`). **PRESERVE** the section's first half:
       the group-vs-DM rationale and the `is_group_chat` sharing note with `bridge/poll_gating.py`
       (#2701) is live architecture, not rollout scaffolding. Rename the heading to describe what
       remains (e.g. "Group chats only").
-- [ ] `docs/features/read-the-room.md:117` — DELETE the `READ_THE_ROOM_ENABLED` bullet from the
+- [x] `docs/features/read-the-room.md:117` — DELETE the `READ_THE_ROOM_ENABLED` bullet from the
       bypass-conditions list.
-- [ ] `docs/features/read-the-room.md:126` — REWRITE the SDLC bypass bullet to cite `session.is_sdlc`
+- [x] `docs/features/read-the-room.md:126` — REWRITE the SDLC bypass bullet to cite `session.is_sdlc`
       and drop any implication that the bullet described working behavior before this change.
-- [ ] `docs/features/read-the-room.md:183/:189/:210/:211/:214` — REWRITE the Coverage section and the
+- [x] `docs/features/read-the-room.md:183/:189/:210/:211/:214` — REWRITE the Coverage section and the
       opt-in/opt-out matrix so the columns describe the caller-type gate and the CLI flags only.
-- [ ] `docs/features/read-the-room.md:263` — REWRITE the Adjacent-layers claim that "RTR's SDLC bypass
+- [x] `docs/features/read-the-room.md:263` — REWRITE the Adjacent-layers claim that "RTR's SDLC bypass
       means RTR is effectively a no-op for SDLC sessions today". After the repair it is true; today it
       is not. State it as current fact, not as a today-qualified aside.
-- [ ] `docs/features/read-the-room.md` — ADD the D1 paragraph recording the short-output threshold as
+- [x] `docs/features/read-the-room.md` — ADD the D1 paragraph recording the short-output threshold as
       a stated decision, naming `CONTEXT_RECALL_PREFILTER_MAX_CHARS` and why the two bounds do not
       conflict.
-- [ ] `docs/features/read-the-room.md` — ADD an operations paragraph replacing the deleted Rollout:
+- [x] `docs/features/read-the-room.md` — ADD an operations paragraph replacing the deleted Rollout:
       which `rtr.*` events to watch, and that recovery is a revert rather than a flag flip.
-- [ ] `docs/features/drafter-redundancy-suppression.md:157` — REWRITE: the "structurally present but
+- [x] `docs/features/drafter-redundancy-suppression.md:157` — REWRITE: the "structurally present but
       currently a no-op" sentence is false after the repair.
-- [ ] `docs/features/bridge-worker-architecture.md:52` — UPDATE the Path A flow line; drop
+- [x] `docs/features/bridge-worker-architecture.md:52` — UPDATE the Path A flow line; drop
       "opt-in via READ_THE_ROOM_ENABLED".
-- [ ] `docs/features/agent-message-delivery.md:114` — UPDATE; drop the flag parenthetical.
-- [ ] `docs/features/telegram-messaging.md:270` — UPDATE; drop "subject to the
+- [x] `docs/features/agent-message-delivery.md:114` — UPDATE; drop the flag parenthetical.
+- [x] `docs/features/telegram-messaging.md:270` — UPDATE; drop "subject to the
       `READ_THE_ROOM_ENABLED` machine-wide gate".
-- [ ] `docs/features/README.md:166` — UPDATE the index row; drop "opt-in via `READ_THE_ROOM_ENABLED`".
-- [ ] `docs/features/context-recall-advisory.md:111` and `:134` — UPDATE: `:111` cites
+- [x] `docs/features/README.md:166` — UPDATE the index row; drop "opt-in via `READ_THE_ROOM_ENABLED`".
+- [x] `docs/features/context-recall-advisory.md:111` and `:134` — UPDATE: `:111` cites
       `READ_THE_ROOM_ENABLED` as a no-`config/settings.py` precedent (the precedent survives, the
       example does not); `:134` lists "enabling `READ_THE_ROOM_ENABLED`" as a future change that no
       longer exists.
-- [ ] `docs/features/personas.md` — ADD a note that `teammate.md` is repo-maintained and that a
+- [x] `docs/features/personas.md` — ADD a note that `teammate.md` is repo-maintained and that a
       private copy shadows it, pointing at the `/update` drift check.
 
 ### Inline Documentation
 
-- [ ] `bridge/read_the_room.py:36` — remove the `READ_THE_ROOM_ENABLED` bullet from the module
+- [x] `bridge/read_the_room.py:36` — remove the `READ_THE_ROOM_ENABLED` bullet from the module
       docstring's public surface list.
-- [ ] `bridge/read_the_room.py:481` — remove the flag bullet from `read_the_room`'s short-circuit list.
-- [ ] `bridge/read_the_room.py:489` — rewrite the `session.sdlc_slug` bullet as `session.is_sdlc`.
-- [ ] `tools/valor_telegram.py:742`, `:903`, `:1453` — rewrite so the caller-type gate and the CLI
+- [x] `bridge/read_the_room.py:481` — remove the flag bullet from `read_the_room`'s short-circuit list.
+- [x] `bridge/read_the_room.py:489` — rewrite the `session.sdlc_slug` bullet as `session.is_sdlc`.
+- [x] `tools/valor_telegram.py:742`, `:903`, `:1453` — rewrite so the caller-type gate and the CLI
       flags are the only conditions described.
-- [ ] `agent/output_handler.py:1046` — rewrite the RTR comment block; it currently says "gated by the
+- [x] `agent/output_handler.py:1046` — rewrite the RTR comment block; it currently says "gated by the
       `READ_THE_ROOM_ENABLED` env var (default off)".
-- [ ] `agent/session_executor.py:2206` — rewrite the `_should_run_rtr` note; drop "also gated by
+- [x] `agent/session_executor.py:2206` — rewrite the `_should_run_rtr` note; drop "also gated by
       `READ_THE_ROOM_ENABLED`".
 
 ### External Documentation Site

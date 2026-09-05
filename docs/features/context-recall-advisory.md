@@ -95,7 +95,7 @@ The check **sets** `needs_self_draft` rather than riding an existing one, becaus
 | Rejected | Why |
 |----------|-----|
 | Extending the promise gate's LLM pass | Its verdict is consumed by `cli_check_or_exit`, which calls `sys.exit(1)` on a block across five CLI call sites. A context-recall block would hard-fail a legitimate `python -m tools.send_message "which one do you mean?"`. There is also no shared call to piggyback on: the drafter path uses the regex-only `_evaluate_promise_heuristic`, never the LLM. |
-| `bridge/read_the_room.py` | Default-off, and it excludes DMs outright — precisely where "which one?" is most likely. It has no PM feedback path at all. |
+| `bridge/read_the_room.py` | Excludes DMs outright — precisely where "which one?" is most likely. It has no PM feedback path at all. |
 | An LLM call inside `draft_message` | The drafter is deliberately LLM-free; putting a model call inside it would reverse a shipped architectural decision. |
 
 Both modules are byte-identical to `main`.
