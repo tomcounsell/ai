@@ -6,10 +6,13 @@ have degraded the entire fleet:
 
 * the **positive self-test** -- ``check_llm_stack_compat().compatible is
   True`` on the pinned pair, and
-* **shape assertions on the derived set** -- it contains ``temperature`` /
-  ``top_p`` / ``top_k`` (the three the 2026-08-24 incident removed) and no
-  ``anthropic_``-prefixed name (the tell that the derivation slipped back
-  onto ``AnthropicModelSettings.__annotations__``).
+* **shape assertions on the derived set** -- it contains the structural
+  create kwargs (``model`` / ``messages`` / ``max_tokens`` / ``stream``),
+  none of the incident trio ``temperature`` / ``top_p`` / ``top_k`` (gone
+  from the call site since pydantic-ai 2.33; their reappearance means a
+  below-boundary regression), and no ``anthropic_``-prefixed name (the tell
+  that the derivation slipped back onto
+  ``AnthropicModelSettings.__annotations__``).
 
 Every fail-closed path is exercised against a **synthetic module source**
 fed through the ``_models_anthropic_source`` seam, so the cases do not
@@ -123,13 +126,27 @@ def test_pinned_pair_is_compatible() -> None:
 
 
 def test_derived_forwarded_set_comes_from_the_call_site() -> None:
-    """Shape assertions: the incident's three knobs in, settings keys out."""
+    """Shape assertions: structural call-site kwargs in, settings keys out.
+
+    Version note (#3073): on pydantic-ai < 2.33 the call site forwarded the
+    incident trio (``temperature``/``top_p``/``top_k``) and this test used
+    them as its canary. From 2.33 the call site forwards none of them --
+    that removal IS the fix the anthropic 1.x upgrade rode on -- so the
+    canary is now the structural core every Messages ``create`` call must
+    pass, plus a negative assertion that the incident trio stays gone.
+    """
     result = compat.check_llm_stack_compat()
     forwarded = set(result.forwarded)
 
     assert forwarded, "derivation produced an empty forwarded set"
-    for name in compat.INCIDENT_KWARGS:
+    for name in ("model", "messages", "max_tokens", "stream"):
         assert name in forwarded, f"{name} missing from the derived set: {sorted(forwarded)}"
+
+    incident_present = sorted(set(compat.INCIDENT_KWARGS) & forwarded)
+    assert not incident_present, (
+        "the call site forwards incident kwargs the anthropic 1.x client "
+        f"removed -- pydantic-ai regressed below the 2.33 boundary: {incident_present}"
+    )
 
     settings_only = sorted(n for n in forwarded if n.startswith("anthropic_"))
     assert not settings_only, (
