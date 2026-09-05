@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from tests.db_claim import subprocess_env
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -234,6 +235,7 @@ class TestOwnerlessAdoption:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [issue_session]  # post-save readback
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=env_session),
@@ -285,6 +287,7 @@ class TestLaneSlugMintedAtLaneStart:
         mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -319,6 +322,7 @@ class TestLaneSlugMintedAtLaneStart:
         mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -384,6 +388,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9991", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -398,6 +403,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9992", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        wire_session_lookup(mock_as)
 
         finalize_mock = MagicMock()
         with (
@@ -427,6 +433,7 @@ class TestKillOrphans:
         orphan = _make_orphan_session("sdlc-local-9993", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [orphan]
+        wire_session_lookup(mock_as)
 
         with (
             patch("models.agent_session.AgentSession", mock_as),
@@ -448,6 +455,7 @@ class TestKillOrphans:
         fresh = _make_orphan_session("sdlc-local-9994", 60)  # 1 minute old
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [fresh]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -465,6 +473,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [old_but_alive]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -477,6 +486,7 @@ class TestKillOrphans:
         at_boundary = _make_orphan_session("sdlc-local-9996", ORPHAN_AGE_SECONDS)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [at_boundary]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -490,6 +500,7 @@ class TestKillOrphans:
         under = _make_orphan_session("sdlc-local-9997", ORPHAN_AGE_SECONDS - 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [under]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -502,6 +513,7 @@ class TestKillOrphans:
         over = _make_orphan_session("sdlc-local-9998", ORPHAN_AGE_SECONDS + 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [over]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -515,6 +527,7 @@ class TestKillOrphans:
         bridge = _make_orphan_session("tg_valor_-1003449100931_691", ORPHAN_AGE_SECONDS + 3600)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -541,6 +554,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [live]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -565,6 +579,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [stale]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -587,6 +602,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -608,6 +624,7 @@ class TestKillOrphans:
         s.started_at = datetime.now(UTC) - timedelta(seconds=30)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -629,6 +646,7 @@ class TestKillOrphans:
         s.started_at = None
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [s]
+        wire_session_lookup(mock_as)
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _kill_orphans(dry_run=True)
@@ -654,6 +672,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [hollow]
+        wire_session_lookup(mock_as)
 
         dead_payload = {
             "run_id": "dead-run",
@@ -696,6 +715,7 @@ class TestKillOrphans:
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [live]
+        wire_session_lookup(mock_as)
 
         live_payload = {
             "run_id": "live-run",

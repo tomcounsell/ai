@@ -35,6 +35,7 @@ import pytest
 
 import reflections.utilities
 from reflections import sdlc_progress
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -263,6 +264,7 @@ def fake_query(monkeypatch):
     q = _FakeQuery()
     session_cls = MagicMock()
     session_cls.query = q
+    wire_session_lookup(session_cls)
     monkeypatch.setattr("models.agent_session.AgentSession", session_cls)
     return q
 

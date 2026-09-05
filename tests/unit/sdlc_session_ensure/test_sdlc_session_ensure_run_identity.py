@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 class TestVerifiedRunIdReuse:
     """#2003 cycle-3 BLOCKER 1: the per-stage /sdlc router re-runs
@@ -19,6 +21,7 @@ class TestVerifiedRunIdReuse:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         return mock_as
 
     def test_consecutive_stage_reuse_survives_own_live_lock(self):
@@ -140,6 +143,7 @@ class TestSupervisedRunSignal:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         return mock_as
 
     def test_bare_ensure_under_live_signal_refuses_and_mints_nothing(self):
@@ -383,6 +387,7 @@ class TestOwnedRunIdsSelfRecognition:
     def _readback_as(session):
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         return mock_as
 
     def test_read_owned_run_ids_tolerant(self):

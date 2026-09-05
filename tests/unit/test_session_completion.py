@@ -82,7 +82,7 @@ def test_drafter_calls_omit_system_prompt_via_ast():
     )
 
 
-@pytest.mark.parametrize("call_lineno_anchor", [792, 854])
+@pytest.mark.parametrize("call_lineno_anchor", [786, 848])
 def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     """Sanity: the documented drafter call lines still resolve to a harness call.
 
@@ -104,8 +104,10 @@ def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     named module-level constants (``_INTERRUPT_SEND_TIMEOUT_S``,
     ``_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S``,
     ``_INTERRUPTED_SENT_DEDUP_TTL_SECONDS``, ``_OUTBOX_TTL``) near the top
-    of the file.
-    Current anchors: 792 (Pass 1) / 854 (Pass 2).
+    of the file; shifted again by 6 lines in #3091 when the fresh-record
+    re-read in ``_complete_agent_session`` moved onto
+    ``AgentSession.rows_for_session_id`` and dropped its local sorts.
+    Current anchors: 786 (Pass 1) / 848 (Pass 2).
 
     A future refactor that moves these calls is fine as long as the AST
     guard above stays green, but this test pins the documented anchors so

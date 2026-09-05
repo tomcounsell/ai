@@ -6,6 +6,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 from tests.db_claim import subprocess_env
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +24,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]  # post-save readback
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session),
@@ -47,6 +49,7 @@ class TestEnsureSession:
         # First filter call: idempotent existing-by-id check (none). Second:
         # the post-save run_id readback (the just-created session).
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -77,6 +80,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -102,6 +106,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_existing]
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -139,6 +144,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -167,6 +173,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -195,6 +202,7 @@ class TestEnsureSession:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
@@ -261,6 +269,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -286,6 +295,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -309,6 +319,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         issue_url = "https://github.com/tomcounsell/ai/issues/1743"
@@ -335,6 +346,7 @@ class TestCreateLocalMessageText:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (

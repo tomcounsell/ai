@@ -4,6 +4,8 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 class TestIssueLockWiring:
     """Issues #1954/#2003: every return point of ensure_session() -- the 4
@@ -30,6 +32,7 @@ class TestIssueLockWiring:
         """Mock AgentSession whose readback query returns the bound session."""
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         return mock_as
 
     def test_mint_on_env_owns_issue_return(self, monkeypatch):
@@ -134,6 +137,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [existing]
+        wire_session_lookup(mock_as)
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2004"))
 
@@ -160,6 +164,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2005"))
@@ -193,6 +198,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2006"))
@@ -221,6 +227,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2007"))
@@ -274,6 +281,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -401,6 +409,7 @@ class TestIssueLockWiring:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [stale]  # readback sees a stale value
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=session),

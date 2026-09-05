@@ -13,6 +13,7 @@ Also tests:
 from unittest.mock import MagicMock, patch
 
 from bridge.telegram_relay import _append_outbound_chat_log
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 
 def _make_session(session_id="sess-abc"):
@@ -68,6 +69,7 @@ class TestAppendOutboundChatLogTierTwo:
             return []
 
         mock_agent_session_cls.query.filter.side_effect = mock_filter
+        wire_session_lookup(mock_agent_session_cls)
         mock_agent_session_cls.query.all.return_value = []
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):
@@ -96,6 +98,7 @@ class TestAppendOutboundChatLogTierTwo:
             return []
 
         mock_agent_session_cls.query.filter.side_effect = mock_filter
+        wire_session_lookup(mock_agent_session_cls)
         mock_agent_session_cls.query.all.return_value = []
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):
@@ -134,6 +137,7 @@ class TestAppendOutboundChatLogTierThree:
             return []
 
         mock_agent_session_cls.query.filter.side_effect = mock_filter
+        wire_session_lookup(mock_agent_session_cls)
         mock_agent_session_cls.query.all.return_value = []
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):
@@ -154,6 +158,7 @@ class TestAppendOutboundChatLogTierThree:
         """When no session is found via any tier, the function returns without crashing."""
         mock_agent_session_cls = MagicMock()
         mock_agent_session_cls.query.filter.return_value = []
+        wire_session_lookup(mock_agent_session_cls)
         mock_agent_session_cls.query.all.return_value = []
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):
@@ -203,6 +208,7 @@ class TestAppendOutboundChatLogEdgeCases:
         """An exception during session lookup does not propagate to the caller."""
         mock_agent_session_cls = MagicMock()
         mock_agent_session_cls.query.filter.side_effect = RuntimeError("Redis exploded")
+        wire_session_lookup(mock_agent_session_cls)
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):
             # Should not raise
@@ -222,6 +228,7 @@ class TestAppendOutboundChatLogEdgeCases:
 
         mock_agent_session_cls = MagicMock()
         mock_agent_session_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_agent_session_cls)
         mock_agent_session_cls.query.all.return_value = []
 
         with patch("models.agent_session.AgentSession", mock_agent_session_cls):

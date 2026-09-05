@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 class TestBridgeShortCircuit:
     """Tests for the VALOR_SESSION_ID / AGENT_SESSION_ID env short-circuit."""
@@ -35,6 +37,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge_session]  # post-save readback
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=bridge_session),
@@ -70,6 +73,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()  # create_local must NOT be called (no duplicate).
         mock_as.query.filter.return_value = [issue_session]  # post-save readback
+        wire_session_lookup(mock_as)
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=env_session),
@@ -104,6 +108,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -133,6 +138,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -161,6 +167,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -187,6 +194,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         find_session_mock = MagicMock()
@@ -226,6 +234,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -274,6 +283,7 @@ class TestBridgeShortCircuit:
 
             mock_as = MagicMock()
             mock_as.query.filter.side_effect = [[], [mock_new_session]]
+            wire_session_lookup(mock_as)
             mock_as.create_local.return_value = mock_new_session
 
             with (
@@ -304,6 +314,7 @@ class TestBridgeShortCircuit:
 
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        wire_session_lookup(mock_as)
         mock_as.create_local.return_value = mock_new_session
 
         with (

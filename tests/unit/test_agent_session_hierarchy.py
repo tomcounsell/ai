@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
@@ -218,6 +220,7 @@ class TestFinalizeParent:
         ]
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = children
+        wire_session_lookup(mock_model)
 
         _finalize_parent_sync("p1")
 
@@ -239,6 +242,7 @@ class TestFinalizeParent:
         ]
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = children
+        wire_session_lookup(mock_model)
 
         _finalize_parent_sync("p1")
 
@@ -260,6 +264,7 @@ class TestFinalizeParent:
         ]
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = children
+        wire_session_lookup(mock_model)
 
         _finalize_parent_sync("p1")
 
@@ -287,6 +292,7 @@ class TestFinalizeParent:
         ]
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = children
+        wire_session_lookup(mock_model)
 
         # With completing_child_id, c2's status is overridden to "completed"
         _finalize_parent_sync(
@@ -313,6 +319,7 @@ class TestFinalizeParent:
         ]
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = children
+        wire_session_lookup(mock_model)
 
         _finalize_parent_sync(
             "p1",
@@ -362,6 +369,7 @@ class TestFinalizeParent:
         )
         mock_model.get_by_id.return_value = parent
         mock_model.query.filter.return_value = []
+        wire_session_lookup(mock_model)
 
         _finalize_parent_sync("p1")
 
@@ -455,6 +463,7 @@ class TestCmdWaitForChildren:
         session = _make_mock_session("sess-pm", "running")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (
@@ -479,6 +488,7 @@ class TestCmdWaitForChildren:
         """wait-for-children with unknown session ID returns 1."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -516,6 +526,7 @@ class TestCmdWaitForChildren:
         session = _make_mock_session("env-sess-123", "running")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (
@@ -541,6 +552,7 @@ class TestCmdWaitForChildren:
         session = _make_mock_session("sess-done", "completed")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (
