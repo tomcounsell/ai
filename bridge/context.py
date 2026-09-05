@@ -403,7 +403,9 @@ def _media_descriptor(
 async def _resolve_media_descriptor(msg, chat_id: int) -> dict | None:
     """Resolve the media descriptor for one reply-chain hop.
 
-    Returns None when the message carries no media. Otherwise returns a
+    Returns None when the message carries no media, or media that is not a
+    downloadable file (get_media_type is the eligibility authority: only
+    photo/document kinds ever resolve). Otherwise returns a
     descriptor (see `_media_descriptor`): media type and filename come from
     the Telethon message already in hand, the on-disk path from the
     `TelegramMessage` record the bridge wrote at intake. The two sources
@@ -510,7 +512,9 @@ async def fetch_reply_chain(
 
     Returns:
         List of message dicts with 'sender', 'content', 'message_id', 'date',
-        and 'media' (a descriptor dict for hops carrying media, else None)
+        and 'media' (a descriptor dict for hops carrying downloadable file
+        media per get_media_type; None for text-only hops, non-file media,
+        or when resolve_media is False)
     """
     chain = []
     current_id = message_id

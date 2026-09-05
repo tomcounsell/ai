@@ -43,11 +43,15 @@ Do not duplicate this string. Import from `bridge.context`.
 
 ## Chain-Ancestor Media Rendering
 
-Chain-ancestor media — a photo, voice note, or document attached to one of
-the messages `fetch_reply_chain` walks — is rendered, never dropped.
+Chain-ancestor file media — a photo, voice note, or document attached to one
+of the messages `fetch_reply_chain` walks — is rendered, never dropped.
 `_resolve_media_descriptor` (`bridge/context.py`) builds a small descriptor
 for that hop, and `format_reply_chain` composes it into the rendered line.
-Three states, each textually distinguishable:
+Descriptor eligibility is decided by `get_media_type` (`bridge/media.py`),
+the same classifier the download path uses: only photo and document kinds
+ever resolve, so the renderer can never claim a file exists for media the
+bridge could never have downloaded. Four outcomes, each textually
+distinguishable:
 
 1. **Resolved.** The ancestor's `TelegramMessage` record carries a
    `media_local_path` that stats readable. The line carries the caption (if
@@ -68,6 +72,16 @@ Three states, each textually distinguishable:
    outbound stores never set `media_local_path`, so a file Valor sent is
    honestly unreadable rather than silently dropped.
 3. **Text only.** No media on the hop. Renders exactly as it always has.
+4. **Non-file media.** Link previews, polls, geo and live locations, venues,
+   contacts, dice, games, invoices, and every other kind `get_media_type`
+   declines yield no descriptor: the hop renders its text alone, and a
+   caption-less such hop renders nothing at all (the same skip applied to
+   empty hops generally). This is what keeps a shared live location from
+   producing a false `[unreadable attachment]` claim.
+
+The session-routing walk (`resolve_root_session_id`) consumes only sender
+and message id, so it calls `fetch_reply_chain(..., resolve_media=False)`
+and skips descriptor resolution — and its Redis lookups — entirely.
 
 **Chat scoping.** The path lookup filters
 `TelegramMessage.query.filter(chat_id=str(chat_id), message_id=msg.id)` —

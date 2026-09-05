@@ -98,16 +98,19 @@ no vision description, no transcription, no document extraction.
 instead: filename, media type, and (when resolvable) the absolute on-disk
 path, composed into the rendered chain line by `format_reply_chain`. See
 [Reply-Thread Context Hydration](reply-thread-context-hydration.md#chain-ancestor-media-rendering)
-for the three rendering states.
+for the rendering outcomes.
 
 The reasoning: a chain can run up to 20 hops deep, and the reply-chain fetch
 shares the same 3-second budget as the Telethon RPCs already in that loop.
 Running AI enrichment over every hop that carries media cannot fit that
 budget, and most of it is wasted work — a description or transcript for a
 file nobody in the conversation ends up asking about. A path reference costs
-one scoped Redis lookup per hop; the agent spends a tool call only on the
-one file that matters to the turn it is answering, reading it with `Read` or
-`valor-ingest` the same way it would any other file on disk.
+one scoped Redis lookup per hop carrying downloadable file media (per
+`get_media_type`; non-file media resolves nothing), and the session-routing
+walk skips resolution entirely via `resolve_media=False`. The agent spends a
+tool call only on the one file that matters to the turn it is answering,
+reading it with `Read` or `valor-ingest` the same way it would any other
+file on disk.
 
 ## Implementation files
 
