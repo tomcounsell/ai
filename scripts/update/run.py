@@ -1470,7 +1470,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # would find "no venv yet" and skip, leaving the freshly created venv
     # unguarded until the next `/update` (Risk 1). Idempotent + non-fatal:
     # log, warn, continue -- same contract as Step 3.13/3.14.
-    log("Installing Redis flush-guard .pth into repo venvs...", v)
+    log("Installing startup .pth shims (Redis flush guard, checkout pin) into repo venvs...", v)
     try:
         from scripts.update import redis_flush_guard_pth
 

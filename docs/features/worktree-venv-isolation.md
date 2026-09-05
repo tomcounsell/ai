@@ -197,6 +197,48 @@ pre-guard script reported "8 passed". `tests/unit/test_worktree_venv_absent_guar
 pins that the guard fires, names all three facts, and does not over-reach onto
 worktrees that have a venv or onto the primary checkout.
 
+### Bare scripts from a worktree (#3141)
+
+`scripts/pytest-clean.sh` protects test runs. A bare `python scripts/<tool>.py`
+has no wrapper, and it is exposed the same way with one more twist. The `c`
+launcher activates `~/src/ai/.venv`, so `python` typed inside a worktree is the
+primary checkout's interpreter; `sys.path[0]` is only the script's directory,
+and every `agent.*`/`tools.*` import resolves through that venv's editable
+`.pth` entry to `main`. The #3069 lane ran `capture_persona_baseline.py` this
+way and it reported the regenerated baseline "unchanged" because it had
+composed the prompt from the wrong checkout.
+
+A `sys.path.insert(0, REPO_ROOT)` at the top of the script does not close it.
+The flush-guard boot shim (`zzz_redis_flush_guard.pth`) imports `tools` during
+`site` processing, before the script's first line, so `sys.modules["tools"]`
+is already `main`'s package and every later `tools.*` import lands inside it
+whatever `sys.path` says. Measured 2026-09-05: such a script got `agent` from
+the worktree and `tools` from the primary checkout.
+
+The fix is one more startup shim, one step earlier. `tools/checkout_pin.py` is
+the single source; `scripts/update/redis_flush_guard_pth.py` copies it into
+every repo venv's `site-packages` as `_valor_checkout_pin.py` beside a
+one-line `_valor_checkout_pin.pth`, which sorts before
+`zzz_redis_flush_guard.pth`. At interpreter start `pin()` reads `sys.argv[0]`;
+for a script path it walks up to the nearest `.git` and, when that directory's
+`pyproject.toml` declares this project and the directory is absent from
+`sys.path`, inserts it at index 0. `-c`, `-m`, stdin, scripts outside a
+checkout of this project, console scripts under a venv, and a script in the
+venv's own checkout all leave `sys.path` untouched. Stdlib only, never raises.
+
+It reaches venvs the same three ways the flush guard does: `/update` Step 3.05
+(`install_fleet`), the worktree venv bootstrap in `agent/worktree_manager.py`,
+and the flush guard's own self-heal, which installs the whole file set. One
+venv by hand: `python -m scripts.update.redis_flush_guard_pth --venv <path>`.
+
+Verified live (2026-09-05) from a worktree through the primary venv, with a
+line appended to `config/personas/engineer.md` in the worktree only:
+`capture_persona_baseline.py --check` reported "current" before the shim and
+"STALE (32730 -> 32786)" after it; the same command on the primary checkout's
+own script stayed "current". `tests/unit/test_checkout_pin.py` pins the
+decision table and runs the two-checkout scenario in a real subprocess with
+the `.pth` present and absent.
+
 ### Guard relaxation (#2050 coordination)
 
 `.claude/hooks/validators/validate_no_uv_sync_in_worktree.py` relaxes from

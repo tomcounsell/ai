@@ -108,7 +108,9 @@ inside a venv would silently never run. This was verified empirically and is rec
 question so nobody retries it.
 
 **A `.pth` file does run**, per site-directory, immune to that shadowing. `scripts/update/redis_flush_guard_pth.py`
-writes two files into a venv's `site-packages`:
+writes two files into a venv's `site-packages` for this guard (plus the two checkout-pin files described in
+[worktree-venv-isolation.md](worktree-venv-isolation.md#bare-scripts-from-a-worktree-3141), whose `.pth` sorts
+before this one so `import tools` inside the shim resolves to the invoking checkout):
 
 - `_redis_flush_guard_boot.py`, a shim whose entire body imports `tools.redis_flush_guard` and calls
   `arm()`, swallowing any exception.
