@@ -332,47 +332,307 @@ secrets, no services, and no Redis.
 
 ## Solution
 
-_placeholder_
+### Key Elements
+
+- **`tests/marker_map.py`** (new): the single home for `FEATURE_MAP`, the resolution function, the
+  three rules, and the path-keyed baseline. Standard library only, no `pytest` import, runnable as
+  `python tests/marker_map.py --audit` on a bare interpreter.
+- **`tests/conftest.py`** (changed): imports `FEATURE_MAP` and `resolve_marker` from the new module
+  and calls the function instead of re-inlining the loop. Behavior is identical; the point is that
+  the guard and the collection hook can no longer disagree.
+- **`tests/unit/test_feature_map_markers.py`** (new): the pytest face of the audit, plus a
+  self-mutation test that proves the audit reports a synthetic mistag. Without that test the guard
+  can pass while reaching nothing.
+- **`.github/workflows/feature-map-guard.yml`** (new): runs the audit on `pull_request`. This is
+  what makes the issue's "runs in CI on every PR" criterion literally true rather than
+  aspirationally true.
+
+### Flow
+
+Author renames or splits a test file → pushes the branch → **GitHub Actions runs the audit in a
+few seconds with no venv, no Redis, no dependencies** → a mistag fails the check with the path,
+the marker it landed on, the marker its package declares, and the `FEATURE_MAP` key responsible →
+author renames the file, adjusts `FEATURE_MAP`, or adds a reasoned `KNOWN_MISTAGS` entry → green.
+
+The same audit also runs as an ordinary unit test, so `scripts/pytest-clean.sh tests/unit/` and the
+SDLC TEST stage cover it too. Two surfaces, one implementation.
+
+### Technical Approach
+
+**The resolution function.** `resolve_marker(basename) -> tuple[str | None, str | None]` returns
+both the marker and the `FEATURE_MAP` key that produced it. Rule R3 needs the key, not just the
+result, so returning only the marker would force a second implementation.
+
+**Rule R1, directory intent.** For a test file whose parent directory is not in
+`KNOWN_ROOT_DIRS` (`tests`, `unit`, `integration`, `e2e`, `tools`, `performance`, `ai_judge`):
+if the parent directory *name* resolves to marker M, the file's basename must resolve to M. The
+directory is a declaration of intent that the basename cannot forge, which is what makes this rule
+non-tautological. It catches the ordering-collision mechanism, which is spike-1's finding.
+
+**Rule R2, sibling uniformity.** For a package directory whose own name does not resolve: every
+test file in it must resolve to the same marker, `None` included. This catches a single file
+drifting away from its package when the package has no name-based intent to compare against.
+`tests/unit/session_runner/test_schema_routing.py` picking up `messaging` from the `routing` key,
+alone among eighteen siblings, is exactly this shape.
+
+**Rule R3, whole-token match.** Suite-wide, with no intent declaration required: the winning
+`FEATURE_MAP` key must appear in the stem as a contiguous run of `_`-delimited tokens, not as a
+fragment inside a longer word. This catches the second mechanism, which R1 and R2 cannot see.
+
+**Exemptions, keyed by path.** `KNOWN_MISTAGS: dict[str, str]` maps a repo-relative POSIX path to a
+prose reason, and `EXEMPT_DIRS: dict[str, str]` does the same for a whole package. Nothing is keyed
+by line number, index, or ordinal position, per #2805. Two assertions bracket the baseline:
+
+1. `violations - KNOWN_MISTAGS.keys()` must be empty. No new mistags.
+2. `KNOWN_MISTAGS.keys() - violations` must be empty. **No stale exemptions.** This is the #3031
+   lesson: an exemption that no longer corresponds to a real violation is a silent hole, so fixing
+   a file makes the guard demand its baseline entry be deleted. The baseline can only shrink, and
+   it cannot rot.
+
+**The baseline as measured at `f3594dd23`: 24 distinct paths.** 21 from R1 (18 in
+`tests/unit/reflections/`, 2 in `tests/integration/reflections/`, `tests/unit/bridge/test_dispatch.py`),
+2 from R2 (`tests/unit/session_runner/test_schema_routing.py`,
+`tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`), and 1 further from R3
+(`tests/unit/test_long_task_checkpointing.py`; `test_pm_briefings_no_slots_configured.py` also
+violates R3 but is already counted under R1). Each entry carries its own reason string. Draining
+the baseline is #3175.
+
+**Two in-scope `FEATURE_MAP` additions**, both measured to change no file's marker except the one
+intended and to lose no marker anywhere:
+
+- `"reflections": "reflections"` inserted immediately before `"reflection"`. Clears 13 benign R3
+  divergences. Zero files change marker.
+- `"youtube": "tools"` inserted immediately before `"transcript"`. Corrects
+  `test_youtube_transcription.py` from `messaging` to `tools`. One file changes marker, none lose one.
+
+**Demonstrated red.** Two independent proofs, because a passing suite proves nothing:
+
+1. A committed test, `test_audit_reports_a_synthetic_mistag`, that runs the rule functions over a
+   synthetic file list containing a deliberately mistagged path and asserts the violation is
+   reported with the right path, marker, and key. This keeps the guard honest after every future
+   refactor, not just on the day it lands.
+2. A manual red/green transcript pasted into the PR body: rename a real file into a mistag, run the
+   audit, capture the failure output, restore the name, run again, capture green. Per the repo's
+   mutation-check habit, do this once per rule (R1, R2, R3), not once overall, since one mutation
+   can leave two of the three rules untouched.
+
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+
+- [ ] The audit has exactly two failure modes that must be loud rather than silent, and both get a
+      test: (a) `FEATURE_MAP` cannot be imported or is not a non-empty dict, and (b) the
+      `git ls-files` enumeration returns zero test files. Either condition means the audit is
+      reaching nothing, so it must raise rather than report "no violations". A guard that passes
+      vacuously is worse than no guard.
+- [ ] No `except Exception: pass` blocks are introduced. `subprocess.run` for `git ls-files` uses
+      `check=True` so a git failure surfaces instead of yielding an empty list.
+
+### Empty/Invalid Input Handling
+
+- [ ] `resolve_marker("")` and `resolve_marker("test_.py")` return `(None, None)` without raising.
+- [ ] A basename with no underscores, and a basename that is exactly a `FEATURE_MAP` key, both
+      resolve correctly under the whole-token comparison (the single-token case is the boundary
+      where a naive tokenizer goes wrong).
+- [ ] A package directory containing exactly one test file passes R2 trivially rather than raising.
+- [ ] `KNOWN_MISTAGS` containing a path that is no longer tracked fails rule 2 above with a message
+      naming the stale path, instead of being ignored.
+
+### Error State Rendering
+
+- [ ] The assertion message lists every violating path with its resolved marker, expected marker,
+      and responsible `FEATURE_MAP` key, one per line, sorted. A guard whose failure message does
+      not say what to change gets exempted rather than fixed.
+- [ ] The message ends with the exact remediation options: rename the file, reorder or extend
+      `FEATURE_MAP`, or add a `KNOWN_MISTAGS` entry with a reason.
+
 
 ## Test Impact
 
-_placeholder_
+- [ ] `tests/conftest.py::pytest_collection_modifyitems` — UPDATE: replace the inlined four-line
+      resolution loop with a call to `resolve_marker()`, and import `FEATURE_MAP` from
+      `tests/marker_map.py` rather than defining it in place. Behavior must be byte-identical in
+      effect; verified by comparing `pytest --collect-only -q -m <marker>` counts for every marker
+      before and after.
+- [ ] Marker assignment for two files changes by design and any test asserting the old value must
+      follow: `tests/unit/test_youtube_transcription.py` moves from `messaging` to `tools`. A
+      `git grep -n "youtube" tests/` sweep confirms no test asserts its marker today, but the
+      builder re-checks rather than trusting this line.
+- [ ] No existing test file is renamed, moved, or deleted by this work. The 24 baseline files are
+      recorded, not touched.
+- [ ] `tests/unit/test_no_legacy_paths.py` — no change. It is read as a precedent for the exemption
+      shape, not modified.
+
 
 ## Rabbit Holes
 
-_placeholder_
+- **Redesigning the resolution algorithm.** Substring-plus-insertion-order is the root defect, and
+  replacing it with explicit per-file declarations or directory-authoritative resolution is
+  tempting the moment you see the numbers. spike-5 shows it also makes rule R1 tautological. It is
+  #3175, and it wants the guard to exist first so it can prove its own before/after.
+- **A golden manifest of all 834 files.** Checking in `path -> marker` for the whole suite catches
+  every change, needs no rules, and needs no exemption list. It also blesses all 552 currently
+  unmarked files as correct, adds a required manifest edit to every new test file, and turns a
+  rename into a large diff. The rule-based guard says something true about correctness; a manifest
+  only says "this changed".
+- **Fixing the 21 reflections and bridge files inside this PR.** It is one line if the resolver
+  changes and roughly nine hand-ordered `FEATURE_MAP` keys if it does not, and either way it makes
+  the diff about the fix rather than the guard. #3175.
+- **Registering markers with `--strict-markers`.** Adjacent, real, and a different problem.
+- **Extending the rules to test *functions* or classes.** `FEATURE_MAP` is keyed on module
+  basename. Nothing below the module is in scope.
+- **Making the audit walk the filesystem instead of `git ls-files`.** Tempting because it removes a
+  subprocess. It also picks up untracked scratch files, worktrees, and `__pycache__`, and it makes
+  the guard's population depend on whatever happens to be lying around.
+
 
 ## Risks
 
-_placeholder_
+### Risk 1: The guard is introduced with 24 exemptions and reads as theater
+
+**Impact:** A reviewer reasonably asks what a guard is worth when its first act is to bless 24
+violations, including the exact class it was built to catch.
+**Mitigation:** The baseline shrinks only, never grows, and rule 2 forces stale entries out. Every
+entry carries a prose reason, not a bare path. The drain is filed as #3175 with its own acceptance
+criteria rather than promised in a comment. And the guard's value is forward-looking by design:
+the four packages #2879 and #2941 created that declare intent are 100% consistent today, so the
+guard's real job is keeping the next split honest, not relitigating old ones.
+
+### Risk 2: Moving `FEATURE_MAP` out of `tests/conftest.py` breaks collection
+
+**Impact:** If `tests.marker_map` is not importable from `tests/conftest.py`, every test run dies
+at collection, which is a maximally loud failure but a wasted cycle.
+**Mitigation:** `tests/__init__.py` exists, so `tests` is a real package and `tests/conftest.py` is
+a module inside it. `git grep FEATURE_MAP` confirms no importer outside `tests/conftest.py`; the
+ten other hits are docstring prose. The builder verifies with a full
+`scripts/pytest-clean.sh tests/unit/ -q` before opening the PR, not just a targeted run.
+
+### Risk 3: Rule R2 is too strict for legitimately mixed packages
+
+**Impact:** A package that deliberately holds tests of two different features fails sibling
+uniformity and the author reaches for an exemption, eroding the rule.
+**Mitigation:** R2 only applies where the directory name does *not* resolve, which is the case
+precisely when nobody has declared what the package is about. `EXEMPT_DIRS` takes a whole package
+out by path with a reason. If more than one or two packages need it, R2 is the wrong rule and
+should be dropped rather than exempted into meaninglessness; the builder reports that rather than
+papering over it.
+
+### Risk 4: The new workflow is the repo's first pytest-adjacent CI job
+
+**Impact:** Adding GitHub Actions to a repo that deliberately runs its tests locally could be
+unwanted, and could invite "why not run the whole suite here" pressure later.
+**Mitigation:** The job runs one stdlib-only script in seconds with no secrets, no venv, and no
+services, so it sets no precedent about running the suite. It is also the only way to satisfy the
+issue's fourth acceptance criterion as written. Raised as the single Open Question so the call is
+made deliberately, and the guard still functions as a unit test if the answer is no.
+
+### Risk 5: The audit passes vacuously
+
+**Impact:** If `git ls-files` returns nothing (wrong cwd, a bare checkout), the audit finds zero
+violations and reports success, which is the worst possible failure for a guard.
+**Mitigation:** The audit raises when the enumeration is empty or `FEATURE_MAP` is empty, covered
+by a test. The verification table asserts a non-zero file count, not just a zero violation count.
+
 
 ## Race Conditions
 
-_placeholder_
+No race conditions identified. The audit is synchronous, single-threaded, and reads only the git
+index and the file system. It performs no writes, holds no locks, and touches no Redis, no
+network, and no shared state. Under `pytest-xdist` the guard test runs on a single worker and is
+read-only, so concurrent workers cannot interfere with it or with each other through it.
+
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- [SEPARATE-SLUG #3175] Draining the 24-entry `KNOWN_MISTAGS` baseline: fixing the 18
+  `tests/unit/reflections/` files, the 2 `tests/integration/reflections/` files,
+  `tests/unit/bridge/test_dispatch.py`, `tests/unit/session_runner/test_schema_routing.py`,
+  `tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`, and
+  `tests/unit/test_long_task_checkpointing.py`. Filed with its own measurements and acceptance
+  criteria, including the requirement that no file loses a marker.
+- [SEPARATE-SLUG #3175] Changing `pytest_collection_modifyitems` to make the package directory
+  authoritative over the basename. spike-5 measured it (39 markers gained, 6 corrected, 0 lost) and
+  it is the most promising remedy, but shipping it alongside the guard makes rule R1 tautological.
+- [SEPARATE-SLUG #3175] Assigning markers to the four packages whose directory name is not a
+  `FEATURE_MAP` key (`hooks`, `memory_extraction`, `output_handler`, `session_runner`, 33 files,
+  all currently unmarked and internally uniform). That is new tagging policy, not regression
+  prevention. They pass rule R2 as they stand.
+- Not deferred, done here: the two `FEATURE_MAP` key additions, the extraction of `resolve_marker`,
+  the guard, the synthetic-mistag test, the workflow, and the documentation.
+
 
 ## Update System
 
-_placeholder_
+No update system changes required. This work adds one test-suite module, one test file, one
+workflow file, and edits `tests/conftest.py`. There are no new dependencies, no config files, no
+secrets, no services, and no Popoto models, so there is no migration and nothing to register in
+`scripts/update/migrations.py`. `/update` propagates it as an ordinary commit and the guard starts
+running on the next test invocation on each machine.
+
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required. The guard is test-suite infrastructure with no runtime surface. It
+adds no CLI entry point to `pyproject.toml [project.scripts]`, the bridge does not import it, and
+no MCP server exposes it. The agent reaches it the same way it reaches every other test, by running
+`scripts/pytest-clean.sh`.
+
+`tests/marker_map.py` is directly runnable (`python tests/marker_map.py --audit`) for the CI job's
+benefit, which incidentally makes it available to an agent via the Bash tool, but that is a
+consequence of being a plain script rather than an integration point that needs wiring or a test.
+
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+
+- [ ] Create `docs/features/feature-map-marker-guard.md`: the two mistag mechanisms with the live
+      examples, the three rules and what each one can and cannot see, why exemptions are keyed by
+      path (#2805) and why stale exemptions are themselves a failure (#3031), and how to respond
+      when the guard goes red.
+- [ ] Add a row for it to the `docs/features/README.md` index table, keeping the table's sort order
+      (enforced by `.claude/hooks/validators/validate_features_readme_sort.py`).
+
+### Inline Documentation
+
+- [ ] `tests/marker_map.py` module docstring states that it is the single source of marker
+      resolution and must stay import-light so the CI job can run it on a bare interpreter.
+- [ ] Every `KNOWN_MISTAGS` and `EXEMPT_DIRS` entry carries a prose reason as its value. A bare
+      path with no reason is not an acceptable entry.
+
+### Test Suite Index
+
+- [ ] Update `tests/README.md`. Its existing split procedure (around lines 495 to 566) tells authors
+      to check each new basename against `FEATURE_MAP` by hand; replace that manual step with the
+      command that runs the audit, and add the worked ordering example the #2879 review asked for
+      (`worktree_manager` sitting after `config`) alongside the fragment-match example
+      (`config` inside `configured`). Add `tests/marker_map.py` to the file's index of
+      test-infrastructure locations, which currently names `tests/conftest.py` as the home of
+      `FEATURE_MAP`.
+
 
 ## Success Criteria
 
-_placeholder_
+- [ ] `tests/unit/test_feature_map_markers.py` exists and fails when a test file is mistagged,
+      proven by a committed synthetic-mistag test and by a manual red/green transcript covering
+      each of R1, R2, and R3 separately.
+- [ ] `python tests/marker_map.py --audit` exits 0 on a clean tree and non-zero on a mistag, using
+      only the standard library.
+- [ ] No exemption in the guard is keyed by line number, index, or ordinal position. Every
+      `KNOWN_MISTAGS` key is a repo-relative path that `git ls-files` currently returns.
+- [ ] Stale exemptions fail the guard: deleting a real violation without deleting its baseline
+      entry turns the guard red.
+- [ ] `.github/workflows/feature-map-guard.yml` runs the audit on `pull_request`, so the guard
+      gates every PR. (Subject to the Open Question.)
+- [ ] Marker resolution has exactly one implementation. The inlined loop is gone from
+      `tests/conftest.py`.
+- [ ] No test file loses a marker it had at `f3594dd23`. `test_youtube_transcription.py` moves from
+      `messaging` to `tools` and is the only intended change.
+- [ ] Full `scripts/pytest-clean.sh tests/unit/ -q` is green.
+- [ ] Documentation updated (`docs/features/feature-map-marker-guard.md`, the features index, and
+      `tests/README.md`).
+
 
 ## Team Orchestration
 
