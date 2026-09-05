@@ -279,15 +279,146 @@ helper. The module keeps one place where "a naive timestamp means UTC" is writte
 
 ## Appetite
 
-_placeholder_
+**Small.** One work session.
+
+The change is deletion plus docstring rewriting, with one mechanical rewrite repeated six times. No
+new behavior, no new dependency, no migration, no schema change. The surface is nine files:
+
+| File | Shape of change |
+|---|---|
+| `models/job.py` | Delete ~45 lines (`save()` override) + 8 lines (`repair_indexes` sweep call and its comment); rewrite 3 docstring passages |
+| `agent/session_health.py` | 6 two-line rewrites |
+| `tests/unit/test_job_model.py` | Delete 2 tests, rewrite 1 docstring, trim 1 test's second half |
+| `scripts/update/migrations.py` | Rewrite 1 docstring |
+| `docs/features/durability-model.md` | Rewrite 1 subsection |
+| `docs/features/popoto-index-hygiene.md` | Rewrite 1 paragraph |
+| `docs/features/utc-timestamps.md` | Rewrite 2 lines |
+
+What would push this to Medium: touching the seven other modules that carry the same guard
+(`agent/session_runner/liveness.py`, `agent/agent_session_queue.py`, `monitoring/session_watchdog.py`,
+`monitoring/bridge_watchdog.py`, `reflections/crash_recovery.py`, `models/agent_session.py`,
+`utils/utc.py`). Explicitly out of scope — see No-Gos.
 
 ## Prerequisites
 
-_placeholder_
+None. Everything this plan depends on is already on main:
+
+- [x] `popoto>=1.9.0` pinned (`pyproject.toml:21`) and installed (`.venv` reports 1.9.0).
+- [x] `POPOTO_DATETIME_KEY_LEGACY` unset repo-wide (confirmed by `git grep`).
+- [x] `docs/features/popoto-version-floor-guard.md`'s fail-closed interlock is shipped, so a
+      below-floor popoto refuses to rebuild rather than silently re-skewing.
+- [x] `backfill_job_last_active_scores` is recorded in `MIGRATIONS` and has run fleet-wide.
 
 ## Solution
 
-_placeholder_
+### Key Elements
+
+1. **Delete `Job.save()`** — `models/job.py:144-188`. `Job` inherits `Model.save` unchanged.
+2. **Delete the post-rebuild sweep call** — `models/job.py:769-783`, the
+   `cls.renormalize_last_active_scores()` call, its four-line comment, and the `if renormalized:`
+   log block. `repair_indexes()` keeps its `(quarantined, rebuilt)` return arity.
+3. **Keep `renormalize_last_active_scores()` itself** — the `backfill_job_last_active_scores`
+   migration still calls it, and an applied migration stays in the registry.
+4. **Correct every 1.8.0-as-present citation** — three docstrings in `models/job.py`, one in
+   `scripts/update/migrations.py`, three feature docs.
+5. **Collapse six inline coercions in `agent/session_health.py` into `_ts` calls** — keep the naive
+   branch inside `_ts`, `_at_rest_coerce_ts`, `_session_is_alive`, and both `session_pickup.py`
+   coercers.
+6. **Remove the tests that pinned the deleted code**, keep `TestScorePurity` as the regression net.
+
+### Flow
+
+Nothing changes at runtime for a caller. The observable deltas are:
+
+- `Job.repair_indexes()` no longer emits `[job] re-normalized N of M recency score(s) after the index
+  rebuild` and no longer walks the class set. Worker start does less Redis work.
+- `Job.save()` no longer mutates `self.last_active_at` as a side effect. A caller that assigns a naive
+  value and then reads the attribute back now sees the naive value it assigned. No production caller
+  does this; only the deleted tests did.
+
+### Technical Approach
+
+**`models/job.py`**
+
+- Remove the whole `def save(...)` block at lines **144-188** (signature, docstring, the
+  `if update_fields is None or "last_active_at" in update_fields:` guard, and the `super().save(...)`
+  delegation). Verify `datetime` and `UTC` are still used elsewhere in the module before touching the
+  imports at line 53 — `_now()` at line 78 uses both, so both stay.
+- In `repair_indexes()`, delete lines **770-783**: the comment beginning `# rebuild_indexes()
+  re-scores every row via field.on_save on`, the `scanned, renormalized = ...` assignment, and the
+  `if renormalized:` logging block. Leave `rebuilt = cls.rebuild_indexes()` and the
+  `cls.backfill_open_expectations_index()` call that follows.
+- Rewrite three docstring passages:
+  - **`:533`** (`recent_for_room`): `popoto 1.8.0's QueryBuilder has no early-limit path` → state the
+    version-independent fact. `QueryBuilder` still has no early-limit path for a `SortedField` on
+    1.9.0; only the version reference is stale. Reword to `popoto's QueryBuilder has no early-limit
+    path for a SortedField`.
+  - **`:807-815`** (`renormalize_last_active_scores`): the "two callers" list drops the
+    `repair_indexes` bullet entirely and the migration bullet loses "before the `save` UTC-reattach
+    override shipped". State what the sweep is now: the one-shot repair of skew written before popoto
+    1.8.2 made the score a pure function of the stored value.
+  - **`:833`** (same docstring): `a scoped save that names the field so the save tz-reattach fires` →
+    the field-scoped write is still the clobber-proof idiom; the reason is now that it cannot touch
+    `goal`/`status`, not that it triggers a reattach.
+- Grep the module for surviving `1.8.0` / `reattach` strings after the edits.
+
+**`agent/session_health.py`** — six sites, one pattern. Each currently reads:
+
+```python
+X_aware = X if X.tzinfo else X.replace(tzinfo=UTC)
+age = (NOW - X_aware).total_seconds()
+```
+
+and becomes:
+
+```python
+age = NOW.timestamp() - _ts(X)
+```
+
+`_ts` returns a float for any `datetime` (its naive branch is kept), and every one of the six sites is
+already behind an `isinstance(X, datetime)` check, so `_ts` cannot return `None` there. Sites, by
+current line number (**re-derive by symbol before editing — this file is ~6500 lines and line numbers
+drift**):
+
+| Line | Function | Local name |
+|---|---|---|
+| 658 | `_check_tool_timeout` | `last_at_aware` |
+| 1614 | `_never_started_past_grace` | `started_aware` |
+| 1750 | `_has_progress` sub-check A | `ts_aware` |
+| 1770 | `_has_progress` sub-check B | `hb_aware` |
+| 1805 | `_has_progress` startup-grace leg | `started_aware` |
+| 1852 | `_has_progress` own-progress leg | `_hb_own_aware` |
+
+At line 658 `_ts(last_at)` is already computed eleven lines earlier for the epoch gate; reuse that
+value rather than calling `_ts` twice.
+
+**`agent/session_pickup.py`** — no code change. Spike-2 found no popoto-attributing comment, and all
+three coercers there (`is_scheduled_eligible`, both `_ensure_tz` copies) keep their naive branch under
+the Spike Results decision. **This file is listed in the issue's Solution Sketch and deliberately
+ends up untouched; the plan records that as a decision, not an omission.**
+
+**`scripts/update/migrations.py:1115-1141`** — rewrite `_migrate_backfill_job_last_active_scores`'s
+docstring. It currently opens "popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
+`Job.save()` UTC-reattach override shipped...". The migration's *purpose* is historical and stays
+accurate as history; say so in the past tense and drop the claim that `repair_indexes` re-runs the
+sweep after every rebuild. Do not touch the function body or its `MIGRATIONS` entry.
+
+**Docs** — three files, all describing the same dead mechanism:
+
+- `docs/features/durability-model.md` **lines 79-108** (heading `### last_active_at score purity
+  (Job.save())`). *Note: the issue cites 82-106; the passage is at 79-108 on `67d714662`.* Rename the
+  heading (it names a method that will not exist), replace the reattach paragraph with popoto's own
+  contract, and delete the final paragraph's renormalize-after-rebuild rationale while keeping the
+  migration's description.
+- `docs/features/popoto-index-hygiene.md` **line 40** — the paragraph opening "`Job.repair_indexes()`
+  carries one extra step the other guarded paths do not". After this change it carries no extra step.
+  Delete the renormalize description from that paragraph. **This file is not named in the issue's
+  Solution Sketch; it was found by grep during planning and would otherwise be left contradicting the
+  code.**
+- `docs/features/utc-timestamps.md` **line 87** ("`SortedField` / `DatetimeField` deserialization can
+  return naive datetimes") and **line 94** ("ai pins `popoto>=1.8.0`"). Line 87's *instruction* —
+  route read-path conversions through `utils.utc.to_unix_ts` — stays correct and is the convention
+  this plan leans on; only its stated rationale changes. Line 94 becomes `popoto>=1.9.0`.
 
 ## Failure Path Test Strategy
 
