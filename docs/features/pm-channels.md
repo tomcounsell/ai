@@ -47,7 +47,7 @@ Eng sessions compose their system prompt via `load_eng_system_prompt(working_dir
 [Work-vault CLAUDE.md — project-specific instructions, if present]
 ```
 
-Specifically `compose_system_prompt` under the `WORKER` branch (`agent/sdk_client.py:1090–1112`):
+Specifically `compose_system_prompt` under the `WORKER` branch (`agent/sdk_client.py:976`):
 - Loads the engineer persona (`load_persona_prompt("engineer")` — base segments + engineer overlay)
 - Puts WORKER_RULES first (safety rails take precedence over persona)
 - Appends the project-specific `CLAUDE.md` from `working_directory` if it exists; logs and proceeds with the worker prompt only if absent
