@@ -510,18 +510,41 @@ The touched scope contains four handlers. All four are `except Exception` with a
 `logger.warning`/`logger.debug` and a defined return, not silent swallows — and each needs
 a test asserting the observable outcome, not just the log.
 
+All citations below were re-derived at `491a88624`; the draft had the first two crossed
+and the third pointed at a test that does not exist.
+
 - [ ] Deferred model import fails → `("error", "model_import_failed:{Type}", "")`, WARNING
-      logged. Already covered at
-      `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py:204`; re-assert
-      after the refactor moves it into `_fetch_live_sessions`.
-- [ ] Indexed query raises → `("error", "query_failed:{Type}", "")`, WARNING logged.
-      Covered at `:212`; must keep passing against `filter(status__in=…)` rather than `all()`.
+      logged. Covered by
+      `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py::TestScanWorktreeSessions::test_model_import_failure_tuple`
+      (`:210`) and `TestWorktreeBusyProbe::test_model_import_failure_reports_error_state`
+      (`:141`); re-assert after the refactor moves the import into `_fetch_live_sessions`.
+- [ ] Indexed query raises **on materialization** → `("error", "query_failed:{Type}", "")`,
+      WARNING logged. Covered by `TestScanWorktreeSessions::test_query_failure_tuple`
+      (`:202`), `TestWorktreeBusyProbe::test_query_failure_reports_error_state` (`:133`),
+      and `TestWorktreeBusyCheck::test_query_raises_returns_none` (`:108`). All three set
+      `query.all.side_effect` today (`:203`, `:135`, `:110`) and must be re-pointed so the
+      raise happens where the real one does — during iteration of the object
+      `query.filter(...)` returns, not at the `filter()` call. A spy whose `__iter__`
+      raises is the faithful shape; a `filter.side_effect` is not, and would leave
+      Decision 0's failure mode untested.
 - [ ] Per-row matching raises (a row with an unreadable attribute) → the row is skipped at
-      DEBUG and the scan continues. Covered at `:227`.
+      DEBUG and the scan continues. **Not covered today.** The draft cited `:227`, which is
+      inside `test_busy_tuple_carries_both_ids` (`:218`), a happy-path busy assertion; the
+      file's only three `query.all.side_effect` uses (`:110`, `:135`, `:203`) are all
+      whole-query failures. The `except Exception` / `logger.debug` / `continue` branch in
+      the matching loop (`agent/worktree_manager.py:539`–`:541`) has zero coverage and
+      Task 1 refactors that exact loop. **New test required:** put a row that raises on
+      attribute access (e.g. `MagicMock(spec=["status"])`, which has no `working_dir`)
+      ahead of a genuine busy row in the same fixture list, and assert the scan still
+      returns `("busy", …)` from the later row — proving both the skip and first-match-wins
+      survive the `sessions=` injection.
 - [ ] **New:** batch fetch raises → `worktree_busy_probe_many` returns `("error", …)` for
       **every** requested slug, and the sweep skips every one of them as
       `busy_check_error:`. The batch path is the new way for a Redis outage to reach the
       reaper, and it is the one that must not default any lane to clear.
+- [ ] **New (Decision 6):** `worktree_busy_probe_many` never propagates an exception. Make
+      the fetch raise and assert the sweep **completes** with every lane skipped, rather
+      than the call raising through `tools/disk_reclaim.py:415`, which has no `except`.
 
 ### Empty/Invalid Input Handling
 
@@ -529,9 +552,12 @@ a test asserting the observable outcome, not just the log.
 - [ ] A slug absent from the map (caller asks for a lane it did not request) must not
       KeyError into a silent clear — `sweep_worktrees` reads with an explicit default that
       is `("error", "not_probed")`, never `("clear", "")`.
-- [ ] Rows with `working_dir` empty/None are skipped, as today (`:483`). Rows with a
-      relative `working_dir` (e.g. `".worktrees/sdlc-1218"`) still resolve against
-      `repo_root` — pinned at `:102`.
+- [ ] Rows with `working_dir` empty/None are skipped, as today
+      (`agent/worktree_manager.py:510`). Rows with a relative `working_dir` (e.g.
+      `".worktrees/sdlc-1218"`) still resolve against `repo_root`
+      (`agent/worktree_manager.py:523`) — pinned by
+      `test_worktree_manager_busy_guards.py::TestWorktreeBusyCheck::test_relative_working_dir_match`
+      (`:95`), which is one of the `query.all` sites that must be re-pointed.
 - [ ] `status` empty or None → row skipped, as today.
 
 ### Error State Rendering
@@ -562,15 +588,35 @@ green tests that have stopped reaching the guard they claim to cover.
 - [ ] `tests/unit/test_disk_reclaim.py::all_clear` fixture (`:66`) — UPDATE: stub both
       `worktree_busy_probe_many` (clear for every slug) and `worktree_busy_probe` (clear),
       since the happy path now crosses both the batch map and the pre-removal re-probe.
-- [ ] `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` (`TestScanWorktreeSessions`,
-      `:204`–`:236`) — UPDATE: these patch `models.agent_session.AgentSession` wholesale, so
-      they survive the query change, but the two error cases must be re-pointed at
-      `filter(status__in=…)` instead of `all()` or they will assert against a call that no
-      longer happens.
-- [ ] `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py::TestWorktreeBusyCheck`
-      / `TestWorktreeBusyProbe` (`:38`–`:195`) — UPDATE mechanically (same `AgentSession`
-      patch, `filter` instead of `all`); their assertions are the fail-open/fail-closed
-      contract and must not change meaning by one character.
+**The second-highest-risk item, and the one the draft got backwards.** The draft claimed
+these tests "patch `models.agent_session.AgentSession` wholesale, so they survive the query
+change" and that only the two error cases needed re-pointing. That is false in the
+dangerous direction: an unconfigured `MagicMock().query.filter(status__in=[...])` is
+iterable and yields an **empty** sequence (verified). So every test that configures only
+`query.all.return_value` and asserts *clear* would pass **vacuously** after the swap,
+reaching no matcher code at all. The busy- and error-asserting tests fail loudly, which is
+exactly what makes the vacuous set easy to miss on an otherwise-red-then-green run.
+
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` — UPDATE **every**
+      `query.all` site, all 17 of them, not just the error cases:
+      `return_value` at `:42`, `:47`, `:58`, `:72`, `:86`, `:97`, `:115`, `:150`, `:163`,
+      `:175`, `:185`, `:194`, `:219`, `:235`; `side_effect` at `:110`, `:135`, `:203`.
+      **Completion check:** after the refactor,
+      `grep -n 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+      must return nothing.
+- [ ] The five that would go vacuous, called out by name because they are the tests backing
+      Success Criterion 2 ("the matcher is byte-for-byte the predicate it is today"):
+      `TestWorktreeBusyCheck::test_terminal_session_does_not_block` (`:46`),
+      `::test_substring_near_miss_does_not_block` (`:84`),
+      `::test_session_with_no_working_dir_skipped` (`:114`),
+      `TestWorktreeBusyProbe::test_unrelated_sessions_report_clear` (`:174`),
+      `::test_terminal_session_in_lane_reports_clear` (`:183`).
+      Prove they bite with the same mutation discipline Risk 1 prescribes: make the matcher
+      return clear unconditionally and confirm all five turn **red**. A test that stays
+      green under that mutation is reaching no code.
+- [ ] `TestWorktreeBusyCheck` / `TestWorktreeBusyProbe` / `TestScanWorktreeSessions`
+      (`:37`–`:236`) — the assertions themselves are the fail-open/fail-closed contract and
+      must not change meaning by one character. Only the mock plumbing moves.
 - [ ] `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py:146` — no change:
       patches `worktree_busy_check` by object, unaffected.
 
@@ -578,8 +624,19 @@ green tests that have stopped reaching the guard they claim to cover.
 
 - [ ] `worktree_busy_probe_many` agrees with N single-slug `worktree_busy_probe` calls over
       the same fixture rows, for clear / busy / error — the anti-drift test for Decision 3.
-- [ ] The sweep performs **exactly one** batch fetch across many lanes (call counter on the
-      query), and **zero** when every lane is `too_young` (Decision 5).
+- [ ] **One rows object, two different verdicts.** Call
+      `worktree_busy_probe_many(root, ["a", "b"])` against a single fixture list in which
+      only `b` is busy, and assert `{"a": ("clear", ""), "b": ("busy", …)}`. This is the
+      test that would have caught a shared-cursor bug, where the second slug sees a
+      consumed or re-executed sequence rather than the same rows.
+- [ ] **Exactly one materialization per sweep, counted correctly.** The counter goes on
+      *iteration*, not on `filter()` — patch `query.filter` to return a spy that wraps a
+      list and increments on `__iter__`, then assert the count is 1 across many lanes and
+      **0** when every lane is `too_young` (Decision 5). Counting `filter()` calls would
+      stay green against the exact defect Decision 0 exists to prevent, so this test is
+      specified by the thing it counts, not by the function it patches.
+- [ ] The single-slug probe is called exactly `len(sweep.removed)` times (Decision 4), so
+      the two-call-site shape is bounded rather than merely permitted.
 - [ ] A lane that reads clear in the snapshot and busy at the re-probe is **not** removed
       (Decision 4).
 

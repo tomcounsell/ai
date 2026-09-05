@@ -26,7 +26,7 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 **Desired outcome:**
 
-`preserve_uncommitted_worktree_changes` refuses to commit when the dirty state is a wipe rather than work. It returns `{"preserved": False, ...}` with an explanatory error, logs loudly at ERROR, mutates neither the index nor the branch, and lets teardown proceed. Legitimate dirty trees — including large refactors that delete many files while adding real content — are preserved exactly as they are today.
+`preserve_uncommitted_worktree_changes` never commits a deletion it detects as a wipe. When the worktree is missing a directory that HEAD tracks, it stages only the additions and edits that coexist with the wipe, commits those, and leaves the deletions in the working tree for the force-remove to discard. When there is nothing but the wipe, it writes no commit and no ref and leaves the index untouched. Either way it logs loudly at ERROR with enough detail to reconstruct the event after the worktree is gone, and lets teardown proceed. Legitimate dirty trees, including refactors that delete files inside directories that survive on disk, are preserved exactly as they are today.
 
 ## Freshness Check
 

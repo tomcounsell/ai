@@ -171,9 +171,10 @@ disclosure rather than pretending one already exists.
 
 ## Spike Results
 
-All five spikes were run as `code-read` / local-prototype probes against
-`67d714662` in a scratch interpreter. No repo edits, nothing committed. Every
-one is reproducible by pasting its snippet into `.venv/bin/python`.
+All seven spikes were run as `code-read` / local-prototype probes in a scratch
+interpreter — spikes 1-6 against `67d714662`, spike-7 against `d2c507ad9` during
+the critique revision. No repo edits, nothing committed. Every one is
+reproducible by pasting its snippet into `.venv/bin/python`.
 
 ### spike-1: Do both holes still reproduce, and is the scanner alive on the input?
 - **Assumption**: "The two gaps described in the issue are still present in shipped source."
