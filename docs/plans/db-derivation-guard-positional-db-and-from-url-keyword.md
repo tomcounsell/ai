@@ -448,27 +448,234 @@ a promise to anyone.
 
 ## Update System
 
-_placeholder_
+No update system changes required. Both changed files live under `tests/` and
+are exercised only by the unit suite. Nothing is imported by `bridge/`,
+`worker/`, `agent/`, or `tools/`; no new dependency, config file, or entry point
+is added; `scripts/remote-update.sh` and the `/update` skill need no change; and
+there is no state on any machine to migrate.
+
+Fleet-wide effect is limited to this: after `/update` pulls the change, a
+machine whose `tests/` grows a call site in one of the three shapes will see the
+unit suite fail where it previously passed silently. That is the intended
+behavior of the change and needs no propagation step of its own.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required. This is a test-suite-internal change with no
+runtime surface.
+
+- No new CLI entry point in `pyproject.toml [project.scripts]`. The guard is invoked by pytest collection, never by the agent's Bash tool.
+- `bridge/telegram_bridge.py` does not and must not import `tests.db_derivation_guard`; `tests/` is not on the bridge's import path.
+- No MCP server or `.mcp.json` change.
+- The agent already reaches this code the only way it needs to: by running `scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py`, which is unchanged.
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+
+- [ ] No new file in `docs/features/`. The guard has no feature doc today and this work does not create the need for one: it repairs three legs of an existing internal test guard, adds no user-facing or agent-facing behavior, and the guard's own module docstring is deliberately the source of truth for how it works and what it cannot see. Creating a thin `docs/features/db-derivation-guard.md` that restates the docstring would create a second place to drift, which is the failure this module's own history warns about.
+- [ ] No entry in `docs/features/README.md` index table, for the same reason.
+
+### Inline Documentation
+
+- [ ] Add a **What this guard still cannot see** section to the module docstring of `tests/db_derivation_guard.py`, enumerating the four residual gaps listed in Technical Approach fix 5, and naming `REDIS_CONSTRUCTORS` as the residual permit list it is (#2768's second folded-in item).
+- [ ] Update the `_splat_candidate` docstring's existing "known cost" paragraph to cross-reference the new module-level section rather than remaining the only place a residual gap is disclosed.
+- [ ] Update the `Candidate.kind` comment (`# "db-kwarg" | "from-url"`) to include `"db-positional"`. It is a contract comment, not decoration.
+- [ ] Update the `CLAIM_FIXTURE_NAMES` docstring: its "mirrors CLAIM_URL_NAMES / the `redis_test_url` leg of Route 2 exactly" claim becomes true when fix 3 lands. If fix 3 is dropped in critique, correct the sentence instead of leaving a false claim standing.
+- [ ] Add a comment at `REDIS_DB_POSITIONAL_INDEX` naming the test that pins it to `inspect.signature`, so a reader who wants to change the constant finds the tripwire.
+- [ ] Update the module docstring's route description to state, per route, which argument positions it reads. The current text says the guard flags "every `db=` keyword argument" and "every `from_url(...)` argument"; that phrasing is what made both holes invisible to review.
+
+### External Documentation Site
+
+- [ ] Not applicable. This repo has no Sphinx/MkDocs site.
 
 ## Success Criteria
 
-_placeholder_
+- [ ] `redis.Redis("h", 6379, 7)` and `redis.StrictRedis("h", 6379, 7)` each yield exactly one violation naming db 7.
+- [ ] `redis.Redis.from_url(url="redis://localhost:6379/9")` yields exactly one violation naming db 9, matching what the positional form already yields.
+- [ ] `redis.Redis(db=scratch_test_db)` used directly on the fixture parameter yields zero violations, matching the aliased form.
+- [ ] `redis.Redis("h", 6379, claim_test_db())` and `from_url(url=redis_test_url())` yield zero violations.
+- [ ] The four laundering probes stay red: `scratch_test_db = 7`, `test_db = 7`, a `scratch_test_db=7` default argument, and any non-`CLAIM_FIXTURE_NAMES` identifier.
+- [ ] The live tree is unchanged: 0 undispositioned violations and 0 stale disposition entries, before and after.
+- [ ] A positional violation's message names the `Redis(...)` shape and its db, and does not render as `from_url(...)` (spike-3's measured defect).
+- [ ] Every violation message, for all three kinds, names `claim_test_db()`, `redis_test_url()`, and both disposition tables (#2768's unpinned-message item).
+- [ ] `REDIS_DB_POSITIONAL_INDEX` is pinned to `inspect.signature(redis.Redis.__init__)` by a test, and `tests/db_derivation_guard.py` still imports no `redis`.
+- [ ] The module docstring carries a **What this guard still cannot see** section naming all four residual gaps and `REDIS_CONSTRUCTORS` (#2768's disclosure item).
+- [ ] Each of the six fixes is mutation-checked individually: revert that hunk alone, its own test goes red, restore, re-measure. A whole-file revert is not accepted as evidence.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+- [ ] No xfail conversions needed: `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/` returns nothing across the suite.
 
 ## Team Orchestration
 
-_placeholder_
+The lead agent orchestrates and does not build directly. This is a small,
+single-file-pair change with one dominant risk (a test that cannot fail), so the
+team is deliberately shaped as one builder plus a reviewer whose only job is
+mutation evidence.
+
+### Team Members
+
+- **Builder (guard)**
+  - Name: `guard-builder`
+  - Role: Implements all six fixes in `tests/db_derivation_guard.py` and their tests in `tests/unit/test_db_derivation_guard.py`. Owns both files exclusively for the duration.
+  - Agent Type: `builder`
+  - Domain: Redis/Popoto data, plus AST/static-analysis care
+  - Resume: true
+
+- **Validator (mutation)**
+  - Name: `mutation-validator`
+  - Role: Read-only. For each of the six fixes independently, reverts that single hunk, confirms the fix's own test goes red, restores, and re-measures. Reports per-fix, never in aggregate.
+  - Agent Type: `validator`
+  - Resume: true
+
+- **Reviewer (guard semantics)**
+  - Name: `guard-reviewer`
+  - Role: Reviews the two callee-scoping exceptions and the `CLAIM_FIXTURE_NAMES` widening against the laundering constraint in comment 5277517215. Confirms the disclosure paragraph matches what the code actually does.
+  - Agent Type: `code-reviewer`
+  - Resume: true
+
+- **Documentarian**
+  - Name: `guard-documentarian`
+  - Role: Docstring work only (fix 5 and the Documentation checklist). No behavior changes.
+  - Agent Type: `documentarian`
+  - Resume: true
+
+**Worktree ownership note.** `mutation-validator` reverts hunks in the working
+tree. It must run in its own worktree, never in `guard-builder`'s, or the two
+corrupt each other's measurements in both directions.
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. Capture the red state
+
+- **Task ID**: `capture-red`
+- **Depends On**: none
+- **Validates**: none (measurement only)
+- **Informed By**: spike-1, spike-3, spike-5
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Run every command in the Verification table against unmodified `main` and record the output verbatim.
+- Confirm the three defect rows are red (`POSITIONAL 0`, `URLKW 0`, `FIXTURE 1`) and the four invariant rows are green.
+- Paste this block into the PR description as the red-state proof. A fix with no recorded red state is not accepted.
+
+### 2. Route 1 positional `db` leg
+
+- **Task ID**: `build-positional`
+- **Depends On**: `capture-red`
+- **Validates**: `tests/unit/test_db_derivation_guard.py` (planted rows `positional-db-redis`, `positional-db-strictredis`; sanctioned row `positional-claim-call`)
+- **Informed By**: spike-2 (index 2 confirmed against redis-py 7.4.0, but derive it in a test, do not trust it forever), spike-1
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `REDIS_DB_POSITIONAL_INDEX = 2` as a module-level constant with a comment naming its pin test.
+- In `scan_source`, after the `node.keywords` loop, add a positional leg scoped to `Redis`/`StrictRedis` by terminal name, guarded on `len(node.args) > REDIS_DB_POSITIONAL_INDEX`, emitting only when no `db=` keyword is present on the same call.
+- Judge the value through `_is_claim_call` / `_resolve_one_hop` / `_first_pool_db`, sharing the keyword leg's judgment rather than duplicating it.
+- Emit `kind="db-positional"` and update the `Candidate.kind` contract comment.
+- Reject `ast.Starred` at that index rather than reading it as a value.
+- Add the empty/invalid input cases from Failure Path Test Strategy (`Redis()`, `Redis("h")`, `Redis("h", 6379)`, `Redis(*args)`).
+
+### 3. Route 2 `url=` keyword leg
+
+- **Task ID**: `build-url-keyword`
+- **Depends On**: `capture-red`
+- **Validates**: `tests/unit/test_db_derivation_guard.py` (planted rows `url-keyword-pool-literal`, `url-keyword-unparseable`; sanctioned row `url-keyword-claim-call`)
+- **Informed By**: spike-1
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Replace the `if callee == "from_url" and node.args:` gate with a resolution that yields the URL argument from `node.args[0]` when present, otherwise from a `url=` keyword, otherwise no candidate.
+- Prefer the positional when both appear, so the call yields one candidate rather than two.
+- Leave `kind="from-url"`, `_url_db`, `CLAIM_URL_NAMES`, and the `pool_db` logic untouched; the shape being reported is identical.
+- Cover `from_url()` with neither argument and `from_url(**kw)` with no visible `url`: no candidate, no exception.
+
+### 4. Route 1 direct fixture-parameter leg
+
+- **Task ID**: `build-fixture-leg`
+- **Depends On**: `capture-red`
+- **Validates**: `tests/unit/test_db_derivation_guard.py` (sanctioned row `direct-fixture-parameter`; refusal rows for the four spike-4 laundering probes)
+- **Informed By**: spike-4 (the shipped leg does not launder, and the reserved-identifier property is why), spike-5
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- In the `isinstance(value, ast.Name)` branch of route 1, accept when `value.id in CLAIM_FIXTURE_NAMES`, detail `"claim-API fixture parameter"`, **before** calling `_resolve_one_hop`.
+- Confirm a locally rebound `scratch_test_db = 7` is still refused: the accept must key on the identifier being a parameter with no local rebinding, not on the identifier alone.
+- Add all four spike-4 probes as standing refusal tests, so the next widening attempt is caught.
+- Update the `CLAIM_FIXTURE_NAMES` docstring so its "mirrors ... exactly" claim becomes true.
+
+### 5. Per-kind violation messages
+
+- **Task ID**: `build-format-violation`
+- **Depends On**: `build-positional`, `build-url-keyword`
+- **Validates**: `tests/unit/test_db_derivation_guard.py` (per-kind message assertions; unknown-kind fallback)
+- **Informed By**: spike-3 (measured: a `db-positional` candidate renders as `from_url(7)`)
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Replace the two-way `kind` branch with an explicit per-kind rendering; the `else` branch must stop meaning `from_url`.
+- An unrecognized kind renders its own kind name, so the next kind added fails visibly rather than impersonating a shape.
+- Assert, per kind, that the message names the file, a non-zero line, the shape, and the `pool_db` sentence when and only when `pool_db` is set.
+- Assert the remedial sentence names `claim_test_db()`, `redis_test_url()`, and both disposition tables (#2768's unpinned-message item).
+
+### 6. Signature tripwire
+
+- **Task ID**: `build-signature-pin`
+- **Depends On**: `build-positional`
+- **Validates**: `tests/unit/test_db_derivation_guard.py` (new signature pin test)
+- **Informed By**: spike-2 and the Research finding on redis/redis-py#510
+- **Assigned To**: `guard-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- In the **test file only**, import `inspect` and `redis` and assert `list(inspect.signature(redis.Redis.__init__).parameters)[REDIS_DB_POSITIONAL_INDEX + 1] == "db"` (the `+ 1` skips `self`).
+- Assert `redis.StrictRedis is redis.Redis`, or if they ever diverge, that both take `db` at that index.
+- Confirm `tests/db_derivation_guard.py` still imports no `redis`; it stays a pure-AST module.
+
+### 7. Residual-gap disclosure
+
+- **Task ID**: `document-residual-gaps`
+- **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`
+- **Assigned To**: `guard-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Add the **What this guard still cannot see** section to the module docstring with all four residual gaps from Technical Approach fix 5, naming `REDIS_CONSTRUCTORS` as the residual permit list.
+- Cross-reference it from `_splat_candidate`'s existing "known cost" paragraph.
+- Rewrite the module docstring's route description to state which argument positions each route reads.
+- Update the `Candidate.kind` contract comment and the `REDIS_DB_POSITIONAL_INDEX` comment.
+
+### 8. Per-fix mutation validation
+
+- **Task ID**: `validate-mutations`
+- **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`, `build-signature-pin`
+- **Assigned To**: `mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- **In its own worktree.** Do not share a checkout with `guard-builder`.
+- For each of the six fixes independently: revert that one hunk, run the suite, confirm **that fix's own test** goes red (not merely that something failed), restore, re-run, confirm green.
+- Use `source_fingerprint()` for the restore check.
+- Report per-fix. An aggregate "mutation testing passed" is not an accepted result.
+
+### 9. Guard-semantics review
+
+- **Task ID**: `review-semantics`
+- **Depends On**: `validate-mutations`, `document-residual-gaps`
+- **Assigned To**: `guard-reviewer`
+- **Agent Type**: code-reviewer
+- **Parallel**: false
+- Verify the positional leg's callee scoping is disclosed as the second bounded exception, not presented as callee-agnostic.
+- Verify the `CLAIM_FIXTURE_NAMES` widening satisfies comment 5277517215's laundering constraint, with the four probes as evidence.
+- Verify the disclosure paragraph describes what the code does, line by line. A disclosure that overstates coverage is worse than none.
+
+### 10. Final validation
+
+- **Task ID**: `validate-all`
+- **Depends On**: `review-semantics`
+- **Assigned To**: `mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table and compare against the `capture-red` baseline.
+- Confirm the live tree still reports 0 undispositioned and 0 stale.
+- Run `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -q -n0`.
+- Confirm all Success Criteria boxes.
 
 ## Verification
 
