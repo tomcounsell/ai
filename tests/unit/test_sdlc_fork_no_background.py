@@ -77,7 +77,6 @@ REQUIRED_ANCHORS = (
     ".claude/skills-global/do-build/SKILL.md",
     ".claude/skills-global/do-sdlc/SKILL.md",
     ".claude/skills/sdlc/SKILL.md",
-    ".claude/skills-global/do-plan-critique/SKILL.md",
     ".claude/skills-global/do-pr-review/SKILL.md",
     ".claude/skills-global/do-build/WORKFLOW.md",
 )
@@ -276,14 +275,11 @@ def test_no_background_dispatch():
 def test_matcher_excludes_negated_prose():
     """do-plan-critique's backtick-wrapped negated mention must NOT flag.
 
-    Guards the matcher against regressing into a false-positive. The file must
-    be in the scanned set AND must register zero violations.
+    Guards the matcher against regressing into a false-positive. The skill
+    runs inline (#3137) so it is outside the scanned fork set, but its prose
+    still carries the exact negated backtick mention the matcher must ignore.
     """
     target = (REPO_ROOT / ".claude/skills-global/do-plan-critique/SKILL.md").resolve()
-    assert target in FORK_SKILL_FILES, (
-        "do-plan-critique/SKILL.md is not in the scanned fork-skill set; "
-        "the false-positive exclusion check cannot run."
-    )
     text = target.read_text(encoding="utf-8")
     assert "run_in_background: true" in text, (
         "Expected do-plan-critique to contain a negated backtick mention of "

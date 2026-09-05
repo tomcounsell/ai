@@ -1,6 +1,6 @@
 # SDLC Fork Turn-Boundary Invariant
 
-A `context: fork` skill (`do-build`, `do-sdlc`, `sdlc`, `pthread`, `do-pr-review`, `do-plan-critique`, etc.) runs in a forked subagent context that gets exactly **one turn**. It is never resumed. If a fork ends that turn with a live background child, no later turn exists to receive the child's result. The fork reports "running in the background, I'll continue when it completes" and then never does, leaving work uncommitted.
+A `context: fork` skill (`do-build`, `do-sdlc`, `sdlc`, `pthread`, `do-pr-review`, etc.) runs in a forked subagent context that gets exactly **one turn**. It is never resumed. If a fork ends that turn with a live background child, no later turn exists to receive the child's result. The fork reports "running in the background, I'll continue when it completes" and then never does, leaving work uncommitted.
 
 ## The turn-boundary invariant
 

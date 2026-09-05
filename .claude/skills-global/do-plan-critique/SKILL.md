@@ -2,10 +2,23 @@
 name: do-plan-critique
 description: "Use when reviewing a plan before build. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
 argument-hint: "<plan-path-or-issue-number>"
-context: fork
 ---
 
 # Plan Critique (War Room)
+
+## Execution Context
+
+This skill runs inline in the context that invokes it. It is deliberately not a
+`context: fork` skill: the harness withholds the Agent tool from any subagent at
+its spawn-depth limit (three layers below the main conversation by default, and
+a forked skill's subagent is an ordinary subagent, not a conversation fork). An
+SDLC supervisor already runs each stage inside its own general-purpose Agent, so
+a forked critique landed exactly at that limit and could spawn no critics; the
+roster silently collapsed into one agent applying every lens in sequence while
+the report kept the war-room format. Running inline keeps the roster one layer
+shallower and leaves the isolation to whoever dispatched the stage. Invoke it
+directly from a top-level conversation and the critics are ordinary subagents;
+invoke it from a stage-runner Agent and they are that runner's subagents.
 
 ## Repo Context Probe
 
@@ -219,7 +232,14 @@ Dispatch the roster's critics (on a fresh run, all roster members; on a resume, 
 - Prior art summaries (if fetched)
 - Their specific lens and instructions from CRITICS.md
 
-Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
+Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost. Do not pass `name` on critic dispatches: a named spawn from inside a subagent is refused where an unnamed one succeeds.
+
+**Record the mode.** The value of the war room is independent convergence: two critics reaching the same blocker without seeing each other's reasoning is stronger evidence than one pass listing it twice. Set `CRITIQUE_MODE` before dispatching:
+
+- Agent tool present and the roster dispatched → `independent roster ({M} critics)`.
+- Agent tool absent from this context, or every dispatch refused with the harness's spawn-depth error → apply each roster lens yourself, in sequence, writing each lens's findings under its roster name so the Step 3.5 gate still sees the full roster, and set `CRITIQUE_MODE` to `sequential lenses (Agent tool unavailable: {exact tool error or "not in tool list"})`.
+
+The mode is printed in the Step 5 report header and never alters the verdict string. A sequential run still produces cited, verified findings; what it cannot produce is corroboration, and the reader must be able to see that from the report alone.
 
 **Generic completion model:** dispatch the critics in the **foreground**, passing `run_in_background: false` explicitly on each call, and wait for each to return its findings before aggregating. Omitting the flag is denied in an eng session, not defaulted to foreground.
 
@@ -322,6 +342,7 @@ Output the final report in this format:
 **Plan**: {plan_path}
 **Issue**: #{issue_number} (if applicable)
 **Critics**: {roster members from _roster.json} ({LITE or FULL} depth)
+**Mode**: {CRITIQUE_MODE — `independent roster (M critics)` or `sequential lenses (Agent tool unavailable: reason)`}
 **Findings**: {N} total ({blockers} blockers, {concerns} concerns, {nits} nits)
 
 ## Blockers
@@ -437,6 +458,8 @@ The skill returns a structured verdict that the SDLC pipeline can use:
 | READY TO BUILD (with concerns) | Revision pass via `/do-plan`, then **re-critique** — never `/do-build` directly |
 | NEEDS REVISION | Return to `/do-plan` with blocker findings |
 | MAJOR REWORK | Return to issue discussion |
+
+The report's **Mode** line is part of the contract. `sequential lenses` tells a supervisor, and any escalation reader weighing a critique-cycle cap, that no finding in the report was independently corroborated, whatever the "Critics" line lists.
 
 **"READY TO BUILD (with concerns)" does not reach `/do-build` directly.** It enters a bounded revision + re-critique loop: `/do-plan` applies the revision, then this skill runs again over the revised plan. The loop exits to `/do-build` either when a round returns `READY TO BUILD (no concerns)`, or when the pipeline's concern re-critique bound is exhausted — at which point the remaining concerns are accepted on the record and the build proceeds. The bound's name and value are pipeline configuration, not part of this skill; where the pipeline declares one, the context file names it.
 

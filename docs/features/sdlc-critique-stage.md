@@ -26,6 +26,26 @@ When a plan completes, the Observer routes to CRITIQUE instead of BUILD. The `/d
 
 4. **Aggregation** (Steps 4-5): After the roster gate confirms all critics are present, findings are deduplicated, sorted by severity, and a verdict is issued.
 
+## Execution Context (#3137)
+
+`/do-plan-critique` runs inline in whatever context invokes it; it carries no
+`context: fork`. The harness withholds the Agent tool from any subagent at its
+spawn-depth limit (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, default 3), and a
+forked skill's subagent is an ordinary subagent rather than a conversation
+fork, so it gets no exemption. In the #2732 supervision run the chain was
+main → dev-session subagent → per-stage general-purpose Agent → forked
+critique, which put the critique at depth 3 with no Agent tool. Both rounds
+applied the three lenses sequentially in one agent, the roster gate still
+reported `complete: true`, and only the report prose mentioned the downgrade.
+
+Inline, the critics spawn one layer shallower on every path. Isolation of the
+critique's context is the dispatcher's job: `/do-sdlc` and `/sdlc` already wrap
+each stage in its own general-purpose Agent. The report header now carries a
+mandatory `**Mode**` line, `independent roster (M critics)` or `sequential
+lenses (Agent tool unavailable: reason)`, so a supervisor or a G2 escalation
+reader can tell a corroborated verdict from a single-agent one without reading
+the prose. The verdict string itself is unchanged in either mode.
+
 ## Finding Format
 
 Each critic finding includes up to five fields:
