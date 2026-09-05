@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 
 from config.settings import settings
@@ -29,11 +28,10 @@ DEAD_LETTER_KEY_PREFIX = "email:dead_letter:"
 
 
 def _get_redis():
-    """Return a Redis connection."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def write_dead_letter(

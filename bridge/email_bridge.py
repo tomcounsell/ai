@@ -141,11 +141,10 @@ def _get_smtp_config() -> dict | None:
 
 
 def _get_redis():
-    """Return a Redis connection (lazy, cached module-level)."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 # =============================================================================
@@ -887,21 +886,15 @@ class EmailOutputHandler:
     email:dead_letter:{session_id}.
     """
 
-    def __init__(
-        self,
-        smtp_config: dict | None = None,
-        redis_url: str | None = None,
-    ):
+    def __init__(self, smtp_config: dict | None = None):
         self._smtp_config = smtp_config or _get_smtp_config()
-        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        # An explicitly assigned client wins; otherwise the shared accessor.
         self._redis = None
 
     def _get_redis(self):
-        if self._redis is None:
-            import redis
-
-            self._redis = redis.Redis.from_url(self._redis_url, decode_responses=True)
-        return self._redis
+        if self._redis is not None:
+            return self._redis
+        return _get_redis()
 
     def _build_reply(
         self,

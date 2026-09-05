@@ -619,7 +619,7 @@ class TestDeliveryPathContracts:
 
         from agent.output_handler import DeliveryOutcome, TelegramRelayOutputHandler
 
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = MagicMock()
 
         session = MagicMock()
@@ -656,7 +656,7 @@ class TestDeliveryPathContracts:
         entry.project_key = "contract-proj"
         entry.extra_context = {"transport": "telegram"}
 
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = MagicMock()
 
         with (

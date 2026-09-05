@@ -60,10 +60,9 @@ def _resolve_transport() -> str:
 
 
 def _get_redis():
-    import redis
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def react(feeling: str) -> None:
