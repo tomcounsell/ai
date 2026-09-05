@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -791,6 +791,10 @@ it by hand rather than treat the table as complete without it.
 ---
 
 ## Open Questions
+
+Every question below carries an explicit default, so the plan is buildable as
+written and nothing here blocks critique or build. They are invitations to
+override, not gates.
 
 1. **Is fix 3b (the route-2 rebinding check) in scope?** It is not in the issue body; it was found by this plan's propagation check. Unlike everything else here it closes a hole in **shipped, currently-green** code: `redis_test_url = "redis://localhost:6379/9"; redis.Redis.from_url(redis_test_url)` is accepted today with detail "claim-API URL fixture parameter". Live exposure is zero (0 sites rebind a sanctioned identifier). The argument for including it is that it is the same one-line condition as fix 3, and that shipping fix 3 without it would leave the guard tightening route 1 while route 1's own stated model stays broken. The argument against is that it narrows an accept in a guard that many lanes run, so a mistake turns the shared suite red. **Default if unanswered: include it, in the same commit as fix 3, with both routes' laundering probes.**
 
