@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -229,7 +229,7 @@ sidestep it.
 - Review rounds: 1
 
 The deletion itself is mechanical. The cost is in not losing anything on the way out:
-seven test patch sites, two feature docs with six reference clusters between them, and one
+seven test patch sites, two feature docs with eight reference clusters between them, and one
 field that needs a new home.
 
 ## Prerequisites
@@ -326,7 +326,7 @@ and `instance.delete()` has nothing to operate on; the raw-Redis guard is a Bash
 PreToolUse hook and does not fire on Python source. Do the sweep through the migration,
 never an ad-hoc `redis-cli DEL` from a build agent's shell.
 
-**5. Docs.** Six reference clusters across two files, enumerated in the Documentation
+**5. Docs.** Eight reference clusters across two files, enumerated in the Documentation
 section. The `## Rotation State` section the issue names is only one of them; the issue
 was written before #2782 and #2739 added the rest.
 
@@ -471,13 +471,13 @@ documented rationale.
 
 ### Risk 4: The build treats "delete the docs section" as "delete the Rotation State section"
 
-**Impact:** The issue names only `## Rotation State`. Following it literally leaves five
+**Impact:** The issue names only `## Rotation State`. Following it literally leaves seven
 other reference clusters, including a whole `## Liveness signal` section in
 `vault-drift-audit.md` describing a function that no longer exists. That is precisely the
 "historical artifact in docs" Principle 1 forbids, and the docs-auditor itself would file
 an issue about it.
 
-**Mitigation:** The Documentation section below enumerates all six clusters by file and
+**Mitigation:** The Documentation section below enumerates all eight clusters by file and
 line. The Verification table greps both files for zero occurrences of `_write_liveness`
 and `last_completed_run`.
 
@@ -556,7 +556,7 @@ No agent integration required. This removes an internal function and its Redis w
 
 ### Feature Documentation
 
-`docs/features/docs-auditor.md`, five clusters, verified on `67d714662`:
+`docs/features/docs-auditor.md`, seven clusters, verified on `67d714662`:
 
 - [ ] `:374-379`: the withheld-count paragraph passes the count "to `_write_liveness` as
       a keyword `fixes_withheld`, emitted into the Redis summary only when non-zero".
@@ -649,7 +649,7 @@ confirm the deletion is total.
 
 - **Documentarian (feature docs)**
   - Name: `liveness-documentarian`
-  - Role: the six reference clusters across `docs-auditor.md` and `vault-drift-audit.md`
+  - Role: the eight reference clusters across `docs-auditor.md` and `vault-drift-audit.md`
   - Agent Type: documentarian
   - Resume: true
 
@@ -724,7 +724,7 @@ confirm the deletion is total.
 - **Assigned To**: liveness-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Work the six clusters enumerated in the Documentation section.
+- Work the eight clusters enumerated in the Documentation section.
 - Rewrite `vault-drift-audit.md`'s `## Liveness signal` around the summary clause, keeping
   the three-way `0`/absent/unresolvable distinction intact.
 - Touch nothing under `docs/archive/`.
