@@ -260,19 +260,101 @@ The write is best-effort and logged on failure, matching how the module treats e
 
 ## Test Impact
 
-_placeholder_
+
+`tests/unit/test_nightly_regression_tests.py` (2835 lines) is the only test file touching this code. The changes are additive at every seam, so almost nothing breaks — but three existing tests sit directly on the surfaces being changed and must be strengthened rather than left to pass vacuously.
+
+- [ ] `tests/unit/test_nightly_regression_tests.py::TestBuildTriagePrompt::test_literal_titles_present` (line 796) — **UPDATE**. Asserts only that each `Nightly regression: {node}` title appears in the prompt. Still true after the change and therefore blind to it. Add sibling assertions: the literal `gh issue list --state all` substring is present, `--search` is absent, and `gh search` is absent.
+- [ ] `tests/unit/test_nightly_regression_tests.py::test_open_issues_uses_the_rest_list_not_the_lagging_search` (line 960) — **UPDATE**: no change to the assertions, but this is the pattern the new prompt guard mirrors, and the new test should reference it by name in its docstring so the two read as one contract.
+- [ ] The `maybe_dispatch_triage_session` call-shape tests (lines 1174, 1223, 1279, 1300, 1332, 1353, 1386, 1401, 1564) — **UPDATE where signature-sensitive**. Most stub with `lambda *a, **k` or `lambda ns, **kw` and absorb a new keyword argument without change. `lambda ns, **kw: "sess-1"` (lines 1353, 1401) also survives, since the new argument is keyword-only. Audit each of the nine, confirm which actually bind positionally, and change only those. Do not blanket-rewrite working stubs.
+- [ ] `tests/unit/test_nightly_regression_tests.py::TestMaybeDispatchTriageSession` dry-run cases (lines 1431, 1489–1513) — **UPDATE**: add an assertion that no ledger file appears under the patched `data/nightly-triage-ledger/` on a dry run. Without this the dry-run/ledger ordering (Solution, "Dry-run") is unguarded.
+
+New coverage to add (not modifications):
+
+- [ ] `TestBuildTriagePrompt` — pre-resolved dispositions render per node; `zip(..., strict=True)` raises on a length mismatch; an empty disposition list degrades to the plain prompt.
+- [ ] `TestWriteTriageLedger` — happy path shape; empty dispositions writes nothing and returns `False`; an unwritable path logs a `WARNING` and returns `False` without raising.
+- [ ] `TestDispatchFindings` — the dispositions handed to `maybe_dispatch_triage_session` cover exactly the surviving `single_nodes`, and contain **no** already-open or closed-not-planned node (the second writer hazard from Solution, fix 2).
 
 ## Rabbit Holes
 
-_placeholder_
+
+- **Diagnosing why the turn was replayed.** The `_agent_session_health_check` requeue legs, the `tool_timeout` path, the role driver's stale-UUID fallback — all of it is #3161's, all of it needs the nightly host this machine is not, and none of it is a prerequisite for making filing idempotent. If the replay mechanism is fixed tomorrow these three defenses are still correct.
+- **Building a general-purpose agent-side idempotency framework.** A `filed_issues` ledger abstraction for every dispatching skill is a tempting generalization of fix 3 and would swallow the appetite whole. One JSON file, one writer, one reader.
+- **Branching from `session/nightly-triage-idempotency-3075`.** Its name matches this work and it is not merged, which makes it look like the natural base. Its content is already on main via PR #3142's squash. Branching there duplicates landed code and produces a diff nobody can review. **Branch from `main`.**
+- **Rewriting the open/closed decision prose in the prompt.** #3075 tuned that language against `partition_closed_matches` and `closed_epilogue`. Fix 1 changes the *read mechanism*, not the *decision rule*. Rewording the rule risks drift between the prompt and the pre-flight — the exact failure #2559 pinned literal titles to prevent.
+- **Chasing the two-simultaneous-filers shape** (#2971, #2982–#2989 interleaving the 20:40 wave). That is a second machine, not a replay; `open_issues()` already reads live REST state and sees another machine's issues instantly. Different problem, no evidence it is currently broken.
+- **Tuning `--limit 200`.** Picking the perfect window is a research project with a wrong answer at every repo size. Take the issue's number, state the failure mode, and move on — see Risks.
 
 ## Risks
 
-_placeholder_
+
+### Risk 1: `--limit 200` silently under-reads on a busy repo
+
+**Impact:** The agent's confirmation read is a newest-created-first window. At ~1900 closed issues in this repo, 200 rows covers only recent history. A node whose issue was filed and closed long ago falls outside the window, the agent sees no match, and re-files — reintroducing the #3075 defect at the agent layer while the script's own read (`CLOSED_ISSUE_LIST_LIMIT = 4000`) still gets it right.
+
+**Mitigation:** The script's pre-resolution is the primary defense and it uses the wide window; the agent's read is explicitly framed in the prompt as a *second check against issues created since the script's read*, not as the authority. Reordering the risk this way is why fix 2 must land with fix 1 rather than after it. The prompt states the window's purpose so the agent does not over-trust it, and states that the script already checked the full closed set.
+
+### Risk 2: The ledger is consulted but never written, or written but never consulted
+
+**Impact:** A defense that exists in the prompt and not in behavior is worse than no defense — it invites the next investigator to conclude the hole is covered.
+
+**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded dispositions before dispatch; a second asserts the prompt contains the ledger's absolute path and the append-before-next-node instruction. Neither test can pass on the other's work.
+
+### Risk 3: The prompt regresses to "search" in a later edit
+
+**Impact:** This is the fourth pass at this bug and prompt wording has drifted before — `8524e765b` hardened the script and left the prompt saying "search", which is precisely how we got here.
+
+**Mitigation:** A verification anti-criterion greps the module's prompt-building region for `--search` and `gh search` and requires zero matches, so a reintroduction fails the gate rather than reaching a nightly run. The prohibition in the prompt text carries its reason inline (#2960–#2999) so a future editor sees the cost before softening it.
+
+### Risk 4: The ledger write breaks `--dry-run`
+
+**Impact:** `--dry-run` is the only safe way to preview a night. The dry-run sentinel exists (docstring, line 2316) because an earlier version spawned real sessions that filed real issues under `--dry-run`. A ledger write placed before the short-circuit puts state-file writes back into the preview path.
+
+**Mitigation:** Ordering is specified in Solution and guarded by a dry-run test asserting no file appears under `data/nightly-triage-ledger/`.
+
+### Risk 5: Stale ledgers accumulate in `data/`
+
+**Impact:** One file per dispatch slug, unbounded. Low severity — small JSON, gitignored, machine-local — but unbounded growth is how `data/` directories become a problem years later.
+
+**Mitigation:** Slugs are a hash of the node set, so a recurring failure set reuses its slug and overwrites rather than accumulating. Growth is bounded by the number of *distinct* failure sets, not by nights. No pruning job for now; noted here so a future reader knows it was considered rather than missed.
 
 ## Race Conditions
 
-_placeholder_
+
+### Race 1: Two triage sessions on one slug appending to one ledger
+
+**Location:** `data/nightly-triage-ledger/{slug}.json`; writers are `write_triage_ledger` (script, seed) and the triage agent (appends to `filed`).
+
+**Trigger:** The 2026-08-24 evidence shows two filers live at once (#2971 / #2982–#2989 interleaving the 20:40 wave). If two sessions ever resolve to the same slug, both read-modify-write the same JSON and a lost update drops one session's `filed` entries — the ledger then under-reports and a replay re-files.
+
+**Data prerequisite:** The ledger must exist and hold the seeded dispositions before any session starts appending.
+
+**State prerequisite:** One writer per slug at a time.
+
+**Mitigation:** The slug is `sha256` of the sorted node set, so two sessions share a slug only when they were dispatched for an identical node set — and `compute_dispatch_set` plus the run lock (`_acquire_run_lock`, `data/nightly_tests.lock`, taken as the first act of `main()`) make that near-impossible within a machine. Across machines the ledger is machine-local and the two never share a file. A lost update degrades the ledger to partial, which falls back to fixes 1 and 2, which is today's behavior plus improvements. **Explicitly not adding file locking** — the cost is not justified for a third-line advisory defense, and this reasoning belongs in the code comment so a reviewer does not read the omission as an oversight.
+
+### Race 2: An issue created between the script's read and the agent's read
+
+**Location:** `dispatch_findings` (`open_issues()` / `closed_issue_dispositions()` at lines 2523–2529) versus the agent's `gh issue list` seconds-to-minutes later.
+
+**Trigger:** Another machine's nightly, or a human, files the exact title in the gap.
+
+**Data prerequisite:** none.
+
+**State prerequisite:** none.
+
+**Mitigation:** This is the ordinary case the agent's own read exists to catch, and it works *because* the read is REST rather than search — a search-index read cannot see an issue created seconds ago, which is the entire defect. Fix 1 is the mitigation. The residual window (an issue created between the agent's read and its `gh issue create`) is sub-second and out of appetite.
+
+### Race 3: Ledger seeded, session dispatch then fails
+
+**Location:** `maybe_dispatch_triage_session`, between the ledger write and the `subprocess.run` returning non-zero or raising (lines 2367, 2373).
+
+**Trigger:** `valor_session create` fails; the ledger exists with dispositions and an empty `filed`.
+
+**Data prerequisite:** none.
+
+**State prerequisite:** The next run must retry these nodes, not treat them as handled.
+
+**Mitigation:** No new hazard. `carry_dispatched_nodes` already records only what `DispatchOutcome.recorded` names, and a failed dispatch returns `None` so its nodes are never recorded (guarded by `test_failed_dispatch_records_nothing`, line 788). The orphan ledger is harmless: `filed` is empty, so a later session on the same slug reads it, sees nothing filed, and proceeds. The ledger must therefore be keyed on the slug and never treated as proof that filing occurred — only its `filed` array carries that meaning.
 
 ## No-Gos (Out of Scope)
 
