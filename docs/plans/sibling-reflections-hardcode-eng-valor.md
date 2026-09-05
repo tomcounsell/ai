@@ -333,27 +333,81 @@ Two pre-existing orderings are worth naming so the change does not disturb them:
 
 ## Update System
 
-<!-- TODO -->
+No update-system changes required. This adds no dependency, no config key, no service, and no new file that must reach other machines beyond the ordinary `git pull` that `/update` already performs. `projects.json` is iCloud-synced and per-machine; this change reads it and does not alter its schema.
+
+One deployment note that is **not** an update-script change but must be said: the fleet machines that actually run these reflections need their projects' `telegram.groups."Eng: X".chat_id` populated for resolution to succeed. Where it is absent, the new behavior is suppression-with-a-warning rather than a misroute. That is the intended outcome, and it is visible in the reflection `summary`, so no migration or backfill is required — but an operator seeing alerts stop should look there first.
+
+No Popoto model changes, so no `scripts/update/migrations.py` entry.
 
 ## Agent Integration
 
-<!-- TODO -->
+No agent integration required. This is entirely internal to the reflection modules.
+
+- **No new CLI entry point.** Nothing is added to `pyproject.toml [project.scripts]`. The existing `valor-telegram` console script is the transport and its interface is unchanged — the same `send --chat <dest> <message>` argv, with `<dest>` now a numeric id string instead of a group name.
+- **No bridge import.** `bridge/telegram_bridge.py` does not call any of these five modules; the reflection scheduler does, out of process.
+- **The agent's reachable surface is unchanged.** The only observable difference to a human in Telegram is *which* chat an alert lands in, which is the point.
 
 ## Documentation
 
-<!-- TODO -->
+- [ ] Update `docs/features/expectation-reconciler.md` — the escalation step (line 40, "action failed → escalate once (Telegram operator alert), stop") must say the alert is addressed to the project's own `Eng:` group by numeric `chat_id`, and that it is suppressed with a finding when no group resolves.
+- [ ] Update `docs/features/stall-advisory-classifier.md` — the Telegram Alert Flag section (lines 140-142) and the component table (line 156) must record that the alert now goes to the host checkout's engineer group via `resolve_host_eng_chat`, with the `PROJECT_ROOT`-narrowed fallback.
+- [ ] Update `docs/features/sentry-triage.md` — the "Telegram digest" section (line 120) must record the same host-machine resolution, and that a foreign or unregistered checkout suppresses the digest rather than sending it to `Eng: Valor`.
+- [ ] Update `docs/features/docs-auditor.md` — lines 50-55 describe `_resolve_notify_chat`'s ladder inline. After the lift, point them at `reflections/utilities.py::resolve_host_eng_chat` as the owner of the rule, keeping the behavior description intact.
+- [ ] Create `docs/features/reflection-telegram-routing.md` — one page describing the two entry points (`send_eng_telegram`, `send_host_eng_telegram`), the id-not-name rule and why, the `PROJECT_ROOT`-narrowed fallback and the warning against unconditionalizing it, the `True`/`False` return contract, and the table of the five consumer modules.
+- [ ] Add `reflection-telegram-routing` to the `docs/features/README.md` index table.
 
 ## Success Criteria
 
-<!-- TODO -->
+1. `git grep -n '"--chat", "Eng: Valor"' -- '*.py'` returns **nothing**. This is the argv-adjacency form, not the bare literal — it deliberately spares `docs_auditor`'s named `FALLBACK_ENG_CHAT` constant and its docstring, which are #2754's merged narrowing.
+2. `git grep -lF '"Eng: Valor"' -- '*.py' | grep -v '^tests/'` returns exactly **one** path: `reflections/utilities.py` (where `FALLBACK_ENG_CHAT` now lives). Five files today; one after.
+3. `reflections/utilities.py` exports `send_eng_telegram`, `send_host_eng_telegram`, and `resolve_host_eng_chat`.
+4. `tests/unit/test_docs_auditor_substrate.py::TestTelegramChatRouting` — all 8 cases pass **with no edits to the test file**. This is the regression check on the lift.
+5. New `tests/unit/reflections/test_utilities_eng_telegram.py` covers every row of both Failure Path Test Strategy tables, including the two mutation anti-tests.
+6. A suppressed alert appears in the reflection's `findings` and `summary` for both `expectation_reconciler` and `sdlc_progress`, pinned by test.
+7. `scripts/memory_consolidation.py` still writes `logs/memory-contradictions.log` when the send does not land, pinned by test.
+8. `scripts/pytest-clean.sh tests/unit/reflections/ tests/unit/test_sentry_triage_apply.py tests/unit/test_docs_auditor_substrate.py` is green.
+9. `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
+10. The six Documentation checkboxes are done, and `docs/features/README.md` indexes the new page.
+
+## Team Orchestration
+
+Single builder. The five source files share one new helper, and the helper's exact signature is the thing every call site depends on — splitting this across parallel agents would have them converging on each other's design, which is the shared-worktree livelock shape. Sequence it instead: helper first, then consumers, then fixtures, then docs.
+
+If a second agent is available, the one genuinely disjoint slice is the **documentation set** (six files, no source dependency once the Solution is settled). That can run in parallel with the fixture sweep, with an explicit file-level ownership split: docs agent owns `docs/features/*`, builder owns `reflections/`, `scripts/`, and `tests/`.
 
 ## Step by Step Tasks
 
-<!-- TODO -->
+1. **Lift the host resolver into `reflections/utilities.py`.** Move `FALLBACK_ENG_CHAT` from `docs_auditor`. Add `resolve_host_eng_chat(repo_root: Path | None = None) -> str | None` carrying every rung and every comment from `docs_auditor._resolve_notify_chat`, defaulting `repo_root` to `utilities.PROJECT_ROOT` computed at call time, not in the signature default.
+2. **Reduce `docs_auditor._resolve_notify_chat` to a delegation**, keeping a `FALLBACK_ENG_CHAT` re-export binding so existing patches of `docs_auditor.PROJECT_ROOT` still work. Run `tests/unit/test_docs_auditor_substrate.py` — **all 176 tests green with zero test edits**, or stop and rethink the lift.
+3. **Add `send_eng_telegram(project, message, *, logger_prefix) -> bool`** to `reflections/utilities.py`: `resolve_eng_group` → warn-and-return-`False` on `None` with no subprocess, else `subprocess.run` with `str(chat_id)`. Swallow `FileNotFoundError` / `TimeoutExpired` / `Exception` / non-zero exit and return `True`.
+4. **Add `send_host_eng_telegram(message, *, logger_prefix) -> bool`** wrapping `resolve_host_eng_chat` with the same swallow-and-return contract.
+5. **Write `tests/unit/reflections/test_utilities_eng_telegram.py`** covering both tables from Failure Path Test Strategy. Run the two mutation anti-tests now, before any consumer is wired: revert `str(chat_id)` to `group_name` and confirm red; restore.
+6. **Wire `expectation_reconciler`**: `_escalate_once(project, job_id, eid, message)`, update the three call sites at 444 / 480 / 506, body calls `send_eng_telegram(..., logger_prefix="expectation_reconciler")`, and thread a `False` return into `findings` as an `alert-suppressed` entry.
+7. **Wire `sdlc_progress`**: `_send_alert(project, message)`; add a `project_dict` keyword to `_escalate_once` (it already takes `project=project_key` as a string — keep that, it feeds the message text) and thread it from `_check_project_stalls`; thread suppression into `findings` and do **not** increment `counts["escalated"]` on a suppressed page.
+8. **Wire `sentry_triage`**: `_send_telegram_notification` body → `send_host_eng_telegram(message, logger_prefix="sentry_triage")`. Arity unchanged.
+9. **Wire `stall_advisory`**: `_send_alert` body → `send_host_eng_telegram(message, logger_prefix="stall_advisory")`. Arity unchanged.
+10. **Wire `scripts/memory_consolidation.py:352`** → `send_host_eng_telegram`, mapping a `False` return to the existing `_write_contradiction_log` fallback so a bridge outage still records the contradiction.
+11. **Sweep the fixtures** listed in Test Impact: `test_expectation_reconciler.py:204`, `test_sdlc_progress_check.py:48,326,1699-1706,1855-1859`, `test_sdlc_stall_auto_resume_e2e.py:133`. Confirm `test_sentry_triage_apply.py` and `test_stall_advisory_reflection.py` need **no** edits — if they do, the arity claim in the Solution was wrong.
+12. **Run the grep criteria** (Success Criteria 1 and 2) and record the actual output, not a claim about it.
+13. **Documentation**: the six items under `## Documentation`.
+14. **`python -m ruff check` and `python -m ruff format`** on changed files. Formatting only, no linting beyond ruff's own check.
 
 ## Verification
 
-<!-- TODO -->
+| Check | Command | Expected |
+|---|---|---|
+| No hardcoded chat argv anywhere | `git grep -n '"--chat", "Eng: Valor"' -- '*.py'` | no output, exit 1 |
+| Literal survives in exactly one non-test file | `git grep -lF '"Eng: Valor"' -- '*.py' \| grep -v '^tests/' \| wc -l` | `1` (`reflections/utilities.py`) |
+| Helpers exist | `git grep -n 'def send_eng_telegram\|def send_host_eng_telegram\|def resolve_host_eng_chat' reflections/utilities.py` | three matches |
+| Lift is behavior-preserving | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | green, and `git diff --stat tests/unit/test_docs_auditor_substrate.py` is empty |
+| New helper coverage | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_eng_telegram.py -q` | green |
+| Consumer suites | `scripts/pytest-clean.sh tests/unit/reflections/ tests/unit/test_sentry_triage_apply.py -q` | green |
+| Auto-resume integration | `scripts/pytest-clean.sh tests/integration/test_sdlc_stall_auto_resume_e2e.py -q` | green |
+| Mutation: name instead of id | swap `str(chat_id)` → `group_name` in `send_eng_telegram`, run the new test module | **red**; restore and re-run green |
+| Mutation: unconditional fallback | drop the `target == PROJECT_ROOT` guard in `resolve_host_eng_chat`, run `test_docs_auditor_substrate.py` | **red** (the foreign-repo case); restore |
+| Format | `python -m ruff check` and `python -m ruff format --check` on changed files | clean |
+
+**Manual check that cannot be automated here:** confirming a real alert lands in the right group requires a machine whose `projects.json` carries populated `telegram.groups` (spike-4 — this one does not). Defer to the operator on a fleet machine after deploy; do not gate the lane on it and do not claim it was done.
 
 ## Critique Results
 
