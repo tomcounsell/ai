@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3072
-last_comment_id:
+last_comment_id: 5505275340
 ---
 
 # Sibling reflections route Telegram alerts to a hardcoded "Eng: Valor"
@@ -54,6 +54,12 @@ The other two, `sentry_triage` and `stall_advisory`, aggregate across every proj
 - Neither moved a sender line; all four line references are byte-exact.
 
 **Active plans in `docs/plans/` overlapping this area:** none. No plan document mentions `resolve_eng_group`, `send_eng_telegram`, or the literal.
+
+**Issue comment incorporated:** comment `5505275340` (valorengels, 2026-09-02T06:08:46Z), a scope correction carried over from the #2754 plan-critique pass. It states the **What** list is illustrative rather than exhaustive and names two further sites. Re-verified here:
+- `scripts/memory_consolidation.py:352` — **still present**, exactly as described. In scope; see Solution and Success Criteria.
+- `scripts/nightly_regression_tests.py:105` — `TELEGRAM_CHAT = "Eng: Valor"` — **gone**. That file carries no `TELEGRAM_CHAT` constant and no `valor-telegram` reference at all on `67d714662`; it was removed sometime after the comment was written. Independently corroborates note 2 below.
+
+The comment also fixes the closing condition: a clean repo-wide grep sweep, covering both the `--chat` argv adjacency **and** the bare literal as a module constant, across tracked `.py` outside `reflections/agents/` prompt text. That is stricter than the argv-only sweep and it collides with `FALLBACK_ENG_CHAT` — see Success Criteria criterion 2 and Open Question 2.
 
 **Notes — the drift that matters:**
 
@@ -363,7 +369,9 @@ No agent integration required. This is entirely internal to the reflection modul
 ## Success Criteria
 
 1. `git grep -n '"--chat", "Eng: Valor"' -- '*.py'` returns **nothing**. This is the argv-adjacency form, not the bare literal — it deliberately spares `docs_auditor`'s named `FALLBACK_ENG_CHAT` constant and its docstring, which are #2754's merged narrowing.
-2. `git grep -lF '"Eng: Valor"' -- '*.py' | grep -v '^tests/'` returns exactly **one** path: `reflections/utilities.py` (where `FALLBACK_ENG_CHAT` now lives). Five files today; one after.
+2. `git grep -lF '"Eng: Valor"' -- '*.py' | grep -v '^tests/' | grep -v '^reflections/agents/'` returns exactly **one** path: `reflections/utilities.py`, where `FALLBACK_ENG_CHAT` now lives. Five files today; one after.
+
+   This is one path short of the closing condition in issue comment `5505275340`, which asks for the bare literal as a module constant to be swept too. It cannot be swept to zero without deleting `FALLBACK_ENG_CHAT`, and deleting it undoes #2754's `PROJECT_ROOT`-narrowed fallback — the merged fix this plan builds on. The single surviving occurrence is that constant and nothing else, which is the strongest form of the criterion that does not contradict the parent PR. Open Question 2 puts the alternative (drop the fallback, let the digests go silent when nothing resolves) to the supervisor.
 3. `reflections/utilities.py` exports `send_eng_telegram`, `send_host_eng_telegram`, and `resolve_host_eng_chat`.
 4. `tests/unit/test_docs_auditor_substrate.py::TestTelegramChatRouting` — all 8 cases pass **with no edits to the test file**. This is the regression check on the lift.
 5. New `tests/unit/reflections/test_utilities_eng_telegram.py` covers every row of both Failure Path Test Strategy tables, including the two mutation anti-tests.
@@ -421,8 +429,14 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 
 ## Open Questions
 
-1. **Is `scripts/memory_consolidation.py:352` in scope?** The issue enumerates four reflections but sets the exit criterion as "a clean grep sweep for the literal". That sweep fails while this fifth argv site stands. This plan includes it (one call-site swap plus preserving the `CalledProcessError` → contradiction-log fallback). Confirm, or cut it and soften the criterion to the four named files.
+1. ~~**Is `scripts/memory_consolidation.py:352` in scope?**~~ **Answered** by issue comment `5505275340`: the four-site list is "illustrative, not exhaustive" and the closing condition is the grep sweep. It is in scope, and the plan includes it. The comment's second site, `scripts/nightly_regression_tests.py:105`, no longer exists — verified in the Freshness Check. No supervisor input needed.
 
-2. **Should the two host-machine digests suppress, or keep the narrowed fallback?** `sentry_triage` and `stall_advisory` have no project in scope, so this plan routes them through `resolve_host_eng_chat`, which falls back to the `Eng: Valor` literal when the root is *this checkout*. That preserves today's behavior on the production machine. The stricter reading of the issue — "resolve → send by numeric `chat_id` → skip-and-warn when unresolvable" with no fallback — would make the digests go silent on any machine whose `projects.json` lacks a populated `Eng:` group. Preserving the fallback is the conservative call and matches #2754; confirm that is what is wanted.
+2. **Should the two host-machine digests suppress, or keep the narrowed fallback?** This is now the load-bearing question, because it also decides Success Criterion 2. `sentry_triage` and `stall_advisory` have no project in scope, so this plan routes them through `resolve_host_eng_chat`, which falls back to the `Eng: Valor` literal when the root is *this checkout*. That preserves today's behavior on the production machine. The stricter reading of the issue — "resolve → send by numeric `chat_id` → skip-and-warn when unresolvable" with no fallback — would make the digests go silent on any machine whose `projects.json` lacks a populated `Eng:` group. Preserving the fallback is the conservative call and matches #2754.
+
+   The cost of preserving it: `FALLBACK_ENG_CHAT = "Eng: Valor"` survives in `reflections/utilities.py`, so the sweep in issue comment `5505275340` — which explicitly asks for the bare literal *as a module constant* — cannot reach zero. The two answers are a package deal:
+   - **Keep the fallback** (this plan's default): one literal survives, in one named constant, with #2754's narrowing intact. Criterion 2 expects exactly one path.
+   - **Drop it**: the sweep reaches zero, and `sentry_triage` / `stall_advisory` go silent on any machine whose `projects.json` lacks a populated `Eng:` group — including, today, this one. It would also mean reverting part of PR #3077.
+
+   Confirm which.
 
 3. **Does the suppression finding need to reach Telegram some other way?** When resolution fails there is by definition no chat to tell. The finding lands in the reflection's `summary` (which the scheduler persists) and in the warning log. If a suppressed page needs to escalate somewhere a human actually watches, that is a separate mechanism and a separate issue — say so and it stays out.
