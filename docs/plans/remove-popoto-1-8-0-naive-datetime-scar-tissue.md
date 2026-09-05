@@ -416,6 +416,34 @@ three coercers there (`is_scheduled_eligible`, both `_ensure_tz` copies) keep th
 the Spike Results decision. **This file is listed in the issue's Solution Sketch and deliberately
 ends up untouched; the plan records that as a decision, not an omission.**
 
+**`ui/data/sdlc.py:822-826`** — comment rewrite only. `_safe_float` (def at `:815`) carries the exact
+claim AC5 targets:
+
+```python
+if val.tzinfo is None:
+    # Popoto strips timezone on serialize/deserialize; all datetimes in this
+    # system are UTC, so re-attach UTC before converting to avoid local-tz offset
+    val = val.replace(tzinfo=datetime.UTC)
+```
+
+The **code stays** — `_safe_float`'s declared contract spans `datetime`, `int`, `float`, and `str`,
+so it is a keep under this plan's own wider-than-popoto rule, and
+`docs/features/utc-timestamps.md:87` already names `ui/data/sdlc._safe_float` as intentionally
+untouched. Rewrite only the two comment lines to state the true rationale: the helper accepts
+non-popoto sources, so a naive value can still arrive and is read as UTC. Spike-2's probe missed this
+because it, AC5, and the issue's Solution Sketch were all scoped to the two `agent/` files.
+
+**Scope of the AC5 widening, measured.** A repo-wide
+`git grep -niE "[Pp]opoto.{0,40}(strips|drops|omits).{0,30}(tzinfo|timezone)" -- '*.py'` returns
+**17 sites: 9 in production, 8 in tests**. Eight of the nine production sites sit in modules this
+plan's No-Gos explicitly defer (`agent/session_runner/liveness.py:69`,
+`models/agent_session.py:1089` and `:2569`, `reflections/pm_briefings/daily_log.py:380`,
+`scripts/update/run.py:494`, `tools/agent_session_scheduler.py:47`, `tools/session_progress.py:201`,
+`utils/utc.py:44`). AC5 therefore widens to **three files** — the two `agent/` files plus
+`ui/data/sdlc.py` — not repo-wide; a repo-wide criterion would be unsatisfiable without breaking the
+No-Gos. The remaining sixteen sites are the concrete scope of the follow-up in Open Question 2, which
+now has a measured size rather than a hand-wave.
+
 **`scripts/update/migrations.py:1115-1141`** — rewrite `_migrate_backfill_job_last_active_scores`'s
 docstring. It currently opens "popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
 `Job.save()` UTC-reattach override shipped...". The migration's *purpose* is historical and stays
@@ -529,11 +557,33 @@ No new tests are added. `TestScorePurity`'s surviving two tests are the regressi
 **Likelihood: low. Impact: high** — `Job.recent_for_room` trusts scores, so a skewed index buries
 recently-active Jobs and the bind-or-mint hot path mints duplicates.
 
-**Mitigation, already shipped:** `docs/features/popoto-version-floor-guard.md` is a fail-closed
-interlock that refuses to rebuild indexes when the running interpreter's popoto is below the floor in
-`pyproject.toml`. The floor is `>=1.9.0`. A downgrade cannot silently rebuild. No new guard is added
-by this plan; the build should re-read that doc and confirm the interlock reads the floor from
-`pyproject.toml` rather than a hardcoded version.
+**Mitigation, already shipped, and its exact limits.** `docs/features/popoto-version-floor-guard.md`
+is a fail-closed interlock that refuses to **rebuild indexes** when the running interpreter's popoto
+is below the floor in `pyproject.toml`. The floor is `>=1.9.0`. Its reach, verified by
+`git grep -n "assert_popoto_floor" -- '*.py'`:
+
+| Surface | Where | Fires when |
+|---|---|---|
+| Three explicit call sites | `models/job.py:712`, `models/agent_session.py:2436`, `models/room.py:240` | at the head of that model's own `repair_indexes()` |
+| One global seam | `config/popoto_floor.py:329-344` wraps `Model.rebuild_indexes` | on any `rebuild_indexes()` call |
+
+**It is a delayed, reactive check that fires at the next `repair_indexes()` / `rebuild_indexes()`
+call, not a synchronous guard on the write path.** `Job.save()`, `touch()`, `mark_active()`,
+`revive()`, and `mint()` reach no floor assertion, which is exactly the path the deleted reattach
+covered. The doc's own "failure it prevents" section describes a different failure mode entirely (an
+`ExtraData` / `msgpack.unpackb` crash decoding `IndexedField` pointers during rebuild); it catches a
+datetime-skew-capable downgrade only incidentally, through the same version comparison.
+
+**The residual gap, stated and accepted.** Under a downgrade below 1.8.2, ordinary writes would
+re-skew scores silently until the next repair, and this plan also deletes the only log line that ever
+reported skew (`[job] re-normalized %d of %d recency score(s) ...`). This plan accepts that, for
+three reasons: (1) the skew is bounded — `renormalize_last_active_scores()` survives and the
+`backfill_job_last_active_scores` migration still calls it, so the repair tool exists and a downgrade
+is recoverable in one command; (2) a downgrade below the floor is a deliberate act, not a drift, and
+the floor guard makes the first repair after it fail loudly rather than rebuild wrong; (3) re-adding
+a write-path guard would re-introduce precisely the compensation this chore exists to retire. No new
+guard is added. The build should re-read the floor-guard doc and confirm the interlock reads the
+floor from `pyproject.toml` rather than a hardcoded version.
 
 ### Risk 2: `POPOTO_DATETIME_KEY_LEGACY` is set on some machine, restoring naive decoding
 
