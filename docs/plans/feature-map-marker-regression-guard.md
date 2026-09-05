@@ -325,9 +325,9 @@ secrets, no services, and no Redis.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Repo venv on the committed pin | `python -m tools.doctor` | Running `scripts/pytest-clean.sh` at all |
-| `git ls-files` reachable from the repo root | `git -C . ls-files 'tests/**/test_*.py' \| head -1` | The guard enumerates its population from git, not the filesystem |
-| Standard library only for the audit module | `python -c "import ast,sys; m=ast.parse(open('tests/marker_map.py').read()); mods={a.name.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.Import) for a in n.names} \| {n.module.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.ImportFrom) and n.module}; assert mods <= set(sys.stdlib_module_names), mods"` | The CI job runs on a bare interpreter |
+| Test suite is tracked in git | `git ls-files tests/conftest.py` | The guard enumerates its population from the git index, not the filesystem, so an untracked checkout would make it pass vacuously |
+| The tests directory is an importable package | `test -f tests/__init__.py` | `tests/conftest.py` imports `tests.marker_map`; without the package marker that import fails at collection |
+| The pytest wrapper is present | `test -x scripts/pytest-clean.sh` | Bare `pytest` is forbidden in this repo |
 
 
 ## Solution
@@ -450,7 +450,7 @@ intended and to lose no marker anywhere:
 
 ## Test Impact
 
-- [ ] `tests/conftest.py::pytest_collection_modifyitems` — UPDATE: replace the inlined four-line
+- [ ] `tests/conftest.py::pytest_collection_modifyitems`. UPDATE: replace the inlined four-line
       resolution loop with a call to `resolve_marker()`, and import `FEATURE_MAP` from
       `tests/marker_map.py` rather than defining it in place. Behavior must be byte-identical in
       effect; verified by comparing `pytest --collect-only -q -m <marker>` counts for every marker
@@ -461,7 +461,7 @@ intended and to lose no marker anywhere:
       builder re-checks rather than trusting this line.
 - [ ] No existing test file is renamed, moved, or deleted by this work. The 24 baseline files are
       recorded, not touched.
-- [ ] `tests/unit/test_no_legacy_paths.py` — no change. It is read as a precedent for the exemption
+- [ ] `tests/unit/test_no_legacy_paths.py`. NO CHANGE: read as a precedent for the exemption
       shape, not modified.
 
 
