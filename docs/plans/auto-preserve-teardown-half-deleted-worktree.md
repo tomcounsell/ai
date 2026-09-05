@@ -285,95 +285,105 @@ Never `git add -A` on this path: it restages the very deletions the check just d
 
 `preserve_uncommitted_worktree_changes` has one broad `except Exception` at the bottom of its body, which is the documented non-blocking contract (it logs at ERROR with the `[worktree-wip-preserve-failed]` tag and returns the error in the result dict). `test_git_failure_returns_error_dict_and_never_raises` already asserts that observable behavior by patching `subprocess.run` to raise.
 
-- [ ] The new guard adds no new `except Exception: pass`. Its own failure mode is a narrow catch around the two `ls-files`/`ls-tree` reads that logs at WARNING and falls through to today's behavior.
-- [ ] Add `test_guard_computation_failure_falls_open_and_warns` — patch the `ls-files` calls to fail, assert the function still preserves a legitimately dirty tree and that a WARNING naming the guard was logged. This is the test that proves fail-open is deliberate rather than accidental.
+- [ ] The new code adds no new `except Exception: pass`. Its own failure mode is a narrow catch around the `ls-tree` / `ls-files` reads that logs at WARNING under `[worktree-wip-guard-failed]` and falls through to today's behavior.
+- [ ] Add `test_guard_computation_failure_falls_open_and_warns` — patch the `ls-tree` read to fail, assert the function still preserves a legitimately dirty tree and that a WARNING naming the guard was logged. This is the test that proves fail-open is deliberate rather than accidental.
 
 ### Empty/Invalid Input Handling
 
 - [ ] **Unborn HEAD** (a worktree whose branch has no commits): `git ls-tree -d HEAD` fails. Covered by the fail-open path above; add an explicit case so the behavior is pinned rather than incidental.
-- [ ] **Empty repository / zero tracked files**: `deleted / tracked` would divide by zero. The absolute floor (`wipe_refusal_min_deleted_files`) is evaluated first and short-circuits, but add a guard test with a repo whose index is empty to pin it.
-- [ ] **Detached HEAD in the stale worktree**: the branch-resolution half of the fix must fall back to the directory name rather than writing `refs/session-wip/HEAD`. Test it.
-- [ ] **Untracked-only dirty tree**: zero deleted files, so neither guard fires and preservation proceeds. Already covered by `test_untracked_only_is_preserved`; re-run it as a non-regression.
+- [ ] **Empty additive set on a wipe** (the pure-wipe case): the code must return *before* staging. Spike-5 showed that `git add --pathspec-from-file=<empty> --pathspec-file-nul --` exits 0 having staged nothing, after which `git commit` fails with "nothing to commit" and the outer handler logs a misleading `[worktree-wip-preserve-failed]`. `test_pure_wipe_writes_no_commit_and_no_ref` pins the short-circuit.
+- [ ] **Repository with no tracked directories at HEAD** (all files at top level): `ls-tree -d HEAD` returns empty, so the check never fires and today's behavior runs. Add a case.
+- [ ] **Detached HEAD in the stale worktree**: the branch-resolution half of the fix must fall back to the `slug` argument rather than writing `refs/session-wip/HEAD`. `rev-parse --abbrev-ref HEAD` returns the literal `HEAD`, which passes `VALID_SLUG_RE`, so the `session/` prefix match is what must gate it. Test it.
+- [ ] **Untracked-only dirty tree**: no directory missing, so the check does not fire and preservation proceeds. Already covered by `test_untracked_only_is_preserved`; re-run it as a non-regression.
 
 ### Error State Rendering
 
 There is no user-visible surface here; the observable is the log line and the returned dict.
 
-- [ ] The refusal log must be ERROR (not WARNING) and must name the slug, the refusal reason, and the counts — a silent refusal is the same class of bug as the silent commit, just in the other direction. Assert on the log record in the refusal tests, the way the existing `worktree-wip-preserved` test does.
-- [ ] Give the refusal its own greppable tag, `[worktree-wip-refused-wipe]`, distinct from `[worktree-wip-preserve-failed]`, so an operator scanning logs can tell "we declined to save a wipe" from "git broke."
+- [ ] The refusal log must be ERROR (not WARNING) and must carry slug, branch, worktree HEAD sha, the sorted missing directory names, and the preserved/deleted path counts. A silent refusal is the same class of bug as the silent commit, just in the other direction — and the worktree is destroyed within milliseconds of the log line, so anything omitted is unrecoverable. Assert on `caplog.records[-1]` in the refusal tests, the way `test_dirty_tree_preserved_in_named_ref_and_wip_commit` asserts on `[worktree-wip-preserved]`.
+- [ ] Give it its own greppable tag, `[worktree-wip-refused-wipe]`, distinct from both `[worktree-wip-preserve-failed]` and `[worktree-wip-guard-failed]`.
 
 ## Test Impact
 
 All existing tests for this function live in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`. Its fixtures (`_init_git_repo`, `_add_linked_worktree`, `_dirty`, `_git`) build real git repos with real linked worktrees, so the regression fixture is an addition to that file, not new scaffolding.
 
-- [ ] `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py::TestPreserveUncommittedChanges::test_dirty_tree_preserved_in_named_ref_and_wip_commit` — **no change expected.** `_dirty()` modifies one tracked file, stages a second, and adds an untracked one: zero deletions, so neither guard fires. Re-run as the primary non-regression proof that legitimate work is still preserved.
-- [ ] `...::test_clean_tree_is_noop_and_creates_no_ref` — **no change expected.** The clean-tree early return runs before the guard.
-- [ ] `...::test_untracked_only_is_preserved` — **no change expected.** Zero deletions.
-- [ ] `...::test_git_failure_returns_error_dict_and_never_raises` — **UPDATE.** It patches `subprocess.run` to raise on *every* call, which now includes the guard's `ls-files` reads. Confirm the assertion still holds (`preserved: False`, error dict, `[worktree-wip-preserve-failed]` logged) and that the guard's own narrow catch does not swallow the failure before the outer handler sees it. Adjust the assertion if the error message changes shape.
-- [ ] `...::test_remove_worktree_preserves_dirty_tree_before_force_remove` — **no change expected.** `_dirty()` again; asserts the `remove_worktree` path still preserves. This is the test that proves the guard did not break Path B.
-- [ ] `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::…` (lines 298, 376) — **REVIEW, likely no change.** Both patch `preserve_uncommitted_worktree_changes` wholesale, so they are insulated from its internals. Confirm neither asserts on a return value whose shape changed.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py::TestPreserveUncommittedChanges::test_dirty_tree_preserved_in_named_ref_and_wip_commit` — **no change expected.** `_dirty()` modifies one tracked file, stages a second, and adds an untracked one: no tracked directory goes missing, so the check does not fire. Re-run as the primary non-regression proof that legitimate work is still preserved by the unchanged `add -A` path.
+- [ ] `...::test_clean_tree_is_noop_and_creates_no_ref` — **no change expected.** The clean-tree early return runs before the check.
+- [ ] `...::test_untracked_only_is_preserved` — **no change expected.**
+- [ ] `...::test_git_failure_returns_error_dict_and_never_raises` — **UPDATE.** It patches `subprocess.run` to raise on *every* call, which now includes the `ls-tree` read. Confirm the assertion still holds (`preserved: False`, error dict, `[worktree-wip-preserve-failed]` logged) and that the narrow guard catch does not swallow the failure before the outer handler sees it. Adjust the assertion if the error message changes shape.
+- [ ] `...::test_remove_worktree_preserves_dirty_tree_before_force_remove` — **no change expected.** Proves the change did not break Path B.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_cleanup.py` `@patch("agent.worktree_manager.preserve_uncommitted_worktree_changes")` at lines 466 and 544 — **REVIEW, likely no change.** Both patch the function wholesale, so they are insulated from its internals. Confirm neither asserts on a return-value shape that changed.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::TestReapIdleWorktree` (the `monkeypatch.setattr` sites at lines 101 and 122, added by `55ad9ac89` for #3162) — **no change expected, and re-run deliberately.** `test_half_deleted_tree_is_kept_and_never_preserved` asserts the reaper never calls preserve on a #3167-shaped tree. It must stay green: this plan does not touch `reap_idle_worktree`, and a break there would mean the change leaked outside its intended surface.
 - [ ] `tests/unit/worktree_manager/test_worktree_manager_creation.py:38` — **no change expected.** Patches `_cleanup_stale_worktree` entirely.
+- [ ] `tests/unit/test_settings.py` — **no change.** The revision dropped both `PerformanceSettings` fields, so this change adds no settings surface for it to cover.
 
-**New tests** (the regression suite the issue asks for), all in `test_worktree_manager_uncommitted.py`:
+**New tests**, all in `test_worktree_manager_uncommitted.py`:
 
-- [ ] `test_missing_tracked_directory_refuses` — fixture worktree with tracked top-level directories deleted on disk; assert `preserved is False`, `refused == "missing-tracked-dirs"`, no new commit on the branch, no `refs/session-wip/{slug}` created, and the `[worktree-wip-refused-wipe]` ERROR logged with the missing directory names.
-- [ ] `test_majority_of_tracked_files_deleted_refuses` — every top-level directory still present but most tracked files removed; assert the proportional guard fires with `refused == "majority-deleted"`.
-- [ ] `test_wipe_with_untracked_artifacts_still_refuses` — the incident's actual shape (spike-3): tracked files deleted **and** untracked artifacts present so `add -A` would report insertions. Assert refusal. This test is the one that would have failed under the issue's proposed insertions-ratio predicate, and it exists to keep anyone from "simplifying" the guard back to that shape.
-- [ ] `test_large_deletion_with_real_work_is_preserved` — deletions above the floor but below the fraction, with genuine edits present; assert `preserved is True`. The false-positive boundary.
-- [ ] `test_index_untouched_on_refusal` — after a refusal, assert `git diff --cached --name-only` is empty. Pins the "check before `git add -A`" decision so a later refactor cannot quietly move the guard after staging.
+- [ ] `test_pure_wipe_writes_no_commit_and_no_ref` — fixture worktree with tracked top-level directories deleted on disk and nothing else dirty; assert `preserved is False`, `refused == "missing-tracked-dirs"`, the branch head sha is unchanged, `refs/session-wip/{slug}` does not exist, and the `[worktree-wip-refused-wipe]` ERROR record carries the missing directory names.
+- [ ] `test_mixed_wipe_preserves_additions_and_drops_deletions` — **the test this revision exists for.** Spike-5's fixture: one tracked top-level directory removed from disk, one tracked file edited, one untracked file added. Assert `preserved is True`, `refused == "missing-tracked-dirs"`, and that the resulting commit's diff against its parent contains **zero deletions** while containing both the edit and the new file. Assert the removed directory is still tracked at the new HEAD.
+- [ ] `test_wipe_with_untracked_artifacts_still_refuses_deletions` — the incident's shape (spike-3): tracked directories deleted **and** untracked build artifacts present, so `add -A` would report real insertions. Assert the deletions are not committed. This is the test that would fail under the issue's proposed insertions-ratio predicate, and it exists to keep anyone from "simplifying" the check back to that shape.
+- [ ] `test_partially_staged_wipe_still_detected` — run `git add -A` on a half-deleted tree *before* calling preserve, then assert detection still fires. Pins spike-6: the structural signal reads HEAD, so the index cannot blind it. This is the test that would have failed under the proportional guard the revision dropped.
+- [ ] `test_deletions_inside_a_surviving_directory_are_preserved_normally` — files deleted from within `tests/` while `tests/` itself survives on disk, alongside genuine edits; assert `preserved is True`, `refused` absent, and the deletions **are** in the commit. The false-positive boundary: a real refactor that deletes files is untouched by this change.
+- [ ] `test_index_untouched_on_pure_wipe` — after the pure-wipe case, assert `git diff --cached --name-only` is empty. Pins the "check before staging" decision so a later refactor cannot quietly move it after `git add -A`.
 - [ ] `test_guard_computation_failure_falls_open_and_warns` — see Failure Path Test Strategy.
 - [ ] `test_ref_slug_follows_checked_out_branch` — a worktree directory named `foo` with `session/bar` checked out; assert the WIP ref is `refs/session-wip/bar`, matching the branch that received the commit. Pins the recon-found mismatch fix.
-- [ ] `test_detached_head_falls_back_to_directory_name` — the edge case of the previous test.
+- [ ] `test_detached_head_falls_back_to_slug_argument` — assert the ref is `refs/session-wip/{slug}` and specifically **not** `refs/session-wip/HEAD`.
 
 ## Rabbit Holes
 
-- **Root-causing what gutted the worktree.** Three mechanisms fit the evidence equally well: a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback (`agent/worktree_manager.py:978`), a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory. Distinguishing them means instrumenting a path that fires only under a bridge restart storm, and the answer changes nothing: the guard is correct against all three. Filed as a No-Go, not attempted here.
+- **Root-causing what gutted the worktree.** Three mechanisms fit the evidence equally well: a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback (`agent/worktree_manager.py:1001`), a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory. Distinguishing them means instrumenting a path that fires only under a bridge restart storm, and the answer changes nothing: the response is correct against all three. Filed as a No-Go, not attempted here.
 - **Fixing the bridge restart loop.** #3166 is the amplifier that turned one latent race into nine teardown passes. It is a separate issue with a separate investigation, and this fix does not wait on it.
 - **Serializing teardown with a lock.** Tempting once you notice the race, and a large change to a module three subsystems call. If the guard proves insufficient in practice, that is the follow-up; it is not the first move.
 - **Building recovery tooling for `refs/session-wip/*`.** There are zero such refs on this machine. Writing a resurrect/inspect CLI for a namespace that is currently empty is speculative work.
-- **Tuning the threshold constants.** They are provisional by declaration and marked so in their descriptions. The structural guard is primary precisely so the numbers do not have to be right on the first try. Arguing about 0.5 versus 0.6 before a single real refusal has been observed is the trap.
+- **The proportional "majority of tracked files gone" guard.** Cut from this change during the revision pass. It was declared secondary yet carried the only two tunables, the only new config and env surface, and two of the tests, while its target case — a partial wipe leaving every tracked top-level directory nominally present — has never been observed, and the reported incident is caught by the structural signal alone. If a real partial wipe ever justifies adding it, **read HEAD, not the index**: spike-6 showed a prior `git add -A` drops `ls-files --deleted` from 4 to 0 and shrinks `ls-files` correspondingly, blinding any index-based ratio. The HEAD-based equivalents are `git ls-files --deleted -z` unioned with `git diff --cached --diff-filter=D --name-only -z HEAD` for the numerator and `git ls-tree -r --name-only -z HEAD` for the denominator, with a `tracked > 0` short-circuit before the division.
 - **Broadening the `validate_no_destructive_git_in_worktree.py` hook.** Different half of the #2137 backstop, agent-facing rather than teardown-facing, and its blocked-shape set was deliberately scoped in that plan's No-Gos. Out of scope.
 - **Auditing `refs/session-wip/*` across the fleet.** The audit is a one-line `git for-each-ref` an operator can run; here it returns zero. It is not a feature and there is nothing to ship for it.
 
 ## Risks
 
-### Risk 1: The guard refuses a legitimate large deletion, losing the backstop for real work
+### Risk 1: The check fires on a legitimate refactor that deletes a whole top-level directory
 
-**Impact:** A lane doing a genuine mass-deletion refactor — deleting a whole package while the replacement lives in a sibling directory — gets torn down without its uncommitted work preserved. That is the exact loss #2137 was built to prevent, reintroduced from the other side.
+**Impact:** A lane deleting an entire tracked top-level package while the replacement lives elsewhere trips the structural signal. Its deletions are then not committed into the WIP commit.
 
-**Mitigation:** Three layers. The structural guard fires only when a directory tracked at HEAD is *absent from disk entirely*, which a refactor deleting files inside a package does not produce (the directory survives with its remaining files). The proportional guard requires **both** an absolute floor and a majority of all tracked files gone — no plausible refactor deletes half the repository's tracked files without committing anything. And the refusal is logged at ERROR with a dedicated tag and the full counts, so the case is visible rather than silent. `test_large_deletion_with_real_work_is_preserved` pins the boundary.
+**Mitigation:** Bounded, and no longer a data-loss risk after the revision. The additive-only path still preserves every addition and every edit that lane made, so nothing it *wrote* is lost — only the record that it deleted a directory, which the branch's own committed history and `origin/main` still hold. The trigger is narrow: a directory tracked at HEAD must be **absent from disk entirely**, which a refactor deleting files inside a package does not produce (the directory survives with its remaining files) — `test_deletions_inside_a_surviving_directory_are_preserved_normally` pins that boundary. And the case is logged at ERROR with a dedicated tag, the branch, the head sha, and the missing names, so it is visible rather than silent.
 
-### Risk 2: Fail-open on guard-computation failure means a wipe slips through
+### Risk 1b: A refusal destroys coexisting uncommitted work
 
-**Impact:** If `git ls-files` errors or times out at exactly the wrong moment, the guard is bypassed and today's behavior resumes — including the possibility of committing a wipe.
+**Impact:** This was the shape the first draft of this plan actually shipped, and the critique's first blocker. With `docs/` gone from disk but `tests/f1.py` edited and `tests/f4.py` newly written, a bare refusal let `git worktree remove --force` proceed and both were destroyed with no backstop — strictly worse than today's unguarded behavior, where they at least land in the WIP commit and can be cherry-picked out.
 
-**Mitigation:** Accepted deliberately, with reasoning recorded. This function's hardest contract is that it never raises into teardown and never hangs it; converting a git hiccup into a refusal would trade a rare wipe for a routine loss of the backstop on legitimate work. The failure is logged at WARNING with its own tag so a recurring pattern is visible in the logs, and `test_guard_computation_failure_falls_open_and_warns` makes the choice explicit rather than incidental. Revisit only if the WARNING actually appears in production logs.
+**Mitigation:** Eliminated by design rather than accepted. The additive-only preserve (spike-5) commits exactly those paths and no deletions. `test_mixed_wipe_preserves_additions_and_drops_deletions` asserts both halves: the edit and the new file are in the commit, and the commit's diff against its parent contains zero deletions.
+
+### Risk 2: Fail-open on check-computation failure means a wipe slips through
+
+**Impact:** If `git ls-tree` or `git ls-files` errors or times out at exactly the wrong moment, the check is bypassed and today's behavior resumes — including the possibility of committing a wipe.
+
+**Mitigation:** Accepted deliberately, with reasoning recorded. This function's hardest contract is that it never raises into teardown and never hangs it; converting a git hiccup into a refusal would trade a rare wipe for a routine loss of the backstop on legitimate work. The failure is logged at WARNING under `[worktree-wip-guard-failed]` so a recurring pattern is visible in the logs, and `test_guard_computation_failure_falls_open_and_warns` makes the choice explicit rather than incidental. Revisit only if the WARNING actually appears in production logs.
 
 ### Risk 3: A future refactor moves the guard after `git add -A`
 
-**Impact:** A refusal computed after staging leaves a fully-staged wipe in the worktree index — worse than the status quo, because the next process to touch that worktree commits it without ever running preserve.
+**Impact:** A check computed after staging leaves a fully-staged wipe in the worktree index — worse than the status quo, because the next process to touch that worktree commits it without ever running preserve. Spike-6 adds a second failure mode: after `add -A` the deletion signal is partly erased from the index, so a moved check also reads degraded input.
 
-**Mitigation:** `test_index_untouched_on_refusal` asserts `git diff --cached --name-only` is empty after a refusal, which fails immediately if the guard moves. A comment at the guard site states the ordering constraint and why it exists.
+**Mitigation:** `test_index_untouched_on_pure_wipe` asserts `git diff --cached --name-only` is empty after the pure-wipe case, which fails immediately if the check moves. A comment at the check site states the ordering constraint and why it exists.
 
 ### Risk 4: Someone "simplifies" the guard back to the insertions-ratio predicate
 
 **Impact:** The predicate the issue originally proposed does not fire on the incident it was written for (spike-3). Reintroducing it would leave the bug fixed on paper and open in fact.
 
-**Mitigation:** `test_wipe_with_untracked_artifacts_still_refuses` reproduces the incident's exact shape — deletions plus untracked artifacts producing real insertions — and fails under that predicate. The Solution section records why it was rejected, with the incident's own numbers.
+**Mitigation:** `test_wipe_with_untracked_artifacts_still_refuses_deletions` reproduces the incident's exact shape — deletions plus untracked artifacts producing real insertions — and fails under that predicate. The Solution section records why it was rejected, with the incident's own numbers.
 
 ## Race Conditions
 
 ### Race 1: A concurrent teardown pass gutting the worktree while preserve reads it
 
-**Location:** `agent/worktree_manager.py:1406-1500` (preserve), against `:948` and `:1660` (the two force-remove call sites), plus the fallback `shutil.rmtree` at `:978`.
+**Location:** `preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1508`), against its two call sites at `:972` and `:1762`, plus the fallback `shutil.rmtree` at `:1001`.
 
 **Trigger:** Two teardown passes target the same `.worktrees/{slug}` concurrently. Pass A's `git worktree remove --force` (or the fallback `rmtree`) begins deleting files; pass B's preserve reads a tree that is now partially gone. The bridge restart loop in #3166 supplied nine such passes in seventeen minutes. This is the leading candidate for what produced the reported commit, though the plan does not depend on it being the right one.
 
-**Data prerequisite:** The guard needs `git ls-files` (reads the index, which lives in `.git/worktrees/{name}/index` and is not touched by a filesystem delete of the working tree) and `git ls-tree HEAD`. Both remain readable while the working tree is being destroyed, which is what makes the guard work at all under this race.
+**Data prerequisite:** The check needs `git ls-tree -d HEAD` (reads the commit object) and, on the wipe path, `git ls-files` (reads the index at `.git/worktrees/{name}/index`, untouched by a filesystem delete of the working tree). Both remain readable while the working tree is being destroyed, which is what makes the check work at all under this race.
 
 **State prerequisite:** None. The guard makes no assumption about who else is operating on the directory.
 
-**Mitigation:** Not prevented — *detected*. The guard converts an unwinnable ordering problem into a check on observable state: whatever the interleaving, a tree missing directories that HEAD tracks is refused. There is a residual window (the guard reads a still-intact tree, then the deletion completes, then `add -A` runs) which the guard cannot close; closing it needs the lock that the Rabbit Holes section defers. The window is milliseconds against a teardown that is otherwise unguarded for its whole duration, and the guard eliminates the case where preserve is invoked against an *already* gutted tree, which is what the stacked no-op commits in the report demonstrate actually happened.
+**Mitigation:** Not prevented — *detected*. The check converts an unwinnable ordering problem into a question about observable state: whatever the interleaving, a tree missing directories that HEAD tracks does not get its deletions committed. There is a residual window (the check reads a still-intact tree, then the deletion completes, then `add -A` runs) which it cannot close; closing that needs the lock the Rabbit Holes section defers. The window is milliseconds against a teardown that is otherwise unguarded for its whole duration, and the check eliminates the case where preserve is invoked against an *already* gutted tree, which is what the stacked no-op commits in the report demonstrate actually happened.
 
 ### Race 2: Repeated preserve passes stacking commits on an already-committed wipe
 
@@ -385,7 +395,7 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 **State prerequisite:** The wipe must have been committed for this to be reachable.
 
-**Mitigation:** Eliminated at the source. If the first wipe is never committed, HEAD never moves, and later passes see the same gutted tree and refuse identically. The refusal is idempotent by construction — it reads state and writes nothing — so N passes produce N ERROR logs and zero commits.
+**Mitigation:** Eliminated at the source. If the first wipe is never committed, HEAD never moves, and later passes see the same gutted tree and respond identically. On a pure wipe the response is idempotent by construction — it reads state and writes nothing — so N passes produce N ERROR logs and zero commits. On the mixed shape the first pass commits the additive work and the tree afterwards has no additive work left, so later passes fall through to the pure-wipe branch.
 
 ## No-Gos (Out of Scope)
 
