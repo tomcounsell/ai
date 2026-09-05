@@ -739,6 +739,7 @@ updates, not new files, so no `docs/features/README.md` index entry is needed.
       the sources that genuinely still can (ISO strings, floats, non-popoto producers). Line 94's
       "ai pins `popoto>=1.8.0`" becomes `popoto>=1.9.0`.
 - [ ] Update the inline docstrings named in Technical Approach: `models/job.py` (`renormalize_last_active_scores`, `recent_for_room`) and `scripts/update/migrations.py::_migrate_backfill_job_last_active_scores`.
+- [ ] Update the two inline comments the critique surfaced, both comment-only with no code change: `ui/data/sdlc.py:824-825` (`_safe_float`'s "Popoto strips timezone on serialize/deserialize") and `tests/unit/test_migrate_job_expectations.py:135-142` (`test_is_idempotent`'s save-spy rationale, which cites the deleted renormalize sweep as ongoing behavior).
 - [ ] Verify no feature doc is left dangling: `git grep -n "renormalize\|re-attach\|reattach\|1\.8\.0" -- docs/features/ models/ scripts/` returns nothing describing the removed code as current.
 
 No new feature doc is created — this removes a mechanism rather than adding one, and no
@@ -814,16 +815,29 @@ the change makes true.
 - For each of the six sites in the Technical Approach table, located **by local variable name and
   enclosing function**, replace `X_aware = X if X.tzinfo else X.replace(tzinfo=UTC)` plus the
   `(NOW - X_aware).total_seconds()` subtraction with `NOW.timestamp() - _ts(X)`.
-- At `_check_tool_timeout` (line ~658), reuse the `_ts(last_at)` value already computed for the epoch
-  gate rather than calling `_ts` twice.
+- `_check_tool_timeout` is the exception to that pattern — there is **no existing `_ts(last_at)`
+  value to reuse**, because the epoch gate's call is an inline sub-expression that `and`
+  short-circuits when `anchor is None`. Hoist `last_at_ts = _ts(last_at)` onto its own line above the
+  `anchor = ...` assignment (currently `:640`), use `last_at_ts` in the gate comparison (`:641`), and
+  replace `:658-659` with `age = datetime.now(tz=UTC).timestamp() - last_at_ts`. See Technical
+  Approach for the full before/after.
 - Leave `_ts`, `_at_rest_coerce_ts`, and `_session_is_alive` untouched. Leave
   `agent/session_pickup.py` untouched entirely.
+- `git grep -n "tzinfo else" agent/session_health.py` — expect no output.
 - `scripts/pytest-clean.sh tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py` — green, with **no test edits**.
 
 ### 5. Correct the docstrings and docs
 
 - `models/job.py`: `recent_for_room` (line ~533), `renormalize_last_active_scores` (lines ~807-833).
 - `scripts/update/migrations.py`: `_migrate_backfill_job_last_active_scores` docstring only.
+- `tests/unit/test_migrate_job_expectations.py` (comment at `:135-142`): drop the
+  `repair_indexes`/renormalize-sweep clause from `test_is_idempotent`'s save-spy comment. Comment
+  only — the lambda, its `update_fields == ["last_active_at"]` branch, and `assert saves == []` all
+  stay. Run `scripts/pytest-clean.sh tests/unit/test_migrate_job_expectations.py`.
+- `ui/data/sdlc.py` (comment at `:824-825`, inside `_safe_float`): rewrite "Popoto strips timezone on
+  serialize/deserialize" to the true rationale — the helper accepts non-popoto sources
+  (`int`/`float`/`str`), so a naive value can still arrive and is read as UTC. The
+  `val.replace(tzinfo=datetime.UTC)` code at `:823-826` stays.
 - `docs/features/durability-model.md`, `docs/features/popoto-index-hygiene.md`,
   `docs/features/utc-timestamps.md` per the Documentation section.
 - Verify: `git grep -n "1\.8\.0\|reattach\|re-attach" -- models/ scripts/ docs/features/` shows only
@@ -839,7 +853,7 @@ itself.
 
 - `python -m ruff check` and `python -m ruff format` (black formatting only; no other linters).
 - `TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity`.
-- `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py`.
+- `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py tests/unit/test_migrate_job_expectations.py tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py`.
 - Walk the Success Criteria checklist.
 - `./scripts/valor-service.sh restart` after merge, then `tail -5 logs/bridge.log`.
 
@@ -848,8 +862,9 @@ itself.
 ```bash
 # AC1 + AC5 + the added third-doc criterion: no stale version claims anywhere
 git grep -n "1\.8\.0" models/job.py docs/features/durability-model.md docs/features/utc-timestamps.md
-git grep -n -i "popoto.*\(strip\|drop\|omit\|naive\)" agent/session_health.py agent/session_pickup.py
+git grep -n -i "popoto.*\(strip\|drop\|omit\|naive\)" agent/session_health.py agent/session_pickup.py ui/data/sdlc.py
 git grep -n "renormalize" docs/features/popoto-index-hygiene.md
+git grep -n "renormalize\|repair_indexes" tests/unit/test_migrate_job_expectations.py   # expect: no output
 
 # AC2: the override is gone and the sweep call with it
 git grep -n "def save" models/job.py            # expect: no output
@@ -862,6 +877,7 @@ TZ=Asia/Bangkok scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePur
 
 # AC4 + the tripwire
 scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/test_migrations.py
+scripts/pytest-clean.sh tests/unit/test_migrate_job_expectations.py
 scripts/pytest-clean.sh tests/unit/test_session_health_tool_timeout.py tests/unit/session_runner/test_liveness.py
 git diff main --stat -- tests/unit/test_session_health_tool_timeout.py   # expect: no change
 
