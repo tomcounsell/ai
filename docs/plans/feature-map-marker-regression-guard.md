@@ -188,20 +188,19 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
   (`tests`, `unit`, `integration`, `e2e`, `tools`, `performance`, `ai_judge`); resolve each
   directory name and each basename; compare.
 - **Finding**: **Yes, and it fires on real defects today.** 80 files sit in 11 package
-  directories. Six of those directory names resolve (`bridge`, `reflections`, `sdlc_router_decision`,
-  `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`), covering 47 files, of which
-  **21 disagree with their directory**: all 19 in `tests/unit/reflections/`, both files in
-  `tests/integration/reflections/`, and `tests/unit/bridge/test_dispatch.py`. Wait, that is 22
-  by that phrasing; the exact set is 18 of the 19 unit-reflections files (`test_reflection_*`
-  names already resolve correctly), plus 2 integration-reflections files, plus 1 bridge file.
-  The four packages produced by #2879 and #2941 that do resolve (`sdlc_router_decision`,
-  `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`) are **100% consistent**, which is
-  PR #3005's 24/24 claim reproduced independently.
-  The five packages whose directory name does not resolve (`hooks`, `memory_extraction`,
-  `output_handler`, `session_runner`, and `tests/unit/bridge` is not among them) have no directory
-  intent, so a second rule is needed for them: sibling uniformity. Under that rule
-  `memory_extraction` and `output_handler` are uniform (all `None`) and pass, while `hooks` and
-  `session_runner` each have exactly one odd file out.
+  directories. Seven of those directories have a name that resolves (`tests/unit/bridge`,
+  `tests/unit/reflections`, `tests/integration/reflections`, `tests/unit/sdlc_router_decision`,
+  `tests/unit/sdlc_session_ensure`, `tests/unit/valor_telegram`, `tests/unit/worktree_manager`),
+  covering 47 files, of which **21 disagree with their directory**: 18 of the 19 files in
+  `tests/unit/reflections/` (only `test_reflection_*`-style names already resolve correctly), both
+  files in `tests/integration/reflections/`, and `tests/unit/bridge/test_dispatch.py`.
+  The four packages produced by #2879 and #2941 whose directory name resolves
+  (`sdlc_router_decision`, `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`) are
+  **100% consistent**, which is PR #3005's 24/24 claim reproduced independently.
+  The four packages whose directory name does not resolve (`hooks`, `memory_extraction`,
+  `output_handler`, `session_runner`) declare no intent, so a second rule is needed for them:
+  sibling uniformity. Under that rule `memory_extraction` and `output_handler` are uniform (all
+  `None`) and pass, while `hooks` and `session_runner` each have exactly one odd file out.
 - **Confidence**: high.
 - **Impact on plan**: produces rules R1 (directory intent) and R2 (sibling uniformity), and the
   21-entry pre-existing baseline they must be introduced against.
@@ -213,16 +212,20 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
   pattern's tokens to appear as a contiguous run) and diff its result against the shipped
   substring resolver across all 834 files.
 - **Finding**: **Yes, one exists and it is cheap.** Substring and whole-token disagree on only
-  **16 of 834 files**, and 12 of those are the benign `reflection`-matching-`reflections` plural,
-  where both spellings map to the same marker. The remaining 4 are genuine fragment matches:
-  `test_pm_briefings_no_slots_configured.py` (`config` inside `configured`),
-  `test_youtube_transcription.py` (`transcript` inside `transcription`),
-  `test_long_task_checkpointing.py` (`checkpoint` inside `checkpointing`), and
-  `test_migrate_reflections_callables.py` / siblings which fall in the plural class.
+  **16 of 834 files**. Thirteen of those are the benign `reflection`-matching-`reflections`
+  plural (`test_reflections_main.py`, `test_update_reflections_yaml.py`,
+  `test_ui_reflections_data.py` and ten more), where both spellings map to the same `reflections`
+  marker and nothing is actually mistagged. The remaining **three are genuine fragment matches**:
+  `test_pm_briefings_no_slots_configured.py` (`config` inside `configured`, tagged `config`),
+  `test_youtube_transcription.py` (`transcript` inside `transcription`, tagged `messaging`), and
+  `test_long_task_checkpointing.py` (`checkpoint` inside `checkpointing`, tagged `validation`).
   Adding `"reflections": "reflections"` immediately before the existing `"reflection"` key erases
   the entire benign class with provably zero collateral: any stem containing the token
-  `reflections` already contained the substring `reflection`, and both keys map to the same
-  marker, so no file can change marker and none can lose one.
+  `reflections` already contained the substring `reflection`, both keys map to the same marker,
+  and inserting directly before `"reflection"` cannot jump ahead of any key that already won.
+  Adding `"youtube": "tools"` immediately before `"transcript"` corrects the one genuine fragment
+  match whose right answer is unambiguous, and the before/after diff confirms
+  `test_youtube_transcription.py` is the only file affected.
 - **Confidence**: high.
 - **Impact on plan**: produces rule R3 (whole-token match), which applies suite-wide and needs no
   intent declaration, plus two in-scope zero-collateral `FEATURE_MAP` additions.
