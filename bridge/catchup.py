@@ -13,6 +13,7 @@ from pathlib import Path
 
 from telethon.errors import FloodWaitError
 
+from agent.private_tag import strip_private
 from bridge.dedup import get_or_init_dm_coverage_epoch
 from bridge.history_fetch import fetch_messages_back_to
 from bridge.routing import (
@@ -330,8 +331,10 @@ async def scan_for_missed_messages(
                     logger.debug(f"[catchup] {chat_label}: msg {message.id} is outgoing - skip")
                     continue
 
-                # Skip messages without text
-                text = message.text or ""
+                # Strip <private> spans at intake, before anything downstream
+                # logs or persists the text (docs/features/durability-model.md,
+                # "Private-tag stripping happens at intake").
+                text = strip_private(message.text or "")
                 if not text.strip():
                     logger.debug(f"[catchup] {chat_label}: msg {message.id} has no text - skip")
                     continue

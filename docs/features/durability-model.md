@@ -181,6 +181,30 @@ lookup filters on the calling session's own `room_id`, so cross-Room Jobs
 are structurally unaddressable (prompt-level constraints drift; tool-level
 ones don't).
 
+## Private-tag stripping happens at intake
+
+`<private>...</private>` is the user's inline opt-out from durable storage
+(`agent/private_tag.py`; the memory-side contract lives in
+[`subconscious-memory.md`](subconscious-memory.md)). The ruling for where
+`strip_private` applies is the simple one: **every path that reads inbound
+message text strips it at the point of first read, before anything is
+logged or persisted.** Live and recovery are the same rule; "recovery" is
+never a reason to hold raw text longer.
+
+| Path | Strip point |
+|------|-------------|
+| Live intake (`bridge/telegram_bridge.py`) | `safe_text = strip_private(text)` right after `message.text` is read; `safe_text` feeds bridge.log, Memory, `TelegramMessage`, and `AgentSession.message_text` via `safe_clean_text` |
+| Startup catchup (`bridge/catchup.py`) | `text = strip_private(message.text or "")` at the top of the per-message loop |
+| Periodic reconciler (`bridge/reconciler.py`) | same, at the top of the per-message loop |
+| Agent-judgment catchup (`bridge/agent_catchup.py`) | `read_thread` strips when it builds each `ThreadMessage`, so the judge transcript, the recovery log line, and the enqueued `message_text` all descend from one stripped read |
+| Reply-chain prehydration | `format_reply_chain` output is stripped before it is spliced into `message_text` (both hydration sites) |
+
+Stripping at intake means the two durable stores a recovery pass touches,
+`bridge.log` (the recovery log line) and `AgentSession.message_text` (the
+enqueue call), can only ever see stripped text; there is no later boundary
+to remember. `tests/unit/test_recovery_strip_private.py` drives each scanner
+with a private-tagged payload and asserts the span reaches neither store.
+
 ## Reactions are durable
 
 A sent reaction is recorded as a reply-to message in the existing message

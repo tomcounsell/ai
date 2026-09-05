@@ -57,6 +57,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from agent.llm import run_typed
+from agent.private_tag import strip_private
 from bridge.dedup import get_or_init_dm_coverage_epoch
 from bridge.routing import (
     find_project_for_dm_dialog,
@@ -400,7 +401,11 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
     for m in raw:
         if m.date < cutoff:
             break  # get_messages returns newest-first; older than cutoff → stop.
-        text = m.text or _poll_transcript_text(m)
+        # Strip <private> spans at intake: every downstream consumer (judge
+        # transcript, recovery log line, AgentSession.message_text) sees the
+        # persistence-safe text (docs/features/durability-model.md,
+        # "Private-tag stripping happens at intake").
+        text = strip_private(m.text or _poll_transcript_text(m))
         is_valor = bool(m.out)
         sender_name = _SENDER_VALOR
         sender_id = None
