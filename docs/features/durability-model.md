@@ -30,8 +30,16 @@ The append (`Room.append_inbox`, written by `bridge/room_inbox.py`) collapses
 the intake loss window to a single Redis write. Cutover is 3-phase; phase 1
 (shadow — append written alongside the untouched dispatch flow) shipped in
 PR #2622, and Milestone 3 added shadow bind-or-mint Job routing at the same
-seam. Dispatch still runs the legacy session path until the authoritative
-flip ships as its own release.
+seam. Shadow coverage spans every **Telegram** enqueue path, live intake and recovery
+alike: the three recovery re-enqueue scanners (`bridge/catchup.py`,
+`bridge/reconciler.py`, `bridge/agent_catchup.py`) append alongside their
+untouched enqueue with the same entry shape (including `strip_private` on the
+persisted text), because recovery and live intake are one code path — the
+2026-08-18 phase-2 gate run caught re-enqueued messages bypassing the inbox.
+Email intake is **not** covered: `bridge/email_bridge.py` enqueues inbound user
+email with no Room-inbox append, so an email-originated message has no inbox
+entry in shadow. Dispatch still runs the legacy session path until the
+authoritative flip ships as its own release.
 
 ## Job routing (`bridge/job_router.py`)
 
