@@ -358,23 +358,68 @@ New coverage to add (not modifications):
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+
+- [SEPARATE-SLUG #3161] **Diagnosing the replay mechanism itself** — reading `logs/worker.log`, `valor-session telemetry`, and `session_events` for `0_1787603653699` to establish which requeue leg produced three fresh contexts at ~300s spacing. Requires the machine that ran `com.valor.nightly-tests` on 2026-08-24; this one is worker-only with `data/nightly-tests-disabled` present, and `valor-session inspect --id 0_1787603653699` reports not found. #3161 is open and holds this.
+- [SEPARATE-SLUG #3161] **Preventing two triage filers from running simultaneously** — the #2971 / #2982–#2989 interleave is a second live filer with a different node list from a different working tree, not a replay. Cross-machine dedup already rests on live REST reads and no evidence says it is currently failing. Belongs with the same investigation.
+- [EXTERNAL] **Verifying the fix against a real nightly run** — the nightly is disabled on this machine (`data/nightly-tests-disabled`) and enabling it on the host that runs `com.valor.nightly-tests` is an operator action on a machine the agent cannot reach. Unit coverage plus `--dry-run` is what this plan can establish; the first real confirmation is the next night on that host.
+- **Pruning stale ledger files.** Growth is bounded by distinct failure sets, not by nights (Risk 5), so there is nothing to prune yet. Not deferred to a follow-up — judged unnecessary, and the reasoning is recorded so it is a decision rather than an omission.
 
 ## Update System
 
-_placeholder_
+
+No update system changes required. The change is three edits inside `scripts/nightly_regression_tests.py` plus its tests and one doc — no new dependency, no new config file, no new env key, no plist change, and no schema. `scripts/remote-update.sh` propagates the repo by pulling; the new code arrives with it.
+
+One thing worth stating because it is easy to assume otherwise: **no service restart is needed.** The nightly detector is not a resident process. `com.valor.nightly-tests` invokes `scripts/nightly_regression_tests.py` fresh on each schedule fire, so the next night after the pull runs the new code. The bridge and worker do not import this module — verified: its only importer is `tests/unit/test_nightly_regression_tests.py`, via `sys.path` insertion.
+
+`data/nightly-triage-ledger/` is created on demand by `write_triage_ledger` using the same `mkdir(parents=True, exist_ok=True)` idiom `save_last_run` uses (line 467). No migration step, no pre-created directory on any machine.
 
 ## Agent Integration
 
-_placeholder_
+
+No new agent-facing surface is required — but this work *is* agent integration in the plain sense, and the wiring already exists in a form worth naming precisely, because "add a CLI entry point" would be the wrong instinct here.
+
+The triage agent is reached through exactly one channel: `maybe_dispatch_triage_session` shells out to `tools.valor_session create --role eng --slug ... --message <prompt>` (line 2347 onward). **The prompt string is the entire interface.** Everything this plan gives the agent — the REST command, the pre-resolved dispositions, the ledger path — travels as prompt text through that one argument. There is nothing to register in `pyproject.toml [project.scripts]`, nothing to add to `.mcp.json`, and no new import for `bridge/telegram_bridge.py`.
+
+The agent already has the two capabilities it needs: `Bash` (to run `gh issue list` and `gh issue create`) and `Read`/`Write` (for the ledger). Both are standard for an `eng` role session. No permission change.
+
+Integration coverage: the existing tests assert the dispatch subprocess argv shape (`TestMaybeDispatchTriageSession`, lines 1489–1513). New assertions extend that to the message content — that the argv's `--message` value carries the ledger's absolute path and the literal `gh issue list --state all`. That is the honest integration test available here; end-to-end confirmation that a live agent obeys the prompt requires the nightly host and is recorded as an `[EXTERNAL]` No-Go.
 
 ## Documentation
 
-_placeholder_
+
+### Feature Documentation
+
+- [ ] Update `docs/features/nightly-triage-dispatch.md` — its "Triage dispatch" bullet (in "What It Does") currently says the prompt "states the same open-and-closed rule so the pre-flight and the agent's instructions cannot drift". Extend that to the three defenses: the prompt hands over the literal REST command rather than an instruction to search, the script passes its resolved dispositions across the dispatch boundary, and a session-local ledger records what was filed. Name the #2960–#2999 wave as the incident that motivated it, as the doc already does for #3131 and #3134.
+- [ ] Add a "Replay Idempotency" subsection to the same doc documenting `data/nightly-triage-ledger/{slug}.json`: its path, its shape, who writes each field, that it is advisory and fail-open, and that it is deliberately unlocked (Race 1).
+- [ ] Check `docs/features/nightly-regression-tests.md` for statements about the triage prompt's dedup contract and update any that describe the search-based read. The two docs cross-reference each other and must not disagree.
+- [ ] `docs/features/README.md` — no new row needed; both affected docs are already indexed. Confirm this rather than assume it.
+
+### External Documentation Site
+
+Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
+
+### Inline Documentation
+
+- [ ] `_build_triage_prompt` docstring: state that the prompt hands over a REST command and why `--search` is prohibited, citing #2960–#2999 and `8524e765b`. The rationale must live next to the code so a future editor meets it before softening the wording.
+- [ ] `write_triage_ledger` docstring: the fail-open posture, the advisory status, and the deliberate absence of file locking (Race 1) — an unexplained missing lock reads as an oversight to a reviewer.
+- [ ] `maybe_dispatch_triage_session` docstring: document the new keyword argument and the ordering constraint that the ledger write follows the `dry_run` short-circuit (line 2340), citing the earlier dry-run defect the sentinel was introduced for.
 
 ## Success Criteria
 
-_placeholder_
+
+- [ ] `_build_triage_prompt` emits the literal `gh issue list --state all --json number,title,state,stateReason --limit 200` and no longer contains `search ALL`, `--search`, or `gh search`.
+- [ ] The prompt warns that `stateReason` is `""` for open issues, so the agent branches on `state` first (Research finding).
+- [ ] The prompt's open / closed-`NOT_PLANNED` / closed-`COMPLETED` decision rule is unchanged in meaning from what #3075 landed — the read mechanism changed, the rule did not.
+- [ ] `dispatch_findings` passes per-node dispositions for exactly the surviving `single_nodes` into `maybe_dispatch_triage_session`, and that list contains no already-open and no closed-not-planned node.
+- [ ] `write_triage_ledger` writes `data/nightly-triage-ledger/{slug}.json` with the seeded dispositions and an empty `filed` array, **before** the session subprocess starts and **after** the `dry_run` short-circuit.
+- [ ] A `--dry-run` invocation creates no file under `data/nightly-triage-ledger/`.
+- [ ] The prompt names the ledger's absolute path and instructs the agent to read it first each turn and append to `filed` immediately after each `gh issue create`, before moving to the next node.
+- [ ] A ledger write failure logs a `WARNING` naming the slug and does not prevent dispatch.
+- [ ] `_build_triage_prompt` raises on a node/disposition length mismatch rather than mis-attributing a disposition (`zip(..., strict=True)`).
+- [ ] Tests pass (`/do-test`) — `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` exits 0.
+- [ ] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three defenses and the ledger's shape.
+- [ ] `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
+- [ ] The branch is rooted on `main`, not on `session/nightly-triage-idempotency-3075` (`git merge-base --is-ancestor origin/main HEAD`).
 
 ## Team Orchestration
 
