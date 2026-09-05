@@ -800,7 +800,9 @@ def run_release_verify(
     """
     try:
         head_short = git.get_short_sha(project_dir)
-        release_check = service.verify_running_release(project_dir, head_short, machine_check)
+        release_check = service.verify_running_release_settled(
+            project_dir, head_short, machine_check
+        )
 
         # Self-heal a stale worker in place before alerting (issues #2400/#2220).
         worker_info = release_check.get("worker")

@@ -490,6 +490,38 @@ class TimeoutSettings(BaseModel):
             "Env: TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS."
         ),
     )
+    beacon_settle_timeout_s: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=600.0,
+        description=(
+            "Settle window (seconds) the release verify waits on a process "
+            "that is mid-boot -- exec'd, but not yet at its boot-beacon write "
+            "(scripts/update/service.py::verify_running_release_settled). A "
+            "bridge or worker restarted while `/update` runs presents exactly "
+            "like a broken beacon (missing, or orphaned by the previous "
+            "image), so the verify reports `unknown` and masks both a genuine "
+            "`stale` and a clean `matches`. Only a LIVE process younger than "
+            "this window is waited on; every other `unknown` is terminal and "
+            "returns immediately. GRAIN OF SALT: provisional/tunable. The "
+            "bridge writes its beacon after the Telegram connect (~30s after "
+            "exec on this fleet); this is that plus headroom for a slow "
+            "catchup, and it doubles as the cap on how long a never-arriving "
+            "beacon can stall the run. Env: TIMEOUTS__BEACON_SETTLE_TIMEOUT_S."
+        ),
+    )
+    beacon_settle_interval_s: float = Field(
+        default=3.0,
+        gt=0.0,
+        le=60.0,
+        description=(
+            "Re-classification interval (seconds) inside the boot-beacon "
+            "settle window above. GRAIN OF SALT: provisional/tunable -- fine "
+            "enough to exit promptly once the beacon lands, coarse enough not "
+            "to spin `git log` per second. Env: "
+            "TIMEOUTS__BEACON_SETTLE_INTERVAL_S."
+        ),
+    )
 
 
 class HybridEvalSettings(BaseModel):

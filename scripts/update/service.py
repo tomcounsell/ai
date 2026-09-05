@@ -1218,14 +1218,18 @@ def _classify_process(
         "process_start_ts": None,
         "classification": "unknown",
     }
+    # Read the process start ts FIRST so it is present even when the beacon is
+    # missing — the settle poll needs the process's age to tell a mid-boot
+    # process (worth waiting for) from a long-running one with no beacon.
+    if pid is not None:
+        result["process_start_ts"] = get_process_start_ts(pid)
     beacon = read_boot_beacon(project_dir / "data" / f"{process_name}_boot_sha")
     if beacon is None:
         return result
     result["boot_sha"], result["beacon_ts"] = beacon
     if pid is None:
         return result
-    start_ts = get_process_start_ts(pid)
-    result["process_start_ts"] = start_ts
+    start_ts = result["process_start_ts"]
     if start_ts is None:
         return result
     if result["beacon_ts"] <= start_ts:
@@ -1273,4 +1277,72 @@ def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict
         results["worker"] = _classify_process(
             project_dir, head_sha, "worker", get_worker_pid(), WORKER_RELEVANT_PATHS
         )
+    return results
+
+
+def _is_mid_boot_unknown(info: dict, now: float, timeout_s: float) -> bool:
+    """True when this ``unknown`` is a live process that has not booted yet.
+
+    A mid-boot unknown is: a running process, whose start ts is readable, that
+    started less than ``timeout_s`` ago, and whose beacon is either absent or
+    orphaned (written by the previous image). Every other ``unknown`` — no PID,
+    unreadable start ts, an old process with no beacon, an unresolvable boot
+    SHA — is terminal, and polling it would only burn the window.
+    """
+    if info.get("classification") != "unknown" or not info.get("running"):
+        return False
+    start_ts = info.get("process_start_ts")
+    if start_ts is None or (now - start_ts) >= timeout_s:
+        return False
+    beacon_ts = info.get("beacon_ts")
+    return beacon_ts is None or beacon_ts <= start_ts
+
+
+def verify_running_release_settled(
+    project_dir: Path,
+    head_sha: str,
+    machine_check: dict,
+    settle_skip: tuple[str, ...] = (),
+    timeout_s: float | None = None,
+    interval_s: float | None = None,
+) -> dict:
+    """:func:`verify_running_release`, re-polled past a process's boot window.
+
+    Same return shape. While any classified process is a *mid-boot* ``unknown``
+    (see :func:`_is_mid_boot_unknown`), re-classify every
+    ``settings.timeouts.beacon_settle_interval_s`` until it resolves or
+    ``settings.timeouts.beacon_settle_timeout_s`` elapses — so a bridge or worker that was
+    restarting when /update reached its verify step lands on a real
+    ``matches``/``stale`` verdict instead of an unactionable ``unknown``.
+
+    ``settle_skip`` names processes never waited on (a deliberately
+    about-to-restart bridge under ``--skip-bridge``: its verdict is discarded
+    anyway, so waiting for it buys nothing). A terminal unknown returns
+    immediately — this never sleeps on a beacon that cannot arrive.
+    """
+    if timeout_s is None or interval_s is None:
+        # Read at call time, never at import (TimeoutSettings, #1968): both
+        # knobs are env-overridable via TIMEOUTS__BEACON_SETTLE_* and
+        # provisional.
+        from config.settings import settings  # noqa: PLC0415
+
+        if timeout_s is None:
+            timeout_s = settings.timeouts.beacon_settle_timeout_s
+        if interval_s is None:
+            interval_s = settings.timeouts.beacon_settle_interval_s
+    deadline = time.monotonic() + timeout_s
+
+    def _needs_settle(results: dict) -> bool:
+        now = time.time()
+        return any(
+            _is_mid_boot_unknown(info, now, timeout_s)
+            for name, info in results.items()
+            if name not in settle_skip
+        )
+
+    results = verify_running_release(project_dir, head_sha, machine_check)
+    while _needs_settle(results) and time.monotonic() < deadline:
+        logger.info("verify_running_release: process still mid-boot — polling for a fresh beacon")
+        time.sleep(interval_s)
+        results = verify_running_release(project_dir, head_sha, machine_check)
     return results
