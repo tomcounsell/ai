@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2712
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-05T13:41:57Z
+revision_applied_at: 2026-09-05T13:56:35Z
 ---
 
 # Busy-guard scan: narrow the query, unamplify the sweep
@@ -538,7 +538,12 @@ and the third pointed at a test that does not exist.
       logged. Covered by
       `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py::TestScanWorktreeSessions::test_model_import_failure_tuple`
       (`:210`) and `TestWorktreeBusyProbe::test_model_import_failure_reports_error_state`
-      (`:141`); re-assert after the refactor moves the import into `_fetch_live_sessions`.
+      (`:141`); re-assert after the refactor, which splits this block: `AgentSession` and
+      `NON_TERMINAL_STATUSES` move into `_fetch_live_sessions`, while `TERMINAL_STATUSES`
+      stays imported unconditionally in `_scan_worktree_sessions` (Task 1) so the matcher's
+      check keeps its name in scope on the injected `sessions=` path too. Both sites raise
+      the same `model_import_failed:{Type}`, so the assertion text is unchanged; only the
+      patch target moves.
 - [ ] Indexed query raises **on materialization** → `("error", "query_failed:{Type}", "")`,
       WARNING logged. Covered by `TestScanWorktreeSessions::test_query_failure_tuple`
       (`:202`), `TestWorktreeBusyProbe::test_query_failure_reports_error_state` (`:133`),
@@ -983,18 +988,32 @@ so they can run in parallel without the shared-worktree livelock.
 - **Parallel**: true
 - **Owns exclusively**: `agent/worktree_manager.py`
 - Add `_fetch_live_sessions()` returning `(rows, error_reason)` where `rows` is a **`list`**:
-  the deferred import of `AgentSession` / `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES`,
-  then, **inside the `try`**,
+  the deferred import of `AgentSession` / `NON_TERMINAL_STATUSES` (the two names the fetch
+  itself needs), then, **inside the `try`**,
   `rows = list(AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES)))`.
   The `list()` is mandatory and inside the `try` for both reasons in Decision 0: `filter()`
   returns a lazy `QueryBuilder` that re-queries on every iteration, and it issues no Redis
   command itself, so a `try` wrapped around `filter()` alone catches nothing. Mirror
   `models/agent_session.py:1389`. Import failure → `model_import_failed:{Type}`; query
   failure → `query_failed:{Type}`. Keep the existing WARNING logs verbatim.
+  `_fetch_live_sessions` owning the `NON_TERMINAL_STATUSES` import does **not** move
+  `TERMINAL_STATUSES` out of `_scan_worktree_sessions`: an import inside
+  `_fetch_live_sessions` binds a name in that frame only, so Decision 2's surviving Python
+  check needs its own binding (see the next bullet). Do not widen `_fetch_live_sessions`'s
+  `(rows, error_reason)` return shape to carry the constant back; that shape is pinned by
+  the Solution's Key Elements and Success Criterion 2.
 - Give `_scan_worktree_sessions` a keyword-only `sessions=None`; when `None`, call
   `_fetch_live_sessions()` and return `("error", reason, "")` on a reason. Leave the
   matching loop, including `if status in TERMINAL_STATUSES: continue` and its per-row
   `except Exception` / `logger.debug` / `continue`, untouched.
+  Keep `from models.session_lifecycle import TERMINAL_STATUSES` in `_scan_worktree_sessions`
+  itself, **unconditionally**: outside the `if sessions is None:` branch, in the same
+  `try` that yields `model_import_failed:{Type}` today (`agent/worktree_manager.py:490`–`:492`).
+  The injected `sessions=` batch path never calls `_fetch_live_sessions`, so a name bound
+  only there would be unbound at `:513` on that path; the resulting `NameError` is swallowed
+  per row by the `except` at `:539`–`:541` and the scan returns `("clear", "", "")` at `:543`,
+  a silent fail-**open** inversion of the fail-closed probe. The duplicate import is the
+  local answer and it costs nothing.
 - Add `worktree_busy_probe_many(repo_root, slugs) -> dict[str, tuple[str, str]]`: fetch
   once into the materialized list; on error return `("error", reason)` for every slug;
   otherwise call `_scan_worktree_sessions(repo_root, s, sessions=rows)` per slug against
