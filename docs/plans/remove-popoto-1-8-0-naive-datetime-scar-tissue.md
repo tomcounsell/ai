@@ -19,14 +19,14 @@ revision_applied_at: 2026-09-05T13:19:43Z
 `models/job.py` still carries three pieces of machinery built for popoto 1.8.0, plus the docstrings
 that justify them:
 
-1. A `Job.save()` override (lines 144-188) that re-attaches UTC to a naive `last_active_at` before
+1. A `Job.save()` override (lines 144-189) that re-attaches UTC to a naive `last_active_at` before
    delegating to `Model.save`.
-2. A `Job.renormalize_last_active_scores()` call inside `Job.repair_indexes()` (lines 769-783) that
+2. A `Job.renormalize_last_active_scores()` call inside `Job.repair_indexes()` (lines 770-781) that
    sweeps every recency score after every `rebuild_indexes()`.
 3. Docstrings at `models/job.py:155`, `:172`, `:533` that describe popoto 1.8.0's decoder in the
    present tense, plus the same story in `docs/features/durability-model.md` (lines 79-108),
    `docs/features/popoto-index-hygiene.md` (line 40), `docs/features/utc-timestamps.md` (lines 87, 94),
-   and `scripts/update/migrations.py` (lines 1115-1141).
+   and `scripts/update/migrations.py` (lines 1116-1155).
 
 Commit `8c1a36ad1` raised the floor to `popoto>=1.9.0`. It updated one docstring and one assertion in
 `tests/unit/test_job_model.py` and left source and docs untouched. A reader of `Job.save()` is told
@@ -184,7 +184,7 @@ them outright is a *silent* tolerance withdrawal whose only witnesses are tests.
 | `session_pickup.py:38-58` `is_scheduled_eligible` | **Keep** | Handles `int | float` as well as `datetime`; docstring declares it shared with the check-in primitive's tests (#2139). |
 | `session_pickup.py:382-389`, `:595-602` `_ensure_tz` (two copies) | **Keep** | Handles `None`, `int`, `float`, `datetime`. Same reasoning. |
 | `session_health.py:6305-6313` `_session_is_alive` | **Keep** | Has an explicit `else: age = time.time() - float(hb)` float leg — heterogeneous by construction. |
-| `session_health.py:658` `last_at_aware` | **Rewrite through `_ts`** | Bare inline copy; `_ts(last_at)` is already called eleven lines above in the same function. |
+| `session_health.py:658` `last_at_aware` | **Rewrite through `_ts`** | Bare inline copy; `_ts(last_at)` is already called seventeen lines above at `:641`, in the same function, but only as a short-circuiting sub-expression — see Technical Approach for the hoist. |
 | `session_health.py:1614` `started_aware` | **Rewrite through `_ts`** | Bare inline copy behind an `isinstance(started_ref, datetime)` check. |
 | `session_health.py:1750` `ts_aware` | **Rewrite through `_ts`** | Same. |
 | `session_health.py:1770` `hb_aware` | **Rewrite through `_ts`** | Same. |
@@ -320,10 +320,12 @@ None. Everything this plan depends on is already on main:
 
 ### Key Elements
 
-1. **Delete `Job.save()`** — `models/job.py:144-188`. `Job` inherits `Model.save` unchanged.
-2. **Delete the post-rebuild sweep call** — `models/job.py:769-783`, the
-   `cls.renormalize_last_active_scores()` call, its four-line comment, and the `if renormalized:`
-   log block. `repair_indexes()` keeps its `(quarantined, rebuilt)` return arity.
+1. **Delete `Job.save()`** — `models/job.py:144-189`. `Job` inherits `Model.save` unchanged.
+2. **Delete the post-rebuild sweep call** — `models/job.py:770-781`: the four-line comment (770-774),
+   the `cls.renormalize_last_active_scores()` call (775), and the `if renormalized:` log block
+   (776-781). Lines 769 (`rebuilt = cls.rebuild_indexes()`), 782
+   (`cls.backfill_open_expectations_index()`), and 783 (the `return`) all stay, so `repair_indexes()`
+   keeps its `(quarantined, rebuilt)` return arity.
 3. **Keep `renormalize_last_active_scores()` itself** — the `backfill_job_last_active_scores`
    migration still calls it, and an applied migration stays in the registry.
 4. **Correct every 1.8.0-as-present citation** — three docstrings in `models/job.py`, one in
@@ -349,14 +351,17 @@ Nothing changes at runtime for a caller. The observable deltas are:
 
 **`models/job.py`**
 
-- Remove the whole `def save(...)` block at lines **144-188** (signature, docstring, the
+- Remove the whole `def save(...)` block at lines **144-189** (signature, docstring, the
   `if update_fields is None or "last_active_at" in update_fields:` guard, and the `super().save(...)`
   delegation). Verify `datetime` and `UTC` are still used elsewhere in the module before touching the
   imports at line 53 — `_now()` at line 78 uses both, so both stay.
-- In `repair_indexes()`, delete lines **770-783**: the comment beginning `# rebuild_indexes()
-  re-scores every row via field.on_save on`, the `scanned, renormalized = ...` assignment, and the
-  `if renormalized:` logging block. Leave `rebuilt = cls.rebuild_indexes()` and the
-  `cls.backfill_open_expectations_index()` call that follows.
+- In `repair_indexes()`, delete lines **770-781**: the comment beginning `# rebuild_indexes()
+  re-scores every row via field.on_save on` (770-774), the `scanned, renormalized = ...` assignment
+  (775), and the `if renormalized:` logging block (776-781). **Three adjacent lines stay**: 769
+  (`rebuilt = cls.rebuild_indexes()`), 782 (`cls.backfill_open_expectations_index()`), and 783
+  (`return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)`). Deleting through 783 would
+  drop the backfill call and the return, silently turning `repair_indexes()` into a `None`-returning
+  function; mutation 2 in Step 3 is the tripwire.
 - Rewrite three docstring passages:
   - **`:533`** (`recent_for_room`): `popoto 1.8.0's QueryBuilder has no early-limit path` → state the
     version-independent fact. `QueryBuilder` still has no early-limit path for a `SortedField` on
@@ -447,10 +452,10 @@ plan's No-Gos explicitly defer (`agent/session_runner/liveness.py:69`,
 `scripts/update/run.py:494`, `tools/agent_session_scheduler.py:47`, `tools/session_progress.py:201`,
 `utils/utc.py:44`). AC5 therefore widens to **three files** — the two `agent/` files plus
 `ui/data/sdlc.py` — not repo-wide; a repo-wide criterion would be unsatisfiable without breaking the
-No-Gos. The remaining sixteen sites are the concrete scope of the follow-up in Open Question 2, which
+No-Gos. The remaining sixteen sites are the concrete scope of the follow-up in Open Question 1, which
 now has a measured size rather than a hand-wave.
 
-**`scripts/update/migrations.py:1115-1141`** — rewrite `_migrate_backfill_job_last_active_scores`'s
+**`scripts/update/migrations.py:1116-1155`** — rewrite `_migrate_backfill_job_last_active_scores`'s
 docstring. It currently opens "popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
 `Job.save()` UTC-reattach override shipped...". The migration's *purpose* is historical and stays
 accurate as history; say so in the past tense and drop the claim that `repair_indexes` re-runs the
@@ -780,7 +785,7 @@ the change makes true.
 
 ### 1. Delete the `Job.save()` override
 
-- Remove `def save(...)` and its docstring from `models/job.py` (currently lines 144-188). Locate by
+- Remove `def save(...)` and its docstring from `models/job.py` (currently lines 144-189). Locate by
   symbol, not line number.
 - Leave the `datetime` and `UTC` imports alone — `_now()` still uses both.
 - Run `scripts/pytest-clean.sh tests/unit/test_job_model.py -k ScorePurity` and expect **two failures**
@@ -792,8 +797,9 @@ the change makes true.
 
 - Delete the `# rebuild_indexes() re-scores every row via field.on_save on ...` comment, the
   `scanned, renormalized = cls.renormalize_last_active_scores()` call, and the `if renormalized:` log
-  block (currently `models/job.py:770-783`).
-- Keep `rebuilt = cls.rebuild_indexes()` and `cls.backfill_open_expectations_index()`.
+  block (currently `models/job.py:770-781` — 770-774 comment, 775 call, 776-781 log block).
+- Keep line 769 `rebuilt = cls.rebuild_indexes()`, line 782 `cls.backfill_open_expectations_index()`,
+  and line 783's `return (quarantined, ...)`. The range stops at 781 for exactly this reason.
 - Confirm `renormalize_last_active_scores` still exists and is still called from
   `scripts/update/migrations.py:1162`.
 - `git grep "re-normalized"` to confirm no log consumer depended on the deleted line.
