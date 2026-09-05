@@ -12,23 +12,99 @@ last_comment_id:
 
 ## Problem
 
-<!-- TODO -->
+Four reflections page a human over Telegram by shelling out to `valor-telegram send --chat "Eng: Valor" <message>` with the chat name as a string literal in the argv:
+
+| Site | Function | What it alerts about |
+|---|---|---|
+| `reflections/expectation_reconciler.py:181` | `_escalate_once` | An orphaned expectation on a Job whose owning lane is gone |
+| `reflections/sdlc_progress.py:792` | `_send_alert` | An SDLC lane stalled at a head sha after auto-resume gave up |
+| `reflections/sentry_triage.py:701` | `_send_telegram_notification` | The per-run Sentry classification digest |
+| `reflections/stall_advisory.py:459` | `_send_alert` | Running sessions classified stalled or suspect |
+
+Two of them, `expectation_reconciler` and `sdlc_progress`, run once per project through `run_per_project_audit(load_local_projects())`. When the reflection acts on `popoto` or `cuttlefish`, the alert about that project still lands in the `valor` engineers' chat. The message body carries a `[{project_key}]` prefix, so the misroute is legible after the fact, but the wrong humans get paged and the right ones never do.
+
+The other two, `sentry_triage` and `stall_advisory`, aggregate across every project into one digest. For those the destination is not wrong so much as unresolved: the correct chat is this checkout's own engineer group, and today that identity is asserted by a string literal rather than looked up.
+
+`valor-telegram`'s `--chat` accepts a group *name*, which re-enters its ambiguity-tolerant `resolve_chat` cascade. Two projects whose engineer groups differ only in suffix could resolve to whichever the cascade prefers. A numeric `chat_id` cannot.
+
+**Current behavior:** every one of these four alerts is addressed to the literal string `Eng: Valor`, regardless of which project the reflection is acting on and regardless of what `projects.json` says.
+
+**Desired outcome:** each sender resolves its destination from configuration — a numeric `chat_id` for the project whose work provoked the alert — and declines to send, loudly, when no destination resolves. The literal survives in exactly one place: `reflections/docs_auditor.py`'s deliberately narrowed `FALLBACK_ENG_CHAT`.
 
 ## Freshness Check
 
-<!-- TODO -->
+**Baseline commit:** `67d714662`
+**Issue filed at:** 2026-09-02T05:51:09Z
+**Disposition:** Minor drift
+
+**File:line references re-verified:**
+- `reflections/expectation_reconciler.py:181` — hardcoded argv in `_escalate_once` — still holds, exact line.
+- `reflections/sentry_triage.py:701` — hardcoded argv in `_send_telegram_notification` — still holds, exact line.
+- `reflections/stall_advisory.py:459` — hardcoded argv in `_send_alert` — still holds, exact line.
+- `reflections/sdlc_progress.py:792` — hardcoded argv in `_send_alert` — still holds, exact line.
+- `reflections/utilities.py::resolve_eng_group` — the prerequisite resolver — present, line 310.
+- `reflections/docs_auditor.py::_resolve_notify_chat` — the landed reference implementation — present, line 1552.
+
+**Cited sibling issues/PRs re-checked:**
+- #2754 — closed 2026-09-02T11:58:29Z. Resolution: PR #3077 (`fix(docs-auditor): route Telegram notifications by audited repo root`, merge commit `974be653`) added `_resolve_notify_chat(repo_root)` plus 8 routing tests, and documented the ladder in `docs/features/docs-auditor.md`. The prerequisite this issue was severed to wait for has landed.
+
+**Commits on main since the issue was filed (touching referenced files):**
+- `3c77e1eab` *AgentSession: one newest-wins resolver for every session_id read* — touched `reflections/expectation_reconciler.py`'s owner-row lookup. Irrelevant to the sender.
+- `b964baf63` *Job: a corrupt goal fails closed on every write and loud on every read* — irrelevant to the sender.
+- Neither moved a sender line; all four line references are byte-exact.
+
+**Active plans in `docs/plans/` overlapping this area:** none. No plan document mentions `resolve_eng_group`, `send_eng_telegram`, or the literal.
+
+**Notes — the drift that matters:**
+
+1. **The issue undercounts the sweep.** A fifth argv site carries the literal outside `reflections/`: `scripts/memory_consolidation.py:352`. The issue's stated exit criterion is "a clean grep sweep for the literal, not an enumerated site list", and that sweep fails today with `memory_consolidation` still present. See No-Gos for the disposition.
+2. **The archived #2754 plan's anti-criterion is already stale.** It asserts six non-`docs_auditor` files carry the literal, naming `scripts/nightly_regression_tests.py` among them. That file carries no `valor-telegram` invocation today. The real count on `67d714662` is five: the four reflections plus `scripts/memory_consolidation.py`.
+3. **`sentry_triage`'s `load_local_projects()` call is not what the issue thinks it is.** It appears at line 913, inside the Class-C filing branch, and exists only to map a Sentry project slug to a `working_directory` for `gh issue create`. It has no bearing on the notification at line 1034, which is a single cross-project digest. Corrected in the Solution.
 
 ## Prior Art
 
-<!-- TODO -->
+- **#2754 / PR #3077 (merged 2026-09-02)** — the direct parent. Fixed `reflections/docs_auditor.py` alone, because that is the one site where the audited repo identity was already in scope at the send call. Its plan (`docs/archive/plans-completed/docs-auditor-telegram-sender-hardcodes-eng-valor.md`) explicitly deferred both the sweep and the shared helper to this issue: *"Building the shared `send_eng_telegram` helper in `utilities.py` now"* is listed as a No-Go there, with the note that *"that belongs with the sweep"*. This plan is the sweep.
+- **#2717** — *Autonomously start SDLC on `upvote`-labeled issues via a scheduled reflection*. Introduced `reflections/sdlc_upvote_lanes.py`, which is already a `resolve_eng_group` consumer; `tests/unit/reflections/test_sdlc_upvote_lanes.py` monkeypatches `resolve_eng_group` at two sites. A second working consumer to pattern-match against.
+- **#2629** — *react() cannot derive a transport: reflection emoji reactions still RPUSH to `telegram:outbox:0`*. Same failure family: a reflection asserting a Telegram destination as a constant instead of deriving it. Confirms this is a recurring shape, not a one-off.
+- **#1633** — *Merge PM/Dev bridge roles into a single Eng role*. Established the `Eng:` group-name prefix convention that `resolve_eng_group` scans for and that `bridge/routing.py` keys the engineer persona off.
+
+No prior attempt at *these four* sites exists. The `## Why Previous Fixes Failed` section is therefore not applicable.
 
 ## Research
 
-<!-- TODO -->
+No external research performed, and none warranted. This is an internal refactor: no new dependency, no external API, no ecosystem pattern in play. Every fact the plan rests on came from reading the checkout at `67d714662` and from `gh` queries against this repo's own issue history, both recorded above.
 
 ## Spike Results
 
-<!-- TODO -->
+All four verifiable assumptions were resolved inline by code-read against `67d714662` — none needed a fan-out, and each came in well under the 5-minute cap. Recorded here because the findings, not the method, are what the build needs.
+
+### spike-1: is the project dict actually in scope at every escalation call site?
+- **Assumption**: "Threading a project through is a per-module signature refactor" (issue body) — implying the project is reachable but several frames up.
+- **Method**: code-read
+- **Result**: Better than assumed for both per-project modules. In `expectation_reconciler`, `_escalate_once` has exactly three call sites (lines 444, 480, 506), all inside `_reconcile_project(project: dict)`, which already binds `project_key = project.get("slug", "?")` at line 372. In `sdlc_progress`, `_escalate_once` has exactly one call site (line 1160), inside the `_escalate` closure in `_check_project_stalls(project: dict)`, and it *already passes* `project=project_key`. No intermediate frames need new parameters — the dict is on the same frame in both cases.
+- **Confidence**: high
+- **Impact if false**: would have forced threading through `_attempt_action` and the action ladder. It does not.
+
+### spike-2: does `sentry_triage`'s digest have a project to thread?
+- **Assumption**: issue body — "`sentry_triage` is a `load_local_projects()` consumer, i.e. it genuinely iterates multiple projects. So its alerts would misroute."
+- **Method**: code-read
+- **Result**: **False as stated.** `run_sentry_triage()` calls `_send_telegram_notification` once, at line 1034, with a digest built from `classified[A..E]` spanning every Sentry project in the org. Its `load_local_projects()` call at line 913 resolves a `working_directory` for `gh issue create` and never reaches the notification. `stall_advisory` is the same shape by a different route: it never calls `load_local_projects()` at all, and `run_stall_advisory()` emits one aggregate alert at line 223 from a global `AgentSession.query.filter(status__in=...)`.
+- **Confidence**: high
+- **Impact if false**: none — this *is* the falsification, and it splits the fix in two. See Solution.
+
+### spike-3: what signature does the shared helper actually need?
+- **Assumption**: issue body — `send_eng_telegram(project_key, message)`.
+- **Method**: code-read
+- **Result**: wrong key type. `resolve_eng_group(project: dict)` takes the full project dict and scans `project["telegram"]["groups"]`. A `project_key`-keyed helper would have to re-run `load_local_projects()` and re-scan on every send, at call sites that already hold the dict. `docs_auditor._resolve_notify_chat` sidesteps this by keying on `repo_root: Path` and matching against each project's `working_directory` — the right shape for the host-machine case, the wrong one for a caller holding the dict.
+- **Confidence**: high
+- **Impact if false**: the helper API changes. It does — see Solution's two-entry-point design.
+
+### spike-4: can resolution be verified on this machine?
+- **Assumption**: a local run can demonstrate a resolved numeric `chat_id`.
+- **Method**: code-read + live probe (`load_local_projects()` → `resolve_eng_group` over every local project).
+- **Result**: **No.** All 20 projects in this machine's `~/Desktop/Valor/projects.json` carry an empty `telegram` block; `resolve_eng_group` returns `None` for every one. This checkout is a worker-only machine whose `projects.json` is Tom's, not production's. The archived #2754 plan records that on the production machine `valor` resolves to `('Eng: Valor', -1003449100931)`.
+- **Confidence**: high
+- **Impact if false**: n/a. The consequence is a hard constraint on verification: only the *skip* branch is observable here. Every resolved-destination assertion must be a unit test against a synthetic project dict, exactly as `tests/unit/test_docs_auditor_substrate.py::TestTelegramChatRouting` does it. Recorded in Risks.
 
 ## Data Flow
 

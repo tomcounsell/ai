@@ -93,15 +93,51 @@ Two spikes ran against a throwaway git repo with a linked worktree, simulating t
 
 ## Data Flow
 
-_placeholder_
+Two paths reach the producer. Both end in the same unguarded commit.
+
+**Path A — stale worktree found while creating a new one** (the path the issue names)
+
+1. **Entry point**: `create_worktree(repo_root, slug)` — `agent/worktree_manager.py:1295`. Called on session start / revival.
+2. `worktree_dir.exists()` is False, so creation proceeds. `_find_worktree_for_branch(repo_root, "session/{slug}")` finds the branch checked out at some *other* `.worktrees/` path (line 1318).
+3. `_cleanup_stale_worktree(repo_root, branch_name, existing_wt)` — line 1323.
+4. Path-containment guard (line 918) passes: the path is under `.worktrees/`. Directory exists, so the force-remove branch is taken.
+5. `stale_slug = wt.name`; `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` — line 948.
+6. **The gap**: `git status --porcelain` in a gutted `wt` returns a long list of ` D` lines. Non-empty, so the clean-tree early return does not fire. `git add -A` stages every deletion. `git commit --no-verify --no-gpg-sign` writes it — **onto whatever branch `wt` has checked out**, which is `session/{slug}`, not `session/{stale_slug}`.
+7. `git -C {repo_root} update-ref refs/session-wip/{stale_slug} {sha}` — the ref is filed under the *directory name*, the commit landed on a *different branch*. Recovery pointer and recovered content disagree.
+8. **Output**: `git worktree remove --force` proceeds. The wipe is now the head of a live session branch, and the durable ref points at it.
+
+**Path B — ordinary teardown** (unnamed in the issue, equally exposed)
+
+1. **Entry point**: `remove_worktree(repo_root, slug)` — line 1551. Called from `post_merge_cleanup` (line 2010) and from session teardown.
+2. Refuse-busy guard (#1357) and live-process guard pass, or `force=True` overrides them.
+3. `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` — line 1660. Same unguarded body, same outcome. Here slug and branch do agree.
+4. **Output**: same wipe commit, same ref.
+
+**Where the guard goes**: step 6 in Path A is step 3 in Path B — the identical function body. Putting the refusal inside `preserve_uncommitted_worktree_changes`, between the `status` read and `git add -A`, covers both paths with one change and leaves every caller's contract unchanged (the function already returns `{"preserved": False, "errors": [...]}` and is documented as never raising into teardown).
+
+**Where the deletions came from** is deliberately *not* on this path. Whatever gutted the tree — a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback at line 978, a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory — the observable at step 6 is identical and the refusal is correct against all three.
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #2150 (#2137) | Added `preserve_uncommitted_worktree_changes`: auto-WIP-commit + `refs/session-wip/{slug}` before every force-remove. Added the destructive-git PreToolUse hook as the agent-facing half. | Treated "dirty" as a single condition. `git status --porcelain` being non-empty was taken as proof that work exists, when it is equally consistent with work having been destroyed. The one place a filter belonged — between reading status and staging everything — is the one place with no logic in it. |
+| PR #2150 (#2137) | Used `--no-verify` on the WIP commit, to keep pre-commit hooks from hanging teardown. | Correct for the stated reason, and it removed the last check that could have caught a 902,840-deletion commit. Nothing else in the path inspects the diff. |
+| #1646 (unmerged-branch guard) | Refuses to delete a session branch carrying unmerged commits. | Worked exactly as designed, in the wrong direction. Once the wipe was committed it *was* unmerged work, so the guard protected it. A safety mechanism for committed work cannot distinguish a commit worth keeping from a commit that should never have been made. |
+
+**Root cause pattern:** every guard in this subsystem answers "is there something here?" and none answers "is what's here plausible?". `status --porcelain` non-empty, `merge-base --is-ancestor` passing, `merged_via_tree` false — each is a presence check, and a wipe satisfies all three. The fix is the first shape-of-the-change check on the path.
+
+**A correction to the issue's own diagnosis.** The Diagnostic Output section attributes the `bridge boot → WIP commit` correlation to `cleanup_stale_branches`. That function (`agent/session_revival.py:193`) lists `session/*` branches, checks their age against `max_age_hours`, and calls `safe_delete_branch`. It never touches a worktree and never reaches preserve. The correlation is real; the mechanism named for it is not. The only caller of `_cleanup_stale_worktree` is `create_worktree` at line 1323 — so what a bridge boot does is *create* worktrees, and it is the stale-worktree recovery inside creation (Path A above) that reaches the producer. Anyone building from the issue's stated mechanism would have instrumented the wrong function.
 
 ## Architectural Impact
 
-_placeholder_
+- **New dependencies**: none. Two additional `git` reads (`ls-tree`, and reuse of the `status` output already captured) inside a function that already shells out four times.
+- **Interface changes**: none breaking. `preserve_uncommitted_worktree_changes` keeps its signature and its documented return shape. The refusal reuses the existing failure branch — `{"preserved": False, "was_clean": False, "errors": [...]}` — and adds one key, `"refused": <reason>`, for callers and tests that want to distinguish a refusal from a git failure. Every existing caller ignores the return value entirely, so nothing downstream changes.
+- **Coupling**: unchanged. The guard is local to one function; no new imports across module boundaries. One named constant lands in `config/settings.py` alongside the other tunables.
+- **Data ownership**: unchanged.
+- **Reversibility**: trivial. Deleting the guard block restores today's behavior exactly. No migration, no persisted state, no schema.
+
+The one thing that genuinely changes is the function's *contract in the failure case*: it can now decline to preserve a tree it previously would have committed. That is the point, and the No-Gos and Risks sections below bound it.
 
 ## Appetite
 
