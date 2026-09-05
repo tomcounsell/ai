@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2712
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-05T13:21:55Z
+revision_applied_at: 2026-09-05T13:41:57Z
 ---
 
 # Busy-guard scan: narrow the query, unamplify the sweep
@@ -319,9 +319,11 @@ Steps 2–4 repeat, from scratch, for every lane that reaches guard 5.
    its `working_dir`, building `{slug: (state, detail)}` — same normalization, same
    segment-prefix match, N cheap Python passes instead of N Redis queries.
 5. **Each lane** reads its verdict from the map.
-6. **Re-probe at the decision point**: a lane that survives all guards and is about to be
-   handed to `cleanup_after_merge` gets a fresh single-slug `worktree_busy_probe` call
-   first. Typically 0–3 lanes per sweep.
+6. **Re-probe at the decision point** (`apply=True` only): a lane that survives all guards
+   and is about to be handed to `cleanup_after_merge` gets a fresh single-slug
+   `worktree_busy_probe` call first. Typically 0–3 lanes per sweep. On the dry-run path the
+   sweep returns at `tools/disk_reclaim.py:437`–`:440` before `cleanup_after_merge` (`:443`)
+   and deletes nothing, so it takes no re-probe.
 7. **Output**: identical tri-state per lane.
 
 Interactive callers (`remove_worktree` at `:1696` via `worktree_busy_check`) are untouched
@@ -330,8 +332,10 @@ except that their single scan is now index-narrowed.
 ## Architectural Impact
 
 - **New dependencies**: none. `NON_TERMINAL_STATUSES` is already exported from
-  `models/session_lifecycle.py` and is already imported alongside `TERMINAL_STATUSES` in
-  the same deferred-import block.
+  `models/session_lifecycle.py`. The deferred-import block inside `_scan_worktree_sessions`
+  (`agent/worktree_manager.py:490`–`:492`) imports only `AgentSession` and
+  `TERMINAL_STATUSES` today, so Task 1 adds one name to an import block that already exists
+  — a new import line, not a new dependency.
 - **Interface changes**: purely additive. `worktree_busy_probe_many(repo_root, slugs) ->
   dict[str, tuple[str, str]]` is new. `_scan_worktree_sessions`, `worktree_busy_check`,
   and `worktree_busy_probe` keep their exact signatures and return shapes.
@@ -364,7 +368,7 @@ the investigation that says what **not** to build; the build itself is a couple 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | popoto >= 1.9.0 | `python -c "import popoto; assert tuple(int(x) for x in popoto.__version__.split('.')[:2]) >= (1, 9), popoto.__version__"` | `status__in` set-union lookups, and the single-hydration fix from #2639 that every timing in this plan assumes |
-| Reachable Redis | `python -c "from models.agent_session import AgentSession; AgentSession.query.filter(status='pending')"` | The scan under change queries it; a build that cannot reach Redis cannot validate the change |
+| Reachable Redis | `python -c "from models.agent_session import AgentSession; assert isinstance(list(AgentSession.query.filter(status='pending')), list)"` | The scan under change queries it; a build that cannot reach Redis cannot validate the change. The `list(...)` is what makes the row able to fail — `filter()` alone issues no Redis command (Decision 0), so the unmaterialized form exits 0 against a dead server. Demonstrated during this revision: under `REDIS_URL=redis://127.0.0.1:6399/9` the materialized command exits **1** with `ConnectionError: Error 61 connecting to 127.0.0.1:6399`, and exits **0** against the live server |
 
 ## Solution
 
@@ -472,6 +476,20 @@ guard chain than today's probe does (after `merged_via_tree` rather than before)
 authorizing read moves closer to the deletion than it is on `main`. Success Criterion 3 and
 the Verification table are worded to this two-call-site shape, and the `all_clear` fixture
 at `tests/unit/test_disk_reclaim.py:66` stubs both functions.
+
+**The re-probe fires on the `apply=True` path only, and the invariant is stated that way
+everywhere.** The dry-run branch at `tools/disk_reclaim.py:437`–`:440` appends the lane to
+`sweep.removed` and `continue`s *before* the `cleanup_after_merge` call at `:443` —
+`tests/unit/test_disk_reclaim.py:147`–`:150` (`test_dry_run_never_calls_cleanup`) already
+pins that on `main`. Dry run deletes nothing, so it opens no TOCTOU window and there is
+nothing for a fresh read to authorize; adding a probe there would buy a query and no safety.
+The consequence is that `probe count == len(sweep.removed)` holds **under `apply=True`** and
+is false by construction under `apply=False`, where the count is 0 against a non-empty
+`sweep.removed`. Every statement of the invariant below carries that qualifier, the probe-count
+test is built off `test_removes_lane_when_every_guard_clears`
+(`tests/unit/test_disk_reclaim.py:138`, `apply=True`) and never off the dry-run test, and
+Task 6's close-out re-measurement — which is a dry run — reports the batch materialization
+count and says plainly that the re-probe count is not observable there.
 
 **Decision 5 — lazy, not eager.** Building the map at sweep start would make an all-
 `too_young` sweep pay one query where it currently pays zero. Building it on first need
@@ -638,8 +656,16 @@ exactly what makes the vacuous set easy to miss on an otherwise-red-then-green r
       **0** when every lane is `too_young` (Decision 5). Counting `filter()` calls would
       stay green against the exact defect Decision 0 exists to prevent, so this test is
       specified by the thing it counts, not by the function it patches.
-- [ ] The single-slug probe is called exactly `len(sweep.removed)` times (Decision 4), so
-      the two-call-site shape is bounded rather than merely permitted.
+- [ ] **Under `apply=True`**, the single-slug probe is called exactly `len(sweep.removed)`
+      times (Decision 4), so the two-call-site shape is bounded rather than merely permitted.
+      Build this by extending `test_removes_lane_when_every_guard_clears`
+      (`tests/unit/test_disk_reclaim.py:138`, `apply=True`) with a `worktree_busy_probe` call
+      counter. Never extend `test_dry_run_never_calls_cleanup` (`:147`, `apply=False`): that
+      path returns at `:437`–`:440` before `cleanup_after_merge` (`:443`), so it would assert
+      0 probe calls against 1 `sweep.removed` entry and fail the invariant as stated.
+- [ ] **Under `apply=False`**, the single-slug probe is called **zero** times while
+      `sweep.removed` is non-empty — the dry-run counterpart, asserted so the asymmetry is
+      pinned rather than merely tolerated.
 - [ ] A lane that reads clear in the snapshot and busy at the re-probe is **not** removed
       (Decision 4).
 
@@ -728,7 +754,7 @@ single-line one.
 (`docs/plans/auto-preserve-teardown-half-deleted-worktree.md`) touches **two** regions, not
 one: `preserve_uncommitted_worktree_changes` (`:1508`) and `_cleanup_stale_worktree`
 (`:903`, where it repairs a slug/branch mismatch in the same edit). `_cleanup_stale_worktree`
-is the nearer neighbour of the two — 324 lines below `worktree_busy_probe` (`:562`) versus
+is the nearer neighbour of the two — 341 lines below `worktree_busy_probe` (`:562`) versus
 946 for the preserve function — so it is the one worth checking, and the draft named only
 the farther one.
 **Mitigation:** Disjoint functions in both cases. This plan's touched range is `:457`–`:579`
@@ -798,8 +824,9 @@ rejected likewise, in Rabbit Holes.
 
 No update system changes required. This changes two functions and adds a third inside code
 that already ships with the repo. No new dependency (`NON_TERMINAL_STATUSES` is already
-imported in the same block as `TERMINAL_STATUSES`), no new config file, no new
-environment variable, no migration.
+exported from `models/session_lifecycle.py`; Task 1 adds it to the existing deferred-import
+block, which today names only `AgentSession` and `TERMINAL_STATUSES`), no new config file,
+no new environment variable, no migration.
 
 The popoto >= 1.9.0 floor this plan relies on is already committed in `pyproject.toml:21`
 via `8c1a36ad1`, so `/update`'s existing `uv sync` propagates it with no change to the
@@ -866,11 +893,14 @@ Not applicable — this repo has no Sphinx/MkDocs site.
       `list(...)` sits inside the `try` that produces `query_failed:{Type}` (Decision 0).
 - [ ] The `working_dir` segment-prefix matcher is byte-for-byte the predicate it is today;
       no `filter(slug=` appears in `agent/worktree_manager.py`.
-- [ ] A sweep over N lanes performs **one batch session query, materialized once**, plus
-      **one fresh single-slug re-probe per lane actually removed** (Decision 4), and
-      **zero of both** when every lane is filtered out above guard 5. Measured by counting
-      iterations of the fetched rows, not `filter()` calls, and by asserting the single-slug
-      probe call count equals `len(sweep.removed)`.
+- [ ] A sweep over N lanes performs **one batch session query, materialized once**, plus,
+      **on the `apply=True` path**, **one fresh single-slug re-probe per lane actually
+      removed** (Decision 4), and **zero of both** when every lane is filtered out above
+      guard 5. Measured by counting iterations of the fetched rows, not `filter()` calls, and
+      by asserting the single-slug probe call count equals `len(sweep.removed)` under
+      `apply=True`. Under `apply=False` the expected re-probe count is **zero** regardless of
+      `len(sweep.removed)`, because the dry-run branch returns at
+      `tools/disk_reclaim.py:437`–`:440` before `cleanup_after_merge` and deletes nothing.
 - [ ] The re-measured saving is recorded, not assumed: the one-materialization test's
       counter is the measurement, and Task 6 additionally reports the observed
       materialization count from a real `python -m tools.disk_reclaim --json` dry run. The
@@ -988,9 +1018,12 @@ so they can run in parallel without the shared-worktree livelock.
   will actually reach guard 5, which is correct and costs nothing extra because the fetch is
   one query regardless of how many slugs are classified against it.
 - Read it as `busy_map.get(slug, ("error", "not_probed"))`. Never default to clear.
-- Immediately before `cleanup_after_merge`, call the single-slug `worktree_busy_probe` once
-  more and skip on `busy`/`error` using the existing `live_session:` / `busy_check_error:`
-  reason strings.
+- On the `apply=True` path only, immediately before the `cleanup_after_merge` call at
+  `tools/disk_reclaim.py:443`, call the single-slug `worktree_busy_probe` once more and skip
+  on `busy`/`error` using the existing `live_session:` / `busy_check_error:` reason strings.
+  The `apply=False` early return at `:437`–`:440` is unchanged and calls no probe: it deletes
+  nothing, so it has no TOCTOU window to close. Placing the re-probe above that branch would
+  charge the daily dry run a query per candidate lane for no safety.
 - Import `worktree_busy_probe_many` alongside the existing deferred imports at `:358`–`:364`,
   keeping `worktree_busy_probe` (Decision 4 keeps the pre-removal call site).
 - Add no `try`/`except` around guard 5. The no-raise guarantee belongs in
@@ -1017,7 +1050,9 @@ so they can run in parallel without the shared-worktree livelock.
   with different verdicts (`["a", "b"]`, busy only in `b`); **exactly one materialization**
   per sweep, counted by iterations of a list-wrapping spy rather than by `filter()` calls;
   zero materializations when every lane is `too_young`; single-slug probe call count equals
-  `len(sweep.removed)`; snapshot-clear + re-probe-busy is not removed; a fetch that raises
+  `len(sweep.removed)` under `apply=True` (extend `test_removes_lane_when_every_guard_clears`,
+  `tests/unit/test_disk_reclaim.py:138`) and equals zero under `apply=False`;
+  snapshot-clear + re-probe-busy is not removed; a fetch that raises
   leaves the sweep completing with every lane `busy_check_error:` rather than propagating;
   a row that raises on attribute access is skipped and a later busy row still wins; an
   unknown status value reads `busy`; `worktree_busy_probe_many(root, [])` returns `{}` and
@@ -1064,10 +1099,15 @@ so they can run in parallel without the shared-worktree livelock.
 - **Parallel**: false
 - Run every row of the Verification table and confirm all Success Criteria.
 - **Re-measure, do not assume.** Run `python -m tools.disk_reclaim --json` as a dry run and
-  report the observed materialization count and the number of lanes that reached guard 5,
-  alongside the pre-change figures recorded in spike-3 (7.0 ms per `query.all()`, 2 of 11
+  report the observed batch materialization count and the number of lanes that reached guard
+  5, alongside the pre-change figures recorded in spike-3 (7.0 ms per `query.all()`, 2 of 11
   lanes reaching the probe). The plan's justification is a measured number, so the close-out
   carries a measured number.
+- **State what this run cannot show.** `--json` without `DISK_RECLAIM_APPLY`
+  (`tools/disk_reclaim.py:50`) is a dry run, and the re-probe is `apply=True`-only, so the
+  observed re-probe count here is zero by construction and is not evidence about Decision 4.
+  The `apply=True` invariant is evidenced by the probe-count test in Task 3, not by this run.
+  Say so in the close-out rather than reporting the zero as a result.
 
 ## Verification
 
@@ -1121,7 +1161,7 @@ is a blocker and neither changes the design. Round-1 findings are not re-listed 
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness; Structural check (independently re-verified) | Decision 4's re-probe is specified to land "immediately before `cleanup_after_merge`", but the dry-run branch at `tools/disk_reclaim.py:437`-`:440` appends the lane to `sweep.removed` and `continue`s *before* the `cleanup_after_merge` call at `:443`. Verified against `main`: `tests/unit/test_disk_reclaim.py:147`-`:150` (`test_dry_run_never_calls_cleanup`) already asserts `sweep.removed == ["lane"]` with zero `cleanup_after_merge` calls under `apply=False`. So on the dry-run path the re-probe fires zero times while `len(sweep.removed)` is non-zero, which falsifies Success Criterion 4 and the Test Impact bullet "The single-slug probe is called exactly `len(sweep.removed)` times (Decision 4)" - both stated with no `apply=True` qualifier. Task 6's close-out re-measurement runs `python -m tools.disk_reclaim --json`, which is dry-run (the apply gate is `DISK_RECLAIM_APPLY`, `tools/disk_reclaim.py:50`), so it will observe zero re-probes by construction rather than as evidence. | pending | Qualify the invariant to the `apply=True` path in Success Criterion 4, in the Test Impact "New tests" bullet, and in Decision 4, stating that dry-run intentionally skips the re-probe because it never reaches `cleanup_after_merge` and deletes nothing, so there is no TOCTOU window to close there. Add the guard condition to Task 2: the re-probe fires only on the `apply=True` path, immediately before the `cleanup_after_merge` call at `tools/disk_reclaim.py:443`; the `apply=False` early return at `:437`-`:440` is unchanged and calls no probe. Build the new probe-count test by extending `test_removes_lane_when_every_guard_clears` (`tests/unit/test_disk_reclaim.py:138`, `apply=True`) with a `worktree_busy_probe` call counter, never by extending `test_dry_run_never_calls_cleanup` (`:147`, `apply=False`) - the latter would assert 0 probe calls against 1 `sweep.removed` entry and fail under the plan's own stated invariant. Task 6 should re-measure the batch materialization count on the dry run and state plainly that the re-probe count is not observable there. |
-| CONCERN | Structural check (measured with a control) | The Prerequisites row "Reachable Redis" runs `python -c "from models.agent_session import AgentSession; AgentSession.query.filter(status='pending')"`, which exits 0 when Redis is unreachable. Measured on this checkout: under `REDIS_URL=redis://127.0.0.1:6399/9` (a dead port) that exact command exits 0 with no output, while the control `list(AgentSession.query.filter(status='pending'))` under the identical environment raises `ConnectionError: Error 61 connecting to 127.0.0.1:6399. Connection refused.` This is precisely the lazy-`QueryBuilder` trap the revision added Decision 0 to document - `filter()` issues no Redis command - left in place in the plan's own prerequisite gate. A prerequisite check that cannot fail does not gate the build, and here it fails to gate the one dependency every spike measurement rests on. | pending | Materialize the query so the check actually touches Redis: `python -c "from models.agent_session import AgentSession; assert isinstance(list(AgentSession.query.filter(status='pending')), list)"`. Then verify the repaired row bites the same way the plan verifies its other anti-criteria: run it once against an unreachable `REDIS_URL` and confirm a non-zero exit before trusting it. The popoto floor row above it is already sound (it exits non-zero on an unmet floor); only the Redis row needs the change. |
-| NIT | History & Consistency | Architectural Impact claims `NON_TERMINAL_STATUSES` "is already imported alongside `TERMINAL_STATUSES` in the same deferred-import block". False against `main`: `agent/worktree_manager.py:490`-`:492` imports only `AgentSession` and `TERMINAL_STATUSES` inside `_scan_worktree_sessions`'s `try`. Task 1 correctly adds the import, so nothing about the build changes - only the rationale text is wrong. | pending | - |
-| NIT | History & Consistency | Risk 5 states `_cleanup_stale_worktree` (`:903`) sits "324 lines below `worktree_busy_probe` (`:562`)"; the arithmetic is 341. The companion figure for `preserve_uncommitted_worktree_changes` (`:1508`, 946 lines) is computed correctly, and the qualitative conclusion - `_cleanup_stale_worktree` is the nearer of #3167's two regions - is unaffected. | pending | - |
+| CONCERN | Risk & Robustness; Structural check (independently re-verified) | Decision 4's re-probe is specified to land "immediately before `cleanup_after_merge`", but the dry-run branch at `tools/disk_reclaim.py:437`-`:440` appends the lane to `sweep.removed` and `continue`s *before* the `cleanup_after_merge` call at `:443`. Verified against `main`: `tests/unit/test_disk_reclaim.py:147`-`:150` (`test_dry_run_never_calls_cleanup`) already asserts `sweep.removed == ["lane"]` with zero `cleanup_after_merge` calls under `apply=False`. So on the dry-run path the re-probe fires zero times while `len(sweep.removed)` is non-zero, which falsifies Success Criterion 4 and the Test Impact bullet "The single-slug probe is called exactly `len(sweep.removed)` times (Decision 4)" - both stated with no `apply=True` qualifier. Task 6's close-out re-measurement runs `python -m tools.disk_reclaim --json`, which is dry-run (the apply gate is `DISK_RECLAIM_APPLY`, `tools/disk_reclaim.py:50`), so it will observe zero re-probes by construction rather than as evidence. | Decision 4 (new closing paragraph); Data Flow step 6; Success Criteria (batch-query/re-probe row); Test Impact "New tests" (two probe-count bullets, `apply=True` and `apply=False`); Task 2 (re-probe bullet); Task 3 (probe-count bullet); Task 6 (new "State what this run cannot show" bullet) | Qualify the invariant to the `apply=True` path in Success Criterion 4, in the Test Impact "New tests" bullet, and in Decision 4, stating that dry-run intentionally skips the re-probe because it never reaches `cleanup_after_merge` and deletes nothing, so there is no TOCTOU window to close there. Add the guard condition to Task 2: the re-probe fires only on the `apply=True` path, immediately before the `cleanup_after_merge` call at `tools/disk_reclaim.py:443`; the `apply=False` early return at `:437`-`:440` is unchanged and calls no probe. Build the new probe-count test by extending `test_removes_lane_when_every_guard_clears` (`tests/unit/test_disk_reclaim.py:138`, `apply=True`) with a `worktree_busy_probe` call counter, never by extending `test_dry_run_never_calls_cleanup` (`:147`, `apply=False`) - the latter would assert 0 probe calls against 1 `sweep.removed` entry and fail under the plan's own stated invariant. Task 6 should re-measure the batch materialization count on the dry run and state plainly that the re-probe count is not observable there. |
+| CONCERN | Structural check (measured with a control) | The Prerequisites row "Reachable Redis" runs `python -c "from models.agent_session import AgentSession; AgentSession.query.filter(status='pending')"`, which exits 0 when Redis is unreachable. Measured on this checkout: under `REDIS_URL=redis://127.0.0.1:6399/9` (a dead port) that exact command exits 0 with no output, while the control `list(AgentSession.query.filter(status='pending'))` under the identical environment raises `ConnectionError: Error 61 connecting to 127.0.0.1:6399. Connection refused.` This is precisely the lazy-`QueryBuilder` trap the revision added Decision 0 to document - `filter()` issues no Redis command - left in place in the plan's own prerequisite gate. A prerequisite check that cannot fail does not gate the build, and here it fails to gate the one dependency every spike measurement rests on. | Prerequisites, "Reachable Redis" row (materialized with `list(...)`, and demonstrated to bite: exit 1 against `redis://127.0.0.1:6399/9`, exit 0 against the live server) | Materialize the query so the check actually touches Redis: `python -c "from models.agent_session import AgentSession; assert isinstance(list(AgentSession.query.filter(status='pending')), list)"`. Then verify the repaired row bites the same way the plan verifies its other anti-criteria: run it once against an unreachable `REDIS_URL` and confirm a non-zero exit before trusting it. The popoto floor row above it is already sound (it exits non-zero on an unmet floor); only the Redis row needs the change. |
+| NIT | History & Consistency | Architectural Impact claims `NON_TERMINAL_STATUSES` "is already imported alongside `TERMINAL_STATUSES` in the same deferred-import block". False against `main`: `agent/worktree_manager.py:490`-`:492` imports only `AgentSession` and `TERMINAL_STATUSES` inside `_scan_worktree_sessions`'s `try`. Task 1 correctly adds the import, so nothing about the build changes - only the rationale text is wrong. | Architectural Impact, "New dependencies" bullet; the same false claim in Update System corrected alongside it | - |
+| NIT | History & Consistency | Risk 5 states `_cleanup_stale_worktree` (`:903`) sits "324 lines below `worktree_busy_probe` (`:562`)"; the arithmetic is 341. The companion figure for `preserve_uncommitted_worktree_changes` (`:1508`, 946 lines) is computed correctly, and the qualitative conclusion - `_cleanup_stale_worktree` is the nearer of #3167's two regions - is unaffected. | Risk 5 (324 → 341) | - |
