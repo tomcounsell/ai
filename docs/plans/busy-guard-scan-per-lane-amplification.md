@@ -348,10 +348,11 @@ except that their single scan is now index-narrowed.
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (to ratify the corrected premise in the Freshness Check — the issue's
-  stated magnitude and its suggested `slug=` fix are both wrong, and someone should agree
-  the reduced scope is still worth shipping)
-- Review rounds: 1
+- PM check-ins: 0. The one check-in the draft reserved was to ratify the corrected premise
+  (the issue's stated magnitude and its suggested `slug=` fix are both wrong). That is
+  settled in Decision 7: ship at the corrected magnitude, on the growth argument rather
+  than the present-day 14 ms/day.
+- Review rounds: 2 (one critique round has already run; its findings are applied here)
 
 Two functions change, one function is added, no schema moves. The bulk of this plan is
 the investigation that says what **not** to build; the build itself is a couple of hours.
@@ -676,6 +677,20 @@ mutation, not by a green run: break `worktree_busy_probe_many` to return `("clea
 unconditionally and confirm `test_busy_check_error_also_blocks_removal` **fails**. A test
 that stays green under that mutation is not testing anything.
 
+### Risk 1b: The batch fetch is passed around as a lazy `QueryBuilder`
+**Impact:** Two failures at once, both silent. The sweep pays N full Redis queries instead
+of one — the amplification the plan exists to remove, reintroduced inside the fix — and a
+Redis outage raises during iteration rather than being caught, escaping
+`_scan_worktree_sessions` and aborting the entire sweep at `tools/disk_reclaim.py:415`
+(no `except` there) instead of skipping lanes as `busy_check_error:`. A "one fetch per
+sweep" test that counts `filter()` calls stays green through both.
+**Mitigation:** Decision 0 — `rows = list(...)` inside the existing `try`, so the object
+crossing the function boundary is a plain list and the only Redis touch is inside a
+handler. Pinned three ways: the one-materialization test counts iterations rather than
+`filter()` calls; the one-rows-object/two-verdicts test would fail against a re-executing
+cursor; and Decision 6's test asserts the sweep completes rather than raising when the
+fetch fails.
+
 ### Risk 2: `status__in` and `not in TERMINAL_STATUSES` diverge on an unknown status
 **Impact:** A status value outside `ALL_STATUSES` would be treated as busy today
 (fail-closed) and as clear after an index-only narrowing (fail-open) — a live worktree
@@ -696,13 +711,36 @@ snapshot says clear and the re-probe says busy.
 **Impact:** A `KeyError`-avoiding `.get(slug, ("clear", ""))` would turn a lookup bug into
 a silent deletion — the single most dangerous line this change could contain.
 **Mitigation:** The default is `("error", "not_probed")`, never `("clear", "")`, and an
-anti-criterion in Verification greps for a clear-valued default on the map read.
+anti-criterion in Verification resolves the second argument of every `.get()` call in
+`tools/disk_reclaim.py` **by AST**, not by grep. A line-oriented grep is not sufficient
+here: a black-wrapped default (`busy_map.get(\n    slug, ("clear", ""),\n)`) satisfies a
+single-line pattern with count 0 while shipping exactly the silent-clear bug this risk
+calls the most dangerous line the change could contain. The defeat is latent rather than
+live today — `busy_map.get(slug, ("error", "not_probed"))` is short enough that black will
+not wrap it — but the check must survive a future reformat, so it is written against the
+parse tree. When demonstrating the row red, inject the **wrapped** form as well as the
+single-line one.
 
 ### Risk 5: Merge conflict with #3167 in `agent/worktree_manager.py`
-**Impact:** Both lanes edit the same module.
-**Mitigation:** Disjoint functions — #3167 works in `preserve_uncommitted_worktree_changes`,
-this plan in `_scan_worktree_sessions` / `worktree_busy_*`, several hundred lines apart. A
-textual conflict is resolvable by inspection; there is no semantic overlap to reason about.
+**Impact:** One other open lane edits the same module. #3167
+(`docs/plans/auto-preserve-teardown-half-deleted-worktree.md`) touches **two** regions, not
+one: `preserve_uncommitted_worktree_changes` (`:1508`) and `_cleanup_stale_worktree`
+(`:903`, where it repairs a slug/branch mismatch in the same edit). `_cleanup_stale_worktree`
+is the nearer neighbour of the two — 324 lines below `worktree_busy_probe` (`:562`) versus
+946 for the preserve function — so it is the one worth checking, and the draft named only
+the farther one.
+**Mitigation:** Disjoint functions in both cases. This plan's touched range is `:457`–`:579`
+(`_scan_worktree_sessions` through `worktree_busy_probe`, plus the new `_fetch_live_sessions`
+and `worktree_busy_probe_many`). Neither `_cleanup_stale_worktree` nor
+`preserve_uncommitted_worktree_changes` calls `_scan_worktree_sessions` or `worktree_busy_*`,
+and neither is reachable from them, so a textual conflict is resolvable by inspection and
+there is no semantic overlap to reason about.
+
+**Not a risk: #3162.** It closed 2026-09-05T12:52:41Z and its commit `55ad9ac89` is an
+ancestor of this plan's baseline `491a88624`, so its `reap_idle_worktree` (`:1007`) and its
++102 lines are already in the file every measurement here was taken against. It is a
+baseline fact, not a concurrent editor. Recorded explicitly so a reviewer who has seen
+#3162 named as a conflict elsewhere does not re-raise it.
 
 ## Race Conditions
 
@@ -807,9 +845,14 @@ Not applicable — this repo has no Sphinx/MkDocs site.
       AgentSession table", which stops being true. State the indexed query, and state why
       the Python terminal-status check survives it (Decision 2) so nobody deletes it as
       dead code later.
+- [ ] Docstring on `_fetch_live_sessions` stating that the `list(...)` is load-bearing:
+      `filter()` returns a lazy `QueryBuilder` that re-queries on every iteration and issues
+      no Redis command itself, so removing the `list()` would both reintroduce the per-lane
+      amplification and move the Redis failure outside this function's `except` (Decision 0).
+      Without that sentence the wrapper reads as noise and the next reader deletes it.
 - [ ] Docstring on `worktree_busy_probe_many` covering the contract, the fan-out of a fetch
-      error to every requested slug, and the fact that it shares one matcher with the
-      single-slug path.
+      error to every requested slug, the never-raises guarantee (Decision 6), and the fact
+      that it shares one matcher with the single-slug path.
 - [ ] A comment at the `sweep_worktrees` map read naming why the default is
       `("error", "not_probed")` and not `("clear", "")` (Risk 4).
 
@@ -817,10 +860,20 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 - [ ] `_scan_worktree_sessions` issues an indexed `status__in` query; `AgentSession.query.all()`
       no longer appears in `agent/worktree_manager.py`.
+- [ ] The query result is **materialized** — `_fetch_live_sessions` returns a `list`, and the
+      `list(...)` sits inside the `try` that produces `query_failed:{Type}` (Decision 0).
 - [ ] The `working_dir` segment-prefix matcher is byte-for-byte the predicate it is today;
       no `filter(slug=` appears in `agent/worktree_manager.py`.
-- [ ] A sweep over N lanes performs **one** session query, and **zero** when every lane is
-      filtered out above guard 5.
+- [ ] A sweep over N lanes performs **one batch session query, materialized once**, plus
+      **one fresh single-slug re-probe per lane actually removed** (Decision 4), and
+      **zero of both** when every lane is filtered out above guard 5. Measured by counting
+      iterations of the fetched rows, not `filter()` calls, and by asserting the single-slug
+      probe call count equals `len(sweep.removed)`.
+- [ ] The re-measured saving is recorded, not assumed: the one-materialization test's
+      counter is the measurement, and Task 6 additionally reports the observed
+      materialization count from a real `python -m tools.disk_reclaim --json` dry run. The
+      plan's justification is a millisecond figure, so something must re-measure it after
+      the change rather than only confirming the query's shape.
 - [ ] `worktree_busy_check` returns `None` for both clear and error; `worktree_busy_probe`
       returns `clear`/`busy`/`error`; a batch fetch failure yields `error` for every
       requested slug.
@@ -829,6 +882,12 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - [ ] The three stale-monkeypatch tests in `tests/unit/test_disk_reclaim.py` exercise the
       new guard path, proven by mutation: forcing the batch probe to return clear makes
       `test_busy_check_error_also_blocks_removal` fail.
+- [ ] `grep -n 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+      returns nothing, and the five predicate tests named in Test Impact turn red under a
+      matcher-returns-clear mutation rather than passing vacuously against an empty
+      `MagicMock` sequence.
+- [ ] The per-row matching `except` branch has a test — it had none before this change, and
+      Task 1 refactors the loop it lives in.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No xfail conversions apply — no expected-failure markers exist in
@@ -891,18 +950,24 @@ so they can run in parallel without the shared-worktree livelock.
 - **Agent Type**: builder
 - **Parallel**: true
 - **Owns exclusively**: `agent/worktree_manager.py`
-- Add `_fetch_live_sessions()` returning `(rows, error_reason)`: the deferred import of
-  `AgentSession` / `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES`, then
-  `AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES))`. Import failure →
-  `model_import_failed:{Type}`; query failure → `query_failed:{Type}`. Keep the existing
-  WARNING logs verbatim.
+- Add `_fetch_live_sessions()` returning `(rows, error_reason)` where `rows` is a **`list`**:
+  the deferred import of `AgentSession` / `TERMINAL_STATUSES` / `NON_TERMINAL_STATUSES`,
+  then, **inside the `try`**,
+  `rows = list(AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES)))`.
+  The `list()` is mandatory and inside the `try` for both reasons in Decision 0: `filter()`
+  returns a lazy `QueryBuilder` that re-queries on every iteration, and it issues no Redis
+  command itself, so a `try` wrapped around `filter()` alone catches nothing. Mirror
+  `models/agent_session.py:1389`. Import failure → `model_import_failed:{Type}`; query
+  failure → `query_failed:{Type}`. Keep the existing WARNING logs verbatim.
 - Give `_scan_worktree_sessions` a keyword-only `sessions=None`; when `None`, call
   `_fetch_live_sessions()` and return `("error", reason, "")` on a reason. Leave the
-  matching loop, including `if status in TERMINAL_STATUSES: continue`, untouched.
+  matching loop, including `if status in TERMINAL_STATUSES: continue` and its per-row
+  `except Exception` / `logger.debug` / `continue`, untouched.
 - Add `worktree_busy_probe_many(repo_root, slugs) -> dict[str, tuple[str, str]]`: fetch
-  once; on error return `("error", reason)` for every slug; otherwise call
-  `_scan_worktree_sessions(repo_root, s, sessions=rows)` per slug and collapse to the same
-  tri-state `worktree_busy_probe` produces. Return `{}` for an empty `slugs` without querying.
+  once into the materialized list; on error return `("error", reason)` for every slug;
+  otherwise call `_scan_worktree_sessions(repo_root, s, sessions=rows)` per slug against
+  that same list and collapse to the same tri-state `worktree_busy_probe` produces. Return
+  `{}` for an empty `slugs` without querying. It must never raise (Decision 6).
 - Do not touch `worktree_busy_check` or `worktree_busy_probe`.
 
 ### 2. Unamplify the sweep
@@ -924,7 +989,11 @@ so they can run in parallel without the shared-worktree livelock.
 - Immediately before `cleanup_after_merge`, call the single-slug `worktree_busy_probe` once
   more and skip on `busy`/`error` using the existing `live_session:` / `busy_check_error:`
   reason strings.
-- Import `worktree_busy_probe_many` alongside the existing deferred imports at `:359`.
+- Import `worktree_busy_probe_many` alongside the existing deferred imports at `:358`–`:364`,
+  keeping `worktree_busy_probe` (Decision 4 keeps the pre-removal call site).
+- Add no `try`/`except` around guard 5. The no-raise guarantee belongs in
+  `worktree_busy_probe_many` (Decision 6); an `except` here would mask a contract breach
+  instead of failing it loudly in tests.
 - Change no guard ordering, no skip-reason string, and no JSON output shape.
 
 ### 3. Re-point the tests, then prove they bite
@@ -935,15 +1004,32 @@ so they can run in parallel without the shared-worktree livelock.
 - **Assigned To**: guard-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Apply every disposition in Test Impact.
-- Add: batch-vs-single agreement across clear/busy/error; exactly one fetch per sweep;
-  zero fetches when every lane is `too_young`; snapshot-clear + re-probe-busy is not
-  removed; an unknown status value reads `busy`; `worktree_busy_probe_many(root, [])`
-  returns `{}` and queries nothing.
-- **Mutation-check each guard and re-measure after each change**: force
-  `worktree_busy_probe_many` to return clear unconditionally and confirm
-  `test_busy_check_error_also_blocks_removal` and `test_skips_lane_with_live_session` both
-  **fail**. Paste the red output into the PR.
+- Apply every disposition in Test Impact, including re-pointing **all 17** `query.all`
+  sites in `test_worktree_manager_busy_guards.py`. Completion check:
+  `grep -c 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`
+  returns 0.
+- Re-point the three whole-query failure mocks (`:110`, `:135`, `:203`) so the raise happens
+  on **iteration**, not on the `filter()` call — a spy whose `__iter__` raises. A
+  `filter.side_effect` would leave Decision 0's real failure mode untested.
+- Add: batch-vs-single agreement across clear/busy/error; one rows object serving two slugs
+  with different verdicts (`["a", "b"]`, busy only in `b`); **exactly one materialization**
+  per sweep, counted by iterations of a list-wrapping spy rather than by `filter()` calls;
+  zero materializations when every lane is `too_young`; single-slug probe call count equals
+  `len(sweep.removed)`; snapshot-clear + re-probe-busy is not removed; a fetch that raises
+  leaves the sweep completing with every lane `busy_check_error:` rather than propagating;
+  a row that raises on attribute access is skipped and a later busy row still wins; an
+  unknown status value reads `busy`; `worktree_busy_probe_many(root, [])` returns `{}` and
+  queries nothing.
+- **Mutation-check each guard and re-measure after each change** — three mutations, each
+  re-measured on its own:
+  1. Force `worktree_busy_probe_many` to return clear unconditionally → both
+     `test_busy_check_error_also_blocks_removal` and `test_skips_lane_with_live_session`
+     must **fail**.
+  2. Make the matcher return clear unconditionally → all five predicate tests named in Test
+     Impact must **fail**. Any that stays green is reaching no code.
+  3. Delete the `list(` wrapper in `_fetch_live_sessions` → the one-materialization test
+     must **fail** with a count of N rather than 1.
+  Paste each red output into the PR.
 
 ### 4. Posture validation
 - **Task ID**: validate-postures
@@ -954,8 +1040,11 @@ so they can run in parallel without the shared-worktree livelock.
 - Diff the matching loop against `main` and confirm the predicate is unchanged.
 - Confirm `worktree_busy_check` still collapses error to `None` and `worktree_busy_probe`
   still returns three states.
-- Confirm no `filter(slug=`, no `query.all()`, and no clear-valued default on the map read.
-- Confirm the mutation run reported red for the guards it targets.
+- Confirm no `filter(slug=`, no `query.all()`, and no clear-valued default on the map read —
+  the last one via the AST row, and demonstrated red against the black-wrapped form.
+- Confirm `_fetch_live_sessions` returns a materialized `list` and that the `list(...)` sits
+  inside the `try` (Decision 0), and that no `QueryBuilder` crosses a function boundary.
+- Confirm the three mutation runs each reported red for the guards they target.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -972,6 +1061,11 @@ so they can run in parallel without the shared-worktree livelock.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every row of the Verification table and confirm all Success Criteria.
+- **Re-measure, do not assume.** Run `python -m tools.disk_reclaim --json` as a dry run and
+  report the observed materialization count and the number of lanes that reached guard 5,
+  alongside the pre-change figures recorded in spike-3 (7.0 ms per `query.all()`, 2 of 11
+  lanes reaching the probe). The plan's justification is a measured number, so the close-out
+  carries a measured number.
 
 ## Verification
 
@@ -982,19 +1076,30 @@ so they can run in parallel without the shared-worktree livelock.
 | Lint clean | `python -m ruff check agent/worktree_manager.py tools/disk_reclaim.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/worktree_manager.py tools/disk_reclaim.py` | exit code 0 |
 | Indexed query present | `grep -c 'status__in' agent/worktree_manager.py` | output > 0 |
+| Query is materialized (Decision 0) | `grep -cE 'list\(\s*AgentSession\.query\.filter' agent/worktree_manager.py` | output > 0 |
 | Batch probe wired into the sweep | `grep -c 'worktree_busy_probe_many' tools/disk_reclaim.py` | output > 0 |
 | Full scan gone (anti-criterion) | `grep -c 'query\.all()' agent/worktree_manager.py` | match count == 0 |
 | Slug narrowing rejected (anti-criterion, Decision 1) | `grep -c 'filter(slug=' agent/worktree_manager.py` | match count == 0 |
-| No clear-valued default on the map read (anti-criterion, Risk 4) | `grep -cE '\.get\([^)]*,[[:space:]]*\("clear"' tools/disk_reclaim.py` | match count == 0 |
+| No lazy builder crosses a function boundary (anti-criterion, Decision 0) | `python -c "import ast,sys; t=ast.parse(open('agent/worktree_manager.py').read()); f=[n for n in ast.walk(t) if isinstance(n,ast.FunctionDef) and n.name=='_fetch_live_sessions'][0]; print('OK' if any(isinstance(n,ast.Call) and getattr(n.func,'id','')=='list' for n in ast.walk(f)) else 'BAD')"` | output `OK` |
+| No clear-valued default on the map read (anti-criterion, Risk 4; AST so a black-wrapped default cannot slip past) | `python -c "import ast; t=ast.parse(open('tools/disk_reclaim.py').read()); bad=[n.lineno for n in ast.walk(t) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='get' and len(n.args)>=2 and isinstance(n.args[1],ast.Tuple) and n.args[1].elts and isinstance(n.args[1].elts[0],ast.Constant) and n.args[1].elts[0].value=='clear']; print('BAD' if bad else 'OK', bad)"` | output `OK []` |
 | Terminal-status check survives (anti-criterion, Decision 2) | `grep -c 'in TERMINAL_STATUSES' agent/worktree_manager.py` | output > 0 |
 | Fail-open wrapper intact | `grep -c 'def worktree_busy_check' agent/worktree_manager.py` | output > 0 |
 | Fail-closed wrapper intact | `grep -c 'def worktree_busy_probe' agent/worktree_manager.py` | output > 0 |
-| Guard order unchanged in the sweep | `grep -n 'too_young\|live_process:\|live_session:\|open_pr\|unmerged' tools/disk_reclaim.py \| head -5` | output contains too_young |
+| Guard order unchanged in the sweep | `sed -n '/^def sweep_worktrees/,/^def [a-z_]/p' tools/disk_reclaim.py \| grep -oE '"protected"\|"too_young"\|"uncommitted_changes"\|live_process:\|busy_check_error:\|live_session:\|"open_pr"\|"unmerged"' \| paste -sd, -` | exactly `"protected","too_young","uncommitted_changes",live_process:,busy_check_error:,live_session:,"open_pr","unmerged"` |
+| No stale `query.all` mocks left behind (Test Impact completion check) | `grep -c 'query\.all' tests/unit/worktree_manager/test_worktree_manager_busy_guards.py` | match count == 0 |
 | No stale xfails in scope | `grep -rn 'xfail' tests/unit/test_disk_reclaim.py tests/unit/worktree_manager/` | exit code 1 |
 
-The three anti-criteria rows above must each be demonstrated red before being trusted:
-introduce the forbidden pattern deliberately, confirm the row FAILS, revert, and paste the
-FAIL output into the PR description.
+Every anti-criterion row above must be demonstrated red before being trusted: introduce the
+forbidden pattern deliberately, confirm the row FAILS, revert, and paste the FAIL output
+into the PR description. Two of them need a specific injection rather than an obvious one:
+
+- **Risk 4's clear-valued default** must be injected in **both** the single-line form and
+  the black-wrapped multi-line form (`busy_map.get(\n    slug, ("clear", ""),\n)`). The
+  wrapped form is the one a line-oriented grep misses; if the AST row lets it through, the
+  row is not doing its job.
+- **Decision 0's materialization** must be injected by deleting the `list(` wrapper, not by
+  removing the query. The point is that the code still runs, still returns rows, and still
+  passes every other row in this table while re-querying Redis once per slug.
 
 ## Critique Results
 
@@ -1014,21 +1119,3 @@ War room, FULL depth (Risk & Robustness, Scope & Value, History & Consistency) p
 | NIT | Scope & Value | Every Success Criterion is structural (grep-shaped or return-shape-shaped), though the plan's whole justification for shipping, restated in Open Question 1, is a measured millisecond figure. Nothing re-measures it after the change, so there is no way to confirm the fix delivered the saving rather than only changing the query shape. | pending | - |
 | NIT | Structural check | The Verification row "Guard order unchanged in the sweep" (`grep -n 'too_young\|live_process:\|live_session:\|open_pr\|unmerged' tools/disk_reclaim.py \| head -5`) returns lines 23, 98, 253, 371 and 387 on current `main`: three comments and two unrelated lines. The `head -5` window never reaches the guard chain, so the row passes today and would keep passing if the guard order were reversed. | pending | - |
 
----
-
-## Open Questions
-
-1. **The issue's stated magnitude is wrong, and the corrected one is small — still ship it?**
-   The Freshness Check measured 2 probes per sweep on this checkout, not 73, because the
-   probe is the fifth guard and `too_young` eliminates most lanes first. Present-day cost is
-   roughly 14 ms/day. The durable argument is that aged **unmerged** lanes reach the probe
-   every night and are never removed, so the multiplier only grows — but that is a slower
-   and smaller problem than the issue describes. Ship at Small appetite as planned, or close
-   #2712 as "measured, not worth it"?
-
-2. **Is the pre-removal re-probe (Decision 4) worth its complexity?** Dropping it makes the
-   change a pure simplification and forces the three `test_disk_reclaim.py` monkeypatches to
-   be re-pointed only once. Keeping it preserves the fail-closed guarantee exactly at the
-   moment of deletion, which is the guarantee #2517 built the probe for. The plan keeps it;
-   a reviewer who thinks `remove_worktree`'s own guards suffice should say so at critique,
-   not at build.
