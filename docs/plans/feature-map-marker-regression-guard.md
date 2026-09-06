@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -671,32 +671,32 @@ wiring or a test.
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/feature-map-marker-guard.md`: the three mistag mechanisms with the live
+- [x] Create `docs/features/feature-map-marker-guard.md`: the three mistag mechanisms with the live
       examples (naming #3184 as the tracker for the third), the three rules and what each one can
       and cannot see, R2's majority attribution and its tie branch, why exemptions are keyed by
       path (#2805) and why stale exemptions are themselves a failure (#3031), and how to respond
       when the guard goes red.
-- [ ] **Required line in that doc**, stated plainly rather than implied: R1 and R2 catch ordering
+- [x] **Required line in that doc**, stated plainly rather than implied: R1 and R2 catch ordering
       collisions only inside a themed package directory, which is 80 of 834 tracked test files
       (9.6%). Suite-wide, only fragment matches are caught. A mistagged file sitting directly under
       `tests/unit/` passes all three rules. Give the worked example
       (`test_worktree_manager_config.py` at top level resolves to `config` and stays green).
-- [ ] Add a row for it to the `docs/features/README.md` index table, keeping the table's sort order
+- [x] Add a row for it to the `docs/features/README.md` index table, keeping the table's sort order
       (enforced by `.claude/hooks/validators/validate_features_readme_sort.py`).
 
 ### Inline Documentation
 
-- [ ] `tests/marker_map.py` module docstring states that it is the single source of marker
+- [x] `tests/marker_map.py` module docstring states that it is the single source of marker
       resolution and must stay import-light so it runs on a bare interpreter with no venv.
-- [ ] Every `KNOWN_MISTAGS` entry carries a prose reason as its value. A bare path with no reason
+- [x] Every `KNOWN_MISTAGS` entry carries a prose reason as its value. A bare path with no reason
       is not an acceptable entry.
-- [ ] `resolve_marker`'s stem line carries a comment pointing at #3184 and stating that the global
+- [x] `resolve_marker`'s stem line carries a comment pointing at #3184 and stating that the global
       `str.replace` is intentional fidelity to the shipped hook, so a future reader does not
       "clean it up" into `removeprefix` and silently retag two files.
 
 ### Test Suite Index
 
-- [ ] Update `tests/README.md`. Its existing split procedure (around lines 495 to 566) tells authors
+- [x] Update `tests/README.md`. Its existing split procedure (around lines 495 to 566) tells authors
       to check each new basename against `FEATURE_MAP` by hand; replace that manual step with the
       command that runs the audit, and add the worked ordering example the #2879 review asked for
       (`worktree_manager` sitting after `config`) alongside the fragment-match example

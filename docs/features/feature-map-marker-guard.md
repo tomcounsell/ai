@@ -24,6 +24,15 @@ staying green — the mistag is invisible until someone runs `pytest -m
 `tests/unit/test_feature_map_markers.py` is the guard: it fails when a
 tracked test file's marker does not resolve as intended.
 
+## Where it runs
+
+The guard is an ordinary unit test under `tests/unit/`, so the SDLC TEST stage
+and the nightly suite both execute it. Those are this repo's CI. No GitHub
+Actions workflow gates it: the repo's only workflow,
+`.github/workflows/claude.yml`, reacts to `@claude` mentions and runs no test
+suite. Adding a workflow was considered and ruled out, because a guard that
+runs everywhere the suite already runs needs no second execution path.
+
 ## Three mistag mechanisms
 
 1. **Ordering collision.** `FEATURE_MAP` is a first-hit-wins dict. A generic
@@ -75,8 +84,8 @@ winning `FEATURE_MAP` key must appear in the stem as a contiguous run of
 `_`-delimited tokens, not as a fragment inside a longer word.
 
 **The coverage boundary, stated plainly.** R1 and R2 need a package directory
-to compare against, so together they reach only **80 of 834 tracked test
-files (9.6%)** — R1 47 files, R2 33. The other 754 files sit directly under a
+to compare against, so together they reach only **80 of 835 tracked test
+files (9.6%)** — R1 47 files, R2 33. The other 755 files sit directly under a
 root directory (`tests/unit/`, `tests/integration/`, ...) and are covered by
 R3 alone, which cannot see an ordering collision: an ordering collision is by
 definition a genuine whole-token match that happens to belong to the wrong
@@ -86,7 +95,7 @@ instead of inside a themed package, would resolve to `config`, pass R3
 (`config` is a whole token), and never reach R1 or R2 (its parent `unit` is a
 known root) — all three rules stay green on a genuine mistag. The rules are
 not widened to close this: doing so would need a declaration of intent that
-does not exist for those 754 files.
+does not exist for those 755 files.
 
 ## Exemptions: `KNOWN_MISTAGS`, keyed by path only
 
@@ -112,8 +121,8 @@ regression. The baseline holds 24 pre-existing paths (21 from R1, 2 from R2,
 
 ## What was considered and rejected
 
-- **Requiring every file to carry a marker.** 554 of 834 files (66.4%)
-  resolve to no marker at all. A must-be-marked rule would need a 554-entry
+- **Requiring every file to carry a marker.** 555 of 835 files (66.5%)
+  resolve to no marker at all. A must-be-marked rule would need a 555-entry
   exemption list on day one — a manifest pretending to be a guard, not a
   guard.
 - **A whole-package exemption (`EXEMPT_DIRS`-shaped mechanism).** The
