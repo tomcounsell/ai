@@ -370,12 +370,11 @@ applies at any age; the escalation issue waits for the same
 `STALE_PR_AGE_DAYS` threshold that would have closed a plain PR, so the
 title's "still unreviewed" claim is true when it is made. Because the dedup
 key fires once ever, a filing made on sight would make the wrong wording the
-permanent record. It also passes the withheld
-count to `_write_liveness` as a keyword `fixes_withheld`, emitted into the
-Redis summary only when non-zero — a secondary signal now that the durable
-operator surface is the GitHub issue plus the reflection dashboard's rendered
-`output_summary` (see [Configuration](#configuration)), not a manual
-`redis-cli` read.
+permanent record. The withheld count also reaches the reflection dashboard's
+rendered `output_summary` (see [Configuration](#configuration)): every
+returned summary string that mentions a withheld run interpolates the count
+directly, so the durable operator surface is the GitHub issue plus that
+rendered summary, not a Redis read.
 
 A rotation run that writes to the working tree and then fails to produce a PR
 — a `git`/`gh` step failing, or the scoped restore itself failing — files its
@@ -404,11 +403,10 @@ that branch for the cascade.
 `run_docs_auditor`'s outcome vocabulary is separate and stricter: `"ok"`
 survives on exactly the one return that created a PR. Every other return that
 reached the lock — the lock-held return, the dirty-tree guard, no candidates
-found, and a zero-diff pass — reports `"skipped"`, matching each one's own
-`_write_liveness(..., "skipped", ...)` call, so the field means "a PR was
-opened" and nothing weaker. (`"disabled"`, returned when the auth probe fails
-before the lock is even acquired, is a pre-flight bail rather than a run
-outcome and sits outside this vocabulary.)
+found, and a zero-diff pass — reports `"skipped"`, so the field means "a PR
+was opened" and nothing weaker. (`"disabled"`, returned when the auth probe
+fails before the lock is even acquired, is a pre-flight bail rather than a
+run outcome and sits outside this vocabulary.)
 
 ### File-as-issue (judgment required)
 
@@ -579,6 +577,11 @@ them with a real vault-aware mechanism that runs **beside**, not through, this
 rotation — see [Vault↔Site/Docs Drift Detector](#vaultsitedocs-drift-detector)
 below.
 
+Run outcomes reach the operator through the reflection's `output_summary`,
+not through a `docs_audit:` Redis key: every return builds a summary string,
+the scheduler stores it on the `Reflection` record, and the reflections
+dashboard renders it (see [Operational Cheatsheet](#operational-cheatsheet)).
+
 ## Locking
 
 ```
@@ -586,8 +589,6 @@ docs_audit:running:global       — rotation reflection lock (TTL 1h)
 docs_audit:sweeper:running      — branch-sweeper lock (TTL 30min)
 docs_audit:issues_filed:{hash}  — per-finding dedup (TTL 30d)
 docs_audit:last_run             — rotation state hash
-docs_audit:last_completed_run_ts        — Phase 2 liveness signal
-docs_audit:last_completed_run_summary   — Phase 2 liveness JSON summary
 ```
 
 All locks use the established SETNX pattern: `r.set(key, "1", nx=True, ex=ttl)`.
@@ -668,13 +669,15 @@ Summary of what lives in `reflections/docs_auditor.py`:
   every other detector in this module.
 - **`vault_narratives_compared`** — a per-run count of narratives actually
   compared (secrets-guarded, missing, or markitdown-sidecar entries don't
-  count), threaded into `_write_liveness` via a new **explicit optional 5th
-  parameter** (`vault_narratives_compared: int | None = None`). The other four
-  existing call sites still pass exactly four positional args and are
-  unaffected — `_write_liveness` only includes the field in the liveness
-  summary when it is not `None`, so "detector ran, found zero drift" (`0`) is
-  distinguishable from "the field is absent because this call site never runs
-  the vault comparison."
+  count), appended as a trailing clause on the created-PR summary string
+  **unconditionally**, including when the count is `0`. No other summary
+  string carries the clause. Of the five "skipped" returns, two (the lock
+  guard and the dirty-tree guard) fire before the vault comparison ever
+  runs; the other three (no candidates, the pre-write PR guards, zero-diff)
+  fire after it and simply don't thread the count into their own summary
+  strings. Either way, "detector ran, found zero drift" (clause reads `0`)
+  stays distinguishable from "this run never reached the created-PR path"
+  (clause absent entirely).
 - **Advisory only.** The detector files GitHub issues; it never rewrites
   `site/*.html` or vault files. The existing markdown-only apply guard is
   unchanged.
@@ -720,11 +723,9 @@ now runs for real (advisory/report-only, same as before). Verify with
 # Inspect rotation state
 redis-cli HGETALL docs_audit:last_run
 
-# Phase 2 liveness signal — a secondary, per-machine surface. The durable
-# operator surfaces are the GitHub issue tracker and the reflections
-# dashboard's rendered "last run summary" (sourced from output_summary).
-redis-cli GET docs_audit:last_completed_run_ts
-redis-cli GET docs_audit:last_completed_run_summary
+# Run outcomes: check the reflections dashboard's "Last run summary" panel
+# for docs-auditor, or query the Reflection model directly. output_summary
+# is the durable surface; there is no Redis key to read.
 
 # Force-clear the lock if a run hung
 redis-cli DEL docs_audit:running:global
@@ -743,10 +744,12 @@ neighborhood cap, zero-diff gate, auth probe degradation, memory-refresh
 hook, and the `/do-docs` thin-caller contract. `TestIsSecretsPath` and
 `TestVaultSiteDrift` cover the vault↔site/docs drift detector (mixed-case,
 near-miss, symlink-into-secrets, out-of-vault exclusion; compared-count
-correctness; issue-cap enforcement); `TestWriteLivenessVaultParam` covers
-the `_write_liveness` 4-arg/5-arg positional contract (`fixes_withheld` is a
-trailing keyword param, so that contract is unchanged); `TestVaultDeadCodeRemoved`
-asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
+correctness; issue-cap enforcement); `TestVaultClauseInSummary` covers the
+created-PR summary's `vault_narratives_compared` clause (unconditional,
+including `0`; absent from the "skipped" summaries); `TestVaultDeadCodeRemoved`
+asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone;
+`TestLivenessDeadCodeRemoved` asserts the retired liveness function and its
+two Redis-key constants are gone.
 
 The four gates are covered by `TestStaleTermDictionary` (cue tiers across
 backticked, cased, alias, and arrow forms; the channel stays
@@ -759,7 +762,7 @@ ambiguous-but-present pass, no re-validation of pre-existing refs — every case
 is expressed as a prose-anchored regex fix whose *replacement*, not its match,
 carries the path-shaped string, so gate 3's path-token suppression cannot eat
 the case before the invariant runs), and `TestWithheldBlocksStaleClose` (a
-bare-name withhold reaching the PR body, Telegram, and liveness).
+bare-name withhold reaching the PR body and Telegram).
 `TestWithheldRateNonRegression` self-baselines the narrow and widened
 `_PATH_REF_RE` arms in one run inside a disposable detached `git worktree`,
 asserting the widening adds no withholds. `TestDeletedTargetFiltering::

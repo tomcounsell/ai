@@ -1199,6 +1199,45 @@ def _migrate_clear_orphaned_warn_state_key(project_dir: Path) -> str | None:
         return None
 
 
+def _migrate_clear_docs_audit_liveness_keys(project_dir: Path) -> str | None:
+    """Sweep the two orphaned ``docs_audit:last_completed_run_*`` Redis keys
+    left by the deleted docs-auditor liveness channel (issue #2743).
+
+    Nothing writes these keys anymore — the docs-auditor rotation now reports
+    its outcome through its return value alone, which the reflection scheduler
+    already forwards into ``Reflection.last_run_summary.output_summary`` for the
+    dashboard to render. Without this one-shot sweep the two keys would sit in
+    every machine's Redis forever, with no TTL and no reader.
+
+    The two key strings are hard-coded rather than imported: the constants that
+    named them (``REDIS_LAST_COMPLETED_TS_KEY``, ``REDIS_LAST_COMPLETED_SUMMARY_KEY``)
+    are deleted along with the function that wrote them.
+
+    Returns None unconditionally; a bookkeeping cleanup must never fail
+    ``/update``. A failure is logged, never swallowed silently, because
+    ``run_pending_migrations`` records a ``None`` return as permanently
+    completed -- a silently-swallowed exception here would never retry.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        deleted = POPOTO_REDIS_DB.delete(
+            "docs_audit:last_completed_run_ts",
+            "docs_audit:last_completed_run_summary",
+        )
+        logger.info(
+            "[migration:clear_docs_audit_liveness_keys] deleted %d orphaned key(s)",
+            deleted,
+        )
+        return None
+    except Exception as e:
+        logger.warning("clear_docs_audit_liveness_keys: %s", e)
+        return None
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -1323,6 +1362,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_clear_orphaned_warn_state_key,
         "Clear the orphaned warn_state key left by the deleted server-side "
         "access-control layer (issue #3004)",
+    ),
+    "clear_docs_audit_liveness_keys": (
+        _migrate_clear_docs_audit_liveness_keys,
+        "Sweep the two orphaned docs_audit:last_completed_run_* Redis keys left "
+        "by the deleted docs-auditor liveness channel (issue #2743)",
     ),
 }
 
