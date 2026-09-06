@@ -534,17 +534,59 @@ class TestContradictionFlagging:
                 "scripts.memory_consolidation._call_haiku",
                 return_value=haiku_response,
             ),
+            patch(
+                "scripts.memory_consolidation.resolve_host_eng_chat",
+                return_value="-1003449100931",
+            ),
             patch("scripts.memory_consolidation.subprocess.run") as mock_subprocess,
         ):
             from scripts.memory_consolidation import run_consolidation
 
             result = run_consolidation(project_key="test", dry_run=True)
 
-        # subprocess.run called with valor-telegram send
+        # subprocess.run called with valor-telegram send, addressed by the
+        # resolved chat_id (not read from the real, ambient projects.json).
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
         assert "valor-telegram" in call_args
         assert "send" in call_args
+        assert "-1003449100931" in call_args
+        assert result["flagged_contradictions"] == 1
+
+    def test_contradiction_suppressed_when_no_eng_group_resolves(self):
+        """No destination resolved -> no subprocess call, no log write."""
+        rec_1 = _make_record("sup-1", "Always use mocks", category="correction")
+        rec_2 = _make_record("sup-2", "Never use mocks", category="correction")
+
+        haiku_response = {
+            "actions": [
+                {
+                    "action": "flag_contradiction",
+                    "ids": ["sup-1", "sup-2"],
+                    "rationale": "Opposing guidance",
+                }
+            ]
+        }
+
+        with (
+            patch(
+                "scripts.memory_consolidation._load_active_memories",
+                return_value=[rec_1, rec_2],
+            ),
+            patch(
+                "scripts.memory_consolidation._call_haiku",
+                return_value=haiku_response,
+            ),
+            patch("scripts.memory_consolidation.resolve_host_eng_chat", return_value=None),
+            patch("scripts.memory_consolidation.subprocess.run") as mock_subprocess,
+            patch("scripts.memory_consolidation._write_contradiction_log") as mock_write_log,
+        ):
+            from scripts.memory_consolidation import run_consolidation
+
+            result = run_consolidation(project_key="test", dry_run=True)
+
+        mock_subprocess.assert_not_called()
+        mock_write_log.assert_not_called()
         assert result["flagged_contradictions"] == 1
 
     def test_contradiction_telegram_failure_writes_log_file(self, tmp_path):

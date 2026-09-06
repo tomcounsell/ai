@@ -47,6 +47,8 @@ import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
+from reflections.utilities import resolve_host_eng_chat
+
 logger = logging.getLogger(__name__)
 
 MAX_MERGES_PER_RUN = 10
@@ -343,13 +345,22 @@ def _flag_contradiction(action: dict, record_map: dict) -> None:
     )
     logger.info(summary)
 
+    chat = resolve_host_eng_chat()
+    if chat is None:
+        logger.warning(
+            "[memory-dedup] no Eng: group resolved for this checkout; "
+            "Telegram notification suppressed (contradiction log not written — "
+            "nothing was attempted, nothing failed)"
+        )
+        return
+
     # Attempt Telegram notification
     try:
         telegram_msg = (
             f"Memory contradiction detected:\nIDs: {ids}\nReason: {rationale}\nMemories: {contents}"
         )
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", telegram_msg],
+            ["valor-telegram", "send", "--chat", chat, telegram_msg],
             check=True,
             capture_output=True,
             timeout=10,

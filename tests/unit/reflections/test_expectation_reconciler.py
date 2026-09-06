@@ -144,6 +144,49 @@ class TestShippedWorkGuard:
         fresh = Job.query.get(id=job.id, room_id=rid)
         assert any(e["id"] == eid for e in fresh.open_expectations(direction="outbound"))
 
+    def test_successful_steer_never_escalates(self, owned_project, monkeypatch):
+        """The site-480 short-circuit: a successful steer must not also page.
+
+        Pins the nested-else restructure (as opposed to a hoisted unpack
+        above the steer check, which would call ``_escalate_once`` — and
+        burn its ``SET NX`` sentinel — unconditionally).
+        """
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/shipped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: "PR #42 (merged)")
+        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: object())
+        monkeypatch.setattr(er, "_steer", lambda _s, m: True)
+        # Note: the per-expectation loop swallows exceptions (log-and-continue),
+        # so a pytest.fail() raised from inside a monkeypatched _escalate_once
+        # would be silently caught rather than failing the test. Spy instead.
+        escalate_calls: list[tuple] = []
+        monkeypatch.setattr(
+            er,
+            "_escalate_once",
+            lambda *a: (escalate_calls.append(a), (True, None))[1],
+        )
+        result = er._reconcile_project(_project(owned_project))
+        assert "0 escalated" in result["summary"]
+        assert not any("escalated-evidence" in f for f in result["findings"])
+        assert escalate_calls == []
+
+    def test_unresolvable_project_suppresses_and_reports_without_counting(
+        self, owned_project, monkeypatch
+    ):
+        """An escalation site reached with no configured Eng: group must
+        report the suppression and must not count a page that never sent."""
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        # _project() carries no "telegram" key, so send_eng_telegram (the real
+        # function, unmocked here) resolves nothing and returns False.
+        result = er._reconcile_project(_project(owned_project))
+        assert "0 escalated" in result["summary"]
+        assert any(f.startswith("alert-suppressed:") for f in result["findings"])
+        assert not any(f.startswith("escalated:") for f in result["findings"])
+
     def test_unshipped_orphan_respawns_when_no_pm(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/dead-lane", what="deliver the migration PR")
@@ -202,7 +245,9 @@ class TestLadderBookkeeping:
         monkeypatch.setattr(
             er,
             "_escalate_once",
-            lambda j, e, m: (pages.append(m) or True) if len(pages) == 0 else False,
+            lambda p, j, e, m: (
+                (pages.append(m) or (True, None)) if len(pages) == 0 else (False, None)
+            ),
         )
         first = er._reconcile_project(_project(owned_project))
         assert any("escalated" in f for f in first["findings"])
