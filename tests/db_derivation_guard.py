@@ -14,10 +14,29 @@ An enumeration of accepted shapes means everything unenumerated passes silently,
 and the next call site was always written in a shape nobody had enumerated. The
 check stayed green while the defect shipped.
 
-So this guard enumerates nothing about *what is being called*. It flags EVERY
-``db=`` keyword argument passed to ANY call anywhere under ``tests/``, and every
-``from_url(...)`` argument, and requires the VALUE to match one of two shapes.
-Anything else is a violation that must be dispositioned in writing.
+So this guard enumerates nothing about *what is being called*. It flags every
+argument-passing SHAPE that can carry a ``db=``, judges the VALUE, and requires
+it to match one of the sanctioned shapes. Anything else is a violation that
+must be dispositioned in writing. That enumeration moved from callee names to
+argument-passing syntax, and #2764 closed the two mirror-image holes the first
+version of that enumeration left: a route that read only keywords never saw a
+positional argument, and a route gated on positional arguments never saw a
+keyword. Stated precisely, per route, so the next author does not have to
+re-derive it by reading the walk:
+
+- **Route 1** (any callee) reads a ``db=`` keyword at any position, and — only
+  for a callee named ``Redis``/``StrictRedis`` — a bare positional argument at
+  :data:`REDIS_DB_POSITIONAL_INDEX`. It does **not** read a positional ``db``
+  on any other callee (see "What this guard still cannot see", gap 2).
+- **Route 2** (``from_url`` only) reads the URL from the first positional
+  argument if present, otherwise from a ``url=`` keyword. It does not read a
+  URL under any other keyword name, and it never resolves more than the two
+  accept shapes below (see gap 6).
+
+Both routes then require the value to be a direct claim-API call, a one-hop
+local alias to one, or the sanctioned fixture parameter used directly and
+unshadowed. Anything else is a violation that must be dispositioned in
+writing.
 
 Measured on the tree at the time of writing: all 17 ``db=`` keyword arguments in
 ``tests/`` are Redis constructions, so ignoring the callee name costs zero false
@@ -26,6 +45,79 @@ All 17 ``Redis`` calls parse as ``ast.Attribute`` (``redis.Redis(...)``) and
 ZERO as ``ast.Name`` — a matcher reading only ``node.func.id`` would match
 nothing and be vacuously green forever. :func:`_terminal_name` reads ``.attr``
 for ``ast.Attribute`` and ``.id`` for ``ast.Name`` for exactly that reason.
+
+What this guard still cannot see
+---------------------------------
+Naming every residual gap in one place, so the next author inherits a known
+boundary rather than an assumed guarantee:
+
+1. A Redis client constructed through an alias outside ``REDIS_CONSTRUCTORS``
+   and receiving an opaque ``**`` splat with no visible ``"db"`` key.
+2. A ``db`` passed positionally to a constructor alias outside
+   ``{"Redis", "StrictRedis"}`` (#2764) — the honest cost of the positional
+   leg's callee scoping: a bare third positional argument means nothing
+   without knowing the callee, so the leg cannot be callee-agnostic the way
+   the rest of this module is. Scoped narrower than ``REDIS_CONSTRUCTORS``
+   deliberately: ``from_url``'s signature is ``(url, **kwargs)`` with no
+   positional ``db`` slot, so including it in this leg's callee set would
+   invent a shape that cannot exist at runtime.
+3. A ``db`` computed inside a helper the guard cannot see through, more than
+   one binding hop from the call site.
+4. :func:`_matches` disposition matching is per-file-per-expression and
+   kind-agnostic, so one ``ALLOWLIST`` entry can cover the same expression
+   across kinds. Bounded by the db-0-only invariant and by
+   :func:`apply_dispositions`'s refusal to let ``ALLOWLIST`` cover any
+   candidate with a ``pool_db``.
+5. A ``db`` arriving inside a starred unpack at the positional index
+   (``redis.Redis("h", 6379, *rest)``) yields no candidate (#2764). The
+   positional leg suppresses ``ast.Starred`` deliberately rather than
+   reporting ``*rest`` as a derived db, so the contents of ``rest`` are
+   unexamined. Direct cost of fix 1's Starred suppression, and the positional
+   mirror of gap 1's opaque ``**`` splat.
+6. Route 2 carries **no one-hop alias leg** (#2764). Route 1 resolves
+   ``d = claim_test_db(); redis.Redis(db=d)`` through :func:`_resolve_one_hop`
+   and accepts it; route 2's only accept legs are a direct call to a
+   ``CLAIM_URL_NAMES`` name and an unshadowed bare parameter, so
+   ``url = redis_test_url(); redis.Redis.from_url(url)`` is reported as a
+   violation. That is a documented false positive, not a hole: the failure
+   direction is loud, and an author who hits it can inline the call or write
+   a disposition.
+7. A walrus written inside a nested ``Lambda``'s own parameter default
+   (``lambda x=(scratch_test_db := 99): x``) rebinds the enclosing
+   function's ``scratch_test_db`` the moment the lambda is defined --
+   exactly the same "default evaluates in the enclosing scope" rule that
+   makes ``def inner(x=(scratch_test_db := 7)): ...`` a genuine rebind (see
+   :func:`_rebound_names`) -- but :func:`_rebound_names` skips the whole
+   ``Lambda`` node on sight and never sweeps its ``args.defaults`` /
+   ``args.kw_defaults`` the way it does for a nested ``def``. Zero live
+   occurrences on this tree. Accept-direction only: this can cause a missed
+   violation, never a false positive, and it was graded accepted tech debt
+   during review rather than reopening #2764's diff; the correct fix mirrors
+   the ``FunctionDef`` leg almost exactly (tracked as #3192).
+
+``REDIS_CONSTRUCTORS`` (below) is the residual permit list the opaque-splat
+leg scopes itself to, and it is exactly that: an enumeration, kept short
+because every name added is a guess about the future that buys nothing
+measurable against the tree today. The positional leg (gap 2) scopes to its
+own narrower ``{"Redis", "StrictRedis"}`` literal instead of this constant --
+see gap 2 for why the two lists cannot be merged into one.
+
+**Accepted, disclosed limitation.** The unshadowed-fixture-parameter check's
+rebinding sweep (:func:`_rebound_names`) is two mechanisms: a structurally
+version-proof sweep of ``ast.Name`` nodes with ``ctx=ast.Store``, plus a
+hand-written list of binders whose bound name is a bare ``str`` rather than a
+``Name`` node (``ast.ExceptHandler.name``, ``ast.alias``, a nested
+``def``/``class``'s own ``.name``, and the ``match`` capture forms). That list
+is enumerated by hand and nothing pins its completeness against Python's
+grammar, so it is a third irreducible enumeration this guard carries,
+alongside the positional leg's callee scoping (gap 2) and
+``REDIS_CONSTRUCTORS`` at the splat layer (gap 1). Checked at the time of
+writing and found safe: ``ast.TypeAlias`` binds through a ``Name`` with
+``ctx=ast.Store`` and is already covered by the sweep; PEP 695's
+``ast.TypeVar``/``ast.ParamSpec``/``ast.TypeVarTuple`` carry bare-``str``
+names that match neither mechanism but were confirmed by execution not to
+rebind a runtime parameter. No cheap, correct, grammar-level completeness
+tripwire exists for this list, which is itself worth saying here.
 
 Two dispositions, deliberately distinct
 ---------------------------------------
@@ -98,7 +190,14 @@ TESTS_ROOT = Path(__file__).resolve().parent
 CLAIM_FUNCS = frozenset({"claim_test_db", "claim_scratch_test_db"})
 
 # The sanctioned source of a Redis URL: ``tests.db_claim.redis_test_url()`` and
-# the same-named pytest fixture in conftest, which returns its value.
+# the same-named pytest fixture in conftest, which returns its value. The bare
+# ``ast.Name`` leg (route 2) accepts this identifier used directly ONLY when
+# ``_is_unshadowed_fixture_parameter`` holds -- it is a genuine parameter of
+# the enclosing function, carries no default, and is rebound nowhere in that
+# function's own scope (#2764). Before #2764 the leg matched the identifier
+# alone, with no scope check at all, and accepted a local variable or a
+# defaulted parameter that merely shared the name -- laundering a hardcoded
+# pool-slot URL to green.
 CLAIM_URL_NAMES = frozenset({"redis_test_url"})
 
 # The sanctioned source of a raw db NUMBER returned by a pytest fixture whose
@@ -108,8 +207,10 @@ CLAIM_URL_NAMES = frozenset({"redis_test_url"})
 # scratch_test_db``) cannot be resolved by :func:`_resolve_one_hop` the way
 # ``local = claim_test_db()`` can, because the bound value is a bare
 # ``ast.Name`` referencing a function argument, not a call. This mirrors
-# CLAIM_URL_NAMES / the ``redis_test_url`` leg of Route 2 exactly: the
-# identifier itself is the sanctioned source.
+# CLAIM_URL_NAMES / the ``redis_test_url`` leg of Route 2 exactly (#2764 makes
+# that true rather than aspirational): route 1 also accepts the sanctioned
+# identifier used DIRECTLY as the fixture parameter itself, not only through a
+# one-hop alias, gated by the same ``_is_unshadowed_fixture_parameter`` check.
 CLAIM_FIXTURE_NAMES = frozenset({"scratch_test_db"})
 
 # Used ONLY to scope the opaque-``**``-splat leg (see `_splat_candidate`). Every
@@ -117,6 +218,18 @@ CLAIM_FIXTURE_NAMES = frozenset({"scratch_test_db"})
 # place an enumeration is the lesser evil, because `**` forwarding is ubiquitous
 # in test helpers and a callee-agnostic version flagged 183 unrelated sites.
 REDIS_CONSTRUCTORS = frozenset({"Redis", "StrictRedis", "from_url"})
+
+# The positional index of `db` on `redis.Redis.__init__` -- `(self, host, port,
+# db, ...)`, so index 2 after `self`. redis-py has never deprecated positional
+# `host`/`port`/`db` construction, but it HAS reshuffled argument conventions
+# before (redis/redis-py#510), so this index is a fact about the installed
+# library, not a permanent truth. It is pinned by
+# ``test_db_derivation_guard.py::test_positional_index_still_names_db``, which
+# re-derives it from ``inspect.signature(redis.Redis.__init__)`` at test time --
+# a future redis-py reshuffle then turns that test red instead of silently
+# making this constant name the wrong argument. This module stays a pure-AST
+# module with no `redis` import; only the test knows about the library.
+REDIS_DB_POSITIONAL_INDEX = 2
 
 _URL_DB_RE = re.compile(r"^redis(?:s)?://[^/]*/(\d+)\s*$")
 
@@ -301,7 +414,7 @@ class Candidate:
 
     path: str  # relative to tests/
     lineno: int
-    kind: str  # "db-kwarg" | "from-url"
+    kind: str  # "db-kwarg" | "from-url" | "db-positional"
     expr: str  # ast.unparse of the value
     callee: str | None  # terminal name of the enclosing call, for the message
     ok: bool
@@ -338,6 +451,200 @@ def _resolve_one_hop(
     if isinstance(value, ast.Name) and value.id in CLAIM_FIXTURE_NAMES:
         return True, f"{name.id!r} = {ast.unparse(value)}, a sanctioned fixture parameter", value
     return False, f"{name.id!r} = {ast.unparse(value)}, which is not a claim call", value
+
+
+def _parameter_names_without_defaults(fn: ast.AST) -> set[str]:
+    """Names of ``fn``'s parameters that carry no default value.
+
+    Reads ``posonlyargs``, ``args`` and ``kwonlyargs`` -- every parameter
+    spelling (plain, positional-only, keyword-only) -- and excludes ``vararg``
+    and ``kwarg``: ``*args`` is a tuple and ``**kw`` a dict, neither is ever a
+    db. ``args.defaults`` aligns RIGHT-to-left against ``posonlyargs + args``
+    (the last N entries carry the last N defaults); ``kwonlyargs`` pairs
+    positionally with ``kw_defaults``, where a ``None`` entry means "no
+    default" for that keyword-only parameter specifically.
+    """
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return set()
+    args = fn.args
+    positional = [*args.posonlyargs, *args.args]
+    cut = len(positional) - len(args.defaults)
+    names = {p.arg for p in positional[:cut]}
+    for kwarg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        if default is None:
+            names.add(kwarg.arg)
+    return names
+
+
+def _rebound_names(fn: ast.AST) -> set[str]:
+    """Names rebound anywhere in ``fn``'s own scope, by any binding form.
+
+    Implemented as a node sweep (``ast.Name`` with ``ctx=ast.Store``), not a
+    statement-type list -- a list has been wrong in this module's own drafts
+    twice (#2764). The sweep is joined with the binders whose bound name is a
+    bare ``str`` rather than a ``Name`` node: ``ast.ExceptHandler.name``,
+    ``ast.alias`` (``import ... as`` / ``from ... import ... as``), a nested
+    ``def``/``class``'s own ``.name``, and the three ``match`` capture forms
+    (``ast.MatchAs.name``, ``ast.MatchStar.name``, ``ast.MatchMapping.rest``).
+
+    Does **not** descend into a nested ``FunctionDef``/``AsyncFunctionDef``/
+    ``ClassDef`` BODY for any of the above: a binding inside a nested scope
+    is that scope's own and leaves the outer name intact (verified in the
+    interpreter). It **does** collect a
+    ``global``/``nonlocal`` DECLARATION naming a name, wherever nested --
+    ``nonlocal`` is the one binding form that can only be spelled inside a
+    nested scope and genuinely rebinds the outer name; a nested ``global``
+    cannot rebind it but is treated as a rebind anyway, a deliberate
+    over-refusal in the safe direction.
+
+    A nested ``def``/``class`` is only its BODY, not the whole node: a
+    parameter default, a keyword-only default, and a decorator all evaluate
+    at DEFINITION time, in the ENCLOSING scope, not inside the new scope the
+    ``def``/``class`` introduces (#2764) -- ``def inner(x=(scratch_test_db
+    := 7)): ...`` rebinds the OUTER ``scratch_test_db`` the moment ``inner``
+    is defined, before its body ever runs. So this sweep recurses into a
+    nested ``FunctionDef``/``AsyncFunctionDef``'s ``args.defaults``,
+    ``args.kw_defaults`` and ``decorator_list``, and into a nested
+    ``ClassDef``'s ``bases``, ``keywords`` and ``decorator_list`` -- never
+    into ``body`` or the parameter names themselves, which stay the new
+    scope's own.
+
+    A nested ``Lambda`` gets none of that recursion: the whole node is
+    skipped on sight, not just its (bodyless) body. A ``Lambda``'s parameter
+    defaults evaluate at DEFINITION time in the ENCLOSING scope exactly like
+    a ``def``'s do, so ``lambda x=(scratch_test_db := 99): x`` rebinds the
+    OUTER ``scratch_test_db`` the same way the ``def inner`` example above
+    does -- and this sweep does not see it. Accepted, disclosed residual gap
+    7 (#3192), not fixed here: zero live occurrences, and it is a missed
+    violation, never a false positive.
+
+    Excludes only ``ast.comprehension.target`` nodes (never a whole
+    comprehension subtree): a ``for``-target has had its own scope since
+    Python 3 and cannot rebind an enclosing parameter, but per PEP 572 a
+    walrus written *inside* a comprehension binds in the nearest enclosing
+    FUNCTION scope and must still be caught.
+    """
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return set()
+
+    names: set[str] = set()
+
+    excluded_ids: set[int] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.comprehension):
+            excluded_ids.update(id(sub) for sub in ast.walk(node.target))
+
+    def walk_own_scope(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                if id(child) not in excluded_ids:
+                    names.add(child.id)
+            elif isinstance(child, ast.ExceptHandler):
+                if child.name:
+                    names.add(child.name)
+            elif isinstance(child, ast.alias):
+                names.add(child.asname or child.name.split(".")[0])
+            elif isinstance(child, ast.MatchAs):
+                if child.name:
+                    names.add(child.name)
+            elif isinstance(child, ast.MatchStar):
+                if child.name:
+                    names.add(child.name)
+            elif isinstance(child, ast.MatchMapping):
+                if child.rest:
+                    names.add(child.rest)
+            elif isinstance(child, ast.Lambda):
+                # Whole node skipped, defaults included: a walrus in a
+                # lambda default rebinds the outer scope just like a def's
+                # default does, and this sweep misses it (gap 7, #3192).
+                continue
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(child.name)  # the def's own name binds HERE
+                # Defaults and decorators evaluate in the ENCLOSING scope at
+                # definition time; only the body and the parameter names
+                # themselves belong to the new scope.
+                for default in (
+                    *child.args.defaults,
+                    *(d for d in child.args.kw_defaults if d is not None),
+                ):
+                    walk_own_scope(default)
+                for decorator in child.decorator_list:
+                    walk_own_scope(decorator)
+                continue  # body/args are a new scope; do not sweep them
+            elif isinstance(child, ast.ClassDef):
+                names.add(child.name)  # the class's own name binds HERE
+                # Bases, keyword arguments (e.g. metaclass=...) and
+                # decorators evaluate in the ENCLOSING scope; only the class
+                # body belongs to the new scope.
+                for base in child.bases:
+                    walk_own_scope(base)
+                for keyword in child.keywords:
+                    walk_own_scope(keyword.value)
+                for decorator in child.decorator_list:
+                    walk_own_scope(decorator)
+                continue  # body is a new scope; do not sweep it
+            walk_own_scope(child)
+
+    walk_own_scope(fn)
+
+    # global/nonlocal DECLARATIONS rebind regardless of nesting depth.
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+
+    return names
+
+
+def _is_unshadowed_fixture_parameter(
+    name: str, sanctioned_names: frozenset[str], enclosing_fn: ast.AST | None
+) -> bool:
+    """The positive fixture-parameter accept, shared by both routes (#2764).
+
+    Accepts only when all three hold: ``name`` is one of the reserved
+    identifiers in ``sanctioned_names`` (never widen this to an arbitrary
+    identifier); ``name`` is genuinely a parameter of ``enclosing_fn`` with no
+    default supplying it; and ``name`` is rebound by no binding form anywhere
+    in that function's own scope.
+
+    Deliberately POSITIVE. A negative formulation -- "sanctioned and absent
+    from ``_LocalBindings``" -- was this fix's first draft and is wrong:
+    ``_LocalBindings`` visits only ``ast.Assign``/``ast.AnnAssign`` inside a
+    function, so absence from it is equally satisfied by a default argument, a
+    module-level assignment, a ``for`` target, a walrus, a ``with ... as``, an
+    ``except ... as``, an ``import ... as``, a nested ``def``, a ``match``
+    capture, or a nested ``nonlocal`` -- every one of which must stay a
+    violation. An absence check reads as a presence check and is not one.
+    """
+    if enclosing_fn is None or name not in sanctioned_names:
+        return False
+    if name not in _parameter_names_without_defaults(enclosing_fn):
+        return False
+    return name not in _rebound_names(enclosing_fn)
+
+
+def _judge_db_value(
+    value: ast.AST,
+    call: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+    bindings: dict[ast.AST, dict[str, list[ast.AST]]],
+) -> tuple[bool, str, int | None]:
+    """Judge a value passed as a Redis ``db=`` -- keyword or positional --
+    against the sanctioned shapes. Shared by route 1's keyword leg and its
+    positional leg (#2764) so the two judgments cannot drift apart."""
+    pool_db: int | None = None
+    if _is_claim_call(value):
+        return True, "direct claim-API call", None
+    if isinstance(value, ast.Name):
+        enclosing_fn = _enclosing_function(call, parents)
+        if _is_unshadowed_fixture_parameter(value.id, CLAIM_FIXTURE_NAMES, enclosing_fn):
+            return True, "claim-API fixture parameter", None
+        ok, detail, bound = _resolve_one_hop(value, enclosing_fn, bindings)
+        if not ok and bound is not None:
+            pool_db = _first_pool_db(_int_literals(bound))
+        return ok, detail, pool_db
+    detail = "value is not a call to claim_test_db()/claim_scratch_test_db()"
+    pool_db = _first_pool_db(_int_literals(value))
+    return False, detail, pool_db
 
 
 def _splat_candidate(
@@ -386,7 +693,9 @@ def _splat_candidate(
     with no visible ``"db"`` key anywhere in it, is invisible. Today that
     costs nothing (the tree has 191 ``**`` call sites and none carries a
     ``"db"`` key together with an opaque entry), and the visible-``"db"``
-    leg above stays fully callee-agnostic, with no exception.
+    leg above stays fully callee-agnostic, with no exception. This is gap 1
+    of "What this guard still cannot see" in the module docstring, which is
+    the single place all of this module's residual gaps are listed together.
     """
     if isinstance(value, ast.Dict):
         db_val: ast.AST | None = None
@@ -537,19 +846,7 @@ def scan_source(source: str, rel_path: str) -> ScanResult:
             if kw.arg != "db":
                 continue
             value = kw.value
-            pool_db = None
-            if _is_claim_call(value):
-                ok, detail = True, "direct claim-API call"
-            elif isinstance(value, ast.Name):
-                ok, detail, bound = _resolve_one_hop(
-                    value, _enclosing_function(node, parents), binder.bindings
-                )
-                if not ok and bound is not None:
-                    pool_db = _first_pool_db(_int_literals(bound))
-            else:
-                ok = False
-                detail = "value is not a call to claim_test_db()/claim_scratch_test_db()"
-                pool_db = _first_pool_db(_int_literals(value))
+            ok, detail, pool_db = _judge_db_value(value, node, parents, binder.bindings)
             result.candidates.append(
                 Candidate(
                     path=rel_path,
@@ -563,38 +860,98 @@ def scan_source(source: str, rel_path: str) -> ScanResult:
                 )
             )
 
-        # --- Route 2: from_url(<url>) --------------------------------------
-        if callee == "from_url" and node.args:
-            arg = node.args[0]
-            pool_db = None
-            if isinstance(arg, ast.Call) and _terminal_name(arg.func) in CLAIM_URL_NAMES:
-                ok, detail = True, "direct claim-API URL call"
-            elif isinstance(arg, ast.Name) and arg.id in CLAIM_URL_NAMES:
-                # The pytest fixture parameter of the same name. It is a
-                # function argument, not a local assignment, so S2 cannot
-                # resolve it; the identifier itself is the sanctioned source.
-                ok, detail = True, "claim-API URL fixture parameter"
-            else:
-                ok = False
-                url_db = _url_db(arg)
-                if url_db is None:
-                    detail = "URL is not redis_test_url() and its db cannot be determined"
-                else:
-                    detail = f"URL literal hardcodes db {url_db}"
-                    if 1 <= url_db <= TEST_DB_POOL_MAX:
-                        pool_db = url_db
-            result.candidates.append(
-                Candidate(
-                    path=rel_path,
-                    lineno=node.lineno,
-                    kind="from-url",
-                    expr=ast.unparse(arg),
-                    callee=callee,
-                    ok=ok,
-                    detail=detail,
-                    pool_db=pool_db,
+        # --- Route 1b: positional `db` on Redis()/StrictRedis() (#2764) ----
+        # A bare positional argument means nothing without knowing the
+        # callee -- unlike a written-out `db=`, `some_helper("a", "b", 7)` is
+        # not a db -- so this leg is deliberately scoped to Redis/StrictRedis
+        # by terminal name. That callee scoping is disclosed as gap 2 in
+        # "What this guard still cannot see" above, not slipped in silently.
+        if (
+            callee in {"Redis", "StrictRedis"}
+            and len(node.args) > REDIS_DB_POSITIONAL_INDEX
+            and not any(kw.arg == "db" for kw in node.keywords)
+            # A `db=` keyword alongside 3+ positionals is a TypeError at
+            # runtime (`Redis("h", 6379, 7, db=8)`) and cannot be a live
+            # site; emitting a second, positional candidate for the same
+            # unrunnable line would duplicate the violation and muddy the
+            # message, so the keyword leg above takes precedence.
+        ):
+            positional_value = node.args[REDIS_DB_POSITIONAL_INDEX]
+            # `redis.Redis("h", 6379, *rest)` puts an `ast.Starred` at this
+            # index and passes the length guard above -- genuinely reachable,
+            # unlike `redis.Redis(*args)` (one argument, short-circuits on the
+            # length guard first). Without this check the Starred node falls
+            # through to `_judge_db_value`'s generic `else` and reports
+            # `expr="*rest"` as a derived db: a spurious violation with a
+            # nonsense expression. Suppressed deliberately; the contents of
+            # `rest` are unexamined -- disclosed as gap 5 above.
+            if not isinstance(positional_value, ast.Starred):
+                ok, detail, pool_db = _judge_db_value(
+                    positional_value, node, parents, binder.bindings
                 )
-            )
+                result.candidates.append(
+                    Candidate(
+                        path=rel_path,
+                        lineno=node.lineno,
+                        kind="db-positional",
+                        expr=ast.unparse(positional_value),
+                        callee=callee,
+                        ok=ok,
+                        detail=detail,
+                        pool_db=pool_db,
+                    )
+                )
+
+        # --- Route 2: from_url(<url>) ---------------------------------------
+        # The URL may arrive positionally or, since #2764, by `url=` keyword;
+        # prefer the positional when both are somehow present, for the same
+        # single-candidate reason as the positional leg above.
+        if callee == "from_url":
+            url_arg: ast.AST | None = None
+            if node.args:
+                url_arg = node.args[0]
+            else:
+                for kw in node.keywords:
+                    if kw.arg == "url":
+                        url_arg = kw.value
+                        break
+            if url_arg is not None:
+                arg = url_arg
+                pool_db = None
+                if isinstance(arg, ast.Call) and _terminal_name(arg.func) in CLAIM_URL_NAMES:
+                    ok, detail = True, "direct claim-API URL call"
+                elif isinstance(arg, ast.Name) and _is_unshadowed_fixture_parameter(
+                    arg.id, CLAIM_URL_NAMES, _enclosing_function(node, parents)
+                ):
+                    # The pytest fixture parameter of the same name, used
+                    # directly and unshadowed. It is a function argument, not
+                    # a local assignment, so _resolve_one_hop cannot resolve
+                    # it; the identifier itself is the sanctioned source, but
+                    # (#2764) only when it is genuinely still that parameter
+                    # -- see _is_unshadowed_fixture_parameter's docstring for
+                    # why a bare identifier match alone is unsafe here.
+                    ok, detail = True, "claim-API URL fixture parameter"
+                else:
+                    ok = False
+                    url_db = _url_db(arg)
+                    if url_db is None:
+                        detail = "URL is not redis_test_url() and its db cannot be determined"
+                    else:
+                        detail = f"URL literal hardcodes db {url_db}"
+                        if 1 <= url_db <= TEST_DB_POOL_MAX:
+                            pool_db = url_db
+                result.candidates.append(
+                    Candidate(
+                        path=rel_path,
+                        lineno=node.lineno,
+                        kind="from-url",
+                        expr=ast.unparse(arg),
+                        callee=callee,
+                        ok=ok,
+                        detail=detail,
+                        pool_db=pool_db,
+                    )
+                )
 
     return result
 
@@ -715,12 +1072,20 @@ def check_dispositions(
 def format_violation(cand: Candidate) -> str:
     where = f"tests/{cand.path}:{cand.lineno}"
     callee = f"{cand.callee}(...)" if cand.callee else "call"
-    lines = [
-        f"{where}: {callee} takes db={cand.expr}"
-        if cand.kind == "db-kwarg"
-        else f"{where}: from_url({cand.expr})",
-        f"    {cand.detail}",
-    ]
+    # An explicit branch per kind (#2764) -- the previous two-way branch's
+    # `else` silently meant "from_url", so a `db-positional` candidate
+    # rendered as `from_url(7)` and named the wrong shape entirely. An
+    # unrecognized kind now renders its own name rather than impersonating
+    # another one, so the next kind added fails visibly instead of silently.
+    if cand.kind == "db-kwarg":
+        headline = f"{where}: {callee} takes db={cand.expr}"
+    elif cand.kind == "db-positional":
+        headline = f"{where}: {callee} takes db={cand.expr} (positional)"
+    elif cand.kind == "from-url":
+        headline = f"{where}: from_url({cand.expr})"
+    else:
+        headline = f"{where}: {cand.kind}({cand.expr})"
+    lines = [headline, f"    {cand.detail}"]
     if cand.pool_db is not None:
         lines.append(
             f"    This provably names db {cand.pool_db}, inside the claimable pool "
