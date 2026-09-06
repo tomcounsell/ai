@@ -536,6 +536,10 @@ intended and to lose no marker anywhere:
       recorded, not touched.
 - [ ] `tests/unit/test_no_legacy_paths.py`. NO CHANGE: read as a precedent for the exemption
       shape, not modified.
+- [ ] `tests/tools/test_test_judge.py` and `tests/unit/test_validate_test_impact.py`. NO CHANGE,
+      and their markers must NOT change either. Both currently resolve to no marker because of
+      mechanism 3 (#3184). If either gains a marker, the builder re-derived the stem instead of
+      copying it, and the parity control is compromised.
 
 
 ## Rabbit Holes
@@ -789,6 +793,15 @@ general review pass.
 - Create `tests/marker_map.py` holding `FEATURE_MAP` moved verbatim from `tests/conftest.py:1106`,
   `KNOWN_ROOT_DIRS`, and `resolve_marker(basename) -> tuple[str | None, str | None]` returning the
   marker and the key that matched.
+- **Pin the stem expression by copying it out of the hook, not by re-deriving it from this prose:**
+  `stem = basename.replace("test_", "").replace(".py", "")`. It is a global `str.replace`.
+  `removeprefix`, `removesuffix`, and anchored regexes are forbidden; each of them retags
+  `tests/tools/test_test_judge.py` and `tests/unit/test_validate_test_impact.py` and breaks the
+  byte-identical requirement. Comment the line with a pointer to #3184 so it survives future
+  tidying.
+- Add committed fixtures in the guard test: `resolve_marker("test_test_judge.py") == (None, None)`
+  and `resolve_marker("test_validate_test_impact.py") == (None, None)`. These are the two files
+  that move if the stem is wrong, so they are the cheapest possible tripwire.
 - Standard library only. No `pytest` import, no `tools.*` import, nothing that pulls in the venv.
 - Add the two measured `FEATURE_MAP` entries: `"reflections": "reflections"` immediately before
   `"reflection"`, and `"youtube": "tools"` immediately before `"transcript"`.
@@ -809,9 +822,14 @@ general review pass.
   with `check=True`, raising when the result is empty.
 - Implement R1, R2, and R3 as separate functions each returning a list of violations carrying
   path, resolved marker, expected marker, matched key, and which rule fired.
-- Add `KNOWN_MISTAGS: dict[str, str]` and `EXEMPT_DIRS: dict[str, str]`, path-keyed, every value a
-  prose reason. Populate `KNOWN_MISTAGS` with the 24 measured paths. Nothing keyed by line number,
-  index, or ordinal.
+- R2 groups a package's files by resolved marker and accuses **every sibling outside the largest
+  group**. On a tie for largest, accuse **every file in the package**, labelled ambiguous rather
+  than as an ordinary R2 violation. A literal "every file must match" reading yields 23 violations
+  instead of 2 and pushes the baseline to 45, tripping the `len(KNOWN_MISTAGS) <= 24`
+  anti-criterion; that is the signal you implemented the wrong attribution.
+- Add `KNOWN_MISTAGS: dict[str, str]` only, path-keyed, every value a prose reason. Populate it
+  with the 24 measured paths. **Do not add `EXEMPT_DIRS` or any other whole-package exemption**;
+  the baseline needs none and an unbracketed exemption mechanism is a silent hole.
 - Add the two bracketing assertions: no violation outside the baseline, and no baseline entry
   without a corresponding violation.
 - Add a `__main__` block with `--audit`, `--report` (`path<TAB>marker` per line, `NONE` for
@@ -832,6 +850,10 @@ general review pass.
 - Add `test_audit_reports_a_synthetic_mistag`, which runs the rule functions over a synthetic file
   list containing a deliberately mistagged path and asserts the violation comes back with the
   right path, rule, and key. One case per rule.
+- Add a synthetic **2-vs-2 package** fixture for R2's tie branch: assert all four files come back,
+  labelled ambiguous, and that the result does not depend on the order the file list is given in
+  (feed it twice, reversed, and assert set equality). Task 4's real-package mutation only ever
+  exercises 1-vs-N, so this branch is untested without a fixture.
 - Add the vacuity tests: empty `FEATURE_MAP` raises, empty file enumeration raises,
   `resolve_marker("")` returns `(None, None)`.
 - Add the stale-exemption test: a `KNOWN_MISTAGS` entry with no matching violation fails.
@@ -863,10 +885,15 @@ general review pass.
 - **Assigned To**: `marker-parity-validator`
 - **Agent Type**: validator
 - **Parallel**: true
-- Generate `--report` on the branch. Generate the equivalent report from `f3594dd23` by replaying
-  the old algorithm over the same file list.
+- Generate `--report` on the branch. Generate the baseline report **from
+  `git show f3594dd23:tests/conftest.py`**, parsing `FEATURE_MAP` out of that text with
+  `ast.literal_eval` and applying the stem expression as it literally appears in that file. Do not
+  import the branch's `tests/marker_map.py` and do not retype the stem from memory: a control that
+  inherits the branch's stem confirms itself and comes back green on a broken implementation.
 - Diff them. The only permitted difference is `tests/unit/test_youtube_transcription.py` moving
   from `messaging` to `tools`. Any other line is a blocker.
+- Assert the marked-file count is **280 on both sides**, not merely non-decreasing. A one-sided
+  floor cannot catch a marker being silently gained, which is what a wrong stem produces.
 - Independently confirm via `pytest --collect-only -q -m <marker>` counts for every marker in
   `FEATURE_MAP`, before and after.
 
