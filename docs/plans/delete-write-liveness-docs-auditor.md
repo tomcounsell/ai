@@ -1143,3 +1143,59 @@ assignment at `:2460`, and `withheld_note` at `:2524-2526`.
 `agent/reflection_scheduler.py:648` is still
 `output_summary=str(summary_str)[:500] if summary_str else None`. No task-1 or task-2 line
 number needed correcting.
+
+---
+
+War room, LITE depth: Consolidated Critic, plus automated structural validation. Mode:
+independent roster (1 critic).
+Round 4 (delta re-critique of commit `5dbce4325`). Verdict: READY TO BUILD (no concerns) —
+0 blockers, 0 concerns, 1 nit.
+
+**Why LITE and why a delta.** `appetite: Small`, no doctrine path touched. Round 3 already
+ran a FULL-depth roster over the whole plan and returned zero blockers, and rounds 1 and 2
+were each verified closed there. The only change since is `5dbce4325`, which touched the
+plan file alone, so round 4 reviewed that diff and its consistency with the sections it
+edits rather than re-deriving the document.
+
+**Round-3 closures, verified independently against the tree.**
+
+- **CONCERN (budget mandate not executable)** — **verified closed.** The name
+  `test_worst_case_summary_stays_under_truncation_budget` is byte-identical across all three
+  executable homes: `## Test Impact` (`:462`, marked **NEW**), task 2 of
+  `## Step by Step Tasks` (`:856-861`, "Use that exact function name"), and the
+  `Truncation budget pinned` row of `## Verification` (`:957`). The row's command,
+  `grep -c 'def test_worst_case_summary_stays_under_truncation_budget' tests/unit/test_docs_auditor_substrate.py`
+  expecting `1`, is therefore satisfiable by construction: it returns `0` on the current
+  tree and reaches `1` only by the builder writing the name task 2 orders.
+  `## Technical Approach` item 1 (`:313-324`) no longer ends with "re-measure once during
+  the build to confirm the number, then move on"; it now reads "The build pins the budget
+  with a permanent test rather than a one-off measurement" and names the test's three homes.
+- **NIT (196 vs 195 characters)** — **verified closed.** No live assertion of 196 as the
+  worst-case figure survives. Every remaining `196` in the document is either an unrelated
+  line-range citation (`:156-196`, `:1960`) or historical record: the "One correction to
+  the round-2 record" paragraph, which names **195** as authoritative, and the round-3 NIT
+  row, which quotes the superseded wording as the finding itself. `## Technical Approach`
+  item 1 (`:316`), `## Risk 1` (`:522`), and `## Success Criteria` (`:753`) all read 195,
+  consistent with 195 + 32 = 227.
+- **NIT (three drifted citations)** — **verified closed**, each re-derived by symbol on the
+  current tree. `reflections/docs_auditor.py:2692-2694` is the "11. Liveness signal"
+  comment, with `:2689-2690` the "10. Update rotation hash" step and `:2695` the call it
+  introduces. `run_docs_auditor`'s outer `except Exception as e:` is at `:2727`, `:2726`
+  blank; both `## Failure Path Test Strategy` citations now read `:2727`.
+  `scripts/update/run.py:2245` is `# Step 5: Service management` and `:2311` is
+  `service.install_worker(project_dir)`; `:1629` is still the Step 3.6 migration comment,
+  so the section's ordering argument holds unchanged.
+
+**Citation drift sweep, spot-checked.** `FALLBACK_ENG_CHAT` at `:44`, the Redis-namespace
+comment at `:132`, `REDIS_LAST_COMPLETED_TS_KEY`/`REDIS_LAST_COMPLETED_SUMMARY_KEY` at
+`:136-137`, `def _write_liveness` at `:2153`, `_run_vault_drift_detection` at `:2370` with
+`return 0` at `:2385` and `:2401` and `return compared` at `:2398`, the vault-count
+assignment at `:2460`, `withheld_note` at `:2524-2526`, all five call sites at `:2450`,
+`:2465`, `:2493`, `:2573`, `:2695`, and `agent/reflection_scheduler.py:648` — all accurate.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| NIT | Consolidated Critic, Structural check | The citation drift sweep records `_write_liveness`'s own `except` at `:2191-2192`; the `except Exception as e:` is at `:2190` and its `logger.warning` at `:2191`, with `:2192` the blank separator. The stated function range `:2153-2192` is right for a deletion (it carries the trailing separator line). This lives in the round-3 disposition record, not in any section a builder executes from. | **Accepted on the record.** Cosmetic and non-gating; the symbol is named unambiguously and locatable by `grep -n 'def _write_liveness'`. | |
+
+**Round-4 disposition.** Zero blockers, zero concerns. `plan_revising` stays `false` and the
+lane proceeds to `/do-build`.
