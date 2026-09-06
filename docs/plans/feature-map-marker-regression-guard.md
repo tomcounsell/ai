@@ -90,8 +90,9 @@ GitHub Actions workflow in this repo, `.github/workflows/claude.yml`, and it onl
 `@claude` mentions in comments, issues, and reviews. No workflow runs pytest, and neither
 `.githooks/pre-commit` nor `.githooks/pre-push` runs tests either (pre-commit's only mention of
 tests is a comment explaining why it does not run them in a worktree). The repo's actual
-per-PR gate is the SDLC TEST stage running `scripts/pytest-clean.sh` locally. The Solution
-addresses this directly rather than declaring the criterion met by placing a file in `tests/`.
+per-PR gate is the SDLC TEST stage running `scripts/pytest-clean.sh` locally, backed by the nightly
+suite. Those are this repo's CI, so the Solution satisfies the criterion by shipping the guard as an
+ordinary unit test that both of them run.
 
 All measurements quoted in this plan were produced by replaying the real `FEATURE_MAP` and the
 real first-hit algorithm, parsed out of `tests/conftest.py` with `ast.literal_eval`, over the
@@ -264,7 +265,7 @@ loop inside the pytest hook, which is why nothing else can check it.
 4. **Output**: `item.add_marker(getattr(pytest.mark, marker_name))`. Consumed later by
    `pytest -m <marker>`.
 
-**Path B, the guard (new, at test time and in CI):**
+**Path B, the guard (new, at test time):**
 
 1. **Entry point**: `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'` from the repo root,
    so untracked scratch files are invisible and a deleted file cannot leave a stale expectation.
@@ -287,8 +288,8 @@ degrades into a second implementation that can drift away from the thing it is g
 ## Architectural Impact
 
 - **New dependencies**: none. `tests/marker_map.py` is standard library only (`os`, `pathlib`,
-  `subprocess`, `argparse`). It deliberately does not import `pytest`, so the CI job and the
-  pre-commit path can run it on a bare interpreter with no venv.
+  `subprocess`, `argparse`). It deliberately does not import `pytest`, so it runs on a bare
+  interpreter with no venv, which keeps `python tests/marker_map.py --audit` usable from any shell.
 - **Interface changes**: `FEATURE_MAP` moves from `tests/conftest.py` to `tests/marker_map.py` and
   `tests/conftest.py` imports it back. `git grep FEATURE_MAP` confirms `tests/conftest.py` is the
   only importer today; the ten other hits are docstring prose in split test modules. The
@@ -321,8 +322,8 @@ will and should push on.
 
 ## Prerequisites
 
-No external prerequisites. The work touches only the test suite and a workflow file, needs no
-secrets, no services, and no Redis.
+No external prerequisites. The work touches only the test suite, needs no secrets, no services, and
+no Redis.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
@@ -553,8 +554,8 @@ read-only, so concurrent workers cannot interfere with it or with each other thr
 
 ## Update System
 
-No update system changes required. This work adds one test-suite module, one test file, one
-workflow file, and edits `tests/conftest.py`. There are no new dependencies, no config files, no
+No update system changes required. This work adds one test-suite module and one test file, and
+edits `tests/conftest.py`. There are no new dependencies, no config files, no
 secrets, no services, and no Popoto models, so there is no migration and nothing to register in
 `scripts/update/migrations.py`. `/update` propagates it as an ordinary commit and the guard starts
 running on the next test invocation on each machine.
@@ -567,9 +568,10 @@ adds no CLI entry point to `pyproject.toml [project.scripts]`, the bridge does n
 no MCP server exposes it. The agent reaches it the same way it reaches every other test, by running
 `scripts/pytest-clean.sh`.
 
-`tests/marker_map.py` is directly runnable (`python tests/marker_map.py --audit`) for the CI job's
-benefit, which incidentally makes it available to an agent via the Bash tool, but that is a
-consequence of being a plain script rather than an integration point that needs wiring or a test.
+`tests/marker_map.py` is directly runnable (`python tests/marker_map.py --audit`) so the audit can
+be checked outside a pytest run, which incidentally makes it available to an agent via the Bash
+tool, but that is a consequence of being a plain script rather than an integration point that needs
+wiring or a test.
 
 
 ## Documentation
@@ -586,7 +588,7 @@ consequence of being a plain script rather than an integration point that needs 
 ### Inline Documentation
 
 - [ ] `tests/marker_map.py` module docstring states that it is the single source of marker
-      resolution and must stay import-light so the CI job can run it on a bare interpreter.
+      resolution and must stay import-light so it runs on a bare interpreter with no venv.
 - [ ] Every `KNOWN_MISTAGS` and `EXEMPT_DIRS` entry carries a prose reason as its value. A bare
       path with no reason is not an acceptable entry.
 
@@ -634,8 +636,8 @@ general review pass.
 
 - **Builder (guard)**
   - Name: `marker-guard-builder`
-  - Role: extract `resolve_marker`, write `tests/marker_map.py`, the guard test, the two
-    `FEATURE_MAP` additions, and the workflow.
+  - Role: extract `resolve_marker`, write `tests/marker_map.py`, the guard test, and the two
+    `FEATURE_MAP` additions.
   - Agent Type: builder
   - Resume: true
 
@@ -815,14 +817,16 @@ general review pass.
 
 ## Open Questions
 
-1. **Should this land a GitHub Actions workflow?** The issue's fourth acceptance criterion says the
-   guard must run in CI on every PR. This repo has exactly one workflow
-   (`.github/workflows/claude.yml`) and it only reacts to `@claude` mentions; nothing runs pytest
-   in CI, and neither git hook runs tests either. The plan proposes a small
-   `pull_request` workflow that runs one standard-library script in seconds with no venv, no
-   secrets, and no services, because that is the only reading under which the criterion is
-   literally true. The alternative is to treat the SDLC TEST stage as "CI" and ship the guard as an
-   ordinary unit test only. Both are defensible; the first adds a GitHub Actions surface to a repo
-   that has deliberately kept testing local. **Recommendation: add the workflow**, precisely because
-   it costs nothing to run and needs no dependencies. Answer this before task 4.
+1. **RESOLVED 2026-09-06 — Should this land a GitHub Actions workflow?** The issue's fourth
+   acceptance criterion says the guard must run in CI on every PR, and this repo has exactly one
+   workflow (`.github/workflows/claude.yml`), which only reacts to `@claude` mentions. The question
+   was whether to add a `pull_request` workflow running the audit, or to ship the guard as an
+   ordinary unit test only.
+
+   **Owner's ruling: unit test only. No GitHub Actions workflow.** Nothing in this work adds a file
+   under `.github/workflows/`.
+
+   **Rationale:** the SDLC TEST stage and the nightly suite are this repo's CI. A guard running as a
+   normal unit test in `tests/unit/` is therefore executed on every PR, which satisfies the
+   criterion as the repo actually gates work.
 

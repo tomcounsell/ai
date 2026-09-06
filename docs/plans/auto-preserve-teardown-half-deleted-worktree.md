@@ -26,7 +26,7 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 **Desired outcome:**
 
-`preserve_uncommitted_worktree_changes` never commits a deletion it detects as a wipe. When the worktree is missing a directory that HEAD tracks, it stages only the additions and edits that coexist with the wipe, commits those, and leaves the deletions in the working tree for the force-remove to discard. When there is nothing but the wipe, it writes no commit and no ref and leaves the index untouched. Either way it logs loudly at ERROR with enough detail to reconstruct the event after the worktree is gone, and lets teardown proceed. Legitimate dirty trees, including refactors that delete files inside directories that survive on disk, are preserved exactly as they are today.
+`preserve_uncommitted_worktree_changes` never commits a deletion it detects as a wipe. When the worktree is missing a directory that HEAD tracks, it stages only the additions and edits that coexist with the wipe, commits those, and leaves the deletions in the working tree for the force-remove to discard. When there is nothing but the wipe, it writes no commit and no ref, and the index it leaves behind carries no staged deletions. Either way it logs loudly at ERROR with enough detail to reconstruct the event after the worktree is gone, and lets teardown proceed. Legitimate dirty trees, including refactors that delete files inside directories that survive on disk, are preserved exactly as they are today.
 
 ## Freshness Check
 
@@ -149,6 +149,15 @@ Two spikes ran against a throwaway git repo with a linked worktree, simulating t
 - **Confidence**: high
 - **Impact on plan**: the proportional guard is **dropped from this change** rather than repaired. It was declared secondary yet carried the change's only two tunables, its only new config and env surface, and two of its eight tests, while its target case (a partial wipe leaving every tracked top-level directory present) has never been observed and the reported incident is caught by the structural check alone. This spike is recorded so that if a real partial wipe ever justifies adding it, whoever does so reads HEAD (`ls-tree -r`, `diff --cached --diff-filter=D`) instead of the index — see **Rabbit Holes**.
 
+### spike-7: Does the additive-only path survive a wipe a previous pass already staged?
+
+- **Assumption**: "The additive candidate set is a faithful picture of the lane's real work." (Raised as the round-2 critique's first blocker.)
+- **Method**: prototype — the *partially-staged mixed* shape, which is spike-5's fixture with a bare `git add -A` run before preserve.
+- **Finding**: **No, and the failure is silent data loss.** Fixture: `agent/ bridge/ docs/ tests/` tracked at HEAD, `docs/` removed from disk, `tests/f1.py` edited, `tests/f4.py` added untracked. Before staging the difference is `{tests/f1.py, tests/f4.py}` and the design works. After `git add -A`, **both** `ls-files --modified --others --exclude-standard` and `ls-files --deleted` return empty — the index now matches the working tree, so nothing is "modified" or "deleted" relative to it — the difference is empty, the pure-wipe branch fires, nothing is committed, and `git diff --cached --stat HEAD` still shows `tests/f1.py | 1 +` and `tests/f4.py | 1 +` staged and about to be destroyed by the force-remove. `test_partially_staged_wipe_still_detected` would not have caught this: it asserts *detection*, never *preservation*.
+- **Fix, verified**: run `git -C <wt> reset -q` (mixed reset) as the FIRST action on the wipe path, before computing the candidate set. Re-run gives the full candidate set back, a commit of `2 files changed, 2 insertions(+)`, an empty `git diff --diff-filter=D --name-only HEAD~1 HEAD`, and `docs/` still tracked at the new HEAD.
+- **Confidence**: high — run end to end on git 2.50.1 by the round-2 critic, including the failing case and the fixed case.
+- **Impact on plan**: the reset is now step zero of the wipe path (**Technical Approach**, task 1). It changes the advertised index contract from "untouched" to "carries no staged deletions", which is why `test_index_untouched_on_pure_wipe` is renamed `test_pure_wipe_carries_no_staged_deletions` and the Desired Outcome sentence is reworded. The new contract is strictly stronger, because the reset clears a pre-staged wipe rather than merely declining to create one.
+
 ## Data Flow
 
 Two paths reach the producer. Both end in the same unguarded commit.
@@ -228,7 +237,7 @@ No prerequisites — this work has no external dependencies. Everything it touch
 
 Teardown begins → preserve called → `git status --porcelain` non-empty → **wipe check** → *no missing tracked directory*: `git add -A` → WIP commit → `refs/session-wip/{slug}` → force-remove (today's behavior, unchanged)
 
-Teardown begins → preserve called → `git status --porcelain` non-empty → **wipe check** → *a tracked directory is missing from disk* → compute the additive-only pathspec (`ls-files --modified --others --exclude-standard` minus `ls-files --deleted`) →
+Teardown begins → preserve called → `git status --porcelain` non-empty → **wipe check** → *a tracked directory is missing from disk* → `git reset -q` (mixed: index to HEAD, working tree untouched, so a wipe a previous pass already staged is unstaged and its real work becomes visible again) → compute the additive-only pathspec (`ls-files --modified --others --exclude-standard` minus `ls-files --deleted`) →
 
 - **set non-empty**: stage exactly those paths → WIP commit carrying additions and edits and **zero deletions** → `refs/session-wip/{branch}` → ERROR log with the full record → force-remove proceeds. Real work preserved, wipe not committed.
 - **set empty** (the pure-wipe case, and the reported incident's shape): **no staging, no commit, no ref** → ERROR log with the full record → force-remove proceeds. Branch head never moves.
@@ -243,7 +252,15 @@ Teardown begins → preserve called → `git status --porcelain` non-empty → *
 
 It reads HEAD, not the index, which is what makes it survive the partially-staged case spike-6 found (a prior `git add -A` erases `ls-files --deleted` but leaves `ls-tree -d HEAD` untouched). It mutates nothing.
 
-**The additive-only pathspec, when the structural signal fires.** Three plumbing reads and a set difference:
+**Step zero on the wipe path: `git -C <wt> reset -q`.** A *mixed* reset — index reset to HEAD, working tree untouched. It is the FIRST action taken once the structural signal fires, before the candidate set is computed, and it is load-bearing rather than hygienic.
+
+Without it the wipe path is blind to anything a prior pass already staged. Reproduced on git 2.50.1 in a throwaway repo with a linked worktree (fixture: `agent/ bridge/ docs/ tests/` tracked at HEAD, `docs/` removed from disk, `tests/f1.py` edited, `tests/f4.py` added untracked): before staging, the candidate-set difference is `{tests/f1.py, tests/f4.py}` and the additive path works as designed. After a bare `git add -A` — which spike-6 shows is reachable today, because `add -A` succeeds and the following `commit` can fail, and which the incident's nine-pass teardown storm makes likely — **both** `ls-files --modified --others --exclude-standard` and `ls-files --deleted` return empty, the difference is empty, the pure-wipe branch fires and commits nothing, while `git diff --cached --stat HEAD` still shows `tests/f1.py | 1 +` and `tests/f4.py | 1 +` staged and about to be destroyed by the force-remove. That is round 1's data-loss blocker resurfacing in a different interleaving.
+
+The reset restores the full candidate set: re-run confirms the commit is `2 files changed, 2 insertions(+)`, `git diff --diff-filter=D --name-only HEAD~1 HEAD` is empty, and `docs/` is still tracked at the new HEAD. Because a mixed reset moves only the index and never the working tree, it cannot itself destroy anything — the deleted paths stay deleted on disk, the edits stay edited, and the untracked file stays untracked.
+
+**This deliberately changes the advertised index contract.** The plan previously promised the index was left untouched on a pure wipe; it now promises the index carries **no staged deletions**. The reset also unstages a pre-staged wipe, which is a strict improvement on Risk 3: where the old contract merely avoided *adding* a staged wipe, the new one actively clears one that a previous pass left behind, so a worktree that survives a failed force-remove is left in a safer state than before. The reset runs only on the wipe path — a legitimately dirty tree never reaches it and its index is genuinely untouched.
+
+**The additive-only pathspec, computed after the reset.** Three plumbing reads and a set difference:
 
 ```
 candidates = split_nul(git -C <wt> ls-files --modified --others --exclude-standard -z)
@@ -263,7 +280,7 @@ Never `git add -A` on this path: it restages the very deletions the check just d
 
 **Why not simply refuse and commit nothing.** That was the first draft's answer and it is a regression against today's behavior in the mixed case. With `docs/` gone from disk but `tests/f1.py` edited and `tests/f4.py` newly written, today's unguarded code commits everything — destructive, but the additions are recoverable by cherry-picking them out of the WIP commit. A bare refusal lets `git worktree remove --force` proceed and the edit and the new file are gone with no backstop at all, which is precisely the loss #2137 exists to prevent, reintroduced from the other side. The additive-only path is strictly better than both: the wipe is never committed *and* the real work is.
 
-**Why the check runs before any staging.** The signal is available without staging, so nothing is gained by staging first and everything is risked: a check computed after `git add -A` leaves a fully-staged wipe in the worktree index, which is worse than today's behavior in exactly the case that matters (the subsequent force-remove fails and the directory survives with a staged wipe waiting for the next process to commit it). Spike-6 adds a second reason: after `add -A` the deletion signal is partly erased from the index anyway.
+**Why the check runs before any staging.** The signal is available without staging, so nothing is gained by staging first and everything is risked: a check computed after `git add -A` leaves a fully-staged wipe in the worktree index, which is worse than today's behavior in exactly the case that matters (the subsequent force-remove fails and the directory survives with a staged wipe waiting for the next process to commit it). Spike-6 adds a second reason: after `add -A` the deletion signal is partly erased from the index anyway. Note that the ordering constraint and the `reset -q` above are answers to *different* problems and both are required: the ordering stops **this** pass from staging a wipe, the reset undoes a wipe **a previous pass** already staged. Neither substitutes for the other.
 
 **Why the insertions-ratio predicate the issue proposes is rejected.** The issue's Next Steps suggest computing `git diff --cached --numstat` after `git add -A` and refusing when deletions dwarf insertions. Spike-3 shows this **would not have fired on the reported incident.** That commit carried 223,142 insertions alongside its 902,840 deletions — because `git add -A` also stages untracked build artifacts (`.venv/`, `.pyc` files, whatever the lane left behind), and those count as insertions. Reproducing the incident's shape in a throwaway repo produced `14 files changed, 5 insertions(+), 9 deletions(-)` — a real insertions figure that defeats any "insertions are a negligible fraction" test.
 
@@ -334,7 +351,8 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 - [ ] `test_wipe_with_untracked_artifacts_still_refuses_deletions` — the incident's shape (spike-3): tracked directories deleted **and** untracked build artifacts present, so `add -A` would report real insertions. Assert the deletions are not committed. This is the test that would fail under the issue's proposed insertions-ratio predicate, and it exists to keep anyone from "simplifying" the check back to that shape.
 - [ ] `test_partially_staged_wipe_still_detected` — run `git add -A` on a half-deleted tree *before* calling preserve, then assert detection still fires. Pins spike-6: the structural signal reads HEAD, so the index cannot blind it. This is the test that would have failed under the proportional guard the revision dropped.
 - [ ] `test_deletions_inside_a_surviving_directory_are_preserved_normally` — files deleted from within `tests/` while `tests/` itself survives on disk, alongside genuine edits; assert `preserved is True`, `refused` absent, and the deletions **are** in the commit. The false-positive boundary: a real refactor that deletes files is untouched by this change.
-- [ ] `test_index_untouched_on_pure_wipe` — after the pure-wipe case, assert `git diff --cached --name-only` is empty. Pins the "check before staging" decision so a later refactor cannot quietly move it after `git add -A`.
+- [ ] `test_pure_wipe_carries_no_staged_deletions` — after the pure-wipe case, assert `git diff --cached --diff-filter=D --name-only HEAD` is empty. Pins the "check before staging" decision so a later refactor cannot quietly move it after `git add -A`. **Renamed from `test_index_untouched_on_pure_wipe`** because the `reset -q` on the wipe path makes "untouched" false and the weaker-sounding "no staged deletions" the actually stronger claim: it holds whether or not a previous pass staged a wipe.
+- [ ] `test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved` — **the test blocker 1 exists for.** Spike-7's fixture: one tracked top-level directory removed from disk, one tracked file edited, one untracked file added, then `git add -A` run *before* calling preserve. Assert `preserved is True`, that the commit contains both the edit and the new file, that its diff against its parent has zero deletions, and that the removed directory is still tracked at the new HEAD. Without the `reset -q` this test fails by committing nothing while the staged work is lost.
 - [ ] `test_guard_computation_failure_falls_open_and_warns` — see Failure Path Test Strategy.
 - [ ] `test_ref_slug_follows_checked_out_branch` — a worktree directory named `foo` with `session/bar` checked out; assert the WIP ref is `refs/session-wip/bar`, matching the branch that received the commit. Pins the recon-found mismatch fix.
 - [ ] `test_detached_head_falls_back_to_slug_argument` — assert the ref is `refs/session-wip/{slug}` and specifically **not** `refs/session-wip/HEAD`.
@@ -373,7 +391,7 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 **Impact:** A check computed after staging leaves a fully-staged wipe in the worktree index — worse than the status quo, because the next process to touch that worktree commits it without ever running preserve. Spike-6 adds a second failure mode: after `add -A` the deletion signal is partly erased from the index, so a moved check also reads degraded input.
 
-**Mitigation:** `test_index_untouched_on_pure_wipe` asserts `git diff --cached --name-only` is empty after the pure-wipe case, which fails immediately if the check moves. A comment at the check site states the ordering constraint and why it exists.
+**Mitigation:** `test_pure_wipe_carries_no_staged_deletions` asserts `git diff --cached --diff-filter=D --name-only HEAD` is empty after the pure-wipe case, which fails immediately if the check moves. A comment at the check site states the ordering constraint and why it exists. The `reset -q` (spike-7) strengthens this further: a wipe a *previous* pass staged is cleared rather than inherited, so the residual hazard this risk names is now smaller than it was before the guard existed.
 
 ### Risk 4: Someone "simplifies" the guard back to the insertions-ratio predicate
 
@@ -462,7 +480,8 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - [ ] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
 - [ ] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
 - [ ] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
-- [ ] The worktree index is unmodified after the pure-wipe case (`git diff --cached --name-only` empty), proving the check runs before staging.
+- [ ] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
+- [ ] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
 - [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:972`) and `remove_worktree` (`:1762`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
 - [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
 - [ ] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts; a check-computation failure logs at WARNING under `[worktree-wip-guard-failed]` and falls through to today's behavior.
@@ -487,7 +506,7 @@ The lead agent orchestrates and never builds directly.
 
 - **Test engineer (regression)**
   - Name: `wipe-test-engineer`
-  - Role: the nine new tests in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`, including the `_gut` fixture helper and the mixed-shape fixture
+  - Role: the eleven new tests in `tests/unit/worktree_manager/test_worktree_manager_uncommitted.py`, including the `_gut` fixture helper and the mixed-shape fixture
   - Agent Type: test-engineer
   - Resume: true
 
@@ -520,7 +539,10 @@ The lead agent orchestrates and never builds directly.
 - In `preserve_uncommitted_worktree_changes`, insert the check **between** the `status --porcelain` non-empty branch and `git add -A`. Add a comment stating the ordering constraint and why staging first is unsafe.
 - Structural check: `git -C <worktree_dir> ls-tree --name-only -d HEAD`, split on newlines; a listed name that is not a directory on disk in the worktree means a wipe. Collect the missing names sorted.
 - On no missing directory, fall through to today's `git add -A` path unchanged.
-- On a wipe, compute the additive-only pathspec: `git -C <wt> ls-files --modified --others --exclude-standard -z` minus the set from `git -C <wt> ls-files --deleted -z`, both split on NUL with empty trailing segments dropped.
+- **On a wipe, the FIRST action is `git -C <wt> reset -q`** — a mixed reset: index to HEAD, working tree untouched. It must run *before* the candidate set is computed, not after. Without it, a wipe a previous pass already staged makes both `ls-files` reads return empty, the candidate set comes back empty, the pure-wipe branch fires, and the lane's staged edits are destroyed by the force-remove with nothing committed (spike-7). A mixed reset moves only the index, so it cannot destroy anything: deleted paths stay deleted on disk, edits stay edited, untracked files stay untracked.
+  - Add a comment at the reset stating that it is index-recovery, not hygiene, and that removing it reopens the round-2 blocker.
+  - Do **not** use `reset --hard` or `reset --mixed <other-ref>`. Bare `git reset -q` is `reset --mixed HEAD` and is the only form that is safe here.
+- On a wipe, then compute the additive-only pathspec: `git -C <wt> ls-files --modified --others --exclude-standard -z` minus the set from `git -C <wt> ls-files --deleted -z`, both split on NUL with empty trailing segments dropped.
   - **Empty set** → return `{"preserved": False, "was_clean": False, "refused": "missing-tracked-dirs", "ref": ref, "errors": [<detail>]}` **without staging or committing.** Do not call `git add` with an empty pathspec file: it exits 0 having staged nothing, and the following `git commit` then fails with "nothing to commit" and the outer handler logs a misleading `[worktree-wip-preserve-failed]` (spike-5).
   - **Non-empty set** → write the NUL-joined paths to a temporary file and run `git -C <wt> add --pathspec-from-file=<tmpfile> --pathspec-file-nul --`, then the existing commit / `rev-parse` / `update-ref` path, returning `preserved: True` alongside the `refused` key.
 - **`git add` has no `-z`.** It is `--pathspec-file-nul`; `-z` exits non-zero with ``error: unknown switch `z` ``. Never use `git add -A` on the wipe path — it restages the deletions the check just declined.
@@ -553,11 +575,12 @@ The lead agent orchestrates and never builds directly.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add a `_gut(wt, *dirs)` fixture helper alongside the existing `_dirty`, deleting the named tracked directories from disk.
-- Write the nine tests enumerated in **Test Impact**, reusing `_init_git_repo` / `_add_linked_worktree` / `_git`.
+- Write the eleven tests enumerated in **Test Impact**, reusing `_init_git_repo` / `_add_linked_worktree` / `_git`.
 - `test_mixed_wipe_preserves_additions_and_drops_deletions` asserts on the commit's diff against its parent: both the edit and the new file present, **zero deletions**, and the removed directory still tracked at the new HEAD.
 - `test_partially_staged_wipe_still_detected` runs `git add -A` before calling preserve.
 - `test_wipe_with_untracked_artifacts_still_refuses_deletions` must create untracked files so `git add -A` would report insertions — this pins spike-3's finding.
-- `test_index_untouched_on_pure_wipe` asserts `git diff --cached --name-only` is empty afterwards.
+- `test_pure_wipe_carries_no_staged_deletions` asserts `git diff --cached --diff-filter=D --name-only HEAD` is empty afterwards.
+- `test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved` runs `git add -A` *before* calling preserve on the mixed fixture, and asserts the additive commit still lands with both files and zero deletions. Do not conflate it with `test_partially_staged_wipe_still_detected`, which asserts only that detection fires.
 - Update `test_git_failure_returns_error_dict_and_never_raises` if the new reads change the error shape; do not weaken its assertions.
 
 ### 4. Validate
@@ -568,7 +591,7 @@ The lead agent orchestrates and never builds directly.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` and confirm the whole directory is green, not just the new file. `TestReapIdleWorktree` in `test_worktree_manager_cleanup.py` must stay green untouched — a break there means the change leaked outside its surface.
-- **Mutation-check each assertion separately**: remove the structural check and confirm `test_pure_wipe_writes_no_commit_and_no_ref` fails; replace the additive-only staging with `git add -A` and confirm `test_mixed_wipe_preserves_additions_and_drops_deletions` fails on the zero-deletions assertion; move the check to after `git add -A` and confirm both `test_index_untouched_on_pure_wipe` and `test_partially_staged_wipe_still_detected` fail; drop the `session/` prefix gate and confirm `test_detached_head_falls_back_to_slug_argument` fails. A test that stays green under removal of the thing it names is not testing it.
+- **Mutation-check each assertion separately**: remove the structural check and confirm `test_pure_wipe_writes_no_commit_and_no_ref` fails; replace the additive-only staging with `git add -A` and confirm `test_mixed_wipe_preserves_additions_and_drops_deletions` fails on the zero-deletions assertion; move the check to after `git add -A` and confirm both `test_pure_wipe_carries_no_staged_deletions` and `test_partially_staged_wipe_still_detected` fail; delete the `git reset -q` from the wipe path and confirm `test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved` fails; drop the `session/` prefix gate and confirm `test_detached_head_falls_back_to_slug_argument` fails. A test that stays green under removal of the thing it names is not testing it.
 - Confirm no pre-existing test in the file was weakened: diff the test file and check that only additions and the one flagged UPDATE appear.
 - Run the Verification table commands and report each result.
 
@@ -605,7 +628,7 @@ Every row is read the same way: **the command must exit 0.** Anti-criteria are w
 | Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit 0 |
 | Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit 0 |
 | Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit 0 |
-| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_index_untouched_on_pure_wipe' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
+| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pure_wipe_carries_no_staged_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
 | Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit 0 |
 | Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit 0 |
 | Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit 0 |
