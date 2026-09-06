@@ -633,22 +633,22 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 - Domain: Redis/Popoto data
 - Create the eight flat modules with `AutoKeyField` id, `KeyField project_key`, `SortedField created_at partition_by="project_key"`, low-cardinality `IndexedField` state fields only, `Meta.ttl` decisions per record (evidence and investigations follow `ReflectionRun`; case, evaluation, and release are immortal like `Job`)
 - Export from `models/__init__.py` after the rebuild interlock
-- Add `ImprovementSettings` to `config/settings.py` with `enabled=False`, `max_concurrent_research_sessions=2`, `daily_question_ceiling`, `portfolio_allocation`, `controller_tick_seconds`
+- Add `ImprovementSettings` to `config/settings.py` with `enabled=False`, `max_concurrent_research_sessions=1` (one SDLC lane on the Claude subscription), `daily_external_llm_usd=10.00`, `portfolio_allocation`, `controller_tick_seconds`. There is no `daily_question_ceiling` field: the ceiling is zero and the capability does not exist
 - Add the no-op migration marker to `scripts/update/migrations.py`
 - Extend the index guard test to enumerate the new models
 
 ### 3. Evidence and reuse seams
 - **Task ID**: build-seams
 - **Depends On**: build-records
-- **Validates**: `tests/unit/test_poll_registry.py`, `tests/unit/test_length_safe_content_store.py`, `tests/unit/test_task_type_profile.py`, `tests/unit/test_session_tags.py`, `tests/unit/test_improvement_evidence.py` (create)
-- **Informed By**: recon (correction detector transient; `_shipped_evidence` discarded; `rework_triggered` unwritten); spike-5 (archive path unverified)
+- **Validates**: `tests/unit/test_length_safe_content_store.py`, `tests/unit/test_task_type_profile.py`, `tests/unit/test_session_tags.py`, `tests/unit/test_improvement_evidence.py` (create)
+- **Informed By**: recon (correction detector transient; `_shipped_evidence` discarded; `rework_triggered` unwritten); spike-5 (archive path unverified); critique blocker 2 (the old anti-criterion matched a dead field)
 - **Assigned To**: seams-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Promote `CORRECTION_PATTERNS` into a persisted detector emitting `SessionEvent` kinds `intervention` and `correction` with a `classification` field (`architectural`, `preference`, `scope`, `clarification`, `unknown`)
 - Persist `expectation_reconciler`'s shipped-work evidence and owner liveness as `ImprovementEvidence` rows with cursor and coverage
-- Decide and implement the `rework_rate` branch: wire `rework_triggered` from the new `correction` event with classification `architectural`, or delete the aggregate, `failure_stage_distribution`, and `get_delegation_recommendation`
-- Add optional `investigation_id` to the poll descriptor and forward it from `tools/ask_poll.py`
+- Delete the `rework_rate` aggregate (Open Question 1 is decided). Remove `rework_rate` and `failure_stage_distribution` from `models/task_type_profile.py` (`:62`, `:94`, `:196`) and `get_delegation_recommendation` with them; remove the `rework_triggered` branch from `tools/session_tags.py` (`:156`, `:181`, `:189`); remove the dead `rework_triggered = Field(null=True)` at `models/agent_session.py:221`, which has no writer and is the reason the old Verification row passed vacuously. Rework is derived from `ImprovementEvidence` rows carrying `classification="architectural"`, which have a real writer
+- Add the memory-inspiration observer adapter: read `Memory` rows with `project_key="valor", source="human"` through `tools/memory_search/__init__.py::search`, dedupe by memory id, write `ImprovementEvidence` rows of kind `inspiration` preserving the original text, its `reference`, and its timestamp. No poll registry change, no `investigation_id`, no question path
 - Add `VerifyingArtifactStore(FilesystemStore)` under a retention root that re-hashes on every load including the archive fallback; wire it into `ImprovementEvaluation` and `ImprovementExperiment` content fields
 - Produce `docs/plans/critiques/recursive-self-improvement-capability-matrix.md` marking each planned component implemented, deployed, measured, or unknown
 
@@ -661,8 +661,8 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `ui/data/improvement.py` read-only queries, `ui/templates/improvement/` partials, `@app.get("/_partials/improvement/...")` routes, and an index card
-- Render coverage, active cases, hypotheses, rejected experiments, intervention burden, spend, release lineage; render `paused_budget`, `inconclusive`, and `reconciliation_required` with reason text
-- Add `admitted` to `ACTIVE_STATUSES` at `ui/data/sdlc.py:469,1255`
+- **Render only what this build writes**: the coverage partial and the intervention-burden partial, both backed by `ImprovementEvidence`, plus the provisional-assumptions list. Cases, hypotheses, rejected experiments, spend, release lineage, and the `paused_budget` / `inconclusive` / `reconciliation_required` state renderings move to the child issue for the lane that first writes each one (lane 3 for intents and reservations, lane 5 for cases and hypotheses, lane 6 for releases). Shipping six permanently empty tiles is not a dashboard
+- Add `admitted` to **both** dashboard sites, which are two different things and were previously cited as one. The module constant `ACTIVE_STATUSES` at `ui/data/sdlc.py:1256` (read at `:1308` and `:1339`), and the inline literal returned by `PipelineProgress.is_active` at `ui/data/sdlc.py:469` (property defined at `:468`). Both belong to `PipelineProgress`, but they are not identical today: the constant carries `"in_progress"` and the inline tuple does not. Collapse them into one definition and keep the union, so the property gains `"in_progress"` as a deliberate, tested change rather than a silent one. Assert in `tests/unit/test_ui_sdlc_data.py` that exactly one definition exists and that `admitted` reads active on both paths. A third `is_active` at `:244` belongs to `StageState`, compares `"in_progress"` on a stage rather than a session status, and is left alone
 
 ### 5. Validate lanes 1 and 2
 - **Task ID**: validate-lanes-1-2
@@ -680,11 +680,11 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 - **Assigned To**: seams-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- File four issues via `/do-issue`, each `Refs #3177`, carrying the relevant Technical Approach subsection and the capability matrix rows it depends on:
-  - Lane 3, control substrate: control namespace and Lua transition, leases and fencing, dispatch intents with `admitted` status and the `_push_agent_session` create-or-bind seam, reservations and settlement, scheduler adapter, `valor-improve` CLI, export/import, fault-injection suite
-  - Lane 4, frozen evaluation inputs: memory corpus export, per-arm private Redis helper for tests, `VALOR_PROJECT_KEY` in `_harness_env`, writer kill switch, isolated retrieval adapter with parity check, judge envelope, `tools/improvement_eval/` statistics with Holm correction and named stopping rules
-  - Lane 5, first complete research cycle: observer adapters, system model revisions, planner tick, investigation lifecycle over the poll transport, the journey-preservation experiment under a frozen contract, qualified-result report
-  - Lane 6, production promotion and meta-experiments: release records, exposure assignment, rollback, observation windows, incident drills, recursive candidate surfaces with budget-matched comparison
+- File four issues via `/do-issue`, each `Refs #3177`, carrying the relevant Technical Approach subsection, the matching rows from "Carried to child issues" in Success Criteria, the render targets moved out of task 4, and the capability matrix rows each depends on:
+  - **Lane 3, control substrate.** Control namespace and Lua transition, dispatch intents with `admitted` status, the `improvement-intent-reconcile` recovery reflection, `valor-improve pause`/`resume`/`doctor` break-glass with its documented manual procedure, the two-unit reservation model with the lane-slot release wired inside `finalize_session`, the scheduler adapter with its `worker:registered_pid:*` liveness check, the `valor-improve` CLI, export/import, and the fault-injection suite. **This issue records a hard dependency on #3183** for the create-or-bind seam, the fencing lease, and the dead-letter record, states the consumer contract from Gap C, and blocks until #3183 lands. It opens no PR against `agent/agent_session_queue.py`. It also carries the dashboard renderings for intents, reservations, spend, and `paused_budget` / `reconciliation_required`, moved out of task 4
+  - **Lane 4, frozen evaluation inputs.** Memory corpus export, per-arm private Redis helper for tests, `VALOR_PROJECT_KEY` in `_harness_env`, writer kill switch, isolated retrieval adapter with parity check, judge envelope, `tools/improvement_eval/` statistics with Holm correction and named stopping rules
+  - **Lane 5, first complete research cycle.** Observer adapters, system model revisions, planner tick, the questionless investigation lifecycle (probe, trace analysis, memory retrieval, web research, resource acquisition), the first resource-acquisition action verifying current provider documentation for **Meta Muse 1.3** and any other nearly-free token source, the journey-preservation experiment under a frozen contract, and the qualified-result report. It also carries: routing `scripts/sdlc_reflection.py`'s lesson extraction through an `ImprovementEvidence` observer adapter so a scraped lesson gains the behavioral validation it has never had. That script is named in "Why Previous Fixes Failed" as exactly the pattern this loop exists to replace, and it stays in production until this lane folds it in. Plus the dashboard renderings for cases and hypotheses, moved out of task 4
+  - **Lane 6, production promotion and meta-experiments.** Release records, exposure assignment, rollback, observation windows, incident drills, recursive candidate surfaces with budget-matched comparison, and the release-lineage dashboard rendering moved out of task 4
 
 ### 7. Documentation
 - **Task ID**: document-feature
