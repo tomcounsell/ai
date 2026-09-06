@@ -161,27 +161,145 @@ Locate every edit site by symbol, never by remembered line number — `8934583dc
 
 ## Failure Path Test Strategy
 
-_placeholder_
+This is a failure-path bug, so the failure path is the deliverable. **The test must inject an exception into the window — substrate write done, push not yet called — and assert the checkout is restored and an escalation is filed.** A test that only asserts the happy path proves nothing about this fix.
+
+All new tests go in `tests/unit/reflections/test_docs_auditor_git_surface.py`, in a new class `TestWriteWindowRestore`. That file already provides the `repo` fixture (a real `git init` checkout with a real bare local `origin`, so `git checkout` / `add` / `commit` / `push` run for real and only `gh` is intercepted), the `gh` dispatcher fixture, `fake_redis`, and the `_porcelain` / `_git` helpers. Reuse them; do not build a parallel harness.
+
+### The four injection points
+
+Each test drives the full `run_docs_auditor()` with `PROJECT_ROOT` monkeypatched to the fixture repo, `_check_auth` forced true, `_git_dirty` forced false, and `_run_vault_drift_detection` stubbed — the pattern `test_restore_checkout_failure_is_reported_and_run_returns_error` already establishes.
+
+- [ ] **Exception between the write and the push (the issue's exact scenario).** Stub `audit` with a function that *really writes* a tracked markdown file in the fixture repo and returns a normal `status="ok"` result naming it in `files_touched`; monkeypatch `_push_branch_and_pr` to raise `RuntimeError("injected")`. Assert: (1) `_porcelain(repo, "docs/features/x.md")` is empty — the file is byte-identical to `HEAD`; (2) `_current_ref(repo)` is back on `main`; (3) `_file_issue_if_new` was called exactly once with `category == "operational-failure"` and a title containing `rotation aborted after writing`; (4) the returned `status` is `"error"`.
+- [ ] **Exception inside the withheld-filing loop.** Same real-writing `audit` stub, but its result carries a non-empty `withheld` list, and `_file_issue_if_new` is stubbed to raise on the *withheld-fix* category and record-and-return-True on the `operational-failure` category. This proves the handler covers the region before the zero-diff gate, not only the push call, and that the escalation still lands when the thing that raised was itself an issue-filing call.
+- [ ] **Exception inside `audit` after it has written.** Stub `_apply_fixes_to_file` (or the advisory `_file_issue_if_new` call inside `audit`) to raise after at least one real write. Assert `audit` returns `status == "error"` with a **non-empty** `files_touched`, and that the caller restores exactly those paths and escalates. This is the test that proves the `audit()` ledger guard is load-bearing — without it the caller has no path list and cannot restore.
+- [ ] **Restore failure inside the new handler escalates with an honest body.** Inject the exception as in the first test *and* make `git checkout main` fail (the `failing_checkout` `subprocess.run` monkeypatch pattern already in `test_restore_checkout_failure_is_reported_and_run_returns_error`). Assert the escalation is still filed and its body reports the restore as failed, naming the paths that need manual cleanup. The body must never claim a restore it did not observe.
+
+### The mutation check (do this, do not skip it)
+
+Each guard gets mutated and re-measured individually, because a green test frequently reaches no new code at all:
+
+- [ ] Revert only the `except Exception` handler in `run_docs_auditor` → tests 1, 2 and 4 must fail.
+- [ ] Revert only the `audit()` top-level guard → test 3 must fail.
+- [ ] Revert only the `status == "error"` check after `audit` returns → test 3 must fail.
+- [ ] Revert only the `_restore_checkout` `branch=None` handling → at least one test must fail.
+- [ ] Delete only the escalation call → tests 1–4 must fail on the `_file_issue_if_new` assertion.
+
+### Exception Handling Coverage
+
+- [ ] `run_docs_auditor`'s outer `except Exception` — already reachable; after this change it covers only the preflight (steps 1–4b), where no write has happened. Keep a test asserting it still returns `status="error"` and files **no** escalation for a pre-write failure, so the new escalation cannot start firing on runs that wrote nothing.
+- [ ] The new `except Exception` in `run_docs_auditor` — covered by the four tests above; asserts observable behavior (a restored tree and a filed issue), never a bare log line.
+- [ ] The new top-level guard in `audit` — asserts an observable return value (`status="error"` carrying `files_touched`), not a swallowed exception.
+- [ ] `_restore_checkout`'s existing `except Exception` returning `False` — already covered by `test_restore_checkout_failure_is_reported_and_run_returns_error`; the new handler must treat its `False` as "escalate with a failed-restore body".
+- [ ] `refresh_docs_in_memory`'s `try/except` and `_send_telegram_notification` — unchanged by this work; existing coverage stands.
+
+### Empty/Invalid Input Handling
+
+- [ ] `files_touched == []` when the exception fires — `_restore_checkout` must still return to `starting_ref` and must skip both the `git checkout HEAD --` call and the scoped `git status` postcondition (it already guards both on `if files_touched:`). Assert the handler does not escalate in this case, because a run that wrote nothing left no dirt.
+- [ ] `starting_ref is None` from the pre-write `_current_ref` read — the run returns `skipped` before `audit` is called. Assert `audit` was never invoked and the working tree is byte-identical.
+- [ ] `branch=None` into `_restore_checkout` — assert no `git branch -D` subprocess is issued.
+
+### Error State Rendering
+
+- [ ] The escalation body is the user-visible surface. Assert it names every path in `files_touched`, states the restore outcome, and carries the cleanup command. Assert the R5-1 title and the new title are distinct strings so the tracker can tell the two failure modes apart.
+- [ ] Assert the failure does **not** send a success Telegram notification and does **not** stamp the rotation hash — a doc written but not audited to completion must be re-picked next run.
 
 ## Test Impact
 
-_placeholder_
+The `starting_ref` keyword on `_push_branch_and_pr` is a required-argument change, so every direct caller in the suite must be updated. Ten call sites, all in two files, all mechanical (`starting_ref="main"` in the fixture repos):
+
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::TestPushBranchAndPr::test_gh_pr_create_failure_restores_head_and_deletes_branch` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_git_add_missing_path_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_push_to_unreachable_remote_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_unrelated_modified_file_is_untouched_by_the_restore` — UPDATE: pass `starting_ref="main"`. This test is the guarantee that foreign dirt survives a restore; it must keep passing unchanged in substance.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_restore_checkout_failure_is_reported_and_run_returns_error` — UPDATE: pass `starting_ref="main"` to the direct call. Its `run_docs_auditor` half also stubs `audit` and `_push_branch_and_pr`; verify the stub `lambda *a, **kw: None` still absorbs the new keyword (it does) and that the test still exercises the `pr_url is None` R5-1 branch rather than being captured by the new handler.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_pr_body_carries_marker_when_fixes_withheld` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_empty_files_touched_creates_no_branch_and_no_commit` — UPDATE: pass `starting_ref="main"`. Asserts the empty-`files_touched` early return, which now sits above the ref handling entirely.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_staging_command_names_the_touched_paths_only` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_restore_uses_head_so_staged_content_cannot_survive` — UPDATE: pass `starting_ref="main"`.
+
+Tests that stub rather than call, and need only re-verification (no edit expected):
+
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py` — the five `monkeypatch.setattr(docs_auditor, "audit", ...)` / `"_push_branch_and_pr"` stubs. VERIFY: each stub's signature still absorbs the new keyword, and each `audit_result` dict still carries `status` so the new `status == "error"` check reads a real value rather than a missing key.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestDoDocsContract::test_pr_mode_does_not_create_branch` and `::test_hook_fires_and_nothing_is_committed_under_pr_mode` — VERIFY: the `audit()` guard must not change `scope_mode="pr-changed-files"` behavior. `/do-docs` still gets a dirty tree and no branch.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard::test_dirty_tree_skips_rotation` — VERIFY: unchanged. The step-3 guard keeps filing nothing; this plan deliberately does not touch it.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestZeroDiffGate::test_zero_diff_skips_pr_creation` — VERIFY: the zero-diff `return` now happens inside the new `try`. Assert it still returns `skipped` and that the new handler does not fire on it.
+
+No test is deleted. No test is replaced.
 
 ## Rabbit Holes
 
-_placeholder_
+- **Making the restore able to clean up dirt it cannot attribute.** Any scheme that diffs `git status --porcelain` before and after the write to infer the auditor's paths will, on a busy shared checkout, eventually attribute a peer lane's concurrent write to the auditor and `git checkout HEAD --` it away. Destroying a peer's uncommitted work is worse than the bug being fixed. The path set comes from `files_touched` and nowhere else.
+- **Restoring a modified-but-untracked markdown file.** `git checkout HEAD -- <path>` errors on an untracked path. This edge exists identically on today's push path and is not created by this change; chasing it here doubles the diff for a case `_apply_fixes_to_file` has never been observed to produce (it only rewrites files it successfully read from the resolved neighborhood).
+- **Turning the widened region into a general transaction abstraction.** A context manager, a rollback registry, or a "write journal" for the auditor is a bigger design than one `except Exception` and one helper, and it would have to be reasoned about against the Redis lock and the reflection scheduler. Not now.
+- **Retrying the aborted run in-process.** Tempting, and wrong: the run holds a Redis lock with a TTL, the failure cause is unknown, and the daily rotation naturally retries tomorrow against a clean tree. Restore, escalate, return.
+- **Auditing the other reflections for the same pattern.** `run_docs_branch_sweeper` and the vault-drift detector may or may not have comparable windows. That is a separate investigation with a separate blast radius.
+- **Rewriting the step-3 dirty-tree guard.** It is correct as written and its comment explains why. Leave it alone.
 
 ## Risks
 
-_placeholder_
+### Risk 1: The new escalation becomes noise on transient `gh` failures
+
+**Impact:** A one-off `gh issue create` timeout in the withheld-filing loop files an `operational-failure` issue even though the restore succeeded and nothing is actually wedged. Repeated over weeks this trains people to ignore the category, which is exactly how R5-1 would stop working too.
+
+**Mitigation:** The title is keyed by slug only — no run id, no date — so a failure that repeats every run files exactly once, matching R5-1's deliberate design. `operational-failure` is already in `_RECURRING_CONDITION_CATEGORIES`, so the Redis fast-path read is off and `_issue_exists(states="open")` is authoritative: a closed issue can re-file on genuine recurrence, and an open one cannot duplicate. The body distinguishes restore-succeeded from restore-failed, so a triager can close the benign case in seconds.
+
+### Risk 2: Double restore on a path where both handlers fire
+
+**Impact:** If `_push_branch_and_pr` somehow propagates an exception (it catches `Exception` internally, so this needs a `BaseException` or a raise from its own `finally`), its `finally` restores and then the caller's handler restores again.
+
+**Mitigation:** `_restore_checkout` is idempotent in practice — `git checkout <ref>` on the ref you are already on and `git checkout HEAD -- <paths>` on clean paths are both no-ops, and the branch delete is gated on a `rev-parse --verify`. A second call costs three subprocesses and changes nothing. Accept it rather than adding a "was I already restored" flag whose staleness is a worse failure mode.
+
+### Risk 3: `audit()`'s new guard changes behavior for `/do-docs`
+
+**Impact:** `audit` is called by two callers. Under `scope_mode="pr-changed-files"` the `/do-docs` SDLC stage would now receive `status="error"` where it previously got a propagating exception.
+
+**Mitigation:** A returned error result carrying `files_touched` is strictly more informative than a traceback, and `/do-docs` already leaves the tree dirty by design for its own review gate, so nothing downstream depended on the exception escaping. The `TestDoDocsContract` tests pin the contract that matters (no branch, no commit, hook fires) and must keep passing untouched.
+
+### Risk 4: Re-derived symbol locations drift again before the build lands
+
+**Impact:** `reflections/docs_auditor.py` took four commits in nine days, one of which (`8934583dc`) rewrote the exact function this plan edits. A builder working from a stale read edits the wrong region.
+
+**Mitigation:** Every reference in this plan is a symbol name, not a line number. The build task carries an explicit instruction to `grep -n` for each symbol at its own HEAD before editing, and to re-read `run_docs_auditor` in full rather than trusting this document's prose. The concurrent #3072 lane touches only `FALLBACK_ENG_CHAT` near the top of the file; expect a trivial rebase and plan no edits in that region.
+
+### Risk 5: The lock TTL expires while the handler runs
+
+**Impact:** `_release_lock` sits in the outermost `finally`. The restore adds up to five `git` subprocesses plus one `gh` call to the failure path; if `LOCK_TTL_SECONDS` elapses first, a concurrent rotation could start mid-restore.
+
+**Mitigation:** The scheduler runs this daily, not on a tight loop, so a second rotation inside the TTL window is not a realistic trigger. The added work is bounded by `settings.timeouts.git_subprocess_s` per subprocess and is small next to the substrate run that preceded it. No change; named here so a reviewer can weigh it rather than discover it.
 
 ## Race Conditions
 
-_placeholder_
+### Race 1: A peer lane writes to the shared checkout during the window
+
+**Location:** `reflections/docs_auditor.py::run_docs_auditor`, the region from `audit(...)` through `_push_branch_and_pr(...)`.
+**Trigger:** Another agent working in `~/src/ai` modifies a file while the auditor is inside the write window, and the auditor then aborts and restores.
+**Data prerequisite:** `files_touched` must name only paths this run wrote.
+**State prerequisite:** No path outside `files_touched` may be modified by the restore.
+**Mitigation:** By construction. `_restore_checkout` uses `git checkout HEAD -- <files_touched>` with an explicit path list, never `checkout -f`, `reset --hard`, or `clean`, and its second postcondition scopes `git status --porcelain` to the same list. `test_unrelated_modified_file_is_untouched_by_the_restore` already pins this and must keep passing. The one genuine collision — a peer editing a file the auditor also wrote in the same window — is unchanged from today's push-path behavior and is not made worse by widening the window's owner.
+
+### Race 2: `starting_ref` no longer names the branch the checkout is on
+
+**Location:** the `_current_ref(PROJECT_ROOT)` capture before step 5, consumed by `_restore_checkout`.
+**Trigger:** A peer switches the shared checkout's branch between the capture and the restore. This is a real event here — `main` in this checkout has been switched to a peer's feature branch before.
+**Data prerequisite:** `starting_ref` must be the ref the auditor found, so the restore returns the checkout to whatever the auditor inherited rather than to a hardcoded `main`.
+**State prerequisite:** none beyond that.
+**Mitigation:** Capturing the ref *before* the write (rather than inside `_push_branch_and_pr`, after) narrows this window rather than widening it, and it is why the capture moves up. `_restore_checkout`'s first postcondition (`_current_ref(repo_root) != starting_ref`) detects a failed return and forces the escalation, so the failure is loud instead of silent. Restoring to the observed starting ref, never to a literal `main`, is a hard requirement on the implementation.
+
+### Race 3: Two rotations overlapping inside the TTL
+
+**Location:** `_acquire_lock` / `_release_lock` around the whole run.
+**Trigger:** covered under Risk 5.
+**Mitigation:** The existing Redis SETNX lock. Unchanged by this plan.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- [SEPARATE-SLUG #3072] Any edit to `FALLBACK_ENG_CHAT` or `_resolve_notify_chat` near the top of `reflections/docs_auditor.py`. A concurrent lane owns that region under `docs/plans/sibling-reflections-hardcode-eng-valor.md`; touching it here manufactures a merge conflict for no benefit.
+- [DESTRUCTIVE] Any whole-tree restore primitive in the auditor — `git checkout -f`, `git reset --hard`, `git clean`, or a `git status`-diffed path set inferred rather than recorded. On a shared main checkout these destroy peer lanes' uncommitted work. The restore path set is `files_touched` and nothing else. An anti-criterion in Verification asserts these strings stay absent from the module.
+- [DESTRUCTIVE] Making the step-3 dirty-tree guard file an issue or escalate. This is option (b), rejected in Solution with the code comment that forbids it. An anti-criterion asserts no `_file_issue_if_new` call appears inside that guard.
+- [SEPARATE-SLUG #3049] The sweeper-side exemption-never-expires concern noted in `run_docs_branch_sweeper`. Different function, different failure mode, already tracked.
+
+Everything else the issue asks for is in scope for this plan and is done here — the restore, the escalation, the `audit()` ledger guard, the second sub-window inside `_push_branch_and_pr`, the tests, and the docs.
 
 ## Update System
 
