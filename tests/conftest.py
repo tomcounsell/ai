@@ -22,6 +22,7 @@ from tests.db_claim import (
     claimed_test_dbs,
     release_test_db_claim,
 )
+from tests.marker_map import FEATURE_MAP, resolve_marker
 
 # --- Un-awaited-coroutine leak guardrail (#2120) --------------------------
 # A test that hands an eagerly-created coroutine to a seam that drops it (never
@@ -1102,115 +1103,21 @@ def create_test_session(**kwargs):
 # e2e, tools, performance, ai_judge).  Run a specific feature's tests with:
 #     pytest -m sdlc
 #     pytest -m "messaging or sessions"
+#
+# FEATURE_MAP and the resolution function live in tests/marker_map.py, the
+# single point of truth shared with tests/unit/test_feature_map_markers.py
+# (the marker-regression guard, #3010). Import it back here rather than
+# re-inlining the loop, so the guard and this hook can never disagree.
 # ---------------------------------------------------------------------------
-FEATURE_MAP = {
-    "bridge": "messaging",
-    "messenger": "messaging",
-    "telegram": "messaging",
-    "duplicate_delivery": "messaging",
-    "transcript": "messaging",
-    "dedup": "messaging",
-    "markdown": "messaging",
-    "media_handling": "messaging",
-    "routing": "messaging",
-    "pm_channels": "messaging",
-    "unthreaded": "messaging",
-    "file_extraction": "messaging",
-    "message_pipeline": "messaging",
-    "reply_delivery": "messaging",
-    "pipeline": "sdlc",
-    "sdlc": "sdlc",
-    "observer": "sdlc",
-    "stop_hook": "sdlc",
-    "stop_reason": "sdlc",
-    "post_tool_use": "sdlc",
-    "pre_tool_use": "sdlc",
-    "skill_outcome": "sdlc",
-    "skills_audit": "sdlc",
-    "steering": "sdlc",
-    "cross_repo_build": "sdlc",
-    "session_status": "sessions",
-    "session_stuck": "sessions",
-    "session_watchdog": "sessions",
-    "stall_detection": "sessions",
-    "pending_stall": "sessions",
-    "pending_recovery": "sessions",
-    "escape_hatch": "sessions",
-    "lifecycle": "sessions",
-    "session_continuity": "sessions",
-    "goal_gates": "sessions",
-    "open_question": "sessions",
-    "agent_session": "sessions",
-    # Execution-fence family (#2494 / #2518): the (pid, create_time) identity
-    # guard and the reapers that consume it. Placed after "agent_session" so
-    # ``agent_session_*`` filenames keep their existing marker.
-    "fence": "sessions",
-    "orphan_reap": "sessions",
-    "agent_session_hierarchy": "jobs",
-    "agent_session_scheduler": "jobs",
-    "agent_session_queue": "jobs",
-    "agent_session_health": "jobs",
-    "enqueue": "jobs",
-    "reflection": "reflections",
-    "config": "config",
-    "context_modes": "context",
-    "session_tags": "context",
-    "auto_continue": "classifiers",
-    "intake_classifier": "classifiers",
-    "work_request_classifier": "classifiers",
-    "message_quality": "classifiers",
-    "stage_aware_auto_continue": "classifiers",
-    "validate_commit": "validation",
-    "validate_verification": "validation",
-    "validate_test_impact": "validation",
-    "validate_sdlc": "validation",
-    "verification_parser": "validation",
-    "features_readme": "validation",
-    "build_validation": "validation",
-    "checkpoint": "validation",
-    "docs_auditor": "validation",
-    "branch_manager": "git",
-    "worktree_manager": "git",
-    "git_state": "git",
-    "workspace_safety": "git",
-    "symlinks": "git",
-    "sdk_client": "sdk",
-    "sdk_permissions": "sdk",
-    "workflow_sdk": "sdk",
-    "code_impact": "impact",
-    "doc_impact": "impact",
-    "cross_repo_gh": "impact",
-    "cross_wire": "impact",
-    "model_relationships": "models",
-    "redis_models": "models",
-    "summarizer": "summarizer",
-    "telemetry": "monitoring",
-    "health_check": "monitoring",
-    "bridge_watchdog": "monitoring",
-    "connectivity": "monitoring",
-    "silent_failures": "monitoring",
-    "remote_update": "config",
-    "benchmarks": "monitoring",
-    "classifier": "classifiers",
-    "code_execution": "tools",
-    "link_analysis": "tools",
-    "doc_summary": "tools",
-    "image_analysis": "tools",
-    "search": "tools",
-    "test_judge": "tools",
-    "ai_judge": "tools",
-    "telegram_history": "tools",
-}
 
 
 def pytest_collection_modifyitems(items):
     """Auto-apply feature markers based on test file name."""
     for item in items:
-        filename = item.nodeid.split("::")[0].split("/")[-1].replace("test_", "").replace(".py", "")
-        for pattern, marker_name in FEATURE_MAP.items():
-            if pattern in filename:
-                item.add_marker(getattr(pytest.mark, marker_name))
-                break
+        filename = item.nodeid.split("::")[0].split("/")[-1]
+        marker_name, _key = resolve_marker(filename)
+        if marker_name is not None:
+            item.add_marker(getattr(pytest.mark, marker_name))
 
 
 @pytest.fixture
