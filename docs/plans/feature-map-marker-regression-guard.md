@@ -509,6 +509,8 @@ intended and to lose no marker anywhere:
 - [ ] A package directory containing exactly one test file passes R2 trivially rather than raising.
 - [ ] `KNOWN_MISTAGS` containing a path that is no longer tracked fails rule 2 above with a message
       naming the stale path, instead of being ignored.
+- [ ] A package whose largest marker group ties (2-vs-2) reports every file as ambiguous rather
+      than silently picking whichever group dict iteration reached first.
 
 ### Error State Rendering
 
@@ -680,8 +682,11 @@ wiring or a test.
 
 - [ ] `tests/marker_map.py` module docstring states that it is the single source of marker
       resolution and must stay import-light so it runs on a bare interpreter with no venv.
-- [ ] Every `KNOWN_MISTAGS` and `EXEMPT_DIRS` entry carries a prose reason as its value. A bare
-      path with no reason is not an acceptable entry.
+- [ ] Every `KNOWN_MISTAGS` entry carries a prose reason as its value. A bare path with no reason
+      is not an acceptable entry.
+- [ ] `resolve_marker`'s stem line carries a comment pointing at #3184 and stating that the global
+      `str.replace` is intentional fidelity to the shipped hook, so a future reader does not
+      "clean it up" into `removeprefix` and silently retag two files.
 
 ### Test Suite Index
 
@@ -701,8 +706,21 @@ wiring or a test.
       each of R1, R2, and R3 separately.
 - [ ] `python tests/marker_map.py --audit` exits 0 on a clean tree and non-zero on a mistag, using
       only the standard library.
+- [ ] **The coverage boundary is stated, not implied.** R1 and R2 catch ordering collisions only
+      inside a themed package directory (80 of 834 files, 9.6%; R1 reaches 47, R2 reaches 33).
+      Suite-wide, only fragment matches are caught. This sentence appears in
+      `docs/features/feature-map-marker-guard.md`, and the rules are not widened to close it.
+- [ ] The stem expression is `basename.replace("test_", "").replace(".py", "")`, copied verbatim
+      from the hook. `removeprefix`, `removesuffix`, and anchored regexes appear nowhere in
+      `tests/marker_map.py`. Committed fixtures assert
+      `resolve_marker("test_test_judge.py") == (None, None)` and
+      `resolve_marker("test_validate_test_impact.py") == (None, None)`.
+- [ ] R2 attributes violations to the siblings outside the largest marker group, and reports every
+      file in the package as ambiguous when the largest group ties. Both branches have committed
+      synthetic fixtures.
 - [ ] No exemption in the guard is keyed by line number, index, or ordinal position. Every
-      `KNOWN_MISTAGS` key is a repo-relative path that `git ls-files` currently returns.
+      `KNOWN_MISTAGS` key is a repo-relative path that `git ls-files` currently returns. There is
+      no whole-package exemption mechanism.
 - [ ] Stale exemptions fail the guard: deleting a real violation without deleting its baseline
       entry turns the guard red.
 - [ ] The issue's "runs in CI on every PR" criterion is met by the guard running as an ordinary
@@ -710,8 +728,9 @@ wiring or a test.
       this repo's CI.
 - [ ] Marker resolution has exactly one implementation. The inlined loop is gone from
       `tests/conftest.py`.
-- [ ] No test file loses a marker it had at `f3594dd23`. `test_youtube_transcription.py` moves from
-      `messaging` to `tools` and is the only intended change.
+- [ ] No test file loses **or gains** a marker relative to `f3594dd23`. The marked-file count is
+      exactly 280 before and after; `test_youtube_transcription.py` moving from `messaging` to
+      `tools` is the only marker change, and it is count-neutral.
 - [ ] Full `scripts/pytest-clean.sh tests/unit/ -q` is green.
 - [ ] Documentation updated (`docs/features/feature-map-marker-guard.md`, the features index, and
       `tests/README.md`).
