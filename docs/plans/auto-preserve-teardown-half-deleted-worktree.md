@@ -30,34 +30,42 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 ## Freshness Check
 
-**Re-verified at:** `ffda9fc86` (`origin/main`, 2026-09-05, during the post-critique revision pass). Every anchor below was re-derived by symbol against this commit, not copied forward.
+**Re-verified at:** `bf0a5d577` (`origin/main`, 2026-09-06, during the round-3 revision pass). Every anchor below was re-derived by symbol against this commit, not copied forward. The previous baseline was `ffda9fc86`, which is an ancestor of this head.
 **Issue filed at:** 2026-09-05T03:25:53Z
-**Disposition:** Minor drift — one commit landed on the module after filing, shifting every line citation by roughly 100 lines and adding a third worktree-removal entry point. The defect and the fix shape are unchanged.
+**Disposition:** Minor drift, twice over. Two commits have landed on `agent/worktree_manager.py` since the issue was filed — `55ad9ac89` (#3162) and `9c75c2e08` (#3179) — shifting every line citation by roughly 220 lines in total and adding a third worktree-removal entry point. The defect and the fix shape are unchanged.
 
 **The drift: #3162 closed after this plan's first draft.** Issue #3162 ("worktree-gc: reap stale `nightly-triage-*` branches and worktrees") closed at 2026-09-05T12:52:41Z via `55ad9ac89`, which is an ancestor of the current head. It touches both files this plan reads (`agent/worktree_manager.py` +102 lines, `agent/session_revival.py` +41) and adds `reap_idle_worktree()` — a third worktree-removal entry point in the same module. The first draft of this plan asserted "#3162 still open, no code overlap" and "no commits since filing"; both statements were false at its own head. Corrected here.
 
+**The second drift: #3179 landed on the module between the round-2 critique and this revision.** `9c75c2e08` ("Busy-guard scan: narrow the query, unamplify the sweep", Refs #2712) merged 2026-09-06T00:52:12+07:00 and is the current `origin/main` head's ancestor. It adds +148 lines to `agent/worktree_manager.py` (`_fetch_live_sessions`, `_scan_worktree_sessions`, `worktree_busy_probe_many`) and edits one line of `docs/features/session-isolation.md`. **It does not change the defect, the fix shape, or the reachability of the producer.** Verified: `grep -n 'preserve_uncommitted_worktree_changes('` still returns exactly the two call sites (`:1090`, `:1880`) plus the definition, so #3179 introduced no fourth producer path. What it did change is every line number below, which is why the whole anchor table is re-derived against `bf0a5d577` rather than carried forward.
+
+**The sweep reaches the producer through Path B, and that is unchanged by #3179.** `tools/disk_reclaim.py::sweep_worktrees` → `cleanup_after_merge` (`agent/worktree_manager.py:2176`) → `remove_worktree` (`:2230`) → `preserve_uncommitted_worktree_changes` (`:1880`). #3179 narrowed how the sweep decides *which* lanes are idle; it did not add or remove a route into preserve. The guard in this plan covers that path because it covers `remove_worktree`.
+
 **`reap_idle_worktree` needs no guard, and this is deliberate, not an oversight.** It lives at `agent/worktree_manager.py:1007` and refuses on a non-empty `git status --porcelain` before doing anything else, so it never calls `preserve_uncommitted_worktree_changes` at all. A half-deleted tree reads as maximally dirty there and the lane is kept. Its docstring already reasons about #3167 explicitly ("The clean-tree guard is also what keeps this path clear of issue #3167"), and `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins that behavior. This plan touches neither the function nor that test.
 
-**Anchors re-derived at `ffda9fc86`** (cited here for orientation; task bodies below cite by *symbol*, because line numbers in this module have now drifted twice):
+**Anchors re-derived at `bf0a5d577`** (cited here for orientation only; task bodies below cite by *symbol*, because line numbers in this module have now drifted three times — the `ffda9fc86` column is kept so a reader can see the size of the shift and distrust any stale citation on sight):
 
-| Symbol | Line | Note |
-|---|---|---|
-| `preserve_uncommitted_worktree_changes` (def) | 1508 | the producer |
-| its `_cleanup_stale_worktree` call site | 972 | Path A, immediately before `git worktree remove --force` |
-| its `remove_worktree` call site | 1762 | Path B |
-| `_cleanup_stale_worktree` (def) | 903 | |
-| path-containment guard (#880) | 942 | |
-| fallback `shutil.rmtree` | 1001 | |
-| `reap_idle_worktree` (def) | 1007 | new in `55ad9ac89`; never reaches preserve |
-| `create_worktree` (def) | 1370 | |
-| its `_cleanup_stale_worktree(...)` call | 1425 | |
-| `cleanup_stale_branches` (`agent/session_revival.py`) | 198 | |
-| `@patch(...preserve_uncommitted_worktree_changes)` in `test_worktree_manager_cleanup.py` | 466, 544 | |
-| `monkeypatch.setattr(wm, "preserve_uncommitted_worktree_changes", ...)` in the same file | 101, 122 | inside `TestReapIdleWorktree`, added by `55ad9ac89` |
-| `VALID_SLUG_RE` | 21 | `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` |
-| `PerformanceSettings` / `max_content_filename_bytes` / its `model_post_init` | 133 / 146 / 160 | `config/settings.py` |
-| `**Why a WIP commit + named ref, not `git stash`.**` paragraph | 263 | `docs/features/session-isolation.md` |
-| the docstring's counter-statement on `refs/stash` | 1518–1527 | `agent/worktree_manager.py` |
+| Symbol | Line at `bf0a5d577` | Was at `ffda9fc86` | Note |
+|---|---|---|---|
+| `preserve_uncommitted_worktree_changes` (def) | 1626 | 1508 | the producer |
+| its `_cleanup_stale_worktree` call site | 1090 | 972 | Path A, immediately before `git worktree remove --force` |
+| its `remove_worktree` call site | 1880 | 1762 | Path B |
+| `_cleanup_stale_worktree` (def) | 1021 | 903 | |
+| path-containment guard (#880) | 1060 | 942 | `wt == repo_root.resolve() or not wt.is_relative_to(worktrees_root)` |
+| fallback `shutil.rmtree` | 1119 | 1001 | |
+| `reap_idle_worktree` (def) | 1125 | 1007 | added by `55ad9ac89`; never reaches preserve |
+| `create_worktree` (def) | 1488 | 1370 | |
+| its `_cleanup_stale_worktree(...)` call | 1543 | 1425 | |
+| `remove_worktree` (def) | 1771 | 1653 | |
+| `cleanup_after_merge` (def) | 2176 | — | the sweep's route into Path B |
+| `cleanup_stale_branches` (`agent/session_revival.py`) | 198 | 198 | unmoved |
+| `@patch(...preserve_uncommitted_worktree_changes)` in `test_worktree_manager_cleanup.py` | 466, 544 | 466, 544 | unmoved |
+| `monkeypatch.setattr(..., "preserve_uncommitted_worktree_changes", ...)` in the same file | 101, 122 | 101, 122 | inside `TestReapIdleWorktree` (class at 93, the test at 111), added by `55ad9ac89` |
+| `VALID_SLUG_RE` | 21 | 21 | `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, unmoved |
+| `PerformanceSettings` / `max_content_filename_bytes` / its `model_post_init` | 133 / 146 / 160 | same | `config/settings.py`, unmoved |
+| `**Why a WIP commit + named ref, not `git stash`.**` paragraph | 263 | 263 | `docs/features/session-isolation.md`, unmoved; #3179's one-line edit to that file landed elsewhere |
+| the "**1. Auto-WIP-commit before teardown.**" subsection | 254 | 254 | same file, unmoved |
+| the `agent/worktree_manager.py` row in that file's file-map table | 307 | 307 | unmoved |
+| the docstring's counter-statement on `refs/stash` | 1636–1645 | 1518–1527 | `agent/worktree_manager.py` |
 
 **Claims re-checked and still true:**
 
