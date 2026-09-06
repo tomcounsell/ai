@@ -400,12 +400,13 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 
 - [ ] `tests/unit/test_autoexperiment.py` — DELETE: tests the removed script; every test imports `scripts.autoexperiment`
 - [ ] `tests/unit/test_valor_service_bootstrap.py` — UPDATE if it enumerates the prefix-drift service list; assert `autoexperiment` is absent
-- [ ] `tests/unit/test_task_type_profile.py`, `tests/unit/test_session_tags.py`, `tests/integration/test_session_finalize.py` — UPDATE: whichever branch lane 2 takes (wire `rework_triggered` or delete the aggregate), these assert the new truth rather than the constant-zero rate
+- [ ] `tests/unit/test_task_type_profile.py`, `tests/unit/test_session_tags.py`, `tests/integration/test_session_finalize.py` — DELETE or REPLACE: Open Question 1 is decided (delete). `TaskTypeProfile`'s `rework_rate`, `failure_stage_distribution`, and `get_delegation_recommendation` are removed, so tests asserting the constant-zero rate go with them; `tools/session_tags.py:156,181,189` loses its `rework_triggered` branch and `tests/unit/test_session_tags.py` is REPLACED with assertions on the reduced tag set
 - [ ] `tests/unit/test_session_lifecycle_consolidation.py`, `tests/unit/test_recovery_ownership.py`, `tests/unit/test_session_health_orphan_process_reap.py`, `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: `NON_TERMINAL_STATUSES` gains `admitted`; ownership map and enumeration checks include it
-- [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py` — UPDATE: new `idempotency_key` and `agent_session_id` kwargs; add the lost-race binding case
+- [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py` — no change from this plan. The queue seam is #3183's; its tests belong to that issue
 - [ ] `tests/unit/test_agentsession_index_guard_generalized.py` — UPDATE: extend the runtime `IndexedField` enumeration to the eight new models
-- [ ] `tests/unit/test_poll_registry.py` — UPDATE: descriptor carries optional `investigation_id`; existing assertions on descriptor shape are extended
-- [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` defaults and `IMPROVEMENT__*` overrides
+- [ ] `tests/unit/test_poll_registry.py` — no change. The poll descriptor is untouched; this plan sends no questions
+- [ ] `tests/unit/test_ui_sdlc_data.py` — UPDATE: the `is_active` property at `ui/data/sdlc.py:468` now reads the `ACTIVE_STATUSES` constant at `:1256` instead of its own inline tuple; assert the two agree
+- [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` defaults (`max_concurrent_research_sessions=1`, `daily_external_llm_usd=10.00`, `daily_question_ceiling` absent) and `IMPROVEMENT__*` overrides
 - [ ] `tests/unit/test_ui_app.py`, `tests/unit/test_ui_reflections_data.py` — UPDATE: new partial routes render with an empty namespace and with a seeded case
 - [ ] `tests/unit/test_length_safe_content_store.py` — UPDATE: add the verifying subclass's archive-path digest check
 - [ ] `tests/unit/test_reflection_register.py` — UPDATE: controller tick registration is idempotent and pinned to the `valor` owner
@@ -511,7 +512,7 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 
 ## Update System
 
-- `scripts/update/run.py` gains a `register_improvement_collector` step calling `reflection_register.py::register_reflection` with the collection tick's callable, cadence, and `project_key="valor"`, idempotent like `register_crash_recovery`.
+- `scripts/update/run.py` gains a `register_improvement_collector` step calling `reflection_register.py::register_reflection` with the collection tick's callable, cadence, and `project_key="valor"`, idempotent like `register_crash_recovery`. Lane 3 adds a second registration on the same seam for `improvement-intent-reconcile` (Gap A's recovery pass).
 - `/update` unloads a launchd job only when its label matches `<prefix>.autoexperiment` exactly, on machines where one is installed; a mismatch is logged, never acted on.
 - No new dependencies. `ImprovementSettings` defaults to disabled, so no `.env` key is required; the `IMPROVEMENT__ENABLED` override is documented in `.env.example` with `# @optional`.
 - Popoto schema: the eight new models are additive; a no-op migration entry in `scripts/update/migrations.py` records their registration so `run_pending_migrations()` has a durable marker for the schema version.
@@ -519,14 +520,14 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 
 ## Agent Integration
 
-- New CLI entry point `valor-improve = "tools.improvement:main"` in `pyproject.toml [project.scripts]` with subcommands `case show`, `case explain`, `propose`, `release compare`, `pause`, `resume`, `export`, `import`, `replay-projection`. Research sessions reach research state only through this CLI, which enforces journal authorization and never exposes a raw transition.
-- The research skill (`.claude/skills/improve-research/SKILL.md`, project-only) instructs the planning session to read a bounded brief, write hypotheses and proposed actions through `valor-improve propose`, and never enqueue sessions or send messages directly.
-- The bridge imports nothing new. The poll descriptor gains an optional `investigation_id` that `tools/ask_poll.py` forwards when present in the environment.
-- Integration tests: a research session in a test worktree runs `valor-improve propose` end to end and the journal shows the event; a session attempting `valor-session create --parent` on the research path receives the existing gate error.
+- New CLI entry point `valor-improve = "tools.improvement:main"` in `pyproject.toml [project.scripts]` with subcommands `case show`, `case explain`, `propose`, `release compare`, `pause`, `resume`, `doctor`, `export`, `import`, `replay-projection`. Research sessions reach research state only through this CLI, which enforces journal authorization and never exposes a raw transition. `pause`, `resume`, and `doctor` are the break-glass path for Gap A's namespace-unreachable state.
+- The research skill (`.claude/skills/improve-research/SKILL.md`, project-only) instructs the planning session to read a bounded brief, use `WebSearch` and `WebFetch` for external research, write hypotheses and proposed actions through `valor-improve propose`, and never enqueue sessions, send messages, or ask a human anything.
+- **The bridge imports nothing new and the poll registry is untouched.** No `investigation_id` on the poll descriptor, no change to `tools/ask_poll.py`, no change to `bridge/poll_registry.py` or `bridge/answer_routing.py`. The controller has no delivery surface, because it asks no questions.
+- Integration tests: a research session in a test worktree runs `valor-improve propose` end to end and the journal shows the event; a session attempting `valor-session create --parent` on the research path receives the existing gate error; `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation.
 
 ## Documentation
 
-- [ ] Create `docs/features/improvement-controller.md`: three layers, authorities, records, control namespace contract, dispatch adapter, reservations, memory isolation, claim levels
+- [ ] Create `docs/features/improvement-controller.md`: three layers, authorities, records, control namespace contract, dispatch adapter, the two reservation units, memory isolation, claim levels, the #3183 dependency, and a **Break-glass** section giving the manual procedure for a paused or wedged case (`valor-improve doctor`, `pause`, `resume`, how to distinguish a namespace outage from a wedged case, what evidence to keep)
 - [ ] Create `docs/features/improvement-evaluation.md`: contract fields, manifest, judge envelope, statistics, holdout policy
 - [ ] Add both rows to `docs/features/README.md`; delete the Autoexperiment row at line 25
 - [ ] Delete `docs/features/autoexperiment.md`; correct `docs/research/claude-code-feature-swot.md:413` and `docs/features/nightly-regression-tests.md:371`
@@ -539,15 +540,27 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 
 ## Success Criteria
 
+### This build (lanes 1 and 2)
+
+Every row here is satisfiable by the tasks in Step by Step Tasks. Nothing here depends on a child issue.
+
 - [ ] Lane 1: autoexperiment entry point, installer, plist, tests, and feature doc are gone; `valor-service.sh` no longer enumerates it; retained corpora still exist and are marked legacy
-- [ ] Lane 2: the eight flat models exist, are exported, pass the index guard, and carry schema-gate docstrings; `ImprovementSettings` exists; `rework_rate` is either written from a verified event or deleted with its reader; the poll descriptor carries `investigation_id`; the verifying store subclass rejects a corrupted archive; a capability matrix marks each planned component implemented, deployed, measured, or unknown
-- [ ] Lane 3: fault-injection tests pass for stale-epoch rejection, crash between admission and creation, unresolved charge on restart, and journal unavailability
-- [ ] Lane 4: two arms on private Redis processes produce byte-identical corpus reads; baseline retrieval parity holds on the frozen corpus; a corrupted artifact invalidates evaluation rather than scoring
-- [ ] Lane 5: one autonomous hypothesis about journey preservation is tested under a frozen contract with paired blinded evaluation and an accepted-or-rejected verdict with complete lineage; the verdict changes the next selection
-- [ ] Dashboard never presents experiment count or merged-patch count as improvement and never renders historical `TaskTypeProfile` zeros as measured success
+- [ ] Lane 2: the eight flat models exist, are exported, pass the index guard, and carry schema-gate docstrings; `ImprovementSettings` exists with `max_concurrent_research_sessions=1` and `daily_external_llm_usd=10.00`; `TaskTypeProfile.rework_rate`, `failure_stage_distribution`, and `get_delegation_recommendation` are deleted along with their readers, and rework is derived from `ImprovementEvidence`; the verifying store subclass rejects a corrupted archive; a capability matrix marks each planned component implemented, deployed, measured, or unknown
+- [ ] Lane 2, user-visible value: the correction detector runs against real sessions. At merge, `ImprovementEvidence.query.filter(project_key="valor").count() >= 0` holds and the trimmed dashboard partial renders (a render smoke test), which is the honest gate on merge day because no correction may have occurred yet. It graduates to `count() > 0` after one week of normal use, checked by hand and recorded on the tracking issue
+- [ ] The `is_active` property at `ui/data/sdlc.py:468` reads the `ACTIVE_STATUSES` constant at `:1256`, so `admitted` cannot be live on one path and inactive on the other
+- [ ] The dashboard never presents experiment count or merged-patch count as improvement, and no template references `rework_rate` (which no longer exists)
+- [ ] Four child issues exist for lanes 3 through 6, each referencing #3177, and the lane-3 issue records its dependency on #3183
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `grep` confirms `tools/improvement.py` is referenced from `pyproject.toml` and the research skill references `valor-improve propose`
+
+### Carried to child issues (lanes 3 through 6)
+
+These are the exit conditions of the child issues filed by task 6, restated here so the delivery order stays committed. They are **not** this build's definition of done.
+
+- Lane 3: the `valor-improve` CLI exists, `tools/improvement.py` is referenced from `pyproject.toml`, and the research skill references `valor-improve propose`; fault-injection tests pass for stale-generation rejection, crash between admission and creation, an unreleased lane slot on restart, and journal unavailability with a break-glass recovery; #3183's seam and lease are consumed without a competing change to `agent/agent_session_queue.py`
+- Lane 4: two arms on private Redis processes produce byte-identical corpus reads; baseline retrieval parity holds on the frozen corpus; a corrupted artifact invalidates evaluation rather than scoring
+- Lane 5: one autonomous hypothesis about journey preservation is tested under a frozen contract with paired blinded evaluation and an accepted-or-rejected verdict with complete lineage; the verdict changes the next selection; the memory-inspiration adapter and the web-research investigation kind are both exercised end to end
+- Lane 6: release records, exposure assignment, rollback, observation windows, and incident drills exist, and the recursive comparison runs on budget-matched fresh opportunities
 
 ## Team Orchestration
 
