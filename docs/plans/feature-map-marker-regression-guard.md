@@ -983,6 +983,89 @@ unmarked packages all stay with #3175; exemptions keyed by path, never by line n
 | NIT | structural check | Two Verification rows expect "match count == 0" from `grep -c`. Over two file arguments `grep -c` prints one `path:count` line per file rather than a single number, and it exits 1 when the count is zero, so neither row is machine-checkable as written; `-r` on explicit file arguments is also a no-op. | **CLOSED.** Both rows are now `! grep -q...` exit-code assertions (`! grep -qE '\\b(lineno\\|line_number\\|line_no)\\b' ...`, `! grep -qF 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py`), and the `Feature doc indexed` row moved to `grep -qF` for the same reason. Verified on this machine that the form exits 0 on no match and 1 on a seeded match. | Rewrite as an exit-code assertion that inverts cleanly, e.g. `! grep -qrE '\b(lineno\|line_number\|line_no)\b' tests/marker_map.py tests/unit/test_feature_map_markers.py`. Confirmed `\b` works on this machine's BSD grep, so the word-boundary syntax itself is fine. |
 | NIT | structural check | #3175 is titled "Drain the FEATURE_MAP mistag baseline: 21 test files carry the wrong marker or none", but this plan's No-Gos hand it 24 paths (21 from R1, 2 from R2, 1 further from R3). Three baseline entries have no tracker under the title as written. | **CLOSED.** No-Gos carries a **Scope note** recording that the two R2 entries and `tests/unit/test_long_task_checkpointing.py` extend #3175's stated scope past its 21-file title, and the reconciliation is posted as a comment on #3175 (which also corrects that issue's `reflection`-at-index-52 claim). No baseline entry is left untracked. | Update #3175's title and body to 24 paths, or note in the No-Gos that the two R2 entries and `test_long_task_checkpointing.py` extend #3175's stated scope. |
 
+
+### Critique round 2 (2026-09-06)
+
+FULL depth, independent roster of 3 critics (Risk & Robustness, Scope & Value, History &
+Consistency). Mode: independent roster (3 critics). All structural checks pass: the four
+mandated sections (Documentation, Update System, Agent Integration, Test Impact) are present
+and substantive, tasks 1-7 have no numbering gaps, every `Depends On` id resolves and the graph
+is acyclic, all referenced paths exist except the three this plan creates, all three
+prerequisites pass, and no Popoto model is touched so no migration is owed.
+
+**Verdict: READY TO BUILD (with concerns)** — 0 blockers, 2 concerns, 0 nits.
+
+**Round-1 closure verification.** Every one of the eight round-1 rows was re-checked against
+the code rather than read out of its own fix-table cell. The driver replayed the shipped
+resolver independently for a third time: `FEATURE_MAP` parsed with `ast.literal_eval` out of
+`git show f3594dd23:tests/conftest.py`, population from
+`git ls-files --with-tree f3594dd23 'tests/**/test_*.py' 'tests/test_*.py'`, stem computed with
+the shipped global `str.replace`. **Every headline figure in this plan reproduces exactly.**
+All eight rows are genuinely closed.
+
+- **BLOCKER 1 (spike-2's 552/282 and the `> 281` verification floor)** — closed. The replay
+  returns 834 files, **280 marked / 554 unmarked (66.4%)**, matching the plan. `554`, `280` and
+  `66.4%` are the only live figures in spike-2, Rabbit Holes, Success Criteria and Task 2; the
+  `552`/`282` pair survives only inside sentences that name it as the corrected-away value. The
+  Verification row is now an equality (`-eq 280`), not a floor, so a silently *gained* marker
+  fails it. Simulating the two `FEATURE_MAP` additions confirms 280 before and 280 after.
+- **BLOCKER 2 (the stem described loosely, and a self-confirming parity control)** — closed. The
+  shipped hook at `tests/conftest.py:1209` is
+  `item.nodeid.split("::")[0].split("/")[-1].replace("test_", "").replace(".py", "")`, and the
+  plan carries `basename.replace("test_", "").replace(".py", "")` verbatim in Data Flow step A2,
+  Technical Approach, Task 1 and Success Criteria, with `removeprefix`, `removesuffix` and
+  anchored regexes forbidden by name at each site. Two committed fixtures pin
+  `test_test_judge.py` and `test_validate_test_impact.py` to `(None, None)`. Task 5's control is
+  now generated from `git show f3594dd23:tests/conftest.py`, so it cannot inherit the branch's
+  stem.
+- **BLOCKER 3 (R1/R2 reach only 9.6% of the suite)** — closed by stating the boundary, with the
+  rules deliberately not widened. The replay confirms 80 files across 11 package directories,
+  R1 reaching 47 and R2 reaching 33, leaving 754 files on R3 alone. The worked example
+  (`test_worktree_manager_config.py` at top level resolving to `config` and staying green on all
+  three rules) is stated in the Problem section, in Success Criteria, and mandated in the
+  feature doc.
+- **BLOCKER 4 (R2 attribution undefined; a literal reading pushes the baseline to 45)** — closed.
+  Majority attribution is now part of the rule. The replay confirms majority attribution yields
+  exactly **2** violations (`tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`,
+  `tests/unit/session_runner/test_schema_routing.py`) against a literal reading's **23**. The tie
+  branch is stated behavior with a synthetic 2-vs-2 fixture and an order-independence assertion,
+  and the replay confirms **zero** real ties at baseline, so that fixture is the branch's only
+  possible coverage.
+- **CONCERN 1 (`EXEMPT_DIRS` unbracketed)** — closed by removal. The identifier now appears only
+  in text explaining why it is absent, in Task 2's prohibition, and in a new anti-criterion
+  Verification row asserting it appears nowhere in the shipped files.
+- **CONCERN 2 (a third, unmentioned mistag mechanism)** — closed, out of scope with a tracker.
+  Mechanism 3 is described in the Problem section, deferred in No-Gos as
+  `[SEPARATE-SLUG #3184]`, and covered in the Documentation section. Issue **#3184 is OPEN** and
+  titled for exactly this defect. The buggy strip is pinned as-is rather than fixed.
+- **NIT 1 (two `grep -c` rows not machine-checkable)** — closed in form. All three affected rows
+  are now exit-code assertions (`! grep -q…` / `grep -q…`). Residue from this fix is raised below
+  as round-2 concern 2.
+- **NIT 2 (#3175 titled for 21 files while this plan hands it 24)** — closed. The No-Gos scope
+  note names the three paths that extend #3175's stated scope, and the reconciliation comment is
+  posted on **#3175** (verified present, 2026-09-06T08:09:47Z), which also corrects that issue's
+  `reflection`-at-index-52 claim.
+
+Two errors the plan author found and corrected unprompted during the round-2 re-derivation were
+also verified: the R1 violation set is 21 files of which **17** carry no marker (four carry a
+wrong one), and `reflection` sits at insertion index **44**, ahead of `config` at 45.
+
+**Round-2 findings.**
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| CONCERN | Scope & Value (rated BLOCKER); Risk & Robustness (rated CONCERN); structural replay | Task 5 (`validate-parity`) declares `Depends On: build-marker-map` and `Parallel: true`, but its entire body reads `python tests/marker_map.py --report`, and the `--report` flag is created by Task 2 (`build-audit`), not Task 1. An orchestrator honoring the declared graph may dispatch Task 5 alongside Task 2, and its first command then fails on an unrecognized flag before any comparison runs. Aggregated as CONCERN rather than BLOCKER: the seven tasks are executable in numeric order by a single builder, and the failure is immediate, loud, and costs one retry — it can neither produce a wrong parity result nor pass green on a broken implementation. The severity split between the two critics is recorded here rather than resolved silently upward. | pending | Change Task 5's `Depends On:` line from `build-marker-map` to `build-marker-map, build-audit`. No other task's edges change: Task 6 already depends on `validate-mutation, validate-parity`, and Task 7 already lists all six prior ids. `Parallel: true` can stay — Task 5 is then schedulable alongside Tasks 3 and 4, which share the `build-audit` dependency and touch a different file than Task 5's read-only `--report` diff. |
+| CONCERN | History & Consistency (rated CONCERN); Risk & Robustness (rated NIT); structural replay | The Verification anti-criterion row "Stem is the shipped global replace, not a prefix strip" cannot catch the case it names. Its command is `! grep -qE 'removeprefix\|removesuffix\|re\\.(sub\|match)' tests/marker_map.py`, and in ERE a double backslash before the dot means "a literal backslash followed by any character", so the `re.sub` / `re.match` leg never matches the text it targets. The driver confirmed this empirically: a seeded file containing `re.sub(r"^test_", "", ...)` left the check green, while the single-backslash form matched. This is residue from round 1's own fix to NIT 1, not a repeat finding. The `removeprefix` and `removesuffix` legs do work. | pending | Use a single backslash before the dot: `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` (only the dot needs escaping; the alternation bars carry a markdown-table pipe escape and are fine). Blast radius is bounded but not nil: Task 1's committed fixture independently catches an anchored-regex stem behaviorally, because `re.sub(r"^test_", "", "test_test_judge.py")` strips only the leading occurrence and yields the stem `test_judge`, which then resolves through the `test_judge` key to `tools` instead of `(None, None)`. So this is a broken belt over working suspenders — fix the regex anyway, because the row is documented as the mechanism that covers this class and a future reader trusting its green will misjudge the coverage. |
+
+**Cycle disposition.** Round 2 is the final authorized critique round: `MAX_CRITIQUE_CYCLES` is
+2 and `revision_round_count` already stands at 1, so a revision-demanding verdict would trip G2
+and escalate to a human. Both findings above are single-line edits to this document with exact
+Implementation Notes, and neither is a blocker, so the verdict is `READY TO BUILD (with
+concerns)`. That verdict increments `concern_round_count` (0 of `MAX_CONCERN_RECRITIQUE_ROUNDS`
+= 3) rather than `revision_round_count`, so G2 stays clear. The `plan_revising` lock IS set: the
+concern bound is unspent, so G7 gate 4 dispatches `/do-plan`, the revision pass clears the lock,
+and the lane proceeds to build.
+
 ---
 
 ## Open Questions
