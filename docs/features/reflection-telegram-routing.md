@@ -79,11 +79,15 @@ resolved, nothing was sent" — covering both a `None` return from the
 resolver and the resolver raising.
 
 The two failure modes map to opposite outcomes and live in separate
-try/except scopes inside each sender: a raising or `None`-returning resolver
-means `False` with **no subprocess call**; a transport failure after a
-destination resolved means `True`. A single blanket handler spanning both
-calls would invert this — mapping a raising resolver to `True` (or letting
-the exception escape).
+try/except scopes: each sender owns its own resolution scope, then hands off
+to a shared private transport, `_send_telegram_transport(chat, message, *,
+logger_prefix)`, once resolution has already succeeded. A raising or
+`None`-returning resolver means `False` with **no subprocess call**, decided
+entirely in the sender before the shared transport is ever reached; a
+transport failure after a destination resolved means `True`, decided inside
+the one shared `subprocess.run` call both senders route through. A single
+blanket handler spanning both calls would invert this — mapping a raising
+resolver to `True` (or letting the exception escape).
 
 ## Suppression reaches the caller
 
@@ -120,9 +124,12 @@ own suppression branch (`resolve_host_eng_chat()` → `None`) skips the send
 
 `reflections/docs_auditor.py::_send_telegram_notification` is the sixth
 Telegram sender in the tree and is deliberately not in the table above — it
-predates this module (#2754) and keeps its own transport for the same
-reason `memory_consolidation` does: it is parameterized by `repo_root`,
-which the two host-only callers must not have.
+predates this module (#2754) and keeps its own transport for a reason
+distinct from `memory_consolidation`'s: it is parameterized by `repo_root`,
+addressing whichever repo it audited (including a foreign one), which the
+two host-only callers must not have. `_resolve_notify_chat`, the resolver
+half, does delegate to `resolve_host_eng_chat` — see
+[Docs Auditor](docs-auditor.md).
 
 ## Out of scope
 
