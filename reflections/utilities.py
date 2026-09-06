@@ -416,6 +416,41 @@ def resolve_host_eng_chat(
     return None
 
 
+def _send_telegram_transport(chat: str, message: str, *, logger_prefix: str) -> bool:
+    """Shell out to ``valor-telegram send --chat <chat> <message>``, swallowed.
+
+    Shared transport for ``send_eng_telegram`` and ``send_host_eng_telegram``.
+    Any outcome here — success, non-zero exit, missing binary, timeout, or any
+    other exception — is swallowed to a log line and this always returns
+    ``True``: by the time this is called, a destination already resolved, so
+    a send was *attempted*. Callers own their own resolution try/except scope
+    and only call this once resolution has already succeeded.
+    """
+    try:
+        proc = subprocess.run(
+            ["valor-telegram", "send", "--chat", chat, message],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.subprocess_default_s,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "%s: valor-telegram exited %s for chat %s: %s",
+                logger_prefix,
+                proc.returncode,
+                chat,
+                (proc.stderr or "")[:200],
+            )
+    except FileNotFoundError:
+        logger.warning("%s: valor-telegram not on PATH; skipping Telegram notify", logger_prefix)
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: valor-telegram send timed out", logger_prefix)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s: valor-telegram send failed: %s", logger_prefix, exc)
+    return True
+
+
 def send_eng_telegram(project: dict, message: str, *, logger_prefix: str) -> bool:
     """Page a project's ``Eng:`` group over Telegram by numeric ``chat_id``.
 
@@ -461,29 +496,7 @@ def send_eng_telegram(project: dict, message: str, *, logger_prefix: str) -> boo
     _, chat_id = resolved
 
     # --- scope 2: transport. Any failure here still means a send was attempted. ---
-    try:
-        proc = subprocess.run(
-            ["valor-telegram", "send", "--chat", str(chat_id), message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logger.warning(
-                "%s: valor-telegram exited %s for chat %s: %s",
-                logger_prefix,
-                proc.returncode,
-                chat_id,
-                (proc.stderr or "")[:200],
-            )
-    except FileNotFoundError:
-        logger.warning("%s: valor-telegram not on PATH; skipping Telegram notify", logger_prefix)
-    except subprocess.TimeoutExpired:
-        logger.warning("%s: valor-telegram send timed out", logger_prefix)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s: valor-telegram send failed: %s", logger_prefix, exc)
-    return True
+    return _send_telegram_transport(str(chat_id), message, logger_prefix=logger_prefix)
 
 
 def send_host_eng_telegram(message: str, *, logger_prefix: str) -> bool:
@@ -502,29 +515,7 @@ def send_host_eng_telegram(message: str, *, logger_prefix: str) -> bool:
             "%s: no Eng: group resolved for this checkout; Telegram alert suppressed", logger_prefix
         )
         return False
-    try:
-        proc = subprocess.run(
-            ["valor-telegram", "send", "--chat", chat, message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logger.warning(
-                "%s: valor-telegram exited %s for chat %s: %s",
-                logger_prefix,
-                proc.returncode,
-                chat,
-                (proc.stderr or "")[:200],
-            )
-    except FileNotFoundError:
-        logger.warning("%s: valor-telegram not on PATH; skipping Telegram notify", logger_prefix)
-    except subprocess.TimeoutExpired:
-        logger.warning("%s: valor-telegram send timed out", logger_prefix)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s: valor-telegram send failed: %s", logger_prefix, exc)
-    return True
+    return _send_telegram_transport(chat, message, logger_prefix=logger_prefix)
 
 
 def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:

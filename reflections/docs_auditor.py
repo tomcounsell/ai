@@ -34,6 +34,7 @@ from pathlib import Path
 from config.machine import get_machine_display_name
 from config.settings import settings
 from reflections.utilities import (
+    FALLBACK_ENG_CHAT,  # noqa: F401 -- re-exported for docs_auditor.FALLBACK_ENG_CHAT readers
     load_local_projects,
     resolve_host_eng_chat,
 )

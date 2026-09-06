@@ -20,7 +20,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import reflections.docs_auditor as docs_auditor
 from reflections.utilities import (
+    FALLBACK_ENG_CHAT,
     resolve_host_eng_chat,
     send_eng_telegram,
     send_host_eng_telegram,
@@ -208,3 +210,63 @@ class TestSendHostEngTelegram:
 
         assert sent is False
         run.assert_not_called()
+
+    # -- transport branches, via the shared _send_telegram_transport helper --
+
+    def test_valor_telegram_absent_still_returns_true(self):
+        with (
+            patch("reflections.utilities.subprocess.run", side_effect=FileNotFoundError),
+            patch("reflections.utilities.resolve_host_eng_chat", return_value="-100999"),
+        ):
+            sent = send_host_eng_telegram("hi", logger_prefix="test")
+
+        assert sent is True
+
+    def test_timeout_still_returns_true(self):
+        import subprocess as _subprocess
+
+        with (
+            patch(
+                "reflections.utilities.subprocess.run",
+                side_effect=_subprocess.TimeoutExpired(cmd="valor-telegram", timeout=10),
+            ),
+            patch("reflections.utilities.resolve_host_eng_chat", return_value="-100999"),
+        ):
+            sent = send_host_eng_telegram("hi", logger_prefix="test")
+
+        assert sent is True
+
+    def test_generic_exception_still_returns_true(self):
+        with (
+            patch("reflections.utilities.subprocess.run", side_effect=RuntimeError("boom")),
+            patch("reflections.utilities.resolve_host_eng_chat", return_value="-100999"),
+        ):
+            sent = send_host_eng_telegram("hi", logger_prefix="test")
+
+        assert sent is True
+
+    def test_nonzero_exit_logs_warning_and_still_returns_true(self, caplog):
+        with (
+            patch(
+                "reflections.utilities.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="boom"),
+            ),
+            patch("reflections.utilities.resolve_host_eng_chat", return_value="-100999"),
+            caplog.at_level("WARNING"),
+        ):
+            sent = send_host_eng_telegram("hi", logger_prefix="test")
+
+        assert sent is True
+        assert "valor-telegram exited 1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# FALLBACK_ENG_CHAT re-export (#3072 tech debt: docs_auditor's import must
+# actually carry the binding its own comment claims it re-exports)
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackEngChatReExport:
+    def test_docs_auditor_reexports_fallback_eng_chat(self):
+        assert hasattr(docs_auditor, "FALLBACK_ENG_CHAT")
+        assert docs_auditor.FALLBACK_ENG_CHAT == FALLBACK_ENG_CHAT

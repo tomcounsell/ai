@@ -356,8 +356,10 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
         run_state["killed"] += 1
 
         # Re-enqueue genuinely-unanswered human messages via valor-catchup.
-        # Mirror _send_alert's subprocess error handling. Catchup failure is
-        # logged + counted but never fatal — the wedged session is already dead.
+        # Swallow FileNotFoundError/TimeoutExpired/general failures the same
+        # way the shared Telegram transport helpers in reflections/utilities.py
+        # do. Catchup failure is logged + counted but never fatal — the wedged
+        # session is already dead.
         catchup_ok = False
         try:
             proc = subprocess.run(
