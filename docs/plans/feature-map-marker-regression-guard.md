@@ -817,7 +817,7 @@ general review pass.
 
 ## Open Questions
 
-1. **RESOLVED 2026-09-06 — Should this land a GitHub Actions workflow?** The issue's fourth
+1. **RESOLVED 2026-09-06. Should this land a GitHub Actions workflow?** The issue's fourth
    acceptance criterion says the guard must run in CI on every PR, and this repo has exactly one
    workflow (`.github/workflows/claude.yml`), which only reacts to `@claude` mentions. The question
    was whether to add a `pull_request` workflow running the audit, or to ship the guard as an
