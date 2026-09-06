@@ -337,6 +337,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -375,6 +376,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -1346,7 +1348,7 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
             docs_auditor._push_branch_and_pr(
-                "slug", repo, ["docs/features/x.md"], withheld=withheld
+                "slug", repo, ["docs/features/x.md"], withheld=withheld, starting_ref="main"
             )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
@@ -1409,6 +1411,7 @@ class TestWithheldBlocksStaleClose:
                 repo,
                 ["docs/features/foo.md"],
                 withheld=audit_result["withheld"],
+                starting_ref="main",
             )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
@@ -1419,6 +1422,7 @@ class TestWithheldBlocksStaleClose:
         # Surface 2 — the Telegram notification, and the returned summary.
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
@@ -1455,6 +1459,7 @@ class TestWithheldBlocksStaleClose:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -1500,6 +1505,7 @@ class TestWithheldBlocksStaleClose:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
@@ -1740,6 +1746,7 @@ class TestTelegramSuppressionReachesSummary:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
@@ -1761,6 +1768,7 @@ class TestTelegramSuppressionReachesSummary:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -1971,6 +1979,7 @@ class TestPRCreationFailure:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -1995,6 +2004,7 @@ class TestPRCreationFailure:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -2037,6 +2047,7 @@ class TestHoistedPRGuards:
         """Drive a rotation with the two guards forced, returning (result, mocks)."""
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch(
@@ -2116,7 +2127,7 @@ class TestExplicitStagingSet:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("reflections.docs_auditor.subprocess.run", side_effect=record):
-            assert docs_auditor._push_branch_and_pr("slug", repo, []) is None
+            assert docs_auditor._push_branch_and_pr("slug", repo, [], starting_ref="main") is None
 
         assert calls == []
 
@@ -2131,7 +2142,9 @@ class TestExplicitStagingSet:
             patch("reflections.docs_auditor.subprocess.run", side_effect=record),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
 
         add = next(c for c in calls if c[:2] == ["git", "add"])
         assert add == ["git", "add", "--", "docs/features/foo.md"]
@@ -2154,7 +2167,9 @@ class TestExplicitStagingSet:
             patch("reflections.docs_auditor.subprocess.run", side_effect=record),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
 
         assert ["git", "checkout", "HEAD", "--", "docs/features/foo.md"] in calls
         # Never a whole-tree operation — other lanes hold uncommitted work here.
@@ -3087,6 +3102,7 @@ class TestVaultClauseInSummary:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -3153,6 +3169,7 @@ def test_worst_case_summary_stays_under_truncation_budget(repo, auth_ok, patch_r
     )
     with (
         patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+        patch("reflections.docs_auditor._current_ref", return_value="main"),
         patch("reflections.docs_auditor._git_dirty", return_value=False),
         patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
         patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),

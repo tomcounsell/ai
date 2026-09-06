@@ -17,6 +17,7 @@ everything else to the real ``subprocess.run``.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -266,7 +267,9 @@ class TestEarlyReturnRestore:
 
         gh.pr_create_url = None  # force gh pr create to fail
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -281,7 +284,7 @@ class TestEarlyReturnRestore:
         # `files_touched` names a path that was never written — `git add --`
         # fails outright (pathspec did not match).
         url = docs_auditor._push_branch_and_pr(
-            "slug", repo, ["docs/features/does_not_exist_xyz.md"]
+            "slug", repo, ["docs/features/does_not_exist_xyz.md"], starting_ref="main"
         )
 
         assert url is None
@@ -296,7 +299,9 @@ class TestEarlyReturnRestore:
         # Point origin at a nonexistent path so the real `git push` fails.
         _git(repo, "remote", "set-url", "origin", "/nonexistent/path/origin.git")
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -324,7 +329,7 @@ class TestForeignDirtSurvives:
 
         gh.pr_create_url = None  # force a failure so the restore path runs
 
-        docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"], starting_ref="main")
 
         # Foreign dirt outside files_touched survives, byte for byte.
         assert (repo / "docs" / "features" / "foreign.md").read_text() == (
@@ -361,7 +366,9 @@ class TestFailedRestoreReporting:
 
         monkeypatch.setattr(docs_auditor.subprocess, "run", failing_checkout)
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
         assert url is None
 
         # Drive the full reflection: the restore failure must route to "error".
@@ -389,6 +396,449 @@ class TestFailedRestoreReporting:
 
         result = docs_auditor.run_docs_auditor()
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# #3050 — restore and escalate when the rotation aborts after writing
+# ---------------------------------------------------------------------------
+
+
+def _seed_tracked_doc(repo: Path, rel: str, content: str) -> None:
+    full = repo / rel
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_text(content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"seed {rel}")
+    _git(repo, "push", "-q", "origin", "main")
+
+
+def _writing_audit_stub(rel: str, withheld: list[dict] | None = None):
+    """A substrate stub that really writes ``rel`` and reports it touched."""
+
+    def _audit(**kwargs) -> dict:
+        full = Path(kwargs["repo_root"]) / rel
+        full.write_text(full.read_text() + "\nedited by the stub\n")
+        return {
+            "status": "ok",
+            "files_touched": [rel],
+            "fixes_applied": 1,
+            "fixes_withheld": len(withheld or []),
+            "withheld": withheld or [],
+            "issues_filed": 0,
+        }
+
+    return _audit
+
+
+def _standard_preflight(monkeypatch, repo: Path, fake_redis) -> None:
+    """The preflight stack every TestWriteWindowRestore test drives through."""
+    monkeypatch.setattr(docs_auditor, "PROJECT_ROOT", repo)
+    monkeypatch.setattr(docs_auditor, "_get_redis", lambda: fake_redis)
+    monkeypatch.setattr(docs_auditor, "_check_auth", lambda: (True, ""))
+    monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
+    monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
+
+
+class TestWriteWindowRestore:
+    """The write-through-push region restores and escalates on abort (#3050).
+
+    Each test drives the full ``run_docs_auditor()``, not a narrower unit —
+    this is a failure-path bug, and the failure path is the deliverable.
+    """
+
+    # -- Injection point 1: the issue's exact scenario -----------------------
+
+    def test_exception_between_write_and_push_restores_and_escalates(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        filed: list[dict] = []
+
+        def fake_file_issue(finding, root):
+            filed.append(finding)
+            return True
+
+        telegram_calls: list[str] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_send_telegram_notification",
+            lambda msg, **kw: telegram_calls.append(msg) or True,
+        )
+        rotation_hash_calls: list[list[str]] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_update_rotation_hash",
+            lambda pk, paths: rotation_hash_calls.append(paths),
+        )
+        monkeypatch.setattr(docs_auditor, "audit", _writing_audit_stub("docs/features/x.md"))
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+        monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
+
+        result = docs_auditor.run_docs_auditor()
+
+        # (1) the file is byte-identical to HEAD
+        assert _porcelain(repo, "docs/features/x.md") == ""
+        # (2) HEAD is back on the ref the run started on
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+        # (3) exactly one operational-failure escalation, titled correctly
+        assert len(filed) == 1
+        finding = filed[0]
+        assert finding["category"] == "operational-failure"
+        assert "rotation aborted after writing" in finding["title"]
+        assert "docs/features/x.md" in finding["body"]
+        assert "restored" in finding["body"].lower()
+        assert "```" in finding["body"]  # carries the manual cleanup command
+        # (4) status is error
+        assert result["status"] == "error"
+        assert "injected" in result["summary"]
+        # No success Telegram, no rotation-hash stamp on an aborted run.
+        assert telegram_calls == []
+        assert rotation_hash_calls == []
+
+    # -- Injection point 2: exception inside the withheld-filing loop -------
+
+    def test_exception_in_withheld_filing_loop_still_restores_and_escalates(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        withheld_entry = {
+            "doc": "docs/features/x.md",
+            "old": "a/b.py",
+            "new": "a/c.py",
+            "reason": "target-absent",
+        }
+        monkeypatch.setattr(
+            docs_auditor,
+            "audit",
+            _writing_audit_stub("docs/features/x.md", withheld=[withheld_entry]),
+        )
+
+        filed: list[dict] = []
+
+        def selective_raise(finding, root):
+            if finding.get("category") == "withheld-fix":
+                raise RuntimeError("gh issue create failed")
+            filed.append(finding)
+            return True
+
+        monkeypatch.setattr(docs_auditor, "_file_issue_if_new", selective_raise)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: pytest.fail("must not be reached — abort fires earlier"),
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert _porcelain(repo, "docs/features/x.md") == ""
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+        assert len(filed) == 1
+        assert filed[0]["category"] == "operational-failure"
+        assert "rotation aborted after writing" in filed[0]["title"]
+
+    # -- Injection point 3: exception inside audit() after it has written ---
+
+    def test_exception_inside_audit_after_write_restores_exactly_those_paths(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(
+            repo,
+            "docs/features/x.md",
+            "# X\n" + "Real content line.\n" * 10,
+        )
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        # Force the per-file loop to take the write path for real...
+        monkeypatch.setattr(
+            docs_auditor, "_detect_stale_term_fixes", lambda content: [(re.compile("x"), "y")]
+        )
+
+        def fake_apply(path, root, fixes):
+            full = root / path
+            full.write_text(full.read_text() + "\nedited inside audit\n")
+            return 1, []
+
+        monkeypatch.setattr(docs_auditor, "_apply_fixes_to_file", fake_apply)
+
+        # ...then raise from the advisory step that runs after the write loop,
+        # inside audit()'s own write-ledger guard.
+        def raising_orphan_scan(root):
+            raise RuntimeError("orphan scan boom")
+
+        monkeypatch.setattr(docs_auditor, "_detect_orphan_plan_issues", raising_orphan_scan)
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_file_issue_if_new",
+            lambda finding, root: filed.append(finding) or True,
+        )
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: pytest.fail("must not be reached — audit's own guard aborts first"),
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        # The caller restored exactly the path audit() reported as touched.
+        assert _porcelain(repo, "docs/features/x.md") == ""
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+        assert len(filed) == 1
+        assert filed[0]["category"] == "operational-failure"
+        assert "docs/features/x.md" in filed[0]["body"]
+
+    # -- Injection point 4: a failed restore escalates honestly -------------
+
+    def test_restore_failure_escalates_with_manual_cleanup_title(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        monkeypatch.setattr(docs_auditor, "audit", _writing_audit_stub("docs/features/x.md"))
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+
+        real_run = docs_auditor.subprocess.run
+
+        def failing_checkout(cmd, *a, **kw):
+            if cmd[:2] == ["git", "checkout"] and len(cmd) == 3 and cmd[2] == "main":
+                return MagicMock(returncode=1, stdout="", stderr="simulated checkout failure")
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(docs_auditor.subprocess, "run", failing_checkout)
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_file_issue_if_new",
+            lambda finding, root: filed.append(finding) or True,
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert len(filed) == 1
+        finding = filed[0]
+        assert finding["category"] == "operational-failure"
+        assert finding["title"].endswith("— manual cleanup required")
+        assert "docs-auditor: rotation aborted after writing for" in finding["title"]
+        assert "did NOT complete" in finding["body"] or "NOT" in finding["body"]
+        assert "docs/features/x.md" in finding["body"]
+
+    # -- Injection point 5: a pre-guard audit() exception does not crash ----
+
+    def test_exception_above_audit_guard_does_not_crash_handler(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        def raising_neighborhood(primary_path, root, cap=None):
+            raise RuntimeError("neighborhood resolution boom")
+
+        monkeypatch.setattr(docs_auditor, "_resolve_neighborhood", raising_neighborhood)
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_file_issue_if_new",
+            lambda finding, root: filed.append(finding) or True,
+        )
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: pytest.fail("must not be reached"),
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert "neighborhood resolution boom" in result["summary"]
+        assert "UnboundLocalError" not in result["summary"]
+        assert "cannot access local variable" not in result["summary"]
+        # Nothing was written, so nothing to escalate.
+        assert filed == []
+        assert _porcelain(repo, "docs/features/x.md") == ""
+
+    # -- Injection point 6: the R5-1 boundary does not leak into the new -----
+    # -- handler, and vice versa. ---------------------------------------------
+
+    def test_r5_1_failure_files_only_the_r5_1_issue(self, repo: Path, gh, monkeypatch, fake_redis):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        monkeypatch.setattr(docs_auditor, "audit", _writing_audit_stub("docs/features/x.md"))
+        monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
+
+        filed: list[dict] = []
+
+        def selective_raise(finding, root):
+            if "rotation failed to produce a PR" in finding["title"]:
+                raise RuntimeError("injected")
+            filed.append(finding)
+            return True
+
+        monkeypatch.setattr(docs_auditor, "_file_issue_if_new", selective_raise)
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert not any("rotation aborted after writing" in f["title"] for f in filed)
+
+    def test_r5_1_benign_pr_url_none_files_only_the_r5_1_issue(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        """The benign counterpart: documents the intended R5-1 behavior.
+
+        Nothing inside the ``if pr_url is None:`` block can propagate on its
+        own, so this half alone cannot discriminate a too-wide boundary —
+        the injected half above is what pins it (mutation row 8).
+        """
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        monkeypatch.setattr(docs_auditor, "audit", _writing_audit_stub("docs/features/x.md"))
+        monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_file_issue_if_new",
+            lambda finding, root: filed.append(finding) or True,
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert len(filed) == 1
+        assert "rotation failed to produce a PR" in filed[0]["title"]
+        assert not any("rotation aborted after writing" in f["title"] for f in filed)
+
+    # -- Empty/Invalid Input Handling -----------------------------------------
+
+    def test_abort_after_write_with_no_files_touched_does_not_escalate(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        """A run that wrote nothing left no dirt: no restore, no escalation."""
+        monkeypatch.setattr(docs_auditor, "PROJECT_ROOT", repo)
+
+        def fail_if_called(finding, root):
+            pytest.fail("must not escalate when files_touched is empty")
+
+        monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fail_if_called)
+
+        real_run = docs_auditor.subprocess.run
+        calls: list[list[str]] = []
+
+        def recording_run(cmd, *a, **kw):
+            calls.append(list(cmd))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(docs_auditor.subprocess, "run", recording_run)
+
+        result = docs_auditor._abort_after_write("slug", "main", [], "boom")
+
+        assert result["status"] == "error"
+        assert "boom" in result["summary"]
+        assert calls == []  # no restore subprocess was issued
+
+    def test_starting_ref_none_skips_audit_and_leaves_tree_untouched(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+        monkeypatch.setattr(docs_auditor, "_current_ref", lambda root: None)
+        monkeypatch.setattr(
+            docs_auditor, "audit", lambda **kw: pytest.fail("audit must not be called")
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert _porcelain(repo) == ""
+
+    def test_branch_none_restore_issues_no_rev_parse_or_branch_delete(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        _standard_preflight(monkeypatch, repo, fake_redis)
+
+        monkeypatch.setattr(docs_auditor, "audit", _writing_audit_stub("docs/features/x.md"))
+        monkeypatch.setattr(
+            docs_auditor,
+            "_push_branch_and_pr",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+        monkeypatch.setattr(docs_auditor, "_file_issue_if_new", lambda finding, root: True)
+
+        real_run = docs_auditor.subprocess.run
+        calls: list[list[str]] = []
+
+        def recording_run(cmd, *a, **kw):
+            calls.append(list(cmd))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(docs_auditor.subprocess, "run", recording_run)
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert ["git", "rev-parse", "--verify", "--quiet", "refs/heads/None"] not in calls
+        assert not any(c[:2] == ["git", "branch"] and "-D" in c for c in calls)
+
+    # -- Pre-write failure escalates nothing (outer except stays narrow) -----
+
+    def test_pre_write_failure_files_no_escalation(self, repo: Path, gh, monkeypatch, fake_redis):
+        _seed_tracked_doc(repo, "docs/features/x.md", "# X\n" + "Padding line.\n" * 6)
+        monkeypatch.setattr(docs_auditor, "PROJECT_ROOT", repo)
+        monkeypatch.setattr(docs_auditor, "_get_redis", lambda: fake_redis)
+        monkeypatch.setattr(docs_auditor, "_check_auth", lambda: (True, ""))
+        monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
+        monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
+
+        def raising_select(root, project_key):
+            raise RuntimeError("rotation pick boom")
+
+        monkeypatch.setattr(docs_auditor, "_select_primary_doc", raising_select)
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor,
+            "_file_issue_if_new",
+            lambda finding, root: filed.append(finding) or True,
+        )
+
+        result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        assert filed == []
+        assert "rotation pick boom" in result["summary"]
+
+    # -- Error State Rendering: the three titles are pairwise distinct -------
+
+    def test_three_operational_failure_titles_are_pairwise_distinct(self):
+        slug = "docs_features_x_md"
+        r5_1 = f"docs-auditor: rotation failed to produce a PR for {slug}"
+        restored = f"docs-auditor: rotation aborted after writing for {slug}"
+        manual = (
+            f"docs-auditor: rotation aborted after writing for {slug} — manual cleanup required"
+        )
+        assert len({r5_1, restored, manual}) == 3
 
 
 # ---------------------------------------------------------------------------

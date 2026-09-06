@@ -76,6 +76,54 @@ stamp, one long-lived withheld PR (which the sweeper never closes — see
 [Branch Sweeper](#branch-sweeper)) would pin the whole rotation on a single
 document indefinitely.
 
+**The rotation restores and escalates when it aborts after writing (#3050).**
+`run_docs_auditor` captures `starting_ref = _current_ref(PROJECT_ROOT)` once,
+immediately after the cap/open-PR guards and before the substrate ever
+touches the shared checkout — that is the only point at which the ref is
+guaranteed to name the pre-write state. If the ref cannot be read, the run
+returns `skipped` before writing anything, and deliberately does **not** stamp
+the rotation hash (unlike the doc-specific cap/open-PR guards, a failed ref
+read is doc-independent, so stamping would advance the rotation past a doc
+that was never audited).
+
+A single `try`/`except Exception` in `run_docs_auditor` — opening immediately
+before the substrate call and closing immediately after the
+`_push_branch_and_pr(...)` assignment — owns everything from the write through
+the push. Any exception in that region, including one raised by `audit()`
+itself after it has already written (`audit()` carries its own top-level
+guard so a post-write exception returns `status="error"` with the write
+ledger intact, rather than propagating and losing it), routes to the
+module-level `_abort_after_write(slug, starting_ref, files_touched, reason)`
+helper. It restores the checkout via the same scoped `_restore_checkout`
+the push path uses — `git checkout <starting_ref>` then
+`git checkout HEAD -- <files_touched>`, never a whole-tree primitive — and
+then escalates. The `if pr_url is None:` block (R5-1, below) sits deliberately
+**outside** this try: by the time it runs, `_push_branch_and_pr`'s own
+`finally` has already restored the checkout, so a handler there would file a
+false "aborted after writing" issue over an already-clean tree.
+
+The escalation is scoped exactly like R5-1's: category `operational-failure`,
+keyed by slug alone (no run id, no date), so a failure that repeats every run
+files once and a closed issue can still re-file on a genuine recurrence. It
+skips entirely when `files_touched` is empty — a run that wrote nothing left
+no dirt to report. Three `operational-failure` titles are pairwise distinct,
+because `_file_issue_if_new` dedups on the exact title string and never
+compares bodies:
+
+- `docs-auditor: rotation failed to produce a PR for {slug}` — R5-1: the
+  substrate wrote and the push helper returned cleanly, but produced no PR URL.
+- `docs-auditor: rotation aborted after writing for {slug}` — the widened
+  handler fired and the restore succeeded.
+- `docs-auditor: rotation aborted after writing for {slug} — manual cleanup
+  required` — the widened handler fired and the restore itself failed.
+
+The restore outcome lives in the **title**, not only the body, precisely
+because dedup compares titles: a single title would let an open, benign
+"restored cleanly" issue mask a later run's failed restore. The body names
+every path in `files_touched`, states the observed restore outcome, and
+carries the manual cleanup command (see
+[Operational Cheatsheet](#operational-cheatsheet)).
+
 ### Caller B — `/do-docs` SDLC stage
 
 The `/do-docs` skill (`.claude/skills-global/do-docs/SKILL.md`) calls the
@@ -727,6 +775,18 @@ now runs for real (advisory/report-only, same as before). Verify with
 
 `config/reflections.yaml` is vault-managed (symlink to `~/Desktop/Valor/reflections.yaml`).
 
+Nothing imports `reflections/docs_auditor.py` at module load time.
+`agent/reflection_scheduler.py`'s `_resolve_callable` resolves
+`reflections.docs_auditor.run_docs_auditor` dynamically
+(`importlib.import_module` + `getattr`) each time the reflection fires. The
+scheduler itself runs inside the standalone `python -m reflections`
+subprocess (`reflections/__main__.py`), supervised by its own launchd service
+(`com.valor.reflection-worker`) — a separate process from the bridge and
+worker. `./scripts/valor-service.sh restart` cycles only the bridge, worker,
+and web UI; it does not touch the reflection worker. The standing
+reflection-worker process keeps executing the pre-change module code until
+that service is reinstalled or restarted.
+
 ## Operational Cheatsheet
 
 ```bash
@@ -739,6 +799,14 @@ redis-cli HGETALL docs_audit:last_run
 
 # Force-clear the lock if a run hung
 redis-cli DEL docs_audit:running:global
+
+# Manual cleanup after a "rotation aborted after writing ... manual cleanup
+# required" issue (#3050) — the automatic restore did not complete. Restore
+# to the ref named in the issue body, then discard exactly the files it names:
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout <starting_ref>
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout HEAD -- <files_touched...>
+# Verify — should print nothing:
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- <files_touched...>
 
 # Run /do-docs from a PR
 python -c "from reflections.docs_auditor import audit; \
