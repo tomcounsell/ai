@@ -82,6 +82,18 @@ boundary rather than an assumed guarantee:
    violation. That is a documented false positive, not a hole: the failure
    direction is loud, and an author who hits it can inline the call or write
    a disposition.
+7. A walrus written inside a nested ``Lambda``'s own parameter default
+   (``lambda x=(scratch_test_db := 99): x``) rebinds the enclosing
+   function's ``scratch_test_db`` the moment the lambda is defined --
+   exactly the same "default evaluates in the enclosing scope" rule that
+   makes ``def inner(x=(scratch_test_db := 7)): ...`` a genuine rebind (see
+   :func:`_rebound_names`) -- but :func:`_rebound_names` skips the whole
+   ``Lambda`` node on sight and never sweeps its ``args.defaults`` /
+   ``args.kw_defaults`` the way it does for a nested ``def``. Zero live
+   occurrences on this tree. Accept-direction only: this can cause a missed
+   violation, never a false positive, and it was graded accepted tech debt
+   during review rather than reopening #2764's diff; the correct fix mirrors
+   the ``FunctionDef`` leg almost exactly (tracked as #3192).
 
 ``REDIS_CONSTRUCTORS`` (below) is the residual permit list the opaque-splat
 leg scopes itself to, and it is exactly that: an enumeration, kept short
@@ -475,10 +487,10 @@ def _rebound_names(fn: ast.AST) -> set[str]:
     ``def``/``class``'s own ``.name``, and the three ``match`` capture forms
     (``ast.MatchAs.name``, ``ast.MatchStar.name``, ``ast.MatchMapping.rest``).
 
-    Does **not** descend into a nested ``Lambda``/``FunctionDef``/
-    ``AsyncFunctionDef``/``ClassDef`` BODY for any of the above: a binding
-    inside a nested scope is that scope's own and leaves the outer name
-    intact (verified in the interpreter). It **does** collect a
+    Does **not** descend into a nested ``FunctionDef``/``AsyncFunctionDef``/
+    ``ClassDef`` BODY for any of the above: a binding inside a nested scope
+    is that scope's own and leaves the outer name intact (verified in the
+    interpreter). It **does** collect a
     ``global``/``nonlocal`` DECLARATION naming a name, wherever nested --
     ``nonlocal`` is the one binding form that can only be spelled inside a
     nested scope and genuinely rebinds the outer name; a nested ``global``
@@ -496,6 +508,15 @@ def _rebound_names(fn: ast.AST) -> set[str]:
     ``ClassDef``'s ``bases``, ``keywords`` and ``decorator_list`` -- never
     into ``body`` or the parameter names themselves, which stay the new
     scope's own.
+
+    A nested ``Lambda`` gets none of that recursion: the whole node is
+    skipped on sight, not just its (bodyless) body. A ``Lambda``'s parameter
+    defaults evaluate at DEFINITION time in the ENCLOSING scope exactly like
+    a ``def``'s do, so ``lambda x=(scratch_test_db := 99): x`` rebinds the
+    OUTER ``scratch_test_db`` the same way the ``def inner`` example above
+    does -- and this sweep does not see it. Accepted, disclosed residual gap
+    7 (#3192), not fixed here: zero live occurrences, and it is a missed
+    violation, never a false positive.
 
     Excludes only ``ast.comprehension.target`` nodes (never a whole
     comprehension subtree): a ``for``-target has had its own scope since
@@ -533,7 +554,10 @@ def _rebound_names(fn: ast.AST) -> set[str]:
                 if child.rest:
                     names.add(child.rest)
             elif isinstance(child, ast.Lambda):
-                continue  # anonymous; nothing binds in the outer scope
+                # Whole node skipped, defaults included: a walrus in a
+                # lambda default rebinds the outer scope just like a def's
+                # default does, and this sweep misses it (gap 7, #3192).
+                continue
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(child.name)  # the def's own name binds HERE
                 # Defaults and decorators evaluate in the ENCLOSING scope at
