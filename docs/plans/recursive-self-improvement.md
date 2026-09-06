@@ -136,12 +136,12 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 - **Assumption B**: "Popoto `ContentField` accepts a per-field store instance."
 - **Finding**: Holds. `ContentField(store=...)` (`~/src/popoto/src/popoto/fields/content_field.py:81`, property at `:94`); a separate `FilesystemStore(base_path=...)` instance affects nothing else. Local precedent: `models/knowledge_document.py:50`, `models/document_chunk.py:42`. `FilesystemStore.delete()` (`stores/filesystem.py:170-187`) unlinks the live path only; `.versions/` copies survive and remain loadable. The `garbage_collect()` its docstring names does not exist.
 - **Confidence**: high on both
-- **Impact on plan**: Gap D settles killed turns at the authorized maximum, never at zero, and treats the tool-budget cap as a backstop only. Experiment artifacts use a dedicated verifying store instance under their own retention root; a pin mechanism is deferred until a GC exists.
+- **Impact on plan**: revised 2026-09-06. Claude work runs on the subscription, so `total_cost_usd` is informational for it and the killed-turn undercount costs nothing that matters; the enforced Claude unit is one SDLC lane of concurrency instead. Dollar settlement applies only to external (OpenRouter) calls, which return per-call usage in the response envelope and so have no killed-turn hole. `agent/tool_budget.py` stays a backstop. Experiment artifacts use a dedicated verifying store instance under their own retention root; a pin mechanism is deferred until a GC exists. See Gap D.
 
 ## Data Flow
 
 1. **Entry point**: real work happens. A Job's goal version is appended, an AgentSession finalizes, a human sends a correction, an issue changes label, a nightly test fails, a poll is answered.
-2. **Observer adapters** (function reflections on the scheduler): each owns a durable cursor, reads its source through the ORM or GitHub, deduplicates by stable source ID, and writes `ImprovementEvidence` rows with coverage and lag metadata. Partial data is marked partial.
+2. **Observer adapters** (function reflections on the scheduler): each owns a durable cursor, reads its source through the ORM or GitHub, deduplicates by stable source ID, and writes `ImprovementEvidence` rows with coverage and lag metadata. Partial data is marked partial. One adapter reads Tom-sourced memories (`Memory` rows with `source="human"`) as inspiration, turning links and remarks into evidence and hypothesis seeds without asking him anything.
 3. **System model**: a bounded planning session reads fresh evidence and proposes `ImprovementModelRevision` deltas (claims, relations, confidence, competing explanations). The observer never turns an inference into a user requirement.
 4. **Planner tick**: reviews evidence, stalled investigations, coverage, and the capability frontier; chooses investigate, experiment, defer, retire, or escalate for an `ImprovementCase`; records rationale and the evidence that could change it. Every choice is a proposed action, not an effect.
 5. **Control journal**: the proposed action becomes a transition request carrying expected revision, epoch, and action ID. A Lua script verifies ownership, advances the head, and appends the journal entry. Flat Popoto records are projections repaired by replay.
@@ -149,7 +149,7 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 7. **Investigation or experiment session**: runs in its own worktree and venv; for experiments, in per-arm isolated Redis with a frozen memory corpus; submits results tagged with action ID and epoch. A stale epoch's result is recorded as evidence and rejected as a transition.
 8. **Evaluation**: the independent runner executes paired incumbent and candidate trials against a frozen contract, applies blinded judges wrapped in the consensus judge envelope, computes paired bootstrap intervals with repeated-selection correction, and writes an `ImprovementEvaluation` verdict artifact by digest.
 9. **Decision and release**: inconclusive returns to investigation with a new registered action; reject closes the case with evidence; qualify produces an `ImprovementRelease` record for human review. Automatic promotion stays disabled.
-10. **Output**: dashboard partials under `/_partials/improvement/` render cases, hypotheses, coverage, spend, intervention burden, and release lineage. Questions to Tom travel through the existing poll transport with an `investigation_id` reference.
+10. **Output**: dashboard partials under `/_partials/improvement/` render coverage and intervention burden in this build; cases, hypotheses, spend, and release lineage arrive with the lanes that first write them. No branch of this flow sends a question to a human. Unresolved decisions become provisional assumptions carrying their evidence, revisited when new evidence arrives.
 
 ## Why Previous Fixes Failed
 
@@ -164,7 +164,7 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 ## Architectural Impact
 
 - **New dependencies**: none external. Redis Lua scripting is already in use (`models/session_lifecycle.py:1357`, `agent/supervised_run.py:306`).
-- **Interface changes**: `_push_agent_session` gains `idempotency_key` and optional preallocated `agent_session_id`; `NON_TERMINAL_STATUSES` gains `admitted`; `config/settings.py` gains `ImprovementSettings`; `ContentField` consumers gain a second store instance; `ui/app.py` gains one HTMX partial route family; `_harness_env` gains `VALOR_PROJECT_KEY` for research sessions; `stop.py` and the prompt-ingest path gain an env-gated kill switch.
+- **Interface changes**: `NON_TERMINAL_STATUSES` gains `admitted`; `config/settings.py` gains `ImprovementSettings`; `ContentField` consumers gain a second store instance; `ui/app.py` gains one HTMX partial route family; `_harness_env` gains `VALOR_PROJECT_KEY` for research sessions; `stop.py` and the prompt-ingest path gain an env-gated kill switch. **This plan changes no queue signature.** `_push_agent_session` is #3183's to change; #3177 consumes whatever contract #3183 lands (Gap C).
 - **Coupling**: the controller depends on Job, AgentSession, the reflection scheduler, the poll registry, and the pipeline ledger through their public APIs. Nothing existing depends on the controller. The control journal introduces one new consistency boundary in a dedicated Redis namespace, authoritative for research transitions only.
 - **Data ownership**: `ImprovementCase` owns research state; Job owns responsibility; AgentSession owns execution; PipelineLedger owns implementation stages; the control journal owns transition authority; flat records are projections. None substitutes for another.
 - **Reversibility**: every piece is additive and behind `ImprovementSettings.enabled` defaulting to false. Removing the controller deletes flat modules, the namespace, the settings block, the partial route, and the reflection registration; production paths are untouched.
@@ -176,7 +176,7 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 **Team:** Solo dev per lane, plan critic, code reviewer, one human decision point per charter field.
 
 **Interactions:**
-- PM check-ins: 2-3 (charter fields: contact permissions, spend limits, releasable surfaces, acceptable regressions; each arrives as an `/ask-me` question when it becomes decision-relevant)
+- PM check-ins: 0 for research. The charter's human-owned fields (contact permissions, spend limits, releasable surfaces, acceptable regressions) are set by the values recorded in this plan and amended only when Tom chooses to amend them. The controller never generates a question for a human; the daily question ceiling to Tom is zero (Gap F).
 - Review rounds: 2+ per lane
 
 Delivery is staged as six lanes (see Step by Step Tasks). Lanes 1 and 2 (retire autoexperiment; evidence and reuse contracts) are the build this plan dispatches; lanes 3 through 6 get child issues filed from lane 2's capability matrix, each referencing #3177. The original calendar estimate is withdrawn: queue admission, financial reservations, and memory isolation are newly explicit engineering work, and the re-estimate happens after lane 2.
@@ -222,6 +222,21 @@ Real work → observer adapters write evidence → planner tick proposes an acti
 | Configuration | `ImprovementSettings(BaseModel)` in `config/settings.py` beside `FeatureSettings` and `HybridEvalSettings`, env-overridable with the `__` nested delimiter. Immutable charter versions are `ImprovementCharter` records in Redis. No `config/improvement.yaml`. |
 | UI | Routes are inline in `ui/app.py` (no `ui/routers/`); data layer under `ui/data/improvement.py`; templates under `ui/templates/improvement/`; sync `def` handlers; read-only. `docs/features/web-ui.md` is corrected in the same lane. |
 | Scheduling | Controller ticks are function reflections registered through `scripts/update/reflection_register.py` from `scripts/update/run.py`, pinned to the `valor` project's owning machine. No agent-type reflection entry, so no vault hand-edit. |
+| Shared substrate | The create-or-bind seam, the renewed fencing lease, and the dead-letter record belong to #3183. This plan states the contract it needs and consumes the result. |
+| Human questions | None. The controller resolves uncertainty from Tom-sourced memories and online research, and records what it still does not know as a provisional assumption with its evidence. |
+
+#### Citation corrections (re-derived 2026-09-06)
+
+Every file:line this revision touches was located by symbol against the working tree, not carried forward. Two were wrong.
+
+| Prior citation | Corrected | How it was verified |
+|---|---|---|
+| `ui/data/sdlc.py:469` described as `ACTIVE_STATUSES` | `ACTIVE_STATUSES` is the module constant at `ui/data/sdlc.py:1256`. `:469` is a separate inline literal, the return of the `is_active` property defined at `:468`: `return self.status in ("pending", "running", "active", "waiting_for_children")`. A third `is_active` at `:244` compares a stage status and is unrelated. | `grep -n "ACTIVE_STATUSES\|def is_active" ui/data/sdlc.py` |
+| `hook_utils/memory_bridge.py` (5 sites in spike-4 and Gap E) | `.claude/hooks/hook_utils/memory_bridge.py` | `ls .claude/hooks/hook_utils/memory_bridge.py` |
+| `models/session_lifecycle.py:90` for `RECOVERY_OWNERSHIP` | Correct: the dict opens at `:90` and its header at `:88` states "This is an informational constant; it is not used for runtime routing." That header is why Gap A now names a real recovery pass instead. | `sed -n '85,95p' models/session_lifecycle.py` |
+| Non-Popoto raw-Redis exemption comment | `models/session_lifecycle.py:885`: "The lock key is NOT Popoto-managed, so raw Redis GET/SET/EXPIRE/EVAL here is fine and already the established pattern." The Lua CAS precedent is `_R.eval` at `:1357`; the `POPOTO_REDIS_DB as _R` import in that file is at `:853`, `:1282`, and `:1501`. | `grep -n "NOT Popoto-managed\|_R.eval\|POPOTO_REDIS_DB as _R" models/session_lifecycle.py` |
+| `NON_TERMINAL_STATUSES` at `models/session_lifecycle.py:72`; `finalize_session` at `:233` | Both correct. | `grep -n "NON_TERMINAL_STATUSES = \|^def finalize_session" models/session_lifecycle.py` |
+| `models/agent_session.py:221` | Correct and load-bearing: `rework_triggered = Field(null=True)` is a dead field with no writer, which is exactly why the old Verification row passed vacuously. `tools/session_tags.py:156,181,189` reads it; `models/task_type_profile.py:62,94,196` aggregates it. | `grep -n "rework_triggered" models/agent_session.py models/task_type_profile.py tools/session_tags.py` |
 
 #### Reuse map
 
@@ -229,16 +244,18 @@ Real work → observer adapters write evidence → planner tick proposes an acti
 |---|---|---|
 | Intended outcome and goal version | `Job.append_goal_version`, append-only goal JSON | none |
 | Implementation lineage | `agent/pipeline_ledger.py` | none |
-| Question transport and late-answer binding | `bridge/poll_registry.py`, `bridge/poll_reconcile.py` orphan adoption, `bridge/answer_routing.py` | add `investigation_id` to the poll descriptor; persist the original answer into `ImprovementInvestigation` before the 24h registry TTL |
+| Inspiration from Tom without asking him | `Memory` rows written with `source="human"` by `.claude/hooks/hook_utils/memory_bridge.py:801-836`; read through `tools/memory_search/__init__.py::search` (`:57`) | an observer adapter filters `project_key="valor", source="human"`, dedupes by memory id, and writes `ImprovementEvidence` rows of kind `inspiration` carrying the original text, its `reference` (URL or pointer), and its timestamp |
+| Online research on current practice | `WebSearch` and `WebFetch` inside the bounded research session | each search or fetch becomes an `ImprovementInvestigation` row of kind `web_research` with the query, source URLs, retrieval date, and the claims extracted; a claim with no URL and date is not a claim |
+| Worker liveness before activation | `worker:registered_pid:*` (prefix constant `agent/session_health.py:216`, written by `register_worker_pid` at `:5268`, scanned at `:6463`, freshness at `_worker_pid_heartbeat_fresh` `:5393`) | the scheduler adapter requires at least one fresh key before flipping `admitted` to `pending` |
 | Bootstrap confidence intervals | `tools/memory_eval/metrics.py` | import; add per-endpoint thresholds, clustered resampling by project, repeated-selection correction outside it |
 | Judge record shape | `agent/sdlc_review_consensus.py` (`judge_id`, `verdict`, `blockers`, confidence) | wrap with experiment ID, contract digest, evaluator version, trial ID, raw-response reference, blinded arm ID |
 | Large artifacts | Popoto `ContentField(store=...)` with a dedicated `FilesystemStore` subclass under a retention root | verifying subclass re-hashes on every load including the archive path |
 | Digest strings | `tools/sdlc_verdict.py:135-224` `"sha256:<hex>"` normalized form | none |
 | Scheduler ticks and timeouts | `agent/reflection_scheduler.py` (`asyncio.wait_for`, startup concurrency cap) | none |
-| Top-level session creation | `_push_agent_session` / `valor_session.create_session` | idempotent create-or-bind (Gap C) |
+| Top-level session creation | `_push_agent_session` / `valor_session.create_session` | none from this plan. #3183 owns the idempotent create-or-bind seam; #3177 states the contract it needs and calls it (Gap C) |
 | Execution fence | `agent/pid_fence.py::fence_is_live` | none |
-| Lease renewal idiom | `models/session_lifecycle.py:1357` Lua CAS | generalized in the control namespace (Gap A) |
-| Session cost | `AgentSession.total_cost_usd` via `agent/sdk_client.py:191` | reservation settlement (Gap D) |
+| Renewed lease with fencing generation | #3183's lease module, itself modeled on the `models/session_lifecycle.py:1357` Lua CAS | none from this plan. The control journal imports it wherever it needs a lease (Gap A) |
+| External-LLM spend | `tools/cross_vendor_judge.py` over the OpenRouter endpoint in `config/models.py:56`, per-call usage in the response envelope | per-call settlement against the daily dollar reservation (Gap D) |
 | Correction detection | `reflections/utilities.py` `CORRECTION_PATTERNS`, `reflections/session_intelligence.py:60-95` | promoted to a persisted, typed detector emitting `SessionEvent` kinds `intervention` and `correction` with a classification field |
 | Existing evidence computation | `reflections/expectation_reconciler.py::_shipped_evidence` and owner liveness | persisted instead of discarded |
 
