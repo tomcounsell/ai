@@ -218,20 +218,37 @@ Two entry points in `reflections/utilities.py`, because recon (spike-2) showed t
 
 For callers that hold a project dict.
 
+**Two try/except scopes, never one.** The resolver call and the transport call map their failures to *opposite* return values, so a single blanket handler spanning both would invert the contract:
+
 ```
-resolved = resolve_eng_group(project)
+# --- scope 1: resolution. Any failure here means nothing was sent. ---
+try:
+    resolved = resolve_eng_group(project)
+except Exception:                      # a monkeypatched resolver, or a future raise
+    log.warning("%s: Eng: group lookup failed for project %s; Telegram alert suppressed",
+                logger_prefix, project.get("slug", "?"))
+    return False                       # NO subprocess is invoked
 if resolved is None:
     log.warning("%s: no Eng: group for project %s; Telegram alert suppressed",
                 logger_prefix, project.get("slug", "?"))
     return False                       # NO subprocess is invoked
 _, chat_id = resolved
-subprocess.run(["valor-telegram", "send", "--chat", str(chat_id), message], ...)
+
+# --- scope 2: transport. Any failure here still means a send was attempted. ---
+try:
+    proc = subprocess.run(["valor-telegram", "send", "--chat", str(chat_id), message], ...)
+    if proc.returncode != 0:
+        log.warning(...)               # non-zero exit is a transport failure, not suppression
+except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+    log.warning(...)
 return True
 ```
 
+`resolve_eng_group` already swallows its own internal exceptions and returns `None` (`reflections/utilities.py:339-341`), so scope 1's `except` fires only when a caller or a test replaces the function object with one that raises — which is exactly the "`resolve_eng_group` raises" row of the Failure Path table, and it demands `False` with no subprocess. Scope 2 swallows to `True`. This split is the whole content of Task 3's swallow instruction; read the two as one and the contract inverts.
+
 Takes the **dict**, not a `project_key` — `resolve_eng_group` scans `project["telegram"]["groups"]`, and every call site already holds the dict (spike-1). A key-based signature would force a redundant `load_local_projects()` scan per send.
 
-Returns `True` when a destination resolved and a send was *attempted* — including a swallowed `FileNotFoundError` / `TimeoutExpired` / non-zero exit. `False` means and only means "nothing resolved, nothing was sent". This is the same contract `docs_auditor._send_telegram_notification` already publishes, and preserving it is what lets callers write an accurate suppression notice.
+Returns `True` when a destination resolved and a send was *attempted* — including a swallowed `FileNotFoundError` / `TimeoutExpired` / any other transport exception / a non-zero exit. `False` means and only means "nothing resolved, nothing was sent", and it covers both ways resolution can fail: `resolve_eng_group` returning `None`, and `resolve_eng_group` raising. This is the same contract `docs_auditor._send_telegram_notification` already publishes, and preserving it is what lets callers write an accurate suppression notice.
 
 `logger_prefix` keeps each module's existing log vocabulary (`"expectation_reconciler"`, `"sdlc_progress"`, …) so log greps and any alerting built on them survive.
 
@@ -481,7 +498,12 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 2. **Reduce `docs_auditor._resolve_notify_chat` to the three-line delegation** in Solution §2, passing `load_projects=load_local_projects` and `project_root=PROJECT_ROOT` — the module-scoped names, read in a body that lives in `docs_auditor`, which is what keeps `patch("reflections.docs_auditor.load_local_projects", ...)` effective. Keep a `FALLBACK_ENG_CHAT` re-export binding. Then run `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` — **all 176 tests green with zero test edits**, and `git diff --stat tests/unit/test_docs_auditor_substrate.py` empty — or stop and rethink the lift. Do this before Task 3; it is cheapest to abandon the lift while nothing depends on it.
 
    **Then, immediately, run mutation anti-test 2** (Failure Path Test Strategy) — it lives here rather than in Task 5 because it only bites once the delegation exists. Delete the `if target == PROJECT_ROOT.resolve():` clause from the lifted `resolve_host_eng_chat` so rung 3 returns `FALLBACK_ENG_CHAT` unconditionally, run `scripts/pytest-clean.sh 'tests/unit/test_docs_auditor_substrate.py::TestTelegramChatRouting' -q`, and confirm **exactly these three** go **red** — `test_foreign_unregistered_repo_suppresses_send` (line 1631), `test_registered_repo_with_malformed_group_suppresses_send` (line 1644), and `test_load_local_projects_raising_falls_back_for_project_root_only` (line 1663) — for a run of **3 failed, 5 passed**. `test_foreign_registered_repo_routes_to_its_own_group` (line 1587) is **expected to stay green**: its fixture resolves at rung 2 and never reaches the mutated guard, so do not read its passing as a failed mutation. Restore the clause and confirm 8 passed. Fewer than three red means the lift carried the code but not the guarantee, and the narrowing is the whole fix — treat it the same as a failed lift.
-3. **Add `send_eng_telegram(project, message, *, logger_prefix) -> bool`** to `reflections/utilities.py`: `resolve_eng_group` → warn-and-return-`False` on `None` with no subprocess, else `subprocess.run` with `str(chat_id)`. Swallow `FileNotFoundError` / `TimeoutExpired` / `Exception` / non-zero exit and return `True`.
+3. **Add `send_eng_telegram(project, message, *, logger_prefix) -> bool`** to `reflections/utilities.py`, with **two separate try/except scopes** — see the illustrated body in Solution §1, which this task restates without widening:
+
+   - **Around the resolver call only.** `resolve_eng_group(project)` raising → warn and `return False`, **no subprocess**. `resolve_eng_group(project)` returning `None` → the same warn-and-`return False`, **no subprocess**. Both are "nothing resolved, nothing was sent", and the Failure Path table's "`resolve_eng_group` raises" row pins the first of them.
+   - **Around the `subprocess.run` call only.** `FileNotFoundError`, `subprocess.TimeoutExpired`, any other `Exception`, or a non-zero `returncode` → warn and `return True`. A destination resolved and a send was attempted; that is what `True` asserts.
+
+   Do **not** write one try/except spanning both calls. That is the shortest thing to type and it returns `True` (or lets the exception escape) on a raising resolver, inverting Solution §1's "`False` means and only means nothing resolved, nothing was sent" and contradicting the Failure Path table. The argv carries `str(chat_id)`, never `group_name`.
 4. **Add `send_host_eng_telegram(message, *, logger_prefix) -> bool`** wrapping `resolve_host_eng_chat` with the same swallow-and-return contract.
 5. **Write `tests/unit/reflections/test_utilities_eng_telegram.py`** covering both tables from Failure Path Test Strategy. Then run **mutation anti-test 1** — revert `str(chat_id)` to `group_name` in `send_eng_telegram`, confirm the resolves-case goes red, restore. Do it now, before any consumer is wired. (Anti-test 2, the `PROJECT_ROOT` guard deletion, ran back in Task 2 — it needs the docs_auditor delegation in place to bite. Both are specified in Failure Path Test Strategy.)
 6. **Wire `expectation_reconciler`**: `_escalate_once(job_id, eid, message)` (line 170) → `_escalate_once(project, job_id, eid, message)`, body calling `send_eng_telegram(project, message, logger_prefix="expectation_reconciler")`. Its return type changes from `bool` to `tuple[bool, str | None]` for the reason in Solution §4 — the three call sites each gate a counter and a finding behind that one boolean, and suppression must reach the finding without touching the counter. All three sites sit inside `_reconcile_project(project: dict)`, which already binds `project_key` at line 372, so the dict needs no threading (spike-1).
