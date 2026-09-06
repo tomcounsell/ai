@@ -417,7 +417,7 @@ was written before #2782 and #2739 added the rest.
 
 ## Test Impact
 
-All in `tests/unit/test_docs_auditor_substrate.py`.
+All in `tests/unit/test_docs_auditor_substrate.py`, with one exception noted at the end.
 
 - [ ] `TestWriteLivenessVaultParam` (`:3042-3091`, six tests: `_summary` helper,
       `test_four_arg_call_omits_vault_count`, `test_five_arg_call_includes_vault_count`,
@@ -463,6 +463,13 @@ All in `tests/unit/test_docs_auditor_substrate.py`.
       untouched and do not let a truncation-headroom edit displace `suppressed_note`.
 
 No test outside this file references `_write_liveness` or either constant.
+
+- [ ] **NEW**, and the one exception to "all in this file": the dashboard-render check of
+      task `validate-dashboard-render` lands in `tests/unit/test_per_project_modal.py`,
+      the module that already owns direct Jinja2 renders of
+      `reflections/_partials/modal_content.html`. It reuses that file's existing `env`
+      fixture (`:30-35`) and `_base_reflection_ctx()` (`:38-53`) and adds no ORM or Redis
+      I/O. Nothing in that file changes; the work is purely additive.
 
 ## Rabbit Holes
 
@@ -813,7 +820,8 @@ confirm the deletion is total.
 - **Task ID**: build-tests
 - **Depends On**: build-delete-liveness
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`
-- **Informed By**: Test Impact (all ten bullets)
+- **Informed By**: Test Impact (the ten `test_docs_auditor_substrate.py` bullets; the
+  eleventh belongs to task `validate-dashboard-render`)
 - **Assigned To**: liveness-deleter
 - **Agent Type**: builder
 - **Parallel**: false
@@ -880,8 +888,9 @@ confirm the deletion is total.
 
 - **Task ID**: validate-dashboard-render
 - **Depends On**: build-delete-liveness, build-tests
-- **Validates**: `ui/templates/reflections/_partials/modal_content.html`
-- **Informed By**: Data Flow (Channel B, steps 2-6)
+- **Validates**: `ui/templates/reflections/_partials/modal_content.html`, via a new test in
+  `tests/unit/test_per_project_modal.py`
+- **Informed By**: Data Flow (Channel B, steps 2-6), Test Impact (final bullet)
 - **Assigned To**: liveness-validator
 - **Agent Type**: validator
 - **Parallel**: false

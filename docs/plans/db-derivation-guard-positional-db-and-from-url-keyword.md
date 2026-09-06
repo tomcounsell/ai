@@ -281,13 +281,16 @@ author inherits a known boundary rather than an assumed guarantee.
 
 **Size:** Small
 
-**Team:** Three agents, two checkouts — one builder (`guard-builder`, owning both
+**Team:** Three agents, one checkout — one builder (`guard-builder`, owning both
 files including their docstrings), one mutation validator (`mutation-validator`),
-one guard-semantics reviewer (`guard-reviewer`). The validator requires a
-**second `.worktrees/{slug}/` checkout of its own**; this is load-bearing rather
-than a convenience, because its per-fix revert protocol edits the working tree
-and would corrupt the builder's measurements in both directions if shared. See
-Team Orchestration for the full roles.
+one guard-semantics reviewer (`guard-reviewer`). All ten tasks are strictly
+serial (`Parallel: false` on every one), so `mutation-validator` runs its
+revert-and-restore protocol in `guard-builder`'s tree after task 7, with the
+builder idle. A second `.worktrees/{slug}/` checkout was specified in the
+previous revision and is dropped: it was justified by a concurrent-edit scenario
+the schedule makes impossible, and it is machinery an `appetite: Small` change
+with measured zero live exposure does not earn. See Team Orchestration for the
+serialization this depends on.
 
 **Interactions:**
 - PM check-ins: 0 (scope is fully specified by the issue plus the two items folded in from #2768; the one judgment call is in Open Questions)
@@ -670,12 +673,17 @@ written by the agent that just wrote the code being disclosed. A fourth standing
 agent would add a resumable identity and a dependency edge on four build tasks
 to gain nothing.
 
-**Worktree ownership note.** This is the reason the team is three agents across
-two checkouts rather than a solo dev. `mutation-validator` reverts hunks in the
-working tree. It must run in its own worktree, never in `guard-builder`'s, or the
-two corrupt each other's measurements in both directions. Appetite states the
-same requirement so a reader sizing the work from that section gets the real
-number.
+**Tree ownership note.** `mutation-validator` reverts hunks in the working tree,
+so it needs the tree to itself while it runs — not a checkout of its own, but an
+interval in which no one else is writing. The schedule provides that: every task
+declares `Parallel: false`, and `validate-mutations` (task 8) depends on
+`document-residual-gaps` (task 7), so the builder has finished all of its writes
+before the validator touches anything. That dependency edge is the whole
+mechanism. It was added in this revision precisely because tasks 7 and 8 write
+the same two files, are assigned to different agents, and previously had no edge
+between them — the one place an orchestrator that parallelizes independent tasks
+could have collided. Anyone who later relaxes `Parallel: false` or removes that
+edge must give the validator its own worktree in the same change.
 
 ## Step by Step Tasks
 
@@ -689,7 +697,8 @@ number.
 - **Agent Type**: builder
 - **Parallel**: false
 - Run every command in the Verification table against unmodified `main` and record the output verbatim.
-- Confirm the three defect rows are red (`POSITIONAL 0`, `URLKW 0`, `FIXTURE 1`) and the four invariant rows are green.
+- Confirm all **six** red rows measure their pre-fix value: `POSITIONAL 0`, `STRICT 0`, `URLKW 0`, `FIXTURE 1`, `URLLAUNDER 0`, `URLDEFAULT 0`. `URLLAUNDER` and `URLDEFAULT` are the two rows this plan calls its single most important new assertions; a red-state proof that omits them is not a red-state proof.
+- Confirm the invariant groups measure what the Verification lead paragraph says they do: the seven leg-2 rows (`LAUNDER1`, `LAUNDER2`, `LDEFAULT`, `LMODULE`, `LFOR`, `LWALRUS`, `LWITH`) at 1, the seventeen `L3*` binding-form rows at 1, the three over-refusal rows (`L3COMP`, `L3LAMBDA`, `L3NESTASSIGN`) at 1 pre-fix and 0 post-fix, the five `URLL3*` refusal rows at 0 pre-fix and 1 post-fix, the two route-2 over-refusal rows (`URLL3COMP`, `URLL3NESTASSIGN`) at 0, `STARRED`/`STARSTRICT` at 0, and `URLHOP` 1 against `DBHOP` 0.
 - Paste this block into the PR description as the red-state proof. A fix with no recorded red state is not accepted.
 
 ### 2. Route 1 positional `db` leg
@@ -775,6 +784,7 @@ number.
 
 - **Task ID**: `document-residual-gaps`
 - **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`
+- **Validates**: Verification rows `DISCLOSE` and `Candidate kind contract comment lists all three`
 - **Assigned To**: `guard-builder`
 - **Agent Type**: builder
 - **Parallel**: false
@@ -786,11 +796,12 @@ number.
 ### 8. Per-fix mutation validation
 
 - **Task ID**: `validate-mutations`
-- **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`, `build-signature-pin`
+- **Depends On**: `build-positional`, `build-url-keyword`, `build-fixture-leg`, `build-format-violation`, `build-signature-pin`, `document-residual-gaps`
+- **Validates**: every Verification row, one fix at a time (per-fix revert, red, restore, green)
 - **Assigned To**: `mutation-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- **In its own worktree.** Do not share a checkout with `guard-builder`.
+- Runs in `guard-builder`'s tree, after task 7 has landed and while the builder is idle. The dependency edge on `document-residual-gaps` is what makes that safe; do not drop it.
 - For each of the six fixes independently: revert that one hunk, run the suite, confirm **that fix's own test** goes red (not merely that something failed), restore, re-run, confirm green.
 - Use `source_fingerprint()` for the restore check.
 - Report per-fix. An aggregate "mutation testing passed" is not an accepted result.
@@ -799,6 +810,7 @@ number.
 
 - **Task ID**: `review-semantics`
 - **Depends On**: `validate-mutations`, `document-residual-gaps`
+- **Validates**: Verification rows `DISCLOSE`, `L3COMP`, `L3LAMBDA`, `L3NESTASSIGN` (that the disclosure and the over-refusal boundary describe the same code)
 - **Assigned To**: `guard-reviewer`
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -810,6 +822,7 @@ number.
 
 - **Task ID**: `validate-all`
 - **Depends On**: `review-semantics`
+- **Validates**: the whole Verification table plus `UNDISP`, `STALE`, `DISP` and the guard suite
 - **Assigned To**: `mutation-validator`
 - **Agent Type**: validator
 - **Parallel**: false
