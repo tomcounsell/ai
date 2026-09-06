@@ -2430,8 +2430,7 @@ def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], r
             )
         else:
             title = (
-                f"docs-auditor: rotation aborted after writing for {slug} "
-                "— manual cleanup required"
+                f"docs-auditor: rotation aborted after writing for {slug} — manual cleanup required"
             )
             outcome_line = (
                 "The automatic restore did NOT complete successfully. Manual "
@@ -2445,7 +2444,7 @@ def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], r
             "Manual cleanup command:\n\n"
             f"```\n{cleanup_cmd}\n```\n\n"
             'Verify with `git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain '
-            f'-- {" ".join(files_touched)}` — it should print nothing.'
+            f"-- {' '.join(files_touched)}` — it should print nothing."
         )
         _file_issue_if_new(
             {"title": title, "body": body, "category": "operational-failure"},
