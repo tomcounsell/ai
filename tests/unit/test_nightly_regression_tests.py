@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -17,6 +18,30 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import nightly_regression_tests as nrt
+
+# The four spellings of the index-backed lookup no prompt may name. Compiled
+# here rather than written inline at each call site: the same alternation lives
+# in the #3170 plan's Verification table, where a markdown cell escaped its
+# pipes and made the row pass on entirely unfixed code.
+SEARCH_TOKENS = re.compile(r"--search|gh search|search all|search open", re.I)
+
+
+def _assert_per_node_dispatch(mock_dispatch, nodes: list[str]) -> None:
+    """Assert the per-node dispatch went out for ``nodes`` with matching dispositions.
+
+    Replaces a bare ``assert_called_once_with(nodes, dry_run=False)``: the
+    per-node call now also carries the ``dispositions=`` the detector resolved
+    (#3170 fix 2), and an exact-kwargs assertion would have to be rewritten
+    again the next time the channel widens. This checks the two things the old
+    assertion checked plus the one the new argument is for -- that the
+    dispositions cover exactly the dispatched nodes, in order.
+    """
+    mock_dispatch.assert_called_once()
+    args, kwargs = mock_dispatch.call_args
+    assert args == (nodes,)
+    assert kwargs["dry_run"] is False
+    assert [d.node for d in kwargs["dispositions"]] == nodes
+    assert all(d.disposition == "file" for d in kwargs["dispositions"])
 
 
 class TestLoadLastRun:
@@ -790,14 +815,72 @@ class TestCarryDispatchedNodes:
         assert nrt.carry_dispatched_nodes(prev, ["a::t1"], []) == []
 
 
+def _disposition(node: str, *, at: str = "2026-09-05T06:00:00+00:00") -> nrt.NodeDisposition:
+    return nrt.NodeDisposition(
+        node=node,
+        title=f"Nightly regression: {node}",
+        disposition="file",
+        resolved_against="gh issue list --state all (open+closed REST read)",
+        resolved_at=at,
+    )
+
+
 class TestBuildTriagePrompt:
     """Titles are computed in Python -- literal, not agent-derived (#2559)."""
 
     def test_literal_titles_present(self) -> None:
+        """The titles, AND the lookup mechanism the agent is told to use.
+
+        The title half alone stayed true across the #3170 change and was
+        therefore blind to it: the prompt could keep every literal title while
+        still directing the agent at the index-backed lookup that produced the
+        #2960-#2999 wave. The two halves belong in one test.
+        """
         nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
         prompt = nrt._build_triage_prompt(nodes)
         for n in nodes:
             assert f"Nightly regression: {n}" in prompt
+        assert "gh issue list --state all" in prompt
+        assert not SEARCH_TOKENS.search(prompt)
+
+    def test_dispositions_render_the_detectors_own_finding_per_node(self) -> None:
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        dispositions = [_disposition(n) for n in nodes]
+        prompt = nrt._build_triage_prompt(nodes, dispositions=dispositions)
+        for n in nodes:
+            assert f"Nightly regression: {n}" in prompt
+        assert prompt.count("2026-09-05T06:00:00+00:00") == 2
+        assert prompt.count("gh issue list --state all (open+closed REST read)") == 2
+
+    def test_empty_disposition_list_degrades_to_the_plain_prompt(self) -> None:
+        """``[]`` and ``None`` both take the same branch, checked before the zip.
+
+        The pair with the mismatch test below pins an ordering that reads as a
+        contradiction unless it is stated: ``if not dispositions`` runs first,
+        so an empty list never reaches ``zip(..., strict=True)`` and never
+        raises, while a non-empty wrong-length list always does.
+        """
+        nodes = ["a::t1", "b::t2", "c::t3"]
+        assert nrt._build_triage_prompt(nodes, dispositions=[]) == nrt._build_triage_prompt(nodes)
+
+    def test_wrong_length_disposition_list_raises(self) -> None:
+        nodes = ["a::t1", "b::t2", "c::t3"]
+        with pytest.raises(ValueError):
+            nrt._build_triage_prompt(
+                nodes, dispositions=[_disposition("a::t1"), _disposition("b::t2")]
+            )
+
+    def test_ledger_paragraph_is_emitted_only_for_a_non_none_path(self) -> None:
+        nodes = ["a::t1"]
+        without = nrt._build_triage_prompt(nodes)
+        assert "Session ledger" not in without
+        assert "nightly-triage-ledger" not in without
+        with_path = nrt._build_triage_prompt(nodes, ledger_path="/abs/nightly-triage-ledger/x.json")
+        assert "/abs/nightly-triage-ledger/x.json" in with_path
+        assert "Read that file FIRST on every turn" in with_path
+        assert "BEFORE moving on to the next entry" in with_path
+        assert "cannot be parsed as JSON" in with_path
+        assert not SEARCH_TOKENS.search(with_path)
 
 
 def _errored(nodeid: str, worker: str, message: str) -> dict:
@@ -1302,6 +1385,149 @@ class TestDispatchFindings:
         assert outcome.recorded == []
 
 
+class TestDispositionHandoff:
+    """What dispatch_findings knows must reach the agent, and only for per-node."""
+
+    MSG = "RuntimeError: redis client is not on the claimed server"
+
+    def _body_failures(self, nodes):
+        return {
+            "tests": [
+                {
+                    "nodeid": n,
+                    "outcome": "failed",
+                    "setup": {"outcome": "passed"},
+                    "call": {"outcome": "failed", "longrepr": f"[gw1] AssertionError: {n}"},
+                }
+                for n in nodes
+            ]
+        }
+
+    def _run(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map):
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
+        monkeypatch.setattr(nrt, "comment_on_issue", lambda n, body, **kw: True)
+        calls: list[tuple[list[str], dict]] = []
+
+        def spy(ns, **kw):
+            calls.append((list(ns), kw))
+            return "sess-1" if ns else None
+
+        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", spy)
+        nrt.dispatch_findings(
+            report,
+            nodes,
+            {},
+            run_at="2026-09-05T03:00:00Z",
+            head_commit="cafe1234",
+        )
+        return calls
+
+    def test_dispositions_cover_the_survivors_and_nothing_already_tracked(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The second-writer hazard, pinned.
+
+        An already-open node and a closed-not-planned node are commented on by
+        the script itself and dropped before the dispatch. Handing either to the
+        agent would make it a second writer for the same comment, so the channel
+        must carry only the nodes the agent is being asked to act on.
+        """
+        already_open = "tests/unit/test_open.py::test_1"
+        closed_np = "tests/unit/test_closed.py::test_2"
+        survivor = "tests/unit/test_new.py::test_3"
+        nodes = [already_open, closed_np, survivor]
+        calls = self._run(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map={f"Nightly regression: {already_open}": 11},
+            closed_map={f"Nightly regression: {closed_np}": (22, "NOT_PLANNED")},
+        )
+        per_node = [c for c in calls if c[0]]
+        assert len(per_node) == 1
+        dispatched, kwargs = per_node[0]
+        assert dispatched == [survivor]
+        assert [d.node for d in kwargs["dispositions"]] == [survivor]
+        assert kwargs["dispositions"][0].title == f"Nightly regression: {survivor}"
+        assert kwargs["dispositions"][0].disposition == "file"
+        assert kwargs["dispositions"][0].resolved_at
+        assert "gh issue list --state all" in kwargs["dispositions"][0].resolved_against
+
+    def test_no_dispositions_when_open_read_fails(self, monkeypatch, tmp_path: Path) -> None:
+        """A failed open-issue read must not assert a detector resolution.
+
+        ``partition_already_open`` fails open on ``open_map=None`` -- every
+        node, including ones that actually have an open issue, survives into
+        ``single_nodes`` unfiltered. Without this fix, dispatch_findings would
+        still hand those survivors a ``dispositions`` list claiming "it read
+        all open and closed issues... and found no issue carrying that exact
+        title", which is false, and which demotes the agent's own live lookup
+        to "a second check" on exactly the night that lookup is the only real
+        defense left.
+        """
+        survivor = "tests/unit/test_new.py::test_3"
+        nodes = [survivor]
+        calls = self._run(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map=None,
+            closed_map={},
+        )
+        per_node = [c for c in calls if c[0]]
+        assert len(per_node) == 1
+        dispatched, kwargs = per_node[0]
+        assert dispatched == [survivor]
+        assert kwargs["dispositions"] is None
+
+    def test_no_dispositions_when_closed_read_fails(self, monkeypatch, tmp_path: Path) -> None:
+        """A partial read (only one of open/closed readable) is still degraded.
+
+        ``open_map={}`` is readable-but-empty while ``closed_map=None`` means
+        the closed-issue read failed, so ``read_shape == ["open"]``: a partial
+        read, not the full read fix 2 requires. Handing out a disposition here
+        would render a ``resolved_against`` naming only the open read while the
+        prompt sentence still claims "it read all open and closed issues" --
+        self-contradictory, and it demotes the agent's own lookup on the one
+        night a closed-not-planned recurrence could otherwise slip through.
+        """
+        survivor = "tests/unit/test_new.py::test_3"
+        nodes = [survivor]
+        calls = self._run(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map={},
+            closed_map=None,
+        )
+        per_node = [c for c in calls if c[0]]
+        assert len(per_node) == 1
+        dispatched, kwargs = per_node[0]
+        assert dispatched == [survivor]
+        assert kwargs["dispositions"] is None
+
+    def test_cascade_dispatch_is_handed_no_dispositions(self, monkeypatch, tmp_path: Path) -> None:
+        """The narrowing, pinned in behaviour rather than only in prose.
+
+        Fixes 2 and 3 stop at the per-node path. The cascade umbrella keeps its
+        pre-rendered ``prompt=`` and gets no disposition, which is what keeps
+        it from acquiring a ledger it has no builder parameter to read.
+        """
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
+        calls = self._run(
+            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
+        )
+        cascade_calls = [c for c in calls if c[1].get("prompt") is not None]
+        assert len(cascade_calls) == 1
+        assert "dispositions" not in cascade_calls[0][1]
+
+
 class TestHandleIntegrityTrip:
     """A storm must not become invisible now that nothing alerts (#3134)."""
 
@@ -1513,6 +1739,81 @@ class TestMaybeDispatchTriage:
             assert nrt.maybe_dispatch_triage_session([]) is None
             mock_run.assert_not_called()
 
+    def _ledger_dir(self, monkeypatch, tmp_path: Path) -> Path:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "test.log")
+        monkeypatch.setattr(nrt, "DATA_DIR", tmp_path / "data")
+        return tmp_path / "data" / "nightly-triage-ledger"
+
+    def test_real_per_node_dispatch_seeds_a_ledger_and_names_it_in_the_message(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        nodes = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
+        ) as mock_run:
+            nrt.maybe_dispatch_triage_session(nodes, dispositions=[_disposition(nodes[0])])
+        written = sorted(ledger_dir.glob("*.json"))
+        assert len(written) == 1
+        payload = json.loads(written[0].read_text())
+        assert [e["node"] for e in payload["entries"]] == nodes
+        assert payload["filed"] == []
+        msg = mock_run.call_args.args[0][mock_run.call_args.args[0].index("--message") + 1]
+        assert str(written[0].resolve()) in msg
+
+    def test_dry_run_writes_no_ledger(self, monkeypatch, tmp_path: Path) -> None:
+        """The ledger write sits BELOW the dry-run short-circuit, and must stay there.
+
+        ``--dry-run`` is the one command an operator reaches for to preview a
+        night. The sentinel exists because an earlier version spawned real
+        sessions that filed real issues under it; a state write placed above
+        the short-circuit puts that class of defect back.
+        """
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        nodes = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run") as mock_run:
+            session_id = nrt.maybe_dispatch_triage_session(
+                nodes, dispositions=[_disposition(nodes[0])], dry_run=True
+            )
+        mock_run.assert_not_called()
+        assert session_id == nrt.DRY_RUN_SESSION_ID
+        assert not ledger_dir.exists()
+
+    def test_prompt_override_dispatch_writes_no_ledger(self, monkeypatch, tmp_path: Path) -> None:
+        """The scope narrowing, at the one place it is enforced.
+
+        The cascade and re-baseline-seed dispatches pass a pre-rendered prompt
+        and no dispositions, so the entry list is empty, no file is created,
+        and ``nightly-triage-baseline.json`` never exists. One gate does the
+        whole narrowing; there is no separate branch to keep in step.
+        """
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
+        ) as mock_run:
+            nrt.maybe_dispatch_triage_session(
+                ["seed:3"], prompt="CUSTOM UMBRELLA PROMPT", slug_suffix="baseline"
+            )
+        assert not ledger_dir.exists()
+        argv = mock_run.call_args.args[0]
+        assert argv[argv.index("--message") + 1] == "CUSTOM UMBRELLA PROMPT"
+
+    def test_a_failed_ledger_write_does_not_stop_the_dispatch(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "test.log")
+        monkeypatch.setattr(nrt, "write_triage_ledger", lambda slug, entries: None)
+        nodes = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
+        ) as mock_run:
+            session_id = nrt.maybe_dispatch_triage_session(
+                nodes, dispositions=[_disposition(nodes[0])]
+            )
+        assert session_id == "abc123"
+        argv = mock_run.call_args.args[0]
+        assert "nightly-triage-ledger" not in argv[argv.index("--message") + 1]
+
 
 class TestMainDispatchPersistence:
     """main() persists only what actually went out to triage (issue #2559)."""
@@ -1590,7 +1891,7 @@ class TestMainDispatchPersistence:
             tmp_path, prev, [standing, fresh], "triage-session-1"
         )
         assert rc == 0
-        mock_dispatch.assert_called_once_with([fresh], dry_run=False)
+        _assert_per_node_dispatch(mock_dispatch, [fresh])
         assert saved["dispatched_nodes"] == sorted([standing, fresh])
 
     def test_no_dispatch_when_everything_is_already_filed(self, tmp_path: Path) -> None:
@@ -1598,7 +1899,7 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[standing], dispatched_nodes=[standing])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [standing], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dry_run=False)
+        mock_dispatch.assert_called_once_with([], dispositions=[], dry_run=False)
         assert saved["dispatched_nodes"] == [standing]
 
     def test_failed_dispatch_leaves_nodes_unfiled_for_retry(self, tmp_path: Path) -> None:
@@ -1608,7 +1909,7 @@ class TestMainDispatchPersistence:
         )
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([node], dry_run=False)
+        _assert_per_node_dispatch(mock_dispatch, [node])
         assert saved["dispatched_nodes"] == []
         assert saved["dispatched_session_id"] == "earlier-session"
 
@@ -1826,7 +2127,7 @@ class TestMainDispatchPersistence:
         rc, saved, mock_dispatch, log_text = self._run_main(tmp_path, prev, [node], None)
 
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dry_run=False)
+        mock_dispatch.assert_called_once_with([], dispositions=[], dry_run=False)
         assert saved["seeded_nodes"] == [node]
         # The regression is still recorded even though no issue is filed.
         assert "newly-confirmed failure" in log_text
@@ -1843,7 +2144,7 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=[])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], "new-session")
         assert rc == 0
-        mock_dispatch.assert_called_once_with([node], dry_run=False)
+        _assert_per_node_dispatch(mock_dispatch, [node])
         assert saved["dispatched_nodes"] == [node]
 
     def test_collection_mismatch_regression_seed_survives_successful_dispatch(
@@ -2833,3 +3134,222 @@ class TestReviewFindings3142:
             "a::t", "NOT_PLANNED", run_at="R", head_commit="H"
         )
         assert nrt.closed_epilogue("NOT_PLANNED") in node_comment
+
+
+class TestPromptsNeverNameTheSearchIndex:
+    """All THREE issue-filing prompts hand over a REST command (#3170 fix 1).
+
+    The module's own reads were moved off GitHub's index-backed lookup by
+    ``8524e765b`` and are held there by
+    ``test_open_issues_uses_the_rest_list_not_the_lagging_search``. This is the
+    same contract one layer out, for the reads the module tells an *agent* to
+    make -- the layer that stayed unfixed through four passes and produced the
+    #2960-#2999 duplicate wave. The two tests are one contract; a prompt that
+    names the index is the same defect as a script that queries it.
+
+    Parametrized over all three prompts on purpose: hardening one and gating on
+    it reported clean with two thirds of the hole open.
+    """
+
+    def _prompts(self) -> dict[str, str]:
+        cascade = {
+            "nodes": ["tests/unit/test_a.py::test_1"],
+            "workers": ["gw1"],
+            "kind": "body",
+            "title": "Nightly regression cascade: boom",
+            "message": "AssertionError: boom",
+        }
+        return {
+            "per-node": nrt._build_triage_prompt(["tests/unit/test_a.py::test_1"]),
+            "cascade": nrt._build_cascade_prompt(cascade),
+            "seed": nrt._build_seed_prompt("Nightly regression baseline: 2 nodes", ["a::t1"]),
+        }
+
+    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
+    def test_prompt_hands_over_the_rest_command(self, name: str) -> None:
+        prompt = self._prompts()[name]
+        assert (
+            "gh issue list --state all --json number,title,state,stateReason --limit 200" in prompt
+        )
+
+    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
+    def test_prompt_carries_the_prohibition_and_its_reason(self, name: str) -> None:
+        prompt = self._prompts()[name]
+        assert "search index" in prompt
+        assert "#2960-#2999" in prompt
+
+    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
+    def test_prompt_warns_that_statereason_is_empty_on_open_rows(self, name: str) -> None:
+        prompt = self._prompts()[name]
+        assert "stateReason" in prompt
+        assert "empty string on OPEN rows" in prompt
+
+    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
+    def test_prompt_never_names_the_index_backed_lookup(self, name: str) -> None:
+        assert SEARCH_TOKENS.findall(self._prompts()[name]) == []
+
+    def test_all_three_share_one_constant(self) -> None:
+        """One string, three readers -- so the three cannot drift again."""
+        for prompt in self._prompts().values():
+            assert nrt.ISSUE_LOOKUP_INSTRUCTION in prompt
+
+
+class TestBuildSeedPrompt:
+    """Extraction out of main() must be a move, not a rewrite (#3170)."""
+
+    TITLE = "Nightly regression baseline: 2 nodes absorbed on abc1234"
+    NODES = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+
+    def _inline_original(self, prior_collection) -> str:
+        """The text as main() carried it, before extraction.
+
+        Kept literal here rather than described, so byte-identity is *gated*
+        rather than asserted: the seed's dedup rule is stricter than the
+        per-node one (a closed umbrella is commented on and never re-filed,
+        whatever the close reason) and a paraphrase during the move would have
+        softened it silently.
+        """
+        seed_size = len(self.NODES)
+        seed_title = self.TITLE
+        return (
+            "Nightly regression detector re-baselined its test collection "
+            f"(old={prior_collection!r}, new={nrt.COLLECTION_PATHS!r}). "
+            f"The following {seed_size} node(s) were already failing at the "
+            "moment of the re-baseline and have been absorbed into the seed — "
+            "they are NOT individually filed. Search open AND closed issues for "
+            f'the EXACT title "{seed_title}". If an open one exists, comment on '
+            "it. If a closed one exists, comment there and do NOT re-file — the "
+            "seed umbrella is a declaration, and a re-baseline retry at the same "
+            "commit must not mint a twin, whatever the close reason. Only if "
+            "neither exists, open ONE umbrella issue with EXACTLY that title, "
+            "summarizing the "
+            "population, its size, and pointing at the persisted state file "
+            "for the full node list. Do NOT file per-node issues for these. Do "
+            "NOT attempt an auto-hotfix.\n\n"
+            "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in self.NODES)
+        )
+
+    def _substitute_back(self, rendered: str) -> str:
+        """Undo the one sentence fix 1 replaced, so the rest can be diffed exactly."""
+        new_unit = "\n" + nrt.ISSUE_LOOKUP_INSTRUCTION + "The EXACT title to match is"
+        assert new_unit in rendered
+        return rendered.replace(new_unit, " Search open AND closed issues for the EXACT title", 1)
+
+    def test_byte_identical_to_the_inline_original_apart_from_the_lookup_sentence(self) -> None:
+        prior = ["tests/", "docs/"]
+        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES, prior_collection=prior)
+        assert self._substitute_back(rendered) == self._inline_original(prior)
+
+    def test_prior_collection_renders_and_defaults_to_none(self) -> None:
+        """The third parameter is the one a two-parameter signature would drop.
+
+        ``old=`` interpolates a main() local derivable from neither the title
+        nor the node list, so a signature without it loses the clause outright
+        while every other assertion here still passes.
+        """
+        with_prior = nrt._build_seed_prompt(self.TITLE, self.NODES, prior_collection=["old/"])
+        assert "(old=['old/'], new=['tests/'])" in with_prior
+        default = nrt._build_seed_prompt(self.TITLE, self.NODES)
+        assert "(old=None, new=['tests/'])" in default
+
+    def test_the_stricter_closed_rule_survives_the_move(self) -> None:
+        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES)
+        assert "comment there and do NOT re-file" in rendered
+        assert "whatever the close reason" in rendered
+
+    def test_carries_no_ledger_and_no_pre_resolved_block(self) -> None:
+        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES)
+        assert "nightly-triage-ledger" not in rendered
+        assert "Already resolved by the detector" not in rendered
+
+
+class TestWriteTriageLedger:
+    """The third, advisory replay defence: seeded by the script, appended by the agent."""
+
+    SLUG = "nightly-triage-a1b2c3d4"
+
+    def _ledger_dir(self, monkeypatch, tmp_path: Path) -> Path:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(nrt, "DATA_DIR", tmp_path / "data")
+        return tmp_path / "data" / "nightly-triage-ledger"
+
+    def test_happy_path_shape_and_absolute_return(self, monkeypatch, tmp_path: Path) -> None:
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        entries = [_disposition("a::t1"), _disposition("b::t2")]
+        returned = nrt.write_triage_ledger(self.SLUG, entries)
+        assert Path(returned).is_absolute()
+        assert Path(returned) == (ledger_dir / f"{self.SLUG}.json").resolve()
+        payload = json.loads(Path(returned).read_text())
+        assert payload["slug"] == self.SLUG
+        assert payload["created_at"]
+        assert payload["filed"] == []
+        assert [e["node"] for e in payload["entries"]] == ["a::t1", "b::t2"]
+        assert payload["entries"][0]["disposition"] == "file"
+
+    def test_empty_entries_writes_nothing_and_returns_none(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """An empty ledger would read to a replay as 'nothing left to file'."""
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        assert nrt.write_triage_ledger(self.SLUG, []) is None
+        assert not ledger_dir.exists()
+
+    def test_an_unwritable_target_logs_a_warning_and_returns_none(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Fail-open: a ledger that cannot be written must not stop the night filing."""
+        log_file = tmp_path / "nightly.log"
+        monkeypatch.setattr(nrt, "LOG_FILE", log_file)
+        blocker = tmp_path / "data"
+        blocker.write_text("not a directory")
+        monkeypatch.setattr(nrt, "DATA_DIR", blocker)
+        assert nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")]) is None
+        assert "WARNING" in log_file.read_text()
+        assert self.SLUG in log_file.read_text()
+
+    def test_a_live_sessions_appends_are_never_re_seeded_away(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A same-slug retry must not erase what the first session already filed.
+
+        maybe_dispatch_triage_session returns None whenever the subprocess exits
+        zero but its stdout will not parse, so an identical node set can come
+        back on a later run under the same sha256 slug while the first session's
+        issues really exist.
+        """
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        first = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
+        payload = json.loads(Path(first).read_text())
+        payload["filed"] = [{"number": 4242, "title": "t", "node": "a::t1"}]
+        Path(first).write_text(json.dumps(payload))
+
+        second = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
+        assert second == first
+        assert json.loads(Path(first).read_text())["filed"] == payload["filed"]
+        assert sorted(x.name for x in ledger_dir.iterdir()) == [f"{self.SLUG}.json"]
+
+    def test_an_untouched_ledger_with_no_filings_is_re_seeded(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The guard keys on filings, not on the file existing."""
+        self._ledger_dir(monkeypatch, tmp_path)
+        nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
+        returned = nrt.write_triage_ledger(self.SLUG, [_disposition("b::t2")])
+        payload = json.loads(Path(returned).read_text())
+        assert [e["node"] for e in payload["entries"]] == ["b::t2"]
+
+    def test_the_write_is_atomic_and_leaves_no_temp_file(self, monkeypatch, tmp_path: Path) -> None:
+        """Truncated JSON is worse for the agent than stale-but-valid JSON."""
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
+        assert [x.name for x in ledger_dir.iterdir()] == [f"{self.SLUG}.json"]
+
+    def test_a_corrupt_existing_ledger_is_overwritten_rather_than_raising(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
+        ledger_dir.mkdir(parents=True)
+        (ledger_dir / f"{self.SLUG}.json").write_text("{ truncated")
+        returned = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
+        assert returned is not None
+        assert json.loads(Path(returned).read_text())["filed"] == []

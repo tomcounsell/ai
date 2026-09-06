@@ -251,28 +251,32 @@ When the guard fires:
 
 Session worktrees are force-removed on session exit (`git worktree remove --force`). The unmerged-branch guard (#1646) protects only *committed* work; before #2137, staged, unstaged, and untracked edits in a dirty worktree were discarded with no backstop. A production incident destroyed six uncommitted files this way (the reflog showed `reset: moving to HEAD`). Three complementary layers close the gap: two PreToolUse guards covering opposite directions (destructive git *inside* a dirty worktree vs. whole-tree destructive git in the *shared main checkout*), plus a teardown backstop.
 
-**1. Auto-WIP-commit before teardown.** `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` (`agent/worktree_manager.py`) runs *before* every force-remove. It is called from `remove_worktree()` and directly from `_cleanup_stale_worktree()` (which force-removes without going through `remove_worktree`). Mechanism:
+**1. Auto-WIP-commit before teardown.** `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` (`agent/worktree_manager.py`) runs *before* every force-remove. It is called from `remove_worktree()` and directly from `_cleanup_stale_worktree()` (which force-removes without going through `remove_worktree`). `reap_idle_worktree()` is a third worktree-removal entry point (#3162) and deliberately never reaches this function: it refuses on a non-empty `git status --porcelain` before doing anything else, so a half-deleted tree reads as dirty and the lane is kept rather than torn down. Mechanism:
 
 1. `git -C <worktree> status --porcelain` — if clean, no-op (`{"preserved": False, "was_clean": True}`).
-2. `git -C <worktree> add -A` — captures untracked + tracked edits.
-3. `git -C <worktree> commit --no-verify --no-gpg-sign -m "WIP: auto-preserved before teardown [slug] [ISO-ts]"` — `--no-verify` avoids pre-commit hooks hanging teardown; `--no-gpg-sign` avoids signing prompts.
-4. `git -C <repo_root> update-ref refs/session-wip/{slug} <sha>` — writes to the **common** ref store (not the per-worktree one), so the ref survives both worktree removal and the unmerged-branch-guard branch deletion.
+2. **Wipe check (#3167).** `git -C <worktree> ls-tree --name-only -d HEAD` lists the directories HEAD tracks; if any is absent from disk, the tree has been (partially or fully) deleted out from under the worktree — by a racing teardown pass, an interrupted `shutil.rmtree`, or similar — and is not a tree whose deletions should be committed. This runs **before** staging, because the signal is cheapest and most reliable before `git add -A` touches the index.
+   - **No missing directory:** falls through to step 3, unchanged.
+   - **A directory is missing:** `git -C <worktree> reset -q` (mixed: index to HEAD, working tree untouched) recovers the index from anything a previous teardown pass already staged, then the additive-only candidate set — `ls-files --modified --others --exclude-standard` minus `ls-files --deleted` — is staged (never `add -A`, which would restage the declined deletions). A non-empty set commits with **zero deletions** plus a trailer recording the refusal; an empty set (the pure-wipe case) writes no commit and no ref at all, leaving the branch head unmoved. Either way, the declined deletions are logged at ERROR under `[worktree-wip-refused-wipe]` with the slug, branch, HEAD sha, missing directory names, and path counts — captured before the force-remove destroys the evidence.
+   - **Fail-open asymmetry:** a failure reading the wipe signal itself (before any directory is confirmed missing) falls open to step 3, logged at WARNING under `[worktree-wip-guard-failed]` — this function's hardest contract is that it never blocks or hangs teardown. A failure *after* a missing directory is confirmed instead refuses (returns the pure-wipe result), because falling open at that point would commit the very wipe just detected.
+3. `git -C <worktree> add -A` — captures untracked + tracked edits.
+4. `git -C <worktree> commit --no-verify --no-gpg-sign -m "WIP: auto-preserved before teardown [slug] [ISO-ts]"` — `--no-verify` avoids pre-commit hooks hanging teardown; `--no-gpg-sign` avoids signing prompts.
+5. `git -C <repo_root> update-ref refs/session-wip/{name} <sha>` — writes to the **common** ref store (not the per-worktree one), so the ref survives both worktree removal and the unmerged-branch-guard branch deletion. `{name}` follows the worktree's actual checked-out branch (`session/<name>` → `<name>`), falling back to the `slug` argument on a detached HEAD or a non-session branch — `_cleanup_stale_worktree` can pass a foreign directory name as `slug` that disagrees with the branch the commit lands on.
 
 The recovery pointer is logged at WARNING with a greppable tag: `[worktree-wip-preserved] slug=… ref=refs/session-wip/… sha=…`.
 
-**Why a WIP commit + named ref, not `git stash`.** A plain `git stash` inside a worktree writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree — useless as a teardown backstop.
+**Why a WIP commit + named ref, not `git stash`.** The reason is *not* that a worktree's stash is worktree-local — `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). That shared stack is precisely the problem: every lane on this machine pushes onto the same one, so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1). A WIP commit under a slug-scoped named ref is single-owner by construction. `git stash` also declines untracked files by default, while the WIP commit captures them.
 
 **Non-blocking contract.** Preservation must never block or hang teardown. Any subprocess failure, timeout, or exception is caught, logged at ERROR with `[worktree-wip-preserve-failed]`, and returned in the result dict (`{"preserved": False, "errors": [...]}`) — the force-remove still proceeds.
 
-**Recovery procedure.** The preserved work lives at `refs/session-wip/{slug}` and as a WIP commit on `session/{slug}`:
+**Recovery procedure.** The preserved work lives at `refs/session-wip/{name}` and as a WIP commit on the worktree's branch. With the #3167 guard in place this promise is sound even on a half-deleted tree, because the ref never carries a wipe:
 
 ```bash
-git checkout refs/session-wip/{slug}      # inspect the preserved tree
-git cherry-pick refs/session-wip/{slug}   # or replay onto another branch
+git checkout refs/session-wip/{name}      # inspect the preserved tree
+git cherry-pick refs/session-wip/{name}   # or replay onto another branch
 git reset --soft HEAD~1                    # on a resumed session: unstage the WIP to restore the dirty tree
 ```
 
-**GC policy.** `refs/session-wip/*` refs are reclaimed **manually** — they are cheap pointers to dangling commits. There is no automated GC/TTL daemon in this feature (out of scope; a scheduled ref-GC reflection is a separate follow-up). Remove a stale ref with `git update-ref -d refs/session-wip/{slug}`.
+**GC policy.** `refs/session-wip/*` refs are reclaimed **manually** — they are cheap pointers to dangling commits. There is no automated GC/TTL daemon in this feature (out of scope; a scheduled ref-GC reflection is a separate follow-up). Remove a stale ref with `git update-ref -d refs/session-wip/{name}`.
 
 **2. Destructive-git PreToolUse guard — inside a dirty worktree (#2137).** `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` blocks an agent from destroying a dirty worktree in-session (before the teardown backstop can fire). It blocks `git reset --hard`, `git clean -f[dx]`, `git checkout -- .` / `git checkout .`, `git restore .`, and bare `git stash` / `git stash push` (no pathspec) **only when** the cwd resolves inside a `.worktrees/` path **and** the tree is dirty. It mirrors `validate_no_uv_sync_in_worktree.py`: a pure `find_violation(command, cwd, is_dirty)` core, command-position (not substring) detection, `cd … &&` chain resolution, and fail-open on any parse/git error.
 
@@ -304,7 +308,7 @@ Experiments validated the approach before implementation:
 
 | File | Purpose |
 |------|---------|
-| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations; `preserve_uncommitted_worktree_changes()` auto-WIP-commit backstop (#2137) |
+| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations; `preserve_uncommitted_worktree_changes()` auto-WIP-commit backstop (#2137), with a wipe-detection guard that declines to commit deletions from a half-deleted tree (#3167) |
 | `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` | PreToolUse guard blocking destructive git commands in a dirty worktree (#2137) |
 | `.claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py` | PreToolUse guard blocking whole-tree destructive git commands in the shared main checkout (#2448) |
 | `.claude/hooks/hook_utils/destructive_git_shapes.py` | Shared destructive-git shape-detection logic used by both guards above |

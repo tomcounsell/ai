@@ -513,9 +513,12 @@ dispatch and, since #3134, comments on rather than re-files any finding whose
 issue is already open — which closes the common cross-machine case, but it is
 a read-then-act check with no lock, so two machines dispatching inside the
 same window still both file. The literal title remains the contract: the detector
-emits it verbatim, the triage session is instructed to search for it, and
-nothing verifies an issue was actually filed under it, so a future change to
-the title format silently reopens #2429/#2430/#2462 across the fleet.
+emits it verbatim, the triage session is handed the same REST read the
+detector uses and told to match that literal title against it (never the
+index-backed lookup, whose lag produced the #2960-#2999 wave — see
+`nightly-triage-dispatch.md`), and nothing verifies an issue was actually filed
+under it, so a future change to the title format silently reopens
+#2429/#2430/#2462 across the fleet.
 `MAX_ISSUES_PER_RUN` (10) bounds the blast radius of any single run;
 a shared, Redis-backed dispatch set is the real fix and is deliberately
 deferred.

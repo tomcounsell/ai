@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3010
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-06T08:15:08Z
+revision_applied_at: 2026-09-06T08:46:22Z
 ---
 
 # FEATURE_MAP Marker-Regression Guard
@@ -883,7 +883,7 @@ general review pass.
 ### 5. Prove no marker was lost
 
 - **Task ID**: validate-parity
-- **Depends On**: build-marker-map
+- **Depends On**: build-marker-map, build-audit
 - **Assigned To**: `marker-parity-validator`
 - **Agent Type**: validator
 - **Parallel**: true
@@ -938,7 +938,7 @@ general review pass.
 | Every exemption carries a reason | `python -c "from tests.marker_map import KNOWN_MISTAGS; bad=[k for k,v in KNOWN_MISTAGS.items() if not isinstance(v,str) or len(v.strip())<20]; assert not bad, bad"` | exit code 0 |
 | No whole-package exemption mechanism (anti-criterion) | `! grep -qF 'EXEMPT_DIRS' tests/marker_map.py tests/unit/test_feature_map_markers.py` | exit code 0 |
 | No line-number keying (anti-criterion) | `! grep -qE '\b(lineno\|line_number\|line_no)\b' tests/marker_map.py tests/unit/test_feature_map_markers.py` | exit code 0 |
-| Stem is the shipped global replace, not a prefix strip (anti-criterion) | `! grep -qE 'removeprefix\|removesuffix\|re\\.(sub\|match)' tests/marker_map.py` | exit code 0 |
+| Stem is the shipped global replace, not a prefix strip (anti-criterion) | `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` | exit code 0 |
 | Stem fidelity fixtures hold | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_test_judge.py')==(None,None); assert resolve_marker('test_validate_test_impact.py')==(None,None)"` | exit code 0 |
 | Resolution has one implementation (anti-criterion) | `! grep -qF 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py` | exit code 0 |
 | Resolver was not made directory-authoritative (anti-criterion) | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_pm_briefings_builder.py')[0] is None"` | exit code 0 |
@@ -1054,8 +1054,8 @@ wrong one), and `reflection` sits at insertion index **44**, ahead of `config` a
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Scope & Value (rated BLOCKER); Risk & Robustness (rated CONCERN); structural replay | Task 5 (`validate-parity`) declares `Depends On: build-marker-map` and `Parallel: true`, but its entire body reads `python tests/marker_map.py --report`, and the `--report` flag is created by Task 2 (`build-audit`), not Task 1. An orchestrator honoring the declared graph may dispatch Task 5 alongside Task 2, and its first command then fails on an unrecognized flag before any comparison runs. Aggregated as CONCERN rather than BLOCKER: the seven tasks are executable in numeric order by a single builder, and the failure is immediate, loud, and costs one retry — it can neither produce a wrong parity result nor pass green on a broken implementation. The severity split between the two critics is recorded here rather than resolved silently upward. | pending | Change Task 5's `Depends On:` line from `build-marker-map` to `build-marker-map, build-audit`. No other task's edges change: Task 6 already depends on `validate-mutation, validate-parity`, and Task 7 already lists all six prior ids. `Parallel: true` can stay — Task 5 is then schedulable alongside Tasks 3 and 4, which share the `build-audit` dependency and touch a different file than Task 5's read-only `--report` diff. |
-| CONCERN | History & Consistency (rated CONCERN); Risk & Robustness (rated NIT); structural replay | The Verification anti-criterion row "Stem is the shipped global replace, not a prefix strip" cannot catch the case it names. Its command is `! grep -qE 'removeprefix\|removesuffix\|re\\.(sub\|match)' tests/marker_map.py`, and in ERE a double backslash before the dot means "a literal backslash followed by any character", so the `re.sub` / `re.match` leg never matches the text it targets. The driver confirmed this empirically: a seeded file containing `re.sub(r"^test_", "", ...)` left the check green, while the single-backslash form matched. This is residue from round 1's own fix to NIT 1, not a repeat finding. The `removeprefix` and `removesuffix` legs do work. | pending | Use a single backslash before the dot: `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` (only the dot needs escaping; the alternation bars carry a markdown-table pipe escape and are fine). Blast radius is bounded but not nil: Task 1's committed fixture independently catches an anchored-regex stem behaviorally, because `re.sub(r"^test_", "", "test_test_judge.py")` strips only the leading occurrence and yields the stem `test_judge`, which then resolves through the `test_judge` key to `tools` instead of `(None, None)`. So this is a broken belt over working suspenders — fix the regex anyway, because the row is documented as the mechanism that covers this class and a future reader trusting its green will misjudge the coverage. |
+| CONCERN | Scope & Value (rated BLOCKER); Risk & Robustness (rated CONCERN); structural replay | Task 5 (`validate-parity`) declares `Depends On: build-marker-map` and `Parallel: true`, but its entire body reads `python tests/marker_map.py --report`, and the `--report` flag is created by Task 2 (`build-audit`), not Task 1. An orchestrator honoring the declared graph may dispatch Task 5 alongside Task 2, and its first command then fails on an unrecognized flag before any comparison runs. Aggregated as CONCERN rather than BLOCKER: the seven tasks are executable in numeric order by a single builder, and the failure is immediate, loud, and costs one retry — it can neither produce a wrong parity result nor pass green on a broken implementation. The severity split between the two critics is recorded here rather than resolved silently upward. | **CLOSED.** Task 5 (`validate-parity`) now reads `Depends On: build-marker-map, build-audit`, so no scheduler honoring the declared graph can dispatch it before the `--report` flag exists. `Parallel: true` kept. No other edge changed: Task 6 still lists `validate-mutation, validate-parity` and Task 7 still lists all six prior ids, and the graph stays acyclic. | Change Task 5's `Depends On:` line from `build-marker-map` to `build-marker-map, build-audit`. No other task's edges change: Task 6 already depends on `validate-mutation, validate-parity`, and Task 7 already lists all six prior ids. `Parallel: true` can stay — Task 5 is then schedulable alongside Tasks 3 and 4, which share the `build-audit` dependency and touch a different file than Task 5's read-only `--report` diff. |
+| CONCERN | History & Consistency (rated CONCERN); Risk & Robustness (rated NIT); structural replay | The Verification anti-criterion row "Stem is the shipped global replace, not a prefix strip" cannot catch the case it names. Its command is `! grep -qE 'removeprefix\|removesuffix\|re\\.(sub\|match)' tests/marker_map.py`, and in ERE a double backslash before the dot means "a literal backslash followed by any character", so the `re.sub` / `re.match` leg never matches the text it targets. The driver confirmed this empirically: a seeded file containing `re.sub(r"^test_", "", ...)` left the check green, while the single-backslash form matched. This is residue from round 1's own fix to NIT 1, not a repeat finding. The `removeprefix` and `removesuffix` legs do work. | **CLOSED.** The Verification row now reads `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` with a single backslash before the dot. Re-verified empirically against `/usr/bin/grep` by seeding one stem variant per leg into a throwaway module: the shipped `basename.replace("test_", "").replace(".py", "")` stem exits 0 (green), while `removeprefix("test_")`, `removesuffix(".py")`, `re.sub(r"^test_", "", ...)` and `re.match(r"^test_(.*)\.py$", ...)` each exit 1 (red). Under the old double-backslash form the same seeds reproduce the defect exactly: the two `re.` seeds stayed green. | Use a single backslash before the dot: `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` (only the dot needs escaping; the alternation bars carry a markdown-table pipe escape and are fine). Blast radius is bounded but not nil: Task 1's committed fixture independently catches an anchored-regex stem behaviorally, because `re.sub(r"^test_", "", "test_test_judge.py")` strips only the leading occurrence and yields the stem `test_judge`, which then resolves through the `test_judge` key to `tools` instead of `(None, None)`. So this is a broken belt over working suspenders — fix the regex anyway, because the row is documented as the mechanism that covers this class and a future reader trusting its green will misjudge the coverage. |
 
 **Cycle disposition.** Round 2 is the final authorized critique round: `MAX_CRITIQUE_CYCLES` is
 2 and `revision_round_count` already stands at 1, so a revision-demanding verdict would trip G2
@@ -1065,6 +1065,60 @@ concerns)`. That verdict increments `concern_round_count` (0 of `MAX_CONCERN_REC
 = 3) rather than `revision_round_count`, so G2 stays clear. The `plan_revising` lock IS set: the
 concern bound is unspent, so G7 gate 4 dispatches `/do-plan`, the revision pass clears the lock,
 and the lane proceeds to build.
+
+### Critique round 3 (2026-09-06)
+
+FULL depth, independent roster of 3 critics (Risk & Robustness, Scope & Value, History &
+Consistency). Mode: independent roster (3 critics). Scope: a narrow concern-closure confirmation
+over commit `34a615496`, the 5-insertion / 5-deletion revision that answered round 2's two
+concerns. All structural checks pass: the four mandated sections (Documentation, Update System,
+Agent Integration, Test Impact) are present and substantive, tasks 1-7 have no numbering gaps,
+every `Depends On` id resolves and the graph is acyclic, all referenced paths exist except the
+three this plan creates, all three prerequisites pass, every Success Criterion maps to a task, and
+no Popoto model is touched so no migration is owed.
+
+**Verdict: READY TO BUILD (no concerns)** — 0 blockers, 0 concerns, 0 nits.
+
+**Round-2 concern closure, verified.**
+
+- **Concern 1 (Task 5 schedulable before its `--report` flag exists)** — closed. Task 5
+  (`validate-parity`) now declares `Depends On: build-marker-map, build-audit`, so no scheduler
+  honoring the declared graph can dispatch it before Task 2 creates `--report`. `Parallel: true`
+  is retained, which stays sound: Task 5 only reads, Task 3 writes a different file, and Task 4
+  runs in its own worktree by instruction. Every other edge was re-read and is unchanged — Task 2
+  on `build-marker-map`, Task 3 on `build-audit`, Task 4 on `build-guard-test`, Task 6 on
+  `validate-mutation, validate-parity`, Task 7 on all six prior ids — and the graph is still
+  acyclic.
+- **Concern 2 (the anti-criterion ERE could not catch `re.sub` / `re.match`)** — closed. The
+  Verification row now carries a single backslash before the dot. Replayed independently against
+  `/usr/bin/grep` with one seeded stem variant per leg: under the shipped form the check exits 0,
+  while `removeprefix("test_")`, `removesuffix(".py")`, `re.sub(r"^test_", "", ...)` and
+  `re.match(r"^test_(.*)\.py$", ...)` each exit 1. The same seeds under the old double-backslash
+  form reproduce the defect exactly — the two `re.` seeds stayed green — so the fix is confirmed in
+  both directions, not merely asserted.
+
+**No previously-closed row regressed.** The revision commit touches exactly five lines: the
+frontmatter `revision_applied_at` timestamp, Task 5's `Depends On`, the Verification regex, and the
+two round-2 "Addressed By" cells. No task body, rule definition, Success Criterion, or other
+Verification row changed, so all eight round-1 rows and both round-2 rows remain accurate as
+written. Every other `grep` row in the Verification table was re-scanned for the same escaping
+defect class and none carries it; the `\b(lineno|line_number|line_no)\b` row was replayed on this
+machine's grep and goes red on a real `lineno` while staying green on `my_lineno_x`. The old
+double-backslash form survives at exactly one place in the document, inside the round-2 finding's
+own narrative describing the defect it fixed, which is correct as history rather than as a live
+instruction.
+
+**Accepted, not raised as findings.** Task 5's new `build-marker-map` edge is transitively implied
+through `build-audit`; stating it explicitly is harmless and is what round 2 prescribed. The 9.6%
+R1/R2 suite reach, the deferral of the 21-file baseline drain to #3175 and the mangled-stem
+mechanism to #3184, the absence of `EXEMPT_DIRS`, and the unit-test-only CI decision are all
+settled and were re-affirmed rather than re-opened.
+
+**Cycle disposition.** `concern_round_count` stands at 1 of `MAX_CONCERN_RECRITIQUE_ROUNDS` = 3 and
+`revision_round_count` at 1 of `MAX_CRITIQUE_CYCLES` = 2, so G2 stays clear. With zero concerns and
+zero blockers the `plan_revising` lock is NOT set, and the lane advances directly to `/do-build`.
+
+**Round-3 findings.** No findings from the war room.
 
 ---
 

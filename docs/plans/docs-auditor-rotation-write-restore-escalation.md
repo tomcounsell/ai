@@ -1,0 +1,583 @@
+---
+status: Ready
+type: bug
+appetite: Small
+owner: Valor Engels
+created: 2026-09-06
+tracking: https://github.com/tomcounsell/ai/issues/3050
+last_comment_id: none  # Phase 2.7: issue #3050 has no comments
+revision_applied: true
+revision_applied_at: 2026-09-06T12:27:25Z
+---
+
+# docs-auditor: restore and escalate when the rotation aborts after writing
+
+## Problem
+
+The docs auditor's daily rotation writes fixes into the **shared main checkout** at `~/src/ai`, then hands the dirty tree to `_push_branch_and_pr`, which branches, commits, pushes, opens a PR, and restores the checkout in its own `finally`. PR #2887 (issue #2739) put that restore in place and it works for every failure inside the push sequence.
+
+It does not work for a failure *before* the push sequence starts. `reflections/docs_auditor.py::run_docs_auditor` runs the substrate (`audit(...)`), then filters withheld fixes, files one GitHub issue per withheld entry through `gh`, checks the zero-diff gate, and only then calls `_push_branch_and_pr`. Every one of those steps can raise. When one does, the outer `except Exception` in `run_docs_auditor` catches it, logs a warning, and returns `{"status": "error"}`. `_push_branch_and_pr` was never entered, so its `finally` never ran, so `_restore_checkout` never ran.
+
+The code says so itself. A `NOTE (#3050)` sits immediately above the `_push_branch_and_pr(...)` call in `run_docs_auditor`, stating the gap and deferring the decision to this issue.
+
+**Current behavior:**
+
+1. Rotation writes N markdown files into the shared main checkout.
+2. An exception fires in the window before the push (say `gh issue create` times out inside the withheld-filing loop).
+3. `run_docs_auditor` returns `{"status": "error"}`. Nothing restores the checkout. The auditor's edits sit uncommitted on `main`.
+4. `agent/reflection_scheduler.py` reads only `result.get("projects")` from that dict, so `status="error"` reaches no human surface. The failure is a log line nobody reads.
+5. Every subsequent rotation hits the step-3 dirty-tree guard, returns `{"status": "skipped"}`, and files nothing — by design, because that guard cannot tell the auditor's dirt from a peer lane's routine uncommitted work.
+6. The auditor is now permanently dormant and silent. A human notices when they eventually run `git status` in the shared checkout and find stale docs edits they did not make.
+
+The R5-1 `operational-failure` escalation added alongside #2887 does not cover this: it is inside the `if pr_url is None:` branch, which an exception in the window never reaches.
+
+**Desired outcome:**
+
+A rotation that writes and then aborts before the push cleans up after itself, in the same run, scoped to exactly the paths it wrote. If the cleanup does not fully succeed, that run files a distinct `operational-failure` issue naming the paths that need manual cleanup and stating what the restore actually achieved. The auditor never goes silently dormant behind a dirty tree it created.
+
+## Freshness Check
+
+**Baseline commit:** `5ae3cbb3dd4288daba1a506041ac0736e259ec63`
+**Issue filed at:** 2026-08-28T03:11:14Z
+**Disposition:** Minor drift — every claim in the issue still holds; the issue cited no line numbers, and all references below were re-derived by symbol at the baseline commit.
+
+**Symbol references re-verified (never carried from memory or an older read):**
+
+- `reflections/docs_auditor.py::run_docs_auditor` — the `NOTE (#3050)` comment block sits directly above the `pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, files_touched, withheld=withheld)` call. Still present and still accurate. Locate it with `grep -n "NOTE (#3050)" reflections/docs_auditor.py`.
+- `reflections/docs_auditor.py::_push_branch_and_pr` — `starting_ref = _current_ref(repo_root)` and the `starting_ref is None` early `return None` both sit **before** the `try`. The `finally` calls `_restore_checkout(repo_root, starting_ref, branch, files_touched)`. Confirmed.
+- `reflections/docs_auditor.py::_restore_checkout` — signature is `(repo_root: Path, starting_ref: str, branch: str, files_touched: list[str]) -> bool`. Scoped by construction: `git checkout <starting_ref>`, `git checkout HEAD -- <files_touched>`, conditional `git branch -D <branch>` gated on `git rev-parse --verify --quiet refs/heads/<branch>`, then two postconditions. Confirmed.
+- `reflections/docs_auditor.py::audit` — no top-level exception handler. `touched` is a local list appended inside the per-file loop; the advisory `_file_issue_if_new` loop and `_detect_orphan_plan_issues(root)` run **after** that loop and can raise, discarding `touched` with the frame. Confirmed.
+- `reflections/docs_auditor.py::run_docs_auditor` step 3 dirty-tree guard — the comment explaining why it files nothing ("a filing guard would mint issues blaming the auditor for a peer's dirt", "Q4 item 5") is present at the baseline. This is the evidence that kills option (b); see Solution.
+- `agent/reflection_scheduler.py` — reads `result.get("projects")` from the reflection's return dict. Nothing else in that dict reaches a human surface. Confirmed by `grep -n "projects" agent/reflection_scheduler.py`.
+- `reflections/docs_auditor.py` module constant `_RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})` — the new escalation's category must be one of these or its Redis fast-path will suppress a genuine recurrence for 30 days after a human closes the first issue.
+
+**Cited sibling issues/PRs re-checked:**
+
+- #2739 — CLOSED. Its PR #2887 merged 2026-08-28T03:43:52Z, ~30 minutes after this issue was filed. Scoped the restore into `_push_branch_and_pr`'s `finally`; that is exactly the boundary this issue extends.
+- PR #2887 — MERGED. Its review flagged this window as non-blocking tech debt, which is how #3050 was born.
+
+**Commits on main touching `reflections/docs_auditor.py` since the issue was filed:**
+
+- `7ccd27d5d` review-gate every write, report broken .md links (#2739, #2834) — the change this issue is a follow-up to. Root cause unchanged.
+- `974be6532` route Telegram notifications by audited repo root (#3077) — irrelevant; touches `_resolve_notify_chat` / `_send_telegram_notification`.
+- `6c68f29ab` resolve installed-package citations, exclude plan docs from outbound links — irrelevant; touches detectors, not the write/push path.
+- `8934583dc` (#3186) delete `_write_liveness` Redis channel, rehome vault count — **rewrote overlapping regions of `run_docs_auditor`**. It removed the liveness channel and moved `_run_vault_drift_detection` into step 3b. It did **not** close this window: the `NOTE (#3050)` marker survives it at the baseline commit. Every symbol reference above was re-derived after this commit landed.
+
+**Active plans in `docs/plans/` overlapping this area:** none target `run_docs_auditor`. `docs/plans/sibling-reflections-hardcode-eng-valor.md` (issue #3072, OPEN) touches `FALLBACK_ENG_CHAT`, which lives at the top of `reflections/docs_auditor.py` and is read only inside `_resolve_notify_chat` — far from every region this plan edits. Expect a trivial rebase; this plan deliberately plans no edits in that region.
+
+**Notes:** No expected-failure (`xfail`) test covers this bug anywhere in `tests/` — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/` returns nothing auditor-related, so there is no xfail to convert.
+
+## Prior Art
+
+- **#2739 / PR #2887** — *docs_auditor is its own committer: put a review gate in front of every write it makes.* Introduced `_restore_checkout`, made it verified (postconditions on HEAD and on the scoped `git status --porcelain`), made a failed restore return `None` from `_push_branch_and_pr` even on a successful PR, and added the R5-1 `operational-failure` escalation on the `pr_url is None` branch. **Succeeded** for its stated scope. This plan extends that same mechanism one step earlier; it does not replace it.
+- **PR #2887's own review** — flagged this window explicitly as non-blocking tech debt and filed #3050. The `NOTE (#3050)` comment in the code is the paper trail.
+- **#3186 / commit `8934583dc`** — deleted the `_write_liveness` Redis channel from the auditor. Relevant as a warning, not as a fix: it is why every reference in this plan was re-derived by symbol rather than reused.
+- **#2728 / PR #2728, #2782 / PR #2782** — word-anchored stale terms, the path-existence invariant, and the migration-context hatch. These built the `withheld` list that the in-window issue-filing loop iterates, which is the most likely place for an exception to fire. Relevant as context for the failure injection point, not as prior attempts at this fix.
+
+No prior attempt to close *this* window exists. There is no "Why Previous Fixes Failed" section in this plan because there were no previous fixes.
+
+## Research
+
+No relevant external findings — proceeding with codebase context. The work is purely internal: Python control flow and `git` subprocess calls already in use in this module. No new library, API, or ecosystem pattern is involved, so Phase 0.7's skip condition applies.
+
+## Data Flow
+
+One rotation run, traced through `reflections/docs_auditor.py::run_docs_auditor`. The **write window** is marked; today it has no restore owner.
+
+1. **Entry point** — `agent/reflection_scheduler.py` invokes the `docs-auditor` reflection callable on its daily schedule and reads only `result["projects"]` from what comes back.
+2. **Preflight (no writes)** — auth probe, Redis SETNX lock, dirty-tree guard, `_run_vault_drift_detection`, `_select_primary_doc` rotation pick, then the daily-cap and open-PR guards. Every failure here returns before anything touches the disk, so no restore is owed.
+3. **Substrate write** — `audit(primary_path=primary, scope_mode="rotation", apply_mode="apply", ...)`. Inside, `_apply_fixes_to_file` rewrites markdown files in place and appends each to a local `touched` list. **The shared main checkout is now dirty.** After the write loop, `audit` files advisory issues through `_file_issue_if_new` (a `gh` subprocess) and runs `_detect_orphan_plan_issues`. An exception in either discards `touched` and propagates out of `audit`.
+4. **⟨WRITE WINDOW — no restore owner today⟩** — back in `run_docs_auditor`: unwrap each withheld regex source with `re.sub`, file one issue per withheld entry through `_file_issue_if_new` (another `gh` subprocess, bounded by `ISSUE_FILING_PER_RUN_CAP`), then the zero-diff gate (`_git_diff_quiet`), `_update_rotation_hash`, and on the withheld-zero-diff path `_send_telegram_notification`. Any exception here unwinds to `run_docs_auditor`'s outer `except Exception`, which restores nothing.
+5. **Push** — `_push_branch_and_pr` reads `starting_ref`, then in a `try` branches, `git add -- <files_touched>`, commits, pushes, and calls `gh pr create`. Its `finally` calls `_restore_checkout(repo_root, starting_ref, branch, files_touched)` and a failed restore forces the return value to `None`.
+6. **Failure escalation** — `pr_url is None` files one `operational-failure` issue titled `docs-auditor: rotation failed to produce a PR for {slug}` and returns `{"status": "error"}`.
+7. **Success** — memory-refresh hook, Telegram notification, `_update_rotation_hash(project_key, files_touched)`, return `{"status": "ok"}`.
+8. **Lock release** — outermost `finally` calls `_release_lock`.
+9. **Next day** — if step 4 aborted, the step-2 dirty-tree guard fires, returns `{"status": "skipped"}`, files nothing. Repeat forever.
+
+The fix inserts a restore owner over the write-through-push region and an escalation on that owner's failure path, so the flow can never reach step 9 with dirt the auditor created. **The numbering in this trace is local to this trace.** The module carries two other, mutually transposed numberings (docstring vs. inline comments); the region's boundary is fixed by statement, not by number, in **The widened region — exact boundary**.
+
+## Architectural Impact
+
+- **New dependencies:** none. No new import, service, or library. Everything used is already in `reflections/docs_auditor.py`.
+- **Interface changes:** two, both internal to the module and both private:
+  - `_restore_checkout(repo_root, starting_ref, branch, files_touched)` — `branch` widens to `str | None`, where `None` means "no branch was created, skip the branch delete". The existing `git rev-parse --verify --quiet refs/heads/<branch>` gate already makes a nonexistent branch harmless; `None` makes the intent explicit instead of relying on a lookup miss.
+  - `_push_branch_and_pr(slug, repo_root, files_touched, withheld=None)` — gains a required keyword `starting_ref: str` and stops calling `_current_ref` itself. The ref is now captured once by the caller **before** the substrate write, which is the only point at which it is guaranteed to name the pre-write state.
+- **Coupling:** slightly reduced. Ownership of "the ref this run started on" moves up to the one function that owns the whole write lifecycle, instead of being re-derived inside the callee after the tree is already dirty.
+- **Data ownership:** unchanged. Rotation state, the Redis lock, and the issue-dedup keys are all untouched. No Popoto model changes, so no migration is required.
+- **Reversibility:** high. The change is additive control flow in one module plus two private signature widenings. Reverting is a single-file revert.
+
+## Appetite
+
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0 (the scope decision is made in this plan and justified from code evidence)
+- Review rounds: 1
+
+One module, two private signature widenings, one new escalation, and a focused test class. The cost is in getting the failure-injection tests right, not in the production diff.
+
+## Prerequisites
+
+No prerequisites — this work has no external dependencies. The tests use the existing `repo` fixture in `tests/unit/reflections/test_docs_auditor_git_surface.py` (a real `git init` checkout with a real bare local `origin`) and the existing `fake_redis` fixture; both `git` and `gh` are already intercepted or real in that file.
+
+## Solution
+
+### The decision: widen the try/finally (option a). Reject the guard-skip escalation (option b).
+
+The issue offers two options. This plan takes **(a) widen the restore to cover substrate-write-through-push**, and explicitly **rejects (b) a dirty-tree-guard-skip escalation**. The reason is written in the code the issue is about:
+
+> `run_docs_auditor` step 3, dirty-tree guard: *"Deliberately files nothing: `_git_dirty` tests the whole shared main checkout, where concurrent lanes routinely hold uncommitted work as a matter of routine, so a filing guard would mint issues blaming the auditor for a peer's dirt. The escalation belongs on the failure path below, which knows it caused the dirt — this guard, which cannot know, stays quiet (Q4 item 5)."*
+
+Option (b) asks that guard to do the one thing a prior review already decided it must not do. `~/src/ai` is a shared main checkout with several agents working in it concurrently; a dirty tree there is the normal case, not an alarm. A guard-skip escalation would file "the checkout needs manual cleanup" against a peer's in-flight work, repeatedly, and the auditor's genuine wedge would be one indistinguishable entry in that flood. It is also temporally detached: the escalation would fire on the *next* run, hours after the run that caused the dirt, with no record of which paths were the auditor's.
+
+Option (a) puts the cleanup where the knowledge is. The run that wrote the files knows exactly which files it wrote, knows the ref it started on, and can restore both — scoped, with no `checkout -f`, no `reset --hard`, no `clean`, preserving foreign dirt outside its own path set, exactly as `_restore_checkout` already does on the push path.
+
+**This plan also adds an escalation, and that escalation is not option (b).** It is a *same-run* escalation on the widened handler's own failure path — the identical shape and category as the existing R5-1 `operational-failure` issue, filed by the run that caused the dirt, naming the exact paths, and stating the restore outcome it actually observed. Scoped that way it cannot fire on a peer's dirt and cannot fire on a later run. Without it, a restore that fails inside the new handler would be as silent as the bug being fixed, because `status="error"` reaches nobody: `agent/reflection_scheduler.py` reads only `result["projects"]`.
+
+### Key Elements
+
+- **One ref capture, taken before the first write** — `run_docs_auditor` calls `_current_ref(PROJECT_ROOT)` once, after the preflight guards and before `audit(...)`. If it returns `None`, the run returns `skipped` *before writing anything*, so no restore is owed. `_push_branch_and_pr` stops reading the ref itself and receives it as a required keyword. This also closes the second uncovered sub-window found during recon: `_push_branch_and_pr`'s own `starting_ref is None` early return, which today exits over a dirty tree before its `try` is entered.
+- **`audit()` never loses its write ledger** — `audit` gains a top-level guard so an exception after the write loop returns `_ok_result("error", files_touched=touched, fixes_applied=..., withheld=...)` instead of propagating and discarding `touched`. A caller cannot restore paths it was never told about, and the post-write `_file_issue_if_new` / `_detect_orphan_plan_issues` calls in `audit` are the most likely exception source in the whole window.
+- **A single restore owner around write-through-push** — an `except Exception` in `run_docs_auditor` over the region defined statement-by-statement in **The widened region — exact boundary** below (opens before the `audit(...)` call, closes after the `pr_url = _push_branch_and_pr(...)` assignment, leaving the `if pr_url is None:` R5-1 block outside). Its handler is a single `return _abort_after_write(...)`, which restores via `_restore_checkout(PROJECT_ROOT, starting_ref, None, files_touched)` and then escalates. `files_touched` is bound to `[]` **before** the `try` so the handler can never read it unbound. Plus an explicit `result.get("status") == "error"` check placed **after** the `files_touched = result.get("files_touched", [])` unpacking — not between it and the `audit` call — so the same restore-and-escalate path receives the ledger `audit` actually returned instead of the pre-bound empty list, and a partially-written tree is never pushed.
+- **A distinct `operational-failure` escalation, in two title variants** — `_file_issue_if_new` dedups on the **exact title string** (`_issue_exists(title, repo_root, states=states)`); the body is never compared. A single slug-keyed title would therefore freeze the first run's body: a run that aborted with a *successful* restore would leave an open, benign issue that silently suppresses a later run's *failed*-restore filing — the one case the escalation exists for. So `_abort_after_write` selects the title from the `_restore_checkout` boolean it just observed:
+  - restored: `f"docs-auditor: rotation aborted after writing for {slug}"`
+  - not restored: `f"docs-auditor: rotation aborted after writing for {slug} — manual cleanup required"`
+
+  Both stay keyed by slug alone — no run id, no date — so each files exactly once per open condition, and the `assert "20" not in finding["title"]` style pin `TestFailedRotationEscalates` uses still holds. Both are deliberately different from R5-1's `docs-auditor: rotation failed to produce a PR for {slug}`, so all three failure modes stay distinguishable in the tracker. Category `operational-failure`, already in `_RECURRING_CONDITION_CATEGORIES`, so the 30-day Redis fast-path does not suppress a genuine recurrence after a human closes it. Unlike R5-1, the body **does** state the restore outcome, because this handler observes it directly.
+
+### Flow
+
+Rotation preflight → guards pass → **capture `starting_ref`** → substrate writes N files → *(exception fires anywhere here)* → **restore `starting_ref` and discard exactly the N written paths** → file one `operational-failure` issue naming the paths and the restore outcome → return `{"status": "error"}` → next day's rotation finds a clean tree and runs normally.
+
+### The widened region — exact boundary
+
+The module numbers its own steps two incompatible ways. `run_docs_auditor`'s docstring `Sequence:` list reads `7. (If diff) push branch + PR` / `8. Memory refresh hook`, while the inline comments in the same function read `# 7. Memory refresh hook (fire-and-forget) — fired after commit` and `# 8. Push branch + PR`. They are transposed at exactly the boundary this plan turns on, and the Data Flow trace above uses a third numbering of its own. **This plan therefore cites no step number for the region.** The boundary is two statements:
+
+- **`try:` opens immediately before** the substrate call `result = audit(primary_path=primary, scope_mode="rotation", apply_mode="apply", project_key=project_key, repo_root=PROJECT_ROOT)`.
+- **`except Exception as e:` closes immediately after** the assignment `pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, files_touched, withheld=withheld, starting_ref=starting_ref)`.
+
+**Inside the `try`:** the `files_touched` / `withheld` / `fixes_withheld` unpacking of `result`, the withheld-fix issue-filing loop, the zero-diff gate and its `return`, and the push call itself.
+
+**Outside the `try`, deliberately:** the `if pr_url is None:` R5-1 block and everything after it — `refresh_docs_in_memory`, the success Telegram send, `_update_rotation_hash`, and the final `return`.
+
+**Why `if pr_url is None:` must sit outside.** By the time that branch is reached, `_push_branch_and_pr` has returned normally and its own `finally` has already run `_restore_checkout`, so the tree is already clean and no restore is owed. A handler covering that branch would file `rotation aborted after writing` against a run that opened a PR successfully, and a `gh` timeout inside R5-1's own `_file_issue_if_new` — the exact transient mode Risk 1 names — would produce two escalations for one failure, one of them false. The same reasoning keeps the Telegram send and `_update_rotation_hash` outside: past the push helper's return there is nothing the new handler could correctly do.
+
+**The ambiguity gets removed from the code, not just from this plan.** Task 3 renumbers the inline comments to agree with the docstring `Sequence:` list and with the actual code order — the push is step 7, the memory-refresh hook is step 8 — so a future reader cannot re-derive two answers. The docstring update in **Documentation** already has to touch that list.
+
+### Technical Approach
+
+Locate every edit site by symbol, never by remembered line number — `8934583dc` rewrote overlapping regions of this file four days after the issue was filed.
+
+1. **`_restore_checkout`** — widen `branch: str` to `branch: str | None` and skip the `rev-parse` / `branch -D` block when it is `None`. Extend the docstring to say `None` means "no branch was created". No other behavior changes; both postconditions stay exactly as they are.
+2. **`_push_branch_and_pr`** — add a required keyword-only `starting_ref: str`, delete the internal `starting_ref = _current_ref(repo_root)` read and its `is None` early return. Update the docstring to record that the caller now owns the ref, captured before the write.
+3. **`audit`** — wrap the body from the detector loop through the advisory issue-filing block so that any exception returns `_ok_result("error", files_touched=touched, fixes_applied=total_fixes, issues_filed=issues_filed, fixes_withheld=len(withheld), withheld=withheld, extras={"reason": str(e)})` and logs a warning. The early returns above the loop (auth, scope resolution) already return results and stay as they are. Note in the docstring that a caller must branch on `status == "error"` with a non-empty `files_touched` as "wrote, then failed".
+4. **`run_docs_auditor`** — capture `starting_ref` after the daily-cap/open-PR guards and before the `audit(...)` call; return `skipped` if it is `None` (see the stamping note below). Bind `files_touched: list[str] = []` on the next line, before the `try`. Wrap the region defined in **The widened region — exact boundary** in a `try` / `except Exception` whose handler restores and escalates. Immediately after `audit` returns, route `status == "error"` into the same handler logic. Pass `starting_ref=starting_ref` into `_push_branch_and_pr`. Delete the `NOTE (#3050)` comment — the gap it describes no longer exists, and per the repo's no-legacy rule the comment must not survive as a historical artifact. Renumber the inline step comments to match the docstring `Sequence:` list.
+5. **Factor the restore-and-escalate body once** — the `audit`-returned-error path and the `except Exception` path do the same three things (restore, escalate, return error). Write it once as a **module-level** helper so the two call sites cannot drift apart:
+
+   ```python
+   def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:
+   ```
+
+   `starting_ref` is a parameter, not a closure read: it is a `run_docs_auditor` local, so a module-level body that referenced it bare would raise `NameError` on its first call — in the one element this plan designates as its anti-drift mechanism. Do **not** resolve that by nesting the helper inside `run_docs_auditor` to capture the local; **Test Impact** and the mutation check both assume a module-level symbol the failure-path tests can import and monkeypatch, and a nested closure is unreachable from `tests/unit/reflections/test_docs_auditor_git_surface.py`.
+
+**Why the ref-read guard does not stamp the rotation hash.** The step-4b cap and open-PR guards stamp `_update_rotation_hash` because their condition is doc-specific: without a stamp, `_select_primary_doc` re-picks the same doc forever while the guard fires. A failed `_current_ref` read is doc-independent — it blocks every doc equally, so it cannot pin the rotation on one doc, and stamping would advance the rotation past a doc that was never audited. This guard deliberately does not stamp, and the code carries a comment saying so with that reason.
+
+**Use `except Exception`, not `finally`, for the widened region.** The success path's restore is already owned by `_push_branch_and_pr`'s own `finally` and must not run twice. The intermediate `return`s inside the region (the zero-diff gate) leave nothing to restore by construction: that branch is reached only when `files_touched` is empty or `git diff --quiet` reports no diff. A `finally` would fire a pointless `git checkout` on every clean run, and — because it cannot tell a successful push from an abort — would also escalate on one.
+
+## Failure Path Test Strategy
+
+This is a failure-path bug, so the failure path is the deliverable. **The test must inject an exception into the window — substrate write done, push not yet called — and assert the checkout is restored and an escalation is filed.** A test that only asserts the happy path proves nothing about this fix.
+
+All new tests go in `tests/unit/reflections/test_docs_auditor_git_surface.py`, in a new class `TestWriteWindowRestore`. That file already provides the `repo` fixture (a real `git init` checkout with a real bare local `origin`, so `git checkout` / `add` / `commit` / `push` run for real and only `gh` is intercepted), the `gh` dispatcher fixture, `fake_redis`, and the `_porcelain` / `_git` helpers. Reuse them; do not build a parallel harness.
+
+### The six injection points
+
+Each test drives the full `run_docs_auditor()` with `PROJECT_ROOT` monkeypatched to the fixture repo, `_check_auth` forced true, `_git_dirty` forced false, and `_run_vault_drift_detection` stubbed — the pattern `test_restore_checkout_failure_is_reported_and_run_returns_error` already establishes.
+
+- [ ] **Exception between the write and the push (the issue's exact scenario).** Stub `audit` with a function that *really writes* a tracked markdown file in the fixture repo and returns a normal `status="ok"` result naming it in `files_touched`; monkeypatch `_push_branch_and_pr` to raise `RuntimeError("injected")`. Assert: (1) `_porcelain(repo, "docs/features/x.md")` is empty — the file is byte-identical to `HEAD`; (2) `_current_ref(repo)` is back on `main`; (3) `_file_issue_if_new` was called exactly once with `category == "operational-failure"` and a title containing `rotation aborted after writing`; (4) the returned `status` is `"error"`.
+- [ ] **Exception inside the withheld-filing loop.** Same real-writing `audit` stub, but its result carries a non-empty `withheld` list, and `_file_issue_if_new` is stubbed to raise on the *withheld-fix* category and record-and-return-True on the `operational-failure` category. This proves the handler covers the region before the zero-diff gate, not only the push call, and that the escalation still lands when the thing that raised was itself an issue-filing call.
+- [ ] **Exception inside `audit` after it has written.** Stub `_apply_fixes_to_file` (or the advisory `_file_issue_if_new` call inside `audit`) to raise after at least one real write. Assert `audit` returns `status == "error"` with a **non-empty** `files_touched`, and that the caller restores exactly those paths and escalates. This is the test that proves the `audit()` ledger guard is load-bearing — without it the caller has no path list and cannot restore.
+- [ ] **Restore failure inside the new handler escalates with an honest title and body.** Inject the exception as in the first test *and* make `git checkout main` fail (the `failing_checkout` `subprocess.run` monkeypatch pattern already in `test_restore_checkout_failure_is_reported_and_run_returns_error`). Assert the escalation is still filed, that its **title** is the `— manual cleanup required` variant (not the plain one), and that its body reports the restore as failed and names the paths needing manual cleanup. The title assertion is the one that matters: because `_file_issue_if_new` dedups on title alone, a body-only distinction would be suppressed by an open benign issue. The body must never claim a restore it did not observe.
+- [ ] **An exception in `audit` *above* its own guard does not crash the handler.** `_resolve_neighborhood` (rotation scope) and `_resolve_pr_changed_files` both run before `audit`'s `touched` list exists and are not covered by the task-2 guard, so they still propagate. Monkeypatch `_resolve_neighborhood` to raise. Assert: the run returns `status == "error"`; the summary names the injected exception, **not** `UnboundLocalError: cannot access local variable 'files_touched'`; no escalation is filed (nothing was written); and the tree is byte-identical. This is the test that proves the pre-`try` `files_touched = []` binding is load-bearing — without it the handler destroys the real cause on the only diagnostic surface that exists, because `agent/reflection_scheduler.py` reads only `result.get("projects")`.
+- [ ] **An R5-1 failure files the R5-1 issue only — the new handler stays out of it.** This is the only test that pins the *closing* boundary of the widened region, and it has to be built so that a too-wide boundary actually fails it. **A benign `pr_url is None` run cannot do that.** Everything inside the `if pr_url is None:` block is `findings.append(...)`, an f-string, `_file_issue_if_new(...)` and a `return`, and both `_file_issue_if_new` and `_issue_exists` wrap their whole bodies in `try` / `except Exception` returning `False` — including the `subprocess.run(timeout=...)` that would raise `TimeoutExpired`. Nothing in that block can propagate, so a handler drawn around it never fires and a benign-run assertion passes under both boundaries.
+
+  So the test injects a raise into that block. Stub `audit` to really write and `_push_branch_and_pr` to return `None` (not raise), then monkeypatch `_file_issue_if_new` to **raise** `RuntimeError("injected")` when the finding's title contains `rotation failed to produce a PR`, and to record-and-return-`True` for every other title. Assert: (1) the run returns `status == "error"`; (2) **no** issue whose title contains `rotation aborted after writing` was recorded. With the boundary closed at the `pr_url = …` assignment the raise unwinds to `run_docs_auditor`'s pre-existing outer `except Exception`, which files nothing; with the boundary drawn one block too wide it unwinds into the new handler, which files the abort issue and fails assertion (2).
+
+  Keep the benign half as a second case in the same test — stub `_push_branch_and_pr` to return `None` with `_file_issue_if_new` merely recording, and assert exactly one issue is filed titled `rotation failed to produce a PR` and none titled `rotation aborted after writing`. It documents the intended R5-1 behavior; it is the injected half that discriminates the boundary.
+
+### The mutation check (do this, do not skip it)
+
+Each guard gets mutated and re-measured individually, because a green test frequently reaches no new code at all:
+
+- [ ] Revert only the `except Exception` handler in `run_docs_auditor` → tests 1, 2 and 4 must fail.
+- [ ] Revert only the `audit()` top-level guard → test 3 must fail.
+- [ ] Revert only the `status == "error"` check after `audit` returns → test 3 must fail.
+- [ ] Revert only the `_restore_checkout` `branch=None` handling → the `branch=None` Empty/Invalid Input test must fail. **It only fails if that test asserts on the argv.** Reverted, `_restore_checkout` runs `git rev-parse --verify --quiet refs/heads/None`, which exits non-zero, so `git branch -D` is skipped and both postconditions are unchanged — a test that asserts only "no `git branch -D` was issued" passes identically under the mutation. Write that test to record every `subprocess.run` argv through the passthrough monkeypatch already used by `test_restore_checkout_failure_is_reported_and_run_returns_error`, and assert neither `["git", "rev-parse", "--verify", "--quiet", "refs/heads/None"]` nor any `git branch -D` appears. Then the reverted handling issues the `rev-parse` and the row bites.
+- [ ] Delete only the escalation call → tests 1–4 must fail on the `_file_issue_if_new` assertion.
+- [ ] Revert only the pre-`try` `files_touched: list[str] = []` binding → test 5 must fail with `UnboundLocalError` surfacing in the summary.
+- [ ] Collapse the two escalation titles back to one (always the plain variant) → test 4 must fail on the title assertion.
+- [ ] Widen the `try` to close after the `if pr_url is None:` block instead of after the `pr_url = …` assignment → test 6's **injected** half must fail on the "no `rotation aborted after writing` issue" assertion. This row bites only because test 6 injects a raise into the R5-1 block; against a benign `pr_url is None` run it would come back green no matter where the boundary sits, since nothing inside that block can propagate (`_file_issue_if_new` and `_issue_exists` both fail open). If the builder ships test 6 without the injected half, this row is untestable and the honest report is "row 8 not exercisable as written", not a green tick. A boundary drawn too wide is invisible to every other row here, which is why this row exists.
+
+### Exception Handling Coverage
+
+- [ ] `run_docs_auditor`'s outer `except Exception` — already reachable; after this change it covers only the preflight (steps 1–4b), where no write has happened. Keep a test asserting it still returns `status="error"` and files **no** escalation for a pre-write failure, so the new escalation cannot start firing on runs that wrote nothing.
+- [ ] The new `except Exception` in `run_docs_auditor` — covered by the four tests above; asserts observable behavior (a restored tree and a filed issue), never a bare log line.
+- [ ] The new top-level guard in `audit` — asserts an observable return value (`status="error"` carrying `files_touched`), not a swallowed exception.
+- [ ] `_restore_checkout`'s existing `except Exception` returning `False` — already covered by `test_restore_checkout_failure_is_reported_and_run_returns_error`; the new handler must treat its `False` as "escalate with a failed-restore body".
+- [ ] `refresh_docs_in_memory`'s `try/except` and `_send_telegram_notification` — unchanged by this work; existing coverage stands.
+
+### Empty/Invalid Input Handling
+
+- [ ] `files_touched == []` when the exception fires — `_restore_checkout` must still return to `starting_ref` and must skip both the `git checkout HEAD --` call and the scoped `git status` postcondition (it already guards both on `if files_touched:`). Assert the handler does not escalate in this case, because a run that wrote nothing left no dirt.
+- [ ] `starting_ref is None` from the pre-write `_current_ref` read — the run returns `skipped` before `audit` is called. Assert `audit` was never invoked and the working tree is byte-identical.
+- [ ] `files_touched` when `audit` raises **above** its own guard (`_resolve_neighborhood` / `_resolve_pr_changed_files`) — the name is bound to `[]` before the `try`, so the handler reads an empty list rather than raising `UnboundLocalError`. Assert the summary carries the injected exception's text and not an `UnboundLocalError` message, and that no escalation is filed.
+- [ ] `branch=None` into `_restore_checkout` — record every `subprocess.run` argv (passthrough monkeypatch, the `test_restore_checkout_failure_is_reported_and_run_returns_error` pattern) and assert that neither `["git", "rev-parse", "--verify", "--quiet", "refs/heads/None"]` nor any `git branch -D` was issued. Asserting only the absence of `git branch -D` is not enough: the `rev-parse` miss already skips the delete, so that weaker assertion holds with or without the `None` handling and leaves the guard untested (mutation row 4).
+
+### Error State Rendering
+
+- [ ] The escalation body is the user-visible surface. Assert it names every path in `files_touched`, states the restore outcome, and carries the cleanup command. Assert all three titles — R5-1's `rotation failed to produce a PR for {slug}`, the restored variant, and the `— manual cleanup required` variant — are pairwise distinct strings, since `_file_issue_if_new`'s dedup key is the title and nothing else.
+- [ ] Assert the failure does **not** send a success Telegram notification and does **not** stamp the rotation hash — a doc written but not audited to completion must be re-picked next run.
+
+## Test Impact
+
+The `starting_ref` keyword on `_push_branch_and_pr` is a required-argument change, so every direct caller in the suite must be updated. Ten call sites, all in two files, all mechanical (`starting_ref="main"` in the fixture repos):
+
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::TestEarlyReturnRestore::test_gh_pr_create_failure_restores_head_and_deletes_branch` — UPDATE: pass `starting_ref="main"`. (There is no `class TestPushBranchAndPr` anywhere under `tests/`; this test lives in `TestEarlyReturnRestore`.)
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_git_add_missing_path_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_push_to_unreachable_remote_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_unrelated_modified_file_is_untouched_by_the_restore` — UPDATE: pass `starting_ref="main"`. This test is the guarantee that foreign dirt survives a restore; it must keep passing unchanged in substance.
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_restore_checkout_failure_is_reported_and_run_returns_error` — UPDATE: pass `starting_ref="main"` to the direct call. Its `run_docs_auditor` half also stubs `audit` and `_push_branch_and_pr`; verify the stub `lambda *a, **kw: None` still absorbs the new keyword (it does) and that the test still exercises the `pr_url is None` R5-1 branch rather than being captured by the new handler.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_pr_body_carries_marker_when_fixes_withheld` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_empty_files_touched_creates_no_branch_and_no_commit` — UPDATE: pass `starting_ref="main"`. Asserts the empty-`files_touched` early return, which now sits above the ref handling entirely.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_staging_command_names_the_touched_paths_only` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_restore_uses_head_so_staged_content_cannot_survive` — UPDATE: pass `starting_ref="main"`.
+
+Tests that stub rather than call, and need only re-verification (no edit expected):
+
+- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py` — the **six** `monkeypatch.setattr(docs_auditor, "audit", ...)` / `"_push_branch_and_pr"` stubs (four `audit`, two `_push_branch_and_pr`). VERIFY: each stub's signature still absorbs the new keyword, and each `audit_result` dict still carries `status` so the new `status == "error"` check reads a real value rather than a missing key.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestDoDocsContract::test_pr_mode_does_not_create_branch` and `::test_hook_fires_and_nothing_is_committed_under_pr_mode` — VERIFY: the `audit()` guard must not change `scope_mode="pr-changed-files"` behavior. `/do-docs` still gets a dirty tree and no branch.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard::test_dirty_tree_skips_rotation` — VERIFY: unchanged. The step-3 guard keeps filing nothing; this plan deliberately does not touch it.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestZeroDiffGate::test_zero_diff_skips_pr_creation` — VERIFY: the zero-diff `return` now happens inside the new `try`. Assert it still returns `skipped` and that the new handler does not fire on it.
+
+No test is deleted. No test is replaced.
+
+## Rabbit Holes
+
+- **Making the restore able to clean up dirt it cannot attribute.** Any scheme that diffs `git status --porcelain` before and after the write to infer the auditor's paths will, on a busy shared checkout, eventually attribute a peer lane's concurrent write to the auditor and `git checkout HEAD --` it away. Destroying a peer's uncommitted work is worse than the bug being fixed. The path set comes from `files_touched` and nowhere else.
+- **Restoring a modified-but-untracked markdown file.** `git checkout HEAD -- <path>` errors on an untracked path. This edge exists identically on today's push path and is not created by this change; chasing it here doubles the diff for a case `_apply_fixes_to_file` has never been observed to produce (it only rewrites files it successfully read from the resolved neighborhood).
+- **Turning the widened region into a general transaction abstraction.** A context manager, a rollback registry, or a "write journal" for the auditor is a bigger design than one `except Exception` and one helper, and it would have to be reasoned about against the Redis lock and the reflection scheduler. Not now.
+- **Retrying the aborted run in-process.** Tempting, and wrong: the run holds a Redis lock with a TTL, the failure cause is unknown, and the daily rotation naturally retries tomorrow against a clean tree. Restore, escalate, return.
+- **Auditing the other reflections for the same pattern.** `run_docs_branch_sweeper` and the vault-drift detector may or may not have comparable windows. That is a separate investigation with a separate blast radius.
+- **Rewriting the step-3 dirty-tree guard.** It is correct as written and its comment explains why. Leave it alone.
+
+## Risks
+
+### Risk 1: The new escalation becomes noise on transient `gh` failures
+
+**Impact:** A transient failure anywhere in the widened region files an `operational-failure` issue even though the restore succeeded and nothing is actually wedged. Repeated over weeks this trains people to ignore the category, which is exactly how R5-1 would stop working too.
+
+Note what the trigger is **not**: a `gh` timeout inside the withheld-filing loop's `_file_issue_if_new` cannot do this. That function wraps its whole body in `try` / `except Exception` returning `False`, and so does `_issue_exists`, so a `subprocess.TimeoutExpired` from either is swallowed into a `False` and never reaches the new handler. The reachable transient triggers in the region are the substrate call itself (`audit`, including anything above its own guard), the withheld loop's `re.sub` / `dict.get` term unwrapping, `_git_diff_quiet`, and `_update_rotation_hash` and `_send_telegram_notification` on the zero-diff branch. `_push_branch_and_pr` is not one of them: it catches `Exception` internally and returns `None`.
+
+**Mitigation:** The title is keyed by slug only — no run id, no date — so a failure that repeats every run files exactly once, matching R5-1's deliberate design. `operational-failure` is already in `_RECURRING_CONDITION_CATEGORIES`, so the Redis fast-path read is off and `_issue_exists(states="open")` is authoritative: a closed issue can re-file on genuine recurrence, and an open one cannot duplicate.
+
+The restore outcome is carried in the **title**, not only in the body, precisely because dedup compares titles and never bodies. Two slug-keyed variants (`… for {slug}` when restored, `… for {slug} — manual cleanup required` when not) keep once-per-condition filing while making it impossible for an open benign issue to mask a later failed restore. A triager reads the disposition off the title and closes the benign case in seconds.
+
+### Risk 2: Double restore on a path where both handlers fire
+
+**Impact:** If `_push_branch_and_pr` somehow propagates an exception (it catches `Exception` internally, so this needs a `BaseException` or a raise from its own `finally`), its `finally` restores and then the caller's handler restores again.
+
+**Mitigation:** `_restore_checkout` is idempotent in practice — `git checkout <ref>` on the ref you are already on and `git checkout HEAD -- <paths>` on clean paths are both no-ops, and the branch delete is gated on a `rev-parse --verify`. A second call costs three subprocesses and changes nothing. Accept it rather than adding a "was I already restored" flag whose staleness is a worse failure mode.
+
+### Risk 3: A false "aborted after writing" escalation on a run that actually succeeded
+
+**Impact:** If the widened region's closing boundary is drawn past the `pr_url = _push_branch_and_pr(...)` assignment, the handler covers the `if pr_url is None:` R5-1 block. Anything raising in there would then unwind into the new handler, which would restore an already-restored tree (harmless, per Risk 2) and file a second, misleading issue saying the rotation aborted after writing when in fact a PR may have been opened. One failure, two escalations, one of them false; the tracker signal the whole plan is buying degrades.
+
+**This is a latent risk, not a live one.** Nothing in that block can raise today: it is `findings.append(...)`, an f-string over `files_touched`, `_file_issue_if_new(...)` and a `return`, and `_file_issue_if_new` and `_issue_exists` both fail open — a `gh` timeout in either is swallowed into `False`. The cost of a too-wide boundary is therefore paid the first time someone adds a statement to that block that *can* raise, at which point the misfiling starts silently. That is precisely why the boundary is pinned by a test that injects a raise rather than by a benign run.
+
+**Mitigation:** The boundary is specified by statement rather than by step number in **The widened region — exact boundary**, with the R5-1 block explicitly outside. Injection point 6 monkeypatches `_file_issue_if_new` to raise on the R5-1 title, which is the only shape that discriminates the two boundaries; mutation row 8 widens the `try` and requires that test to go red. The mutation check's `except Exception` reversion row would not catch a boundary drawn too wide, so this is pinned by that injected assertion instead.
+
+### Risk 4: `audit()`'s new guard changes behavior for `/do-docs`
+
+**Impact:** `audit` is called by two callers. Under `scope_mode="pr-changed-files"` the `/do-docs` SDLC stage would now receive `status="error"` where it previously got a propagating exception.
+
+**Mitigation:** A returned error result carrying `files_touched` is strictly more informative than a traceback, and `/do-docs` already leaves the tree dirty by design for its own review gate, so nothing downstream depended on the exception escaping. The `TestDoDocsContract` tests pin the contract that matters (no branch, no commit, hook fires) and must keep passing untouched.
+
+### Risk 5: Re-derived symbol locations drift again before the build lands
+
+**Impact:** `reflections/docs_auditor.py` took four commits in nine days, one of which (`8934583dc`) rewrote the exact function this plan edits. A builder working from a stale read edits the wrong region.
+
+**Mitigation:** Every reference in this plan is a symbol name, not a line number. The build task carries an explicit instruction to `grep -n` for each symbol at its own HEAD before editing, and to re-read `run_docs_auditor` in full rather than trusting this document's prose. The concurrent #3072 lane touches only `FALLBACK_ENG_CHAT` near the top of the file; expect a trivial rebase and plan no edits in that region.
+
+### Risk 6: The lock TTL expires while the handler runs
+
+**Impact:** `_release_lock` sits in the outermost `finally`. The restore adds up to five `git` subprocesses plus one `gh` call to the failure path; if `LOCK_TTL_SECONDS` elapses first, a concurrent rotation could start mid-restore.
+
+**Mitigation:** The scheduler runs this daily, not on a tight loop, so a second rotation inside the TTL window is not a realistic trigger. The added work is bounded by `settings.timeouts.git_subprocess_s` per subprocess and is small next to the substrate run that preceded it. No change; named here so a reviewer can weigh it rather than discover it.
+
+## Race Conditions
+
+### Race 1: A peer lane writes to the shared checkout during the window
+
+**Location:** `reflections/docs_auditor.py::run_docs_auditor`, the region from `audit(...)` through `_push_branch_and_pr(...)`.
+**Trigger:** Another agent working in `~/src/ai` modifies a file while the auditor is inside the write window, and the auditor then aborts and restores.
+**Data prerequisite:** `files_touched` must name only paths this run wrote.
+**State prerequisite:** No path outside `files_touched` may be modified by the restore.
+**Mitigation:** By construction. `_restore_checkout` uses `git checkout HEAD -- <files_touched>` with an explicit path list, never `checkout -f`, `reset --hard`, or `clean`, and its second postcondition scopes `git status --porcelain` to the same list. `test_unrelated_modified_file_is_untouched_by_the_restore` already pins this and must keep passing. The one genuine collision — a peer editing a file the auditor also wrote in the same window — is unchanged from today's push-path behavior and is not made worse by widening the window's owner.
+
+### Race 2: `starting_ref` no longer names the branch the checkout is on
+
+**Location:** the `_current_ref(PROJECT_ROOT)` capture before step 5, consumed by `_restore_checkout`.
+**Trigger:** A peer switches the shared checkout's branch between the capture and the restore. This is a real event here — `main` in this checkout has been switched to a peer's feature branch before.
+**Data prerequisite:** `starting_ref` must be the ref the auditor found, so the restore returns the checkout to whatever the auditor inherited rather than to a hardcoded `main`.
+**State prerequisite:** none beyond that.
+**Mitigation:** Capturing the ref *before* the write (rather than inside `_push_branch_and_pr`, after) narrows this window rather than widening it, and it is why the capture moves up. `_restore_checkout`'s first postcondition (`_current_ref(repo_root) != starting_ref`) detects a failed return and forces the escalation, so the failure is loud instead of silent. Restoring to the observed starting ref, never to a literal `main`, is a hard requirement on the implementation.
+
+### Race 3: Two rotations overlapping inside the TTL
+
+**Location:** `_acquire_lock` / `_release_lock` around the whole run.
+**Trigger:** covered under Risk 6.
+**Mitigation:** The existing Redis SETNX lock. Unchanged by this plan.
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #3072] Any edit to `FALLBACK_ENG_CHAT` or `_resolve_notify_chat` near the top of `reflections/docs_auditor.py`. A concurrent lane owns that region under `docs/plans/sibling-reflections-hardcode-eng-valor.md`; touching it here manufactures a merge conflict for no benefit.
+- [SEPARATE-SLUG #3072] **Overwriting #3072's paragraph inside `### Caller A — docs-auditor daily rotation reflection` in `docs/features/docs-auditor.md`.** The Python No-Go above is not the whole boundary: live PR #3191 (`session/sdlc-3072`, open at plan time) adds a paragraph to that exact section recording that the Telegram resolution ladder now lives in `reflections/utilities.py::resolve_host_eng_chat` and that `_resolve_notify_chat` delegates to it. This plan's Documentation task rewrites the same section. That paragraph must **survive alongside** the new restore-owner prose; a section rewrite that drops it silently reverts another lane's landed docs. Task 6 carries the rebase-and-re-read instruction.
+- [DESTRUCTIVE] Any whole-tree restore primitive in the auditor — `git checkout -f`, `git reset --hard`, `git clean`, or a `git status`-diffed path set inferred rather than recorded. On a shared main checkout these destroy peer lanes' uncommitted work. The restore path set is `files_touched` and nothing else. An anti-criterion in Verification asserts these strings stay absent from the module.
+- [DESTRUCTIVE] Making the step-3 dirty-tree guard file an issue or escalate. This is option (b), rejected in Solution with the code comment that forbids it. An anti-criterion asserts no `_file_issue_if_new` call appears inside that guard.
+
+Everything else the issue asks for is in scope for this plan and is done here — the restore, the escalation, the `audit()` ledger guard, the second sub-window inside `_push_branch_and_pr`, the tests, and the docs.
+
+## Update System
+
+No update system changes required. The change is confined to `reflections/docs_auditor.py` and its tests: no new dependency, no new config key, no new `.env` entry, no new console script, and no Popoto model change (so no `scripts/update/migrations.py` entry). The daily reflection already runs on every machine that owns the `valor` project; a normal `/update` pull picks the fix up with no migration step.
+
+## Agent Integration
+
+No agent integration required. This is a reflection-internal change. `run_docs_auditor` is invoked by `agent/reflection_scheduler.py` on its daily schedule, not by the agent through a tool call, and the fix adds no new surface the agent needs to reach.
+
+One integration detail is worth stating because it is the reason the escalation exists at all: `agent/reflection_scheduler.py` reads only `result.get("projects")` from the dict this callable returns. `status`, `findings`, and `summary` reach no human. That is why a failure must escalate through `_file_issue_if_new` rather than through the return value, and why the plan does not "just" set a better status string. No change to the scheduler's contract is proposed here.
+
+## Documentation
+
+### Feature Documentation
+- [ ] **Rebase and re-read `### Caller A` in full before editing it.** `git fetch origin && git rebase origin/main`, then confirm with `git log --oneline origin/main -- docs/features/docs-auditor.md` whether #3072's PR #3191 has landed. Its addition to that section (the `resolve_host_eng_chat` delegation note) is an insertion, not a rewrite, and must survive this task. If #3191 has not landed yet, coordinate ordering rather than editing the section blind.
+- [ ] Update `docs/features/docs-auditor.md` — the "Caller A — `docs-auditor` daily rotation reflection" section must describe the restore owner over the write-through-push region (bounded by statement, per the plan's boundary section), the one-ref-capture-before-the-write rule, and the **three** distinct `operational-failure` titles: R5-1's `rotation failed to produce a PR for {slug}`, `rotation aborted after writing for {slug}`, and `rotation aborted after writing for {slug} — manual cleanup required`. State what distinguishes them and why the restore outcome lives in the title (title-keyed dedup). Also update the "Operational Cheatsheet" with the manual-cleanup command the new escalation body prints.
+- [ ] Update the same file's "Locking" or rotation-state prose if it asserts that a failed run leaves the tree clean — verify the current wording against the new behavior rather than assuming.
+- [ ] No new row in `docs/features/README.md` — the index already carries a `Docs Auditor` entry pointing at `docs-auditor.md`.
+
+### External Documentation Site
+Not applicable — this repo publishes no Sphinx/MkDocs site for internal features.
+
+### Inline Documentation
+- [ ] `_restore_checkout` docstring — record that `branch=None` means no branch was created.
+- [ ] `_push_branch_and_pr` docstring — record that the caller now owns `starting_ref`, captured before the substrate write, and delete the sentence describing the internal ref read.
+- [ ] `audit` docstring — record that a caller must read `status == "error"` with a non-empty `files_touched` as "wrote, then failed", and must restore. Record the second-order effect on the CLI surface in the same place: the module's `__main__` block calls `audit(...)` and `print(json.dumps(out))`, so an internal failure under `pr-changed-files` that used to exit non-zero with a traceback now exits 0 with a `status="error"` dict. No tracked caller gates on the old exit status (the `/do-docs` skill's only mention of the module is a historical note in its `SKILL.md`), but the change must be written down rather than discovered.
+- [ ] Also note in the `audit` docstring that exceptions raised **above** the guard — `_resolve_neighborhood`, `_resolve_pr_changed_files` — still propagate, so a caller must be exception-safe as well as status-aware.
+- [ ] `run_docs_auditor` docstring — its numbered "Sequence:" list must gain the ref capture and the restore/escalate step, since the current list is the file's map of this function. In the same pass, renumber the function's inline `# N.` step comments to agree with it and with code order (push is 7, memory refresh is 8); today they are transposed against the docstring, which is what made the widened region's boundary ambiguous in the first place.
+- [ ] Delete the `NOTE (#3050)` comment above the `_push_branch_and_pr` call. Per the repo's no-legacy rule it must not survive as a historical artifact once the gap it names is closed.
+
+## Success Criteria
+
+- [ ] An exception injected between the substrate write and the `_push_branch_and_pr` call leaves the shared checkout byte-identical to `HEAD` for every path in `files_touched`, and leaves `HEAD` on the ref the run started on.
+- [ ] That same run files exactly one `operational-failure` issue whose title contains `rotation aborted after writing`, distinct from the R5-1 `rotation failed to produce a PR` title.
+- [ ] When the restore itself fails, the escalation is still filed under the `— manual cleanup required` **title** variant (not merely a different body), its body names the paths needing manual cleanup, and it never claims an outcome it did not observe. All three `operational-failure` titles are pairwise distinct, because `_file_issue_if_new` dedups on title alone.
+- [ ] A run where `_push_branch_and_pr` returns `None` files exactly one issue, titled `rotation failed to produce a PR`, and **no** `rotation aborted after writing` issue — the widened region ends at the `pr_url = …` assignment. Proven with a raise injected into the R5-1 block's `_file_issue_if_new` (injection point 6), not by a benign `pr_url is None` run: nothing in that block can propagate on its own, so the benign form holds under a too-wide boundary too.
+- [ ] An exception raised inside `audit` above its own guard (`_resolve_neighborhood`) surfaces its own message in the returned summary, never `UnboundLocalError`, and files no escalation.
+- [ ] `run_docs_auditor`'s docstring `Sequence:` list and its inline `# N.` step comments agree with each other and with code order.
+- [ ] `audit()` returns `status="error"` carrying a non-empty `files_touched` when it raises after writing, instead of propagating and discarding the list.
+- [ ] A pre-write failure (auth, lock, dirty tree, rotation pick, cap/open-PR guard) files no escalation and leaves the tree untouched.
+- [ ] `_push_branch_and_pr` no longer reads the starting ref itself; its pre-`try` early return over a dirty tree is gone.
+- [ ] The `NOTE (#3050)` comment is absent from `reflections/docs_auditor.py`.
+- [ ] No whole-tree restore primitive (`checkout -f`, `reset --hard`, `git clean`) appears anywhere in `reflections/docs_auditor.py`.
+- [ ] The step-3 dirty-tree guard still files nothing.
+- [ ] The mutation check in the Failure Path Test Strategy has been run and each reverted guard produced the predicted failure.
+- [ ] Scoped tests pass via `scripts/pytest-clean.sh` (`tests/unit/reflections/test_docs_auditor_git_surface.py` and `tests/unit/test_docs_auditor_substrate.py`).
+- [ ] Documentation updated (`/do-docs`), including `docs/features/docs-auditor.md`.
+- [ ] No xfail conversions needed — the recon confirmed none exist for this bug.
+
+## Team Orchestration
+
+Small appetite, one module. Two builders would collide in the same function, so the build is serial: one builder, one reviewer, one documentarian.
+
+### Team Members
+
+- **Builder (auditor-restore)**
+  - Name: `auditor-restore-builder`
+  - Role: All production and test edits in `reflections/docs_auditor.py` and the two test files.
+  - Agent Type: `builder`
+  - Domain: debugging / subprocess-and-git control flow — paste the matching rules from `DOMAIN_FRAMING.md` into the assignment.
+  - Resume: true
+
+- **Validator (mutation)**
+  - Name: `auditor-restore-mutation-validator`
+  - Role: Runs the mutation check — reverts each guard individually and confirms the predicted test fails. Read-only on production code.
+  - Agent Type: `validator`
+  - Resume: true
+  - Note: give this agent its **own worktree**. A mutation run in a checkout the builder is still editing corrupts both directions.
+
+- **Documentarian (docs-auditor)**
+  - Name: `auditor-restore-documentarian`
+  - Role: `docs/features/docs-auditor.md` updates and the inline docstring pass.
+  - Agent Type: `documentarian`
+  - Resume: true
+
+## Step by Step Tasks
+
+**Before the first edit, re-derive every location by symbol at your own HEAD.** `reflections/docs_auditor.py` took four commits in nine days and `8934583dc` rewrote `run_docs_auditor`. Run `grep -n "def _restore_checkout\|def _push_branch_and_pr\|def audit\|def run_docs_auditor\|NOTE (#3050)" reflections/docs_auditor.py` and read `run_docs_auditor` in full. Do not trust any line number, including one in this plan (there are none, deliberately).
+
+Stage files by explicit path — peers share this checkout, so `git add -A` is forbidden. Run tests only through `scripts/pytest-clean.sh`, scoped to the two auditor test files; under heavy test-DB contention "no tests ran" with `-n auto` means retry with `-n0`, not a failure.
+
+### 1. Widen the two private signatures
+- **Task ID**: build-signatures
+- **Depends On**: none
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`, `tests/unit/test_docs_auditor_substrate.py`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- `_restore_checkout`: `branch: str` → `branch: str | None`; skip the `rev-parse --verify` / `git branch -D` block when `None`; extend the docstring. Leave both postconditions exactly as they are.
+- `_push_branch_and_pr`: add required keyword-only `starting_ref: str`; delete the internal `starting_ref = _current_ref(repo_root)` read and its `is None` early return; update the docstring to say the caller owns the ref and captured it before the write.
+- Update all ten direct test call sites listed in **Test Impact** to pass `starting_ref="main"`. Nothing else in those tests changes.
+
+### 2. Give `audit()` a write ledger that survives an exception
+- **Task ID**: build-audit-ledger
+- **Depends On**: build-signatures
+- **Validates**: `tests/unit/test_docs_auditor_substrate.py::TestAuditSubstrate`, `::TestDoDocsContract`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Wrap `audit`'s body from the per-file detector loop through the advisory issue-filing block so any exception returns `_ok_result("error", files_touched=touched, fixes_applied=total_fixes, issues_filed=issues_filed, fixes_withheld=len(withheld), withheld=withheld, extras={"reason": str(e)})` and logs a warning.
+- Leave the early returns above the loop (auth probe, scope resolution, empty-`files`) untouched — they already return results.
+- Record the new contract in the docstring: `status == "error"` with a non-empty `files_touched` means "wrote, then failed; the caller must restore". In the same docstring, record two second-order facts: the `__main__` CLI now exits 0 with a `status="error"` dict where it used to exit non-zero with a traceback, and exceptions raised **above** the guard (`_resolve_neighborhood`, `_resolve_pr_changed_files`) still propagate.
+- **Do not try to widen the guard upward to cover `_resolve_neighborhood` / `_resolve_pr_changed_files`.** They run before `touched` exists, so there is no ledger to preserve and nothing to restore; the caller's pre-`try` `files_touched = []` binding (task 3) is what keeps that class of failure honest.
+- Confirm `TestDoDocsContract` still passes untouched — `/do-docs` behavior must not change.
+
+### 3. Install the restore owner and the escalation in `run_docs_auditor`
+- **Task ID**: build-restore-owner
+- **Depends On**: build-audit-ledger
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Capture `starting_ref = _current_ref(PROJECT_ROOT)` after the cap/open-PR guards and before `audit(...)`. If `None`, return `{"status": "skipped", ...}` **without** stamping the rotation hash, and carry a comment giving the reason: unlike the cap and open-PR guards this condition is doc-independent, so it cannot pin the rotation on one doc, and stamping would advance past a doc that was never audited.
+- On the next line, before the `try`, bind `files_touched: list[str] = []`. The existing `files_touched = result.get("files_touched", [])` assignment stays exactly where it is, inside the `try`. Without the pre-binding, an exception raised by `audit` above its own guard leaves the name unbound and `_abort_after_write(..., files_touched, ...)` raises `UnboundLocalError`, which the outer handler converts into a summary reading "cannot access local variable 'files_touched'" — destroying the real cause on the only diagnostic surface that exists.
+- Write one **module-level** helper — `def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:` — that calls `_restore_checkout(PROJECT_ROOT, starting_ref, None, files_touched)`, files the escalation, and returns the error dict. **Both call sites `return` it**, never call it bare: `return _abort_after_write(slug, starting_ref, files_touched, str(e))` in the `except`, and the step-3 form above on the audit-error route. Without the `return`, the `except` handler falls through to the `if pr_url is None:` block with `pr_url` unbound.
+- The returned dict is `{"status": "error", "findings": [...], "summary": ...}`, and **both `summary` and `findings` must carry `reason` verbatim**. That is the only diagnostic surface this failure has — `agent/reflection_scheduler.py` reads only `result.get("projects")` — and injection point 5 asserts the summary names the injected exception rather than an `UnboundLocalError`. The summary also names `slug`, the count of `files_touched`, and the observed restore outcome. `starting_ref` **must** be a parameter: it is a `run_docs_auditor` local, so a module-level body referencing it bare raises `NameError` on the first call. Do not nest the helper inside `run_docs_auditor` to capture the local either — the failure-path tests and the mutation check both need a module-level symbol they can import and monkeypatch. Both abort paths call it so they cannot drift apart.
+- Escalation: category `"operational-failure"`, title selected from the `_restore_checkout` boolean — `f"docs-auditor: rotation aborted after writing for {slug}"` when the restore succeeded, `f"docs-auditor: rotation aborted after writing for {slug} — manual cleanup required"` when it did not. The outcome belongs in the title because `_file_issue_if_new` dedups on the exact title and never compares bodies; a single title would let an open benign issue mask a later failed restore. Keep both free of run id and date. Body names every path in `files_touched`, restates the observed restore outcome, gives the manual cleanup command, and names the reason that aborted the run.
+- Skip the escalation entirely when `files_touched` is empty — a run that wrote nothing left no dirt.
+- Route an `audit`-returned error into `_abort_after_write`, in this **exact statement order** — the check must read the ledger `audit` returned, never the pre-`try` `[]`:
+
+  1. `result = audit(...)`
+  2. `files_touched = result.get("files_touched", [])` (the existing assignment, unmoved — it already sits on the statement following the `audit` call)
+  3. `if result.get("status") == "error": return _abort_after_write(slug, starting_ref, files_touched, result.get("reason", "audit returned error"))`
+
+  Putting the status check ahead of step 2 hands the helper the pre-bound empty list: nothing is restored, and the escalation is skipped by the empty-`files_touched` rule below — silently defeating the whole point of task 2's ledger guard. Injection point 3 asserts the caller restores exactly the paths `audit` reported, so a wrong order fails a planned test, but do not rely on the test to catch a choice this plan can just state.
+- Wrap the region defined in **The widened region — exact boundary** in `try` / `except Exception as e:` whose handler is a single `return _abort_after_write(slug, starting_ref, files_touched, str(e))`. The `try` opens immediately before `result = audit(...)`; the `except` closes immediately after the `pr_url = _push_branch_and_pr(...)` assignment. The `if pr_url is None:` R5-1 block, `refresh_docs_in_memory`, the success Telegram send and `_update_rotation_hash` all stay **outside** — past the push helper's return the tree is already restored by its own `finally`, so a handler there would file a false abort issue and, on a `gh` timeout inside R5-1, a second escalation for one failure. Use `except`, not `finally`: the success path's restore is owned by `_push_branch_and_pr` and must not run twice, and the zero-diff `return` inside the region leaves nothing to restore.
+- Pass `starting_ref=starting_ref` into `_push_branch_and_pr`.
+- Delete the `NOTE (#3050)` comment block, update `run_docs_auditor`'s numbered "Sequence:" docstring to include the ref capture and the restore/escalate step, and renumber the function's inline `# N.` step comments to agree with that list and with code order (push is 7, memory refresh is 8). They are transposed today, which is the reason this plan cites the region by statement rather than by number.
+
+### 4. Write the failure-path tests
+- **Task ID**: build-failure-tests
+- **Depends On**: build-restore-owner
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py::TestWriteWindowRestore`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add class `TestWriteWindowRestore` to `tests/unit/reflections/test_docs_auditor_git_surface.py`, reusing the existing `repo`, `gh`, and `fake_redis` fixtures and the `_git` / `_porcelain` helpers.
+- Implement all six injection points from **Failure Path Test Strategy**, plus the four empty/invalid-input cases and the pre-write-failure-files-no-escalation case. Injection point 6 is the only assertion that catches a `try` closed one block too wide — do not drop it as redundant, and do **not** simplify it to a benign `pr_url is None` run. It must monkeypatch `_file_issue_if_new` to raise on the R5-1 title; without that raise nothing in the R5-1 block can propagate, the new handler never fires under either boundary, and both the test and mutation row 8 come back green on a broken boundary.
+- The `branch=None` empty/invalid-input case must record `subprocess.run` argv and assert the `rev-parse refs/heads/None` call is absent, not merely that `git branch -D` is. Mutation row 4 is untestable otherwise.
+- The `audit` stub must perform a **real** write into the fixture repo, not just return a path list — a stub that writes nothing cannot prove a restore happened.
+- Run scoped: `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q`.
+
+### 5. Mutation check
+- **Task ID**: validate-mutation
+- **Depends On**: build-failure-tests
+- **Assigned To**: `auditor-restore-mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Work in your **own worktree**; do not share a checkout with the builder.
+- Revert each of the eight guards listed in **Failure Path Test Strategy** *individually*, re-run the scoped suite after each, and record which test failed. Restore the guard before mutating the next one. Two of the eight are boundary mutations rather than deletions (widening the `try` past the R5-1 block; collapsing the two escalation titles into one) — apply them as written, not as a deletion.
+- A guard whose reversion leaves the suite green is an untested guard — report it as a blocker, do not wave it through.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-mutation
+- **Assigned To**: `auditor-restore-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- **First**: `git fetch origin && git rebase origin/main`, then `git log --oneline origin/main -- docs/features/docs-auditor.md` to see whether #3072's PR #3191 has landed. Re-read `### Caller A — docs-auditor daily rotation reflection` in full at your own HEAD before touching it. #3191 inserts a `resolve_host_eng_chat` delegation paragraph into that section; it must survive this task's edits, not be swallowed by a section rewrite. If #3191 has not landed, coordinate ordering rather than editing blind.
+- Complete every checkbox in the **Documentation** section.
+- Verify the existing prose in `docs/features/docs-auditor.md` does not now contain a stale claim about failure behavior; correct it rather than appending a contradiction.
+
+### 7. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-signatures, build-audit-ledger, build-restore-owner, build-failure-tests, validate-mutation, document-feature
+- **Assigned To**: `auditor-restore-mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row in the **Verification** table and report pass/fail per row.
+- Confirm every **Success Criteria** checkbox, including the anti-criteria.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Scoped auditor tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| Format clean | `python -m ruff format --check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| New escalation exists and is distinctly titled | `grep -c "rotation aborted after writing" reflections/docs_auditor.py` | output > 0 |
+| R5-1 escalation still present | `grep -c "rotation failed to produce a PR" reflections/docs_auditor.py` | output > 0 |
+| Write-window restore test class exists | `grep -c "class TestWriteWindowRestore" tests/unit/reflections/test_docs_auditor_git_surface.py` | output > 0 |
+| Caller owns the starting ref | `grep -c "starting_ref=starting_ref" reflections/docs_auditor.py` | output > 0 |
+| Docs record the new behavior | `grep -c "rotation aborted after writing" docs/features/docs-auditor.md` | output > 0 |
+| Anti-criterion: no whole-tree restore primitive | `grep -cE '"(reset\|clean)"\|"--hard"\|"checkout", "-f"' reflections/docs_auditor.py` | match count == 0 |
+| Anti-criterion: NOTE (#3050) removed | `grep -c "NOTE (#3050)" reflections/docs_auditor.py` | match count == 0 |
+| Anti-criterion: dirty-tree guard still files nothing | `sed -n '/if _git_dirty(PROJECT_ROOT):/,/dirty_tree/p' reflections/docs_auditor.py \| grep -c "_file_issue_if_new"` | match count == 0 |
+| Anti-criterion: push helper no longer reads the ref | `sed -n '/^def _push_branch_and_pr/,/^def _update_rotation_hash/p' reflections/docs_auditor.py \| grep -c "_current_ref"` | match count == 0 |
+| Anti-criterion: FALLBACK_ENG_CHAT region untouched (#3072 lane) | `git diff origin/main...HEAD -- reflections/docs_auditor.py \| grep -c "FALLBACK_ENG_CHAT"` | match count == 0 |
+| Anti-criterion: #3072's Caller A paragraph survives | `grep -c "resolve_host_eng_chat" docs/features/docs-auditor.md` | output > 0 once #3191 has landed; if it has not landed, record that instead of asserting |
+| Failed-restore title variant exists | `grep -c "manual cleanup required" reflections/docs_auditor.py` | output > 0 |
+| Handler binds files_touched before the try | `grep -c 'files_touched: list\[str\] = \[\]' reflections/docs_auditor.py` | output > 0 |
+| Abort helper is module-level | `grep -c "^def _abort_after_write" reflections/docs_auditor.py` | output > 0 |
+| Abort helper takes the ref as a parameter | `grep -A2 "^def _abort_after_write" reflections/docs_auditor.py \| grep -c "starting_ref"` | output > 0 |
+
+The abort-helper check is deliberately two greps rather than one prefix match. The whole signature — `def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:` — is exactly 100 characters against this repo's `line-length = 100`, so it fits on one line today and any rename or added parameter makes `ruff format` wrap it, silently zeroing a single-prefix row. `^def _abort_after_write` survives the wrap, and the `-A2` window catches `starting_ref` on the continuation line.
+
+**How to judge the `match count == 0` rows.** `grep -c` **exits 1 when it counts zero**, so every one of these rows exits non-zero on its expected result. Replayed on `main` at `2ef76bea1`: the whole-tree-primitive row prints `0` and exits 1; the dirty-tree-guard row prints `0` and exits 1. **These rows are judged on stdout, never on exit status** — the expected observation is the literal string `0` on stdout. A validator that scores exit status marks four correct rows red, and a builder "fixing" the red could paper over a genuinely broken `sed` range. Where a runner insists on exit status, append `|| true` to that row and keep scoring stdout; do not rewrite the greps to invert their sense.
+
+All five `match count == 0` rows were replayed against `main` at `2ef76bea1` — one sha for the whole measurement — and each one's state there is recorded so a reviewer can tell a real check from a vacuous one:
+
+| Anti-criterion | Count on `2ef76bea1` | Reading |
+|---|---|---|
+| No whole-tree restore primitive | `0` | Already green — a **preservation** check. It bites only if the build introduces `reset --hard` / `git clean` / `checkout -f`, which is exactly the No-Go it guards. |
+| `NOTE (#3050)` removed | `1` | **Red today.** Proven to bite; goes green only when task 3 deletes the comment. |
+| Dirty-tree guard files nothing | `0` | Already green — a **preservation** check guarding the rejection of option (b). |
+| Push helper no longer reads the ref | `1` | **Red today.** Proven to bite; goes green only when task 1 removes the internal `_current_ref` call. |
+| `FALLBACK_ENG_CHAT` region untouched | `0` | Already green — guards the #3072 lane's region. Note `grep -c` prints `0` on an empty diff, so stdout is non-empty and the row cannot false-pass on an errored command. |
+
+## Critique Results
+
+**Critique run 3 — 2026-09-06 — convergence round.** FULL roster (Risk & Robustness, Scope & Value, History & Consistency), applied as **sequential lenses** (the Agent tool is absent from this stage-runner context, so no finding here is independently corroborated). Verdict: **NEEDS REVISION** — 1 blocker, 0 concerns, 1 nit.
+
+**Round-2 rows: all seven closed.** Re-derived by symbol against `main` at `6c804d0d8`; `reflections/docs_auditor.py` is byte-identical between the cited `2ef76bea1` and HEAD, so the plan's replay sha is still valid.
+
+- *CONCERN 1 (boundary pin cannot fail)* — CLOSED. Injection point 6 monkeypatches `_file_issue_if_new` to raise on the R5-1 title; mutation row 8 carries the "not exercisable as written" instruction; Risk 3 is relabelled latent with the reachable triggers enumerated; Risk 1's Impact carries the matching correction. `run_docs_auditor`'s pre-existing outer `except Exception` — the test's premise — exists and returns `summary=f"docs-auditor error: {e}"`.
+- *CONCERN 2 (mutation row 4 predicts an impossible red)* — CLOSED. Mutation row 4, the Empty/Invalid Input row, and task 4 all now require recording `subprocess.run` argv and asserting `["git", "rev-parse", "--verify", "--quiet", "refs/heads/None"]` is absent as well as `git branch -D`.
+- *CONCERN 3 (Task 3 ordering ambiguity)* — CLOSED. The numbered three-statement order is present and Key Elements matches. The existing `files_touched = result.get("files_touched", [])` does sit on the statement following the `audit(...)` call, so no code-order change is implied.
+- *NIT (return it, never call it bare)* — CLOSED, both call sites and the unbound-`pr_url` consequence stated.
+- *NIT (helper's returned dict)* — CLOSED, `summary` and `findings` both specified to carry `reason` verbatim.
+- *NIT (100-char grep anchor)* — CLOSED. Both replacement greps replayed here against a deliberately wrapped signature and against the one-line form; each returns `1`.
+- *NIT (two replay shas)* — CLOSED. The live prose and table cite `2ef76bea1` only. All five anti-criteria re-replayed at HEAD: `0`, `1`, `0`, `1`, `0`, matching every recorded reading; both `sed` ranges resolve.
+
+Also re-verified this round: all ten `_push_branch_and_pr(` direct call sites map one-for-one to the ten test functions named in **Test Impact**, with the correct enclosing classes; the six `audit` / `_push_branch_and_pr` stubs match; every cited test entity resolves and `TestWriteWindowRestore` / `TestPushBranchAndPr` are correctly reported absent; `_ok_result` splats `extras` into the top-level dict, so task 3's `result.get("reason", ...)` reads task 2's `extras={"reason": str(e)}`; every name in task 2's `_ok_result("error", ...)` call is bound where the guard closes.
+
+Findings from this round:
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency | Task 3's pre-write ref guard turns **12 tests red** in `tests/unit/test_docs_auditor_substrate.py`, and **Test Impact** does not list one of them. That file's `repo` fixture is a bare `tmp_path` (mkdir + `pyproject.toml`, no `git init`; `git_repo` is the separate fixture that inits), so `_current_ref(PROJECT_ROOT)` returns `None` and every rotation there returns `skipped` before `audit` is called. Measured, not inferred: with only the Task 3 capture inserted into a shadowed copy of the module, `12 failed, 199 passed, 1 skipped`; the control through the identical shadow mechanism on unmodified code is `211 passed, 1 skipped, 0 failed`. Test Impact instead claims the change is "Ten call sites, all in two files, all mechanical" and "No test is deleted. No test is replaced.", so the builder meets a wall of red at task 3 with no guidance and a Success Criterion ("Scoped tests pass") that cannot be met as written. | pending | The 12 are `TestRefreshDocsInMemoryHook::test_hook_invoked_once_per_non_empty_touched_paths`, `::test_hook_failure_does_not_propagate`, `TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_and_telegram`, `::test_rotation_result_surfaces_withheld_count`, `::test_all_withheld_zero_diff_run_still_notifies`, `TestTelegramSuppressionReachesSummary::test_zero_diff_suppression_reaches_summary`, `::test_step9_suppression_reaches_summary_before_pr_url`, `TestPRCreationFailure::test_push_failure_returns_finding_no_raise`, `::test_push_failure_escalates_via_operational_failure_issue`, `TestHoistedPRGuards::test_no_guard_lets_the_substrate_run`, `TestVaultClauseInSummary::test_created_pr_summary_carries_vault_count_including_zero`, and `test_worst_case_summary_stays_under_truncation_budget`. Add `patch("reflections.docs_auditor._current_ref", return_value="main")` to each of those twelve `with` blocks — none of them reaches `_restore_checkout`, so a literal ref string is sound. Do **not** relax the guard: the Empty/Invalid Input row requires `starting_ref is None` to return `skipped` before `audit`, so weakening it deletes a planned assertion. Do **not** add `git init` to the shared `repo` fixture: 111 test functions take it, and `git_repo`'s own docstring records that the bare-name existence oracle (`_build_basename_index`, `git ls-files --cached --others --exclude-standard`) "only exists inside a git checkout", so initialising `repo` silently flips withhold/existence behaviour across the whole file. `tests/unit/reflections/test_docs_auditor_git_surface.py` is unaffected (real `git init` fixture): 15 passed under both control and treatment. |
+| NIT | Risk & Robustness | The round-2 CONCERN 1 *Addressed By* cell says `_issue_exists` and `_file_issue_if_new` "each wrap their entire body in `try` / `except Exception` returning `False`". Strictly, `_file_issue_if_new`'s `title` extraction, `_normalize_title`, and the `body = f"...{_filing_machine_name()}..."` assembly sit outside any `try`. The conclusion is unaffected — injection point 6 monkeypatches the function itself rather than relying on its internals. | pending | n/a — NIT. No build action. If the sentence is revisited, narrow it to "every `gh` call site and every exit path that reaches a subprocess". |
+
+**Structural checks: all pass.** Required sections (Documentation with a `docs/features/` checkbox, Update System, Agent Integration, Test Impact with dispositions) present and substantive; tasks 1-7 with no numbering gap; every `Depends On` resolves to a real task ID with no cycle; every referenced repo path exists; no prerequisites to check; every Success Criterion maps to a task, and no No-Go or Rabbit Hole appears as planned work.
