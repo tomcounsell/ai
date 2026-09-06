@@ -372,6 +372,7 @@ Arity changes to `_escalate_once` (`expectation_reconciler`) and `_send_alert` (
 
 - [ ] `tests/unit/reflections/test_expectation_reconciler.py:204` — **UPDATE**: the `lambda j, e, m:` patch of `_escalate_once` must become `lambda p, j, e, m:` **and return a 2-tuple** — the return type changes from `bool` to `tuple[bool, str | None]` (Task 6), so a stub returning a bare `True` will unpack-error at the call site. One site.
 - [ ] `reflections/expectation_reconciler.py` call-site gates at 451-452, 481-482, 513-514 — **CREATE** a case in `tests/unit/reflections/test_expectation_reconciler.py`: `_reconcile_project` with an unresolvable project reaches an escalation site → `counts["escalated"] == 0`, an `alert-suppressed` entry in `findings`, no `escalated: {eid}` entry. No existing case pins the counter against a suppressed page.
+- [ ] `reflections/expectation_reconciler.py:476-483` — the short-circuited `elif` at the evidence site — **CREATE** a case in `tests/unit/reflections/test_expectation_reconciler.py` pinning that a **successful steer never escalates**. Drive `_reconcile_project` to the evidence branch with a live PM whose `_steer` returns `True`, then assert all three: `counts["escalated"] == 0`, no `escalated-evidence` entry in `findings`, and `_escalate_once` was **not called** (spy it, so the burned `SET NX` sentinel is observable — a suppressed-but-called escalation would otherwise look identical from the counters). `test_expectation_reconciler.py:139` covers the same branch today and asserts only that `steered-evidence` reached `findings`, so the hoisted-unpack restructure Task 6 warns against passes it unchanged. This case is what makes the hoist go red.
 - [ ] `reflections/sdlc_progress.py:1159-1172` — the `_escalate` closure in `_check_project_stalls` — **CREATE** a case in `tests/unit/reflections/test_sdlc_progress_check.py`. The closure currently gates `counts["escalated"] += 1` (line 1171) and `findings.append(msg)` (line 1172) behind one `if msg:` at line 1170; Task 7 splits them. Nothing in that module asserts on `counts["escalated"]` today — line 1878 only checks the four rung keys are present — so the split is unguarded until this case exists. Assert counter, finding, and summary together (see Failure Path Test Strategy).
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py:326` — **UPDATE**: `lambda msg: lab.alerts.append(msg)` → 2-arg form.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py:48,1699-1706` — **UPDATE**: `_REAL_SEND_ALERT` is re-installed deliberately to put the real subprocess boundary under test; the restore and the call that follows both need the new arity.
@@ -483,7 +484,43 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 3. **Add `send_eng_telegram(project, message, *, logger_prefix) -> bool`** to `reflections/utilities.py`: `resolve_eng_group` → warn-and-return-`False` on `None` with no subprocess, else `subprocess.run` with `str(chat_id)`. Swallow `FileNotFoundError` / `TimeoutExpired` / `Exception` / non-zero exit and return `True`.
 4. **Add `send_host_eng_telegram(message, *, logger_prefix) -> bool`** wrapping `resolve_host_eng_chat` with the same swallow-and-return contract.
 5. **Write `tests/unit/reflections/test_utilities_eng_telegram.py`** covering both tables from Failure Path Test Strategy. Then run **mutation anti-test 1** — revert `str(chat_id)` to `group_name` in `send_eng_telegram`, confirm the resolves-case goes red, restore. Do it now, before any consumer is wired. (Anti-test 2, the `PROJECT_ROOT` guard deletion, ran back in Task 2 — it needs the docs_auditor delegation in place to bite. Both are specified in Failure Path Test Strategy.)
-6. **Wire `expectation_reconciler`**: `_escalate_once(job_id, eid, message)` (line 170) → `_escalate_once(project, job_id, eid, message)`, body calling `send_eng_telegram(project, message, logger_prefix="expectation_reconciler")`. Its return type changes from `bool` to `tuple[bool, str | None]` for the reason in Solution §4 — the three call sites each gate a counter and a finding behind that one boolean, and suppression must reach the finding without touching the counter. Update all three (the call at 444 gated by 451-452, at 480 gated by 481-482, at 506 gated by 513-514) to `sent, sup = _escalate_once(project, ...)` then `if sent:` → the existing `counts["escalated"] += 1` plus that site's existing finding string, `elif sup:` → `findings.append(sup)`. All three sites sit inside `_reconcile_project(project: dict)`, which already binds `project_key` at line 372, so the dict needs no threading (spike-1).
+6. **Wire `expectation_reconciler`**: `_escalate_once(job_id, eid, message)` (line 170) → `_escalate_once(project, job_id, eid, message)`, body calling `send_eng_telegram(project, message, logger_prefix="expectation_reconciler")`. Its return type changes from `bool` to `tuple[bool, str | None]` for the reason in Solution §4 — the three call sites each gate a counter and a finding behind that one boolean, and suppression must reach the finding without touching the counter. All three sites sit inside `_reconcile_project(project: dict)`, which already binds `project_key` at line 372, so the dict needs no threading (spike-1).
+
+   **Sites 444 (gated by 451-452) and 506 (gated by 513-514) take the recipe as written.** Both are plain `if _escalate_once(...):`, so each becomes `sent, sup = _escalate_once(project, ...)` followed by `if sent:` → the existing `counts["escalated"] += 1` plus that site's existing finding string, `elif sup:` → `findings.append(sup)`.
+
+   **Site 480 cannot take that recipe, and the shortest restructure that compiles is wrong.** Lines 476-483 are a short-circuited chain: the call is an `elif`, reached only when steering did not happen or failed.
+
+   ```python
+   if pm is not None and _steer(pm, message):          # 476
+       counts["steered"] += 1                          # 477
+       findings.append(f"steered-evidence: {eid} ({evidence})")   # 478
+       _bump_attempts(job.job_id, eid)                 # 479
+   elif _escalate_once(job.job_id, eid, f"[{project_key}] {message}"):   # 480
+       counts["escalated"] += 1                        # 481
+       findings.append(f"escalated-evidence: {eid}")   # 482
+   continue                                            # 483
+   ```
+
+   A tuple unpack cannot live in an `elif` condition, so this site must be restructured. **Do not hoist the unpack above line 476.** That is the shortest edit that compiles and it calls `_escalate_once` unconditionally — burning the `SET NX` sentinel (claimed before the send, see Race Conditions) and paging a human even when the steer succeeded. Convert the `elif` into a nested `else` instead, so the call stays inside the failure branch:
+
+   ```python
+   if pm is not None and _steer(pm, message):
+       counts["steered"] += 1
+       findings.append(f"steered-evidence: {eid} ({evidence})")
+       _bump_attempts(job.job_id, eid)
+   else:
+       sent, sup = _escalate_once(
+           project, job.job_id, eid, f"[{project_key}] {message}"
+       )
+       if sent:
+           counts["escalated"] += 1
+           findings.append(f"escalated-evidence: {eid}")
+       elif sup:
+           findings.append(sup)
+   continue
+   ```
+
+   Nothing today catches the hoist: `tests/unit/reflections/test_expectation_reconciler.py:139` asserts `steered-evidence` is in `findings` and never asserts that no alert was sent, so a hoisted unpack passes it. The pin is the new short-circuit case in `## Test Impact` — a successful steer must leave `counts["escalated"] == 0`, must not append an `escalated-evidence` finding, and must not burn the sentinel.
 7. **Wire `sdlc_progress`, and change `_escalate_once`'s return type to a 2-tuple.** Three coupled edits, all in `reflections/sdlc_progress.py`:
 
    - `_send_alert(message)` (line 784) → `_send_alert(project_dict, message) -> bool`, body calling `send_eng_telegram(project_dict, message, logger_prefix="sdlc_progress")` and returning its result.
