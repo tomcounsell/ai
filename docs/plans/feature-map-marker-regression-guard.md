@@ -543,13 +543,13 @@ intended and to lose no marker anywhere:
   tempting the moment you see the numbers. spike-5 shows it also makes rule R1 tautological. It is
   #3175, and it wants the guard to exist first so it can prove its own before/after.
 - **A golden manifest of all 834 files.** Checking in `path -> marker` for the whole suite catches
-  every change, needs no rules, and needs no exemption list. It also blesses all 552 currently
+  every change, needs no rules, and needs no exemption list. It also blesses all 554 currently
   unmarked files as correct, adds a required manifest edit to every new test file, and turns a
   rename into a large diff. The rule-based guard says something true about correctness; a manifest
   only says "this changed".
 - **Fixing the 21 reflections and bridge files inside this PR.** It is one line if the resolver
-  changes and roughly nine hand-ordered `FEATURE_MAP` keys if it does not, and either way it makes
-  the diff about the fix rather than the guard. #3175.
+  changes, 19 renames plus two hand-ordered `FEATURE_MAP` keys if it does not, and either way it
+  makes the diff about the fix rather than the guard. #3175.
 - **Registering markers with `--strict-markers`.** Adjacent, real, and a different problem.
 - **Extending the rules to test *functions* or classes.** `FEATURE_MAP` is keyed on module
   basename. Nothing below the module is in scope.
@@ -584,10 +584,12 @@ ten other hits are docstring prose. The builder verifies with a full
 **Impact:** A package that deliberately holds tests of two different features fails sibling
 uniformity and the author reaches for an exemption, eroding the rule.
 **Mitigation:** R2 only applies where the directory name does *not* resolve, which is the case
-precisely when nobody has declared what the package is about. `EXEMPT_DIRS` takes a whole package
-out by path with a reason. If more than one or two packages need it, R2 is the wrong rule and
-should be dropped rather than exempted into meaninglessness; the builder reports that rather than
-papering over it.
+precisely when nobody has declared what the package is about, and it accuses only the siblings
+outside the largest marker group, so a deliberate minority costs one `KNOWN_MISTAGS` entry each
+rather than the whole package. There is no whole-package exemption on purpose: an unexercised
+`EXEMPT_DIRS` with no bracketing assertions is a silent hole. If a package ever needs more than a
+couple of per-file entries, R2 is the wrong rule and should be dropped rather than exempted into
+meaninglessness; the builder reports that rather than papering over it.
 
 ### Risk 4: The audit passes vacuously
 
@@ -612,7 +614,18 @@ read-only, so concurrent workers cannot interfere with it or with each other thr
   `tests/unit/bridge/test_dispatch.py`, `tests/unit/session_runner/test_schema_routing.py`,
   `tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`, and
   `tests/unit/test_long_task_checkpointing.py`. Filed with its own measurements and acceptance
-  criteria, including the requirement that no file loses a marker.
+  criteria, including the requirement that no file loses a marker. **Scope note:** #3175's title
+  says 21 files. This plan hands it 24 paths, so the two R2 entries
+  (`tests/unit/session_runner/test_schema_routing.py`,
+  `tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`) and
+  `tests/unit/test_long_task_checkpointing.py` extend #3175's stated scope beyond its title. The
+  reconciliation is recorded as a comment on #3175 so no baseline entry is left untracked.
+- [SEPARATE-SLUG #3184] Correcting the global `test_` strip in the stem expression. Mechanism 3 in
+  the Problem section: five basenames contain `test_` twice, and two of them
+  (`tests/tools/test_test_judge.py`, `tests/unit/test_validate_test_impact.py`) lose a marker a
+  `FEATURE_MAP` key was written for. Fixing it here would retag those two files, contradicting this
+  plan's own criterion that `test_youtube_transcription.py` is the only intended marker change.
+  This plan pins the buggy expression verbatim instead, so the guard measures the world as it is.
 - [SEPARATE-SLUG #3175] Changing `pytest_collection_modifyitems` to make the package directory
   authoritative over the basename. spike-5 measured it (39 markers gained, 6 corrected, 0 lost) and
   it is the most promising remedy, but shipping it alongside the guard makes rule R1 tautological.
@@ -650,10 +663,16 @@ wiring or a test.
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/feature-map-marker-guard.md`: the two mistag mechanisms with the live
-      examples, the three rules and what each one can and cannot see, why exemptions are keyed by
+- [ ] Create `docs/features/feature-map-marker-guard.md`: the three mistag mechanisms with the live
+      examples (naming #3184 as the tracker for the third), the three rules and what each one can
+      and cannot see, R2's majority attribution and its tie branch, why exemptions are keyed by
       path (#2805) and why stale exemptions are themselves a failure (#3031), and how to respond
       when the guard goes red.
+- [ ] **Required line in that doc**, stated plainly rather than implied: R1 and R2 catch ordering
+      collisions only inside a themed package directory, which is 80 of 834 tracked test files
+      (9.6%). Suite-wide, only fragment matches are caught. A mistagged file sitting directly under
+      `tests/unit/` passes all three rules. Give the worked example
+      (`test_worktree_manager_config.py` at top level resolves to `config` and stays green).
 - [ ] Add a row for it to the `docs/features/README.md` index table, keeping the table's sort order
       (enforced by `.claude/hooks/validators/validate_features_readme_sort.py`).
 
