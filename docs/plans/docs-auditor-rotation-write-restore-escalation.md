@@ -371,11 +371,108 @@ Small appetite, one module. Two builders would collide in the same function, so 
 
 ## Step by Step Tasks
 
-_placeholder_
+**Before the first edit, re-derive every location by symbol at your own HEAD.** `reflections/docs_auditor.py` took four commits in nine days and `8934583dc` rewrote `run_docs_auditor`. Run `grep -n "def _restore_checkout\|def _push_branch_and_pr\|def audit\|def run_docs_auditor\|NOTE (#3050)" reflections/docs_auditor.py` and read `run_docs_auditor` in full. Do not trust any line number, including one in this plan (there are none, deliberately).
+
+Stage files by explicit path — peers share this checkout, so `git add -A` is forbidden. Run tests only through `scripts/pytest-clean.sh`, scoped to the two auditor test files; under heavy test-DB contention "no tests ran" with `-n auto` means retry with `-n0`, not a failure.
+
+### 1. Widen the two private signatures
+- **Task ID**: build-signatures
+- **Depends On**: none
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`, `tests/unit/test_docs_auditor_substrate.py`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- `_restore_checkout`: `branch: str` → `branch: str | None`; skip the `rev-parse --verify` / `git branch -D` block when `None`; extend the docstring. Leave both postconditions exactly as they are.
+- `_push_branch_and_pr`: add required keyword-only `starting_ref: str`; delete the internal `starting_ref = _current_ref(repo_root)` read and its `is None` early return; update the docstring to say the caller owns the ref and captured it before the write.
+- Update all ten direct test call sites listed in **Test Impact** to pass `starting_ref="main"`. Nothing else in those tests changes.
+
+### 2. Give `audit()` a write ledger that survives an exception
+- **Task ID**: build-audit-ledger
+- **Depends On**: build-signatures
+- **Validates**: `tests/unit/test_docs_auditor_substrate.py::TestAuditSubstrate`, `::TestDoDocsContract`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Wrap `audit`'s body from the per-file detector loop through the advisory issue-filing block so any exception returns `_ok_result("error", files_touched=touched, fixes_applied=total_fixes, issues_filed=issues_filed, fixes_withheld=len(withheld), withheld=withheld, extras={"reason": str(e)})` and logs a warning.
+- Leave the early returns above the loop (auth probe, scope resolution, empty-`files`) untouched — they already return results.
+- Record the new contract in the docstring: `status == "error"` with a non-empty `files_touched` means "wrote, then failed; the caller must restore".
+- Confirm `TestDoDocsContract` still passes untouched — `/do-docs` behavior must not change.
+
+### 3. Install the restore owner and the escalation in `run_docs_auditor`
+- **Task ID**: build-restore-owner
+- **Depends On**: build-audit-ledger
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Capture `starting_ref = _current_ref(PROJECT_ROOT)` after the cap/open-PR guards and before `audit(...)`. If `None`, return `{"status": "skipped", ...}` **without** stamping the rotation hash, and carry a comment giving the reason: unlike the cap and open-PR guards this condition is doc-independent, so it cannot pin the rotation on one doc, and stamping would advance past a doc that was never audited.
+- Write one module-level helper — `_abort_after_write(slug, files_touched, reason)` — that calls `_restore_checkout(PROJECT_ROOT, starting_ref, None, files_touched)`, files the escalation, and returns the error dict. Both abort paths call it so they cannot drift apart.
+- Escalation: title `f"docs-auditor: rotation aborted after writing for {slug}"`, category `"operational-failure"`. Body names every path in `files_touched`, states the observed restore outcome (succeeded / failed — this handler sees the boolean, unlike R5-1), gives the manual cleanup command, and names the reason that aborted the run.
+- Skip the escalation entirely when `files_touched` is empty — a run that wrote nothing left no dirt.
+- Immediately after `audit` returns, route `result.get("status") == "error"` into `_abort_after_write`.
+- Wrap steps 5 through 8 in `try` / `except Exception as e:` whose handler calls `_abort_after_write`. Use `except`, not `finally`: the success path's restore is owned by `_push_branch_and_pr` and must not run twice, and the zero-diff `return` inside the region leaves nothing to restore.
+- Pass `starting_ref=starting_ref` into `_push_branch_and_pr`.
+- Delete the `NOTE (#3050)` comment block and update `run_docs_auditor`'s numbered "Sequence:" docstring to include the ref capture and the restore/escalate step.
+
+### 4. Write the failure-path tests
+- **Task ID**: build-failure-tests
+- **Depends On**: build-restore-owner
+- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py::TestWriteWindowRestore`
+- **Assigned To**: `auditor-restore-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add class `TestWriteWindowRestore` to `tests/unit/reflections/test_docs_auditor_git_surface.py`, reusing the existing `repo`, `gh`, and `fake_redis` fixtures and the `_git` / `_porcelain` helpers.
+- Implement all four injection points from **Failure Path Test Strategy**, plus the three empty/invalid-input cases and the pre-write-failure-files-no-escalation case.
+- The `audit` stub must perform a **real** write into the fixture repo, not just return a path list — a stub that writes nothing cannot prove a restore happened.
+- Run scoped: `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q`.
+
+### 5. Mutation check
+- **Task ID**: validate-mutation
+- **Depends On**: build-failure-tests
+- **Assigned To**: `auditor-restore-mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Work in your **own worktree**; do not share a checkout with the builder.
+- Revert each of the five guards listed in **Failure Path Test Strategy** *individually*, re-run the scoped suite after each, and record which test failed. Restore the guard before mutating the next one.
+- A guard whose reversion leaves the suite green is an untested guard — report it as a blocker, do not wave it through.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-mutation
+- **Assigned To**: `auditor-restore-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Complete every checkbox in the **Documentation** section.
+- Verify the existing prose in `docs/features/docs-auditor.md` does not now contain a stale claim about failure behavior; correct it rather than appending a contradiction.
+
+### 7. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-signatures, build-audit-ledger, build-restore-owner, build-failure-tests, validate-mutation, document-feature
+- **Assigned To**: `auditor-restore-mutation-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row in the **Verification** table and report pass/fail per row.
+- Confirm every **Success Criteria** checkbox, including the anti-criteria.
 
 ## Verification
 
-_placeholder_
+| Check | Command | Expected |
+|-------|---------|----------|
+| Scoped auditor tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| Format clean | `python -m ruff format --check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| New escalation exists and is distinctly titled | `grep -c "rotation aborted after writing" reflections/docs_auditor.py` | output > 0 |
+| R5-1 escalation still present | `grep -c "rotation failed to produce a PR" reflections/docs_auditor.py` | output > 0 |
+| Write-window restore test class exists | `grep -c "class TestWriteWindowRestore" tests/unit/reflections/test_docs_auditor_git_surface.py` | output > 0 |
+| Caller owns the starting ref | `grep -c "starting_ref=starting_ref" reflections/docs_auditor.py` | output > 0 |
+| Docs record the new behavior | `grep -c "rotation aborted after writing" docs/features/docs-auditor.md` | output > 0 |
+| Anti-criterion: no whole-tree restore primitive | `grep -cE '"(reset\|clean)"\|"--hard"\|"checkout", "-f"' reflections/docs_auditor.py` | match count == 0 |
+| Anti-criterion: NOTE (#3050) removed | `grep -c "NOTE (#3050)" reflections/docs_auditor.py` | match count == 0 |
+| Anti-criterion: dirty-tree guard still files nothing | `sed -n '/if _git_dirty(PROJECT_ROOT):/,/dirty_tree/p' reflections/docs_auditor.py \| grep -c "_file_issue_if_new"` | match count == 0 |
+| Anti-criterion: push helper no longer reads the ref | `sed -n '/^def _push_branch_and_pr/,/^def _update_rotation_hash/p' reflections/docs_auditor.py \| grep -c "_current_ref"` | match count == 0 |
+| Anti-criterion: FALLBACK_ENG_CHAT region untouched (#3072 lane) | `git diff origin/main...HEAD -- reflections/docs_auditor.py \| grep -c "FALLBACK_ENG_CHAT"` | match count == 0 |
+
+The three `match count == 0` anti-criteria at the bottom were each measured against `main` at `5ae3cbb3d` while authoring this plan. Two already return `0` there (the whole-tree-primitive grep and the push-helper grep return `0` and `1` respectively before the fix, so the push-helper row is a genuine red-state today and must go green only after task 1). The `NOTE (#3050)` row returns `1` on `main` today — that is its red state, and it is the proof the check bites.
 
 ## Critique Results
 
@@ -383,4 +480,5 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+1. **Should a run whose restore *succeeded* still file an issue?** This plan says yes: the run wrote and then failed, that is an operational failure worth one slug-keyed issue, and the title-based dedup means a repeating failure files once rather than daily. The alternative — escalate only when the restore fails — is quieter but hides a rotation that has been aborting silently for a week. If you would rather have the quieter behavior, say so and the escalation moves inside `if not restored:`.
+2. **Should `audit()`'s new top-level guard apply to the `/do-docs` caller too, or only to rotation scope?** This plan applies it to both, because a returned error result carrying `files_touched` is strictly more informative than a propagating traceback and `/do-docs` already reviews a dirty tree by hand. If `/do-docs` depends on the exception escaping for some reason not visible in `TestDoDocsContract`, the guard should be gated on `scope_mode == "rotation"`.
