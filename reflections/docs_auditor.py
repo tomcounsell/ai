@@ -33,15 +33,18 @@ from pathlib import Path
 
 from config.machine import get_machine_display_name
 from config.settings import settings
-from reflections.utilities import load_local_projects, resolve_eng_group
+from reflections.utilities import (
+    load_local_projects,
+    resolve_host_eng_chat,
+)
 
 logger = logging.getLogger("reflections.docs_auditor")
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
-# Fallback Telegram destination used only when the audited repo IS this checkout
-# and projects.json is unreadable or unmatched — see _resolve_notify_chat.
-FALLBACK_ENG_CHAT = "Eng: Valor"
+# FALLBACK_ENG_CHAT now lives in reflections/utilities.py (#3072); re-exported
+# here (via the import above) so any external reader of
+# docs_auditor.FALLBACK_ENG_CHAT still resolves.
 
 # ---------------------------------------------------------------------------
 # Module-level configuration
@@ -1552,51 +1555,17 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
 def _resolve_notify_chat(repo_root: Path) -> str | None:
     """Map the audited repo root to a ``--chat`` destination, or ``None``.
 
-    Ladder:
-      1. Match ``repo_root`` against a ``projects.json`` entry's
-         ``working_directory``.
-      2. If matched, resolve that project's ``Eng:`` group via
-         ``resolve_eng_group`` and return its numeric ``chat_id`` as a string
-         (never the group name — a name re-enters ``valor-telegram``'s
-         ambiguity-tolerant resolve_chat cascade; an id cannot).
-      3. If no project matches, or the matched project has no properly
-         configured ``Eng:`` group, return ``FALLBACK_ENG_CHAT`` **only when**
-         ``repo_root`` is this very checkout (``PROJECT_ROOT``) — never for a
-         foreign or unregistered repo. This is a deliberate narrowing: an
-         unconditional fallback would re-create the exact misroute this
-         function exists to remove, paging the valor engineers about a repo
-         they don't own. This checkout's own engineer group genuinely is
-         ``Eng: Valor``, so the fallback is provably correct only in that one
-         case — do not "simplify" this back into an unconditional default.
-      4. Any exception during lookup is swallowed, logged, and falls through
-         to the step-3 rule (best-effort: a notification failure must never
-         break an audit run).
-
-    Returns ``None`` to mean "do not send" — the caller must not shell out.
+    Delegates to ``reflections.utilities.resolve_host_eng_chat`` (#3072),
+    which carries the full ladder and reasoning this function used to own.
+    Passes this module's own bindings through explicitly — read here, in a
+    body that lives in ``docs_auditor``, so
+    ``patch("reflections.docs_auditor.load_local_projects", ...)`` and
+    ``patch("reflections.docs_auditor.PROJECT_ROOT", ...)`` both still land on
+    the value actually used.
     """
-    target = repo_root.resolve()
-    try:
-        for project in load_local_projects():
-            wd = project.get("working_directory")
-            if wd and Path(wd).resolve() == target:
-                resolved = resolve_eng_group(project)
-                if resolved is not None:
-                    _, chat_id = resolved
-                    return str(chat_id)
-                break
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("docs_auditor: project lookup for Telegram routing failed: %s", exc)
-
-    if target == PROJECT_ROOT.resolve():
-        return FALLBACK_ENG_CHAT
-
-    logger.warning(
-        "docs_auditor: no Eng: group for audited repo %s (repo not registered in "
-        "projects.json, or its project has no configured Eng: group); "
-        "Telegram notification suppressed",
-        target,
+    return resolve_host_eng_chat(
+        repo_root, load_projects=load_local_projects, project_root=PROJECT_ROOT
     )
-    return None
 
 
 def _send_telegram_notification(message: str, *, repo_root: Path | None = None) -> bool:

@@ -27,6 +27,12 @@ logger = logging.getLogger("reflections.utilities")
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT
 
+# Fallback Telegram destination used only when the resolved repo root IS this
+# checkout and projects.json is unreadable or unmatched — see
+# resolve_host_eng_chat. Relocated from reflections/docs_auditor.py (#2754);
+# docs_auditor keeps a re-export binding.
+FALLBACK_ENG_CHAT = "Eng: Valor"
+
 # Correction patterns in user messages (for session intelligence analysis)
 CORRECTION_PATTERNS = [
     re.compile(r"\bno,?\s+i\s+meant\b", re.IGNORECASE),
@@ -339,6 +345,186 @@ def resolve_eng_group(project: dict) -> tuple[str, int] | None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("resolve_eng_group swallowed exception: %r", exc)
         return None
+
+
+def resolve_host_eng_chat(
+    repo_root: Path | None = None,
+    *,
+    load_projects: Callable[[], list[dict]] | None = None,
+    project_root: Path | None = None,
+) -> str | None:
+    """Map a repo root to a ``--chat`` destination, or ``None``.
+
+    Lifted verbatim (ladder and reasoning both) from
+    ``reflections/docs_auditor.py::_resolve_notify_chat`` (#2754), generalized
+    from a required ``repo_root`` to defaulting on this module's own
+    ``PROJECT_ROOT`` — the rule callers with no audited repo in scope
+    (``sentry_triage``, ``stall_advisory``) need.
+
+    Ladder:
+      1. Match ``repo_root`` against a ``projects.json`` entry's
+         ``working_directory``.
+      2. If matched, resolve that project's ``Eng:`` group via
+         ``resolve_eng_group`` and return its numeric ``chat_id`` as a string
+         (never the group name — a name re-enters ``valor-telegram``'s
+         ambiguity-tolerant resolve_chat cascade; an id cannot).
+      3. If no project matches, or the matched project has no properly
+         configured ``Eng:`` group, return ``FALLBACK_ENG_CHAT`` **only when**
+         ``repo_root`` is this very checkout (``PROJECT_ROOT``) — never for a
+         foreign or unregistered repo. This is a deliberate narrowing: an
+         unconditional fallback would re-create the exact misroute this
+         function exists to remove, paging the valor engineers about a repo
+         they don't own. This checkout's own engineer group genuinely is
+         ``Eng: Valor``, so the fallback is provably correct only in that one
+         case — do not "simplify" this back into an unconditional default.
+      4. Any exception during lookup is swallowed, logged, and falls through
+         to the step-3 rule (best-effort: a notification failure must never
+         break a reflection run).
+
+    ``load_projects`` and ``project_root`` are injectable seams for a caller
+    that must delegate while preserving its own patchable bindings (see
+    ``docs_auditor._resolve_notify_chat``) — read here at call time, never
+    frozen in the signature default, so a test that patches the *caller's*
+    module-level name is honored.
+
+    Returns ``None`` to mean "do not send" — the caller must not shell out.
+    """
+    loader = load_projects or load_local_projects
+    anchor = project_root or PROJECT_ROOT
+    target = (repo_root or anchor).resolve()
+    try:
+        for project in loader():
+            wd = project.get("working_directory")
+            if wd and Path(wd).resolve() == target:
+                resolved = resolve_eng_group(project)
+                if resolved is not None:
+                    _, chat_id = resolved
+                    return str(chat_id)
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reflections.utilities: project lookup for Telegram routing failed: %s", exc)
+
+    if target == anchor.resolve():
+        return FALLBACK_ENG_CHAT
+
+    logger.warning(
+        "reflections.utilities: no Eng: group for repo %s (repo not registered in "
+        "projects.json, or its project has no configured Eng: group); "
+        "Telegram notification suppressed",
+        target,
+    )
+    return None
+
+
+def send_eng_telegram(project: dict, message: str, *, logger_prefix: str) -> bool:
+    """Page a project's ``Eng:`` group over Telegram by numeric ``chat_id``.
+
+    For callers that already hold a project dict (``expectation_reconciler``,
+    ``sdlc_progress``). Takes the dict rather than a ``project_key`` because
+    ``resolve_eng_group`` scans ``project["telegram"]["groups"]`` and every
+    call site already holds it — a key-based signature would force a
+    redundant ``load_local_projects()`` scan per send.
+
+    Two separate try/except scopes, deliberately never merged into one:
+    resolution failure (``resolve_eng_group`` raising, or returning ``None``)
+    means nothing was sent and returns ``False`` with **no subprocess**;
+    transport failure (``valor-telegram`` missing, timing out, raising, or
+    exiting non-zero) means a send was attempted and returns ``True``. A
+    single blanket handler spanning both calls would map a raising resolver
+    to ``True`` (or let the exception escape), inverting that contract.
+
+    Returns ``True`` only when a destination resolved and a send was
+    *attempted* (regardless of transport outcome); ``False`` means and only
+    means "nothing resolved, nothing was sent" — the caller uses that to
+    thread an ``alert-suppressed`` finding through to the reflection summary.
+    """
+    project_key = project.get("slug", "?")
+
+    # --- scope 1: resolution. Any failure here means nothing was sent. ---
+    try:
+        resolved = resolve_eng_group(project)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s: Eng: group lookup failed for project %s; Telegram alert suppressed (%s)",
+            logger_prefix,
+            project_key,
+            exc,
+        )
+        return False
+    if resolved is None:
+        logger.warning(
+            "%s: no Eng: group for project %s; Telegram alert suppressed",
+            logger_prefix,
+            project_key,
+        )
+        return False
+    _, chat_id = resolved
+
+    # --- scope 2: transport. Any failure here still means a send was attempted. ---
+    try:
+        proc = subprocess.run(
+            ["valor-telegram", "send", "--chat", str(chat_id), message],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "%s: valor-telegram exited %s for chat %s: %s",
+                logger_prefix,
+                proc.returncode,
+                chat_id,
+                (proc.stderr or "")[:200],
+            )
+    except FileNotFoundError:
+        logger.warning("%s: valor-telegram not on PATH; skipping Telegram notify", logger_prefix)
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: valor-telegram send timed out", logger_prefix)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s: valor-telegram send failed: %s", logger_prefix, exc)
+    return True
+
+
+def send_host_eng_telegram(message: str, *, logger_prefix: str) -> bool:
+    """Page this checkout's own engineer group over Telegram.
+
+    For callers with no project dict in scope — the fleet-wide digests
+    (``sentry_triage``, ``stall_advisory``). Wraps ``resolve_host_eng_chat()``
+    (no ``repo_root``, so it always resolves *this* checkout) with the same
+    swallow-and-return contract as ``send_eng_telegram``: ``False`` only when
+    nothing resolved, ``True`` on any attempted send including a swallowed
+    transport failure.
+    """
+    chat = resolve_host_eng_chat()
+    if chat is None:
+        logger.warning(
+            "%s: no Eng: group resolved for this checkout; Telegram alert suppressed", logger_prefix
+        )
+        return False
+    try:
+        proc = subprocess.run(
+            ["valor-telegram", "send", "--chat", chat, message],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "%s: valor-telegram exited %s for chat %s: %s",
+                logger_prefix,
+                proc.returncode,
+                chat,
+                (proc.stderr or "")[:200],
+            )
+    except FileNotFoundError:
+        logger.warning("%s: valor-telegram not on PATH; skipping Telegram notify", logger_prefix)
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: valor-telegram send timed out", logger_prefix)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s: valor-telegram send failed: %s", logger_prefix, exc)
+    return True
 
 
 def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:
