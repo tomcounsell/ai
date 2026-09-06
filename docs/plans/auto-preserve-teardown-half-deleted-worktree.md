@@ -696,24 +696,24 @@ Every row is read the same way: **the command must exit 0.** Anti-criteria are w
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit 0 |
-| Lint clean | `python -m ruff check .` | exit 0 |
-| Format clean | `python -m ruff format --check .` | exit 0 |
-| Refusal tag exists in the producer | `grep -q 'worktree-wip-refused-wipe' agent/worktree_manager.py` | exit 0 |
-| Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit 0 |
-| Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit 0 |
-| Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit 0 |
-| Additive staging reads stdin, not a temp file | `grep -q -- '--pathspec-from-file=-' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — no temp file on the wipe path | `! grep -qE 'tempfile\|NamedTemporaryFile\|mkstemp' agent/worktree_manager.py` | exit 0 |
-| Refusal trailer is emitted | `grep -q 'Auto-preserve declined deletions' agent/worktree_manager.py` | exit 0 |
-| Fail-open asymmetry is tested | `grep -q 'def test_ls_files_failure_after_detection_refuses_and_never_commits' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_guard_detection_failure_falls_open_and_warns' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
-| Wipe path resets the index before computing candidates | `grep -q '"reset", "-q"' agent/worktree_manager.py` | exit 0 |
-| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pure_wipe_carries_no_staged_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
-| Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit 0 |
-| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `test -z "$(git diff --name-only origin/main...HEAD -- bridge/ monitoring/)"` | exit 0 |
-| No stale xfails in scope | `! grep -rq 'xfail' tests/unit/worktree_manager/` | exit 0 |
+| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Refusal tag exists in the producer | `grep -q 'worktree-wip-refused-wipe' agent/worktree_manager.py` | exit code 0 |
+| Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit code 0 |
+| Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit code 0 |
+| Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit code 0 |
+| Additive staging reads stdin, not a temp file | `grep -q -- '--pathspec-from-file=-' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — no temp file on the wipe path | `! grep -qE 'tempfile\|NamedTemporaryFile\|mkstemp' agent/worktree_manager.py` | exit code 0 |
+| Refusal trailer is emitted | `grep -q 'Auto-preserve declined deletions' agent/worktree_manager.py` | exit code 0 |
+| Fail-open asymmetry is tested | `grep -q 'def test_ls_files_failure_after_detection_refuses_and_never_commits' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_guard_detection_failure_falls_open_and_warns' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit code 0 |
+| Wipe path resets the index before computing candidates | `grep -q '"reset", "-q"' agent/worktree_manager.py` | exit code 0 |
+| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pure_wipe_carries_no_staged_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit code 0 |
+| Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit code 0 |
+| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `test -z "$(git diff --name-only origin/main...HEAD -- bridge/ monitoring/)"` | exit code 0 |
+| No stale xfails in scope | `! grep -rq 'xfail' tests/unit/worktree_manager/` | exit code 0 |
 
 The `"reset", "-q"` row was mutation-checked in the concern-closing pass, after round 3 found its first form (`grep -q 'reset'`) vacuous — that pattern exits 0 against unmodified `origin/main`, matching the producer docstring's ``git reset --soft HEAD~1`` at line 1662, so it would have certified a build that never added the reset. Re-verified both directions: `grep -q '"reset", "-q"'` exits **1** against `git show origin/main:agent/worktree_manager.py` and exits **0** against a seeded file carrying the argv form, so it bites.
 

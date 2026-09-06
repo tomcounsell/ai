@@ -443,6 +443,52 @@ class TestPreserveWipeDetection:
         assert "worktree-wip-guard-failed" in joined
         assert "worktree-wip-refused-wipe" in joined
 
+    def test_branch_resolve_timeout_still_preserves_ordinary_dirty_tree(self, tmp_path, caplog):
+        """Regression (#3167 review follow-up): the `rev-parse --abbrev-ref
+        HEAD` read used to name the WIP ref runs on every preserve path,
+        including the ordinary non-wipe one, with no narrow try/except of its
+        own. A non-zero rc already falls back to the slug-derived ref; an
+        exception (e.g. `TimeoutExpired`) must degrade the same way rather
+        than propagate to the outer handler, which would skip `add -A`, the
+        WIP commit, and the ref write entirely -- losing legitimate
+        uncommitted work on a normally dirty worktree.
+        """
+        import subprocess as _sp
+
+        from agent import worktree_manager as wm
+
+        repo = _init_git_repo(tmp_path)
+        slug = "sdlc-branchto"
+        wt = _add_linked_worktree(repo, slug)
+        head_before = _git(wt, "rev-parse", "HEAD").stdout.strip()
+        _dirty(wt)
+
+        real_run = wm.subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if "rev-parse" in cmd and "--abbrev-ref" in cmd and "HEAD" in cmd:
+                raise _sp.TimeoutExpired(cmd=cmd, timeout=5)
+            return real_run(cmd, *args, **kwargs)
+
+        with patch.object(wm.subprocess, "run", side_effect=fake_run):
+            with caplog.at_level(logging.WARNING, logger="agent.worktree_manager"):
+                result = wm.preserve_uncommitted_worktree_changes(repo, slug, wt)
+
+        assert result["preserved"] is True
+        assert result["was_clean"] is False
+        sha = result["sha"]
+        assert sha and sha != head_before
+        # Falls back to the slug-derived ref, exactly like a non-zero rc would.
+        assert result["ref"] == f"refs/session-wip/{slug}"
+
+        ref_sha = _git(repo, "rev-parse", f"refs/session-wip/{slug}").stdout.strip()
+        assert ref_sha == sha
+        assert _git(wt, "rev-parse", "HEAD").stdout.strip() == sha
+        assert _git(wt, "status", "--porcelain").stdout.strip() == ""
+
+        joined = " ".join(r.message for r in caplog.records)
+        assert "worktree-wip-branch-resolve-failed" in joined
+
     def test_ref_slug_follows_checked_out_branch(self, tmp_path):
         import subprocess as _sp
 

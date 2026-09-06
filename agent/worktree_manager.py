@@ -1733,8 +1733,10 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
           "deleted_paths": <int>, "ref": ..., "errors": []}``. No commit, no
           ref write, branch head unmoved.
         - A failure salvaging a detected wipe (block B) returns the pure-wipe
-          shape above plus ``"guard_error": <str>``, still with ``"errors":
-          []`` — the outcome is a refusal, not a broken-git failure.
+          shape above minus ``"deleted_paths"`` (the salvage step failed
+          before that count could be determined) plus ``"guard_error":
+          <str>``, still with ``"errors": []`` — the outcome is a refusal,
+          not a broken-git failure.
         - Git subprocess failure (the pre-existing contract): ``{"preserved":
           False, "was_clean": False, "ref": ..., "errors": [<msg>, ...]}``,
           with no ``"refused"`` key. ``"refused"`` is therefore the sole
@@ -1769,13 +1771,28 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
         # `rev-parse --abbrev-ref HEAD` returns the literal string "HEAD",
         # which passes VALID_SLUG_RE and would otherwise produce
         # `refs/session-wip/HEAD`.
-        branch_result = subprocess.run(
-            ["git", "-C", str(worktree_dir), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-        )
-        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+        try:
+            branch_result = subprocess.run(
+                ["git", "-C", str(worktree_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+            )
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+        except Exception as branch_exc:
+            # A non-zero rc already falls back to the `slug` default above; an
+            # exception (e.g. TimeoutExpired) must degrade the same way rather
+            # than propagate to the outer handler, which would skip the
+            # ordinary path's `add -A` + WIP commit + ref write entirely and
+            # lose legitimate uncommitted work (#3167 follow-up).
+            logger.warning(
+                "[worktree-wip-branch-resolve-failed] slug=%s worktree=%s error=%s — "
+                "falling back to slug-derived ref.",
+                slug,
+                worktree_dir,
+                branch_exc,
+            )
+            branch = ""
         session_match = re.match(r"^session/(.+)$", branch) if branch else None
         if session_match and VALID_SLUG_RE.match(session_match.group(1)):
             ref = f"refs/session-wip/{session_match.group(1)}"
