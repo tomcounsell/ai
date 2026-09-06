@@ -905,14 +905,17 @@ general review pass.
 | Audit runs on a bare interpreter | `python tests/marker_map.py --audit` | exit code 0 |
 | Audit population is non-empty | `python tests/marker_map.py --count` | output > 800 |
 | Audit module is standard library only | `python -c "import ast,sys; m=ast.parse(open('tests/marker_map.py').read()); mods={a.name.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.Import) for a in n.names} \| {n.module.split('.')[0] for n in ast.walk(m) if isinstance(n,ast.ImportFrom) and n.module}; assert mods <= set(sys.stdlib_module_names), sorted(mods)"` | exit code 0 |
-| Every exemption is a tracked path | `python -c "import subprocess; from tests.marker_map import KNOWN_MISTAGS, EXEMPT_DIRS; tracked=set(subprocess.run(['git','ls-files'],capture_output=True,text=True).stdout.split()); bad=[k for k in KNOWN_MISTAGS if k not in tracked]; assert not bad, bad"` | exit code 0 |
-| Every exemption carries a reason | `python -c "from tests.marker_map import KNOWN_MISTAGS, EXEMPT_DIRS; bad=[k for k,v in list(KNOWN_MISTAGS.items())+list(EXEMPT_DIRS.items()) if not isinstance(v,str) or len(v.strip())<20]; assert not bad, bad"` | exit code 0 |
-| No line-number keying (anti-criterion) | `grep -crE '\b(lineno\|line_number\|line_no)\b' tests/marker_map.py tests/unit/test_feature_map_markers.py` | match count == 0 |
-| Resolution has one implementation (anti-criterion) | `grep -c 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py` | match count == 0 |
+| Every exemption is a tracked path | `python -c "import subprocess; from tests.marker_map import KNOWN_MISTAGS; tracked=set(subprocess.run(['git','ls-files'],capture_output=True,text=True).stdout.split()); bad=[k for k in KNOWN_MISTAGS if k not in tracked]; assert not bad, bad"` | exit code 0 |
+| Every exemption carries a reason | `python -c "from tests.marker_map import KNOWN_MISTAGS; bad=[k for k,v in KNOWN_MISTAGS.items() if not isinstance(v,str) or len(v.strip())<20]; assert not bad, bad"` | exit code 0 |
+| No whole-package exemption mechanism (anti-criterion) | `! grep -qF 'EXEMPT_DIRS' tests/marker_map.py tests/unit/test_feature_map_markers.py` | exit code 0 |
+| No line-number keying (anti-criterion) | `! grep -qE '\b(lineno\|line_number\|line_no)\b' tests/marker_map.py tests/unit/test_feature_map_markers.py` | exit code 0 |
+| Stem is the shipped global replace, not a prefix strip (anti-criterion) | `! grep -qE 'removeprefix\|removesuffix\|re\\.(sub\|match)' tests/marker_map.py` | exit code 0 |
+| Stem fidelity fixtures hold | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_test_judge.py')==(None,None); assert resolve_marker('test_validate_test_impact.py')==(None,None)"` | exit code 0 |
+| Resolution has one implementation (anti-criterion) | `! grep -qF 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py` | exit code 0 |
 | Resolver was not made directory-authoritative (anti-criterion) | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_pm_briefings_builder.py')[0] is None"` | exit code 0 |
 | Baseline did not grow (anti-criterion) | `python -c "from tests.marker_map import KNOWN_MISTAGS; assert len(KNOWN_MISTAGS) <= 24, len(KNOWN_MISTAGS)"` | exit code 0 |
 | youtube test retagged to tools | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_youtube_transcription.py')[0] == 'tools'"` | exit code 0 |
-| No marker lost | `python tests/marker_map.py --report \| grep -vc 'NONE$'` | output > 281 |
+| No marker lost or gained | `test "$(python tests/marker_map.py --report \| grep -vc 'NONE$')" -eq 280` | exit code 0 |
 | Feature doc exists | `test -f docs/features/feature-map-marker-guard.md` | exit code 0 |
 | Feature doc indexed | `grep -c 'feature-map-marker-guard' docs/features/README.md` | output > 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
