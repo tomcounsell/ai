@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -509,11 +509,11 @@ The one agent-facing surface in this subsystem is the sibling `validate_no_destr
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 (unmoved at `bf0a5d577`) describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
-- [ ] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1636-1645`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
-- [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
-- [ ] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
-- [ ] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
+- [x] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 (unmoved at `bf0a5d577`) describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
+- [x] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1636-1645`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
+- [x] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
+- [x] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
+- [x] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
 
 ### External Documentation Site
 
@@ -521,13 +521,13 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
 
-- [ ] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and staging, describe both wipe branches (additive-only commit vs. no commit at all), state the ordering constraint (before staging) with the reason, and name the `git reset -q` that opens the wipe path along with why it is index-recovery rather than hygiene.
-- [ ] State the fail-open asymmetry in the docstring explicitly: detection failure falls open, response failure refuses. A reader who assumes one uniform rule will "simplify" the two blocks into one and reopen the round-2 blocker.
-- [ ] Update the docstring's Returns block for the `refused` key and the two wipe shapes.
-- [ ] Add a comment at the check site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
-- [ ] Add a comment on the staging call recording that `git add` spells NUL-separated pathspecs `--pathspec-file-nul` and rejects `-z`, that `git add -A` must never be used on the wipe path because it restages the deletions, and that this one call deliberately omits `text=True` because `input` has to be bytes for a NUL-delimited pathspec.
-- [ ] Document the return contract in the docstring's Returns block: `errors` stays `[]` on a refusal, `refused` is the sole discriminator against a git failure, and `missing` / `deleted_paths` carry the detail.
-- [ ] No `config/settings.py` docstring work — the revision dropped both fields.
+- [x] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and staging, describe both wipe branches (additive-only commit vs. no commit at all), state the ordering constraint (before staging) with the reason, and name the `git reset -q` that opens the wipe path along with why it is index-recovery rather than hygiene.
+- [x] State the fail-open asymmetry in the docstring explicitly: detection failure falls open, response failure refuses. A reader who assumes one uniform rule will "simplify" the two blocks into one and reopen the round-2 blocker.
+- [x] Update the docstring's Returns block for the `refused` key and the two wipe shapes.
+- [x] Add a comment at the check site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
+- [x] Add a comment on the staging call recording that `git add` spells NUL-separated pathspecs `--pathspec-file-nul` and rejects `-z`, that `git add -A` must never be used on the wipe path because it restages the deletions, and that this one call deliberately omits `text=True` because `input` has to be bytes for a NUL-delimited pathspec.
+- [x] Document the return contract in the docstring's Returns block: `errors` stays `[]` on a refusal, `refused` is the sole discriminator against a git failure, and `missing` / `deleted_paths` carry the detail.
+- [x] No `config/settings.py` docstring work — the revision dropped both fields.
 
 ## Success Criteria
 
