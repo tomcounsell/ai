@@ -704,26 +704,33 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 
 ## Verification
 
+Every anti-criterion row below was measured against the working tree on 2026-09-06 so none of them can pass vacuously. Where a row asserts an absence, the baseline count is recorded beside it. Multi-file `grep -c` is avoided throughout: per-file `path:N` lines are not a scalar, so each counting row pipes through `wc -l` and uses the `match count == 0` form, which the checker at `agent/verification_parser.py:352` rejects on empty stdout and so fails closed when a target directory is missing.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Autoexperiment script gone | `test -e scripts/autoexperiment.py; echo $?` | output contains 1 |
 | Installer and plist gone | `ls scripts/install_autoexperiment.sh com.valor.autoexperiment.plist 2>&1 \| grep -c "No such file"` | output > 1 |
 | Service enumeration clean | `grep -c autoexperiment scripts/valor-service.sh` | match count == 0 |
-| Docs no longer cite it as live | `grep -rc "autoexperiment" docs/features/README.md docs/features/nightly-regression-tests.md docs/research/claude-code-feature-swot.md` | match count == 0 |
-| Legacy corpora retained | `ls data/experiments/summarizer/eval_samples.jsonl data/experiments/observer/eval_corpus.jsonl data/experiments/README.md \| wc -l` | output > 2 |
+| Docs no longer cite it as live | `grep -rn "autoexperiment" docs/features/README.md docs/features/nightly-regression-tests.md docs/research/claude-code-feature-swot.md \| wc -l` | match count == 0 |
+| Legacy corpora retained | `ls data/experiments/summarizer/eval_samples.jsonl data/experiments/observer/eval_corpus.jsonl data/experiments/README.md 2>/dev/null \| wc -l` | output > 2 |
 | No models sub-package | `test -d models/improvement; echo $?` | output contains 1 |
 | No YAML config | `test -e config/improvement.yaml; echo $?` | output contains 1 |
 | Eight flat models exported | `.venv/bin/python -c "import models as m; names=[n for n in m.__all__ if n.startswith('Improvement')]; print(len(names))"` | output > 7 |
 | Settings block present | `grep -c "class ImprovementSettings" config/settings.py` | output > 0 |
+| Concurrency bound is one lane | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(S().max_concurrent_research_sessions)"` | output contains 1 |
+| Daily external-LLM dollars set | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(int(S().daily_external_llm_usd))"` | output contains 10 |
 | Index guard covers new models | `scripts/pytest-clean.sh tests/unit/test_agentsession_index_guard_generalized.py tests/unit/test_improvement_models.py -q` | exit code 0 |
 | Verifying store rejects corrupted archive | `scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -q -k verifying` | exit code 0 |
-| Poll descriptor carries investigation_id | `grep -c "investigation_id" bridge/poll_registry.py tools/ask_poll.py` | output > 1 |
 | Correction detector persists events | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -q` | exit code 0 |
-| rework_rate no longer constant zero | `grep -rn "rework_triggered" agent/ reflections/ models/ \| grep -v "task_type_profile.py\|session_tags.py" \| wc -l` | output > 0 |
+| Memory-inspiration adapter reads Tom-sourced memories | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -q -k inspiration` | exit code 0 |
 | Dashboard partials render | `scripts/pytest-clean.sh tests/unit/test_ui_app.py -q -k improvement` | exit code 0 |
-| Anti-criterion: no child-gate bypass on research path | `grep -rc "VALOR_ALLOW_CHILD_SESSIONS" agent/improvement_*.py tools/improvement.py 2>/dev/null \|\| echo 0` | match count == 0 |
-| Anti-criterion: no raw Redis on Popoto keys | `grep -rcE "POPOTO_REDIS_DB\.(hset\|hdel\|sadd\|srem\|zadd\|zrem\|delete)\(" models/improvement_*.py` | match count == 0 |
-| Anti-criterion: historical zeros never render as success | `grep -c "rework_rate" ui/templates/improvement/*.html \|\| echo 0` | match count == 0 |
+| `admitted` is active on one definition, not two | `scripts/pytest-clean.sh tests/unit/test_ui_sdlc_data.py -q -k active_statuses` | exit code 0 |
+| Anti-criterion: the rework aggregate and its dead field are gone (measured 2026-09-06 with `/usr/bin/grep`: **27** matches across exactly `models/agent_session.py`, `models/task_type_profile.py`, `tools/session_tags.py`, including the writerless field at `models/agent_session.py:221` that made the old row pass vacuously) | `grep -rnE "rework_rate\|rework_triggered\|failure_stage_distribution\|get_delegation_recommendation" models/ agent/ reflections/ tools/ ui/ \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: no child-gate bypass on the research surface (measured 2026-09-06: **0** with the one definition site and `__pycache__` excluded, 3 without. The `__pycache__` filter is load-bearing: a stale `.pyc` matches and `/usr/bin/grep` reports it while a `.gitignore`-honoring grep does not) | `grep -rn "VALOR_ALLOW_CHILD_SESSIONS" agent/ tools/ models/ reflections/ \| grep -v "models/child_session_gate.py" \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: control modules never bind the Popoto client (Gap A private alias; paired with the "Eight flat models exported" row above so a missing target cannot masquerade as a pass) | `grep -rn "POPOTO_REDIS_DB" models/ ui/ \| grep improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: no question path to a human (measured 2026-09-06: **0**, so any reintroduction of the poll seam or a question ceiling bites) | `grep -rnE "investigation_id\|daily_question_ceiling" bridge/ tools/ config/ models/ ui/ \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: no controller module handles a credential (`[EXTERNAL]` No-Go; measured 2026-09-06: **0**) | `grep -rnE "OP_SERVICE_ACCOUNT_TOKEN\|op read\|op run\|Desktop/Valor/.env" models/ ui/ \| grep improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: historical zeros never render as success | `grep -rn "rework_rate" ui/ \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
