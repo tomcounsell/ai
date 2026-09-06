@@ -48,9 +48,100 @@ three behaviors layered around that base run:
    and closed sets: an open issue gets a recurrence comment instead of a second issue,
    and a title closed `NOT_PLANNED` (by its most recent closure) is commented on and
    never re-filed, while one closed `COMPLETED` re-files because failing again after a
-   fix is new information. The triage prompt states the same open-and-closed rule so
-   the pre-flight and the agent's instructions cannot drift (see the base doc's
-   "Comment-over-create" decision and issue #3075).
+   fix is new information. The prompts state the same open-and-closed rule so the
+   pre-flight and the agent's instructions cannot drift (see the base doc's
+   "Comment-over-create" decision and issue #3075). Three defences then keep a
+   *replayed* turn from filing a second issue for a node the same session already
+   opened, which is what produced the #2960–#2999 wave (issue #3170):
+   - **All three prompts hand over the lookup command.** `ISSUE_LOOKUP_INSTRUCTION`
+     carries the literal `gh issue list --state all …` REST read, so the agent sees an
+     issue the instant it exists rather than waiting on an index that lags creation by
+     minutes.
+   - **The per-node dispatch carries the detector's own resolved dispositions**, so the
+     agent confirms a decision instead of re-deriving one.
+   - **The per-node dispatch seeds a session ledger** recording what it has already
+     filed. See "Replay Idempotency" below.
+
+   Fixes two and three stop at the per-node path deliberately, and the gap is a
+   decision rather than an oversight: the cascade umbrella and the re-baseline seed
+   pre-render their own prompt at the call site and their builders take no disposition
+   or ledger parameter, so a disposition built for them would have no reader. Every
+   observed duplicate-filing incident came out of the per-node path. Both override
+   paths still get the lookup command, which is the defence that addresses the read
+   failure itself. Widening the other two is the first thing to do if a cascade or seed
+   duplicate is ever seen.
+
+### Three prompts, one lookup instruction
+
+There are **three** issue-filing prompts, not one, and each dispatches a session that
+opens real GitHub issues:
+
+| Builder | Dispatched from | Files |
+|---------|-----------------|-------|
+| `_build_triage_prompt` | `dispatch_findings`, per surviving node | One issue per node |
+| `_build_cascade_prompt` | `dispatch_findings`, per collapsed cascade | One umbrella issue |
+| `_build_seed_prompt` | `main()`, on a collection re-baseline | One seed umbrella issue |
+
+All three interpolate the same `ISSUE_LOOKUP_INSTRUCTION` constant. That matters
+historically: the doc used to imply a single prompt, which is how the cascade and seed
+prompts went four passes at this bug without ever being hardened — each carried its own
+copy of the sentence, and each pass fixed the copy it happened to be looking at. The
+seed prompt lived inline inside `main()` until #3170 and could not be rendered by a
+test or scanned by a gate at all; extracting it into a named builder is what made its
+copy of the defect visible.
+
+### Replay Idempotency
+
+`data/nightly-triage-ledger/{slug}.json` is the third and last-resort defence: a record
+on disk of what one triage session has already filed, so a turn replayed with a fresh
+context reads its predecessor's work instead of starting from zero.
+
+```json
+{
+  "slug": "nightly-triage-a1b2c3d4",
+  "created_at": "2026-09-05T06:00:00Z",
+  "entries": [
+    {"node": "tests/unit/test_a.py::test_1",
+     "title": "Nightly regression: tests/unit/test_a.py::test_1",
+     "disposition": "file",
+     "resolved_against": "gh issue list --state all (open+closed REST read)",
+     "resolved_at": "2026-09-05T06:00:00Z"}
+  ],
+  "filed": []
+}
+```
+
+- **Who writes what.** `write_triage_ledger` seeds `slug`, `created_at`, `entries` and
+  an empty `filed` before the session subprocess starts; the triage agent appends to
+  `filed` after each `gh issue create`, before moving to the next entry.
+- **Per-node dispatch only.** `entries` derives from the `dispositions` argument and
+  from nothing else, so the two `prompt=`-override dispatches produce an empty entry
+  list, no file is created for them, and `nightly-triage-baseline.json` never exists.
+  One gate does the whole narrowing; there is no separate branch.
+- **Advisory and fail-open.** Any write failure logs a `WARNING` naming the slug and
+  returns `None`; the dispatch proceeds without a ledger paragraph in its prompt. A
+  ledger that cannot be written must not stop the night from filing, the same posture
+  `open_issues()` takes when it cannot read. The prompt also tells the agent to treat a
+  missing or unparseable ledger as an empty `filed` list.
+- **Written after the `--dry-run` short-circuit.** A preview writes no state file.
+- **Deliberately unlocked.** Two sessions share a ledger only when dispatched for an
+  identical node set, which the run lock and `compute_dispatch_set` make
+  near-impossible within a machine, and the file is machine-local so two hosts never
+  share one. The one case defended is a same-slug retry landing on a ledger a live
+  session is appending to: an existing file whose `filed` array is non-empty is left
+  exactly as it is. The write itself goes through a temp file and `os.replace`, because
+  truncated JSON is worse for the agent than stale-but-valid JSON.
+- **Why `data/` and not the lane worktree.** The issue asked for a session-local file
+  under `.worktrees/{slug}/`. That worktree is a git checkout, so a file there shows up
+  in the agent's own `git status` and dies with the lane on teardown — and the
+  stale-branch sweep described under "Lane reaping" keeps any lane whose tree is dirty,
+  so a ledger inside the lane would make every triage worktree permanently unreapable,
+  reintroducing the accumulation #3162 just fixed. `data/` is already this script's
+  state home, is gitignored, survives teardown, and is reachable by absolute path from
+  inside a worktree. The slug-keyed filename preserves the session-local property.
+- **Growth is bounded by distinct failure sets, not by nights.** The per-node dispatch
+  never passes `slug_suffix`, so its slug is always the sha256 of the sorted node set
+  and a recurring failure set overwrites its own file. No pruning job.
 
 ## Run Lock (Race 1)
 
@@ -154,6 +245,7 @@ by a script with nothing to come back for. `tools/disk_reclaim.py` remains the
 | `scripts/nightly_regression_tests.py` | Adds `_acquire_run_lock` and `maybe_dispatch_triage_session` around the existing detector; see `docs/features/nightly-regression-tests.md` for the base run mechanics |
 | `data/nightly_tests.lock` | Advisory lock file for `_acquire_run_lock` (gitignored, empty — existence and the flock state are all that matter) |
 | `data/nightly_tests_last_run.json` | Now also carries `dispatched_nodes` and `dispatched_session_id` alongside the existing delta-state fields |
+| `data/nightly-triage-ledger/{slug}.json` | Per-node dispatch replay ledger (gitignored, machine-local, advisory) — see "Replay Idempotency" |
 
 ## Design Decisions
 

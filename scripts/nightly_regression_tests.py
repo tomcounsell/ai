@@ -326,6 +326,25 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 
+# The one lookup instruction all three issue-filing prompts interpolate: the
+# per-node dispatch, the cascade umbrella, and the re-baseline seed. It hands
+# the agent a REST list command instead of naming GitHub's index-backed lookup,
+# which lags issue creation by minutes -- reading it inside its own lag window
+# is how one dispatch filed the same node three times and the #2960-#2999 wave
+# followed. `8524e765b` established that principle for this module's own reads;
+# the prompts went three more passes still pointing at the index, because each
+# builder carried its own copy of the sentence. One constant, three readers, so
+# they cannot drift apart again.
+#
+# The wording constraint is load-bearing and two gates enforce it from opposite
+# directions. This comment, the constant, every prompt body, and every
+# prompt-builder docstring must express the prohibition as "the search index"
+# and "the search API" and must never spell the flag or the phrasings out
+# literally: one gate scans the rendered prompts and requires zero hits, and
+# another counts the flag across this whole module and requires exactly the
+# three legitimate mentions in the constant comments above and in
+# `open_issues`' docstring. Spelling a token out here to forbid it adds a
+# fourth and fails a passing build.
 ISSUE_LOOKUP_INSTRUCTION = (
     "To find out whether an issue already exists, run exactly this ONCE for the "
     "whole list below and filter the JSON locally on each exact title:\n"
