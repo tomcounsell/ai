@@ -304,6 +304,18 @@ So the split is: **resolution** moves to the shared helper (which is the whole p
 
 Both `expectation_reconciler._escalate_once` and `sdlc_progress._escalate_once` currently return a truthy value meaning "the human was told". After this change that claim can be false. Each must thread the helper's `False` into the reflection's `findings` list — e.g. `f"alert-suppressed: no Eng: group for {project_key}"` — so it reaches the `summary` the scheduler persists. `docs_auditor` set this precedent in PR #3077 and it is the whole mitigation for the behavior boundary named in Architectural Impact.
 
+**In `sdlc_progress` that requires a return-type change, not just a new finding.** Its `_escalate_once` returns `str | None` and its sole caller — the `_escalate` closure in `_check_project_stalls`, `reflections/sdlc_progress.py:1159-1172` — reads that single value as *both* signals at once:
+
+```python
+if msg:
+    counts["escalated"] += 1     # line 1171 — "a human was paged"
+    findings.append(msg)         # line 1172 — "there is something to report"
+```
+
+After this change those diverge: a suppressed page has something to report and nobody was paged. `_escalate_once` therefore returns `tuple[bool, str | None]` and the closure gates the two lines separately. The exact shape and the reason it is a tuple rather than a message-prefix convention are in Task 7; it is called out here because Success Criterion 6 is unreachable without the closure edit, and the closure is not visible from the per-module wiring table above.
+
+`expectation_reconciler` needs no equivalent change: its `_escalate_once` result is not read into a counter.
+
 ## Failure Path Test Strategy
 
 The whole point of this change is what happens when resolution *fails*, so the failure paths carry more weight than the happy path. Every case below is a unit test against a synthetic project dict — spike-4 established that no local run can resolve a real chat.
@@ -453,7 +465,26 @@ If a second agent is available, the one genuinely disjoint slice is the **docume
 4. **Add `send_host_eng_telegram(message, *, logger_prefix) -> bool`** wrapping `resolve_host_eng_chat` with the same swallow-and-return contract.
 5. **Write `tests/unit/reflections/test_utilities_eng_telegram.py`** covering both tables from Failure Path Test Strategy. Run the two mutation anti-tests now, before any consumer is wired: revert `str(chat_id)` to `group_name` and confirm red; restore.
 6. **Wire `expectation_reconciler`**: `_escalate_once(project, job_id, eid, message)`, update the three call sites at 444 / 480 / 506, body calls `send_eng_telegram(..., logger_prefix="expectation_reconciler")`, and thread a `False` return into `findings` as an `alert-suppressed` entry.
-7. **Wire `sdlc_progress`**: `_send_alert(project, message)`; add a `project_dict` keyword to `_escalate_once` (it already takes `project=project_key` as a string — keep that, it feeds the message text) and thread it from `_check_project_stalls`; thread suppression into `findings` and do **not** increment `counts["escalated"]` on a suppressed page.
+7. **Wire `sdlc_progress`, and change `_escalate_once`'s return type to a 2-tuple.** Three coupled edits, all in `reflections/sdlc_progress.py`:
+
+   - `_send_alert(message)` (line 784) → `_send_alert(project_dict, message) -> bool`, body calling `send_eng_telegram(project_dict, message, logger_prefix="sdlc_progress")` and returning its result.
+   - `_escalate_once` (line 750) gains a `project_dict: dict` keyword — it already takes `project=project_key` as a *string* that feeds the message text; keep that, it is a different thing. **Its return type changes from `str | None` to `tuple[bool, str | None]`**, `(sent, msg)`:
+     - sentinel already burned or Redis unreadable → `(False, None)` — nothing to report, nothing to count (unchanged behavior, just re-typed).
+     - `_send_alert` returned `True` → `(True, message)`.
+     - `_send_alert` returned `False` (no `Eng:` group resolved) → `(False, f"alert-suppressed: no Eng: group for {project} ({slug}@{sha[:8]})")`. Update the docstring, which currently promises "the message that was sent, or None".
+   - **The `_escalate` closure inside `_check_project_stalls` (lines 1159-1172) must be edited, and this is the part a builder following only the table would miss.** It currently collapses both outcomes into one gate at lines 1170-1172 — `if msg:` → `counts["escalated"] += 1; findings.append(msg)`. One boolean cannot express "have something to report" and "told a human" independently. Split it:
+
+     ```python
+     sent, msg = _escalate_once(project_dict=project, project=project_key, ...)
+     if msg:
+         findings.append(msg)
+     if sent:
+         counts["escalated"] += 1
+     ```
+
+     The tuple is chosen over branching on an `"alert-suppressed"` string prefix deliberately: a prefix makes the counter's correctness depend on message wording, and the suppression string is exactly the kind of text a later edit rewords without realizing a counter reads it.
+
+   `_escalate_once` has exactly one call site — this closure (line 1160) — so the return-type change has no other blast radius. `project` (the dict) is already bound on the same frame in `_check_project_stalls`; nothing new needs threading (spike-1).
 8. **Wire `sentry_triage`**: `_send_telegram_notification` body → `send_host_eng_telegram(message, logger_prefix="sentry_triage")`. Arity unchanged.
 9. **Wire `stall_advisory`**: `_send_alert` body → `send_host_eng_telegram(message, logger_prefix="stall_advisory")`. Arity unchanged.
 10. **Wire `scripts/memory_consolidation.py:352` to `resolve_host_eng_chat` only — do NOT route it through `send_host_eng_telegram`.** In `_flag_contradiction` (line 333), replace the literal `"Eng: Valor"` in the argv at line 352 with the return of `resolve_host_eng_chat()`, and guard: `chat = resolve_host_eng_chat()`; if `chat is None`, log a warning naming the suppression and return without sending *and without* writing the contradiction log. Otherwise keep the existing `subprocess.run([..., "--chat", chat, telegram_msg], check=True, capture_output=True, timeout=10)` verbatim, and keep **both** existing handlers untouched — `except subprocess.CalledProcessError` (line 357) and `except Exception` (line 365), each already calling `_write_contradiction_log(ids, rationale, contents)`. The transport-failure → log-file guarantee must come out of this task byte-identical in behavior; only the destination changes. See "Why `memory_consolidation` keeps its own `subprocess.run`" in Solution §3.

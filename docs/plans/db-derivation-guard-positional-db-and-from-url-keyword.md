@@ -807,21 +807,44 @@ number.
 ## Verification
 
 Every row below was executed against unmodified `main` — rows present in the
-first draft at `67d714662`, rows added during the critique revision at
-`d2c507ad9`. **Five defects sit behind six red rows today**: `POSITIONAL 0` and
-`STRICT 0` are one defect against two constructor names, then `URLKW 0`,
-`FIXTURE 1`, `URLLAUNDER 0`, and `URLDEFAULT 0`. The last two matter most: they
-are shipped code accepting a hardcoded pool-slot URL, once through a plain local
-and once through a parameter default. That recorded red state is the paper
-trail: a fix that cannot be shown flipping these exact rows has not been
+first draft at `67d714662`, rows added during the first critique revision at
+`d2c507ad9`, and the leg-2/leg-3 split plus the corrected binding-form rows
+added during the second at `bf0a5d577`.
+
+**Four defects sit behind six red rows today.** `POSITIONAL 0` and `STRICT 0`
+are defect 1 against two constructor names. `URLKW 0` is defect 2. `FIXTURE 1`
+is defect 3. `URLLAUNDER 0` and `URLDEFAULT 0` are defect 4 — route 2's
+bare-name leg performs no scope check — in two spellings, once through a plain
+local and once through a parameter default. The route-2 pair matters most: it is
+shipped code accepting a hardcoded pool-slot URL. That recorded red state is the
+paper trail: a fix that cannot be shown flipping these exact rows has not been
 demonstrated.
 
-Three groups of rows are **invariants rather than defects**, and each exists
-because a plausible implementation would break it silently:
+Every other row is an **invariant rather than a defect**, and each exists
+because a plausible implementation would break it silently. The largest group
+exists to make the shared accept predicate's three legs individually falsifiable.
+**A row proves something about leg 3 (`_rebound_names`) only if it first
+SATISFIES leg 2**: the sanctioned identifier must be a parameter of the enclosing
+function carrying no default, or leg 2 refuses the site and leg 3 is never
+consulted. That distinction is what the row groups below encode, and it is why
+the row count grew rather than the fix.
 
-- `LDEFAULT`, `LMODULE`, `LFOR`, `LWALRUS`, `LWITH`, `LAUG`, `LAUNDER1`, `LAUNDER2` are red today and must stay red. The first six are the shapes spike-7 measured the negative binding check flipping to green. They are the executable form of the constraint; before the revision the default-argument case existed only as prose in Success Criteria with no runnable command, and the other five appeared nowhere.
-- `STARRED` and `STARSTRICT` pin fix 1's `ast.Starred` suppression at the one index where the branch is reachable. `EDGE` cannot substitute: its `redis.Redis(*args)` has one argument and short-circuits on the length guard.
-- `URLHOP` paired with `DBHOP` pins residual gap 6 — route 2 has no one-hop alias leg, so the same shape that route 1 accepts is a violation there. The pair is what makes the disclosure checkable: if someone closes the gap, `URLHOP` goes to 0 and the docstring must change with it.
+- **Leg-2 evidence — 7 rows, red today, red after.** `LAUNDER1`, `LAUNDER2`, `LMODULE`, `LFOR`, `LWALRUS` and `LWITH` never make the sanctioned identifier a parameter of the enclosing function at all; `LDEFAULT` makes it one carrying a default. Leg 2 refuses all seven on its own, so none of them exercises `_rebound_names`. They are the executable form of the reserved-identifier and no-default constraints, nothing more.
+- **Leg-3 evidence — 17 rows, red today, red after.** Every `L3*` row puts the sanctioned name in the parameter list with **no default**, so legs 1 and 2 both pass and only the rebinding check can refuse the site. One row per binding form the corrected `_rebound_names` must catch: `L3ASSIGN`, `L3ANNASSIGN`, `L3AUG`, `L3FOR`, `L3ASYNCFOR`, `L3WALRUS`, `L3WITH`, `L3ASYNCWITH` (the eight the `ast.Name`/`Store` sweep covers), then `L3EXCEPT`, `L3IMPORT`, `L3DEF`, `L3CLASS`, `L3MATCH`, `L3MATCHSTAR`, `L3MATCHMAP` (the seven str-valued binders), then `L3NONLOCAL` and `L3GLOBAL` (the two that require descending into a nested scope for the declaration statement alone).
+- **Leg-3 over-refusal evidence — 3 rows, red today, GREEN after.** `L3COMP`, `L3LAMBDA` and `L3NESTASSIGN` are the shapes a too-eager `_rebound_names` turns into false positives on a genuine fixture parameter. Each was verified in the interpreter to leave the outer parameter's value intact (5, not 7). They are the only rows in the leg-3 group whose expected value differs from their value at HEAD, and they are why the group cannot be satisfied by refusing everything.
+- **Route-2 leg-3 evidence — 5 rows, GREEN today, red after.** `URLL3ASSIGN`, `URLL3FOR`, `URLL3EXCEPT`, `URLL3MATCH` and `URLL3NONLOCAL` mirror the route-1 leg-3 rows on `from_url`, where the leg accepts on the identifier alone today. They are defect 4 measured across binding forms rather than only the two spellings named above.
+- **Route-2 over-refusal evidence — 2 rows, green today, green after.** `URLL3COMP` and `URLL3NESTASSIGN` keep fix 3b from acquiring the false positive its route-1 twin is guarded against. Green in both directions is not vacuous here: it is green today for the wrong reason (name match) and must stay green for the right one (unshadowed parameter).
+- **`STARRED` and `STARSTRICT`** pin fix 1's `ast.Starred` suppression at the one index where the branch is reachable. `EDGE` cannot substitute: its `redis.Redis(*args)` has one argument and short-circuits on the length guard.
+- **`URLHOP` paired with `DBHOP`** pins residual gap 6 — route 2 has no one-hop alias leg, so the same shape that route 1 accepts is a violation there. The pair is what makes the disclosure checkable: if someone closes the gap, `URLHOP` goes to 0 and the docstring must change with it.
+
+**What is actually pinned, stated plainly.** An earlier revision claimed the
+eight `L*` rows gave all ten spike-7 shapes an executable row. That was false:
+seven of the eight are leg-2 evidence and never reach `_rebound_names`, only
+`LAUG` (now `L3AUG`) did, and four shapes spike-7 named — `except ... as`,
+`import ... as`, nested `def`, and the comprehension target — carried no row,
+no Success Criterion and no Test Impact entry. The set pinned now is the
+seventeen `L3*` binding-form rows, the three `L3*` over-refusal rows, and the
+seven route-2 rows, each measured at HEAD by the driver below.
 
 | Check | Command | Expected |
 |-------|---------|----------|

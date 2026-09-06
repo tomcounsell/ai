@@ -760,10 +760,20 @@ confirm the deletion is total.
 - **Parallel**: false
 - Delete the five `_write_liveness(...)` call sites at `reflections/docs_auditor.py:2450`,
   `:2465`, `:2493`, `:2573`, `:2695`, and the "11. Liveness signal" comment above the last.
-- Append the vault clause to the created-PR summary string, emitting on `0` and omitting
-  on `None`. Measure the worst-case summary length against the scheduler's 500-character
-  truncation and record the number in the PR description; reorder the clause ahead of
-  `PR={pr_url}` if the budget is tight.
+- Append the vault clause to the created-PR summary string **unconditionally**. Write no
+  `is not None` guard: `_run_vault_drift_detection` is annotated `-> int`
+  (`reflections/docs_auditor.py:2370`) and returns an `int` on all three of its exits —
+  `return 0` when the vault root is unresolvable (`:2384-2385`), `return compared` on
+  success (`:2398`), and `return 0` from its `except Exception` (`:2401`). A `None` arm
+  would guard a value that cannot occur, which is exactly the dead code this PR deletes,
+  and it would fail the plan's own "Clause is unconditional" Verification row.
+- Measure the worst-case summary length against the scheduler's 500-character truncation
+  (`agent/reflection_scheduler.py:648`, `str(summary_str)[:500]`) and record the number in
+  the PR description. Do **not** reorder the clause ahead of `PR={pr_url}`: Risk 1 deletes
+  that fallback outright, because inserting anything between `{suppressed_note}` and
+  `, PR=` can displace `suppressed_note` past `PR=` and break
+  `test_step9_suppression_reaches_summary_before_pr_url`
+  (`tests/unit/test_docs_auditor_substrate.py:1762`, assertion at `:1787`).
 - Delete `_write_liveness` (`:2153-2192`) and the two constants (`:136-137`); trim the
   "liveness" clause from the `:132` comment.
 - Run `python -m ruff check reflections/docs_auditor.py`. An F841 on
@@ -774,7 +784,7 @@ confirm the deletion is total.
 - **Task ID**: build-tests
 - **Depends On**: build-delete-liveness
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`
-- **Informed By**: Test Impact (all eight bullets)
+- **Informed By**: Test Impact (all ten bullets)
 - **Assigned To**: liveness-deleter
 - **Agent Type**: builder
 - **Parallel**: false
@@ -786,7 +796,10 @@ confirm the deletion is total.
   comment at `:1960`.
 - Add `TestLivenessDeadCodeRemoved` (three `hasattr` assertions) beside
   `TestVaultDeadCodeRemoved` at `:3093`.
-- Add the two vault-clause tests: present-and-zero, absent-when-None.
+- Add the two vault-clause tests: **present-and-zero** on the created-PR path (the summary
+  contains `vault 0 narratives compared`); **absent** on the zero-diff and no-candidates
+  paths (`"vault"` appears in neither summary). There is no `None`-valued case to test —
+  the detector is `-> int` on every path (`:2370`, `:2384-2385`, `:2398`, `:2401`).
 - Run `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py`.
 
 ### 3. Add the orphaned-key migration
@@ -808,10 +821,13 @@ confirm the deletion is total.
 
 - **Task ID**: document-feature
 - **Depends On**: build-delete-liveness, build-tests, build-migration
+- **Validates**: `docs/features/docs-auditor.md`, `docs/features/vault-drift-audit.md`
+  (Verification rows "Docs clean (literal symbols)" and "Docs clean (bare word)")
+- **Informed By**: Documentation (all nine clusters), Risk 4
 - **Assigned To**: liveness-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Work the eight clusters enumerated in the Documentation section.
+- Work the nine clusters enumerated in the Documentation section.
 - Rewrite `vault-drift-audit.md`'s `## Liveness signal` around the summary clause, keeping
   the three-way `0`/absent/unresolvable distinction intact.
 - Touch nothing under `docs/archive/`.
@@ -820,6 +836,9 @@ confirm the deletion is total.
 
 - **Task ID**: validate-all
 - **Depends On**: build-delete-liveness, build-tests, build-migration, document-feature
+- **Validates**: the whole `## Verification` table (every row), plus `docs/archive/`
+  byte-identity
+- **Informed By**: Verification, Success Criteria
 - **Assigned To**: liveness-validator
 - **Agent Type**: validator
 - **Parallel**: false
