@@ -54,13 +54,17 @@ Every kill in this file is safe by construction and does NOT get routed through
 - The single ``recover()``/``os.kill`` path (``test_recover_down_does_not_raise``)
   uses a hardcoded non-existent PID (99999999), never a runtime-derived one.
 
-``assert_not_live_worker`` is deliberately NOT applied to the spawned fake-worker
-PID: ``_spawn_fake_worker`` reassigns ``sys.argv`` inside its ``python -c`` payload
-so the process *reports itself* as ``python -m worker``, which is exactly the shape
-the guard refuses. Guarding it would (correctly) raise on the intentionally
-worker-argv-shaped fixture. AC#2 is therefore satisfied by the additive guard + its
-unit test (``tests/unit/test_worker_guard.py``), per the plan's success-criteria
-note that an all-mock-scoped audit result needs no in-test guard call.
+Every fake-worker kill IS additionally routed through
+``tests._worker_guard.assert_not_live_worker`` (see ``_kill_fake_worker``), and it
+passes. The fixture only reassigns ``sys.argv`` from *inside* the process, which
+does not rewrite the OS-level argv, and the guard reads the kernel argv via
+``ps -ww -p <pid> -o command=``. What it sees is
+``<python> -c "import sys, time; sys.argv[0] = '-m'; ..."`` — no ``-m worker``
+token pair for the guard's "``-m`` + whitespace + ``worker``" regex, and no match in
+``find_python_service_pids`` either — so the guard does not fire on the fixture
+while still covering these call sites against a future refactor that drops a
+probe mock. AC#2 is satisfied by that call plus the guard's own unit test
+(``tests/unit/test_worker_guard.py``).
 
 Why the fake worker is invisible to the real lookup
 ---------------------------------------------------
@@ -83,6 +87,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from monitoring.worker_watchdog import HEARTBEAT_THRESHOLD, _handle_missing_worker, check, recover
+from tests._worker_guard import assert_not_live_worker
 from tests.db_claim import subprocess_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.macos_only]
@@ -113,13 +118,28 @@ def _spawn_fake_worker() -> subprocess.Popen:
         [
             sys.executable,
             "-c",
-            # Self-report as 'python -m worker' (the shape _worker_guard refuses).
+            # Self-report as 'python -m worker' from the inside only: the
+            # kernel argv stays `<python> -c "..."`, which _worker_guard's
+            # `-m\s+worker` regex does not match. See the module docstring.
             "import sys, time; sys.argv[0] = '-m'; sys.argv[1:] = ['worker']; time.sleep(300)",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=subprocess_env(),
     )
+
+
+def _kill_fake_worker(proc: subprocess.Popen) -> None:
+    """SIGKILL a fake worker, guarded by ``assert_not_live_worker`` first (#2147).
+
+    The PID is self-spawned and signalled by ``Popen`` handle, so it can never be
+    the launchd worker — but the guard is cheap and pins that invariant here
+    rather than in prose. It passes on this fixture: the kernel argv is
+    ``<python> -c "..."``, not ``python -m worker``.
+    """
+    assert_not_live_worker(proc.pid)
+    proc.kill()
+    proc.wait()
 
 
 def _pid_lookup_for(proc: subprocess.Popen):
@@ -175,8 +195,7 @@ class TestWatchdogDetectsUnexpectedExit:
             if status["pid"] is not None:
                 assert isinstance(status["pid"], int)
         finally:
-            proc.kill()
-            proc.wait()
+            _kill_fake_worker(proc)
 
     def test_check_detects_down_after_unexpected_exit(self):
         """Core acceptance criterion: watchdog detects process exit < one tick + 10s grace.
@@ -190,8 +209,7 @@ class TestWatchdogDetectsUnexpectedExit:
         time.sleep(0.3)  # let the process table register the process
 
         # Ungraceful exit — simulate OOM kill / supervisor force-kill
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         t0 = time.monotonic()
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
@@ -213,8 +231,7 @@ class TestWatchdogDetectsUnexpectedExit:
         proc = _spawn_fake_worker()
         time.sleep(0.3)
 
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         t0 = time.monotonic()
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
@@ -261,8 +278,7 @@ class TestWatchdogDetectsUnexpectedExit:
         proc = _spawn_fake_worker()
         time.sleep(0.3)
 
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
             status = check()
@@ -297,8 +313,7 @@ class TestWatchdogDetectsUnexpectedExit:
         exit_time = time.monotonic()
 
         # Simulate unexpected exit (e.g., OOM kill, uncaught exception → crash)
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         # Watchdog runs check() on its tick — simulate that tick now
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):

@@ -708,7 +708,7 @@ def kill_stale_processes() -> int:
     Those are one-shot migration guards ("is the worker stopped before I
     migrate?"), where the ancestor defect fails *dangerous* rather than safe —
     a worker-hosted caller reads a live worker as stopped. Tracked as
-    follow-ups on #3164, not fixed here.
+    follow-ups on #3187, not fixed here (#3164 closes with this PR).
     """
     killed = 0
     try:

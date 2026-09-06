@@ -2383,6 +2383,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         else:
                             # Kickstart fallback: force-start the service if launchd
                             # didn't auto-start after bootout+bootstrap.
+                            #
+                            # No `is_own_ancestor` gate here, unlike the sibling
+                            # kickstart in `_self_heal_stale_worker`: this branch is
+                            # reached ONLY when `service.get_worker_pid()` returned
+                            # None, so the ancestor-safe lookup found nothing and
+                            # there is no PID that could be this run's own ancestor.
+                            # That positional invariant is load-bearing (#3164) — do
+                            # not hoist this call out of the `else`, or a `kickstart
+                            # -k` can SIGKILL the update run's own parent worker.
                             import subprocess
 
                             uid = os.getuid()

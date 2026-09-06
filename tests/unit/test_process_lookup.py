@@ -188,6 +188,18 @@ def test_interpreter_options_before_dash_m_still_resolve(monkeypatch, line, why)
     assert process_lookup.find_python_service_pids(module="worker") == [pid], why
 
 
+def test_clustered_short_flag_module_launch_resolves(monkeypatch):
+    """`python -um worker` — a cluster ending in `m` must still resolve the module.
+
+    Skipping the cluster whole reads `worker` as a *script path*, so both
+    selectors miss and the lookup returns nothing (a silent false negative).
+    """
+    fake_ps(monkeypatch, ["  62007 /usr/bin/python3 -um worker"])
+
+    assert process_lookup.find_python_service_pids(module="worker") == [62007]
+    assert process_lookup.find_python_service_pids(script_suffix=WORKER_SUFFIX) == []
+
+
 def test_value_option_before_a_script_path_still_resolves(monkeypatch):
     """`python -X importtime /abs/.../worker/__main__.py` resolves via script_suffix."""
     fake_ps(
@@ -433,6 +445,19 @@ def test_argv_without_a_program_matches_nothing_and_does_not_raise(monkeypatch, 
         # `--check-hash-based-pycs` also begins with `-c`: it must keep taking a
         # value token, not be read as an attached `-c` payload.
         (["python", "--check-hash-based-pycs", "always", "-mworker"], ("worker", None)),
+        # -- bundled short-flag clusters ---------------------------------------
+        # A cluster whose LAST letter is a terminator or a value option cannot be
+        # skipped whole: `-um worker` would otherwise report `worker` as a script
+        # path. All of these are legal CPython (verified against the interpreter).
+        (["python", "-um", "worker"], ("worker", None)),
+        (["python", "-uEm", "platform"], ("platform", None)),
+        (["python", "-umworker"], ("worker", None)),
+        (["python", "-uc", "print(1)"], (None, None)),
+        # `W` inside a cluster takes the rest of the cluster as its value, or the
+        # next argv token when the cluster ends at the flag.
+        (["python", "-uW", "ignore", "-m", "worker"], ("worker", None)),
+        (["python", "-uWignore", "-m", "worker"], ("worker", None)),
+        (["python", "-uW", "ignore", "/abs/worker/__main__.py"], (None, "/abs/worker/__main__.py")),
     ],
 )
 def test_parse_python_invocation(argv, expected):
@@ -491,15 +516,27 @@ def test_is_own_ancestor_false_for_init():
     assert process_lookup.is_own_ancestor(1) is False
 
 
-def test_is_own_ancestor_false_when_the_tree_is_unreadable(monkeypatch):
-    """Conservative on failure: no suppression, so a real recovery restart still runs."""
+@pytest.mark.parametrize("on_unreadable", [False, True], ids=["fail-open", "fail-closed"])
+def test_is_own_ancestor_unreadable_tree_returns_the_requested_polarity(monkeypatch, on_unreadable):
+    """An unreadable chain is INCONCLUSIVE, so the caller picks the answer.
+
+    The restart path (`run.py`) takes the default False — a spurious True would
+    disable a legitimate recovery restart. The kill paths (`recover`,
+    `stop_email`) pass True, because "unreadable → proceed to kill" is the
+    dangerous direction there.
+    """
     monkeypatch.setattr(process_lookup, "_parent_pid", lambda pid: None)
 
-    assert process_lookup.is_own_ancestor(999_999) is False
+    assert process_lookup.is_own_ancestor(999_999, on_unreadable=on_unreadable) is on_unreadable
 
 
-def test_is_own_ancestor_terminates_on_a_parent_cycle(monkeypatch):
-    """A cycle in the reported tree must exhaust the bound, not hang the caller."""
+@pytest.mark.parametrize("on_unreadable", [False, True], ids=["fail-open", "fail-closed"])
+def test_is_own_ancestor_terminates_on_a_parent_cycle(monkeypatch, on_unreadable):
+    """A cycle in the reported tree must exhaust the bound, not hang the caller.
+
+    Exhausting the bound is inconclusive too — the walk never reached pid 1 — so
+    it returns ``on_unreadable`` rather than a hardcoded False.
+    """
     seen: list[int] = []
 
     def _cycle(pid: int) -> int:
@@ -508,8 +545,20 @@ def test_is_own_ancestor_terminates_on_a_parent_cycle(monkeypatch):
 
     monkeypatch.setattr(process_lookup, "_parent_pid", _cycle)
 
-    assert process_lookup.is_own_ancestor(999_999) is False
+    assert process_lookup.is_own_ancestor(999_999, on_unreadable=on_unreadable) is on_unreadable
     assert len(seen) <= 64, "the walk must be bounded"
+
+
+@pytest.mark.parametrize("on_unreadable", [False, True], ids=["fail-open", "fail-closed"])
+def test_is_own_ancestor_polarity_does_not_affect_conclusive_answers(on_unreadable):
+    """``on_unreadable`` is returned ONLY when the walk cannot answer.
+
+    Reaching pid <= 1 with no match is a real "no", and a live self/ancestor hit
+    is a real "yes"; neither may be flipped by the keyword.
+    """
+    assert process_lookup.is_own_ancestor(1, on_unreadable=on_unreadable) is False
+    assert process_lookup.is_own_ancestor(os.getpid(), on_unreadable=on_unreadable) is True
+    assert process_lookup.is_own_ancestor(os.getppid(), on_unreadable=on_unreadable) is True
 
 
 # ---------------------------------------------------------------------------
@@ -594,13 +643,31 @@ def test_stop_email_refuses_to_signal_its_own_ancestor(
     direct-signal fallback over the service script.
     """
     monkeypatch.setattr(update_service, "get_email_pid", lambda: 4242)
-    monkeypatch.setattr(update_service, "is_own_ancestor", lambda pid: is_ancestor)
+    monkeypatch.setattr(update_service, "is_own_ancestor", lambda pid, **kwargs: is_ancestor)
     kills: list[tuple[int, int]] = []
-    monkeypatch.setattr(update_service.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    # Patch the module's own `_signal_pid` seam, not `os.kill`, so nothing else
+    # in the process sees a stubbed `os.kill` for the duration of the test.
+    monkeypatch.setattr(update_service, "_signal_pid", lambda pid, sig: kills.append((pid, sig)))
 
     # The PID is still resolvable either way, so the "did it stop?" answer is False.
     assert update_service.stop_email(tmp_path) is False
     assert kills == expected_kills
+
+
+def test_stop_email_refuses_to_signal_when_the_process_tree_is_unreadable(monkeypatch, tmp_path):
+    """A kill path must gate with ``on_unreadable=True`` (#3164).
+
+    If `ps` cannot be read, "is this my own ancestor?" is unanswered — and here
+    the unsafe direction is proceeding, so the call site must ask for the
+    fail-closed polarity rather than the default.
+    """
+    monkeypatch.setattr(update_service, "get_email_pid", lambda: 4242)
+    monkeypatch.setattr(process_lookup, "_parent_pid", lambda pid: None)
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(update_service, "_signal_pid", lambda pid, sig: kills.append((pid, sig)))
+
+    assert update_service.stop_email(tmp_path) is False
+    assert kills == [], "an unreadable process tree must mean 'refuse to signal'"
 
 
 # ---------------------------------------------------------------------------

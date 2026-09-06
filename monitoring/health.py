@@ -122,11 +122,21 @@ class HealthChecker:
         # Check if bridge is running by looking for PID file or process
         try:
             # Ancestor-safe probe (#3164). BSD `pgrep` excludes the calling
-            # process and all of its ancestors, and this check runs inside
-            # bridge-hosted processes — the dashboard and `tools.doctor` both
-            # execute in `claude -p` sessions the bridge spawned — so a healthy
-            # bridge read as absent. `tools.process_lookup` reads `ps`, which
-            # has no ancestor filter, and never raises.
+            # process and all of its ancestors, so any caller that the bridge
+            # spawned reads a healthy bridge as absent.
+            #
+            # This probe has no live caller today: `check_telegram_connection`
+            # is reached only from `get_overall_health()` below, whose only
+            # caller is `tests/e2e/test_config_bootstrap.py`. The dashboard's
+            # bridge card is `ui/app.py::_get_bridge_health()`, which reads the
+            # mtime of `data/last_connected`; `tools/doctor.py`'s telegram check
+            # is `_check_telegram_session` -> `scripts.update.verify
+            # .check_telegram_session`, a session-file check (doctor uses
+            # `HealthChecker` only for Redis, API keys and disk). It is
+            # converted anyway because it is the same defect class #3164 fixed,
+            # so a caller appearing later cannot silently reintroduce it.
+            # `tools.process_lookup` reads `ps`, which has no ancestor filter,
+            # and never raises.
             from tools.process_lookup import find_python_service_pids
 
             pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import monitoring.worker_watchdog as wwd
+from tools import process_lookup
 
 # --- Fixtures -----------------------------------------------------------------
 
@@ -56,7 +57,7 @@ def _pin_recover_ancestry_guard(monkeypatch):
     and without ``raising=False``, so a moved import fails loudly. The test that
     exercises the gate itself overrides this with its own patch.
     """
-    monkeypatch.setattr(wwd, "is_own_ancestor", lambda pid: False)
+    monkeypatch.setattr(wwd, "is_own_ancestor", lambda pid, **kwargs: False)
 
 
 @pytest.fixture
@@ -854,6 +855,35 @@ class TestRecoverAncestryGuard:
         mock_kill.assert_not_called()
         mock_poll.assert_not_called()
         assert any("ancestor" in r.message for r in caplog.records)
+
+    def test_recover_refuses_when_the_process_tree_is_unreadable(self, isolated_state, caplog):
+        """The gate must ask for the fail-closed polarity (#3164).
+
+        ``is_own_ancestor`` defaults to fail-OPEN — an unreadable process tree
+        answers "not an ancestor", which is right for ``run.py``'s restart path
+        but wrong here, where proceeding means SIGTERM/SIGKILL on a PID that may
+        be this caller's own ancestor. Under fork pressure — the condition that
+        wedges a worker and triggers ``recover()`` — ``ps`` is also the thing
+        most likely to fail, so the default polarity would drop the gate exactly
+        when it is needed. Exercises the REAL ``is_own_ancestor`` (overriding the
+        autouse pin) with the process-table read broken.
+        """
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+                patch.object(wwd, "is_own_ancestor", process_lookup.is_own_ancestor),
+                patch.object(process_lookup, "_parent_pid", lambda pid: None),
+            ):
+                with caplog.at_level(logging.ERROR, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_kill.assert_not_called()
+        mock_poll.assert_not_called()
 
 
 class TestRecoverW2SigkillEscalation:

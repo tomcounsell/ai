@@ -720,6 +720,16 @@ def is_email_configured(project_dir: Path) -> bool:
     return False
 
 
+def _signal_pid(pid: int, sig: int) -> None:
+    """Send ``sig`` to ``pid``.
+
+    A module-level seam so a test can patch signalling on *this* module instead
+    of on the shared ``os`` module, whose ``kill`` every other import in the
+    process also sees.
+    """
+    os.kill(pid, sig)
+
+
 def stop_email(project_dir: Path) -> bool:
     """Stop the email bridge. Returns True if it stopped."""
     service_script = project_dir / "scripts" / "valor-service.sh"
@@ -730,7 +740,11 @@ def stop_email(project_dir: Path) -> bool:
         # its own ancestor's PID; signalling it would take the caller down.
         # Skipping the kill also means we do not claim it stopped — the
         # `is_email_running()` return below still reports it up.
-        if pid and is_own_ancestor(pid):
+        # `on_unreadable=True`: this is a kill path, so an unreadable process
+        # tree must mean "refuse to signal" rather than "proceed" (see
+        # `is_own_ancestor`'s docstring for why the restart gate in
+        # `scripts/update/run.py` takes the opposite polarity).
+        if pid and is_own_ancestor(pid, on_unreadable=True):
             logger.warning(
                 "stop_email: email bridge pid %s is an ancestor of this process — "
                 "refusing to SIGTERM it; stop it from outside a hosted session",
@@ -738,7 +752,7 @@ def stop_email(project_dir: Path) -> bool:
             )
         elif pid:
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal_pid(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         return not is_email_running()

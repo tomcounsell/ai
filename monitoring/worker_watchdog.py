@@ -293,7 +293,13 @@ def recover(status: dict) -> None:
     # exclusion used to make that unreachable by accident; it is now an explicit
     # decision, symmetric with the gate in `scripts/update/run.py`. The launchd
     # tick is unaffected: it runs at ppid 1 and is never a worker descendant.
-    if is_own_ancestor(pid):
+    #
+    # `on_unreadable=True` because this is a kill path: an unreadable process
+    # tree must mean "refuse to signal", not "proceed". `run.py`'s restart gate
+    # takes the opposite (default) polarity — see `is_own_ancestor`'s docstring.
+    # Cheap here: `ps` already succeeded once to produce this PID, so a later
+    # transient failure only defers the kill to the next watchdog tick.
+    if is_own_ancestor(pid, on_unreadable=True):
         logger.error(
             "recover(): worker PID %d is an ancestor of this process — refusing to signal "
             "it, because SIGTERM/SIGKILL here would kill this caller. Run the watchdog "
