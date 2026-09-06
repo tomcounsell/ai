@@ -232,7 +232,7 @@ sidestep it.
 - Review rounds: 1
 
 The deletion itself is mechanical. The cost is in not losing anything on the way out:
-seven test patch sites, two feature docs with eight reference clusters between them, and one
+seven test patch sites, two feature docs with nine reference clusters between them, and one
 field that needs a new home.
 
 ## Prerequisites
@@ -287,8 +287,8 @@ f"PR={pr_url}; vault {vault_narratives_compared} narratives compared"
 **The clause is unconditional. Write no `is not None` guard.**
 `_run_vault_drift_detection` is annotated `-> int` (`reflections/docs_auditor.py:2370`)
 and returns an `int` on every path: `return 0` when `_resolve_vault_root` yields `None`
-(`:2384-2385`), `return compared` on success (`:2396`), and `return 0` from its
-`except Exception` (`:2399-2400`). The local at `:2460` is therefore never `None`, and a
+(`:2384-2385`), `return compared` on success (`:2398`), and `return 0` from its
+`except Exception` (`:2399`, `return 0` at `:2401`). The local at `:2460` is therefore never `None`, and a
 guard against a value that cannot occur would ship dead code inside a dead-code-deletion
 PR. A builder must not "fix" this by making the function return `None`; its annotation is
 correct and stays.
@@ -371,7 +371,8 @@ and `instance.delete()` has nothing to operate on; the raw-Redis guard is a Bash
 PreToolUse hook and does not fire on Python source. Do the sweep through the migration,
 never an ad-hoc `redis-cli DEL` from a build agent's shell.
 
-**5. Docs.** Eight reference clusters across two files, enumerated in the Documentation
+**5. Docs.** Nine reference clusters across two files (seven in `docs-auditor.md`, two in
+`vault-drift-audit.md`), enumerated in the Documentation
 section. The `## Rotation State` section the issue names is only one of them; the issue
 was written before #2782 and #2739 added the rest.
 
@@ -399,7 +400,7 @@ was written before #2782 and #2739 added the rest.
       never carried the count and still must not. This is the per-call-site half of the
       distinction (Technical Approach item 1); there is no `None`-valued case to test,
       because `_run_vault_drift_detection` is `-> int` and returns `0` on every path
-      (`:2384`, `:2396`, `:2399-2400`).
+      (`:2384-2385`, `:2398`, `:2401`).
 - [ ] Empty `summary` reaching the scheduler is out of scope: every return path builds a
       non-empty f-string, and the scheduler's `if summary_str else None` guard
       (`:648`) already handles a falsy value.
@@ -539,19 +540,20 @@ documented rationale.
 
 ### Risk 4: The build treats "delete the docs section" as "delete the Rotation State section"
 
-**Impact:** The issue names only `## Rotation State`. Following it literally leaves seven
+**Impact:** The issue names only `## Rotation State`. Following it literally leaves eight
 other reference clusters, including a whole `## Liveness signal` section in
 `vault-drift-audit.md` describing a function that no longer exists. That is precisely the
 "historical artifact in docs" Principle 1 forbids, and the docs-auditor itself would file
 an issue about it.
 
-**Mitigation:** The Documentation section below enumerates all eight clusters by file and
+**Mitigation:** The Documentation section below enumerates all nine clusters by file and
 line. The Verification table greps both files for zero occurrences of `_write_liveness`
 and `last_completed_run`.
 
 ## Race Conditions
 
-No race conditions identified. The work deletes two `r.set` calls and adds no concurrent
+No race conditions identified. Two `/update`-ordering windows are documented below, both
+of them cosmetic and neither of them a race. The work deletes two `r.set` calls and adds no concurrent
 access. `run_docs_auditor` already serializes itself behind `docs_audit:running:global`
 (SETNX, 1h TTL) and the deleted writes were the last operations before a return, read by
 nobody. The summary string is built and returned synchronously inside the same function
@@ -561,6 +563,19 @@ One ordering fact worth stating so it is not mistaken for a race: the two orphan
 may still hold values while a machine runs post-deletion code but pre-migration `/update`.
 That window is benign because nothing reads them in either state, and the migration is
 idempotent.
+
+The opposite window exists too and is equally benign. `/update` runs migrations at Step 3.6
+— "after git pull, before service restart" (`scripts/update/run.py:1629`) — while the
+worker restart happens later in the same run (`:1925` onward). A rotation pass firing
+between those two points executes still-loaded pre-deletion code and can repopulate both
+Redis keys *after* the one-shot sweep has already recorded itself permanently complete,
+since `run_pending_migrations` treats a `None` return as done. This is the same cosmetic
+Risk-3-class residue arriving from the other direction, and it resolves on the next
+restart, when the code that writes the keys is gone. Do **not** respond by making the
+migration re-runnable or by returning an error string to force a retry:
+the docstring of `_migrate_clear_orphaned_warn_state_key`
+(`scripts/update/migrations.py:1174-1194`) records why a bookkeeping cleanup must never be
+able to fail `/update`.
 
 ## No-Gos (Out of Scope)
 
@@ -673,6 +688,18 @@ No agent integration required. This removes an internal function and its Redis w
       warning in the logs). Do not describe any arm as a `None` return;
       `_run_vault_drift_detection` is `-> int` and cannot produce one.
 
+- [ ] `:254-266` (`## Tests`), specifically the bullet at `:263-264`: the list of test
+      classes in this file's own `## Tests` section carries
+      "`TestWriteLivenessVaultParam` — 4-arg call sites unaffected, 5-arg call site
+      includes the count", naming the six-test class this plan deletes in full. It sits
+      outside the `:156-196` range above, so the documentarian gets no instruction for it
+      from that bullet, while the bare-word Verification grep does match it
+      (`WriteLiveness` under `-i`). **Replace that one bullet** with a
+      `TestLivenessDeadCodeRemoved` entry naming what the new guard proves — the function
+      and both constants stay gone. This is a single-bullet swap inside an existing
+      bulleted list, not a rewrite of the section. Leave the `TestVaultDeadCodeRemoved`
+      bullet directly below it (`:265`) alone; it covers a different guard.
+
 - [ ] `docs/features/README.md`: check whether either file's index row summary mentions
       the liveness keys; update if so, leave alone if not.
 
@@ -703,9 +730,11 @@ No agent integration required. This removes an internal function and its Redis w
       created-PR summary measures under the scheduler's 500-character truncation (195
       characters today, 227 with the clause).
 - [ ] `TestLivenessDeadCodeRemoved` exists and fails if any of the three symbols returns.
-- [ ] The replacement surface is demonstrated, not assumed: a seeded `Reflection` whose
-      `output_summary` is the new created-PR string renders the vault clause in the
-      reflections modal partial, and `modal_content.html:59`'s render guard is unchanged.
+- [ ] The replacement surface is demonstrated, not assumed: a direct Jinja2 render of
+      `reflections/_partials/modal_content.html` (no ORM, no Redis — the
+      `tests/unit/test_per_project_modal.py` pattern) with
+      `last_run_summary.output_summary` set to the new created-PR string emits the vault
+      clause, and `modal_content.html:59`'s render guard is unchanged.
 - [ ] The two behavioral assertions that the withheld count reaches a durable surface
       still exist, now asserting on `result["summary"]` rather than a mock's kwargs.
 - [ ] `docs/features/docs-auditor.md` and `docs/features/vault-drift-audit.md` contain
@@ -735,7 +764,7 @@ confirm the deletion is total.
 
 - **Documentarian (feature docs)**
   - Name: `liveness-documentarian`
-  - Role: the eight reference clusters across `docs-auditor.md` and `vault-drift-audit.md`
+  - Role: the nine reference clusters across `docs-auditor.md` and `vault-drift-audit.md`
   - Agent Type: documentarian
   - Resume: true
 
@@ -862,16 +891,26 @@ containment, or a `git diff --stat`. None of them reaches the template layer, ye
 entire justification for the deletion is that an operator now reads this on the dashboard.
 Demonstrate the end-to-end claim once instead of assuming it:
 
-- Seed a `Reflection` through the ORM (never raw Redis) with a recognizable `test-`
-  prefixed key, calling `mark_completed(duration, output_summary=<the new created-PR
-  summary string, vault count 0>)`.
-- Render the modal partial for that record and assert the output contains
-  `vault 0 narratives compared`, which proves the render guard
+- Render the template directly, with **no ORM write and no Redis I/O**, following the
+  pattern this repo already uses against this exact template in
+  `tests/unit/test_per_project_modal.py`. Reuse its `env` fixture (`:30-35`:
+  `Environment(loader=FileSystemLoader(str(UI_TEMPLATES)), autoescape=True)` then
+  `register_template_filters(e)`, imported from `ui.app`) and its `_base_reflection_ctx()`
+  helper (`:38-53`), which already supplies every top-level `r.*` field the template
+  dereferences. Merge one key into that context:
+  `"last_run_summary": {"output_summary": <the new created-PR summary string with vault
+  count 0>}`. That key alone satisfies the render guard. Render
+  `reflections/_partials/modal_content.html` the way `_render_modal` (`:56-63`) does —
+  `r=<merged ctx>, recent_runs=[], sparkline=[], manual_command=None` — and assert
+  `"vault 0 narratives compared" in html`. A seed-and-delete through the ORM would add a
+  real Redis write plus a teardown that leaks a record if the test fails midway, all to
+  prove a Jinja2 template interpolates a string.
+- The assertion proves the render guard
   `{% if r.last_run_summary and r.last_run_summary.output_summary %}`
-  (`modal_content.html:59`) passes and the string survives to HTML.
+  (`ui/templates/reflections/_partials/modal_content.html:59`) passes and the string
+  survives to HTML.
 - Confirm that guard is byte-identical to its pre-change state; this work must not touch
   it.
-- Delete the seeded record through the ORM afterward, scoped by that `test-` key.
 
 ## Verification
 
@@ -880,19 +919,53 @@ Demonstrate the end-to-end claim once instead of assuming it:
 | Function gone | `grep -rn '_write_liveness' reflections/ \| wc -l` | `0` |
 | Constants gone | `grep -rn 'REDIS_LAST_COMPLETED' reflections/ \| wc -l` | `0` |
 | Keys gone from code | `grep -rn 'last_completed_run' reflections/ ui/ agent/ models/ \| wc -l` | `0` |
-| No test references survive | `grep -n '_write_liveness\|REDIS_LAST_COMPLETED' tests/unit/test_docs_auditor_substrate.py \| wc -l` | `0` |
+| No live test references survive | `grep -n 'docs_auditor\._write_liveness\|_write_liveness(\|docs_auditor\.REDIS_LAST_COMPLETED' tests/unit/test_docs_auditor_substrate.py \| wc -l` | `0` |
 | Deletion guard exists | `grep -c 'class TestLivenessDeadCodeRemoved' tests/unit/test_docs_auditor_substrate.py` | `1` |
 | Vault count rehomed | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | `> 0` |
 | Clause is unconditional | `grep -n 'vault_narratives_compared is not None' reflections/docs_auditor.py \| wc -l` | `0` |
 | Withheld count still asserted behaviorally | `grep -c 'fix(es) withheld" in result\["summary"\]' tests/unit/test_docs_auditor_substrate.py` | `> 0` |
 | Docs clean (literal symbols) | `grep -rn '_write_liveness\|last_completed_run' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| wc -l` | `0` |
-| Docs clean (bare word) | `grep -rni 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| wc -l` | `0` |
+| Docs clean (bare word) | `grep -rni 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| grep -v 'TestLivenessDeadCodeRemoved' \| wc -l` | `0` |
 | Archives untouched | `git diff --stat origin/main -- docs/archive/ \| wc -l` | `0` |
 | Migration registered | `grep -c 'clear_docs_audit_liveness_keys' scripts/update/migrations.py` | `> 0` |
 | Dashboard renders the clause | see task `validate-dashboard-render` below | modal partial HTML contains `vault 0 narratives compared` |
 | Auditor tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+
+**Why two rows are scoped rather than bare.** The deletion-guard class this plan mandates,
+`TestLivenessDeadCodeRemoved`, must contain the string literals `"_write_liveness"`,
+`"REDIS_LAST_COMPLETED_TS_KEY"`, and `"REDIS_LAST_COMPLETED_SUMMARY_KEY"` inside its
+`hasattr` assertions — that is the whole point of a guard, and it is the shape
+`TestVaultDeadCodeRemoved` (`tests/unit/test_docs_auditor_substrate.py:3093`) already
+uses. A bare `grep -n '_write_liveness\|REDIS_LAST_COMPLETED'` therefore counts the guard
+itself and can never reach `0`; measured against a stub of the guard class it returns `4`.
+Two rows are scoped so they stay satisfiable without weakening what they check:
+
+- **No live test references survive** matches *uses* of the symbols
+  (`docs_auditor._write_liveness`, a `_write_liveness(` call or comment, and
+  `docs_auditor.REDIS_LAST_COMPLETED*`) rather than the bare names. Measured on
+  `67d714662` this pattern returns the same `15` lines the bare pattern does — every
+  `patch(...)` site, the `:1960` comment, and every `TestWriteLivenessVaultParam` call —
+  and returns `0` against the guard-class stub. It catches everything the broad pattern
+  caught and nothing the plan orders written.
+- **Docs clean (bare word)** filters `TestLivenessDeadCodeRemoved` out before counting,
+  because Documentation cluster 7 (and the new cluster 9) instruct writing that class
+  name into both feature docs.
+
+Do **not** resolve either row by renaming the guard class away from `Liveness` or by
+dropping it: it is the artifact that stops a future revert from silently reintroducing the
+channel, and the `Deletion guard exists` row expects it by that exact name.
+
+**Every other row was re-audited against `67d714662` and reasoned about for the
+post-change tree.** Current counts: `_write_liveness` in `reflections/` = 6,
+`REDIS_LAST_COMPLETED` in `reflections/` = 4, `last_completed_run` across
+`reflections/ ui/ agent/ models/` = 2 (both the constant definitions at
+`reflections/docs_auditor.py:136-137`), docs literal-symbol matches = 13, docs bare-word
+matches = 16 (all 16 map to an enumerated Documentation cluster), archives diff = 0,
+migration = 0. Each goes to its expected value by deletion alone; none of them matches a
+symbol this plan orders the builder to write. The migration hard-codes the two key
+strings in `scripts/update/migrations.py`, which no row's search path covers.
 
 Every zero-expectation row is written as `grep ... | wc -l` rather than `grep -c`.
 `grep -c` **exits 1 when the count is zero**, so a validator that gates on exit status
