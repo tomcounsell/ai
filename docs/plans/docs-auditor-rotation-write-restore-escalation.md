@@ -472,7 +472,15 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
 | Anti-criterion: push helper no longer reads the ref | `sed -n '/^def _push_branch_and_pr/,/^def _update_rotation_hash/p' reflections/docs_auditor.py \| grep -c "_current_ref"` | match count == 0 |
 | Anti-criterion: FALLBACK_ENG_CHAT region untouched (#3072 lane) | `git diff origin/main...HEAD -- reflections/docs_auditor.py \| grep -c "FALLBACK_ENG_CHAT"` | match count == 0 |
 
-The three `match count == 0` anti-criteria at the bottom were each measured against `main` at `5ae3cbb3d` while authoring this plan. Two already return `0` there (the whole-tree-primitive grep and the push-helper grep return `0` and `1` respectively before the fix, so the push-helper row is a genuine red-state today and must go green only after task 1). The `NOTE (#3050)` row returns `1` on `main` today — that is its red state, and it is the proof the check bites.
+All five `match count == 0` rows were run against `main` at `5ae3cbb3d` while authoring this plan, and each one's state there is recorded so a reviewer can tell a real check from a vacuous one:
+
+| Anti-criterion | Count on `5ae3cbb3d` | Reading |
+|---|---|---|
+| No whole-tree restore primitive | `0` | Already green — a **preservation** check. It bites only if the build introduces `reset --hard` / `git clean` / `checkout -f`, which is exactly the No-Go it guards. |
+| `NOTE (#3050)` removed | `1` | **Red today.** Proven to bite; goes green only when task 3 deletes the comment. |
+| Dirty-tree guard files nothing | `0` | Already green — a **preservation** check guarding the rejection of option (b). |
+| Push helper no longer reads the ref | `1` | **Red today.** Proven to bite; goes green only when task 1 removes the internal `_current_ref` call. |
+| `FALLBACK_ENG_CHAT` region untouched | `0` | Already green — guards the #3072 lane's region. Note `grep -c` prints `0` on an empty diff, so stdout is non-empty and the row cannot false-pass on an errored command. |
 
 ## Critique Results
 
