@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -343,19 +343,16 @@ secrets, no services, and no Redis.
 - **`tests/unit/test_feature_map_markers.py`** (new): the pytest face of the audit, plus a
   self-mutation test that proves the audit reports a synthetic mistag. Without that test the guard
   can pass while reaching nothing.
-- **`.github/workflows/feature-map-guard.yml`** (new): runs the audit on `pull_request`. This is
-  what makes the issue's "runs in CI on every PR" criterion literally true rather than
-  aspirationally true.
 
 ### Flow
 
-Author renames or splits a test file → pushes the branch → **GitHub Actions runs the audit in a
-few seconds with no venv, no Redis, no dependencies** → a mistag fails the check with the path,
-the marker it landed on, the marker its package declares, and the `FEATURE_MAP` key responsible →
-author renames the file, adjusts `FEATURE_MAP`, or adds a reasoned `KNOWN_MISTAGS` entry → green.
+Author renames or splits a test file → runs the suite, or the SDLC TEST stage runs it for them →
+the guard test goes red naming the path, the marker it landed on, the marker its package declares,
+and the `FEATURE_MAP` key responsible → author renames the file, adjusts `FEATURE_MAP`, or adds a
+reasoned `KNOWN_MISTAGS` entry → green.
 
-The same audit also runs as an ordinary unit test, so `scripts/pytest-clean.sh tests/unit/` and the
-SDLC TEST stage cover it too. Two surfaces, one implementation.
+The SDLC TEST stage and the nightly suite are this repo's CI, so an ordinary unit test in
+`tests/unit/` is the per-PR gate. One implementation, reached through `scripts/pytest-clean.sh`.
 
 ### Technical Approach
 
@@ -734,25 +731,10 @@ general review pass.
   `resolve_marker("")` returns `(None, None)`.
 - Add the stale-exemption test: a `KNOWN_MISTAGS` entry with no matching violation fails.
 
-### 4. Add the CI workflow
-
-- **Task ID**: build-workflow
-- **Depends On**: build-audit
-- **Validates**: `.github/workflows/feature-map-guard.yml` (create)
-- **Informed By**: the Freshness Check finding that no workflow in this repo runs any test
-- **Assigned To**: `marker-guard-builder`
-- **Agent Type**: builder
-- **Parallel**: true
-- Create `.github/workflows/feature-map-guard.yml`, `on: pull_request`, ubuntu-latest,
-  `actions/checkout@v4` with full history not required, `actions/setup-python@v5` pinned to the
-  interpreter in `.python-version`, one step running `python tests/marker_map.py --audit`.
-- No `pip install`, no secrets, no services. If the step needs a dependency, the module is wrong.
-- Hold this task if the Open Question is answered "no workflow"; the guard still runs as a unit test.
-
-### 5. Mutation-check every rule
+### 4. Mutation-check every rule
 
 - **Task ID**: validate-mutation
-- **Depends On**: build-guard-test, build-workflow
+- **Depends On**: build-guard-test
 - **Assigned To**: `marker-guard-mutator`
 - **Agent Type**: validator
 - **Parallel**: false
@@ -769,7 +751,7 @@ general review pass.
 - Report the four transcripts verbatim for the PR body. A rule that stays green under its own
   mutation is a finding, not a formality.
 
-### 6. Prove no marker was lost
+### 5. Prove no marker was lost
 
 - **Task ID**: validate-parity
 - **Depends On**: build-marker-map
@@ -783,7 +765,7 @@ general review pass.
 - Independently confirm via `pytest --collect-only -q -m <marker>` counts for every marker in
   `FEATURE_MAP`, before and after.
 
-### 7. Documentation
+### 6. Documentation
 
 - **Task ID**: document-feature
 - **Depends On**: validate-mutation, validate-parity
@@ -797,10 +779,10 @@ general review pass.
   (`worktree_manager` after `config`) and the fragment match (`config` inside `configured`).
 - Update the `tests/README.md` line naming `tests/conftest.py` as the home of `FEATURE_MAP`.
 
-### 8. Final validation
+### 7. Final validation
 
 - **Task ID**: validate-all
-- **Depends On**: build-marker-map, build-audit, build-guard-test, build-workflow,
+- **Depends On**: build-marker-map, build-audit, build-guard-test,
   validate-mutation, validate-parity, document-feature
 - **Assigned To**: `marker-parity-validator`
 - **Agent Type**: validator
