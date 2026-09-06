@@ -57,6 +57,16 @@ suppression notice spliced into the run's `summary` (placed before the PR
 URL so the 500-char truncation the reflection scheduler applies cannot drop
 it). Errors are swallowed; the auditor never crashes the worker.
 
+The resolution ladder itself — repo-root match, numeric `chat_id`, the
+`PROJECT_ROOT`-narrowed fallback — now lives in
+[`reflections/utilities.py::resolve_host_eng_chat`](reflection-telegram-routing.md)
+(#3072), lifted out of this module so `sentry_triage` and `stall_advisory`
+share the same host-machine rule instead of each asserting a destination.
+`docs_auditor._resolve_notify_chat(repo_root)` delegates to it, passing this
+module's own `load_local_projects` and `PROJECT_ROOT` bindings through so an
+existing `patch("reflections.docs_auditor....")` still lands correctly. The
+behavior described above is unchanged by the lift.
+
 A guard-skipped run (daily PR cap reached, or an open PR already exists for
 the picked doc's slug) performs no working-tree write and no git operation,
 but it still stamps the rotation hash for the doc it picked — exactly as a
