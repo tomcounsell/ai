@@ -707,38 +707,38 @@ wiring or a test.
 
 ## Success Criteria
 
-- [ ] `tests/unit/test_feature_map_markers.py` exists and fails when a test file is mistagged,
+- [x] `tests/unit/test_feature_map_markers.py` exists and fails when a test file is mistagged,
       proven by a committed synthetic-mistag test and by a manual red/green transcript covering
       each of R1, R2, and R3 separately.
-- [ ] `python tests/marker_map.py --audit` exits 0 on a clean tree and non-zero on a mistag, using
+- [x] `python tests/marker_map.py --audit` exits 0 on a clean tree and non-zero on a mistag, using
       only the standard library.
-- [ ] **The coverage boundary is stated, not implied.** R1 and R2 catch ordering collisions only
+- [x] **The coverage boundary is stated, not implied.** R1 and R2 catch ordering collisions only
       inside a themed package directory (80 of 834 files, 9.6%; R1 reaches 47, R2 reaches 33).
       Suite-wide, only fragment matches are caught. This sentence appears in
       `docs/features/feature-map-marker-guard.md`, and the rules are not widened to close it.
-- [ ] The stem expression is `basename.replace("test_", "").replace(".py", "")`, copied verbatim
+- [x] The stem expression is `basename.replace("test_", "").replace(".py", "")`, copied verbatim
       from the hook. `removeprefix`, `removesuffix`, and anchored regexes appear nowhere in
       `tests/marker_map.py`. Committed fixtures assert
       `resolve_marker("test_test_judge.py") == (None, None)` and
       `resolve_marker("test_validate_test_impact.py") == (None, None)`.
-- [ ] R2 attributes violations to the siblings outside the largest marker group, and reports every
+- [x] R2 attributes violations to the siblings outside the largest marker group, and reports every
       file in the package as ambiguous when the largest group ties. Both branches have committed
       synthetic fixtures.
-- [ ] No exemption in the guard is keyed by line number, index, or ordinal position. Every
+- [x] No exemption in the guard is keyed by line number, index, or ordinal position. Every
       `KNOWN_MISTAGS` key is a repo-relative path that `git ls-files` currently returns. There is
       no whole-package exemption mechanism.
-- [ ] Stale exemptions fail the guard: deleting a real violation without deleting its baseline
+- [x] Stale exemptions fail the guard: deleting a real violation without deleting its baseline
       entry turns the guard red.
-- [ ] The issue's "runs in CI on every PR" criterion is met by the guard running as an ordinary
+- [x] The issue's "runs in CI on every PR" criterion is met by the guard running as an ordinary
       unit test in `tests/unit/`, executed by the SDLC TEST stage and the nightly suite. Those are
       this repo's CI.
-- [ ] Marker resolution has exactly one implementation. The inlined loop is gone from
+- [x] Marker resolution has exactly one implementation. The inlined loop is gone from
       `tests/conftest.py`.
-- [ ] No test file loses **or gains** a marker relative to `f3594dd23`. The marked-file count is
+- [x] No test file loses **or gains** a marker relative to `f3594dd23`. The marked-file count is
       exactly 280 before and after; `test_youtube_transcription.py` moving from `messaging` to
       `tools` is the only marker change, and it is count-neutral.
 - [ ] Full `scripts/pytest-clean.sh tests/unit/ -q` is green.
-- [ ] Documentation updated (`docs/features/feature-map-marker-guard.md`, the features index, and
+- [x] Documentation updated (`docs/features/feature-map-marker-guard.md`, the features index, and
       `tests/README.md`).
 
 
