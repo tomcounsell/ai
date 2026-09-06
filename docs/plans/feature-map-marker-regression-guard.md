@@ -401,6 +401,16 @@ The SDLC TEST stage and the nightly suite are this repo's CI, so an ordinary uni
 both the marker and the `FEATURE_MAP` key that produced it. Rule R3 needs the key, not just the
 result, so returning only the marker would force a second implementation.
 
+Its stem expression is copied verbatim from the shipped hook and must not be re-derived from prose:
+
+```python
+stem = basename.replace("test_", "").replace(".py", "")
+```
+
+`removeprefix`, `removesuffix`, and anchored regexes are forbidden here. They look like the same
+thing and are not: they retag `tests/tools/test_test_judge.py` and
+`tests/unit/test_validate_test_impact.py`, which is mechanism 3 and belongs to #3184.
+
 **Rule R1, directory intent.** For a test file whose parent directory is not in
 `KNOWN_ROOT_DIRS` (`tests`, `unit`, `integration`, `e2e`, `tools`, `performance`, `ai_judge`):
 if the parent directory *name* resolves to marker M, the file's basename must resolve to M. The
@@ -413,19 +423,42 @@ drifting away from its package when the package has no name-based intent to comp
 `tests/unit/session_runner/test_schema_routing.py` picking up `messaging` from the `routing` key,
 alone among eighteen siblings, is exactly this shape.
 
+**R2 attribution is part of the rule, not an implementation detail.** Group the package's files by
+resolved marker. **The violating set is every sibling outside the largest group.** The majority is
+the package's de facto intent; reporting all of them would make a one-file drift look like a
+23-file problem. Measured at `f3594dd23`: `tests/unit/hooks/` splits 4 `None` against 1 `sdlc` and
+`tests/unit/session_runner/` splits 17 `None` against 1 `messaging`, so majority attribution yields
+**2** violations while a literal reading of "every file must match" yields **23** and would push
+the baseline to 45.
+
+**The tie branch is stated behavior, not an accident.** When two or more groups tie for largest
+(a 2-vs-2 package, say), there is no majority to attribute against, so **report every file in the
+package as ambiguous**, with a rule label distinguishing it from an ordinary R2 violation. Letting
+dict-iteration order break the tie would make the guard's output depend on filesystem ordering,
+which is the class of bug this whole plan exists to prevent. A synthetic 2-vs-2 fixture covers this
+branch in the guard test, because Task 4's real-package mutation only ever exercises 1-vs-N.
+
 **Rule R3, whole-token match.** Suite-wide, with no intent declaration required: the winning
 `FEATURE_MAP` key must appear in the stem as a contiguous run of `_`-delimited tokens, not as a
 fragment inside a longer word. This catches the second mechanism, which R1 and R2 cannot see.
 
 **Exemptions, keyed by path.** `KNOWN_MISTAGS: dict[str, str]` maps a repo-relative POSIX path to a
-prose reason, and `EXEMPT_DIRS: dict[str, str]` does the same for a whole package. Nothing is keyed
-by line number, index, or ordinal position, per #2805. Two assertions bracket the baseline:
+prose reason. It is the only exemption mechanism. Nothing is keyed by line number, index, or
+ordinal position, per #2805. Two assertions bracket the baseline:
 
 1. `violations - KNOWN_MISTAGS.keys()` must be empty. No new mistags.
 2. `KNOWN_MISTAGS.keys() - violations` must be empty. **No stale exemptions.** This is the #3031
    lesson: an exemption that no longer corresponds to a real violation is a silent hole, so fixing
    a file makes the guard demand its baseline entry be deleted. The baseline can only shrink, and
    it cannot rot.
+
+There is deliberately **no whole-package exemption mechanism**. An earlier draft carried an
+`EXEMPT_DIRS` dict, and the measured baseline populates zero entries in it, so it would ship as an
+unexercised path with neither bracketing assertion applied to it. That is the #3031 hole
+reintroduced inside the mechanism meant to close it. Risk 3's concern (a legitimately mixed
+package) is handled by per-file `KNOWN_MISTAGS` entries; if a package ever needs more than a
+couple, that is evidence R2 is the wrong rule and should be dropped rather than exempted into
+meaninglessness.
 
 **The baseline as measured at `f3594dd23`: 24 distinct paths.** 21 from R1 (18 in
 `tests/unit/reflections/`, 2 in `tests/integration/reflections/`, `tests/unit/bridge/test_dispatch.py`),
