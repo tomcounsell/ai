@@ -113,7 +113,9 @@ The previously known-bad clusters on `main` were driven to green in #1578. The f
 
 ## Feature Markers
 
-Every test is auto-tagged by filename via `tests/conftest.py`. When a feature changes, run its marker to find tests that may need updating.
+Every test is auto-tagged by filename via `tests/marker_map.py`'s `FEATURE_MAP` and
+`resolve_marker()`, which `tests/conftest.py` imports and calls at collection time. When a
+feature changes, run its marker to find tests that may need updating.
 
 | Marker | What it covers | Example command |
 |--------|----------------|-----------------|
@@ -156,6 +158,7 @@ The merge gate runs no tests (#2376) — the TEST stage owns the final full-suit
 ```
 tests/
 ├── conftest.py              # Root fixtures + feature auto-tagging
+├── marker_map.py            # FEATURE_MAP, resolve_marker(), and the marker-regression guard's rules (#3010)
 ├── unit/                    # Pure logic, no external deps
 ├── integration/             # Requires Redis and/or network
 ├── tools/                   # Tool-specific tests (may need API keys)
@@ -492,9 +495,12 @@ enforces this in CI, not just in this note.
 ## Adding Tests for New Features
 
 1. **Pick the right level**: Unit for pure logic, integration for Redis/network, e2e for multi-component flows
-2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/conftest.py` so it auto-tags
+2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags
 3. **Or add a new entry** to `FEATURE_MAP` if creating a new feature area
 4. **Add to this index** under the appropriate feature section
+5. **Run the audit** (`python tests/marker_map.py --audit`) before opening the PR — it fails
+   loudly if the new basename resolves to a marker nobody intended. See
+   [`docs/features/feature-map-marker-guard.md`](../docs/features/feature-map-marker-guard.md).
 
 ### Naming Convention
 
@@ -502,68 +508,77 @@ enforces this in CI, not just in this note.
 test_{feature_keyword}[_detail].py
 ```
 
-The `{feature_keyword}` must match a key in `FEATURE_MAP` (in `tests/conftest.py`) for auto-tagging. Examples:
+The `{feature_keyword}` must match a key in `FEATURE_MAP` (in `tests/marker_map.py`) for auto-tagging. Examples:
 - `test_pipeline_new_stage.py` → auto-tagged `sdlc`
 - `test_session_timeout.py` → auto-tagged `sessions` (matches "session_")
 - `test_bridge_rate_limit.py` → auto-tagged `messaging` (matches "bridge")
 
 ### Splitting or Renaming a Test File
 
-Markers are derived from the **basename only** — `pytest_collection_modifyitems` in
-`tests/conftest.py` strips `test_` and `.py` from the nodeid's last path segment and
-substring-matches the remainder against `FEATURE_MAP`, taking the first hit. The
-directory a file sits in contributes nothing, so moving a file into a subpackage is
-marker-neutral while renaming it is not.
+Markers are derived from the **basename only** — `resolve_marker()` in
+`tests/marker_map.py` (called by `pytest_collection_modifyitems` in `tests/conftest.py`)
+strips `test_` and `.py` from the nodeid's last path segment and substring-matches the
+remainder against `FEATURE_MAP`, taking the first hit. The directory a file sits in
+contributes nothing to *this* substring match, so moving a file into a subpackage is
+marker-neutral on its own — see the ordering-collision example below for the case where
+the package directory and the basename disagree.
 
-That makes a split of a large module a silent marker hazard in both directions:
+That makes a split of a large module a silent marker hazard in three ways. All three are
+caught before you open the PR by `python tests/marker_map.py --audit` (see
+[`docs/features/feature-map-marker-guard.md`](../docs/features/feature-map-marker-guard.md)
+for what each rule can and cannot see):
 
 - **Losing a marker.** `test_stop_hook.py` (marker `sdlc`) split into
   `tests/unit/stop_hook/test_exit_codes.py` yields basename `exit_codes`, which matches
   nothing — those tests vanish from `pytest -m sdlc` while still running in a full sweep.
 - **Gaining one.** A new basename can pick up an unrelated pattern by accident;
   `..._transport_aware_routing` matches `routing` and would be tagged `messaging`.
+- **An ordering collision.** `FEATURE_MAP` is a first-hit-wins dict, so a correctly
+  prefixed name can still land on the wrong marker when an *earlier* key happens to
+  appear in the suffix you chose. `worktree_manager` sits well after `config` and
+  `lifecycle`:
 
-A `--collect-only` total-count check cannot catch either: the total is unchanged, only
-the tagging moves. So when splitting a file:
+  ```
+  test_worktree_manager_config.py     -> "config" is found first    -> tagged `config`,   not `git`
+  test_worktree_manager_lifecycle.py  -> "lifecycle" is found first -> tagged `sessions`, not `git`
+  test_worktree_manager_cleanup.py    -> no earlier key matches     -> tagged `git`       (correct)
+  ```
+
+  All three follow the "keep the original basename as a prefix" convention. Two of them
+  are silently wrong. `resolve_marker()`'s guard rule R1 catches this class *only* when
+  the file sits inside a themed package directory whose own name resolves — a file at
+  `tests/unit/` top level with the same basename passes every rule and stays silently
+  wrong (see the feature doc's coverage-boundary section).
+
+- **A fragment match.** The winning key does not have to be a whole word: `config` is a
+  literal substring of `configured`, so `test_pm_briefings_no_slots_configured.py` tags
+  `config` even though nothing named "config" was intended. Guard rule R3 catches this
+  one suite-wide, with no package-directory signal required.
+
+A `--collect-only` total-count check cannot catch any of these: the total is unchanged,
+only the tagging moves. So when splitting a file:
 
 1. Keep the original basename as a **prefix** of every new file
    (`test_output_handler.py` → `test_output_handler_drafter.py`), which preserves any
    matching substring by construction.
-2. Check each new basename against `FEATURE_MAP` for an accidental new match.
-3. Verify by comparing the per-marker collected counts before and after, not just the
-   total — e.g. `pytest -m <marker> --collect-only -q | tail -1` for every marker the
+2. Run `python tests/marker_map.py --audit`. It replays the real first-hit algorithm
+   against every candidate basename and reports a mistag with its resolved marker,
+   expected marker, and the `FEATURE_MAP` key responsible — do this *before* writing the
+   files, since renaming afterwards is cheap only if you notice.
+3. If the audit is clean but you still want to eyeball the count shift, compare
+   `pytest -m <marker> --collect-only -q | tail -1` before and after for every marker the
    file touches.
 
-**Step 1 is necessary but not sufficient, because "first hit" means insertion order
-decides.** A correctly-prefixed name can still lose its marker when an *earlier* key in
-`FEATURE_MAP` happens to appear in the suffix you chose. `worktree_manager` sits near the
-end of the dict, well after `config` and `lifecycle`:
-
-```
-test_worktree_manager_config.py     -> "config" is found first    -> tagged `config`,   not `git`
-test_worktree_manager_lifecycle.py  -> "lifecycle" is found first -> tagged `sessions`, not `git`
-test_worktree_manager_cleanup.py    -> no earlier key matches     -> tagged `git`       (correct)
-```
-
-All three follow the prefix rule. Two of them are silently wrong. The same trap applies to
-`test_sdlc_session_ensure_*`: a file named `..._bridge_short_circuit.py` matches `bridge` —
-the very first key — and would be tagged `messaging` instead of `sdlc`.
-
-So the check in step 2 must run a candidate basename through the **real first-hit
-algorithm**, not just scan for an obviously-unrelated word. Iterate `FEATURE_MAP` in order
-and take the first `pattern in basename` hit, exactly as `pytest_collection_modifyitems`
-does. Do this *before* writing the files; renaming afterwards is cheap, but only if you
-notice, and step 3's count check is what catches you if you didn't.
-
-This procedure is currently manual. Automating it as a standing regression guard — so a
-mistagged basename fails a test instead of relying on whoever does the split remembering
-to check — is tracked in [#3010](https://github.com/tomcounsell/ai/issues/3010).
+This is no longer a manual habit to remember: `tests/unit/test_feature_map_markers.py`
+runs the same audit as an ordinary test, so a mistagged basename fails the suite instead
+of relying on whoever does the split noticing. See #3010 for the guard itself and #3175
+for draining the pre-existing baseline it was introduced against.
 
 ### Feature Marker Registration
 
 New markers must be added in two places:
 1. `pyproject.toml` → `[tool.pytest.ini_options]` markers list
-2. `tests/conftest.py` → `FEATURE_MAP` dictionary
+2. `tests/marker_map.py` → `FEATURE_MAP` dictionary
 
 ## Known Blind Spots
 
