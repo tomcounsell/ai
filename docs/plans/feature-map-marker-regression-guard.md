@@ -196,10 +196,14 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
 
 - **Assumption**: "Most test files already carry a marker, so requiring one needs a short exemption list."
 - **Method**: replay the resolver over all 834 tracked test files, count `None` results.
-- **Finding**: **Not viable.** 552 of 834 files (66%) resolve to no marker at all. A
-  must-be-marked rule would need a 552-entry exemption list on day one, which is a manifest
-  pretending to be a guard.
-- **Confidence**: high.
+- **Finding**: **Not viable.** 554 of 834 files (66.4%) resolve to no marker at all; 280 resolve
+  to a marker. A must-be-marked rule would need a 554-entry exemption list on day one, which is a
+  manifest pretending to be a guard.
+- **Confidence**: high. Re-derived independently during critique round 2. The earlier 552/282 pair
+  in this plan was wrong: it is what a `removeprefix("test_")` stem produces, not what the shipped
+  `str.replace("test_", "")` stem produces. The two divergent files are `tests/tools/test_test_judge.py`
+  and `tests/unit/test_validate_test_impact.py`, which is mechanism 3 (#3184) showing up in the
+  measurement. Every count in this plan is against the shipped stem.
 - **Impact on plan**: the guard asserts *consistency* of the marker a file resolves to, never
   *presence*. Unmarked files are only a violation when a sibling or a parent directory declares
   an intent they contradict.
@@ -261,11 +265,17 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
 - **Finding**: **The fix is attractive but it cannot ship with the guard.** The simulation gains
   39 markers, corrects 6, and loses 0. But it makes rule R1 tautological: if the effective marker
   is taken from the directory, then "the effective marker equals the directory's marker" is true
-  by construction and the guard asserts nothing. The renaming alternative also fails, because
-  `config` sits at index 45 and `reflection` at 52, so a file renamed to
-  `test_reflections_pm_briefings_no_slots_configured.py` still resolves to `config` first. The
-  ordering trap that motivates the guard also blocks the obvious remedy.
-- **Confidence**: high.
+  by construction and the guard asserts nothing. The renaming alternative is partial: prefixing
+  each violating basename with its own package directory name fixes 19 of the 21 R1 violations,
+  and the two that survive are `tests/unit/reflections/test_sdlc_progress_check.py` and
+  `tests/unit/reflections/test_sdlc_upvote_lanes.py`, which still resolve to `sdlc` because `sdlc`
+  sits at insertion index 15, ahead of `reflection` at 44. The ordering trap that motivates the
+  guard also blocks the obvious remedy, on a smaller set than first stated.
+- **Confidence**: high. Re-derived in critique round 2. An earlier draft of this spike and the body
+  of #3175 both put `reflection` at index 52 and concluded the rename fails outright; that does not
+  reproduce. `reflection` is at 44 and `config` at 45, so
+  `test_reflections_pm_briefings_no_slots_configured.py` does resolve to `reflections`. The
+  correction is recorded on #3175.
 - **Impact on plan**: the resolver stays unchanged, the 21 violations enter a path-keyed baseline
   with a per-entry reason, and the resolver question is filed separately as #3175 so it can be
   decided on evidence the guard will then be able to produce.
@@ -280,8 +290,16 @@ loop inside the pytest hook, which is why nothing else can check it.
 
 1. **Entry point**: `pytest` collects an item; `pytest_collection_modifyitems` runs
    (`tests/conftest.py:1206`).
-2. **Stem extraction**: `item.nodeid` is split on `::`, the last path segment taken, `test_`
-   and `.py` stripped.
+2. **Stem extraction**: verbatim from `tests/conftest.py::pytest_collection_modifyitems`:
+   ```python
+   filename = item.nodeid.split("::")[0].split("/")[-1].replace("test_", "").replace(".py", "")
+   ```
+   This is a **global** `str.replace`, not a prefix strip. It removes *every* occurrence of
+   `test_`, which is mechanism 3 (#3184). `resolve_marker()` must reproduce this expression
+   character for character. Using `removeprefix("test_")`, `removesuffix(".py")`, or an anchored
+   regex is forbidden: it silently retags `tests/tools/test_test_judge.py` (none to `tools`) and
+   `tests/unit/test_validate_test_impact.py` (none to `validation`), breaking the plan's
+   byte-identical-behavior requirement and its only-one-intended-change criterion.
 3. **Resolution**: the stem is substring-matched against `FEATURE_MAP` in insertion order, first
    hit wins, no hit means no marker.
 4. **Output**: `item.add_marker(getattr(pytest.mark, marker_name))`. Consumed later by
