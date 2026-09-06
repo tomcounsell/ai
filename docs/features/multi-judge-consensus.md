@@ -77,7 +77,7 @@ from agent.sdlc_review_consensus import compute_consensus
 
 # Parent skill flow — single record_verdict call writes scalar + side-fields:
 judges = [judge_a_dict, judge_b_dict]
-agg = compute_consensus(judges, rule="any-blocker-wins")
+agg = compute_consensus(judges, rule="any-blocker-wins", expected_judges=2)
 record_verdict(
     session,
     "REVIEW",
