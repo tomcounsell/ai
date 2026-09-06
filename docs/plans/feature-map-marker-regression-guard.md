@@ -1066,6 +1066,60 @@ concerns)`. That verdict increments `concern_round_count` (0 of `MAX_CONCERN_REC
 concern bound is unspent, so G7 gate 4 dispatches `/do-plan`, the revision pass clears the lock,
 and the lane proceeds to build.
 
+### Critique round 3 (2026-09-06)
+
+FULL depth, independent roster of 3 critics (Risk & Robustness, Scope & Value, History &
+Consistency). Mode: independent roster (3 critics). Scope: a narrow concern-closure confirmation
+over commit `34a615496`, the 5-insertion / 5-deletion revision that answered round 2's two
+concerns. All structural checks pass: the four mandated sections (Documentation, Update System,
+Agent Integration, Test Impact) are present and substantive, tasks 1-7 have no numbering gaps,
+every `Depends On` id resolves and the graph is acyclic, all referenced paths exist except the
+three this plan creates, all three prerequisites pass, every Success Criterion maps to a task, and
+no Popoto model is touched so no migration is owed.
+
+**Verdict: READY TO BUILD (no concerns)** — 0 blockers, 0 concerns, 0 nits.
+
+**Round-2 concern closure, verified.**
+
+- **Concern 1 (Task 5 schedulable before its `--report` flag exists)** — closed. Task 5
+  (`validate-parity`) now declares `Depends On: build-marker-map, build-audit`, so no scheduler
+  honoring the declared graph can dispatch it before Task 2 creates `--report`. `Parallel: true`
+  is retained, which stays sound: Task 5 only reads, Task 3 writes a different file, and Task 4
+  runs in its own worktree by instruction. Every other edge was re-read and is unchanged — Task 2
+  on `build-marker-map`, Task 3 on `build-audit`, Task 4 on `build-guard-test`, Task 6 on
+  `validate-mutation, validate-parity`, Task 7 on all six prior ids — and the graph is still
+  acyclic.
+- **Concern 2 (the anti-criterion ERE could not catch `re.sub` / `re.match`)** — closed. The
+  Verification row now carries a single backslash before the dot. Replayed independently against
+  `/usr/bin/grep` with one seeded stem variant per leg: under the shipped form the check exits 0,
+  while `removeprefix("test_")`, `removesuffix(".py")`, `re.sub(r"^test_", "", ...)` and
+  `re.match(r"^test_(.*)\.py$", ...)` each exit 1. The same seeds under the old double-backslash
+  form reproduce the defect exactly — the two `re.` seeds stayed green — so the fix is confirmed in
+  both directions, not merely asserted.
+
+**No previously-closed row regressed.** The revision commit touches exactly five lines: the
+frontmatter `revision_applied_at` timestamp, Task 5's `Depends On`, the Verification regex, and the
+two round-2 "Addressed By" cells. No task body, rule definition, Success Criterion, or other
+Verification row changed, so all eight round-1 rows and both round-2 rows remain accurate as
+written. Every other `grep` row in the Verification table was re-scanned for the same escaping
+defect class and none carries it; the `\b(lineno|line_number|line_no)\b` row was replayed on this
+machine's grep and goes red on a real `lineno` while staying green on `my_lineno_x`. The old
+double-backslash form survives at exactly one place in the document, inside the round-2 finding's
+own narrative describing the defect it fixed, which is correct as history rather than as a live
+instruction.
+
+**Accepted, not raised as findings.** Task 5's new `build-marker-map` edge is transitively implied
+through `build-audit`; stating it explicitly is harmless and is what round 2 prescribed. The 9.6%
+R1/R2 suite reach, the deferral of the 21-file baseline drain to #3175 and the mangled-stem
+mechanism to #3184, the absence of `EXEMPT_DIRS`, and the unit-test-only CI decision are all
+settled and were re-affirmed rather than re-opened.
+
+**Cycle disposition.** `concern_round_count` stands at 1 of `MAX_CONCERN_RECRITIQUE_ROUNDS` = 3 and
+`revision_round_count` at 1 of `MAX_CRITIQUE_CYCLES` = 2, so G2 stays clear. With zero concerns and
+zero blockers the `plan_revising` lock is NOT set, and the lane advances directly to `/do-build`.
+
+**Round-3 findings.** No findings from the war room.
+
 ---
 
 ## Open Questions
