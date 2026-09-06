@@ -585,7 +585,7 @@ These are the exit conditions of the child issues filed by task 6, restated here
 
 - **Builder (evidence and reuse seams)**
   - Name: seams-builder
-  - Role: lane 2, correction detector persistence, `rework_rate` decision, poll descriptor `investigation_id`, verifying store subclass, capability matrix
+  - Role: lane 2, correction detector persistence, deleting the `rework_rate` aggregate and its readers, the memory-inspiration observer adapter, verifying store subclass, capability matrix
   - Agent Type: builder
   - Resume: true
 
