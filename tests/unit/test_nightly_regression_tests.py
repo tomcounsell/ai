@@ -1456,6 +1456,61 @@ class TestDispositionHandoff:
         assert kwargs["dispositions"][0].resolved_at
         assert "gh issue list --state all" in kwargs["dispositions"][0].resolved_against
 
+    def test_no_dispositions_when_open_read_fails(self, monkeypatch, tmp_path: Path) -> None:
+        """A failed open-issue read must not assert a detector resolution.
+
+        ``partition_already_open`` fails open on ``open_map=None`` -- every
+        node, including ones that actually have an open issue, survives into
+        ``single_nodes`` unfiltered. Without this fix, dispatch_findings would
+        still hand those survivors a ``dispositions`` list claiming "it read
+        all open and closed issues... and found no issue carrying that exact
+        title", which is false, and which demotes the agent's own live lookup
+        to "a second check" on exactly the night that lookup is the only real
+        defense left.
+        """
+        survivor = "tests/unit/test_new.py::test_3"
+        nodes = [survivor]
+        calls = self._run(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map=None,
+            closed_map={},
+        )
+        per_node = [c for c in calls if c[0]]
+        assert len(per_node) == 1
+        dispatched, kwargs = per_node[0]
+        assert dispatched == [survivor]
+        assert kwargs["dispositions"] is None
+
+    def test_no_dispositions_when_closed_read_fails(self, monkeypatch, tmp_path: Path) -> None:
+        """A partial read (only one of open/closed readable) is still degraded.
+
+        ``open_map={}`` is readable-but-empty while ``closed_map=None`` means
+        the closed-issue read failed, so ``read_shape == ["open"]``: a partial
+        read, not the full read fix 2 requires. Handing out a disposition here
+        would render a ``resolved_against`` naming only the open read while the
+        prompt sentence still claims "it read all open and closed issues" --
+        self-contradictory, and it demotes the agent's own lookup on the one
+        night a closed-not-planned recurrence could otherwise slip through.
+        """
+        survivor = "tests/unit/test_new.py::test_3"
+        nodes = [survivor]
+        calls = self._run(
+            monkeypatch,
+            tmp_path,
+            nodes=nodes,
+            report=self._body_failures(nodes),
+            open_map={},
+            closed_map=None,
+        )
+        per_node = [c for c in calls if c[0]]
+        assert len(per_node) == 1
+        dispatched, kwargs = per_node[0]
+        assert dispatched == [survivor]
+        assert kwargs["dispositions"] is None
+
     def test_cascade_dispatch_is_handed_no_dispositions(self, monkeypatch, tmp_path: Path) -> None:
         """The narrowing, pinned in behaviour rather than only in prose.
 

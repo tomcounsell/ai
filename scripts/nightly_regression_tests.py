@@ -2503,7 +2503,7 @@ def write_triage_ledger(slug: str, entries: list[NodeDisposition]) -> str | None
         payload = {
             "slug": slug,
             "created_at": datetime.now(UTC).isoformat(),
-            "entries": [asdict(e) if isinstance(e, NodeDisposition) else dict(e) for e in entries],
+            "entries": [asdict(e) for e in entries],
             "filed": [],
         }
         tmp_path = path.with_name(f"{path.name}.tmp")
@@ -2929,21 +2929,31 @@ def dispatch_findings(
         for name, mapping in (("open", open_issue_map), ("closed", closed_issue_map))
         if mapping is not None
     ]
-    resolved_against = (
-        f"gh issue list --state all ({'+'.join(read_shape)} REST read)"
-        if read_shape
-        else "no open/closed issue read succeeded this run"
-    )
-    dispositions = [
-        NodeDisposition(
-            node=node,
-            title=f"Nightly regression: {node}",
-            disposition="file",
-            resolved_against=resolved_against,
-            resolved_at=issue_read_at,
-        )
-        for node in single_nodes
-    ]
+    # A degraded read (either map is None) means partition_already_open /
+    # partition_closed_matches fail-open above already let unfiltered nodes
+    # through single_nodes without knowing whether they truly have no issue.
+    # Only a complete read licenses the disposition's claim that "the detector
+    # already resolved this" -- on a degraded night with survivors still to
+    # dispatch, dispositions=None makes _build_triage_prompt fall back to its
+    # plain per-node form, so the agent's own live lookup (already always in
+    # the prompt) stays the sole, undemoted defense (#3170). An empty
+    # single_nodes carries no such risk either way, so it always gets `[]`.
+    if not single_nodes:
+        dispositions = []
+    elif read_shape == ["open", "closed"]:
+        resolved_against = f"gh issue list --state all ({'+'.join(read_shape)} REST read)"
+        dispositions = [
+            NodeDisposition(
+                node=node,
+                title=f"Nightly regression: {node}",
+                disposition="file",
+                resolved_against=resolved_against,
+                resolved_at=issue_read_at,
+            )
+            for node in single_nodes
+        ]
+    else:
+        dispositions = None
     session_id = maybe_dispatch_triage_session(
         single_nodes, dispositions=dispositions, dry_run=dry_run
     )
