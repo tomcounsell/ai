@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3167
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-05T13:16:40Z
+revision_applied_at: 2026-09-06T07:45:34Z
 ---
 
 # Auto-preserve refuses a half-deleted worktree
