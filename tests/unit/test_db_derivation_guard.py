@@ -20,15 +20,21 @@ written to ``tmp_path`` and PARSED, never executed.
 from __future__ import annotations
 
 import ast
+import inspect
 from datetime import date
 from pathlib import Path
 
 import pytest
+import redis
 
 from tests.db_derivation_guard import (
+    REDIS_DB_POSITIONAL_INDEX,
     TEST_DB_POOL_MAX,
     TESTS_ROOT,
+    Candidate,
     Exemption,
+    _parameter_names_without_defaults,
+    _rebound_names,
     _terminal_name,
     apply_dispositions,
     check_dispositions,
@@ -212,6 +218,33 @@ PLANTED_OFFENDERS = [
         "may carry a db= the guard cannot see",
         id="opaque-splat-into-a-redis-construction",
     ),
+    # #2764: positional `db` and keyword `url=` produced NO candidate at all --
+    # not a violation, not a pass, simply unseen. Each row here was shown red
+    # against pre-#2764 `main` before this file's fix landed.
+    pytest.param(
+        "positional-db-redis",
+        "import redis\n\n\ndef test_x():\n    redis.Redis('localhost', 6379, 7)\n",
+        "db 7",
+        id="positional-db-redis",
+    ),
+    pytest.param(
+        "positional-db-strictredis",
+        "import redis\n\n\ndef test_x():\n    redis.StrictRedis('localhost', 6379, 7)\n",
+        "db 7",
+        id="positional-db-strictredis",
+    ),
+    pytest.param(
+        "url-keyword-pool-literal",
+        "import redis\n\n\ndef test_x():\n    redis.Redis.from_url(url='redis://localhost:6379/9')\n",
+        "db 9",
+        id="url-keyword-pool-literal",
+    ),
+    pytest.param(
+        "url-keyword-unparseable",
+        "import redis\n\n\ndef test_x(cfg):\n    redis.Redis.from_url(url=cfg.url)\n",
+        "cannot be determined",
+        id="url-keyword-unparseable",
+    ),
 ]
 
 
@@ -259,12 +292,24 @@ def test_sanctioned_shapes_are_accepted(tmp_path: Path):
         "def test_url_call():\n"
         "    redis.Redis.from_url(redis_test_url())\n\n\n"
         "def test_url_fixture(redis_test_url):\n"
-        "    redis.Redis.from_url(redis_test_url, decode_responses=True)\n"
+        "    redis.Redis.from_url(redis_test_url, decode_responses=True)\n\n\n"
+        # #2764: the positional claim call, the keyword-form sanctioned URL,
+        # and the direct (unaliased) fixture parameter -- the last of these
+        # was red before #2764 landed, refused with "no local binding in the
+        # enclosing function" despite being the most obvious correct spelling.
+        "def test_positional_claim_call():\n"
+        "    redis.Redis('localhost', 6379, claim_test_db())\n\n\n"
+        "def test_url_keyword_claim_call():\n"
+        "    redis.Redis.from_url(url=redis_test_url())\n\n\n"
+        "def test_direct_fixture_parameter(scratch_test_db):\n"
+        "    redis.Redis(db=scratch_test_db)\n"
     )
     result = scan_source(source, "test_sanctioned.py")
-    # 4 db= keywords (direct, attribute-qualified, and the one-hop local twice)
-    # plus 2 from_url arguments (the call form and the fixture-parameter form).
-    assert len(result.candidates) == 6
+    # 4 db= keywords (direct, attribute-qualified, the one-hop local twice)
+    # plus 1 direct fixture parameter, plus 2 from_url arguments (call form,
+    # fixture-parameter form) plus 1 url= keyword call, plus 1 positional
+    # claim call.
+    assert len(result.candidates) == 9
     assert not result.violations, "\n".join(format_violation(c) for c in result.violations)
 
 
@@ -507,3 +552,628 @@ class TestSplatHandling:
         """Scoping claim, measured rather than asserted: 191 `**` sites, zero Redis."""
         remaining, _ = apply_dispositions(scan_tree())
         assert remaining == []
+
+    def test_the_positional_leg_and_the_splat_leg_compose(self):
+        """#2764: a positional `db` alongside a `**` splat must yield BOTH
+        violations, not one that swallows the other -- they are unrelated
+        legs judging unrelated arguments on the same call."""
+        result = scan_source(
+            "import redis\ndef t(kw):\n    redis.Redis('h', 6379, 7, **kw)\n", "t.py"
+        )
+        kinds = sorted(c.kind for c in result.violations)
+        assert kinds == ["db-kwarg", "db-positional"]
+        assert len(result.violations) == 2
+
+    def test_starred_positional_yields_no_candidate(self):
+        """`redis.Redis("h", 6379, *rest)` puts an `ast.Starred` at the db
+        index and passes the length guard -- the only shape where the
+        suppression branch is actually reachable."""
+        result = scan_source(
+            "import redis\ndef t(rest):\n    redis.Redis('h', 6379, *rest)\n", "t.py"
+        )
+        assert result.candidates == []
+
+    def test_starred_positional_strictredis_mirror_yields_no_candidate(self):
+        result = scan_source(
+            "import redis\ndef t(rest):\n    redis.StrictRedis('h', 6379, *rest)\n", "t.py"
+        )
+        assert result.candidates == []
+
+
+# ---------------------------------------------------------------------------
+# #2764: positional `db` and keyword `from_url(url=...)` produced no
+# candidate at all, and route 2's bare-name leg laundered a shadowed
+# identifier to green. Every row below was shown to reproduce against
+# pre-#2764 `main` before this file's fix landed.
+# ---------------------------------------------------------------------------
+
+
+def test_positional_db_on_redis_goes_red():
+    result = scan_source("import redis\ndef t():\n    redis.Redis('h', 6379, 7)\n", "x.py")
+    assert len(result.violations) == 1
+    assert result.violations[0].kind == "db-positional"
+    assert result.violations[0].pool_db == 7
+
+
+def test_positional_db_on_strictredis_goes_red():
+    result = scan_source("import redis\ndef t():\n    redis.StrictRedis('h', 6379, 7)\n", "x.py")
+    assert len(result.violations) == 1
+
+
+def test_positional_claim_call_is_accepted():
+    result = scan_source(
+        "import redis\nfrom tests.db_claim import claim_test_db\n"
+        "def t():\n    redis.Redis('h', 6379, claim_test_db())\n",
+        "x.py",
+    )
+    assert result.violations == []
+    assert len(result.candidates) == 1
+
+
+def test_positional_db_alongside_an_explicit_db_keyword_emits_once():
+    """`Redis("h", 6379, 7, db=8)` is a TypeError at runtime and cannot be a
+    live site; the positional leg must not double-report it."""
+    result = scan_source("import redis\ndef t():\n    redis.Redis('h', 6379, 7, db=8)\n", "x.py")
+    assert len(result.violations) == 1
+    assert result.violations[0].kind == "db-kwarg"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import redis\ndef t():\n    redis.Redis()\n",
+        "import redis\ndef t():\n    redis.Redis('h')\n",
+        "import redis\ndef t():\n    redis.Redis('h', 6379)\n",
+        "import redis\ndef t(args):\n    redis.Redis(*args)\n",
+    ],
+    ids=["zero-args", "one-arg", "two-args", "single-starred-arg"],
+)
+def test_short_and_starred_positional_calls_raise_nothing(source: str):
+    """`Redis(*args)` short-circuits on the length guard -- one argument --
+    and proves nothing about the Starred-suppression branch itself."""
+    assert scan_source(source, "x.py").candidates == []
+
+
+def test_keyword_url_on_from_url_goes_red():
+    result = scan_source(
+        "import redis\ndef t():\n    redis.Redis.from_url(url='redis://localhost:6379/9')\n",
+        "x.py",
+    )
+    assert len(result.violations) == 1
+    assert result.violations[0].pool_db == 9
+
+
+def test_keyword_sanctioned_url_is_accepted():
+    result = scan_source(
+        "import redis\nfrom tests.db_claim import redis_test_url\n"
+        "def t():\n    redis.Redis.from_url(url=redis_test_url())\n",
+        "x.py",
+    )
+    assert result.violations == []
+
+
+def test_from_url_with_neither_positional_nor_keyword_yields_no_candidate():
+    result = scan_source("import redis\ndef t():\n    redis.Redis.from_url()\n", "x.py")
+    assert result.candidates == []
+
+
+def test_from_url_with_only_an_opaque_splat_yields_no_from_url_candidate():
+    """No visible `url` -- the splat leg is what fires (unchanged), not route 2."""
+    result = scan_source("import redis\ndef t(kw):\n    redis.Redis.from_url(**kw)\n", "x.py")
+    assert all(c.kind != "from-url" for c in result.candidates)
+
+
+def test_direct_unshadowed_fixture_parameter_route1():
+    result = scan_source(
+        "import redis\ndef t(scratch_test_db):\n    redis.Redis(db=scratch_test_db)\n", "x.py"
+    )
+    assert result.violations == []
+
+
+def test_direct_unshadowed_fixture_parameter_route2():
+    result = scan_source(
+        "import redis\ndef t(redis_test_url):\n    redis.Redis.from_url(redis_test_url)\n", "x.py"
+    )
+    assert result.violations == []
+
+
+@pytest.mark.parametrize(
+    "fn_src",
+    [
+        "def t(scratch_test_db):\n    redis.Redis(db=scratch_test_db)\n",
+        "def t(*, scratch_test_db):\n    redis.Redis(db=scratch_test_db)\n",
+        "def t(scratch_test_db, /):\n    redis.Redis(db=scratch_test_db)\n",
+        "async def t(scratch_test_db):\n    redis.Redis(db=scratch_test_db)\n",
+    ],
+    ids=["plain", "keyword-only", "positional-only", "async-def"],
+)
+def test_the_genuine_fixture_parameter_passes_in_every_spelling_route1(fn_src: str):
+    result = scan_source(f"import redis\n{fn_src}", "x.py")
+    assert result.violations == []
+
+
+@pytest.mark.parametrize(
+    "fn_src",
+    [
+        "def t(redis_test_url):\n    redis.Redis.from_url(redis_test_url)\n",
+        "def t(*, redis_test_url):\n    redis.Redis.from_url(redis_test_url)\n",
+        "def t(redis_test_url, /):\n    redis.Redis.from_url(redis_test_url)\n",
+        "async def t(redis_test_url):\n    redis.Redis.from_url(redis_test_url)\n",
+    ],
+    ids=["plain", "keyword-only", "positional-only", "async-def"],
+)
+def test_the_genuine_fixture_parameter_passes_in_every_spelling_route2(fn_src: str):
+    result = scan_source(f"import redis\n{fn_src}", "x.py")
+    assert result.violations == []
+
+
+def test_a_defaulted_fixture_parameter_stays_red_route1():
+    result = scan_source(
+        "import redis\ndef t(scratch_test_db=7):\n    redis.Redis(db=scratch_test_db)\n", "x.py"
+    )
+    assert len(result.violations) == 1
+
+
+def test_a_defaulted_fixture_parameter_stays_red_route2():
+    result = scan_source(
+        "import redis\ndef t(redis_test_url='redis://localhost:6379/9'):\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        "x.py",
+    )
+    assert len(result.violations) == 1
+
+
+# Leg-2 evidence (route 1) -- the sanctioned identifier is never an
+# unshadowed parameter at all, so leg 2 refuses these on its own and
+# `_rebound_names` is never consulted.
+LEG2_ROWS = [
+    ("LAUNDER1", "def t():\n    scratch_test_db = 7\n    redis.Redis(db=scratch_test_db)\n", 1),
+    ("LAUNDER2", "def t():\n    test_db = 7\n    redis.Redis(db=test_db)\n", 1),
+    (
+        "LDEFAULT",
+        "def t(scratch_test_db=7):\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "LMODULE",
+        "scratch_test_db = 7\ndef t():\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "LFOR",
+        "def t(xs):\n    for scratch_test_db in xs:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "LWALRUS",
+        "def t():\n    if (scratch_test_db := 7):\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "LWITH",
+        "def t(c):\n    with c as scratch_test_db:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+]
+
+# Leg-3 evidence (route 1) -- the sanctioned name IS a parameter with no
+# default (legs 1 and 2 both pass), so only `_rebound_names` can refuse it.
+# One row per binding form.
+LEG3_ROWS = [
+    (
+        "L3ASSIGN",
+        "def t(scratch_test_db):\n    scratch_test_db = 7\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3ANNASSIGN",
+        "def t(scratch_test_db):\n"
+        "    scratch_test_db: int = 7\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3AUG",
+        "def t(scratch_test_db):\n    scratch_test_db += 1\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3FOR",
+        "def t(scratch_test_db, xs):\n"
+        "    for scratch_test_db in xs:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3ASYNCFOR",
+        "async def t(scratch_test_db, xs):\n"
+        "    async for scratch_test_db in xs:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3WALRUS",
+        "def t(scratch_test_db):\n"
+        "    if (scratch_test_db := 7):\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3WITH",
+        "def t(scratch_test_db, c):\n"
+        "    with c as scratch_test_db:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3ASYNCWITH",
+        "async def t(scratch_test_db, c):\n"
+        "    async with c as scratch_test_db:\n        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3COMPWALRUS",
+        "def t(scratch_test_db, xs):\n"
+        "    [scratch_test_db := y for y in xs]\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3EXCEPT",
+        "def t(scratch_test_db):\n"
+        "    try:\n        pass\n    except ValueError as scratch_test_db:\n"
+        "        redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3IMPORT",
+        "def t(scratch_test_db):\n"
+        "    import os as scratch_test_db\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3DEF",
+        "def t(scratch_test_db):\n"
+        "    def scratch_test_db():\n        return 7\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3CLASS",
+        "def t(scratch_test_db):\n"
+        "    class scratch_test_db:\n        pass\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3MATCH",
+        "def t(scratch_test_db, m):\n"
+        "    match m:\n        case scratch_test_db:\n"
+        "            redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3MATCHSTAR",
+        "def t(scratch_test_db, m):\n"
+        "    match m:\n        case [*scratch_test_db]:\n"
+        "            redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3MATCHMAP",
+        "def t(scratch_test_db, m):\n"
+        '    match m:\n        case {"a": 1, **scratch_test_db}:\n'
+        "            redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3NONLOCAL",
+        "def t(scratch_test_db):\n"
+        "    def inner():\n        nonlocal scratch_test_db\n        scratch_test_db = 7\n"
+        "    inner()\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+    (
+        "L3GLOBAL",
+        "def t(scratch_test_db):\n"
+        "    def inner():\n        global scratch_test_db\n        scratch_test_db = 7\n"
+        "    inner()\n    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
+]
+
+# Leg-3 over-refusal -- the sanctioned parameter is genuinely unshadowed;
+# each is scope-local in Python 3 and leaves the outer parameter intact.
+LEG3_OVERREFUSAL_ROWS = [
+    (
+        "L3COMP",
+        "def t(scratch_test_db, xs):\n"
+        "    ys = [scratch_test_db for scratch_test_db in xs]\n"
+        "    redis.Redis(db=scratch_test_db)\n",
+        0,
+    ),
+    (
+        "L3LAMBDA",
+        "def t(scratch_test_db):\n"
+        "    f = lambda scratch_test_db: scratch_test_db\n"
+        "    redis.Redis(db=scratch_test_db)\n",
+        0,
+    ),
+    (
+        "L3NESTASSIGN",
+        "def t(scratch_test_db):\n"
+        "    def inner():\n        scratch_test_db = 7\n        return scratch_test_db\n"
+        "    redis.Redis(db=scratch_test_db)\n",
+        0,
+    ),
+]
+
+# Route-2 mirrors: the leg's bare-name accept performed NO scope check before
+# #2764, so every one of these was green when it should have been red.
+ROUTE2_ROWS = [
+    (
+        "URLLAUNDER",
+        "def t():\n"
+        "    redis_test_url = 'redis://localhost:6379/9'\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLDEFAULT",
+        "def t(redis_test_url='redis://localhost:6379/9'):\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3ASSIGN",
+        "def t(redis_test_url):\n"
+        "    redis_test_url = 'redis://localhost:6379/9'\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3FOR",
+        "def t(redis_test_url, xs):\n"
+        "    for redis_test_url in xs:\n        redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3EXCEPT",
+        "def t(redis_test_url):\n"
+        "    try:\n        pass\n    except ValueError as redis_test_url:\n"
+        "        redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3MATCH",
+        "def t(redis_test_url, m):\n"
+        "    match m:\n        case redis_test_url:\n"
+        "            redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3NONLOCAL",
+        "def t(redis_test_url):\n"
+        "    def inner():\n        nonlocal redis_test_url\n"
+        "        redis_test_url = 'redis://localhost:6379/9'\n"
+        "    inner()\n    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3COMPWALRUS",
+        "def t(redis_test_url, xs):\n"
+        "    [redis_test_url := y for y in xs]\n    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+]
+
+ROUTE2_OVERREFUSAL_ROWS = [
+    (
+        "URLL3COMP",
+        "def t(redis_test_url, xs):\n"
+        "    ys = [redis_test_url for redis_test_url in xs]\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        0,
+    ),
+    (
+        "URLL3NESTASSIGN",
+        "def t(redis_test_url):\n"
+        "    def inner():\n        redis_test_url = 'redis://localhost:6379/9'\n"
+        "        return redis_test_url\n"
+        "    redis.Redis.from_url(redis_test_url)\n",
+        0,
+    ),
+]
+
+ALL_LABELED_ROWS = (
+    LEG2_ROWS + LEG3_ROWS + LEG3_OVERREFUSAL_ROWS + ROUTE2_ROWS + ROUTE2_OVERREFUSAL_ROWS
+)
+
+
+@pytest.mark.parametrize(
+    "label,body,expected",
+    ALL_LABELED_ROWS,
+    ids=[row[0] for row in ALL_LABELED_ROWS],
+)
+def test_shadowing_and_rebinding_shapes(label: str, body: str, expected: int):
+    result = scan_source(f"import redis\n{body}", "x.py")
+    assert len(result.violations) == expected, (
+        f"{label}: expected {expected} violation(s), got {len(result.violations)}"
+    )
+
+
+def test_route2_one_hop_alias_stays_a_disclosed_false_positive():
+    """URLHOP paired with DBHOP pins residual gap 6: route 2 has no one-hop
+    alias leg, so the shape route 1 accepts is a violation here."""
+    url_hop = scan_source(
+        "import redis\nfrom tests.db_claim import redis_test_url\n"
+        "def t():\n    url = redis_test_url()\n    redis.Redis.from_url(url)\n",
+        "x.py",
+    )
+    db_hop = scan_source(
+        "import redis\nfrom tests.db_claim import claim_test_db\n"
+        "def t():\n    d = claim_test_db()\n    redis.Redis(db=d)\n",
+        "x.py",
+    )
+    assert len(url_hop.violations) == 1
+    assert db_hop.violations == []
+
+
+# ---------------------------------------------------------------------------
+# `_parameter_names_without_defaults` and `_rebound_names`, asserted
+# directly. A helper that over-collects and a leg-2 refusal produce the same
+# violation COUNT through `scan_source`; asserting the helper's return set
+# is what tells them apart.
+# ---------------------------------------------------------------------------
+
+
+def _parse_fn(src: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    module = ast.parse(src)
+    fn = module.body[0]
+    assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    return fn
+
+
+class TestParameterNamesWithoutDefaults:
+    def test_plain_parameters_with_no_defaults(self):
+        assert _parameter_names_without_defaults(_parse_fn("def t(a, b):\n    pass\n")) == {
+            "a",
+            "b",
+        }
+
+    def test_right_to_left_default_alignment(self):
+        fn = _parse_fn("def t(a, b, c=1, d=2):\n    pass\n")
+        assert _parameter_names_without_defaults(fn) == {"a", "b"}
+
+    def test_positional_only_and_keyword_only(self):
+        fn = _parse_fn("def t(a, /, b, *, c, d=1):\n    pass\n")
+        assert _parameter_names_without_defaults(fn) == {"a", "b", "c"}
+
+    def test_vararg_and_kwarg_are_excluded(self):
+        fn = _parse_fn("def t(a, *args, **kw):\n    pass\n")
+        assert _parameter_names_without_defaults(fn) == {"a"}
+
+    def test_async_def_is_supported(self):
+        fn = _parse_fn("async def t(a, b=1):\n    pass\n")
+        assert _parameter_names_without_defaults(fn) == {"a"}
+
+    def test_non_function_node_returns_empty(self):
+        assert _parameter_names_without_defaults(ast.parse("x = 1").body[0]) == set()
+
+
+class TestReboundNames:
+    def test_plain_assign(self):
+        fn = _parse_fn("def t(p):\n    p = 7\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_augassign(self):
+        fn = _parse_fn("def t(p):\n    p += 1\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_comprehension_target_does_not_rebind(self):
+        fn = _parse_fn("def t(p, xs):\n    ys = [p for p in xs]\n")
+        assert "p" not in _rebound_names(fn)
+
+    def test_walrus_inside_comprehension_rebinds(self):
+        fn = _parse_fn("def t(p, xs):\n    [p := y for y in xs]\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_lambda_parameter_does_not_rebind(self):
+        fn = _parse_fn("def t(p):\n    f = lambda p: p\n")
+        assert "p" not in _rebound_names(fn)
+
+    def test_assignment_inside_nested_def_does_not_rebind(self):
+        fn = _parse_fn("def t(p):\n    def inner():\n        p = 7\n        return p\n")
+        assert "p" not in _rebound_names(fn)
+
+    def test_nested_def_of_the_same_name_rebinds(self):
+        fn = _parse_fn("def t(p):\n    def p():\n        return 7\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_nested_nonlocal_rebinds(self):
+        fn = _parse_fn("def t(p):\n    def inner():\n        nonlocal p\n        p = 1\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_nested_global_rebinds_conservatively(self):
+        fn = _parse_fn("def t(p):\n    def inner():\n        global p\n        p = 1\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_except_handler_name(self):
+        fn = _parse_fn(
+            "def t(p):\n    try:\n        pass\n    except ValueError as p:\n        pass\n"
+        )
+        assert "p" in _rebound_names(fn)
+
+    def test_import_as(self):
+        fn = _parse_fn("def t(p):\n    import os as p\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_non_function_node_returns_empty(self):
+        assert _rebound_names(ast.parse("x = 1").body[0]) == set()
+
+
+# ---------------------------------------------------------------------------
+# Per-kind violation messages (#2768's unpinned-message item; spike-3's
+# measured defect that a non-`db-kwarg` kind rendered as `from_url(...)`).
+# ---------------------------------------------------------------------------
+
+
+def test_positional_message_is_not_mislabeled_as_from_url():
+    v = scan_source("import redis\ndef t():\n    redis.Redis('h', 6379, 7)\n", "x.py").violations
+    message = format_violation(v[0])
+    assert "takes db=7" in message
+    assert not message.startswith("tests/x.py:3: from_url(")
+
+
+@pytest.mark.parametrize("kind", ["db-kwarg", "from-url", "db-positional"])
+def test_every_kind_names_the_remedial_api(kind: str):
+    cand = Candidate(
+        path="x.py", lineno=1, kind=kind, expr="7", callee="Redis", ok=False, detail="d", pool_db=7
+    )
+    message = format_violation(cand)
+    for token in ("claim_test_db()", "redis_test_url()", "ALLOWLIST", "DEFERRED"):
+        assert token in message, f"{kind} message missing {token!r}:\n{message}"
+
+
+def test_an_unrecognized_kind_renders_its_own_name_rather_than_impersonating_from_url():
+    cand = Candidate(
+        path="x.py",
+        lineno=1,
+        kind="some-future-kind",
+        expr="7",
+        callee="Redis",
+        ok=False,
+        detail="d",
+        pool_db=None,
+    )
+    message = format_violation(cand)
+    assert "some-future-kind(7)" in message
+    assert "from_url(" not in message
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: the signature tripwire. Only THIS file imports `redis`; the guard
+# module stays pure-AST.
+# ---------------------------------------------------------------------------
+
+
+def test_positional_index_still_names_db():
+    params = list(inspect.signature(redis.Redis.__init__).parameters)
+    assert params[REDIS_DB_POSITIONAL_INDEX + 1] == "db"  # +1 skips `self`
+
+
+def test_strictredis_is_redis():
+    assert redis.StrictRedis is redis.Redis
+
+
+def test_guard_module_imports_no_redis():
+    source = Path("tests/db_derivation_guard.py").read_text()
+    assert not any(
+        line.startswith("import redis") or line.startswith("from redis")
+        for line in source.splitlines()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Residual-gap disclosure (fix 5, #2768's second folded-in item).
+# ---------------------------------------------------------------------------
+
+
+def test_residual_gaps_are_disclosed_in_the_module_docstring():
+    import tests.db_derivation_guard as guard_module
+
+    doc = guard_module.__doc__ or ""
+    assert "What this guard still cannot see" in doc
+    assert "REDIS_CONSTRUCTORS" in doc
