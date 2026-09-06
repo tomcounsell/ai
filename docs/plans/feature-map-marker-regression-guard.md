@@ -298,8 +298,8 @@ degrades into a second implementation that can drift away from the thing it is g
   instead of four lines buried in a collection hook that only pytest can reach.
 - **Data ownership**: unchanged. `FEATURE_MAP` remains test-suite-owned and lives under `tests/`.
   It is not promoted into `tools/`, where a pytest marker table has no business.
-- **Reversibility**: high. Deleting the guard file, the workflow, and moving the dict back is a
-  clean revert with no data or state to unwind.
+- **Reversibility**: high. Deleting the guard file and moving the dict back is a clean revert with
+  no data or state to unwind.
 
 
 ## Appetite
@@ -309,11 +309,12 @@ degrades into a second implementation that can drift away from the thing it is g
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1 (one open question, on whether the GitHub Actions workflow is wanted)
+- PM check-ins: 0 remaining (the one open question, on whether a GitHub Actions workflow was
+  wanted, is answered and closed: unit test only)
 - Review rounds: 1-2
 
-The code is small: one new stdlib module, one new test file, a four-line change to a collection
-hook, and a short workflow. The Medium sizing is entirely alignment cost. The guard is introduced
+The code is small: one new stdlib module, one new test file, and a four-line change to a collection
+hook. The Medium sizing is entirely alignment cost. The guard is introduced
 against 24 pre-existing violations, and how those are dispositioned is a judgement call a reviewer
 will and should push on.
 
@@ -515,16 +516,7 @@ out by path with a reason. If more than one or two packages need it, R2 is the w
 should be dropped rather than exempted into meaninglessness; the builder reports that rather than
 papering over it.
 
-### Risk 4: The new workflow is the repo's first pytest-adjacent CI job
-
-**Impact:** Adding GitHub Actions to a repo that deliberately runs its tests locally could be
-unwanted, and could invite "why not run the whole suite here" pressure later.
-**Mitigation:** The job runs one stdlib-only script in seconds with no secrets, no venv, and no
-services, so it sets no precedent about running the suite. It is also the only way to satisfy the
-issue's fourth acceptance criterion as written. Raised as the single Open Question so the call is
-made deliberately, and the guard still functions as a unit test if the answer is no.
-
-### Risk 5: The audit passes vacuously
+### Risk 4: The audit passes vacuously
 
 **Impact:** If `git ls-files` returns nothing (wrong cwd, a bare checkout), the audit finds zero
 violations and reports success, which is the worst possible failure for a guard.
@@ -556,7 +548,7 @@ read-only, so concurrent workers cannot interfere with it or with each other thr
   all currently unmarked and internally uniform). That is new tagging policy, not regression
   prevention. They pass rule R2 as they stand.
 - Not deferred, done here: the two `FEATURE_MAP` key additions, the extraction of `resolve_marker`,
-  the guard, the synthetic-mistag test, the workflow, and the documentation.
+  the guard, the synthetic-mistag test, and the documentation.
 
 
 ## Update System
@@ -620,8 +612,9 @@ consequence of being a plain script rather than an integration point that needs 
       `KNOWN_MISTAGS` key is a repo-relative path that `git ls-files` currently returns.
 - [ ] Stale exemptions fail the guard: deleting a real violation without deleting its baseline
       entry turns the guard red.
-- [ ] `.github/workflows/feature-map-guard.yml` runs the audit on `pull_request`, so the guard
-      gates every PR. (Subject to the Open Question.)
+- [ ] The issue's "runs in CI on every PR" criterion is met by the guard running as an ordinary
+      unit test in `tests/unit/`, executed by the SDLC TEST stage and the nightly suite. Those are
+      this repo's CI.
 - [ ] Marker resolution has exactly one implementation. The inlined loop is gone from
       `tests/conftest.py`.
 - [ ] No test file loses a marker it had at `f3594dd23`. `test_youtube_transcription.py` moves from
@@ -808,14 +801,10 @@ general review pass.
 | Baseline did not grow (anti-criterion) | `python -c "from tests.marker_map import KNOWN_MISTAGS; assert len(KNOWN_MISTAGS) <= 24, len(KNOWN_MISTAGS)"` | exit code 0 |
 | youtube test retagged to tools | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_youtube_transcription.py')[0] == 'tools'"` | exit code 0 |
 | No marker lost | `python tests/marker_map.py --report \| grep -vc 'NONE$'` | output > 281 |
-| Workflow gates pull requests | `python -c "import yaml; d=yaml.safe_load(open('.github/workflows/feature-map-guard.yml')); trig=d.get(True) or d.get('on'); assert 'pull_request' in trig, trig"` | exit code 0 |
 | Feature doc exists | `test -f docs/features/feature-map-marker-guard.md` | exit code 0 |
 | Feature doc indexed | `grep -c 'feature-map-marker-guard' docs/features/README.md` | output > 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Full unit suite green | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
-
-Note on the workflow row: GitHub Actions' `on:` key is parsed by PyYAML as the boolean `True`, not
-the string `"on"`. The check reads both so it cannot pass vacuously on a `None` lookup.
 
 
 ## Critique Results
