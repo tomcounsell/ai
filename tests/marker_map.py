@@ -157,11 +157,12 @@ KNOWN_ROOT_DIRS = ("tests", "unit", "integration", "e2e", "tools", "performance"
 # line number, index, or ordinal position -- a line-keyed ALLOWLIST silently
 # un-exempted call sites on unrelated merges). Every value is a prose reason;
 # a bare path with no reason is not an acceptable entry. There is deliberately
-# no whole-package exemption mechanism (no EXEMPT_DIRS): the measured baseline
-# needs none, and an unbracketed exemption is a silent hole (#3031). Draining
-# this baseline is #3175; it can only shrink, never grow -- rule 2 below
-# forces a stale entry (one whose violation was fixed without deleting the
-# entry) to fail loudly rather than rot.
+# no whole-package exemption mechanism: the measured baseline needs none, and
+# an unbracketed, unmeasured exemption keyed on an entire directory would be a
+# silent hole of exactly the kind #3031 warns about. Draining this baseline is
+# #3175; it can only shrink, never grow -- rule 2 below forces a stale entry
+# (one whose violation was fixed without deleting the entry) to fail loudly
+# rather than rot.
 KNOWN_MISTAGS: dict[str, str] = {
     # R1 (directory intent): tests/unit/reflections/ resolves to "reflections"
     # via its own name, but these 18 basenames resolve to no marker at all
@@ -211,13 +212,13 @@ def resolve_marker(basename: str) -> tuple[str | None, str | None]:
     This is Path A and Path B's single point of truth: the pytest collection
     hook and this guard both call this function, so they cannot disagree.
     """
-    # Global str.replace, not a prefix strip -- copied verbatim from the
-    # shipped hook (tests/conftest.py::pytest_collection_modifyitems). It
-    # removes *every* occurrence of "test_", which mangles the five
+    # Global str.replace of *every* occurrence, not a leading-prefix strip --
+    # copied verbatim from the shipped hook
+    # (tests/conftest.py::pytest_collection_modifyitems). It mangles the five
     # basenames containing "test_" twice (tracked as #3184, e.g.
     # test_test_judge.py -> "judge" instead of "test_judge"). Do NOT
-    # "clean this up" into removeprefix/removesuffix or an anchored regex:
-    # each of those retags tests/tools/test_test_judge.py and
+    # "clean this up" with a prefix/suffix-stripping helper or a pattern
+    # substitution: each of those retags tests/tools/test_test_judge.py and
     # tests/unit/test_validate_test_impact.py, silently gaining them a
     # marker and breaking the byte-identical-behavior requirement.
     stem = basename.replace("test_", "").replace(".py", "")
