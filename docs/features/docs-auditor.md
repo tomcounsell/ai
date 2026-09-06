@@ -775,6 +775,12 @@ now runs for real (advisory/report-only, same as before). Verify with
 
 `config/reflections.yaml` is vault-managed (symlink to `~/Desktop/Valor/reflections.yaml`).
 
+`reflections/docs_auditor.py` is imported by the reflection scheduler running
+inside the bridge process, so a bridge machine needs
+`./scripts/valor-service.sh restart` after a change to this module lands —
+already part of `/update`. Until that restart, a running bridge keeps
+executing the pre-change module code.
+
 ## Operational Cheatsheet
 
 ```bash

@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -387,7 +387,7 @@ Everything else the issue asks for is in scope for this plan and is done here �
 
 ## Update System
 
-No update system changes required. The change is confined to `reflections/docs_auditor.py` and its tests: no new dependency, no new config key, no new `.env` entry, no new console script, and no Popoto model change (so no `scripts/update/migrations.py` entry). The daily reflection already runs on every machine that owns the `valor` project; a normal `/update` pull picks the fix up with no migration step.
+No update system changes required. The change is confined to `reflections/docs_auditor.py` and its tests: no new dependency, no new config key, no new `.env` entry, no new console script, and no Popoto model change (so no `scripts/update/migrations.py` entry). The daily reflection already runs on every machine that owns the `valor` project; a normal `/update` pull picks the fix up with no migration step. `reflections/docs_auditor.py` is imported by the reflection scheduler in the bridge process, so bridge machines need `./scripts/valor-service.sh restart` after this lands — already part of `/update`, and now stated in `docs/features/docs-auditor.md`'s Configuration section.
 
 ## Agent Integration
 
@@ -619,3 +619,5 @@ Also re-verified this round: the substrate `repo` fixture performs no `git init`
 | NIT | Aggregator (structural measurement) | Risk 1's narrowed sentence says the statements outside any `try` in `_file_issue_if_new` "touch no subprocess". The body assembly calls `_filing_machine_name()`, which delegates to `config.machine.get_machine_display_name` → `get_machine_name()` → a `scutil` subprocess. That subprocess is itself fully wrapped in `try` / `except Exception` returning `""`, so nothing can propagate from it and the operative conclusion — no `gh` timeout arrives through those statements — is correct as written. | **Embedded (round-4b revision pass).** Verified in source: `_filing_machine_name()` → `config.machine.get_machine_display_name` → `get_machine_name()` → `subprocess.run(["scutil", "--get", "ComputerName"], timeout=…)`, wrapped in `try` / `except Exception` returning `""`, with the `socket.gethostname()` fallback wrapped too. **Risk 1's** clause is narrowed rather than reversed: it now separates the three statements that touch no subprocess from the body assembly that reaches `scutil`, and rests the conclusion on "no `gh` call is reachable from any of these statements". The three downstream sites that carry the narrowed wording (injection point 6, mutation row 8, Risk 3) speak only of `_file_issue_if_new` / `_issue_exists` `gh` call sites and are unaffected. |  |
 
 **Structural checks: all pass.** Required sections (Documentation with a `docs/features/` checkbox, Update System, Agent Integration, Test Impact with dispositions) present and substantive; tasks 1-7 with no numbering gap; every `Depends On` resolves to a real task ID with no cycle; every referenced repo path exists; no prerequisites to check; every Success Criterion maps to a task; no No-Go or Rabbit Hole appears as planned work.
+
+**Terminal round record.** This lane reached the G2 critique-cycle cap (2/2), and the owner authorized exactly one revision-plus-critique round beyond it. That round — critique run 4, above — returned `READY TO BUILD (WITH CONCERNS)`: 0 blockers, 2 concerns, 3 nits. The round-4b embed pass folded all five items into the plan body (see the Addressed By column above and the paragraph preceding it). No critique reviewed that embed pass: the concern re-critique bound was declared spent by owner authorization (`MAX_CONCERN_RECRITIQUE_ROUNDS=1` on the router call), so row 4c dispatched `/do-build` with the embeds accepted unreviewed. `docs/features/with-concerns-recritique-gate.md` expects `/do-build` to write an "Accepted Residual Concerns" note into this section in that situation; `/do-build` re-derived the condition against the repo-default `MAX_CONCERN_RECRITIQUE_ROUNDS=3` (`concern_round_count` was 2), resolved to `normal`, and wrote none. This paragraph is the substitute record.
