@@ -22,7 +22,7 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 **Current behavior:**
 
-`preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1508` at `ffda9fc86`) tests only whether `git status --porcelain` is non-empty, then unconditionally runs `git add -A` and commits. It never asks *what* is dirty. A worktree caught mid-teardown is maximally dirty, so the guard meant to skip a clean tree instead waves a total deletion straight through.
+`preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1626` at `bf0a5d577`) tests only whether `git status --porcelain` is non-empty, then unconditionally runs `git add -A` and commits. It never asks *what* is dirty. A worktree caught mid-teardown is maximally dirty, so the guard meant to skip a clean tree instead waves a total deletion straight through.
 
 **Desired outcome:**
 
@@ -40,7 +40,7 @@ The same wipe is written to `refs/session-wip/{slug}`, so the advertised recover
 
 **The sweep reaches the producer through Path B, and that is unchanged by #3179.** `tools/disk_reclaim.py::sweep_worktrees` → `cleanup_after_merge` (`agent/worktree_manager.py:2176`) → `remove_worktree` (`:2230`) → `preserve_uncommitted_worktree_changes` (`:1880`). #3179 narrowed how the sweep decides *which* lanes are idle; it did not add or remove a route into preserve. The guard in this plan covers that path because it covers `remove_worktree`.
 
-**`reap_idle_worktree` needs no guard, and this is deliberate, not an oversight.** It lives at `agent/worktree_manager.py:1007` and refuses on a non-empty `git status --porcelain` before doing anything else, so it never calls `preserve_uncommitted_worktree_changes` at all. A half-deleted tree reads as maximally dirty there and the lane is kept. Its docstring already reasons about #3167 explicitly ("The clean-tree guard is also what keeps this path clear of issue #3167"), and `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins that behavior. This plan touches neither the function nor that test.
+**`reap_idle_worktree` needs no guard, and this is deliberate, not an oversight.** It lives at `agent/worktree_manager.py:1125` and refuses on a non-empty `git status --porcelain` before doing anything else, so it never calls `preserve_uncommitted_worktree_changes` at all. A half-deleted tree reads as maximally dirty there and the lane is kept. Its docstring already reasons about #3167 explicitly ("The clean-tree guard is also what keeps this path clear of issue #3167"), and `tests/unit/worktree_manager/test_worktree_manager_cleanup.py::TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins that behavior. This plan touches neither the function nor that test.
 
 **Anchors re-derived at `bf0a5d577`** (cited here for orientation only; task bodies below cite by *symbol*, because line numbers in this module have now drifted three times — the `ffda9fc86` column is kept so a reader can see the size of the shift and distrust any stale citation on sight):
 
@@ -164,27 +164,27 @@ Two paths reach the producer. Both end in the same unguarded commit.
 
 **Path A — stale worktree found while creating a new one** (the path the issue names)
 
-1. **Entry point**: `create_worktree(repo_root, slug)` — `agent/worktree_manager.py:1370`. Called on session start / revival.
+1. **Entry point**: `create_worktree(repo_root, slug)` — `agent/worktree_manager.py:1488`. Called on session start / revival.
 2. `worktree_dir.exists()` is False, so creation proceeds. `_find_worktree_for_branch(repo_root, "session/{slug}")` finds the branch checked out at some *other* `.worktrees/` path.
-3. `_cleanup_stale_worktree(repo_root, branch_name, existing_wt)` — line 1425.
-4. Path-containment guard (line 942) passes: the path is under `.worktrees/`. Directory exists, so the force-remove branch is taken.
-5. `stale_slug = wt.name`; `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` — line 972.
+3. `_cleanup_stale_worktree(repo_root, branch_name, existing_wt)` — line 1543.
+4. Path-containment guard (line 1060) passes: the path is under `.worktrees/`. Directory exists, so the force-remove branch is taken.
+5. `stale_slug = wt.name`; `preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)` — line 1090.
 6. **The gap**: `git status --porcelain` in a gutted `wt` returns a long list of ` D` lines. Non-empty, so the clean-tree early return does not fire. `git add -A` stages every deletion. `git commit --no-verify --no-gpg-sign` writes it — **onto whatever branch `wt` has checked out**, which is `session/{slug}`, not `session/{stale_slug}`.
 7. `git -C {repo_root} update-ref refs/session-wip/{stale_slug} {sha}` — the ref is filed under the *directory name*, the commit landed on a *different branch*. Recovery pointer and recovered content disagree.
 8. **Output**: `git worktree remove --force` proceeds. The wipe is now the head of a live session branch, and the durable ref points at it.
 
 **Path B — ordinary teardown** (unnamed in the issue, equally exposed)
 
-1. **Entry point**: `remove_worktree(repo_root, slug)` — line 1653. Called from `cleanup_after_merge` and from session teardown.
+1. **Entry point**: `remove_worktree(repo_root, slug)` — line 1771. Called from `cleanup_after_merge` and from session teardown.
 2. Refuse-busy guard (#1357) and live-process guard pass, or `force=True` overrides them.
-3. `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` — line 1762. Same unguarded body, same outcome. Here slug and branch do agree.
+3. `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` — line 1880. Same unguarded body, same outcome. Here slug and branch do agree.
 4. **Output**: same wipe commit, same ref.
 
-**Path C — the idle-lane reaper** (`reap_idle_worktree`, `agent/worktree_manager.py:1007`, added by `55ad9ac89` for #3162) **does not reach the producer and needs no change.** It refuses on a non-empty `git status --porcelain` before any other work, so a half-deleted tree reads as dirty, the lane is kept, and preserve is never called. Its docstring says so explicitly and `TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins it. Named here so a reader auditing the module's teardown surface does not have to rediscover it.
+**Path C — the idle-lane reaper** (`reap_idle_worktree`, `agent/worktree_manager.py:1125`, added by `55ad9ac89` for #3162) **does not reach the producer and needs no change.** It refuses on a non-empty `git status --porcelain` before any other work, so a half-deleted tree reads as dirty, the lane is kept, and preserve is never called. Its docstring says so explicitly and `TestReapIdleWorktree::test_half_deleted_tree_is_kept_and_never_preserved` pins it. Named here so a reader auditing the module's teardown surface does not have to rediscover it.
 
 **Where the guard goes**: step 6 in Path A is step 3 in Path B — the identical function body. Putting the check inside `preserve_uncommitted_worktree_changes`, between the `status` read and the staging step, covers both live paths with one change and leaves every caller's contract unchanged (the function already returns `{"preserved": False, "errors": [...]}` and is documented as never raising into teardown).
 
-**Where the deletions came from** is deliberately *not* on this path. Whatever gutted the tree — a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback at line 1001, a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory — the observable at step 6 is identical and the response is correct against all three.
+**Where the deletions came from** is deliberately *not* on this path. Whatever gutted the tree — a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback at line 1119, a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory — the observable at step 6 is identical and the response is correct against all three.
 
 ## Why Previous Fixes Failed
 
@@ -196,7 +196,7 @@ Two paths reach the producer. Both end in the same unguarded commit.
 
 **Root cause pattern:** every guard in this subsystem answers "is there something here?" and none answers "is what's here plausible?". `status --porcelain` non-empty, `merge-base --is-ancestor` passing, `merged_via_tree` false — each is a presence check, and a wipe satisfies all three. The fix is the first shape-of-the-change check on the path.
 
-**A correction to the issue's own diagnosis.** The Diagnostic Output section attributes the `bridge boot → WIP commit` correlation to `cleanup_stale_branches`. That function (`agent/session_revival.py:198`) lists `session/*` branches, checks their age against `max_age_hours`, and calls `safe_delete_branch`. It never touches a worktree and never reaches preserve. The correlation is real; the mechanism named for it is not. The only caller of `_cleanup_stale_worktree` is `create_worktree` at line 1425 — so what a bridge boot does is *create* worktrees, and it is the stale-worktree recovery inside creation (Path A above) that reaches the producer. Anyone building from the issue's stated mechanism would have instrumented the wrong function.
+**A correction to the issue's own diagnosis.** The Diagnostic Output section attributes the `bridge boot → WIP commit` correlation to `cleanup_stale_branches`. That function (`agent/session_revival.py:198`) lists `session/*` branches, checks their age against `max_age_hours`, and calls `safe_delete_branch`. It never touches a worktree and never reaches preserve. The correlation is real; the mechanism named for it is not. The only caller of `_cleanup_stale_worktree` is `create_worktree` at line 1543 — so what a bridge boot does is *create* worktrees, and it is the stale-worktree recovery inside creation (Path A above) that reaches the producer. Anyone building from the issue's stated mechanism would have instrumented the wrong function.
 
 ## Architectural Impact
 
@@ -402,7 +402,7 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 ## Rabbit Holes
 
-- **Root-causing what gutted the worktree.** Three mechanisms fit the evidence equally well: a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback (`agent/worktree_manager.py:1001`), a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory. Distinguishing them means instrumenting a path that fires only under a bridge restart storm, and the answer changes nothing: the response is correct against all three. Filed as a No-Go, not attempted here.
+- **Root-causing what gutted the worktree.** Three mechanisms fit the evidence equally well: a `shutil.rmtree` that raised partway through the `_cleanup_stale_worktree` fallback (`agent/worktree_manager.py:1119`), a `git worktree remove --force` that deleted files and then failed, or two concurrent teardown passes racing on the same directory. Distinguishing them means instrumenting a path that fires only under a bridge restart storm, and the answer changes nothing: the response is correct against all three. Filed as a No-Go, not attempted here.
 - **Fixing the bridge restart loop.** #3166 is the amplifier that turned one latent race into nine teardown passes. It is a separate issue with a separate investigation, and this fix does not wait on it.
 - **Serializing teardown with a lock.** Tempting once you notice the race, and a large change to a module three subsystems call. If the guard proves insufficient in practice, that is the follow-up; it is not the first move.
 - **Building recovery tooling for `refs/session-wip/*`.** There are zero such refs on this machine. Writing a resurrect/inspect CLI for a namespace that is currently empty is speculative work.
@@ -454,7 +454,7 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 ### Race 1: A concurrent teardown pass gutting the worktree while preserve reads it
 
-**Location:** `preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1508`), against its two call sites at `:972` and `:1762`, plus the fallback `shutil.rmtree` at `:1001`.
+**Location:** `preserve_uncommitted_worktree_changes` (`agent/worktree_manager.py:1626`), against its two call sites at `:1090` and `:1880`, plus the fallback `shutil.rmtree` at `:1119`.
 
 **Trigger:** Two teardown passes target the same `.worktrees/{slug}` concurrently. Pass A's `git worktree remove --force` (or the fallback `rmtree`) begins deleting files; pass B's preserve reads a tree that is now partially gone. The bridge restart loop in #3166 supplied nine such passes in seventeen minutes. This is the leading candidate for what produced the reported commit, though the plan does not depend on it being the right one.
 
@@ -480,7 +480,7 @@ All existing tests for this function live in `tests/unit/worktree_manager/test_w
 
 Three of the issue's five Next Steps bullets were completed during planning rather than deferred, and are recorded where they belong:
 
-- The **ordering question** in `_cleanup_stale_worktree` is answered, not deferred. Within a single pass the ordering is already correct: preserve runs at `agent/worktree_manager.py:972`, before that pass's own `git worktree remove --force`. The "preserve running against a tree a previous pass already gutted" hypothesis is a *cross-pass* concern, which is Race 1 in the Race Conditions section and is what the check detects. No code change is needed for ordering.
+- The **ordering question** in `_cleanup_stale_worktree` is answered, not deferred. Within a single pass the ordering is already correct: preserve runs at `agent/worktree_manager.py:1090`, before that pass's own `git worktree remove --force`. The "preserve running against a tree a previous pass already gutted" hypothesis is a *cross-pass* concern, which is Race 1 in the Race Conditions section and is what the check detects. No code change is needed for ordering.
 - The **`refs/session-wip/*` audit** is done: `git for-each-ref refs/session-wip/` returns zero refs on this machine. Nothing to audit, nothing to ship.
 - The **sharper "missing tracked directory" variant** is not an alternative to evaluate later — it is the *only* signal this plan ships, and spike-2 removed the need for the hardcoded directory list the issue proposed.
 
@@ -499,7 +499,7 @@ No `.env.example` entry is needed either. The revision pass dropped the two `Per
 
 No agent integration required — this is a bridge-internal change.
 
-`preserve_uncommitted_worktree_changes` is called only from within `agent/worktree_manager.py` (lines 972 and 1762) on teardown paths the bridge and worker drive automatically. There is no CLI entry point to add to `pyproject.toml [project.scripts]`, no MCP tool to register, and nothing for the agent to invoke. The agent's relationship to this code is as a *subject* of it, not a caller: its worktree is what gets torn down.
+`preserve_uncommitted_worktree_changes` is called only from within `agent/worktree_manager.py` (lines 1090 and 1880) on teardown paths the bridge and worker drive automatically. There is no CLI entry point to add to `pyproject.toml [project.scripts]`, no MCP tool to register, and nothing for the agent to invoke. The agent's relationship to this code is as a *subject* of it, not a caller: its worktree is what gets torn down.
 
 The one agent-facing surface in this subsystem is the sibling `validate_no_destructive_git_in_worktree.py` PreToolUse hook, and it is explicitly out of scope (see Rabbit Holes).
 
@@ -507,8 +507,8 @@ The one agent-facing surface in this subsystem is the sibling `validate_no_destr
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
-- [ ] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1518-1527`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
+- [ ] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 (unmoved at `bf0a5d577`) describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
+- [ ] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1636-1645`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
 - [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
 - [ ] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
 - [ ] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
@@ -537,7 +537,7 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - [ ] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
 - [ ] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
 - [ ] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
-- [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:972`) and `remove_worktree` (`:1762`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
+- [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:1090`) and `remove_worktree` (`:1880`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
 - [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
 - [ ] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts.
 - [ ] **Failure handling is asymmetric.** A failure of the *detection* read (`ls-tree`, block A) logs WARNING under `[worktree-wip-guard-failed]` and falls through to today's `git add -A` behavior. A failure of the *response* reads (`reset` / `ls-files`, block B, reached only after HEAD has proven a directory missing) logs WARNING under `[worktree-wip-guard-failed]` **and** ERROR under `[worktree-wip-refused-wipe]`, returns the pure-wipe dict, and **leaves the branch head unmoved** — it never falls through to `git add -A`. Asserted by patching each read independently.
