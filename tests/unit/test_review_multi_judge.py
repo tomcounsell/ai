@@ -686,7 +686,8 @@ class TestCrossVendorJudgeConsensus:
 
 class TestTrivialDiffPathDoesNotReachQuorumGuard:
     """The trivial-diff check is inline prose applied by the executing agent
-    at docs/sdlc/do-pr-review.md:250-254 -- there is no shape-classifier
+    -- the "Cost containment" bullet in docs/sdlc/do-pr-review.md's
+    Multi-Judge Consensus section -- there is no shape-classifier
     module to import or exempt (scripts/pr_shape_classify.py was deleted by
     #2378). This is the honest testable property: the prose forces the
     legacy single-judge path, and the outcome contract forbids the

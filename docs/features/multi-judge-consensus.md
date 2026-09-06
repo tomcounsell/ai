@@ -110,9 +110,10 @@ whose changed files are all docs (`docs/**`, `**/*.md`) or all lockfile sync
 (`uv.lock` / `pyproject.toml` only) force the legacy single-judge path. It is
 automatic and per-PR, which is what makes it the right shape for this — cost
 scales with what a PR actually is, not with what someone remembered to export.
-This path is unaffected by the quorum floor below: it is inline prose
-(`docs/sdlc/do-pr-review.md:250-254`, not a script — there is no shape
-classifier module) applied by the executing agent, and it never calls
+This path is unaffected by the quorum floor below: it is inline prose (the
+"Cost containment" bullet in `docs/sdlc/do-pr-review.md`'s Multi-Judge
+Consensus section, not a script — there is no shape classifier module)
+applied by the executing agent, and it never calls
 `compute_consensus` at all. It posts one judge's verdict directly, with no
 `judges`/`consensus` kwargs on `record_verdict` and no `judges_run` in its
 OUTCOME, so the floor has nothing to trip on that path.
