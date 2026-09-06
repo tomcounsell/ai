@@ -323,7 +323,9 @@ def lab(fake_redis, fake_query, fake_ledger, owns_project, monkeypatch):
     lab = _Lab(fake_redis, fake_query)
     lab.ledger = fake_ledger
 
-    monkeypatch.setattr(sdlc_progress, "_send_alert", lambda msg: lab.alerts.append(msg))
+    monkeypatch.setattr(
+        sdlc_progress, "_send_alert", lambda project_dict, msg: lab.alerts.append(msg) or True
+    )
 
     def _steer(session_id, message):
         lab.steers.append((session_id, message))
@@ -1194,6 +1196,27 @@ def test_attempt_budget_exhaustion_escalates_once_then_goes_silent(lab, stub_wor
     assert lab.steers == [], "an exhausted budget must stop acting, not keep steering"
 
 
+def test_unresolvable_project_suppresses_and_reports_without_counting(
+    lab, stub_workdir, stalled_pr, monkeypatch
+):
+    """A suppressed page (no Eng: group configured) must reach findings and
+    summary without incrementing the escalated counter — the split the
+    ``_escalate`` closure exists to make (Task 7)."""
+    monkeypatch.setattr(sdlc_progress, "_send_alert", _REAL_SEND_ALERT)
+    lab.redis.set(
+        sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"),
+        str(sdlc_progress._max_attempts()),
+    )
+
+    # _PROJECT carries no telegram config, so send_eng_telegram resolves
+    # nothing and _send_alert returns False without ever calling subprocess.
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert "0 escalated" in result["summary"]
+    assert any(f.startswith("alert-suppressed:") for f in result["findings"])
+    assert not any(f.startswith("escalated") for f in result["findings"])
+
+
 def test_escalation_redis_unavailable_sends_nothing(lab, stub_workdir, stalled_pr):
     """UPDATE: retargeted from the deleted alert key to the escalation key.
 
@@ -1702,11 +1725,23 @@ def test_valor_telegram_missing_does_not_break_the_tick(lab, stub_workdir, stall
         sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"),
         str(sdlc_progress._max_attempts()),
     )
+    # _send_alert now delegates to reflections.utilities.send_eng_telegram,
+    # which owns its own subprocess.run reference — that is the boundary to
+    # patch, not sdlc_progress's module-level subprocess.
     monkeypatch.setattr(
-        sdlc_progress.subprocess, "run", MagicMock(side_effect=FileNotFoundError("valor-telegram"))
+        reflections.utilities.subprocess,
+        "run",
+        MagicMock(side_effect=FileNotFoundError("valor-telegram")),
     )
 
-    result = sdlc_progress._check_project_stalls(_PROJECT)
+    # _PROJECT carries no telegram config, so send_eng_telegram would suppress
+    # before ever reaching subprocess.run — a project with a configured Eng:
+    # group is what puts the real subprocess boundary under test here.
+    project_with_eng_group = {
+        **_PROJECT,
+        "telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}},
+    }
+    result = sdlc_progress._check_project_stalls(project_with_eng_group)
     assert result["status"] == "ok"
 
 
@@ -1854,9 +1889,12 @@ def test_git_log_failure_returns_none(monkeypatch):
 
 def test_send_alert_swallows_filenotfound(monkeypatch):
     monkeypatch.setattr(
-        sdlc_progress.subprocess, "run", MagicMock(side_effect=FileNotFoundError("valor-telegram"))
+        reflections.utilities.subprocess,
+        "run",
+        MagicMock(side_effect=FileNotFoundError("valor-telegram")),
     )
-    sdlc_progress._send_alert("hello")  # must not raise
+    project = {"telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}}}
+    sdlc_progress._send_alert(project, "hello")  # must not raise
 
 
 # ---------------------------------------------------------------------------

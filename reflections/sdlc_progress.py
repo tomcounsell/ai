@@ -110,6 +110,7 @@ from reflections.utilities import (  # noqa: F401
     _lock_says_live,
     machine_owns_project,
     run_per_project_audit,
+    send_eng_telegram,
 )
 from tools.lane_identity import adopt_lane_slug
 
@@ -750,6 +751,7 @@ def _escalation_message(
 def _escalate_once(
     *,
     project: str,
+    project_dict: dict,
     slug: str,
     sha: str,
     pr_number: Any,
@@ -757,17 +759,22 @@ def _escalate_once(
     age_hours: int,
     attempts: int,
     reason: str,
-) -> str | None:
+) -> tuple[bool, str | None]:
     """Page a human at most once per ``(slug, head-sha)``.
 
-    Returns the message that was sent, or None when nothing was sent — either
-    because the human was already told about this head sha, or because Redis
-    was unavailable for the ``SET NX`` guard (under-alert during a flap beats
-    spam during one).
+    Returns ``(sent, message)``:
+      - sentinel already burned or Redis unreadable for the ``SET NX`` guard
+        → ``(False, None)`` — nothing to report, nothing to count
+        (under-alert during a flap beats spam during one, unchanged).
+      - a page was sent → ``(True, message)``.
+      - the sentinel claimed but ``send_eng_telegram`` resolved no ``Eng:``
+        group for this project → ``(False, "alert-suppressed: ...")`` — the
+        caller threads this into ``findings`` without counting a page that
+        never sent.
     """
     if not _escalation_set(slug, sha):
         logger.info("sdlc_progress: escalation already recorded for %s@%s", slug, sha[:8])
-        return None
+        return False, None
     message = _escalation_message(
         project=project,
         slug=slug,
@@ -777,30 +784,22 @@ def _escalate_once(
         attempts=attempts,
         reason=reason,
     )
-    _send_alert(message)
-    return message
+    sent = _send_alert(project_dict, message)
+    if sent:
+        return True, message
+    return False, f"alert-suppressed: no Eng: group for {project} ({slug}@{sha[:8]})"
 
 
-def _send_alert(message: str) -> None:
-    """Best-effort Telegram alert. All failures swallowed and logged.
+def _send_alert(project_dict: dict, message: str) -> bool:
+    """Page ``project_dict``'s own ``Eng:`` group. All transport failures
+    swallowed and logged.
 
     Caller contract: fires ONLY from the escalation path, and only after
-    ``_escalation_set`` returned True.
+    ``_escalation_set`` returned True. Returns ``False`` only when no
+    ``Eng:`` group resolved for the project — see
+    ``reflections.utilities.send_eng_telegram``'s contract.
     """
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("sdlc_progress: valor-telegram not on PATH; skipping alert")
-    except subprocess.TimeoutExpired:
-        logger.warning("sdlc_progress: valor-telegram timed out")
-    except Exception as exc:
-        logger.warning("sdlc_progress: valor-telegram failed: %s", exc)
+    return send_eng_telegram(project_dict, message, logger_prefix="sdlc_progress")
 
 
 # --- The steer-target ladder ------------------------------------------------
@@ -1157,8 +1156,9 @@ def _check_project_stalls(project: dict) -> dict:
             continue
 
         def _escalate(reason: str, attempts: int) -> None:
-            msg = _escalate_once(
+            sent, msg = _escalate_once(
                 project=project_key,
+                project_dict=project,
                 slug=slug,
                 sha=sha,
                 pr_number=pr.get("number"),
@@ -1168,8 +1168,9 @@ def _check_project_stalls(project: dict) -> dict:
                 reason=reason,
             )
             if msg:
-                counts["escalated"] += 1
                 findings.append(msg)
+            if sent:
+                counts["escalated"] += 1
 
         if not resume_enabled:
             _escalate("auto-resume disabled (SDLC_STALL_RESUME_ENABLED=false)", 0)
