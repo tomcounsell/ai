@@ -485,26 +485,26 @@ Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
 ## Success Criteria
 
 
-- [ ] `ISSUE_LOOKUP_INSTRUCTION` exists at module scope and is interpolated by **all three** prompt builders: `_build_triage_prompt`, `_build_cascade_prompt`, `_build_seed_prompt`.
-- [ ] Each of the three **rendered** prompts contains the literal `gh issue list --state all --json number,title,state,stateReason --limit 200`.
-- [ ] Each of the three **rendered** prompts contains the prohibition on GitHub's search index, carrying its reason (#2960–#2999).
-- [ ] A case-insensitive scan of the three **rendered** prompts for `--search`, `gh search`, `search all`, `search open` returns **zero** matches. The prohibition is worded as "the search index" / "the search API" precisely so this row and the row above are simultaneously satisfiable — the earlier draft demanded a token the same gate forbade, which was unreachable.
-- [ ] The three pre-existing `--search` mentions in the module's constant comments and `open_issues`' docstring are **unchanged** — they are the REST-not-search rationale this work extends, and they sit outside the scanned prompt region.
-- [ ] Each of the three rendered prompts warns that `stateReason` is `""` for open issues, so the agent branches on `state` first (Research finding).
-- [ ] Every prompt's open / closed-`NOT_PLANNED` / closed-`COMPLETED` decision rule is unchanged in meaning from what #3075 landed — the read mechanism changed, the rule did not. This includes the seed prompt's stricter rule (comment and do NOT re-file whatever the close reason), which extraction into `_build_seed_prompt` must preserve verbatim.
-- [ ] `dispatch_findings` passes `dispositions=` for exactly the surviving `single_nodes` into `maybe_dispatch_triage_session`, and that list contains no already-open and no closed-not-planned node.
-- [ ] The cascade call site (~2598) and the seed call site (~2934) pass **no** `dispositions` and are otherwise unchanged in shape; neither produces a file under `data/nightly-triage-ledger/`, and neither rendered prompt contains a ledger paragraph. `_build_cascade_prompt` and `_build_seed_prompt` gain no `dispositions` or `ledger_path` parameter.
-- [ ] `_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None)` renders text **byte-identical to the inline original in `main()`** apart from the one replaced lookup sentence — including the `(old={prior_collection!r}, new={COLLECTION_PATHS!r})` clause, which a two-parameter signature could not reproduce. `main()` calls it as `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))`.
-- [ ] `grep -c -- '--search' scripts/nightly_regression_tests.py` still reports exactly `3` after the change (Verification row 9). No comment, constant, prompt body, or prompt-builder docstring added by this work spells a forbidden token.
-- [ ] `write_triage_ledger` writes `data/nightly-triage-ledger/{slug}.json` with the seeded entries and an empty `filed` array, **before** the session subprocess starts and **after** the `dry_run` short-circuit, and returns the absolute path (or `None`).
-- [ ] A `--dry-run` invocation creates no file under `data/nightly-triage-ledger/`, and its rendered prompt carries no ledger paragraph.
-- [ ] When `ledger_path` is non-`None`, the prompt names the ledger's absolute path and instructs the agent to read it first each turn and append to `filed` immediately after each `gh issue create`, before moving to the next entry. When it is `None`, no ledger paragraph appears at all.
-- [ ] A ledger write failure logs a `WARNING` naming the slug, returns `None`, and does not prevent dispatch.
-- [ ] `_build_triage_prompt` returns the plain prompt for `dispositions=None` **and** `dispositions=[]`, and raises `ValueError` only for a non-empty list whose length differs from the node list.
-- [ ] Tests pass (`/do-test`) — `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` exits 0.
-- [ ] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three prompts, states each defense's reach (fix 1 on all three, fixes 2 and 3 on the per-node path) with the reason for the narrowing, and gives the ledger's shape and location rationale.
-- [ ] `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
-- [ ] The branch is rooted on `main`, not on the stale local `session/nightly-triage-idempotency-3075` (`git merge-base --is-ancestor origin/main HEAD`).
+- [x] `ISSUE_LOOKUP_INSTRUCTION` exists at module scope and is interpolated by **all three** prompt builders: `_build_triage_prompt`, `_build_cascade_prompt`, `_build_seed_prompt`.
+- [x] Each of the three **rendered** prompts contains the literal `gh issue list --state all --json number,title,state,stateReason --limit 200`.
+- [x] Each of the three **rendered** prompts contains the prohibition on GitHub's search index, carrying its reason (#2960–#2999).
+- [x] A case-insensitive scan of the three **rendered** prompts for `--search`, `gh search`, `search all`, `search open` returns **zero** matches. The prohibition is worded as "the search index" / "the search API" precisely so this row and the row above are simultaneously satisfiable — the earlier draft demanded a token the same gate forbade, which was unreachable.
+- [x] The three pre-existing `--search` mentions in the module's constant comments and `open_issues`' docstring are **unchanged** — they are the REST-not-search rationale this work extends, and they sit outside the scanned prompt region.
+- [x] Each of the three rendered prompts warns that `stateReason` is `""` for open issues, so the agent branches on `state` first (Research finding).
+- [x] Every prompt's open / closed-`NOT_PLANNED` / closed-`COMPLETED` decision rule is unchanged in meaning from what #3075 landed — the read mechanism changed, the rule did not. This includes the seed prompt's stricter rule (comment and do NOT re-file whatever the close reason), which extraction into `_build_seed_prompt` must preserve verbatim.
+- [x] `dispatch_findings` passes `dispositions=` for exactly the surviving `single_nodes` into `maybe_dispatch_triage_session`, and that list contains no already-open and no closed-not-planned node.
+- [x] The cascade call site (~2598) and the seed call site (~2934) pass **no** `dispositions` and are otherwise unchanged in shape; neither produces a file under `data/nightly-triage-ledger/`, and neither rendered prompt contains a ledger paragraph. `_build_cascade_prompt` and `_build_seed_prompt` gain no `dispositions` or `ledger_path` parameter.
+- [x] `_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None)` renders text **byte-identical to the inline original in `main()`** apart from the one replaced lookup sentence — including the `(old={prior_collection!r}, new={COLLECTION_PATHS!r})` clause, which a two-parameter signature could not reproduce. `main()` calls it as `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))`.
+- [x] `grep -c -- '--search' scripts/nightly_regression_tests.py` still reports exactly `3` after the change (Verification row 9). No comment, constant, prompt body, or prompt-builder docstring added by this work spells a forbidden token.
+- [x] `write_triage_ledger` writes `data/nightly-triage-ledger/{slug}.json` with the seeded entries and an empty `filed` array, **before** the session subprocess starts and **after** the `dry_run` short-circuit, and returns the absolute path (or `None`).
+- [x] A `--dry-run` invocation creates no file under `data/nightly-triage-ledger/`, and its rendered prompt carries no ledger paragraph.
+- [x] When `ledger_path` is non-`None`, the prompt names the ledger's absolute path and instructs the agent to read it first each turn and append to `filed` immediately after each `gh issue create`, before moving to the next entry. When it is `None`, no ledger paragraph appears at all.
+- [x] A ledger write failure logs a `WARNING` naming the slug, returns `None`, and does not prevent dispatch.
+- [x] `_build_triage_prompt` returns the plain prompt for `dispositions=None` **and** `dispositions=[]`, and raises `ValueError` only for a non-empty list whose length differs from the node list.
+- [x] Tests pass (`/do-test`) — `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` exits 0.
+- [x] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three prompts, states each defense's reach (fix 1 on all three, fixes 2 and 3 on the per-node path) with the reason for the narrowing, and gives the ledger's shape and location rationale.
+- [x] `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
+- [x] The branch is rooted on `main`, not on the stale local `session/nightly-triage-idempotency-3075` (`git merge-base --is-ancestor origin/main HEAD`).
 
 ## Team Orchestration
 
