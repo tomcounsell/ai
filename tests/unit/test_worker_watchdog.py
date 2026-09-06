@@ -44,6 +44,21 @@ def _restore_worker_watchdog_constants():
         setattr(wwd, name, value)
 
 
+@pytest.fixture(autouse=True)
+def _pin_recover_ancestry_guard(monkeypatch):
+    """Pin ``recover()``'s #3164 ancestry gate instead of reading the live tree.
+
+    ``recover()`` refuses to signal a worker PID that is an ancestor of the
+    running process — the W1/W2 ladder would otherwise SIGKILL the caller. This
+    suite routinely runs inside an agent session that IS a worker descendant, so
+    leaving the gate on the real process table would make the recover tests pass
+    or fail by host state. Pinned on ``wwd`` (the module that imported the name)
+    and without ``raising=False``, so a moved import fails loudly. The test that
+    exercises the gate itself overrides this with its own patch.
+    """
+    monkeypatch.setattr(wwd, "is_own_ancestor", lambda pid: False)
+
+
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch):
     """Redirect log file and disable real Redis/launchctl for each test."""
@@ -810,6 +825,35 @@ class TestRecoverW1SigtermSuccess:
         mock_kill.assert_not_called()
         mock_poll.assert_not_called()
         assert any("no PID in status" in r.message for r in caplog.records)
+
+
+class TestRecoverAncestryGuard:
+    """#3164: never signal the worker this process is running inside."""
+
+    def test_recover_refuses_to_signal_an_ancestor_worker(self, isolated_state, caplog):
+        """A worker-hosted `python -m monitoring.worker_watchdog` must not self-kill.
+
+        The launchd tick is unaffected (ppid 1, never a worker descendant), but
+        the module has an argparse ``main()``, so a manual run from a
+        worker-hosted session with a stale heartbeat would SIGTERM then SIGKILL
+        its own ancestor.
+        """
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+                patch.object(wwd, "is_own_ancestor", return_value=True),
+            ):
+                with caplog.at_level(logging.ERROR, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_kill.assert_not_called()
+        mock_poll.assert_not_called()
+        assert any("ancestor" in r.message for r in caplog.records)
 
 
 class TestRecoverW2SigkillEscalation:

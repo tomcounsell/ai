@@ -39,7 +39,6 @@ from scripts.update.service import (
     read_boot_beacon,
     verify_running_release,
 )
-from tools import process_lookup
 
 pytestmark = pytest.mark.unit
 
@@ -652,13 +651,14 @@ def _pin_ancestry_guard(run_mod, monkeypatch, *, worker_pid=None, is_ancestor=Fa
     worker descendant, so leaving the guard on the real process table would make
     the self-heal tests pass or fail by host state.
 
-    Both plausible binding sites are patched — the name as ``run.py`` holds it and
-    the ``tools.process_lookup`` definition — so the pin survives either import
-    style.
+    ``run.py`` does ``from tools.process_lookup import is_own_ancestor`` at import
+    time, so ``run_mod.is_own_ancestor`` is the only binding that can affect it —
+    patching the ``tools.process_lookup`` definition would not. No
+    ``raising=False``: if that import is ever moved or renamed, this pin must
+    fail loudly rather than silently let these tests read the live process tree.
     """
     monkeypatch.setattr(run_mod.service, "get_worker_pid", lambda: worker_pid)
-    monkeypatch.setattr(process_lookup, "is_own_ancestor", lambda pid: is_ancestor)
-    monkeypatch.setattr(run_mod, "is_own_ancestor", lambda pid: is_ancestor, raising=False)
+    monkeypatch.setattr(run_mod, "is_own_ancestor", lambda pid: is_ancestor)
 
 
 def _write_worker_beacon(project_dir, sha, ts_iso):

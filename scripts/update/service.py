@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from tools.process_lookup import find_python_service_pids
+from tools.process_lookup import find_python_service_pids, is_own_ancestor
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,12 @@ def get_worker_pid() -> int | None:
 
     Both launch shapes are accepted: ``python -m worker`` (how launchd starts
     it) and ``python .../worker/__main__.py`` (a direct start).
+
+    Ordering (#3164): the old ``pgrep`` probe preferred the ``-m worker`` shape
+    and only fell back to the script shape; this ORs both selectors and takes
+    the lowest matching PID. The answer can therefore differ from the old one
+    only when both launch shapes are live at once, which no installed path
+    produces — the launchd plist is the sole worker launcher.
     """
     pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
     return pids[0] if pids else None
@@ -718,10 +725,18 @@ def stop_email(project_dir: Path) -> bool:
     service_script = project_dir / "scripts" / "valor-service.sh"
     if not service_script.exists():
         pid = get_email_pid()
-        if pid:
-            import os
-            import signal
-
+        # Never SIGTERM the email bridge this process is running inside (#3164).
+        # `get_email_pid` is ancestor-safe now, so a hosted caller can be handed
+        # its own ancestor's PID; signalling it would take the caller down.
+        # Skipping the kill also means we do not claim it stopped — the
+        # `is_email_running()` return below still reports it up.
+        if pid and is_own_ancestor(pid):
+            logger.warning(
+                "stop_email: email bridge pid %s is an ancestor of this process — "
+                "refusing to SIGTERM it; stop it from outside a hosted session",
+                pid,
+            )
+        elif pid:
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:

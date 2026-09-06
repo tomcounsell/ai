@@ -695,12 +695,20 @@ def check_bridge_health() -> HealthStatus:
 def kill_stale_processes() -> int:
     """Kill any stale bridge processes. Returns count killed.
 
-    This probe deliberately stays on ``pgrep`` while every other Python
-    service-PID probe moved to ``tools.process_lookup`` (#3164). Here BSD
-    ``pgrep``'s exclusion of the caller's ancestors is load-bearing rather
-    than a bug: this function SIGKILLs every match, so an ancestor-safe lookup
-    would let a bridge-descended caller kill its own live ancestor bridge.
+    This probe deliberately stays on ``pgrep`` while every probe converted by
+    #3164 moved to ``tools.process_lookup``. Here BSD ``pgrep``'s exclusion of
+    the caller's ancestors is load-bearing rather than a bug: this function
+    SIGKILLs every match, so an ancestor-safe lookup would let a
+    bridge-descended caller kill its own live ancestor bridge.
     Do not "finish the sweep" by converting this call site.
+
+    The sweep is not complete elsewhere either, so do not read this comment as
+    "everything else is done": ``scripts/migrate_session_type_pm_to_eng.py``
+    and ``scripts/merge_dev_chat_into_eng.py`` still ``pgrep`` for the worker.
+    Those are one-shot migration guards ("is the worker stopped before I
+    migrate?"), where the ancestor defect fails *dangerous* rather than safe —
+    a worker-hosted caller reads a live worker as stopped. Tracked as
+    follow-ups on #3164, not fixed here.
     """
     killed = 0
     try:

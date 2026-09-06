@@ -121,17 +121,21 @@ class HealthChecker:
 
         # Check if bridge is running by looking for PID file or process
         try:
-            import subprocess
+            # Ancestor-safe probe (#3164). BSD `pgrep` excludes the calling
+            # process and all of its ancestors, and this check runs inside
+            # bridge-hosted processes — the dashboard and `tools.doctor` both
+            # execute in `claude -p` sessions the bridge spawned — so a healthy
+            # bridge read as absent. `tools.process_lookup` reads `ps`, which
+            # has no ancestor filter, and never raises.
+            from tools.process_lookup import find_python_service_pids
 
-            result = subprocess.run(
-                ["pgrep", "-f", "telegram_bridge"], capture_output=True, text=True
-            )
-            if result.returncode == 0:
+            pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")
+            if pids:
                 return HealthCheckResult(
                     component="telegram",
                     status=HealthStatus.HEALTHY,
                     message="Telegram bridge running",
-                    details={"pids": result.stdout.strip().split("\n")},
+                    details={"pids": pids},
                 )
             return HealthCheckResult(
                 component="telegram",

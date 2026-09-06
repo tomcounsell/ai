@@ -77,7 +77,7 @@ PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 from config.settings import settings  # noqa: E402
-from tools.process_lookup import find_python_service_pids  # noqa: E402
+from tools.process_lookup import find_python_service_pids, is_own_ancestor  # noqa: E402
 
 HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
 # 180s = 6× the 30s heartbeat write interval (plan: ≥6× guard).
@@ -282,6 +282,24 @@ def recover(status: dict) -> None:
     pid = status.get("pid")
     if not pid:
         logger.error("recover(): no PID in status — cannot kill")
+        return
+
+    # Never signal the worker this process is running inside (#3164).
+    #
+    # `_get_worker_pid` is ancestor-safe now, so a manual
+    # `python -m monitoring.worker_watchdog` from a worker-hosted agent session
+    # is handed its own ancestor's PID, and the W1/W2 ladder below would SIGTERM
+    # then SIGKILL it — killing the caller mid-recovery. `pgrep`'s ancestor
+    # exclusion used to make that unreachable by accident; it is now an explicit
+    # decision, symmetric with the gate in `scripts/update/run.py`. The launchd
+    # tick is unaffected: it runs at ppid 1 and is never a worker descendant.
+    if is_own_ancestor(pid):
+        logger.error(
+            "recover(): worker PID %d is an ancestor of this process — refusing to signal "
+            "it, because SIGTERM/SIGKILL here would kill this caller. Run the watchdog "
+            "from its launchd job, not from inside a worker-hosted session.",
+            pid,
+        )
         return
 
     host = socket.gethostname()

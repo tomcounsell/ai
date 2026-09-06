@@ -127,9 +127,11 @@ def _parse_python_invocation(argv: list[str]) -> tuple[str | None, str | None]:
     Exactly one of the two results is ever non-None:
 
     - ``python -m worker`` → ``("worker", None)``
+    - ``python -mworker`` → ``("worker", None)`` — CPython accepts the value
+      attached to the flag, with no separating space.
     - ``python /abs/path/worker/__main__.py`` → ``(None, "/abs/path/worker/__main__.py")``
-    - ``python -c "..."`` → ``(None, None)`` — a ``-c`` payload is source code,
-      and everything after it belongs to the program.
+    - ``python -c "..."`` and ``python -c"..."`` → ``(None, None)`` — a ``-c``
+      payload is source code, and everything after it belongs to the program.
     - ``python`` (REPL) → ``(None, None)``
     """
     index = 1
@@ -144,6 +146,15 @@ def _parse_python_invocation(argv: list[str]) -> tuple[str | None, str | None]:
             continue
         if token == "-":
             return None, None  # stdin
+        # Attached short-option forms: `python -mworker`, `python -cCODE`. Both
+        # are legal CPython and both end option parsing exactly like their
+        # separated spellings. Checked AFTER the exact and value-option cases so
+        # `--check-hash-based-pycs` is not mistaken for an attached `-c` payload.
+        if not token.startswith("--"):
+            if token.startswith("-m"):
+                return token[2:], None
+            if token.startswith("-c"):
+                return None, None
         if token.startswith("-"):
             index += 1  # a bundled short-flag cluster such as `-EsSu`
             continue
@@ -211,9 +222,13 @@ def find_python_service_pids(
     OR — the worker runs as ``python -m worker`` under launchd but as
     ``python .../worker/__main__.py`` when started directly.
 
-    Returns PIDs sorted ascending (callers take the first, matching the
-    ordering the previous ``pgrep`` probes relied on). Returns ``[]`` when
-    nothing matches or the process table cannot be read; never raises.
+    Returns PIDs sorted **ascending**, so a caller taking ``pids[0]`` gets the
+    lowest matching PID. That is a PID ordering, not the per-shape ordering the
+    old ``pgrep`` probes produced (they tried one launch shape first and only
+    then fell back to the other), so a caller whose two selectors can match
+    different live processes gets a different answer — see
+    ``scripts/update/service.py::get_worker_pid``. Returns ``[]`` when nothing
+    matches or the process table cannot be read; never raises.
     """
     if module is None and script_suffix is None:
         raise ValueError("find_python_service_pids requires module or script_suffix")

@@ -10,6 +10,7 @@ import pytest
 
 from bridge.routing import build_group_to_project_map, load_config
 from monitoring.health import HealthChecker, HealthStatus
+from tools import process_lookup
 
 
 @pytest.mark.e2e
@@ -132,6 +133,32 @@ class TestHealthChecker:
             HealthStatus.DEGRADED,
             HealthStatus.UNHEALTHY,
         )
+
+    def test_telegram_check_uses_the_ancestor_safe_lookup(self, tmp_path, monkeypatch):
+        """#3164: the bridge probe reads the process table, not BSD `pgrep`.
+
+        `pgrep` excludes the caller's ancestors, and this check runs inside
+        bridge-hosted processes (the dashboard, `tools.doctor`), so a live
+        bridge read as absent. `check_telegram_connection` imports the helper at
+        call time, so pinning it on `tools.process_lookup` is load-bearing.
+        """
+        (tmp_path / "valor_bridge.session").touch()
+        monkeypatch.setattr(process_lookup, "find_python_service_pids", lambda **kw: [68539])
+
+        result = HealthChecker(data_dir=tmp_path).check_telegram_connection()
+
+        assert result.status is HealthStatus.HEALTHY
+        assert result.details["pids"] == [68539]
+
+    def test_telegram_check_degrades_when_the_bridge_is_absent(self, tmp_path, monkeypatch):
+        """No match is still DEGRADED, not UNKNOWN — the three-way shape is unchanged."""
+        (tmp_path / "valor_bridge.session").touch()
+        monkeypatch.setattr(process_lookup, "find_python_service_pids", lambda **kw: [])
+
+        result = HealthChecker(data_dir=tmp_path).check_telegram_connection()
+
+        assert result.status is HealthStatus.DEGRADED
+        assert "not running" in result.message
 
     def test_overall_health(self):
         checker = HealthChecker()

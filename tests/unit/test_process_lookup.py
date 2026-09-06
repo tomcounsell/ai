@@ -31,6 +31,7 @@ service.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 
@@ -294,6 +295,18 @@ def test_argv0_is_excluded_from_script_suffix_matching(monkeypatch):
     assert process_lookup.find_python_service_pids(script_suffix="Contents/MacOS/Python") == []
 
 
+def test_attached_module_form_resolves(monkeypatch):
+    """`python -mworker` — the attached form CPython accepts with no space.
+
+    It used to fall into the generic short-flag branch and parse as
+    ``(None, None)``. A false negative here is what drives ``kickstart -k``
+    escalation against a perfectly healthy worker (the #1331 failure mode).
+    """
+    fake_ps(monkeypatch, [f"  94410 {FRAMEWORK_PYTHON} -mworker"])
+
+    assert process_lookup.find_python_service_pids(module="worker") == [94410]
+
+
 def test_module_match_is_token_equality_not_prefix(monkeypatch):
     """`python -m workerfoo` does not satisfy module="worker"."""
     fake_ps(monkeypatch, [f"  55005 {FRAMEWORK_PYTHON} -m workerfoo"])
@@ -392,6 +405,9 @@ def test_argv_without_a_program_matches_nothing_and_does_not_raise(monkeypatch, 
         # `-m` ends option parsing: pytest's own `-m worker` marker never wins.
         (["python", "-m", "pytest", "tests/", "-m", "worker"], ("pytest", None)),
         (["python", "-m", "ruff", "check", "bridge/telegram_bridge.py"], ("ruff", None)),
+        # CPython accepts the value attached to the flag, with no space.
+        (["python", "-mworker"], ("worker", None)),
+        (["python", "-u", "-mworker"], ("worker", None)),
         # -- the script form -------------------------------------------------
         (["python", "worker/__main__.py"], (None, "worker/__main__.py")),
         (["python", "-u", "/abs/worker/__main__.py"], (None, "/abs/worker/__main__.py")),
@@ -411,6 +427,12 @@ def test_argv_without_a_program_matches_nothing_and_does_not_raise(monkeypatch, 
         (["python", "-u", "-I"], (None, None)),
         (["python", "-c", "import", "worker"], (None, None)),
         (["python", "-c", "print(sys.argv)", "-m", "worker"], (None, None)),
+        # The attached `-c` form ends option parsing just like the separated one.
+        (["python", "-cprint(1)"], (None, None)),
+        (["python", "-cimport worker", "-m", "worker"], (None, None)),
+        # `--check-hash-based-pycs` also begins with `-c`: it must keep taking a
+        # value token, not be read as an attached `-c` payload.
+        (["python", "--check-hash-based-pycs", "always", "-mworker"], ("worker", None)),
     ],
 )
 def test_parse_python_invocation(argv, expected):
@@ -552,6 +574,33 @@ def test_get_bridge_pid_takes_the_first_pid(monkeypatch):
     monkeypatch.setattr(update_service, "find_python_service_pids", lambda **kwargs: [100, 300])
 
     assert update_service.get_bridge_pid() == 100
+
+
+@pytest.mark.parametrize(
+    ("is_ancestor", "expected_kills"),
+    [(True, []), (False, [(4242, signal.SIGTERM)])],
+    ids=["ancestor-skipped", "not-ancestor-signalled"],
+)
+def test_stop_email_refuses_to_signal_its_own_ancestor(
+    monkeypatch, tmp_path, is_ancestor, expected_kills
+):
+    """The fallback SIGTERM branch must gate on ``is_own_ancestor`` (#3164).
+
+    ``get_email_pid`` is ancestor-safe now, so a caller hosted by the email
+    bridge can be handed its own ancestor's PID; SIGTERMing it would take the
+    caller down. ``pgrep`` made that unreachable by accident.
+
+    ``tmp_path`` has no ``scripts/valor-service.sh``, which is what selects the
+    direct-signal fallback over the service script.
+    """
+    monkeypatch.setattr(update_service, "get_email_pid", lambda: 4242)
+    monkeypatch.setattr(update_service, "is_own_ancestor", lambda pid: is_ancestor)
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(update_service.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    # The PID is still resolvable either way, so the "did it stop?" answer is False.
+    assert update_service.stop_email(tmp_path) is False
+    assert kills == expected_kills
 
 
 # ---------------------------------------------------------------------------
