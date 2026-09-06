@@ -28,11 +28,14 @@ import pytest
 import redis
 
 from tests.db_derivation_guard import (
+    ALLOWLIST,
+    DEFERRED,
     REDIS_DB_POSITIONAL_INDEX,
     TEST_DB_POOL_MAX,
     TESTS_ROOT,
     Candidate,
     Exemption,
+    _matches,
     _parameter_names_without_defaults,
     _rebound_names,
     _terminal_name,
@@ -90,20 +93,71 @@ def test_disposition_tables_satisfy_their_own_rules():
 
 
 def test_guard_sees_a_non_zero_number_of_candidates(capsys):
-    """A guard with nothing to check is indistinguishable from a passing one."""
+    """A guard with nothing to check is indistinguishable from a passing one.
+
+    ``db-positional``'s floor is 0, deliberately, not an oversight: the live
+    tree has zero positional ``db`` sites (#2764's positional leg is scoped to
+    ``Redis``/``StrictRedis`` by terminal name, and nothing under ``tests/``
+    constructs either one that way today). Non-vacuity for this kind comes
+    from the planted offenders in ``PLANTED_OFFENDERS`` and the labeled rows
+    in ``test_shadowing_and_rebinding_shapes``, never from a floor asserted
+    against the live tree here. A future reader must not "fix" this floor by
+    raising it above 0 -- there is nothing in the tree to raise it against
+    until a real positional site is written.
+    """
     result = scan_tree()
     db_kwargs = [c for c in result.candidates if c.kind == "db-kwarg"]
     from_urls = [c for c in result.candidates if c.kind == "from-url"]
+    db_positionals = [c for c in result.candidates if c.kind == "db-positional"]
     with capsys.disabled():
         print(
             f"\n[db-derivation-guard] candidates: {len(result.candidates)} "
-            f"({len(db_kwargs)} db= keyword, {len(from_urls)} from_url)"
+            f"({len(db_kwargs)} db= keyword, {len(from_urls)} from_url, "
+            f"{len(db_positionals)} db-positional)"
         )
     assert len(db_kwargs) >= _MIN_DB_KWARG_SITES, (
         "the db= walk matched almost nothing — suspect the walker"
     )
     assert len(from_urls) >= _MIN_FROM_URL_SITES, (
         "the from_url walk matched almost nothing — suspect the walker"
+    )
+    assert len(db_positionals) == 0, (
+        "a positional db site appeared in the live tree — confirm it is a "
+        "genuine site needing a disposition, not a walker regression, before "
+        "raising this floor"
+    )
+
+
+def test_no_disposition_entry_is_silently_absorbed_by_a_new_kind():
+    """Sibling to ``test_no_stale_disposition_entries``: that test catches an
+    ALLOWLIST/DEFERRED entry matching NOTHING (orphaned); this one catches the
+    mirror-image failure of matching the WRONG thing. ``_matches`` covers a
+    candidate by ``(path, expr)`` only, never by ``kind`` (#2764's positional
+    and keyword legs add two new candidate-producing shapes), so a new-kind
+    candidate landing on the same file and expression as an existing entry
+    would silently cover it -- the entry stops being stale, for the wrong
+    reason, and the site the entry actually described could go unmonitored.
+    Assert every currently-dispositioned candidate is still the db-kwarg/
+    from-url kind the four ``ALLOWLIST`` entries were written for.
+    """
+    result = scan_tree()
+    covered = [
+        cand for cand in result.violations if any(_matches(e, cand) for e in ALLOWLIST + DEFERRED)
+    ]
+    # Mirror of test_no_stale_disposition_entries' orphan check: every entry
+    # must still cover at least one candidate.
+    for entry in ALLOWLIST + DEFERRED:
+        assert any(_matches(entry, c) for c in covered), (
+            f"disposition entry {entry.path} :: {entry.expr!r} covers no candidate"
+        )
+    # The absorption direction: none of the candidates an entry covers may be
+    # a kind #2764 introduced (db-positional). All four ALLOWLIST entries
+    # were written for db-kwarg/from-url sites; a db-positional candidate
+    # sharing one's (path, expr) would be covered by coincidence, not intent.
+    absorbed = [c for c in covered if c.kind not in ("db-kwarg", "from-url")]
+    assert not absorbed, (
+        "a disposition entry was silently absorbed by a new candidate kind: "
+        + ", ".join(f"{c.path}:{c.lineno} ({c.kind})" for c in absorbed)
     )
 
 
@@ -872,6 +926,13 @@ LEG3_ROWS = [
         "    inner()\n    redis.Redis(db=scratch_test_db)\n",
         1,
     ),
+    (
+        "L3NESTEDDEFAULT",
+        "def t(scratch_test_db):\n"
+        "    def inner(x=(scratch_test_db := 7)):\n        return x\n"
+        "    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
 ]
 
 # Leg-3 over-refusal -- the sanctioned parameter is genuinely unshadowed;
@@ -955,6 +1016,13 @@ ROUTE2_ROWS = [
         "URLL3COMPWALRUS",
         "def t(redis_test_url, xs):\n"
         "    [redis_test_url := y for y in xs]\n    redis.Redis.from_url(redis_test_url)\n",
+        1,
+    ),
+    (
+        "URLL3NESTEDDEFAULT",
+        "def t(redis_test_url):\n"
+        '    def inner(x=(redis_test_url := "redis://localhost:6379/9")):\n        return x\n'
+        "    redis.Redis.from_url(redis_test_url)\n",
         1,
     ),
 ]
@@ -1082,6 +1150,25 @@ class TestReboundNames:
         fn = _parse_fn("def t(p):\n    def p():\n        return 7\n")
         assert "p" in _rebound_names(fn)
 
+    def test_nested_def_default_walrus_rebinds(self):
+        """A nested def's default evaluates in the ENCLOSING scope at
+        definition time, not inside the new scope its body introduces
+        (#2764's accept-direction gap)."""
+        fn = _parse_fn("def t(p):\n    def inner(x=(p := 7)):\n        return x\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_nested_def_decorator_walrus_rebinds(self):
+        fn = _parse_fn("def t(p):\n    @deco(p := 7)\n    def inner():\n        pass\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_nested_class_base_walrus_rebinds(self):
+        fn = _parse_fn("def t(p):\n    class C((p := 7) and object):\n        pass\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_nested_class_keyword_walrus_rebinds(self):
+        fn = _parse_fn("def t(p):\n    class C(metaclass=(p := type)):\n        pass\n")
+        assert "p" in _rebound_names(fn)
+
     def test_nested_nonlocal_rebinds(self):
         fn = _parse_fn("def t(p):\n    def inner():\n        nonlocal p\n        p = 1\n")
         assert "p" in _rebound_names(fn)
@@ -1159,7 +1246,7 @@ def test_strictredis_is_redis():
 
 
 def test_guard_module_imports_no_redis():
-    source = Path("tests/db_derivation_guard.py").read_text()
+    source = (TESTS_ROOT / "db_derivation_guard.py").read_text()
     assert not any(
         line.startswith("import redis") or line.startswith("from redis")
         for line in source.splitlines()

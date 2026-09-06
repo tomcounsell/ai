@@ -54,10 +54,13 @@ boundary rather than an assumed guarantee:
 1. A Redis client constructed through an alias outside ``REDIS_CONSTRUCTORS``
    and receiving an opaque ``**`` splat with no visible ``"db"`` key.
 2. A ``db`` passed positionally to a constructor alias outside
-   ``REDIS_CONSTRUCTORS`` (#2764) — the honest cost of the positional leg's
-   callee scoping: a bare third positional argument means nothing without
-   knowing the callee, so the leg cannot be callee-agnostic the way the rest
-   of this module is.
+   ``{"Redis", "StrictRedis"}`` (#2764) — the honest cost of the positional
+   leg's callee scoping: a bare third positional argument means nothing
+   without knowing the callee, so the leg cannot be callee-agnostic the way
+   the rest of this module is. Scoped narrower than ``REDIS_CONSTRUCTORS``
+   deliberately: ``from_url``'s signature is ``(url, **kwargs)`` with no
+   positional ``db`` slot, so including it in this leg's callee set would
+   invent a shape that cannot exist at runtime.
 3. A ``db`` computed inside a helper the guard cannot see through, more than
    one binding hop from the call site.
 4. :func:`_matches` disposition matching is per-file-per-expression and
@@ -81,9 +84,11 @@ boundary rather than an assumed guarantee:
    a disposition.
 
 ``REDIS_CONSTRUCTORS`` (below) is the residual permit list the opaque-splat
-leg and the positional leg both scope themselves to, and it is exactly that:
-an enumeration, kept short because every name added is a guess about the
-future that buys nothing measurable against the tree today.
+leg scopes itself to, and it is exactly that: an enumeration, kept short
+because every name added is a guess about the future that buys nothing
+measurable against the tree today. The positional leg (gap 2) scopes to its
+own narrower ``{"Redis", "StrictRedis"}`` literal instead of this constant --
+see gap 2 for why the two lists cannot be merged into one.
 
 **Accepted, disclosed limitation.** The unshadowed-fixture-parameter check's
 rebinding sweep (:func:`_rebound_names`) is two mechanisms: a structurally
@@ -471,7 +476,7 @@ def _rebound_names(fn: ast.AST) -> set[str]:
     (``ast.MatchAs.name``, ``ast.MatchStar.name``, ``ast.MatchMapping.rest``).
 
     Does **not** descend into a nested ``Lambda``/``FunctionDef``/
-    ``AsyncFunctionDef``/``ClassDef`` body for any of the above: a binding
+    ``AsyncFunctionDef``/``ClassDef`` BODY for any of the above: a binding
     inside a nested scope is that scope's own and leaves the outer name
     intact (verified in the interpreter). It **does** collect a
     ``global``/``nonlocal`` DECLARATION naming a name, wherever nested --
@@ -479,6 +484,18 @@ def _rebound_names(fn: ast.AST) -> set[str]:
     nested scope and genuinely rebinds the outer name; a nested ``global``
     cannot rebind it but is treated as a rebind anyway, a deliberate
     over-refusal in the safe direction.
+
+    A nested ``def``/``class`` is only its BODY, not the whole node: a
+    parameter default, a keyword-only default, and a decorator all evaluate
+    at DEFINITION time, in the ENCLOSING scope, not inside the new scope the
+    ``def``/``class`` introduces (#2764) -- ``def inner(x=(scratch_test_db
+    := 7)): ...`` rebinds the OUTER ``scratch_test_db`` the moment ``inner``
+    is defined, before its body ever runs. So this sweep recurses into a
+    nested ``FunctionDef``/``AsyncFunctionDef``'s ``args.defaults``,
+    ``args.kw_defaults`` and ``decorator_list``, and into a nested
+    ``ClassDef``'s ``bases``, ``keywords`` and ``decorator_list`` -- never
+    into ``body`` or the parameter names themselves, which stay the new
+    scope's own.
 
     Excludes only ``ast.comprehension.target`` nodes (never a whole
     comprehension subtree): a ``for``-target has had its own scope since
@@ -517,9 +534,31 @@ def _rebound_names(fn: ast.AST) -> set[str]:
                     names.add(child.rest)
             elif isinstance(child, ast.Lambda):
                 continue  # anonymous; nothing binds in the outer scope
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names.add(child.name)  # the def/class's own name binds HERE
-                continue  # its body/args are a new scope; do not sweep them
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(child.name)  # the def's own name binds HERE
+                # Defaults and decorators evaluate in the ENCLOSING scope at
+                # definition time; only the body and the parameter names
+                # themselves belong to the new scope.
+                for default in (
+                    *child.args.defaults,
+                    *(d for d in child.args.kw_defaults if d is not None),
+                ):
+                    walk_own_scope(default)
+                for decorator in child.decorator_list:
+                    walk_own_scope(decorator)
+                continue  # body/args are a new scope; do not sweep them
+            elif isinstance(child, ast.ClassDef):
+                names.add(child.name)  # the class's own name binds HERE
+                # Bases, keyword arguments (e.g. metaclass=...) and
+                # decorators evaluate in the ENCLOSING scope; only the class
+                # body belongs to the new scope.
+                for base in child.bases:
+                    walk_own_scope(base)
+                for keyword in child.keywords:
+                    walk_own_scope(keyword.value)
+                for decorator in child.decorator_list:
+                    walk_own_scope(decorator)
+                continue  # body is a new scope; do not sweep it
             walk_own_scope(child)
 
     walk_own_scope(fn)
