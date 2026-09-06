@@ -35,10 +35,10 @@ One work-item model for side effects, one dead-letter model with a scheduled rep
 
 | Concern | #3177 proposes (research namespace) | This plan proposes (production path) | How they compose |
 |---|---|---|---|
-| Idempotent create | Gap C: `idempotency_key` + preallocated `agent_session_id` on `_push_agent_session`, NX key in `improve:*` | Reflections pass `idempotency_key=(name, due_window)` through the **same** parameter | #3177 lane 3 owns the signature change and fixes the `int` return contract (its critique finding). This plan's lane 5b consumes it; if #3177 lane 3 has not landed, 5b lands the minimal seam (`idempotency_key`, `status` kwarg, `tuple[int, str]` return) and #3177 rebases. One owner at a time. |
+| Idempotent create | Gap C: `idempotency_key` + preallocated `agent_session_id` on `_push_agent_session`, NX key in `improve:*` | Reflections pass `idempotency_key=(name, due_window)` through the **same** parameter | **Decided 2026-09-06: this plan's lane 5b lands the seam** (`idempotency_key`, `status` kwarg, `tuple[int, str]` return, fixing the `int`-return contract the #3177 critique flagged). #3177 Gap C consumes the shipped primitive; its lane 3 child issue should reference this plan's seam task instead of redesigning it. |
 | Lease and fencing | Gap A: epoch lease in Lua with `TIME`, accept `epoch >= highest_accepted`, compare-and-delete release, for `ImprovementCase` heads | Lane 6: the same Lua idiom keyed by `agent_session_id`, generation checked in `transition_status` and output writes | Same primitive, two key families. Lane 6 extracts the lease script into `models/redis_lease.py` under a private client alias; #3177 lane 3 imports it instead of writing a second one. |
 | Stranded work | `reconciliation_required` state + a reflection tick sweeping stale intents (critique BLOCKER fix) | Lane 2: one `DeadLetter` model with `stage`, one `dead-letter-replay` reflection | #3177's stranded intents become one more `stage` value. Its sweep reflection and this replayer are the same tick with two scanners. |
-| Fail-open vs fail-closed | Controller pauses when its namespace is unreachable (fail-closed) | Lane 4: run claim fails closed; message claim and pop lock stay fail-open with counters | #3177 assumes one execution per action id; a fail-open run claim violates that under Redis degradation. Lane 4 is a prerequisite for #3177 lane 3, not a nicety. |
+| Fail-open vs fail-closed | Controller pauses when its namespace is unreachable (fail-closed) | Lane 4: run claim fails closed with no break-glass; message claim and pop lock stay fail-open with counters | #3177 assumes one execution per action id; a fail-open run claim violates that under Redis degradation. Lane 4 is a prerequisite for #3177 lane 3, not a nicety. |
 | Lineage | Observer adapters with durable cursors, dedup by source id; evidence never reads missing data as success | Lane 5a: `correlation_id` into the subprocess env and outbox payload, JSON worker logs | #3177's objective 1 measures end-to-end journey preservation; it needs a journey that is traceable intake to delivery. Lane 5a is the cheapest evidence source it does not yet have. |
 | Steering correlation | Rabbit hole: steering is correlation-free by design | Not proposed | Agreed; steering is out of scope here. |
 | Side-effect durability | Kill switch on extraction for trial arms (Gap E) | Lane 1: extraction as a durable `SideEffectJob` | Lane 1's job row is where Gap E's kill switch should live (a `skip` disposition), instead of an env check before `try_reserve_detach_slot()`. |
@@ -120,9 +120,9 @@ Nothing here changes #3177's scope. Every row above is either a shared primitive
 2. **Side-effect job** (lane 1): `finalize_session` writes a `SideEffectJob(kind="memory_extraction", session_id, attempts=0, next_attempt_at=now)` through the ORM; the `side-effect-drain` reflection pops due rows, runs the kind's handler, and on exception bumps `attempts` with backoff or, at the cap, writes a `DeadLetter(stage="extraction")` and deletes the job.
 3. **Dead-letter** (lane 2): every terminal sink writes `DeadLetter(stage, payload_json, reason, attempts, first_seen, last_seen, replayable)`; the `dead-letter-replay` reflection retries `replayable` rows by stage handler and ages the rest; the dashboard tile reads counts by stage.
 4. **Wire schema** (lane 3): writers construct `OutboxPayload | SteeringPayload | NotifyPayload` (pydantic, `v: int`) and serialize; readers parse; a `ValidationError` becomes a `DeadLetter(stage="outbox_parse" | "steering_parse")` and the raw bytes are the payload.
-5. **Lock policy** (lane 4): each fail-open branch calls `record_fail_open(name)` which `HINCRBY`s `{project}:locks:fail_open` under a private client alias; `claim_pending_run` returns `False` on error unless `settings.features.run_claim_fail_open` is true.
+5. **Lock policy** (lane 4): each fail-open branch calls `record_fail_open(name)` which `HINCRBY`s `{project}:locks:fail_open` under a private client alias; `claim_pending_run` returns `False` on error, with no override setting.
 6. **Lineage** (lane 5a): `_harness_env` adds `VALOR_CORRELATION_ID`; `build_telegram_outbox_payload` adds `correlation_id`; the worker installs `StructuredJsonFormatter`.
-7. **Idempotent reflection** (lane 5b): `_enqueue_agent_reflection` passes `idempotency_key`; the seam's NX check returns the existing row id on a repeat.
+7. **Idempotent reflection** (lane 5b): `_push_agent_session` gains `idempotency_key`, `status`, and a `tuple[int, str]` return with a `SET NX` guard on `enqueue:idem:{key}`; `_enqueue_agent_reflection` passes the key and the seam returns the existing row id on a repeat.
 8. **Lease** (lane 6): pop acquires `lease:session:{id}` with generation `g` (Lua, server `TIME`); the executor renews every TTL/3; `transition_status` and outbox writes carry `g` and are rejected when the head generation is higher; the health loop's lapsed-lease scan moves the row to `pending` and dead-letters the prior attempt's fence record.
 9. **Output**: dashboard tiles for dead letters by stage and fail-open counts; `logs/worker.log` as JSON; no silent discard anywhere on the path.
 
@@ -140,18 +140,18 @@ Nothing here changes #3177's scope. Every row above is either a shared primitive
 ## Architectural Impact
 
 - **New dependencies**: none. Redis Lua, Popoto, pydantic are in use.
-- **Interface changes**: `_push_agent_session` gains `idempotency_key`, `status`, and a `tuple[int, str]` return (coordinated with #3177 lane 3); `transition_status` gains an optional `generation` kwarg; `DeadLetter` gains `stage`, `payload_json`, `reason`, `attempts`, `replayable`; two new models `SideEffectJob` and `SessionLease` (the latter a non-Popoto key family under `models/redis_lease.py`); `FeatureSettings.run_claim_fail_open`; three pydantic payload models in `bridge/wire_schemas.py`.
+- **Interface changes**: `_push_agent_session` gains `idempotency_key`, `status`, and a `tuple[int, str]` return (owned here; #3177 consumes); `transition_status` gains an optional `generation` kwarg; `DeadLetter` gains `stage`, `payload_json`, `reason`, `attempts`, `replayable`; two new models `SideEffectJob` and `SessionLease` (the latter a non-Popoto key family under `models/redis_lease.py`); three pydantic payload models in `bridge/wire_schemas.py`.
 - **Coupling**: the reflection process gains two function reflections that read worker-written rows through the ORM; the worker gains no new imports from `bridge/`. The lease module is imported by `models/session_lifecycle.py` and later by #3177's control journal.
 - **Data ownership**: `AgentSession` keeps execution state; `SessionLease` owns the claim; `DeadLetter` owns terminal failures; `SideEffectJob` owns pending side effects. No model substitutes for another.
 - **Reversibility**: lanes 1-5 are additive and each behind its own reflection `enabled` flag or settings field. Lane 6 changes the pop path; it ships behind `FeatureSettings.session_lease_enabled` defaulting to false for one release, log-only, then flips.
 
 ## Appetite
 
-**Size:** Large, delivered as six independently shippable lanes; this build dispatches lanes 1-5a. Lanes 5b and 6 are child issues filed by the last task because both depend on the `_push_agent_session` seam #3177 lane 3 owns.
+**Size:** Large, delivered as six independently shippable lanes; this build dispatches lanes 1-5, including the `_push_agent_session` seam. Lane 6 is a child issue filed by the last task because it ships behind a shadow-release flag over two releases.
 
 **Team:** one builder per lane, one validator, one documentarian, code review per PR.
 
-**Interactions:** one PM check-in on Open Question 2 (break-glass env var) before lane 4 merges; none otherwise.
+**Interactions:** none; the three open questions were answered before critique (see §Decisions).
 
 ## Prerequisites
 
@@ -170,9 +170,9 @@ Run via `python scripts/check_prerequisites.py docs/plans/etl-pipeline-hardening
 - **`SideEffectJob`** (`models/side_effect_job.py`): `job_id` AutoKeyField, `kind` IndexedField, `session_id` KeyField, `project_key` KeyField, `attempts` IntField, `next_attempt_at` DatetimeField, `status` IndexedField (`pending | running | done`), `Meta.ttl` 7 days. Handlers registered in `agent/side_effects.py` as `{kind: callable}`; first kind is `memory_extraction`. Drained by `reflections/housekeeping/side_effect_drain.py` every 60s with backoff `min(30 * 2**attempts, 900)` and cap 4.
 - **`DeadLetter`** generalized in place: add `stage` IndexedField, `payload_json` Field, `reason`, `attempts` IntField, `first_seen`/`last_seen` DatetimeField, `replayable` Field. Existing `chat_id`, `reply_to`, `text` stay for `stage="telegram_send"`. Stages: `telegram_send`, `email_send`, `outbox_parse`, `steering_parse`, `notify_parse`, `extraction`, `session_recovery_cap`, `session_init_hang`, `session_corrupt_row`, `archive_restore`, and (reserved for #3177) `improve_intent`. `reflections/housekeeping/dead_letter_replay.py` every 300s: `replayable` rows go to the stage's handler (`bridge/dead_letters.py` grows a handler registry); non-replayable rows age out at 30 days. `ui/data/dead_letters.py` + a dashboard tile with counts by stage.
 - **Wire schemas** (`bridge/wire_schemas.py`): `OutboxPayload`, `SteeringPayload`, `NotifyPayload`, each with `v: int = 1`, constructed by every writer (`build_telegram_outbox_payload`, `push_steering_message`, `publish_session_notify`) and parsed by every reader (`process_outbox`, `_drain_list`, `_session_notify_listener`). Unknown fields allowed; a parse failure dead-letters with the raw string.
-- **Lock policy** (`agent/lock_policy.py`): `record_fail_open(name: str)` increments `{project}:locks:fail_open` (private alias, non-Popoto key); each of the three locks states its policy in its docstring; `claim_pending_run` fails closed unless `settings.features.run_claim_fail_open`. Dashboard tile reads the hash.
+- **Lock policy** (`agent/lock_policy.py`): `record_fail_open(name: str)` increments `{project}:locks:fail_open` (private alias, non-Popoto key); each of the three locks states its policy in its docstring; `claim_pending_run` fails closed, no override. Dashboard tile reads the hash.
 - **Lineage**: `VALOR_CORRELATION_ID` in `_harness_env`; `correlation_id` in the outbox payload model; `worker/__main__.py::_configure_logging` uses `bridge.log_format.StructuredJsonFormatter` for the file handler (stderr stays text).
-- **Idempotent reflection enqueue** (child): `idempotency_key=f"reflection:{name}:{int(due_at.timestamp())}"` through the seam.
+- **Idempotent enqueue seam and reflection key**: `_push_agent_session(..., idempotency_key: str | None = None, status: str = "pending") -> tuple[int, str]`; with a key it runs `SET enqueue:idem:{key} {agent_session_id} NX EX 86400` under a private alias after the stale-terminal reconcile and before `async_create`, and on a lost race returns the bound id. Reflections pass `idempotency_key=f"reflection:{name}:{int(due_at.timestamp())}"`.
 - **Session lease** (child): `models/redis_lease.py` with `acquire(key, ttl) -> generation`, `renew(key, generation)`, `release(key, generation)`, all Lua with server `TIME`; `SessionLease` keyed `lease:session:{agent_session_id}`; pop acquires, executor renews every TTL/3 (TTL 90s), `transition_status(generation=...)` and outbox writes check `generation >= head`; health loop scans for rows `running` with no live lease and moves them to `pending`, dead-lettering the attempt's fence. Pop lock and run claim are deleted once the lease is authoritative.
 
 ### Flow
@@ -209,7 +209,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 - `agent/lock_policy.py::record_fail_open(name)`; private alias `_lock_redis = POPOTO_REDIS_DB` bound in that module only.
 - `_acquire_pop_lock`, `claim_message`: keep fail-open, add the call and a docstring line "Policy: fail open; duplicate work is preferred to a stalled queue."
-- `claim_pending_run`: fail closed; `FeatureSettings.run_claim_fail_open: bool = False` as break-glass; docstring "Policy: fail closed; a duplicate `claude -p` on one worktree corrupts git state."
+- `claim_pending_run`: fail closed, no break-glass setting (owner decision 2026-09-06); docstring "Policy: fail closed; a duplicate `claude -p` on one worktree corrupts git state."
 - `ui/data/locks.py` tile.
 
 #### Lane 5a: lineage
@@ -218,10 +218,12 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - `worker/__main__.py::_configure_logging`: file handler uses `StructuredJsonFormatter`; `scripts/log_rotate.py` unaffected (line-oriented).
 - `docs/features/correlation-ids.md` gains the two new hops.
 
-#### Lane 5b (child issue): idempotent reflection enqueue
+#### Lane 5b: idempotent enqueue seam and reflection key
 
-- Depends on the `_push_agent_session` seam (`idempotency_key`, `status`, `tuple[int, str]` return). If #3177 lane 3 has landed, consume it; else land the seam here and #3177 rebases.
-- `_enqueue_agent_reflection` passes the key; log the bound id on a repeat.
+- Add `idempotency_key: str | None = None` and `status: str = "pending"` to `_push_agent_session` (`agent/agent_session_queue.py:204-231`); thread `status` into `async_create` at `:369`; change the return to `tuple[int, str]` (queue depth, bound `agent_session_id`) and update every caller (`enqueue_agent_session`, `retry_agent_session`, `tools/valor_session.py`, `agent/reflection_scheduler.py`, `tools/agent_session_scheduler.py`).
+- With a key: `SET enqueue:idem:{key} {preallocated_id} NX EX 86400` under a private alias in `agent/enqueue_idempotency.py`, placed after the stale-terminal reconcile at `:361` and before `async_create` at `:369`; on a lost race read the bound id back from the key and return it without creating a row. The preallocated id is minted with the same `AutoKeyField` generator Popoto uses so the created row carries it.
+- `_enqueue_agent_reflection` passes `idempotency_key=f"reflection:{entry.name}:{int(due_at.timestamp())}"` and logs the bound id on a repeat.
+- #3177 Gap C consumes this seam unchanged; its `admitted` status value is a caller concern (`status="admitted"`), not a seam change.
 
 #### Lane 6 (child issue): execution lease
 
@@ -261,7 +263,9 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - [ ] `tests/unit/test_dedup.py`, `tests/unit/test_agent_session_queue.py`, `tests/integration/test_worker_concurrency.py` — UPDATE: fail-open cases assert the counter; run-claim case asserts fail-closed
 - [ ] `tests/unit/output_handler/test_output_handler_handlers.py`, `tests/unit/test_tool_call_delivery.py` — UPDATE: payload carries `correlation_id`
 - [ ] `tests/integration/test_harness_env_pm_injection.py` — UPDATE: `VALOR_CORRELATION_ID` present
-- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE (lane 5b): duplicate-tick case
+- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: duplicate-tick case
+- [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py` — UPDATE: `_push_agent_session` returns a tuple; new `idempotency_key` and `status` kwargs; lost-race binding case
+- [ ] `tests/unit/test_agent_session_scheduler_kill.py`, `tests/integration/test_session_spawning.py` — UPDATE: callers of the seam unpack the tuple
 - [ ] `tests/integration/test_steering.py` — UPDATE (lane 3): entries built via `SteeringPayload`
 
 ## Rabbit Holes
@@ -282,7 +286,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ### Risk 2: run claim fail-closed under a Redis blip stalls pickup
 **Impact:** pending sessions wait until Redis recovers.
-**Mitigation:** the pop lock is retried on the next loop iteration already; the break-glass setting exists; the counter makes the blip visible on the dashboard.
+**Mitigation:** the pop lock is retried on the next loop iteration already; the counter makes the blip visible on the dashboard; there is deliberately no override, so a prolonged Redis degradation stalls pickup rather than risking a duplicate `claude -p`.
 
 ### Risk 3: extraction moves out of process and loses the worker's in-memory context
 **Impact:** an extraction that depended on worker state fails in the reflection process.
@@ -294,7 +298,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ### Risk 5: seam contention with #3177 lane 3
 **Impact:** two PRs change `_push_agent_session`'s signature.
-**Mitigation:** §Relationship to #3177; lane 5b is a child issue that names the owner at filing time.
+**Mitigation:** decided: this plan owns the seam (task build-seam); #3177's lane 3 child issue references it.
 
 ## Race Conditions
 
@@ -315,6 +319,11 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 **Trigger:** owner A stalls past TTL, health loop redelivers, B acquires generation g+1, A wakes and renews
 **Mitigation:** renew is compare-and-set on generation; A's renew returns `False` and A's next write is rejected by `transition_status(generation=g)`
 
+### Race 5: two callers race on one idempotency key
+**Location:** `agent/enqueue_idempotency.py`
+**Trigger:** a reflection tick and a crash-retry of the same tick call `_push_agent_session` with one key
+**Mitigation:** `SET NX` is single-winner; the loser reads the bound id from the key and returns it; if the key exists but the row does not yet (winner crashed between `SET NX` and `async_create`), the loser retries `async_create` with the preallocated id, matching #3177 Race 2
+
 ### Race 4: finalize enqueues a job for a session the archive already restored
 **Location:** `finalize_session` vs `session_archive.restore_if_empty`
 **Mitigation:** job key is `(kind, session_id)` with `SET NX` on create; a second enqueue binds to the existing row
@@ -332,7 +341,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 - `scripts/update/run.py` gains `register_side_effect_drain` and `register_dead_letter_replay` steps through `reflection_register.py`, idempotent like `register_crash_recovery`, pinned to no `project_key` (they run on every machine that runs a worker).
 - Migrations `side_effect_job_model` and `dead_letter_stage_backfill` registered in `MIGRATIONS`.
-- No new dependencies. New settings fields default off or safe; `.env.example` gains `FEATURES__RUN_CLAIM_FAIL_OPEN` and `FEATURES__SESSION_LEASE_ENABLED` with `# @optional`.
+- No new dependencies. New settings fields default off or safe; `.env.example` gains `FEATURES__SESSION_LEASE_ENABLED` (lane 6) with `# @optional`; no run-claim override exists.
 - Worker and bridge restart after merge (`./scripts/valor-service.sh restart`); the reflection worker restarts on `/update`.
 
 ## Agent Integration
@@ -356,18 +365,18 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ## Success Criteria
 
-### This build (lanes 1-5a)
+### This build (lanes 1-5)
 - [ ] A session finalizing on `main` produces a `SideEffectJob` row and, after the drain, an extraction record; a handler that raises produces a `DeadLetter(stage="extraction")` after 4 attempts
 - [ ] `DeadLetter` has a `stage` field and every terminal sink on the relay, session, and archive paths writes it; no silent discard remains in `process_outbox`
 - [ ] The `dead-letter-replay` and `side-effect-drain` reflections are registered through `reflection_register.py` and survive a simulated `/update`
 - [ ] Outbox, steering, and notify payloads are constructed and parsed through `bridge/wire_schemas.py`
 - [ ] Each of the three locks states its policy; every fail-open branch increments the counter; `claim_pending_run` fails closed under a simulated Redis error
 - [ ] `VALOR_CORRELATION_ID` reaches the subprocess and `correlation_id` reaches the outbox payload; `logs/worker.log` lines parse as JSON
+- [ ] `_push_agent_session` returns the bound id; two consecutive reflection ticks for one due window enqueue one session; a crash-retry with the same key binds to the existing row
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
-### Carried to child issues
-- [ ] Lane 5b: two consecutive ticks for one due window enqueue one session
+### Carried to the child issue
 - [ ] Lane 6: a `running` session whose owner dies is redelivered within 90s; a stale-generation `transition_status` is rejected; the pop lock and run claim are deleted
 
 ## Team Orchestration
@@ -397,6 +406,13 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Builder (locks and lineage)**
   - Name: locks-builder
   - Role: lanes 4 and 5a
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (enqueue seam)**
+  - Name: seam-builder
+  - Role: lane 5b
+  - Domain: Redis/Popoto data
   - Agent Type: builder
   - Resume: true
 
@@ -452,23 +468,33 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Parallel**: true
 - Lanes 4 and 5a Technical Approach
 
-### 5. Validate lanes 1-5a
+### 5. Enqueue seam and reflection idempotency
+- **Task ID**: build-seam
+- **Depends On**: none
+- **Validates**: `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py`, `tests/unit/test_reflection_scheduler.py`, `tests/unit/test_enqueue_idempotency.py` (create)
+- **Informed By**: spike-3; #3177 spike-2 and its structural critique finding on the `int` return
+- **Assigned To**: seam-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Lane 5b Technical Approach in full; every caller of `_push_agent_session` updated for the tuple return; lost-race binding test
+
+### 6. Validate lanes 1-5
 - **Task ID**: validate-lanes
-- **Depends On**: build-jobs, build-dlq, build-schemas, build-locks-lineage
+- **Depends On**: build-jobs, build-dlq, build-schemas, build-locks-lineage, build-seam
 - **Assigned To**: pipeline-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every Verification row; mutate each guard (raise in a handler, corrupt a payload, error the run claim) and confirm the row catches it
 
-### 6. File child issues for lanes 5b and 6
+### 7. File the child issue for lane 6
 - **Task ID**: file-children
 - **Depends On**: validate-lanes
 - **Assigned To**: locks-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- File two issues via `/do-issue`, each `Refs #3183` and `Refs #3177`, carrying the lane's Technical Approach subsection and the §Relationship row; lane 6's issue states the shadow-release rule; lane 5b's issue names which plan owns the `_push_agent_session` seam at filing time
+- File one issue via `/do-issue`, `Refs #3183` and `Refs #3177`, carrying lane 6's Technical Approach subsection and the §Relationship lease row; it states the shadow-release rule and names `models/redis_lease.py` as the module #3177 lane 3 imports
 
-### 7. Documentation
+### 8. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-lanes
 - **Assigned To**: pipeline-docs
@@ -476,13 +502,13 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Parallel**: true
 - Every item in the Documentation section
 
-### 8. Final validation
+### 9. Final validation
 - **Task ID**: validate-all
 - **Depends On**: file-children, document-feature
 - **Assigned To**: pipeline-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run Verification; confirm the two child issues exist and reference both parents
+- Re-run Verification; confirm the child issue exists and references both parents
 
 ## Verification
 
@@ -501,14 +527,24 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 | Correlation reaches subprocess | `grep -c "VALOR_CORRELATION_ID" agent/session_executor.py` | output > 0 |
 | Correlation in outbox payload | `grep -c "correlation_id" bridge/wire_schemas.py` | output > 0 |
 | Worker logs JSON | `grep -c "StructuredJsonFormatter" worker/__main__.py` | output > 0 |
+| Seam carries idempotency key | `grep -c "idempotency_key" agent/agent_session_queue.py` | output > 0 |
+| Reflections pass the key | `grep -c "idempotency_key=" agent/reflection_scheduler.py` | output > 0 |
+| Duplicate tick enqueues once | `scripts/pytest-clean.sh tests/unit/test_enqueue_idempotency.py tests/unit/test_reflection_scheduler.py -q -k idempot` | exit code 0 |
+| No break-glass on the run claim | `grep -rn "run_claim_fail_open" config/ models/ agent/ \| wc -l` | output contains 0 |
 | Side-effect and dead-letter tests | `scripts/pytest-clean.sh tests/unit/test_side_effect_jobs.py tests/unit/test_dead_letters.py tests/unit/test_wire_schemas.py -q` | exit code 0 |
 | Anti-criterion: no raw Redis on Popoto keys | `grep -rnE "POPOTO_REDIS_DB\.(hset\|hdel\|sadd\|srem\|zadd\|zrem\|delete)\(" models/side_effect_job.py models/dead_letter.py agent/side_effects.py \| wc -l` | output contains 0 |
 | Anti-criterion: lease not deleted early | `grep -c "def claim_pending_run" models/session_lifecycle.py` | output > 0 |
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
+## Decisions
+
+Answered by the owner on 2026-09-06 via `/ask-me`:
+
+1. **Two models, not one.** `SideEffectJob` is live state with a next-attempt time; `DeadLetter` is terminal with a payload snapshot. Taken as the default (reversible trivia, not asked).
+2. **No break-glass on the fail-closed run claim.** Fail-closed is the only behavior; a prolonged Redis degradation stalls pickup rather than risking a duplicate `claude -p` on one worktree.
+3. **#3183 owns the `_push_agent_session` seam.** Lane 5b lands `idempotency_key`, `status`, and the `tuple[int, str]` return in this build; #3177 Gap C consumes the shipped primitive.
+
 ## Open Questions
 
-1. **One model or two for jobs and dead letters?** Default: two. A job is live state with a next-attempt time; a dead letter is terminal with a payload snapshot. Merging them puts a `status` discriminator on every dashboard query. Reversible.
-2. **Break-glass for the fail-closed run claim.** Default: `FEATURES__RUN_CLAIM_FAIL_OPEN=false` in settings, documented `# @optional`. Alternative: no break-glass, rely on the pop-lock retry. The default is safer for an operator at 3am.
-3. **Seam ownership for lane 5b.** Whichever of #3177 lane 3 or this plan's lane 5b files first owns the `_push_agent_session` signature change; the other consumes it. Needs a one-line decision when the child issues are filed.
+None.
