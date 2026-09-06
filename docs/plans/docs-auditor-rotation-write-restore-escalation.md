@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor Engels
 created: 2026-09-06
 tracking: https://github.com/tomcounsell/ai/issues/3050
-last_comment_id:
+last_comment_id: none  # Phase 2.7: issue #3050 has no comments
 ---
 
 # docs-auditor: restore and escalate when the rotation aborts after writing
