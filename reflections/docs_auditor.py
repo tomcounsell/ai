@@ -2333,8 +2333,9 @@ def _run_vault_drift_detection(project_key: str) -> int:
     the whole block is wrapped so ``run_docs_auditor`` continues on the repo-doc
     rotation. Vault-drift ``gh issue create`` volume is bounded by
     ``VAULT_DRIFT_ISSUE_CAP``, checked before every filing. Returns the count of
-    narratives actually compared (0 when the vault is unresolvable/empty), which is
-    threaded into the liveness payload.
+    narratives actually compared (0 when the vault is unresolvable/empty), which
+    is folded into the created-PR summary string that the scheduler stores as
+    ``output_summary`` and the reflections dashboard renders.
     """
     try:
         vault_root = _resolve_vault_root(project_key)
@@ -2554,7 +2555,7 @@ def run_docs_auditor() -> dict:
         # unambiguously means the branch/commit/push/PR or the restore failed —
         # never "a guard declined". That routes to status="error": no success
         # Telegram, no rotation-hash stamp (the doc was written but not audited to
-        # completion, so re-picking it next run is correct), and no liveness "ok".
+        # completion, so re-picking it next run is correct).
         # NOTE (#3050): `_restore_checkout` only runs inside this call's own
         # `finally`. An exception raised between the substrate write above and
         # this call leaves the shared checkout dirty with no restore; the next
