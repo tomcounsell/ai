@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/3170
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-05T13:17:33Z
+revision_applied_at: 2026-09-06T07:47:23Z
 ---
 
 # Nightly Triage Filing Idempotency
@@ -31,7 +31,7 @@ A replayed triage turn re-files nothing. Three independent defenses, cheapest fi
 
 1. The agent never consults the lagging search index — the prompt hands it the exact `gh issue list --state all` REST command.
 2. The agent mostly does not need to look at all — the script hands it the disposition it already resolved, per node, with the issue number when one exists.
-3. If both of those are somehow bypassed, a session-local ledger on disk records every issue the session opened, and the agent consults it before opening the next.
+3. If both of those are somehow bypassed, a session-local ledger on disk records every issue the session opened, and the agent consults it before opening the next. Defences 2 and 3 apply to the per-node dispatch, which is the path the 2026-08-24 wave came out of; defence 1 applies to all three filing prompts. The reasoning is in Solution → "Scope decision".
 
 ## Freshness Check
 
@@ -316,7 +316,7 @@ The write is best-effort and logged on failure, matching how the module treats e
 - [ ] **Empty disposition list against a non-empty node list degrades to the plain prompt.** `if not dispositions:` runs before the zip and catches both `None` and `[]`. Test: `dispositions=[]` with three nodes returns a prompt with no pre-resolved block and does not raise.
 - [ ] **Non-empty disposition list of the wrong length raises.** Only this case reaches `zip(dispatch_nodes, dispositions, strict=True)` (matching the builder's existing `strict=True` use). Test: two dispositions against three nodes raises `ValueError`. The two bullets above are ordered, not contradictory — see Solution, "Precedence between the empty case and the mismatch case" — and are pinned by two separate tests so a builder cannot satisfy one by collapsing the other.
 - [ ] `write_triage_ledger(slug, [])` — must write nothing and return `None` rather than creating an empty ledger a replay would read as "nothing to file".
-- [ ] `ledger_path=None` against a non-empty node list — the prompt builds and omits the ledger paragraph entirely. This is both the dry-run rendering and the ledger-write-failure rendering, and it is what makes fix 3 independently revertible.
+- [ ] `ledger_path=None` against a non-empty node list — the prompt builds and omits the ledger paragraph entirely. This is the dry-run rendering, the ledger-write-failure rendering, and (via `_build_triage_prompt`'s default) the shape every `prompt=`-override dispatch already has. It is what makes fix 3 independently revertible and what scopes it to the per-node path with no extra branch.
 
 ### Error State Rendering
 
@@ -500,7 +500,7 @@ Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
 - [ ] A ledger write failure logs a `WARNING` naming the slug, returns `None`, and does not prevent dispatch.
 - [ ] `_build_triage_prompt` returns the plain prompt for `dispositions=None` **and** `dispositions=[]`, and raises `ValueError` only for a non-empty list whose length differs from the node list.
 - [ ] Tests pass (`/do-test`) — `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` exits 0.
-- [ ] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three prompts, all three defenses, and the ledger's shape and location rationale.
+- [ ] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three prompts, states each defense's reach (fix 1 on all three, fixes 2 and 3 on the per-node path) with the reason for the narrowing, and gives the ledger's shape and location rationale.
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
 - [ ] The branch is rooted on `main`, not on the stale local `session/nightly-triage-idempotency-3075` (`git merge-base --is-ancestor origin/main HEAD`).
 
