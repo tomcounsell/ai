@@ -242,7 +242,14 @@ Each guard gets mutated and re-measured individually, because a green test frequ
 
 ## Test Impact
 
-The `starting_ref` keyword on `_push_branch_and_pr` is a required-argument change, so every direct caller in the suite must be updated. Ten call sites, all in two files, all mechanical (`starting_ref="main"` in the fixture repos):
+This plan breaks existing tests **two** ways, and task 4 must handle both. **Twenty-one distinct test functions need an edit**, split across two independent causes:
+
+1. **The `starting_ref` keyword on `_push_branch_and_pr` is a required-argument change**, so every direct caller must pass it. Ten call sites, in two files, all mechanical (`starting_ref="main"` in the fixture repos).
+2. **Task 3's pre-write `_current_ref(PROJECT_ROOT)` capture returns `None` under the bare `repo` fixture**, so the guard returns `skipped` before `audit` is called and twelve rotations in `tests/unit/test_docs_auditor_substrate.py` go red. Each needs the ref read patched.
+
+One test — `test_bare_name_withhold_propagates_to_pr_body_and_telegram` — appears in **both** lists and needs **both** edits (see its entries below).
+
+### Direct `_push_branch_and_pr` callers — UPDATE: add `starting_ref`
 
 - [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::TestEarlyReturnRestore::test_gh_pr_create_failure_restores_head_and_deletes_branch` — UPDATE: pass `starting_ref="main"`. (There is no `class TestPushBranchAndPr` anywhere under `tests/`; this test lives in `TestEarlyReturnRestore`.)
 - [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_git_add_missing_path_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
@@ -250,10 +257,38 @@ The `starting_ref` keyword on `_push_branch_and_pr` is a required-argument chang
 - [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_unrelated_modified_file_is_untouched_by_the_restore` — UPDATE: pass `starting_ref="main"`. This test is the guarantee that foreign dirt survives a restore; it must keep passing unchanged in substance.
 - [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_restore_checkout_failure_is_reported_and_run_returns_error` — UPDATE: pass `starting_ref="main"` to the direct call. Its `run_docs_auditor` half also stubs `audit` and `_push_branch_and_pr`; verify the stub `lambda *a, **kw: None` still absorbs the new keyword (it does) and that the test still exercises the `pr_url is None` R5-1 branch rather than being captured by the new handler.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_pr_body_carries_marker_when_fixes_withheld` — UPDATE: pass `starting_ref="main"`.
-- [ ] `tests/unit/test_docs_auditor_substrate.py::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: pass `starting_ref="main"` **on the direct call**. This test also has a second, `run_docs_auditor` phase, so it needs the `_current_ref` patch as well — it is the one test that appears in both lists here. Its two dispositions are complementary, not competing: the direct-call phase needs the argument, the rotation phase needs the patch. Apply both.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_empty_files_touched_creates_no_branch_and_no_commit` — UPDATE: pass `starting_ref="main"`. Asserts the empty-`files_touched` early return, which now sits above the ref handling entirely.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_staging_command_names_the_touched_paths_only` — UPDATE: pass `starting_ref="main"`.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_restore_uses_head_so_staged_content_cannot_survive` — UPDATE: pass `starting_ref="main"`.
+
+### Rotations under the bare `repo` fixture — UPDATE: patch `_current_ref`
+
+`tests/unit/test_docs_auditor_substrate.py`'s `repo` fixture is a bare `tmp_path` (it mkdirs `docs/features`, `docs/plans`, `scripts` and writes a `pyproject.toml`, and does **not** run `git init` — `git_repo` is the separate fixture that inits, taking `repo` as its own input). So task 3's pre-write `_current_ref(PROJECT_ROOT)` read returns `None`, the new guard returns `skipped` before `audit` is ever called, and every rotation in that file that expects `audit` to run goes red. Measured against a shadowed copy of the module carrying only the task 3 capture: `12 failed, 199 passed, 1 skipped`, versus a control through the identical shadow mechanism on unmodified code of `211 passed, 1 skipped, 0 failed`.
+
+**Disposition for all twelve — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.** None of the twelve reaches `_restore_checkout`, so a literal ref string is sound; nothing in these tests inspects the ref's value beyond letting the guard pass.
+
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestRefreshDocsInMemoryHook::test_hook_invoked_once_per_non_empty_touched_paths` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestRefreshDocsInMemoryHook::test_hook_failure_does_not_propagate` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block. **This is the overlap test.** It also appears in the direct-caller list above and needs `starting_ref="main"` on its direct `_push_branch_and_pr(` call in addition to this patch. Both edits, not one or the other.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestWithheldBlocksStaleClose::test_rotation_result_surfaces_withheld_count` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestWithheldBlocksStaleClose::test_all_withheld_zero_diff_run_still_notifies` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestTelegramSuppressionReachesSummary::test_zero_diff_suppression_reaches_summary` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestTelegramSuppressionReachesSummary::test_step9_suppression_reaches_summary_before_pr_url` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestPRCreationFailure::test_push_failure_returns_finding_no_raise` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestPRCreationFailure::test_push_failure_escalates_via_operational_failure_issue` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestHoistedPRGuards::test_no_guard_lets_the_substrate_run` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::TestVaultClauseInSummary::test_created_pr_summary_carries_vault_count_including_zero` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block.
+- [ ] `tests/unit/test_docs_auditor_substrate.py::test_worst_case_summary_stays_under_truncation_budget` — UPDATE: add `patch("reflections.docs_auditor._current_ref", return_value="main")` to the test's `with` block. (Module-level function, no enclosing class.)
+
+**Two repairs that look tempting and are rejected. Do not take either.**
+
+- **Do NOT relax the guard** so a `None` starting ref falls through to `audit`. The **Empty/Invalid Input Handling** row above requires `starting_ref is None` to produce `skipped` *before* `audit` is called, and asserts `audit` was never invoked. Weakening the guard to make these twelve pass deletes a planned assertion and removes the only thing standing between a `None` ref and a restore that cannot return anywhere.
+- **Do NOT add `git init` to the shared `repo` fixture.** 111 test functions in that file take `repo`. `git_repo`'s own docstring records why the split exists: the bare-name existence oracle (#2759) resolves a filename with no `/` against a `git ls-files --cached --others --exclude-standard` basename index, and that index "only exists inside a git checkout". Initialising `repo` therefore silently flips withhold and existence behaviour across the entire file — a change of blast radius far beyond this plan, landing as green tests that are testing something else.
+
+`tests/unit/reflections/test_docs_auditor_git_surface.py` is **unaffected** by cause 2: its fixture is a real `git init` checkout, so the pre-write ref read resolves. Measured: 15 passed under both control and treatment.
+
+### Tests that stub rather than call — VERIFY only
 
 Tests that stub rather than call, and need only re-verification (no edit expected):
 
@@ -262,7 +297,7 @@ Tests that stub rather than call, and need only re-verification (no edit expecte
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard::test_dirty_tree_skips_rotation` — VERIFY: unchanged. The step-3 guard keeps filing nothing; this plan deliberately does not touch it.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestZeroDiffGate::test_zero_diff_skips_pr_creation` — VERIFY: the zero-diff `return` now happens inside the new `try`. Assert it still returns `skipped` and that the new handler does not fire on it.
 
-No test is deleted. No test is replaced.
+**No test is deleted. No test is replaced.** Every disposition in this section is UPDATE or VERIFY. The twenty-one UPDATEs are the full set of edits task 4 must land alongside the new `TestWriteWindowRestore` class; task 4 is not complete until both files are green.
 
 ## Rabbit Holes
 
