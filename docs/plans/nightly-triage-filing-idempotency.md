@@ -636,17 +636,25 @@ Standard Tier 1 roster. No domain framing needed — this is ordinary Python wit
 ## Verification
 
 
-Structural rows use `inspect.getsource` or call the builders directly, never line-scoped `sed`, so they survive the line drift this module sees constantly. **Every row below was executed against `origin/main` at `0a9bb455f` while revising, and every row's measured pre-fix value appears in the red-state table.** The earlier draft measured only four of eleven rows and two of the unmeasured ones were defective — one passed on unmodified `main`, one raised `ValueError` instead of returning a value.
+Structural rows use `inspect.getsource` or call the builders directly, never line-scoped `sed`, so they survive the line drift this module sees constantly. **Every row below was executed against `origin/main` at `bf0a5d577` while revising, and every row's measured pre-fix value appears in the red-state table.** (`scripts/nightly_regression_tests.py` is byte-identical between `0a9bb455f` and `bf0a5d577` — `git diff 0a9bb455f bf0a5d577 -- scripts/nightly_regression_tests.py` is empty — so the earlier round's measurements reproduce unchanged.)
+
+**Every command below was re-measured by copying it out of this document's committed text**, not out of a working buffer. That distinction is the whole of round 2's first concern: row 5's regex had its pipes escaped as `\|` by the markdown table it lived in, so the copied text compiled to a single literal and returned `0` — the row's PASS value — against entirely unfixed code. Row 5 is the plan's most important anti-criterion and it was reporting green on `main`. **Audit of every other row for the same defect:** rows 1–4, 6–17 contain no `\|` and no other markdown escape; row 11's `\"` sequences are shell escaping inside a `python -c "..."` double-quoted string, which is correct as written and was re-measured to confirm it. The only other `\|` anywhere in this plan is spike-4's `grep -rn 'pytest.mark.xfail\|pytest.xfail('`, where `\|` is BRE alternation and therefore correct for `grep`. **The fix is structural: any regex a Verification row needs now lives in the PRELUDE code block, where markdown does not escape it, and the table cell only references it by name.**
 
 Three rows share a preamble. Written once here and abbreviated as `PRELUDE` in the table:
 
 ```python
 # PRELUDE — renders all three prompts, falling back to main()'s inline seed text
 # while _build_seed_prompt does not yet exist, so the same command has a defined
-# value before and after the fix.
+# value before and after the fix. The two-positional call below stays valid after
+# _build_seed_prompt gains its keyword-only, defaulted `prior_collection`.
+#
+# SEARCH_TOKENS lives HERE and not in a table cell on purpose: a regex written
+# inside a markdown table gets its pipes escaped to `\|`, which compiles to one
+# literal string instead of an alternation and makes row 5 pass on unfixed code.
 import sys, re, inspect
 sys.path.insert(0, 'scripts')
 import nightly_regression_tests as n
+SEARCH_TOKENS = re.compile(r"--search|gh search|search all|search open", re.I)
 _c = {"nodes": ["a::b"], "workers": [], "kind": "body", "title": "T", "message": "m"}
 P = [n._build_triage_prompt(["a::b"]), n._build_cascade_prompt(_c)]
 P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
@@ -659,7 +667,7 @@ P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
 | 2 | Lint clean | `python -m ruff check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
 | 3 | Format clean | `python -m ruff format --check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
 | 4 | All three prompts hand over the REST command | `PRELUDE; print(min(p.count('gh issue list --state all') for p in P))` | output > 0 |
-| 5 | No prompt names the lagging search index (anti-criterion) | `PRELUDE; print(len(re.findall(r'--search\|gh search\|search all\|search open', '\n'.join(P), re.I)))` | output == 0 |
+| 5 | No prompt names the lagging search index (anti-criterion) | `PRELUDE; print(len(SEARCH_TOKENS.findall(chr(10).join(P))))` | output == 0 |
 | 6 | Every prompt carries the prohibition | `PRELUDE; print(min(p.count('search index') for p in P))` | output > 0 |
 | 7 | Every prompt warns about the open-issue `stateReason` | `PRELUDE; print(min(p.count('stateReason') for p in P))` | output > 0 |
 | 8 | The seed prompt is an addressable function | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int(callable(getattr(n,'_build_seed_prompt',None))))"` | output == 1 |
@@ -670,10 +678,14 @@ P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
 | 13 | Named new tests exist and pass | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q -k "TestWriteTriageLedger or TestBuildTriagePrompt or TestPromptsNeverNameTheSearchIndex or TestBuildSeedPrompt"` | exit code 0 |
 | 14 | Dry run writes no ledger (behavioral) | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q -k "dry_run and ledger"` | exit code 0 |
 | 15 | Branch is rooted on main (not the stale #3075 lane) | `git merge-base --is-ancestor origin/main HEAD; echo $?` | output contains 0 |
+| 16 | The cascade and seed prompts carry no ledger (scope guard) | `PRELUDE; print(sum(1 for p in P[1:] if 'nightly-triage-ledger' in p))` | output == 0 |
+| 17 | The per-node prompt does carry the ledger path when given one | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int('/tmp/led.json' in n._build_triage_prompt(['a::b'], ledger_path='/tmp/led.json')))"` | output == 1 |
 
-**Notes on three rows that were defective in the earlier draft and are now repaired:**
+**Notes on four rows that were defective in an earlier draft and are now repaired:**
 
 - **Row 5** was `inspect.getsource(_build_triage_prompt)` scanned for `--search` / `gh search` / `search ALL`, while the same plan required that function's docstring and prompt body to *contain* the token `--search`. `getsource` returns the docstring, so the green state was unreachable. It now scans the **rendered** prompts (no docstring in scope), covers all three, and is case-insensitive — the earlier case-sensitive form missed `_build_cascade_prompt`'s capitalised "Search ALL" entirely. Row 6 asserts the prohibition is present as a separate positive check, so the two are simultaneously satisfiable only because the wording constraint in Solution keeps the literal tokens out of the prompt text.
+
+  **Round 2 found it still broken for a different reason, now fixed.** The regex had been written inline in the table cell as `r'--search\|gh search\|search all\|search open'`. Markdown escapes a `|` inside a table cell as `\|`, so a validator copying the cell verbatim into Python compiled a pattern matching one literal string containing pipe characters. **Measured against unmodified `origin/main` `bf0a5d577`: the as-committed escaped form returned `0` — the row's PASS value — while the intended alternation returned `3`.** The regex now lives in the PRELUDE code block as `SEARCH_TOKENS`, where markdown performs no escaping, and the cell references it by name. Re-measured from the committed text: **`3`**, matching `['search ALL', 'Search ALL', 'Search open']`.
 - **Row 11** used `str.index` on the bare name `write_triage_ledger` over the whole source including the docstring, which the Documentation section requires to mention the ordering — the docstring precedes the code, so the row would flip to fail on correct code. And `str.index` raises `ValueError` when the substring is absent, so it had no defined pre-fix value. It now strips the docstring with `split('"""', 2)[-1]`, matches the call form `write_triage_ledger(`, and uses `find` so the absent case returns `-1` rather than raising. Row 14 is the behavioral guard on the same constraint and is the primary one; row 11 is a cheap second opinion.
 - **Row 12** counted `dispositions` in `dispatch_findings` and expected > 0. That already measured **1** on unmodified `main`, from the existing `closed_issue_dispositions()` call inside the function, so the row could not distinguish the fix from HEAD. It now counts `dispositions=`, the keyword form only the fix introduces, measured at **0** pre-fix.
 
@@ -685,7 +697,7 @@ P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
 | 2 | Lint clean | exit 0 | PASSES pre-fix — regression guard. |
 | 3 | Format clean | exit 0 | PASSES pre-fix — regression guard. |
 | 4 | Prompts hand over the REST command | `0` | FAIL (needs > 0) — row bites |
-| 5 | No prompt names the search index | `3` (`search ALL` in triage, `Search ALL` in cascade, `Search open` in seed) | FAIL (needs 0) — anti-criterion bites, and its value is exactly the blocker-2 hole: three prompts, three hits |
+| 5 | No prompt names the search index | `3` — matches `['search ALL', 'Search ALL', 'Search open']` | FAIL (needs 0) — anti-criterion bites, and its value is exactly the round-1 blocker-2 hole: three prompts, three hits. **Re-measured from this document's committed text after moving the regex into the PRELUDE. The previous, table-escaped form measured `0` on the same code — a vacuous pass.** |
 | 6 | Prohibition present in every prompt | `0` | FAIL (needs > 0) — row bites |
 | 7 | `stateReason` warning in every prompt | `0` | FAIL (needs > 0) — row bites |
 | 8 | Seed prompt is an addressable function | `0` | FAIL (needs 1) — row bites |
@@ -696,8 +708,10 @@ P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
 | 13 | Named new tests exist and pass | no tests collected | FAIL — row bites |
 | 14 | Dry run writes no ledger | no tests collected | FAIL — row bites |
 | 15 | Branch rooted on main | exit 0 on a `main`-rooted checkout, non-zero on `session/nightly-triage-idempotency-3075` | Environment gate, not a code criterion. The stale branch no longer exists on origin (Freshness Check), so the row now guards only against a local checkout of the surviving local ref. |
+| 16 | Cascade and seed prompts carry no ledger | `0` | PASSES pre-fix **by design** — a scope guard on the deliberate narrowing, not an acceptance criterion. Its red state is "after wiring a ledger paragraph into either override builder", which is exactly the widening the `[DEFERRED]` No-Go forbids. Row 17 is the paired positive check that stops rows 16 and 4–9 from being satisfiable by a fix 3 that does nothing at all. |
+| 17 | Per-node prompt carries the ledger path | `TypeError: _build_triage_prompt() got an unexpected keyword argument 'ledger_path'` | FAIL — row bites |
 
-Eleven of fifteen rows fail against current `main` and therefore cannot pass vacuously. The four that pass pre-fix are labelled with what they are — three regression guards and one invariant — rather than presented as evidence the fix landed.
+Twelve of seventeen rows fail against current `main` and therefore cannot pass vacuously. The five that pass pre-fix are labelled with what they are — three regression guards (1–3), one invariant (9), and one scope guard (16) — rather than presented as evidence the fix landed. Every row was re-measured by copying its command out of this document's committed text; row 5 is the reason that distinction is now stated rather than assumed.
 
 ## Critique Results
 
