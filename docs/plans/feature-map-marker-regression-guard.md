@@ -315,9 +315,8 @@ degrades into a second implementation that can drift away from the thing it is g
 - Review rounds: 1-2
 
 The code is small: one new stdlib module, one new test file, and a four-line change to a collection
-hook. The Medium sizing is entirely alignment cost. The guard is introduced
-against 24 pre-existing violations, and how those are dispositioned is a judgement call a reviewer
-will and should push on.
+hook. The Medium sizing is entirely alignment cost. The guard is introduced against 24 pre-existing
+violations, and how those are dispositioned is a judgement call a reviewer will and should push on.
 
 
 ## Prerequisites
@@ -554,9 +553,9 @@ read-only, so concurrent workers cannot interfere with it or with each other thr
 
 ## Update System
 
-No update system changes required. This work adds one test-suite module and one test file, and
-edits `tests/conftest.py`. There are no new dependencies, no config files, no
-secrets, no services, and no Popoto models, so there is no migration and nothing to register in
+No update system changes required. This work adds one test-suite module and one test file, and edits
+`tests/conftest.py`. There are no new dependencies, no config files, no secrets, no services, and no
+Popoto models, so there is no migration and nothing to register in
 `scripts/update/migrations.py`. `/update` propagates it as an ordinary commit and the guard starts
 running on the next test invocation on each machine.
 
