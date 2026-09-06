@@ -125,7 +125,7 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 ### spike-4: per-arm Redis isolation path
 - **Assumption**: "A candidate arm subprocess can be pointed at an isolated Redis via `REDIS_URL` and nothing on the memory hook path falls back to production."
 - **Method**: code-read
-- **Finding**: `REDIS_URL` at the subprocess is necessary and not sufficient. Env plumbing works: `_harness_env` (`agent/session_executor.py:2194`) is an additive overlay that never strips `REDIS_URL`; it flows through `agent/session_runner/runner.py:520` and `role_driver.py:204` to `harness/claude.py:459-462`, where `proc_env.update(env)` lets a `_harness_env` value override the worker's. Popoto binds once at import; hooks and MCP servers are fresh processes inheriting the arm env. Two leaks remain. First, partition: no `"valor"` is hardcoded on the hook path, but `config/project_key_resolver.py:89` resolves by `projects.json` working-directory prefix, so an arm in an `ai` worktree resolves to the production key, and `hook_utils/memory_bridge.py:551-552,683-684` falls back to `DEFAULT_PROJECT_KEY` (`"default"`) on `None`. `_harness_env` has no `VALOR_PROJECT_KEY` entry. Second, writers: post-session extraction (`.claude/hooks/stop.py:134` → detached `Popen(env=dict(os.environ))` at `stop_detach_worker.py:246`), prompt ingest (`memory_bridge.py:803-833`), retrieval-side decay counter bumps (`agent/memory_retrieval.py:116`), and post-merge extraction (`memory_bridge.py:997`) all inherit the arm env and would mutate a fixed corpus; the decay/prune reflection (`reflections/memory/memory_decay_prune.py` via `reflections/memory_management.py:14`) runs in the reflection process with a hardcoded `"valor"` fallback at `reflections/redis_access.py:32` and is not isolated by the arm env at all. The flush guard (`tools/redis_flush_guard.py:81`) reads only the `db` number, never host or port, so `redis://localhost:6390/0` is treated as production; `tests/db_claim.py:342` sidesteps this with a non-zero db.
+- **Finding**: `REDIS_URL` at the subprocess is necessary and not sufficient. Env plumbing works: `_harness_env` (`agent/session_executor.py:2194`) is an additive overlay that never strips `REDIS_URL`; it flows through `agent/session_runner/runner.py:520` and `role_driver.py:204` to `harness/claude.py:459-462`, where `proc_env.update(env)` lets a `_harness_env` value override the worker's. Popoto binds once at import; hooks and MCP servers are fresh processes inheriting the arm env. Two leaks remain. First, partition: no `"valor"` is hardcoded on the hook path, but `config/project_key_resolver.py:89` resolves by `projects.json` working-directory prefix, so an arm in an `ai` worktree resolves to the production key, and `.claude/hooks/hook_utils/memory_bridge.py:551-552,683-684` falls back to `DEFAULT_PROJECT_KEY` (`"default"`) on `None`. `_harness_env` has no `VALOR_PROJECT_KEY` entry. Second, writers: post-session extraction (`.claude/hooks/stop.py:134` → detached `Popen(env=dict(os.environ))` at `stop_detach_worker.py:246`), prompt ingest (`.claude/hooks/hook_utils/memory_bridge.py:803-833`), retrieval-side decay counter bumps (`agent/memory_retrieval.py:116`), and post-merge extraction (`.claude/hooks/hook_utils/memory_bridge.py:997`) all inherit the arm env and would mutate a fixed corpus; the decay/prune reflection (`reflections/memory/memory_decay_prune.py` via `reflections/memory_management.py:14`) runs in the reflection process with a hardcoded `"valor"` fallback at `reflections/redis_access.py:32` and is not isolated by the arm env at all. The flush guard (`tools/redis_flush_guard.py:81`) reads only the `db` number, never host or port, so `redis://localhost:6390/0` is treated as production; `tests/db_claim.py:342` sidesteps this with a non-zero db.
 - **Confidence**: high on env plumbing and flush guard; medium on the decay reflection's cadence.
 - **Impact on plan**: Gap E sets both `REDIS_URL` and `VALOR_PROJECT_KEY` in the arm's `_harness_env`, uses a non-zero db on the private instance, adds an env-gated kill switch before `try_reserve_detach_slot()` in `stop.py` and the prompt-ingest path, pins the decay counter on the read path for trials, and pauses the decay/prune reflection for the trial window. Startup asserts the resolved project key equals the arm's assigned key.
 
@@ -342,7 +342,7 @@ Claude work runs on the Claude subscription. Dollars are the wrong unit for it, 
 - The first experiment uses a fixed evidence corpus exported through ORM reads into the experiment content store: complete memory fields consumed by retrieval, embedding bytes, embedding model and dimension, retrieval parameters, reference maps, and the effective retrieval clock. The manifest and bytes are hashed. Neither arm reads live production memory.
 - An export of a changing partition is not a point-in-time snapshot. The default is to define the experiment corpus as the exact exported immutable dataset with a disclosed collection interval and no point-in-time claim. Experiments that need temporal coherence first implement a partition write barrier or a versioned export protocol.
 - Each arm runs as a subprocess whose `_harness_env` sets both `REDIS_URL` (a private Redis process on a private port, non-zero db so the flush guard's db-0 rule stays honest) and `VALOR_PROJECT_KEY` (the arm's own key, so `project_key_resolver` does not prefix-match the worktree to production). Startup asserts the resolved key equals the assigned key and refuses otherwise.
-- Writers disabled for fixed-corpus trials, each with its trigger site (spike-4): post-session extraction at `.claude/hooks/stop.py:134` and the prompt-ingest path in `hook_utils/memory_bridge.py:803-833` gain an env-gated kill switch checked before `try_reserve_detach_slot()`; the retrieval-side decay counter bump at `agent/memory_retrieval.py:116` is pinned for trials; post-merge extraction at `memory_bridge.py:997` is covered by the same switch; the decay/prune reflection (`reflections/memory/memory_decay_prune.py`, reflection process, `"valor"` fallback at `reflections/redis_access.py:32`) is paused for the trial window through the scheduler's `enabled` flag, and the pause is recorded in the experiment manifest. The restriction is validated through the real hook and retrieval path.
+- Writers disabled for fixed-corpus trials, each with its trigger site (spike-4): post-session extraction at `.claude/hooks/stop.py:134` and the prompt-ingest path in `.claude/hooks/hook_utils/memory_bridge.py:803-833` gain an env-gated kill switch checked before `try_reserve_detach_slot()`; the retrieval-side decay counter bump at `agent/memory_retrieval.py:116` is pinned for trials; post-merge extraction at `.claude/hooks/hook_utils/memory_bridge.py:997` is covered by the same switch; the decay/prune reflection (`reflections/memory/memory_decay_prune.py`, reflection process, `"valor"` fallback at `reflections/redis_access.py:32`) is paused for the trial window through the scheduler's `enabled` flag, and the pause is recorded in the experiment manifest. The restriction is validated through the real hook and retrieval path.
 - Test infrastructure: the pytest DB-claim fixture exports one `REDIS_URL` process-wide and cannot host two arms. Paired-arm tests launch their own Redis processes on private ports through a sanctioned helper in `tests/` extending the `redis_test_url()` pattern, each on a non-zero db.
 - The isolated adapter must reproduce baseline retrieval on the frozen corpus before any scoring; a mismatch blocks scoring until explained or registered as a factor.
 - Later learning-policy experiments clone the same seed into separate mutable stores and replay the same task sequence with per-arm embeddings, caches, extraction sidecars, outcomes, and decay clock.
@@ -440,13 +440,13 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 **Impact:** two controller ticks dispatch one case, or a replaced worker's result overwrites the new owner's state.
 **Mitigation:** monotonic epoch per lease, Lua transition with expected revision, fence re-check inside every effect-recording script call, action-ID tagged results with stale-epoch rejection.
 
-### Risk 5: Unbounded spend or unknown spend
-**Impact:** a runaway experiment consumes the budget needed to evaluate or revert it.
-**Mitigation:** atomic admission accounting, separate evaluator reservation, settlement at the authorized maximum for turns with no `result` event, unknown spend pauses further work.
+### Risk 5: Unbounded spend, unknown spend, or a stranded lane slot
+**Impact:** a runaway experiment consumes the external-LLM budget needed to evaluate or revert it; or, at a concurrency bound of 1, a single unreleased lane slot wedges all research indefinitely.
+**Mitigation:** atomic admission accounting for both units; separate controller and evaluator dollar reservations out of the same daily pool; per-call settlement from OpenRouter usage; the lane-slot release wired inside `finalize_session` (`models/session_lifecycle.py:233`) so every termination path frees it; the `improvement-intent-reconcile` reflection as the backstop for a slot whose session row vanished; unknown external spend pauses external evaluation.
 
-### Risk 6: More demands on Tom than the system removes
-**Impact:** the attention cost exceeds the rescue time saved and the project fails its first objective.
-**Mitigation:** daily question ceiling in the charter, batching of low-urgency questions, observed response-burden metric published beside rescue incidence, bootstrap from already-supplied answers.
+### Risk 6: The system substitutes its own guesses for Tom's judgment
+**Impact:** with a question ceiling of zero, an uncertainty that genuinely needed Tom's answer becomes a confident wrong assumption, and the system optimizes toward the wrong objective while reporting progress.
+**Mitigation:** unresolved uncertainty is recorded as an explicit **provisional assumption** with its evidence, its confidence, and the observation that would overturn it, never as a settled claim; provisional assumptions are rendered on the dashboard where Tom can correct one on his own initiative; the three objectives, the journey-comprehension diagnosis, and the charter's human-owned fields stay externally governed and are never inferred; a correction Tom volunteers is captured as ordinary evidence and supersedes the assumption it contradicts. Observed intervention burden is published beside rescue incidence so the trade is visible.
 
 ### Risk 7: Registration clobbered by `/update`
 **Impact:** the controller silently stops ticking after the next fleet update.
@@ -462,20 +462,20 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 **Mitigation:** the Lua transition compares `expected_revision`; the loser gets a reason code and no effect. Admission and reservation live in the same script call.
 
 ### Race 2: Crash between intent admission and session creation
-**Location:** `agent/agent_session_queue.py:361-397`
-**Trigger:** process dies after `SET NX` on the create key and before `async_create` returns.
-**Data prerequisite:** the NX key holds the preallocated `agent_session_id`.
-**State prerequisite:** intent is `admitted`, no row exists.
-**Mitigation:** reconciliation retries `async_create` with the same identity; the NX key's TTL exceeds the reconciliation interval; request-digest equality is checked on retry.
+**Location:** the create-or-bind seam, owned by #3183; the call site is this plan's scheduler adapter.
+**Trigger:** the process dies after the intent is admitted and before the seam returns a bound `agent_session_id`.
+**Data prerequisite:** the intent holds the idempotency key; the seam's binding survives the crash.
+**State prerequisite:** intent is `admitted`, the row may or may not exist.
+**Mitigation:** reconciliation retries the seam with the **same idempotency key**, which by #3183's contract yields the one row rather than a second; request-digest equality is checked on retry; the `improvement-intent-reconcile` reflection sweeps an intent that stays `admitted` past the staleness threshold, transitions it to `reconciliation_required`, and releases its lane slot. This plan does not implement the seam's crash safety; it depends on it, and lane 3 blocks until #3183 provides it.
 
-### Race 3: Answer arrives after the registry row expired
-**Location:** `bridge/poll_registry.py` TTL `POLL_REGISTRY_TTL_S`; `bridge/poll_vote.py:294-326`
-**Trigger:** Tom answers after 24h.
-**Data prerequisite:** the investigation persisted the question and its `poll_id` at send time.
-**State prerequisite:** investigation in `sent` or `expired`.
-**Mitigation:** the vote path's `NONE` branch is extended to look up the investigation by `poll_id` and record the late answer with `applicability=late`; no re-ask is issued.
+### Race 3: A lane slot outlives the session that held it
+**Location:** `models/session_lifecycle.py::finalize_session` (`:233`) and the reservation record in the control namespace.
+**Trigger:** a watchdog, the health sweep, or the scheduler kills a research session on a path that does not run the ordinary completion code.
+**Data prerequisite:** the session carries reservation and action-ID provenance.
+**State prerequisite:** the reservation is outstanding and `max_concurrent_research_sessions` is 1, so nothing else can be admitted.
+**Mitigation:** the release is a post-transition side effect **inside** `finalize_session`, the common floor for every one of those callers, so it fires uniformly. If the row is gone entirely, the reconciliation reflection releases the slot from the intent side. A slot is never released by lease expiry alone, because an expired lease does not prove the work stopped.
 
-### Race 4: Result submitted under a replaced epoch
+### Race 4: Result submitted under a replaced fencing generation
 **Location:** result submission script; `agent/pid_fence.py`
 **Trigger:** executor A stalls past lease expiry, B takes over, A finishes.
 **Data prerequisite:** A's result carries `(action_id, epoch_A)`.
@@ -502,8 +502,12 @@ Delete `scripts/autoexperiment.py`, `scripts/install_autoexperiment.sh`, `com.va
 - [ORDERED] Real stakeholder communication (client outreach, meeting attendance, voice calls). Each requires its own charter scope approved by Tom; offline simulations and capability probes are in scope, real deployment is not.
 - [EXTERNAL] Shared durable artifact storage for fleet-wide execution. Requires a storage decision and credentials on machines the agent does not administer; local retention root plus export/import is the in-scope substitute.
 - [EXTERNAL] Any hand edit of `~/Desktop/Valor/reflections.yaml`. Registration goes through `reflection_register.py`; if an agent-type entry is ever needed, that is a vault edit only Tom performs.
-- [DESTRUCTIVE] Deleting `data/experiments/*/eval_*.jsonl`. They are retained as marked-legacy evidence; a Verification row asserts they still exist.
-- [DESTRUCTIVE] Lifting or bypassing the child session gate. The research path never passes a parent and never sets `VALOR_ALLOW_CHILD_SESSIONS`; a Verification row asserts the env var does not appear in the controller modules.
+- [EXTERNAL] Placing a new credential for any acquired resource. Resource-acquisition research may find a token source worth adopting, but the system stops at a prepared adapter and a written request naming the vault item. The key is written to `~/Desktop/Valor/.env` by Tom, per the repo's secrets rule. A keyless source may be integrated autonomously behind `ImprovementSettings`, defaulting off. A Verification row asserts no controller module writes to `.env` or shells out to `op`.
+- [SEPARATE-SLUG #3183] The idempotent create-or-bind seam on `_push_agent_session`. Owned by #3183 for the production path; #3177 lane 3 consumes it and changes no queue signature. If #3183 has not landed when lane 3 starts, lane 3 blocks.
+- [SEPARATE-SLUG #3183] The renewed execution lease with a fencing generation. Owned by #3183; the control journal imports it rather than writing a second lease.
+- [SEPARATE-SLUG #3183] The dead-letter record. Owned by #3183 as one generalized model with a `stage` field; exhausted improvement intents write to it with `stage="improvement-intent"`. This plan defines no second sink.
+- [DESTRUCTIVE] Deleting `data/experiments/*/eval_*.jsonl`. They are retained as marked-legacy evidence; the "Legacy corpora retained" Verification row asserts all three paths still exist and fails closed if any is missing.
+- [DESTRUCTIVE] Lifting or bypassing the child session gate. The research path never passes a parent and never sets `VALOR_ALLOW_CHILD_SESSIONS`. The "no child-gate bypass" Verification row greps trees that exist today (`agent/`, `tools/`, `models/`, `reflections/`) with the one sanctioned definition site excluded, so it bites during lanes 1 and 2 rather than passing on a missing directory.
 
 ## Update System
 
