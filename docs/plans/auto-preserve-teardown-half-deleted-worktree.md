@@ -531,23 +531,23 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ## Success Criteria
 
-- [ ] On a worktree missing a directory tracked at HEAD **with no other uncommitted work**, `preserve_uncommitted_worktree_changes` writes no commit and no ref, leaves the branch head unmoved, and returns `{"preserved": False, "refused": "missing-tracked-dirs", ...}`.
-- [ ] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
-- [ ] That commit carries a **trailer** recording the refusal (`Auto-preserve declined deletions (#3167)`, `Missing-tracked-dirs:`, `Declined-deletions:`) with the subject line byte-identical to an ordinary preserve, so the durable artifact records the refusal and not only the rotating log.
-- [ ] `errors` is `[]` on both wipe branches and `refused` is the sole discriminator: on a git failure `errors` is truthy and `refused` is absent. Both directions asserted in one test.
-- [ ] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
-- [ ] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
-- [ ] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
-- [ ] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
-- [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:1090`) and `remove_worktree` (`:1880`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
-- [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
-- [ ] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts.
-- [ ] **Failure handling is asymmetric.** A failure of the *detection* read (`ls-tree`, block A) logs WARNING under `[worktree-wip-guard-failed]` and falls through to today's `git add -A` behavior. A failure of the *response* reads (`reset` / `ls-files`, block B, reached only after HEAD has proven a directory missing) logs WARNING under `[worktree-wip-guard-failed]` **and** ERROR under `[worktree-wip-refused-wipe]`, returns the pure-wipe dict, and **leaves the branch head unmoved** — it never falls through to `git add -A`. Asserted by patching each read independently.
-- [ ] The change adds no settings field and no env key.
-- [ ] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
-- [ ] Documentation updated (`/do-docs`), including the `refs/stash` correction in `docs/features/session-isolation.md`.
-- [ ] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
-- [ ] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
+- [x] On a worktree missing a directory tracked at HEAD **with no other uncommitted work**, `preserve_uncommitted_worktree_changes` writes no commit and no ref, leaves the branch head unmoved, and returns `{"preserved": False, "refused": "missing-tracked-dirs", ...}`.
+- [x] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
+- [x] That commit carries a **trailer** recording the refusal (`Auto-preserve declined deletions (#3167)`, `Missing-tracked-dirs:`, `Declined-deletions:`) with the subject line byte-identical to an ordinary preserve, so the durable artifact records the refusal and not only the rotating log.
+- [x] `errors` is `[]` on both wipe branches and `refused` is the sole discriminator: on a git failure `errors` is truthy and `refused` is absent. Both directions asserted in one test.
+- [x] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
+- [x] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
+- [x] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
+- [x] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
+- [x] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:1090`) and `remove_worktree` (`:1880`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
+- [x] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
+- [x] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts.
+- [x] **Failure handling is asymmetric.** A failure of the *detection* read (`ls-tree`, block A) logs WARNING under `[worktree-wip-guard-failed]` and falls through to today's `git add -A` behavior. A failure of the *response* reads (`reset` / `ls-files`, block B, reached only after HEAD has proven a directory missing) logs WARNING under `[worktree-wip-guard-failed]` **and** ERROR under `[worktree-wip-refused-wipe]`, returns the pure-wipe dict, and **leaves the branch head unmoved** — it never falls through to `git add -A`. Asserted by patching each read independently.
+- [x] The change adds no settings field and no env key.
+- [x] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
+- [x] Documentation updated (`/do-docs`), including the `refs/stash` correction in `docs/features/session-isolation.md`.
+- [x] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
+- [x] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
 
 ## Team Orchestration
 
