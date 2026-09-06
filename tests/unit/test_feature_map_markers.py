@@ -127,7 +127,9 @@ def test_empty_feature_map_raises():
 
 def test_empty_file_enumeration_raises():
     with patch("tests.marker_map.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
         with pytest.raises(RuntimeError):
             iter_test_files()
 
@@ -196,7 +198,9 @@ def test_audit_reports_stale_exemption():
     synthetic_files = [
         "tests/unit/some_pkg/test_only_file.py",  # single file, R2 trivially passes
     ]
-    stale_baseline = {"tests/unit/some_pkg/test_only_file.py": "synthetic stale exemption for this test"}
+    stale_baseline = {
+        "tests/unit/some_pkg/test_only_file.py": "synthetic stale exemption for this test"
+    }
     with patch("tests.marker_map.iter_test_files", return_value=synthetic_files):
         with patch("tests.marker_map.KNOWN_MISTAGS", stale_baseline):
             _violations, new_mistags, stale_exemptions = run_audit()

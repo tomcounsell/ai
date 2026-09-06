@@ -299,7 +299,13 @@ def check_r1(files: list[str]) -> list[dict[str, str | None]]:
             marker, key = resolve_marker(Path(path).name)
             if marker != dir_marker:
                 violations.append(
-                    {"path": path, "resolved": marker, "expected": dir_marker, "key": key, "rule": "R1"}
+                    {
+                        "path": path,
+                        "resolved": marker,
+                        "expected": dir_marker,
+                        "key": key,
+                        "rule": "R1",
+                    }
                 )
     return violations
 
@@ -334,7 +340,13 @@ def check_r2(files: list[str]) -> list[dict[str, str | None]]:
             for path in paths:
                 marker, key = resolve_marker(Path(path).name)
                 violations.append(
-                    {"path": path, "resolved": marker, "expected": None, "key": key, "rule": "R2-ambiguous"}
+                    {
+                        "path": path,
+                        "resolved": marker,
+                        "expected": None,
+                        "key": key,
+                        "rule": "R2-ambiguous",
+                    }
                 )
             continue
         majority_marker = largest_markers[0]
@@ -344,7 +356,13 @@ def check_r2(files: list[str]) -> list[dict[str, str | None]]:
             for path in members:
                 _majority_dummy, key = resolve_marker(Path(path).name)
                 violations.append(
-                    {"path": path, "resolved": marker, "expected": majority_marker, "key": key, "rule": "R2"}
+                    {
+                        "path": path,
+                        "resolved": marker,
+                        "expected": majority_marker,
+                        "key": key,
+                        "rule": "R2",
+                    }
                 )
     return violations
 
@@ -418,9 +436,15 @@ def _report_lines(files: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--audit", action="store_true", help="Exit non-zero on any mistag or stale exemption.")
-    group.add_argument("--report", action="store_true", help="Print 'path<TAB>marker' for every tracked test file.")
-    group.add_argument("--count", action="store_true", help="Print the number of tracked test files.")
+    group.add_argument(
+        "--audit", action="store_true", help="Exit non-zero on any mistag or stale exemption."
+    )
+    group.add_argument(
+        "--report", action="store_true", help="Print 'path<TAB>marker' for every tracked test file."
+    )
+    group.add_argument(
+        "--count", action="store_true", help="Print the number of tracked test files."
+    )
     args = parser.parse_args(argv)
 
     if args.count:
