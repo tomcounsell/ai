@@ -58,7 +58,9 @@ def _dedup_last_wins(judges: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [by_id[k] for k in sorted(by_id.keys())]
 
 
-def _conservative_outcome(rule: str, *, n: int = 0, expected_n: int | None = None) -> dict[str, Any]:
+def _conservative_outcome(
+    rule: str, *, n: int = 0, expected_n: int | None = None
+) -> dict[str, Any]:
     """Return a conservative CHANGES REQUESTED outcome.
 
     Shared by two call sites that are the same failure shape: zero judges

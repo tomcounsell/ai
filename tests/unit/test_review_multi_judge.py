@@ -83,6 +83,24 @@ class TestComputeConsensusAnyBlockerWins:
         assert meta["tied"] is False
         assert meta["mean_confidence"] == pytest.approx(0.85)
 
+    def test_omitting_expected_judges_preserves_todays_verdict(self):
+        """Back-compat contract: expected_judges defaults to None, which must
+        reproduce today's verdict across the existing matrix rather than being
+        assumed. Pinned here for the single-judge case explicitly."""
+        judges = [
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+        ]
+        result = compute_consensus(judges, rule="any-blocker-wins")
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+        assert result["consensus"]["expected_n"] is None
+
     def test_split_one_blocker_returns_changes_requested(self):
         judges = [
             {
@@ -202,6 +220,11 @@ class TestComputeConsensusEdgeCases:
         assert result["verdict"] == "CHANGES REQUESTED"
         assert result["blockers"] >= 1
         assert result["consensus"]["n"] == 0
+        # The zero-judge and shortfall paths now share one outcome builder,
+        # so the metadata keys are unconditionally present even with no
+        # expectation stated.
+        assert result["consensus"]["expected_n"] is None
+        assert result["consensus"]["quorum_shortfall"] is False
 
     def test_duplicate_judge_id_last_wins(self):
         judges = [
@@ -224,6 +247,32 @@ class TestComputeConsensusEdgeCases:
         # Dedup: only the LAST entry for code-quality counts.
         assert result["verdict"] == "CHANGES REQUESTED"
         assert result["consensus"]["n"] == 1
+
+    def test_duplicate_judge_id_collapse_trips_quorum(self):
+        """Two dicts under one judge_id must count as ONE distinct judge for
+        the quorum floor, not two — otherwise a retry that reported twice
+        under one id would satisfy a quorum of two."""
+        judges = [
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.5,
+            },
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+        ]
+        result = compute_consensus(judges, rule="any-blocker-wins", expected_judges=2)
+        assert result["verdict"] == "CHANGES REQUESTED"
+        assert result["consensus"]["n"] == 1
+        assert result["consensus"]["quorum_shortfall"] is True
+        assert result["consensus"]["expected_n"] == 2
 
     def test_deterministic_sort_by_judge_id(self):
         # Reverse order in input should not change output (sorted alphabetically).
@@ -268,6 +317,101 @@ class TestComputeConsensusEdgeCases:
         ]
         with pytest.raises(ValueError):
             compute_consensus(judges, rule="bogus-rule")
+
+
+# ---------------------------------------------------------------------------
+# compute_consensus — quorum floor (expected_judges), issue #3197
+# ---------------------------------------------------------------------------
+
+
+def _judge(judge_id: str, *, verdict: str = "APPROVED", blockers: int = 0) -> dict:
+    return {
+        "judge_id": judge_id,
+        "verdict": verdict,
+        "blockers": blockers,
+        "tech_debt": 0,
+        "confidence": 0.9,
+    }
+
+
+class TestComputeConsensusQuorumFloor:
+    def test_one_of_two_returns_changes_requested_with_shortfall(self):
+        """The mutation target: a single APPROVED judge against a declared
+        roster of two must never read back as consensus."""
+        judges = [_judge("code-quality")]
+        result = compute_consensus(judges, expected_judges=2)
+        assert result["verdict"] == "CHANGES REQUESTED"
+        assert result["consensus"]["quorum_shortfall"] is True
+        assert result["consensus"]["expected_n"] == 2
+        assert result["consensus"]["n"] == 1
+
+    def test_same_input_omitting_expected_judges_still_approves(self):
+        """Back-compat: the identical single-judge input approves when the
+        caller states no expectation — pinning that the default changes
+        nothing."""
+        judges = [_judge("code-quality")]
+        result = compute_consensus(judges)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+
+    def test_zero_judges_with_expectation_is_conservative_shortfall(self):
+        result = compute_consensus([], expected_judges=2)
+        assert result["verdict"] == "CHANGES REQUESTED"
+        assert result["consensus"]["n"] == 0
+        assert result["consensus"]["expected_n"] == 2
+        assert result["consensus"]["quorum_shortfall"] is True
+
+    def test_zero_judges_no_expectation_unchanged_conservative(self):
+        result = compute_consensus([])
+        assert result["verdict"] == "CHANGES REQUESTED"
+        assert result["consensus"]["expected_n"] is None
+        assert result["consensus"]["quorum_shortfall"] is False
+
+    def test_quorum_satisfied_exactly_at_floor(self):
+        judges = [_judge("code-quality"), _judge("risk")]
+        result = compute_consensus(judges, expected_judges=2)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+        assert result["consensus"]["n"] == 2
+
+    def test_quorum_satisfied_above_floor_cross_vendor_return(self):
+        """A cross-vendor judge that returns raises n above the mandatory
+        floor and must not be penalized for it."""
+        judges = [_judge("code-quality"), _judge("risk"), _judge("cross-vendor")]
+        result = compute_consensus(judges, expected_judges=2)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+        assert result["consensus"]["n"] == 3
+
+    def test_cross_vendor_skip_still_satisfies_quorum(self):
+        """A cross-vendor skip means the parent never appends its dict, so
+        n legitimately sits at exactly the mandatory roster size. This must
+        NOT be treated as a shortfall."""
+        judges = [_judge("code-quality"), _judge("risk")]  # no cross-vendor dict
+        result = compute_consensus(judges, expected_judges=2)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+
+    def test_expected_judges_one_with_one_judge_satisfied(self):
+        """Pins that the comparison reads the *parameter*, not a hardcoded
+        2 — a guard written as `n < 2` would pass every other case in this
+        class and fail only here."""
+        judges = [_judge("code-quality")]
+        result = compute_consensus(judges, expected_judges=1)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+        assert result["consensus"]["expected_n"] == 1
+
+    @pytest.mark.parametrize("bad", [0, -1, 2.5, True, "2"])
+    def test_invalid_expected_judges_raises_value_error(self, bad):
+        judges = [_judge("code-quality")]
+        with pytest.raises(ValueError):
+            compute_consensus(judges, expected_judges=bad)
+
+    def test_none_expected_judges_is_valid_and_is_the_default(self):
+        judges = [_judge("code-quality")]
+        result = compute_consensus(judges, expected_judges=None)
+        assert result["consensus"]["quorum_shortfall"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +511,39 @@ class TestRecordVerdictWithJudges:
         # Either reject outright OR write scalar without side-fields.
         # Spec: reject (return {}) so callers can't accidentally fork CRITIQUE shape.
         assert result == {}
+
+    def test_quorum_shortfall_consensus_survives_record_verdict_round_trip(
+        self, fake_session_reload_patched
+    ):
+        """A shortfall consensus dict persists intact through record_verdict —
+        record_verdict schema-validates only the `judges` list, so the two
+        new metadata keys cannot be dropped by validation."""
+        session = fake_session_reload_patched
+        judges = [
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+        ]
+        consensus_meta = compute_consensus(judges, expected_judges=2)["consensus"]
+        assert consensus_meta["quorum_shortfall"] is True
+        record = record_verdict(
+            session,
+            "REVIEW",
+            "CHANGES REQUESTED",
+            blockers=1,
+            tech_debt=0,
+            judges=judges,
+            consensus=consensus_meta,
+        )
+        assert record["verdict"] == "CHANGES REQUESTED"
+        data = json.loads(session.stage_states)
+        review = data["_verdicts"]["REVIEW"]
+        assert review["_consensus"]["quorum_shortfall"] is True
+        assert review["_consensus"]["expected_n"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +677,41 @@ class TestCrossVendorJudgeConsensus:
         from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID
 
         assert CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}
+
+
+# ---------------------------------------------------------------------------
+# Trivial-diff path never reaches compute_consensus (issue #3197, spike-1)
+# ---------------------------------------------------------------------------
+
+
+class TestTrivialDiffPathDoesNotReachQuorumGuard:
+    """The trivial-diff check is inline prose applied by the executing agent
+    at docs/sdlc/do-pr-review.md:250-254 -- there is no shape-classifier
+    module to import or exempt (scripts/pr_shape_classify.py was deleted by
+    #2378). This is the honest testable property: the prose forces the
+    legacy single-judge path, and the outcome contract forbids the
+    consensus side-fields there, so the quorum floor inside
+    compute_consensus cannot fire on that path without ever being called."""
+
+    def test_no_shape_classifier_module_exists(self):
+        import importlib.util
+
+        assert importlib.util.find_spec("scripts.pr_shape_classify") is None
+
+    def test_do_pr_review_doc_declares_trivial_diff_forces_legacy_path(self):
+        import pathlib
+
+        doc = pathlib.Path("docs/sdlc/do-pr-review.md").read_text()
+        assert "trivial" in doc.lower()
+        assert "single-judge" in doc.lower() or "legacy" in doc.lower()
+
+    def test_outcome_contract_forbids_consensus_fields_on_single_judge_path(self):
+        import pathlib
+
+        doc = pathlib.Path(
+            ".claude/skills-global/do-pr-review/sub-skills/outcome-contract.md"
+        ).read_text()
+        assert "MUST NOT include these fields" in doc
 
 
 class TestRecordVerdictCLIShape:
