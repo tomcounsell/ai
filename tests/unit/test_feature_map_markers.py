@@ -17,6 +17,7 @@ import pytest
 from tests.marker_map import (
     FEATURE_MAP,
     KNOWN_MISTAGS,
+    _partition_packages,
     check_r1,
     check_r2,
     check_r3,
@@ -256,3 +257,48 @@ def test_r2_tie_is_order_independent():
     reversed_files = list(reversed(synthetic_files)) + list(reversed(synthetic_files))
     backward = {v["path"] for v in check_r2(reversed_files)}
     assert forward == backward == set(synthetic_files)
+
+
+# ---------------------------------------------------------------------------
+# Package identity: two same-named directories in different trees are two
+# packages. Keying the partition on the bare directory name pooled them into
+# one group and invented R2 violations for whichever tree fell in the
+# minority of the pooled set.
+# ---------------------------------------------------------------------------
+
+TWO_HELPERS_PACKAGES = [
+    "tests/unit/helpers/test_alpha_sdlc.py",
+    "tests/unit/helpers/test_beta_sdlc.py",
+    "tests/unit/helpers/test_gamma_sdlc.py",
+    "tests/integration/helpers/test_delta_plain.py",
+    "tests/integration/helpers/test_epsilon_plain.py",
+]
+
+
+def test_same_named_packages_in_different_trees_stay_separate():
+    packages = _partition_packages(TWO_HELPERS_PACKAGES)
+    assert set(packages) == {"tests/unit/helpers", "tests/integration/helpers"}
+    assert packages["tests/unit/helpers"] == TWO_HELPERS_PACKAGES[:3]
+    assert packages["tests/integration/helpers"] == TWO_HELPERS_PACKAGES[3:]
+
+
+def test_r2_does_not_merge_same_named_packages():
+    """Each `helpers/` package is internally uniform, so R2 has nothing to say.
+
+    Pooled on the shared name they read as 3 "sdlc" against 2 unmarked, and
+    the two unmarked files are reported as minority drift that does not exist.
+    """
+    assert check_r2(TWO_HELPERS_PACKAGES) == []
+
+
+def test_r1_does_not_merge_same_named_packages():
+    """R1 still reads directory intent from the package's own name, not its path."""
+    files = [
+        "tests/unit/worktree_manager/test_worktree_manager_creation.py",
+        "tests/integration/worktree_manager/test_worktree_manager_config.py",
+    ]
+    violations = check_r1(files)
+    assert [v["path"] for v in violations] == [
+        "tests/integration/worktree_manager/test_worktree_manager_config.py"
+    ]
+    assert violations[0]["expected"] == "git"

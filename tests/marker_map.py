@@ -169,48 +169,130 @@ KNOWN_MISTAGS: dict[str, str] = {
     # (or, for the *_configured.py and *_sdlc_*.py files below, to a wrong
     # one) because nothing in the basename matches a FEATURE_MAP key that
     # points at "reflections". Tracked for drain by #3175.
-    "tests/unit/reflections/test_daily_log_aggregator.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_daily_log_audio_guard.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_daily_log_renderer.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_docs_auditor_git_surface.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to 'validation' via 'docs_auditor'. Drain tracked by #3175.",
-    "tests/unit/reflections/test_expectation_reconciler.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_log_audit_sentry.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_merged_branch_cleanup.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_builder.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_collector.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_delivery.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_init.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_machine_gate.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_no_slots_configured.py": "R1 and R3: package resolves to 'reflections'; basename fragment-matches 'config' inside 'configured'. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_skip_when_empty.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_pm_briefings_slot_match.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/unit/reflections/test_sdlc_progress_check.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to 'sdlc' ('sdlc' sits ahead of 'reflection' in insertion order). Drain tracked by #3175.",
-    "tests/unit/reflections/test_sdlc_upvote_lanes.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to 'sdlc' ('sdlc' sits ahead of 'reflection' in insertion order). Drain tracked by #3175.",
-    "tests/unit/reflections/test_utilities_resolve_eng_group.py": "R1: package tests/unit/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
+    "tests/unit/reflections/test_daily_log_aggregator.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_daily_log_audio_guard.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_daily_log_renderer.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_docs_auditor_git_surface.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to 'validation' via 'docs_auditor'. "
+        "Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_expectation_reconciler.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_log_audit_sentry.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_merged_branch_cleanup.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_builder.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_collector.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_delivery.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_init.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_machine_gate.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_no_slots_configured.py": (
+        "R1 and R3: package resolves to 'reflections'; basename "
+        "fragment-matches 'config' inside 'configured'. "
+        "Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_skip_when_empty.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_pm_briefings_slot_match.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_sdlc_progress_check.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to 'sdlc' ('sdlc' sits ahead of 'reflection' "
+        "in insertion order). Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_sdlc_upvote_lanes.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to 'sdlc' ('sdlc' sits ahead of 'reflection' "
+        "in insertion order). Drain tracked by #3175."
+    ),
+    "tests/unit/reflections/test_utilities_resolve_eng_group.py": (
+        "R1: package tests/unit/reflections/ resolves to 'reflections'; "
+        "basename resolves to no marker. Drain tracked by #3175."
+    ),
     # R1: tests/integration/reflections/ resolves to "reflections" the same way.
-    "tests/integration/reflections/test_pm_briefings_dispatch.py": "R1: package tests/integration/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
-    "tests/integration/reflections/test_pm_briefings_e2e.py": "R1: package tests/integration/reflections/ resolves to 'reflections'; basename resolves to no marker. Drain tracked by #3175.",
+    "tests/integration/reflections/test_pm_briefings_dispatch.py": (
+        "R1: package tests/integration/reflections/ resolves to "
+        "'reflections'; basename resolves to no marker. "
+        "Drain tracked by #3175."
+    ),
+    "tests/integration/reflections/test_pm_briefings_e2e.py": (
+        "R1: package tests/integration/reflections/ resolves to "
+        "'reflections'; basename resolves to no marker. "
+        "Drain tracked by #3175."
+    ),
     # R1: tests/unit/bridge/ resolves to "messaging" via "bridge"; this file's
     # basename resolves to no marker.
-    "tests/unit/bridge/test_dispatch.py": "R1: package tests/unit/bridge/ resolves to 'messaging'; basename resolves to no marker. Drain tracked by #3175.",
+    "tests/unit/bridge/test_dispatch.py": (
+        "R1: package tests/unit/bridge/ resolves to 'messaging'; basename "
+        "resolves to no marker. Drain tracked by #3175."
+    ),
     # R2 (sibling uniformity): the package directory name does not itself
     # resolve, so there is no directory-level intent to compare against, but
     # each of these is the lone sibling that drifted away from its package's
     # majority marker (17 None vs 1 "messaging" in session_runner/, 4 None
     # vs 1 "sdlc" in hooks/).
-    "tests/unit/session_runner/test_schema_routing.py": "R2: lone sibling (1 of 18) resolving to 'messaging' via 'routing', against 17 unmarked siblings in tests/unit/session_runner/, which does not itself resolve. Drain tracked by #3175.",
-    "tests/unit/hooks/test_pre_tool_use_foreground_subagents.py": "R2: lone sibling (1 of 5) resolving to 'sdlc' via 'pre_tool_use', against 4 unmarked siblings in tests/unit/hooks/, which does not itself resolve. Drain tracked by #3175.",
+    "tests/unit/session_runner/test_schema_routing.py": (
+        "R2: lone sibling (1 of 18) resolving to 'messaging' via 'routing', "
+        "against 17 unmarked siblings in tests/unit/session_runner/, which "
+        "does not itself resolve. Drain tracked by #3175."
+    ),
+    "tests/unit/hooks/test_pre_tool_use_foreground_subagents.py": (
+        "R2: lone sibling (1 of 5) resolving to 'sdlc' via 'pre_tool_use', "
+        "against 4 unmarked siblings in tests/unit/hooks/, which does not "
+        "itself resolve. Drain tracked by #3175."
+    ),
     # R3 (whole-token match): a genuine fragment match with no package
     # signal to contradict it. "checkpoint" is a prefix of "checkpointing".
-    "tests/unit/test_long_task_checkpointing.py": "R3: fragment match, 'checkpoint' matches inside 'checkpointing' rather than as a whole token; resolves to 'validation'. Drain tracked by #3175.",
+    "tests/unit/test_long_task_checkpointing.py": (
+        "R3: fragment match, 'checkpoint' matches inside 'checkpointing' "
+        "rather than as a whole token; resolves to 'validation'. "
+        "Drain tracked by #3175."
+    ),
 }
 
 
-def resolve_marker(basename: str) -> tuple[str | None, str | None]:
-    """Resolve one test module basename to (marker, matched FEATURE_MAP key).
+def _stem(basename: str) -> str:
+    """Reduce a test module basename to the string FEATURE_MAP is matched against.
 
-    This is Path A and Path B's single point of truth: the pytest collection
-    hook and this guard both call this function, so they cannot disagree.
+    The one implementation of the stem expression. `resolve_marker` and
+    `resolve_marker_whole_token` both call this, so the two resolvers cannot
+    drift apart, and #3184 has exactly one line to change instead of two.
     """
     # Global str.replace of *every* occurrence, not a leading-prefix strip --
     # copied verbatim from the shipped hook
@@ -221,7 +303,16 @@ def resolve_marker(basename: str) -> tuple[str | None, str | None]:
     # substitution: each of those retags tests/tools/test_test_judge.py and
     # tests/unit/test_validate_test_impact.py, silently gaining them a
     # marker and breaking the byte-identical-behavior requirement.
-    stem = basename.replace("test_", "").replace(".py", "")
+    return basename.replace("test_", "").replace(".py", "")
+
+
+def resolve_marker(basename: str) -> tuple[str | None, str | None]:
+    """Resolve one test module basename to (marker, matched FEATURE_MAP key).
+
+    This is Path A and Path B's single point of truth: the pytest collection
+    hook and this guard both call this function, so they cannot disagree.
+    """
+    stem = _stem(basename)
     for pattern, marker_name in FEATURE_MAP.items():
         if pattern in stem:
             return marker_name, pattern
@@ -244,7 +335,7 @@ def resolve_marker_whole_token(basename: str) -> tuple[str | None, str | None]:
     Used only by rule R3 to detect a fragment match (a pattern that matched as
     a bare substring inside a longer word rather than as its own token).
     """
-    stem = basename.replace("test_", "").replace(".py", "")
+    stem = _stem(basename)
     for pattern, marker_name in FEATURE_MAP.items():
         if _whole_token_match(pattern, stem):
             return marker_name, pattern
@@ -275,24 +366,31 @@ def iter_test_files() -> list[str]:
 
 
 def _partition_packages(files: list[str]) -> dict[str, list[str]]:
-    """Group files by parent directory, excluding KNOWN_ROOT_DIRS parents."""
+    """Group files by parent directory *path*, excluding KNOWN_ROOT_DIRS parents.
+
+    Keyed on the repo-relative directory path, never on the bare directory
+    name: two same-named packages in different trees (``tests/unit/helpers/``
+    and ``tests/integration/helpers/``) are two independent packages with two
+    independent intents. Merging them on the shared name pools their files
+    into one group, which invents R2 violations for whichever tree is in the
+    minority of the pooled set.
+    """
     packages: dict[str, list[str]] = {}
     for path in files:
         parts = Path(path).parts
         if len(parts) < 2:
             continue
-        parent = parts[-2]
-        if parent in KNOWN_ROOT_DIRS:
+        if parts[-2] in KNOWN_ROOT_DIRS:
             continue
-        packages.setdefault(parent, []).append(path)
+        packages.setdefault(str(Path(path).parent.as_posix()), []).append(path)
     return packages
 
 
 def check_r1(files: list[str]) -> list[dict[str, str | None]]:
     """Directory intent: a package whose own name resolves declares that marker."""
     violations: list[dict[str, str | None]] = []
-    for pkg_name, paths in _partition_packages(files).items():
-        dir_marker, _dir_key = resolve_marker(pkg_name)
+    for pkg_path, paths in _partition_packages(files).items():
+        dir_marker, _dir_key = resolve_marker(Path(pkg_path).name)
         if dir_marker is None:
             continue  # no declared intent; R2's territory, not R1's
         for path in paths:
@@ -319,8 +417,8 @@ def check_r2(files: list[str]) -> list[dict[str, str | None]]:
     dict-iteration order silently pick a side.
     """
     violations: list[dict[str, str | None]] = []
-    for pkg_name, paths in _partition_packages(files).items():
-        dir_marker, _dir_key = resolve_marker(pkg_name)
+    for pkg_path, paths in _partition_packages(files).items():
+        dir_marker, _dir_key = resolve_marker(Path(pkg_path).name)
         if dir_marker is not None:
             continue  # R1's territory, not R2's
         if len(paths) <= 1:

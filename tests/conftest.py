@@ -22,7 +22,7 @@ from tests.db_claim import (
     claimed_test_dbs,
     release_test_db_claim,
 )
-from tests.marker_map import FEATURE_MAP, resolve_marker
+from tests.marker_map import resolve_marker
 
 # --- Un-awaited-coroutine leak guardrail (#2120) --------------------------
 # A test that hands an eagerly-created coroutine to a seam that drops it (never
