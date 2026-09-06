@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-09-05
 baseline_commit: 85524b94092d7062e0ae5b231a7ef57385a711f3
 tracking: https://github.com/tomcounsell/ai/issues/3177
-last_comment_id: none
+last_comment_id: 5560558494
 ---
 
 # Recursive self-improvement controller
@@ -37,12 +37,12 @@ Classification of a correction (architect intervention, ordinary preference, new
 - Human corrections are detected by a flat regex list (`reflections/utilities.py:31-40`) whose result is a transient dict. Nothing classifies a correction.
 - `TaskTypeProfile.rework_rate` is structurally zero: `rework_triggered` has zero production writers, `failure_stage_distribution` has zero writers, `get_delegation_recommendation` has zero callers.
 - No evaluator compares a full candidate agent run against an incumbent. Every judge scores one artifact with candidate identity visible. No holdout split, blinding, or judge calibration exists.
-- Questions to humans have transport identity in the poll registry and no research identity: no link to the decision they inform, no expiry policy, no interpretation of the answer into claims.
+- Ideas Tom sends as links land as `Memory` rows with `source="human"` (`.claude/hooks/hook_utils/memory_bridge.py:801-836`) and nothing reads them as research input. No record links a claim to the source and date it came from, so an assumption about a provider, a price, or a technique is indistinguishable from a guess.
 - `scripts/autoexperiment.py` assigns `self.branch` at line 308 and never reads it, so it commits to whatever branch is checked out. Its `--dry-run` still overwrites tracked source and spends API money. Its installer defaults to a target whose module was deleted in #466, so a default install schedules a nightly job that raises `KeyError` forever.
 
 **Desired outcome:**
 
-A persistent controller, served by bounded sessions and existing reflections, that can notice a consequential weakness, decide what it needs to learn, acquire that information (including by asking Tom within an authorized scope), build and evaluate a candidate in isolation, and explain with durable evidence why the next version deserves to exist. Claim levels:
+A persistent controller, served by bounded sessions and existing reflections, that can notice a consequential weakness, decide what it needs to learn, acquire that information on its own (mining Tom-sourced memories for inspiration and researching current practice online), build and evaluate a candidate in isolation, and explain with durable evidence why the next version deserves to exist. Claim levels:
 
 1. **Loop operational:** one complete autonomous investigation-to-measurement cycle.
 2. **System improvement demonstrated:** held-out and production gains over incumbent.
@@ -65,11 +65,13 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 - #818 (SDLC harness benchmarking): closed; no benchmarking code landed.
 - #1633 (child session gate): closed with the gate deliberately retained; rationale recorded in `models/child_session_gate.py`.
 - #2731 (stage liveness gate): closed re-scoped; intra-run collision remains a documented residual.
-- #3095 (`/ask-me` poll deferrals): open; the poll registry's remaining gaps.
+- #3095 (`/ask-me` poll deferrals): open; no longer relevant, because this plan asks no questions (see Gap F).
+- #1312 / PR #2196 (bridge reacts when no worker is alive): shipped and closed. **No overlap.** Re-verified 2026-09-06: the liveness substrate it established is the `worker:registered_pid:{hostname}:{pid}` key family, prefix constant at `agent/session_health.py:216`, written with TTL by `register_worker_pid` at `:5268`, read by a `scan_iter` over the prefix at `:6463`, with per-PID freshness at `_worker_pid_heartbeat_fresh` (`:5393`). The scheduler adapter reuses that read before activating an `admitted` session (Gap B), so a research session never rots in a queue no worker is draining.
+- #3183 (ETL-grade pipeline hardening): **open, filed 2026-09-06, overlap resolved by ownership.** It owns the shared substrate this plan previously proposed to build: the idempotent create-or-bind seam on `_push_agent_session`, the renewed Lua execution lease with a fencing generation, and the one dead-letter record. #3177 lane 3 consumes those primitives and changes no queue signature. See No-Gos and Gaps A and C.
 
-**Commits on main since issue was filed (touching referenced files):** none. The only code commit since filing is 988fac09a (Read-the-Room, #3174), which touches none of the cited files.
+**Commits on main since issue was filed (touching referenced files):** none as of `85524b9`. Re-checked on 2026-09-06: the citations this revision touches were re-derived directly against the working tree rather than trusted from the prior pass. Two had drifted and are corrected below (see the Citation corrections table under Technical Approach).
 
-**Active plans in `docs/plans/` overlapping this area:** `remove-popoto-1-8-0-naive-datetime-scar-tissue` touches Popoto datetime handling across models and will land before the new records are written; new models follow whatever `_ts` convention it settles. `sibling-reflections-hardcode-eng-valor` touches reflection routing and does not overlap the controller's registration path. Neither blocks.
+**Active plans in `docs/plans/` overlapping this area:** `remove-popoto-1-8-0-naive-datetime-scar-tissue` touches Popoto datetime handling across models and will land before the new records are written; new models follow whatever `_ts` convention it settles. `sibling-reflections-hardcode-eng-valor` touches reflection routing and does not overlap the controller's registration path. `etl-pipeline-hardening` (#3183) overlaps deliberately and is resolved by the ownership split above. None blocks lanes 1 and 2; #3183 blocks lane 3.
 
 **Notes:** the revision proposal at `docs/plans/critiques/recursive-self-improvement-revision-proposal.md` was reviewed at `af89100b` and its factual claims re-verified (popoto `FilesystemStore.load` archive fallback returns bytes unverified at `stores/filesystem.py:159-163`; Lua compare-and-set precedent at `models/session_lifecycle.py:1357`; child gate enforced at `agent/agent_session_queue.py:259-265`; reflection scheduler enqueues top-level sessions with no parent at `agent/reflection_scheduler.py:754`).
 
@@ -81,7 +83,8 @@ Repeated edits alone satisfy none of the latter two. This is system-level recurs
 - **PR #2210**: memory telemetry baseline export. Source of the `--force`-guarded `docs/baselines/` artifact pattern in `tools/memory_eval/snapshot.py`. Reused for holdout manifests.
 - **#1633**: merged PM/Dev roles and retained the child session gate. Its rationale (redundant with in-session subagents; no per-parent fanout cap) is the constraint Gap B answers.
 - **#2731**: stage liveness gate. Proved ownership leases cannot detect intra-run collisions. The control journal's action-ID fencing is designed around that finding.
-- **#3092 / #3095**: `/ask-me` Telegram polls. The poll registry, orphan adoption, and late-answer routing this plan reuses for question transport.
+- **#3183**: ETL-grade pipeline hardening. Owns the create-or-bind seam on `_push_agent_session`, the renewed execution lease with a fencing generation, and the generalized dead-letter record. Filed as the production-path complement to this plan's research namespace, explicitly so the two do not each change the queue signature. Lane 3 consumes it.
+- **#1312 / PR #2196**: bridge reacts when no worker is alive. Shipped; no overlap. Its `worker:registered_pid:*` liveness convention is the pre-activation check the scheduler adapter reuses.
 - **`docs/archive/plans-completed/do-build-ai-evaluator.md`**: single-arm plan-acceptance judge (`scripts/evaluate_build.py`). Advisory only; its PASS/PARTIAL/FAIL shape is not reused.
 
 ## Research
