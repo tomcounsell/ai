@@ -297,29 +297,77 @@ No test is deleted. No test is replaced.
 - [SEPARATE-SLUG #3072] Any edit to `FALLBACK_ENG_CHAT` or `_resolve_notify_chat` near the top of `reflections/docs_auditor.py`. A concurrent lane owns that region under `docs/plans/sibling-reflections-hardcode-eng-valor.md`; touching it here manufactures a merge conflict for no benefit.
 - [DESTRUCTIVE] Any whole-tree restore primitive in the auditor — `git checkout -f`, `git reset --hard`, `git clean`, or a `git status`-diffed path set inferred rather than recorded. On a shared main checkout these destroy peer lanes' uncommitted work. The restore path set is `files_touched` and nothing else. An anti-criterion in Verification asserts these strings stay absent from the module.
 - [DESTRUCTIVE] Making the step-3 dirty-tree guard file an issue or escalate. This is option (b), rejected in Solution with the code comment that forbids it. An anti-criterion asserts no `_file_issue_if_new` call appears inside that guard.
-- [SEPARATE-SLUG #3049] The sweeper-side exemption-never-expires concern noted in `run_docs_branch_sweeper`. Different function, different failure mode, already tracked.
 
 Everything else the issue asks for is in scope for this plan and is done here — the restore, the escalation, the `audit()` ledger guard, the second sub-window inside `_push_branch_and_pr`, the tests, and the docs.
 
 ## Update System
 
-_placeholder_
+No update system changes required. The change is confined to `reflections/docs_auditor.py` and its tests: no new dependency, no new config key, no new `.env` entry, no new console script, and no Popoto model change (so no `scripts/update/migrations.py` entry). The daily reflection already runs on every machine that owns the `valor` project; a normal `/update` pull picks the fix up with no migration step.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required. This is a reflection-internal change. `run_docs_auditor` is invoked by `agent/reflection_scheduler.py` on its daily schedule, not by the agent through a tool call, and the fix adds no new surface the agent needs to reach.
+
+One integration detail is worth stating because it is the reason the escalation exists at all: `agent/reflection_scheduler.py` reads only `result.get("projects")` from the dict this callable returns. `status`, `findings`, and `summary` reach no human. That is why a failure must escalate through `_file_issue_if_new` rather than through the return value, and why the plan does not "just" set a better status string. No change to the scheduler's contract is proposed here.
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+- [ ] Update `docs/features/docs-auditor.md` — the "Caller A — `docs-auditor` daily rotation reflection" section must describe the restore owner around the write-through-push region, the one-ref-capture-before-the-write rule, and the two distinct `operational-failure` escalations (`rotation failed to produce a PR for {slug}` vs `rotation aborted after writing for {slug}`) with what distinguishes them. Also update the "Operational Cheatsheet" with the manual-cleanup command the new escalation body prints.
+- [ ] Update the same file's "Locking" or rotation-state prose if it asserts that a failed run leaves the tree clean — verify the current wording against the new behavior rather than assuming.
+- [ ] No new row in `docs/features/README.md` — the index already carries a `Docs Auditor` entry pointing at `docs-auditor.md`.
+
+### External Documentation Site
+Not applicable — this repo publishes no Sphinx/MkDocs site for internal features.
+
+### Inline Documentation
+- [ ] `_restore_checkout` docstring — record that `branch=None` means no branch was created.
+- [ ] `_push_branch_and_pr` docstring — record that the caller now owns `starting_ref`, captured before the substrate write, and delete the sentence describing the internal ref read.
+- [ ] `audit` docstring — record that a caller must read `status == "error"` with a non-empty `files_touched` as "wrote, then failed", and must restore.
+- [ ] `run_docs_auditor` docstring — its numbered "Sequence:" list must gain the ref capture and the restore/escalate step, since the current list is the file's map of this function.
+- [ ] Delete the `NOTE (#3050)` comment above the `_push_branch_and_pr` call. Per the repo's no-legacy rule it must not survive as a historical artifact once the gap it names is closed.
 
 ## Success Criteria
 
-_placeholder_
+- [ ] An exception injected between the substrate write and the `_push_branch_and_pr` call leaves the shared checkout byte-identical to `HEAD` for every path in `files_touched`, and leaves `HEAD` on the ref the run started on.
+- [ ] That same run files exactly one `operational-failure` issue whose title contains `rotation aborted after writing`, distinct from the R5-1 `rotation failed to produce a PR` title.
+- [ ] When the restore itself fails, the escalation is still filed and its body reports the restore as failed and names the paths needing manual cleanup — it never claims an outcome it did not observe.
+- [ ] `audit()` returns `status="error"` carrying a non-empty `files_touched` when it raises after writing, instead of propagating and discarding the list.
+- [ ] A pre-write failure (auth, lock, dirty tree, rotation pick, cap/open-PR guard) files no escalation and leaves the tree untouched.
+- [ ] `_push_branch_and_pr` no longer reads the starting ref itself; its pre-`try` early return over a dirty tree is gone.
+- [ ] The `NOTE (#3050)` comment is absent from `reflections/docs_auditor.py`.
+- [ ] No whole-tree restore primitive (`checkout -f`, `reset --hard`, `git clean`) appears anywhere in `reflections/docs_auditor.py`.
+- [ ] The step-3 dirty-tree guard still files nothing.
+- [ ] The mutation check in the Failure Path Test Strategy has been run and each reverted guard produced the predicted failure.
+- [ ] Scoped tests pass via `scripts/pytest-clean.sh` (`tests/unit/reflections/test_docs_auditor_git_surface.py` and `tests/unit/test_docs_auditor_substrate.py`).
+- [ ] Documentation updated (`/do-docs`), including `docs/features/docs-auditor.md`.
+- [ ] No xfail conversions needed — the recon confirmed none exist for this bug.
 
 ## Team Orchestration
 
-_placeholder_
+Small appetite, one module. Two builders would collide in the same function, so the build is serial: one builder, one reviewer, one documentarian.
+
+### Team Members
+
+- **Builder (auditor-restore)**
+  - Name: `auditor-restore-builder`
+  - Role: All production and test edits in `reflections/docs_auditor.py` and the two test files.
+  - Agent Type: `builder`
+  - Domain: debugging / subprocess-and-git control flow — paste the matching rules from `DOMAIN_FRAMING.md` into the assignment.
+  - Resume: true
+
+- **Validator (mutation)**
+  - Name: `auditor-restore-mutation-validator`
+  - Role: Runs the mutation check — reverts each guard individually and confirms the predicted test fails. Read-only on production code.
+  - Agent Type: `validator`
+  - Resume: true
+  - Note: give this agent its **own worktree**. A mutation run in a checkout the builder is still editing corrupts both directions.
+
+- **Documentarian (docs-auditor)**
+  - Name: `auditor-restore-documentarian`
+  - Role: `docs/features/docs-auditor.md` updates and the inline docstring pass.
+  - Agent Type: `documentarian`
+  - Resume: true
 
 ## Step by Step Tasks
 
