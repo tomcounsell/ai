@@ -266,7 +266,9 @@ class TestEarlyReturnRestore:
 
         gh.pr_create_url = None  # force gh pr create to fail
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -281,7 +283,7 @@ class TestEarlyReturnRestore:
         # `files_touched` names a path that was never written — `git add --`
         # fails outright (pathspec did not match).
         url = docs_auditor._push_branch_and_pr(
-            "slug", repo, ["docs/features/does_not_exist_xyz.md"]
+            "slug", repo, ["docs/features/does_not_exist_xyz.md"], starting_ref="main"
         )
 
         assert url is None
@@ -296,7 +298,9 @@ class TestEarlyReturnRestore:
         # Point origin at a nonexistent path so the real `git push` fails.
         _git(repo, "remote", "set-url", "origin", "/nonexistent/path/origin.git")
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -324,7 +328,9 @@ class TestForeignDirtSurvives:
 
         gh.pr_create_url = None  # force a failure so the restore path runs
 
-        docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
 
         # Foreign dirt outside files_touched survives, byte for byte.
         assert (repo / "docs" / "features" / "foreign.md").read_text() == (
@@ -361,7 +367,9 @@ class TestFailedRestoreReporting:
 
         monkeypatch.setattr(docs_auditor.subprocess, "run", failing_checkout)
 
-        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
+        url = docs_auditor._push_branch_and_pr(
+            "slug", repo, ["docs/features/x.md"], starting_ref="main"
+        )
         assert url is None
 
         # Drive the full reflection: the restore failure must route to "error".

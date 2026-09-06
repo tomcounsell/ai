@@ -1648,6 +1648,21 @@ def audit(
 
         Callers must branch on ``fixes_withheld > 0`` rather than trust
         ``status``: a run that withheld every fix still reports success.
+
+        ``status == "error"`` with a non-empty ``files_touched`` means "wrote,
+        then failed": an exception raised after the write loop (most likely
+        from the advisory issue-filing calls) is caught here and returned as a
+        result carrying the write ledger, instead of propagating and
+        discarding it. The caller must restore the paths named in
+        ``files_touched`` rather than leave them dirty. An exception raised
+        **above** this guard — inside ``_resolve_neighborhood`` or
+        ``_resolve_pr_changed_files``, before any write has happened — still
+        propagates; the caller must be exception-safe as well as status-aware.
+
+        Second-order effect: the module's ``__main__`` block calls
+        ``audit(...)`` and prints the result as JSON. An internal failure under
+        ``scope_mode="pr-changed-files"`` that used to exit non-zero with a
+        traceback now exits 0 with a ``status="error"`` dict.
     """
     # The name existence oracle is a per-*run* snapshot: a long-lived process
     # must not answer from an index built before the last commit (#2759).
@@ -1690,63 +1705,80 @@ def audit(
     issue_findings: list[dict] = []
     withheld: list[dict] = []
 
-    for path in files:
-        full = root / path
-        if not full.exists():
-            continue
-        try:
-            content = full.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
+    # This block runs after the write loop has a chance to append to `touched`,
+    # so any exception in here — including the advisory issue-filing calls, the
+    # most likely source — must not discard the write ledger the caller needs to
+    # restore. A caller reads `status == "error"` with a non-empty
+    # `files_touched` as "wrote, then failed; must restore".
+    try:
+        for path in files:
+            full = root / path
+            if not full.exists():
+                continue
+            try:
+                content = full.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
 
-        # Auto-fix detectors — anchored stale terms are the only fix channel.
-        regex_fixes = _detect_stale_term_fixes(content)
+            # Auto-fix detectors — anchored stale terms are the only fix channel.
+            regex_fixes = _detect_stale_term_fixes(content)
 
-        # Apply-mode writes are markdown-only (#2058). The detector above is
-        # markdown-regex based (bare-term renames), so a committed non-.md file
-        # that lands in the same PR — e.g. a site/*.html doc page — must never be
-        # auto-rewritten inside tags, attributes, or inline <script>. Reporting
-        # still runs; only the write-back is guarded.
-        if regex_fixes and apply_mode == "apply" and str(path).endswith(".md"):
-            applied, rejected = _apply_fixes_to_file(path, root, regex_fixes)
-            withheld.extend(rejected)
-            if applied > 0:
-                total_fixes += applied
-                touched.append(str(path))
+            # Apply-mode writes are markdown-only (#2058). The detector above is
+            # markdown-regex based (bare-term renames), so a committed non-.md file
+            # that lands in the same PR — e.g. a site/*.html doc page — must never be
+            # auto-rewritten inside tags, attributes, or inline <script>. Reporting
+            # still runs; only the write-back is guarded.
+            if regex_fixes and apply_mode == "apply" and str(path).endswith(".md"):
+                applied, rejected = _apply_fixes_to_file(path, root, regex_fixes)
+                withheld.extend(rejected)
+                if applied > 0:
+                    total_fixes += applied
+                    touched.append(str(path))
 
-        # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
-        # deleted-target reference has no rename to correct to. These are
-        # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
-        # every PR's docs stage, so filing advisory issues there re-files the
-        # same unfixable findings per-PR, which is the documentation-label
-        # duplicate flood. Auto-fix detectors above still run per-PR; only
-        # issue-filing is gated to rotation.
+            # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
+            # deleted-target reference has no rename to correct to. These are
+            # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
+            # every PR's docs stage, so filing advisory issues there re-files the
+            # same unfixable findings per-PR, which is the documentation-label
+            # duplicate flood. Auto-fix detectors above still run per-PR; only
+            # issue-filing is gated to rotation.
+            if scope_mode == "rotation":
+                issue_findings.extend(_detect_deleted_target_issues(path, content, root))
+                stub = _detect_stub_doc(path, content)
+                if stub is not None:
+                    issue_findings.append(stub)
+
+        # Orphan plans (repo-wide, run once)
         if scope_mode == "rotation":
-            issue_findings.extend(_detect_deleted_target_issues(path, content, root))
-            stub = _detect_stub_doc(path, content)
-            if stub is not None:
-                issue_findings.append(stub)
+            issue_findings.extend(_detect_orphan_plan_issues(root))
 
-    # Orphan plans (repo-wide, run once)
-    if scope_mode == "rotation":
-        issue_findings.extend(_detect_orphan_plan_issues(root))
-
-    # File issues (deduped); only when applying in rotation scope.
-    # Hard per-run cap prevents flood: rotation allows up to 5.
-    per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3
-    if apply_mode == "apply" and scope_mode == "rotation":
-        for finding in issue_findings:
-            if issues_filed >= per_run_cap:
-                logger.warning(
-                    "docs_auditor: per-run cap (%d) reached for scope=%s — "
-                    "%d finding(s) suppressed; re-run to file remaining",
-                    per_run_cap,
-                    scope_mode,
-                    len(issue_findings) - issues_filed,
-                )
-                break
-            if _file_issue_if_new(finding, root):
-                issues_filed += 1
+        # File issues (deduped); only when applying in rotation scope.
+        # Hard per-run cap prevents flood: rotation allows up to 5.
+        per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3
+        if apply_mode == "apply" and scope_mode == "rotation":
+            for finding in issue_findings:
+                if issues_filed >= per_run_cap:
+                    logger.warning(
+                        "docs_auditor: per-run cap (%d) reached for scope=%s — "
+                        "%d finding(s) suppressed; re-run to file remaining",
+                        per_run_cap,
+                        scope_mode,
+                        len(issue_findings) - issues_filed,
+                    )
+                    break
+                if _file_issue_if_new(finding, root):
+                    issues_filed += 1
+    except Exception as e:
+        logger.warning(f"docs_auditor: audit write/issue-filing loop failed: {e}")
+        return _ok_result(
+            "error",
+            files_touched=touched,
+            fixes_applied=total_fixes,
+            issues_filed=issues_filed,
+            fixes_withheld=len(withheld),
+            withheld=withheld,
+            extras={"reason": str(e)},
+        )
 
     # Caller B (pr-changed-files): fire the memory-refresh hook on the applied
     # set. The hook operates on applied paths and needs no commit — the working
@@ -1907,7 +1939,7 @@ def _current_ref(repo_root: Path) -> str | None:
 
 
 def _restore_checkout(
-    repo_root: Path, starting_ref: str, branch: str, files_touched: list[str]
+    repo_root: Path, starting_ref: str, branch: str | None, files_touched: list[str]
 ) -> bool:
     """Return the checkout to ``starting_ref`` and discard only the auditor's own paths.
 
@@ -1920,6 +1952,9 @@ def _restore_checkout(
     the bare ``git checkout -- <paths>`` restores the worktree from the **index**,
     which on the staged-then-commit-failed path still holds the auditor's own
     content. The ``HEAD`` form resets index *and* worktree for those paths only.
+
+    ``branch=None`` means no branch was created — the ``rev-parse`` /
+    ``git branch -D`` block is skipped entirely rather than looked up and missed.
 
     Returns True only when the postcondition holds: HEAD is back on
     ``starting_ref`` **and** no ``files_touched`` path is dirty in either column of
@@ -1956,22 +1991,24 @@ def _restore_checkout(
                     f"{(discard.stderr or '').strip()}"
                 )
 
-        # Delete the created branch if it exists.
-        exists = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-        )
-        if exists.returncode == 0:
-            subprocess.run(
-                ["git", "branch", "-D", branch],
+        # Delete the created branch if it exists. `branch is None` means no
+        # branch was ever created, so skip the lookup entirely.
+        if branch is not None:
+            exists = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
                 capture_output=True,
                 text=True,
                 timeout=settings.timeouts.git_subprocess_s,
                 cwd=str(repo_root),
             )
+            if exists.returncode == 0:
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                    cwd=str(repo_root),
+                )
 
         # Postcondition (a): back on the starting ref.
         if _current_ref(repo_root) != starting_ref:
@@ -2002,7 +2039,12 @@ def _restore_checkout(
 
 
 def _push_branch_and_pr(
-    slug: str, repo_root: Path, files_touched: list[str], withheld: list[dict] | None = None
+    slug: str,
+    repo_root: Path,
+    files_touched: list[str],
+    withheld: list[dict] | None = None,
+    *,
+    starting_ref: str,
 ) -> str | None:
     """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
 
@@ -2010,6 +2052,11 @@ def _push_branch_and_pr(
     and it is the **only** thing staged: the commit is built from
     ``git add -- <files_touched>``, never a whole-tree sweep. An empty list means
     the auditor wrote nothing, so no branch is created and no commit is run.
+
+    ``starting_ref`` is owned by the caller, captured before the substrate write —
+    this function no longer reads it itself. That is the only point at which the
+    ref is guaranteed to name the pre-write state; reading it here, after the
+    tree is already dirty, could no longer distinguish "before" from "during".
 
     On every exit path the checkout is returned to the ref it started on and the
     auditor's own paths are discarded, scoped to ``files_touched`` — see
@@ -2028,11 +2075,6 @@ def _push_branch_and_pr(
     """
     if not files_touched:
         logger.info("docs_auditor: no files touched, skipping branch/commit/PR")
-        return None
-
-    starting_ref = _current_ref(repo_root)
-    if starting_ref is None:
-        logger.error("docs_auditor: cannot read starting ref, refusing to branch")
         return None
 
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
@@ -2329,6 +2371,90 @@ def _run_vault_drift_detection(project_key: str) -> int:
         return 0
 
 
+def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:
+    """Restore the shared checkout and escalate after a write-then-abort.
+
+    Called from both abort routes inside `run_docs_auditor`'s widened
+    write-through-push region: an `audit()`-returned `status == "error"`, and
+    an exception raised anywhere else in that region. `starting_ref` is a
+    parameter, not a closure read — it is a `run_docs_auditor` local, so a
+    module-level body referencing it bare would raise `NameError` on its
+    first call. Both call sites `return` this function's result; the two
+    abort routes share this one body so they cannot drift apart.
+
+    Restores via `_restore_checkout(PROJECT_ROOT, starting_ref, None,
+    files_touched)` — `branch=None` because the widened region aborts before
+    `_push_branch_and_pr` ever creates one, so there is no branch to delete.
+    Skips the restore and the escalation entirely when `files_touched` is
+    empty: a run that wrote nothing left no dirt, so there is nothing to
+    clean up and nothing to report.
+
+    The escalation's TITLE — not only its body — carries the observed restore
+    outcome, because `_file_issue_if_new` dedups on the exact title string
+    and never compares bodies. A single title would let an open, benign
+    "restored cleanly" issue silently mask a later run's failed restore, the
+    one case this escalation exists to catch. Category `operational-failure`
+    (already in `_RECURRING_CONDITION_CATEGORIES`), keyed by slug alone — no
+    run id, no date — so a failure that repeats every run files exactly once,
+    matching the R5-1 escalation's own design.
+
+    `summary` and `findings` carry `reason` verbatim: `agent/reflection_scheduler.py`
+    reads only `result.get("projects")` from this dict, so this is the only
+    diagnostic surface the failure has.
+    """
+    restored = True
+    if files_touched:
+        restored = _restore_checkout(PROJECT_ROOT, starting_ref, None, files_touched)
+
+    outcome = "restore succeeded" if restored else "restore FAILED"
+    summary = (
+        f"docs-auditor error ({slug}): aborted after writing {len(files_touched)} "
+        f"file(s) — {reason} ({outcome})"
+    )
+    findings = [f"docs-auditor: rotation aborted after writing for {slug}: {reason}"]
+    if files_touched:
+        findings.append(f"docs-auditor: {outcome} for {len(files_touched)} file(s)")
+
+    if files_touched:
+        cleanup_cmd = (
+            'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout '
+            f"{starting_ref}\n"
+            'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout HEAD -- '
+            f"{' '.join(files_touched)}"
+        )
+        if restored:
+            title = f"docs-auditor: rotation aborted after writing for {slug}"
+            outcome_line = (
+                "The shared checkout was restored automatically — no manual "
+                "cleanup should be needed. Filed for visibility only."
+            )
+        else:
+            title = (
+                f"docs-auditor: rotation aborted after writing for {slug} "
+                "— manual cleanup required"
+            )
+            outcome_line = (
+                "The automatic restore did NOT complete successfully. Manual "
+                "cleanup of the shared checkout is required."
+            )
+        body = (
+            f"Rotation wrote {len(files_touched)} file(s) for `{slug}` and then aborted "
+            f"before opening a PR: {reason}\n\n"
+            f"Files touched: {', '.join(files_touched)}\n\n"
+            f"{outcome_line}\n\n"
+            "Manual cleanup command:\n\n"
+            f"```\n{cleanup_cmd}\n```\n\n"
+            'Verify with `git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain '
+            f'-- {" ".join(files_touched)}` — it should print nothing.'
+        )
+        _file_issue_if_new(
+            {"title": title, "body": body, "category": "operational-failure"},
+            PROJECT_ROOT,
+        )
+
+    return {"status": "error", "findings": findings, "summary": summary}
+
+
 def run_docs_auditor() -> dict:
     """Daily rotation reflection callable.
 
@@ -2337,7 +2463,10 @@ def run_docs_auditor() -> dict:
       2. SETNX lock acquire (global)
       3. Dirty-tree guard
       4. Rotation pick, then the daily-cap and open-PR guards (pre-write)
-      5. Run substrate
+      4c. Capture starting_ref (pre-write) — skip with no stamp if unreadable
+      5. Run substrate — from here through step 7, any exception restores the
+         checkout (scoped to the paths it wrote) and escalates via
+         `_abort_after_write` instead of leaving the shared checkout dirty
       6. Zero-diff gate
       7. (If diff) push branch + PR
       8. Memory refresh hook (fire-and-forget)
@@ -2421,117 +2550,166 @@ def run_docs_auditor() -> dict:
                 "summary": f"docs-auditor skipped ({slug}): {guard_reason}",
             }
 
-        # 5. Substrate
-        result = audit(
-            primary_path=primary,
-            scope_mode="rotation",
-            apply_mode="apply",
-            project_key=project_key,
-            repo_root=PROJECT_ROOT,
-        )
-
-        files_touched: list[str] = result.get("files_touched", [])
-        # Existence-invariant rejections. This is the one caller with no human
-        # review before the PR opens — every rotation PR still requires a human
-        # merge, but the withheld count must reach every surface this function
-        # produces so the human reviewing it sees it, not just a log line:
-        # findings, the returned summary, Telegram, and the PR body.
-        # Telegram has two mutually exclusive senders, and a run can also reach
-        # neither. Three cases: files were touched — step 9 sends the pass
-        # summary; nothing was touched but fixes were withheld — the zero-diff
-        # early return sends the withheld alert, the loudest case and one step 9
-        # can never reach; nothing was touched and nothing was withheld — a clean
-        # zero-diff run, which stays silent.
-        withheld: list[dict] = result.get("withheld", [])
-        fixes_withheld: int = result.get("fixes_withheld", 0)
-        withheld_note = (
-            f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
-        )
-
-        # Q5 (B4): file one issue per withheld entry so a human is pointed at the
-        # specific substitution the existence invariant rejected, not just a log
-        # line. Deduped per-defect by `_file_issue_if_new`'s title-based gate.
-        # Bounded at the module's shared per-run cap (NEW-4 / R3-3) — a withheld
-        # flood must not spend a different budget than the advisory loop's.
-        if withheld:
-            for i, w in enumerate(withheld):
-                if i >= ISSUE_FILING_PER_RUN_CAP:
-                    logger.warning(
-                        "docs_auditor: withheld-fix per-run cap (%d) reached — "
-                        "%d finding(s) suppressed",
-                        ISSUE_FILING_PER_RUN_CAP,
-                        len(withheld) - ISSUE_FILING_PER_RUN_CAP,
-                    )
-                    break
-                # `old` is a regex source (rf"\b{re.escape(old_term)}\b"), not the
-                # substitution term itself — unwrap it before it becomes the
-                # dedup key (R5-3), or the title carries a literal `\b` into
-                # `gh issue list --search`.
-                term = re.sub(
-                    r"\\(.)",
-                    r"\1",
-                    w.get("old", "").removeprefix(r"\b").removesuffix(r"\b"),
-                )
-                _file_issue_if_new(
-                    {
-                        "title": (
-                            f"docs-auditor: withheld fix in {w.get('doc')} "
-                            f"({term} -> {w.get('new')})"
-                        ),
-                        "body": (
-                            f"The docs auditor tried to rewrite `{term}` to "
-                            f"`{w.get('new')}` in `{w.get('doc')}`, but the rewrite "
-                            "would have introduced a path that does not exist in "
-                            f"the working tree ({w.get('reason', 'target-absent')}), "
-                            "so it was withheld and the file was left unchanged."
-                        ),
-                        "category": "withheld-fix",
-                    },
-                    PROJECT_ROOT,
-                )
-
-        # 6. Zero-diff gate
-        if not files_touched or _git_diff_quiet(PROJECT_ROOT):
-            _update_rotation_hash(project_key, [str(primary)])
-            # Initialized unconditionally (mirroring withheld_note above): the
-            # summary f-string below interpolates this on every zero-diff
-            # return, including the clean path where the notify call never
-            # runs. Assigning it only inside the `if fixes_withheld:` guard
-            # would raise NameError on that common path, which the enclosing
-            # `except Exception` silently converts into {"status": "error"}.
-            suppressed_note = ""
-            zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
-            if fixes_withheld:
-                sent = _send_telegram_notification(
-                    f"docs-auditor pass for {slug}: zero-diff, no PR"
-                    f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                    "nothing was written and no PR was opened to review them",
-                    repo_root=PROJECT_ROOT,
-                )
-                if not sent:
-                    suppressed_note = f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
-                    zero_diff_findings.append(
-                        f"docs-auditor: Telegram notification suppressed — no Eng: "
-                        f"group for {PROJECT_ROOT}"
-                    )
+        # Ref capture — taken before the first write, so a restore afterward
+        # always names the pre-write state rather than a ref a peer moved the
+        # checkout to later. Unlike the cap/open-PR guards above, this
+        # condition is doc-independent: it blocks every doc equally, so it
+        # cannot pin the rotation on one doc, and stamping the rotation hash
+        # here would advance the rotation past a doc that was never audited.
+        # Deliberately does not stamp.
+        starting_ref = _current_ref(PROJECT_ROOT)
+        if starting_ref is None:
+            logger.error("docs_auditor: cannot read starting ref, refusing to write")
             return {
                 "status": "skipped",
-                "findings": zero_diff_findings,
-                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}",
+                "findings": ["docs-auditor skipped: cannot read starting ref"],
+                "summary": "docs-auditor skipped: no_starting_ref",
             }
 
-        # 7. Memory refresh hook (fire-and-forget) — fired after commit
-        # 8. Push branch + PR. The guards moved to the preflight, so a None here
-        # unambiguously means the branch/commit/push/PR or the restore failed —
-        # never "a guard declined". That routes to status="error": no success
-        # Telegram, no rotation-hash stamp (the doc was written but not audited to
-        # completion, so re-picking it next run is correct).
-        # NOTE (#3050): `_restore_checkout` only runs inside this call's own
-        # `finally`. An exception raised between the substrate write above and
-        # this call leaves the shared checkout dirty with no restore; the next
-        # rotation's dirty-tree guard then skips silently. Left as-is pending a
-        # decision on widening the try/finally — see #3050.
-        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, files_touched, withheld=withheld)
+        # Bound before the widened try below so an exception raised by
+        # `audit()` above its own write-ledger guard (_resolve_neighborhood /
+        # _resolve_pr_changed_files, before `touched` exists) leaves this name
+        # bound to `[]` rather than unbound. Without this, the handler would
+        # raise `UnboundLocalError` and destroy the real cause on the only
+        # diagnostic surface this failure has.
+        files_touched: list[str] = []
+
+        # The widened region: opens immediately before the substrate call and
+        # closes immediately after the push assignment. Any exception in here
+        # — including one raised by `audit()` after it has already written —
+        # restores the checkout and escalates via `_abort_after_write`, never
+        # falls through silently. The `if pr_url is None:` R5-1 block below is
+        # deliberately OUTSIDE this try: by the time it is reached,
+        # `_push_branch_and_pr`'s own `finally` has already restored the
+        # checkout, so a handler here would file a false "aborted after
+        # writing" issue over an already-clean tree.
+        try:
+            # 5. Substrate
+            result = audit(
+                primary_path=primary,
+                scope_mode="rotation",
+                apply_mode="apply",
+                project_key=project_key,
+                repo_root=PROJECT_ROOT,
+            )
+
+            files_touched = result.get("files_touched", [])
+            if result.get("status") == "error":
+                return _abort_after_write(
+                    slug,
+                    starting_ref,
+                    files_touched,
+                    result.get("reason", "audit returned error"),
+                )
+
+            # Existence-invariant rejections. This is the one caller with no
+            # human review before the PR opens — every rotation PR still
+            # requires a human merge, but the withheld count must reach every
+            # surface this function produces so the human reviewing it sees
+            # it, not just a log line: findings, the returned summary,
+            # Telegram, and the PR body.
+            # Telegram has two mutually exclusive senders, and a run can also
+            # reach neither. Three cases: files were touched — step 9 sends
+            # the pass summary; nothing was touched but fixes were withheld —
+            # the zero-diff early return sends the withheld alert, the
+            # loudest case and one step 9 can never reach; nothing was
+            # touched and nothing was withheld — a clean zero-diff run, which
+            # stays silent.
+            withheld: list[dict] = result.get("withheld", [])
+            fixes_withheld: int = result.get("fixes_withheld", 0)
+            withheld_note = (
+                f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
+            )
+
+            # Q5 (B4): file one issue per withheld entry so a human is pointed
+            # at the specific substitution the existence invariant rejected,
+            # not just a log line. Deduped per-defect by
+            # `_file_issue_if_new`'s title-based gate. Bounded at the module's
+            # shared per-run cap (NEW-4 / R3-3) — a withheld flood must not
+            # spend a different budget than the advisory loop's.
+            if withheld:
+                for i, w in enumerate(withheld):
+                    if i >= ISSUE_FILING_PER_RUN_CAP:
+                        logger.warning(
+                            "docs_auditor: withheld-fix per-run cap (%d) reached — "
+                            "%d finding(s) suppressed",
+                            ISSUE_FILING_PER_RUN_CAP,
+                            len(withheld) - ISSUE_FILING_PER_RUN_CAP,
+                        )
+                        break
+                    # `old` is a regex source (rf"\b{re.escape(old_term)}\b"),
+                    # not the substitution term itself — unwrap it before it
+                    # becomes the dedup key (R5-3), or the title carries a
+                    # literal `\b` into `gh issue list --search`.
+                    term = re.sub(
+                        r"\\(.)",
+                        r"\1",
+                        w.get("old", "").removeprefix(r"\b").removesuffix(r"\b"),
+                    )
+                    _file_issue_if_new(
+                        {
+                            "title": (
+                                f"docs-auditor: withheld fix in {w.get('doc')} "
+                                f"({term} -> {w.get('new')})"
+                            ),
+                            "body": (
+                                f"The docs auditor tried to rewrite `{term}` to "
+                                f"`{w.get('new')}` in `{w.get('doc')}`, but the rewrite "
+                                "would have introduced a path that does not exist in "
+                                f"the working tree ({w.get('reason', 'target-absent')}), "
+                                "so it was withheld and the file was left unchanged."
+                            ),
+                            "category": "withheld-fix",
+                        },
+                        PROJECT_ROOT,
+                    )
+
+            # 6. Zero-diff gate
+            if not files_touched or _git_diff_quiet(PROJECT_ROOT):
+                _update_rotation_hash(project_key, [str(primary)])
+                # Initialized unconditionally (mirroring withheld_note above):
+                # the summary f-string below interpolates this on every
+                # zero-diff return, including the clean path where the notify
+                # call never runs. Assigning it only inside the
+                # `if fixes_withheld:` guard would raise NameError on that
+                # common path, which the enclosing `except Exception` would
+                # silently convert into {"status": "error"}.
+                suppressed_note = ""
+                zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
+                if fixes_withheld:
+                    sent = _send_telegram_notification(
+                        f"docs-auditor pass for {slug}: zero-diff, no PR"
+                        f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                        "nothing was written and no PR was opened to review them",
+                        repo_root=PROJECT_ROOT,
+                    )
+                    if not sent:
+                        suppressed_note = (
+                            f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
+                        )
+                        zero_diff_findings.append(
+                            f"docs-auditor: Telegram notification suppressed — no Eng: "
+                            f"group for {PROJECT_ROOT}"
+                        )
+                return {
+                    "status": "skipped",
+                    "findings": zero_diff_findings,
+                    "summary": (
+                        f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"
+                    ),
+                }
+
+            # 7. Push branch + PR. The guards moved to the preflight, so a
+            # None here unambiguously means the branch/commit/push/PR or the
+            # restore failed — never "a guard declined". That routes to
+            # status="error": no success Telegram, no rotation-hash stamp
+            # (the doc was written but not audited to completion, so
+            # re-picking it next run is correct).
+            pr_url = _push_branch_and_pr(
+                slug, PROJECT_ROOT, files_touched, withheld=withheld, starting_ref=starting_ref
+            )
+        except Exception as e:
+            return _abort_after_write(slug, starting_ref, files_touched, str(e))
 
         if pr_url is None:
             findings.append(
@@ -2576,6 +2754,7 @@ def run_docs_auditor() -> dict:
                 ),
             }
 
+        # 8. Memory refresh hook (fire-and-forget) — fired after commit
         try:
             refresh_docs_in_memory(files_touched)
         except Exception as e:
