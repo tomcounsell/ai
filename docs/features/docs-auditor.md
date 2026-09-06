@@ -671,10 +671,13 @@ Summary of what lives in `reflections/docs_auditor.py`:
   compared (secrets-guarded, missing, or markitdown-sidecar entries don't
   count), appended as a trailing clause on the created-PR summary string
   **unconditionally**, including when the count is `0`. No other summary
-  string carries the clause — the four "skipped" returns never ran the vault
-  comparison as part of producing that summary, so "detector ran, found zero
-  drift" (clause reads `0`) stays distinguishable from "this run never
-  reached the created-PR path" (clause absent entirely).
+  string carries the clause. Of the five "skipped" returns, two (the lock
+  guard and the dirty-tree guard) fire before the vault comparison ever
+  runs; the other three (no candidates, the pre-write PR guards, zero-diff)
+  fire after it and simply don't thread the count into their own summary
+  strings. Either way, "detector ran, found zero drift" (clause reads `0`)
+  stays distinguishable from "this run never reached the created-PR path"
+  (clause absent entirely).
 - **Advisory only.** The detector files GitHub issues; it never rewrites
   `site/*.html` or vault files. The existing markdown-only apply guard is
   unchanged.
