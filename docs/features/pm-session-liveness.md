@@ -316,12 +316,16 @@ on it, keyed on `(slug, head-sha)`:
 10. **Rung 4: escalate.** The dispatched action failed for a non-benign
     reason, so escalate once and stop.
 
-Escalation sends a single Telegram alert to `Eng: Valor` (`_send_alert`, via
-the `valor-telegram` CLI) and writes the Redis dedup key
-`sdlc:stall:escalated:{slug}:{sha}` (`SET NX`, TTL
+Escalation sends a single Telegram alert to the stalled lane's own project
+`Eng:` group, addressed by numeric `chat_id` (`_send_alert` →
+`reflections.utilities.send_eng_telegram`, via the `valor-telegram` CLI —
+see [`reflection-telegram-routing.md`](reflection-telegram-routing.md)), and
+writes the Redis dedup key `sdlc:stall:escalated:{slug}:{sha}` (`SET NX`, TTL
 `SDLC_STALL_ESCALATION_TTL_DAYS`) so a human hears about a given head sha at
 most once, no matter how many ticks keep hitting the exhausted-budget or
-action-failed rung.
+action-failed rung. When no `Eng:` group resolves for the project, the page
+is suppressed rather than misrouted to `Eng: Valor`; the suppression still
+reaches the reflection's `findings`/`summary`.
 
 Every rung's outcome is classified and, on success or failure, charges the
 `(slug, sha)` attempt counter: a steer that lands but doesn't move the
