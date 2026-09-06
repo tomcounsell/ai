@@ -39,8 +39,8 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from config.settings import settings
 from reflections.redis_access import get_project_key, get_redis
+from reflections.utilities import send_host_eng_telegram
 
 logger = logging.getLogger("reflections.stall_advisory")
 
@@ -453,18 +453,12 @@ def _reset_consec(r, project_key, session_id) -> None:
 
 
 def _send_alert(message: str) -> None:
-    """Best-effort Telegram alert. All failures swallowed and logged."""
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("stall_advisory: valor-telegram not on PATH; skipping alert")
-    except subprocess.TimeoutExpired:
-        logger.warning("stall_advisory: valor-telegram timed out")
-    except Exception as exc:
-        logger.warning("stall_advisory: valor-telegram failed: %s", exc)
+    """Best-effort Telegram alert to this checkout's own Eng: group.
+
+    ``run_stall_advisory`` never calls ``load_local_projects()`` (spike-2):
+    it classifies sessions globally via ``AgentSession.query.filter(...)``,
+    with no single project in scope, so the destination is this host's own
+    engineer group via ``send_host_eng_telegram`` rather than a per-project
+    ``Eng:`` lookup.
+    """
+    send_host_eng_telegram(message, logger_prefix="stall_advisory")
