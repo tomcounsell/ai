@@ -367,7 +367,7 @@ New coverage to add (not modifications):
 
 **Impact:** A defense that exists in the prompt and not in behavior is worse than no defense — it invites the next investigator to conclude the hole is covered.
 
-**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded entries before dispatch; a second asserts the prompt contains the ledger's absolute path and the append-before-next-node instruction. Neither test can pass on the other's work.
+**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded entries before the per-node dispatch; a second asserts the per-node prompt contains the ledger's absolute path and the append-before-next-node instruction; a third asserts a `prompt=`-override dispatch writes no file at all. Neither test can pass on the other's work.
 
 ### Risk 3: The prompt regresses to "search" in a later edit
 
@@ -383,16 +383,16 @@ New coverage to add (not modifications):
 
 ### Risk 5: Stale ledgers accumulate in `data/`
 
-**Impact:** One file per dispatch slug, unbounded. Low severity — small JSON, gitignored, machine-local — but unbounded growth is how `data/` directories become a problem years later.
+**Impact:** One file per per-node dispatch slug, unbounded. Low severity — small JSON, gitignored, machine-local — but unbounded growth is how `data/` directories become a problem years later.
 
-**Mitigation:** Slugs are a hash of the node set, so a recurring failure set reuses its slug and overwrites rather than accumulating. Growth is bounded by the number of *distinct* failure sets, not by nights. No pruning job for now; noted here so a future reader knows it was considered rather than missed.
+**Mitigation:** A ledger is written only on the per-node dispatch, which never passes `slug_suffix`, so its slug is always the sha256 of the sorted node set: a recurring failure set reuses its slug and overwrites rather than accumulating. Growth is bounded by the number of *distinct* failure sets, not by nights. No pruning job for now; noted here so a future reader knows it was considered rather than missed.
 
 ## Race Conditions
 
 
 ### Race 1: Two triage sessions on one slug appending to one ledger
 
-**Location:** `data/nightly-triage-ledger/{slug}.json`; writers are `write_triage_ledger` (script, seed) and the triage agent (appends to `filed`).
+**Location:** `data/nightly-triage-ledger/{slug}.json`; writers are `write_triage_ledger` (script, seed) and the triage agent (appends to `filed`). Only the **per-node** dispatch writes one — see "Scope decision".
 
 **Trigger:** The 2026-08-24 evidence shows two filers live at once (#2971 / #2982–#2989 interleaving the 20:40 wave). If two sessions ever resolve to the same slug, both read-modify-write the same JSON and a lost update drops one session's `filed` entries — the ledger then under-reports and a replay re-files.
 
@@ -400,7 +400,9 @@ New coverage to add (not modifications):
 
 **State prerequisite:** One writer per slug at a time.
 
-**Mitigation:** The slug is `sha256` of the sorted node set, so two sessions share a slug only when they were dispatched for an identical node set — and `compute_dispatch_set` plus the run lock (`_acquire_run_lock`, `data/nightly_tests.lock`, taken as the first act of `main()`) make that near-impossible within a machine. Across machines the ledger is machine-local and the two never share a file. A lost update degrades the ledger to partial, which falls back to fixes 1 and 2, which is today's behavior plus improvements. **Explicitly not adding file locking** — the cost is not justified for a third-line advisory defense, and this reasoning belongs in the code comment so a reviewer does not read the omission as an oversight.
+**Mitigation:** A ledger exists only for the per-node dispatch, and that call site passes no `slug_suffix`, so its slug is *always* the `sha256` of the sorted node set — the node-set claim below holds without qualification. Two sessions therefore share a ledger slug only when they were dispatched for an identical node set, and `compute_dispatch_set` plus the run lock (`_acquire_run_lock`, `data/nightly_tests.lock`, taken as the first act of `main()`) make that near-impossible within a machine. Across machines the ledger is machine-local and the two never share a file.
+
+**The two fixed-suffix call sites cannot reach this race**, which is what the narrowing bought here. The cascade dispatch passes `slug_suffix=sha256(cascade_state_key(cascade))[:8]` and the seed dispatch passes the literal `slug_suffix="baseline"`; both bypass the node-set derivation, and the seed's is a single slot every re-baseline would reuse. Under the narrowing neither passes `dispositions`, so neither writes a ledger at all and `data/nightly-triage-ledger/nightly-triage-baseline.json` is never created. Round 2's concern that a second re-baseline could overwrite an earlier seed session's ledger inside its replay window is dissolved by construction rather than mitigated. A lost update on the per-node path degrades the ledger to partial, which falls back to fixes 1 and 2, which is today's behavior plus improvements. **Explicitly not adding file locking** — the cost is not justified for a third-line advisory defense, and this reasoning belongs in the code comment so a reviewer does not read the omission as an oversight.
 
 ### Race 2: An issue created between the script's read and the agent's read
 
@@ -431,7 +433,8 @@ New coverage to add (not modifications):
 
 - [SEPARATE-SLUG #3161] **Diagnosing the replay mechanism itself** — reading `logs/worker.log`, `valor-session telemetry`, and `session_events` for `0_1787603653699` to establish which requeue leg produced three fresh contexts at ~300s spacing. Requires the machine that ran `com.valor.nightly-tests` on 2026-08-24; this one is worker-only with `data/nightly-tests-disabled` present, and `valor-session inspect --id 0_1787603653699` reports not found. #3161 is open and holds this.
 - [SEPARATE-SLUG #3161] **Preventing two triage filers from running simultaneously** — the #2971 / #2982–#2989 interleave is a second live filer with a different node list from a different working tree, not a replay. Cross-machine dedup already rests on live REST reads and no evidence says it is currently failing. Belongs with the same investigation.
-- [DEFERRED] **A REST pre-flight for the baseline-seed path, so it can carry dispositions too.** The seed dispatch in `main()` fires only on a collection re-baseline and performs no `open_issues()` / `closed_issue_dispositions()` read of its own, so there is no resolved finding to hand across the boundary — fix 2 has nothing to pass there. Adding a pre-flight is new behavior on a rarely-exercised path and is outside this appetite. **The seed path still gets fixes 1 and 3** (the live-REST lookup instruction and the ledger), which are the two defenses that actually stop a replay; fix 2 only makes the agent's read a confirmation rather than a derivation. This is a deliberate deferral, recorded here the same way Race 1 records the deliberate absence of file locking, so a future reader can tell it from an oversight.
+- [DEFERRED] **Fix 2 (pre-resolved dispositions) on the cascade and baseline-seed paths.** The seed dispatch in `main()` fires only on a collection re-baseline and performs no `open_issues()` / `closed_issue_dispositions()` read of its own, so there is no resolved finding to hand across the boundary — fix 2 has nothing to pass there, and adding a REST pre-flight is new behavior on a rarely-exercised path, outside this appetite. The cascade dispatch *does* pre-resolve, but its prompt is pre-rendered at the call site and `_build_cascade_prompt` gains no parameter to read a disposition with, so a disposition built there would have no consumer. **Both paths still get fix 1** — the live-REST lookup instruction, which is the defense that actually addresses the 2026-08-24 read failure. Recorded here the same way Race 1 records the deliberate absence of file locking, so a future reader can tell it from an oversight.
+- [DEFERRED] **Fix 3 (the session ledger) on the cascade and baseline-seed paths.** Round 2's Scope & Value concern offered two resolutions and **the narrowing was chosen**; the full reasoning, including why the alternative (a `prompt_builder: Callable[[str | None], str]` deferred-construction contract) was rejected, is in Solution → "Scope decision". In short: zero lines versus a new callable-typed parameter and three changed call sites on an `appetite: Small` plan; no cascade or seed duplicate-filing incident is cited anywhere in Problem, Prior Art, or the Freshness Check; and the ledger is by the plan's own description an advisory, fail-open third defense that cannot be verified on this machine. If a cascade or seed duplicate is ever observed, this is the first thing to widen — and the widening is exactly the `prompt_builder` contract described above.
 - [EXTERNAL] **Verifying the fix against a real nightly run** — the nightly is disabled on this machine (`data/nightly-tests-disabled`) and enabling it on the host that runs `com.valor.nightly-tests` is an operator action on a machine the agent cannot reach. Unit coverage plus `--dry-run` is what this plan can establish; the first real confirmation is the next night on that host.
 
 ## Update System
