@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2764
 last_comment_id: 5277517215
 revision_applied: true
-revision_applied_at: 2026-09-05T13:24:26Z
+revision_applied_at: 2026-09-06T07:44:28Z
 ---
 
 # db-derivation guard: positional `db` and keyword `from_url(url=...)` produce no candidate

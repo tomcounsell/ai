@@ -714,7 +714,11 @@ The three `! grep -qE` rows were mutation-checked during the revision pass: each
 
 ## Critique Results
 
-War-room verdict **NEEDS REVISION** (round 2: 2 blockers, 4 concerns, 2 nits), against the revised plan at `a49415e99`. Every anchor cited in the plan was re-derived by symbol at `origin/main`; `ffda9fc86` is an ancestor of the current head and nothing has landed on `agent/worktree_manager.py`, `agent/session_revival.py`, `config/settings.py`, `docs/features/session-isolation.md`, or `tests/unit/worktree_manager/` since, so the Freshness Check is still accurate. Both blockers were reproduced end to end in a throwaway repo with a linked worktree on git 2.50.1, and the fix for each was run to a passing state before being written down. Round 1's nine findings were verified as addressed.
+War-room verdict **NEEDS REVISION** (round 2: 2 blockers, 4 concerns, 2 nits), against the revised plan at `a49415e99`. Both blockers were reproduced end to end in a throwaway repo with a linked worktree on git 2.50.1, and the fix for each was run to a passing state before being written down. Round 1's nine findings were verified as addressed and are not revisited.
+
+**Round-3 revision applied (2026-09-06).** The critique cycle cap (G2) was reached at round 2 and the owner authorized exactly one further revision-plus-critique round. All eight rows below are addressed in that single pass — there is no round 4 and nothing is deferred. The two blockers were written in from the critic's own reproduced fixes rather than re-derived. Each Disposition column below now records what actually changed.
+
+**One correction to the round-2 critique's own freshness claim.** It asserted that nothing had landed on `agent/worktree_manager.py` since `ffda9fc86`. That was false by the time this revision ran: `9c75c2e08` (#3179) merged 2026-09-06T00:52:12+07:00, adding +148 lines to that module and editing `docs/features/session-isolation.md`. Every anchor in the plan is therefore re-derived by symbol at `bf0a5d577` (see **Freshness Check**), not carried forward. The defect, the two call sites, and the fix shape are unchanged — #3179 introduced no fourth producer path.
 
 | Severity | Critics | Finding | Addressed By | Disposition |
 |----------|---------|---------|--------------|-------------|
