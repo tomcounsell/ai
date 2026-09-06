@@ -2938,6 +2938,11 @@ def dispatch_findings(
     # plain per-node form, so the agent's own live lookup (already always in
     # the prompt) stays the sole, undemoted defense (#3170). An empty
     # single_nodes carries no such risk either way, so it always gets `[]`.
+    # dispositions=None also withdraws the session ledger, not just the
+    # prompt paragraph: maybe_dispatch_triage_session passes list(None or [])
+    # to write_triage_ledger, which returns None (writes no file) on an empty
+    # entries list -- acceptable only because the live REST-read instruction
+    # above stays undemoted on this path.
     if not single_nodes:
         dispositions = []
     elif read_shape == ["open", "closed"]:

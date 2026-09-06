@@ -123,6 +123,13 @@ context reads its predecessor's work instead of starting from zero.
   ledger that cannot be written must not stop the night from filing, the same posture
   `open_issues()` takes when it cannot read. The prompt also tells the agent to treat a
   missing or unparseable ledger as an empty `filed` list.
+- **Degraded read, same no-file outcome, different cause.** A degraded read (either the
+  open-issues or closed-issues REST read fails) also produces no ledger file:
+  `dispatch_findings` passes `dispositions=None` in that case, `maybe_dispatch_triage_session`
+  calls `write_triage_ledger` with an empty entries list, and `write_triage_ledger` returns
+  `None`, the same no-file outcome as the write failure above but from withheld dispositions
+  rather than a failed write, with the live REST-read instruction in every prompt remaining
+  undemoted as the defense that actually covers a degraded read.
 - **Written after the `--dry-run` short-circuit.** A preview writes no state file.
 - **Deliberately unlocked.** Two sessions share a ledger only when dispatched for an
   identical node set, which the run lock and `compute_dispatch_set` make
