@@ -1629,9 +1629,9 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     Session worktrees under ``.worktrees/{slug}`` are force-removed on session
     exit (normal, exception, or cancellation). The unmerged-branch guard (#1646)
     protects only *committed* work; staged, unstaged, and untracked edits are
-    otherwise discarded with no backstop. This helper captures ALL uncommitted
-    work as a WIP commit on ``session/{slug}`` plus a durable named ref
-    ``refs/session-wip/{slug}`` before any ``git worktree remove --force``.
+    otherwise discarded with no backstop. This helper captures uncommitted work
+    as a WIP commit on the worktree's checked-out branch plus a durable named
+    ref ``refs/session-wip/{name}`` before any ``git worktree remove --force``.
 
     Mechanism (WIP commit + named ref, NOT ``git stash``). The reason is NOT
     that a worktree's stash is worktree-local: ``refs/stash`` lives in the
@@ -1642,37 +1642,104 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     is meaningless and a teardown backstop keyed on it would race every peer
     (issue #2650, shape 1). A WIP commit under a slug-scoped named ref is
     single-owner by construction, and it captures untracked files, which
-    ``git stash`` declines by default. Instead:
+    ``git stash`` declines by default.
 
     1. ``git -C <worktree> status --porcelain`` — if empty, no-op.
-    2. ``git -C <worktree> add -A`` — captures untracked + tracked edits.
-    3. ``git -C <worktree> commit --no-verify --no-gpg-sign`` — the WIP commit
+    2. **Wipe check (#3167).** ``git -C <worktree> ls-tree --name-only -d HEAD``
+       lists the directories HEAD tracks; if any is absent from disk, the tree
+       is a wipe (partially or fully deleted from under the worktree, e.g. by a
+       racing teardown pass or a `shutil.rmtree` that raised partway through),
+       not a tree whose deletions should be committed. This check runs BEFORE
+       staging: the signal is available without mutating the index, and after
+       ``git add -A`` the deletion signal is partly erased from the index
+       anyway. An earlier design considered a deletions/insertions ratio
+       (refusing when deletions dwarf insertions); it is rejected because the
+       reported incident's own commit carried 223,142 insertions alongside its
+       902,840 deletions — ``git add -A`` also stages untracked build
+       artifacts, which count as insertions and defeat any "insertions are
+       negligible" test.
+       - **No missing directory**: fall through to step 3 unchanged.
+       - **A directory is missing**: first ``git -C <worktree> reset -q`` (a
+         mixed reset — index to HEAD, working tree untouched). This is
+         index-recovery, not hygiene: without it, a wipe a *previous* teardown
+         pass already staged (``add -A`` succeeded, the following commit
+         failed) leaves both the "deleted" and "modified/others" plumbing
+         reads blind to it, and the additive salvage below would silently
+         discard real coexisting work. Then compute the additive-only
+         candidate set — ``ls-files --modified --others --exclude-standard``
+         minus ``ls-files --deleted`` — and stage exactly those paths (never
+         ``add -A``, which would restage the declined deletions). If the
+         candidate set is empty (the pure-wipe case), no staging or commit
+         happens at all. Otherwise the WIP commit carries the coexisting
+         additions/edits with **zero deletions**, plus a trailer recording
+         that deletions were declined. Either way the declined deletions are
+         logged at ERROR under ``[worktree-wip-refused-wipe]`` with enough
+         detail (slug, branch, HEAD sha, missing directories, path counts) to
+         reconstruct the event after the worktree is destroyed.
+       - **Fail-open asymmetry**: a failure reading the wipe signal itself
+         (before any directory is known missing) is not evidence of a wipe, so
+         it falls open to step 3 — this function's hardest contract is that it
+         never blocks or hangs teardown. A failure *after* a missing directory
+         is already confirmed (during the reset or the salvage reads) refuses
+         instead of falling through, because falling open there would commit
+         the very wipe just detected.
+    3. ``git -C <worktree> add -A`` — captures untracked + tracked edits.
+    4. ``git -C <worktree> commit --no-verify --no-gpg-sign`` — the WIP commit
        (``--no-verify`` avoids pre-commit hooks hanging teardown;
        ``--no-gpg-sign`` avoids signing prompts).
-    4. ``git -C <repo_root> update-ref refs/session-wip/{slug} <sha>`` — writes
+    5. ``git -C <repo_root> update-ref refs/session-wip/{name} <sha>`` — writes
        to the *common* ref store, so the ref survives both worktree removal and
-       the unmerged-branch-guard branch deletion.
+       the unmerged-branch-guard branch deletion. ``{name}`` is derived from
+       the worktree's checked-out branch (``session/<name>`` -> ``<name>``),
+       falling back to the ``slug`` argument on a detached HEAD, a non-session
+       branch, or a failed read — `_cleanup_stale_worktree` passes the foreign
+       *directory* name as `slug`, which can disagree with the branch the
+       commit actually lands on.
 
     Non-blocking contract: any subprocess failure, timeout, or exception is
     caught, logged at ERROR with the ``[worktree-wip-preserve-failed]`` tag,
     and returned in the result dict — this function NEVER raises into the
     teardown path and must never hang teardown.
 
-    Recovery: ``git checkout refs/session-wip/{slug}`` (or diff/cherry-pick the
+    Recovery: ``git checkout refs/session-wip/{name}`` (or diff/cherry-pick the
     WIP commit). ``git reset --soft HEAD~1`` on the resumed session unstages the
-    WIP commit to restore the dirty tree. Refs live in ``refs/session-wip/*``
-    and are reclaimed manually (no automated GC — see the plan No-Gos).
+    WIP commit to restore the dirty tree. This promise now holds even on a
+    half-deleted tree, because the ref never carries a wipe. Refs live in
+    ``refs/session-wip/*`` and are reclaimed manually (no automated GC — see
+    the plan No-Gos).
 
     Args:
         repo_root: Path to the main repository (common ref store owner).
-        slug: Work item slug (validated).
+        slug: Work item slug (validated). Used to name the ref only when the
+            worktree's checked-out branch cannot be resolved to a
+            ``session/<name>`` form.
         worktree_dir: Path to the worktree to preserve.
 
     Returns:
-        A result dict. On a clean tree: ``{"preserved": False, "was_clean":
-        True}``. On success: ``{"preserved": True, "was_clean": False, "sha":
-        <sha>, "ref": "refs/session-wip/{slug}", "errors": []}``. On failure:
-        ``{"preserved": False, "was_clean": False, "errors": [<msg>, ...]}``.
+        A result dict, always carrying ``"errors"`` (``[]`` unless a git
+        subprocess itself broke) and ``"ref"``.
+
+        - Clean tree: ``{"preserved": False, "was_clean": True, "ref": ...,
+          "errors": []}``.
+        - Ordinary dirty tree (no missing tracked directory): ``{"preserved":
+          True, "was_clean": False, "sha": <sha>, "ref": ..., "errors": []}``.
+        - Wipe, with coexisting additive work: ``{"preserved": True,
+          "was_clean": False, "refused": "missing-tracked-dirs", "missing":
+          [<dir>, ...], "deleted_paths": <int>, "sha": <sha>, "ref": ...,
+          "errors": []}``. The commit's diff against its parent has zero
+          deletions.
+        - Pure wipe (nothing coexisting): ``{"preserved": False, "was_clean":
+          False, "refused": "missing-tracked-dirs", "missing": [...],
+          "deleted_paths": <int>, "ref": ..., "errors": []}``. No commit, no
+          ref write, branch head unmoved.
+        - A failure salvaging a detected wipe (block B) returns the pure-wipe
+          shape above plus ``"guard_error": <str>``, still with ``"errors":
+          []`` — the outcome is a refusal, not a broken-git failure.
+        - Git subprocess failure (the pre-existing contract): ``{"preserved":
+          False, "was_clean": False, "ref": ..., "errors": [<msg>, ...]}``,
+          with no ``"refused"`` key. ``"refused"`` is therefore the sole
+          discriminator between a refusal and a git failure — never populate
+          ``"errors"`` on a refusal.
     """
     _validate_slug(slug)
     ref = f"refs/session-wip/{slug}"
@@ -1691,6 +1758,294 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
             # Clean tree — nothing to preserve.
             return {"preserved": False, "was_clean": True, "ref": ref, "errors": []}
 
+        # Resolve the worktree's checked-out branch once — reused both to name
+        # the WIP ref correctly (the recon-found slug/branch mismatch: a
+        # foreign worktree directory name can disagree with the branch that
+        # actually receives the commit) and as a field in the wipe-refusal log
+        # record below. A failed read (or a non-`session/` branch, or a
+        # detached HEAD) falls back to the `slug` argument — `ref` above
+        # already carries that default. The `session/` prefix match is the
+        # load-bearing gate, not VALID_SLUG_RE alone: a detached HEAD's
+        # `rev-parse --abbrev-ref HEAD` returns the literal string "HEAD",
+        # which passes VALID_SLUG_RE and would otherwise produce
+        # `refs/session-wip/HEAD`.
+        branch_result = subprocess.run(
+            ["git", "-C", str(worktree_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+        session_match = re.match(r"^session/(.+)$", branch) if branch else None
+        if session_match and VALID_SLUG_RE.match(session_match.group(1)):
+            ref = f"refs/session-wip/{session_match.group(1)}"
+
+        # --- Wipe check (#3167), block A: detection ---
+        # A worktree missing a directory HEAD tracks is definitionally not a
+        # tree whose deletions should be committed. Runs BEFORE any staging:
+        # the signal is available without mutating the index, and staging
+        # first would leave a fully-staged wipe sitting in the index if the
+        # subsequent force-remove then fails and the directory survives.
+        missing: list[str] = []
+        try:
+            ls_tree = subprocess.run(
+                ["git", "-C", str(worktree_dir), "ls-tree", "--name-only", "-d", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+            )
+            if ls_tree.returncode != 0:
+                raise RuntimeError(f"git ls-tree failed: {ls_tree.stderr.strip()}")
+            tracked_dirs = [d for d in ls_tree.stdout.splitlines() if d.strip()]
+            missing = sorted(d for d in tracked_dirs if not (worktree_dir / d).is_dir())
+        except Exception as guard_exc:
+            # Detection failure is not evidence of a wipe. Fall open to
+            # today's unconditional preserve rather than trade a rare
+            # committed wipe for a routine loss of the backstop on legitimate
+            # work every time a git read hiccups (e.g. an unborn HEAD).
+            logger.warning(
+                "[worktree-wip-guard-failed] slug=%s worktree=%s stage=detection "
+                "error=%s — wipe-detection read failed; falling through to "
+                "unconditional preserve.",
+                slug,
+                worktree_dir,
+                guard_exc,
+            )
+            missing = []
+
+        if missing:
+            # --- Wipe check, block B: response ---
+            # HEAD has already proven a tracked directory is missing from
+            # disk. The only open question is how much coexisting work can be
+            # salvaged — a failure anywhere in this block REFUSES rather than
+            # falling through, because falling open here would answer "a git
+            # read timed out" with "so commit the deletions".
+            try:
+                head_result = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if head_result.returncode != 0:
+                    raise RuntimeError(f"git rev-parse HEAD failed: {head_result.stderr.strip()}")
+                head_sha = head_result.stdout.strip()
+
+                # Step zero, and load-bearing rather than hygienic: a mixed
+                # reset (index to HEAD, working tree untouched) so the index
+                # equals HEAD before anything is staged. Without this, a wipe
+                # a previous pass already staged makes both plumbing reads
+                # below come back empty, silently discarding any real
+                # coexisting work. A mixed reset cannot itself destroy
+                # anything — deleted paths stay deleted on disk, edits stay
+                # edited, untracked files stay untracked. A failed reset must
+                # not fall forward: `git commit` commits the ENTIRE index, not
+                # only paths just staged, so an unchecked reset failure would
+                # let the additive commit below carry a pre-staged wipe.
+                reset = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "reset", "-q"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if reset.returncode != 0:
+                    raise RuntimeError(f"git reset failed: {reset.stderr.strip()}")
+
+                candidates_result = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "ls-files",
+                        "--modified",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if candidates_result.returncode != 0:
+                    raise RuntimeError(
+                        f"git ls-files (modified/others) failed: {candidates_result.stderr.strip()}"
+                    )
+                deleted_result = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "ls-files", "--deleted", "-z"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if deleted_result.returncode != 0:
+                    raise RuntimeError(
+                        f"git ls-files --deleted failed: {deleted_result.stderr.strip()}"
+                    )
+
+                deleted_paths = [p for p in deleted_result.stdout.split("\0") if p]
+                deleted_set = set(deleted_paths)
+                candidates = [p for p in candidates_result.stdout.split("\0") if p]
+                additive = [p for p in candidates if p not in deleted_set]
+                preserved_paths = len(additive)
+
+                # Captured before staging/committing — the record is the sole
+                # durable evidence of the refusal on the pure-wipe branch, and
+                # the force-remove that follows destroys the worktree within
+                # milliseconds.
+                logger.error(
+                    "[worktree-wip-refused-wipe] slug=%s branch=%s head=%s missing=%s "
+                    "preserved_paths=%d deleted_paths=%d — auto-preserve declined to "
+                    "commit a wipe; teardown proceeds.",
+                    slug,
+                    branch or "<unknown>",
+                    head_sha,
+                    ",".join(missing),
+                    preserved_paths,
+                    len(deleted_paths),
+                )
+
+                if not additive:
+                    # Pure wipe. Do not call `git add` with an empty
+                    # pathspec — it exits 0 having staged nothing, and the
+                    # following `git commit` then fails with "nothing to
+                    # commit", logging a misleading
+                    # [worktree-wip-preserve-failed].
+                    return {
+                        "preserved": False,
+                        "was_clean": False,
+                        "refused": "missing-tracked-dirs",
+                        "missing": missing,
+                        "deleted_paths": len(deleted_paths),
+                        "ref": ref,
+                        "errors": [],
+                    }
+
+                # Stage exactly the additive set, on stdin — never a temp
+                # file, which would either race the very deletion that
+                # triggered this path (inside the worktree) or leak (in
+                # /tmp, with a cleanup obligation inside a never-raise
+                # contract). This call deliberately omits `text=True`:
+                # `input` must be bytes for a NUL-delimited pathspec: str
+                # encoding would mangle the separator. `git add` spells the
+                # NUL-delimited pathspec flag `--pathspec-file-nul`, not
+                # `-z` (that exits non-zero with "unknown switch `z`").
+                # Never use `git add -A` here — it restages the very
+                # deletions this branch exists to decline.
+                stage = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "add",
+                        "--pathspec-from-file=-",
+                        "--pathspec-file-nul",
+                        "--",
+                    ],
+                    input=b"\0".join(p.encode() for p in additive) + b"\0",
+                    capture_output=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if stage.returncode != 0:
+                    stage_err = stage.stderr.decode(errors="replace").strip()
+                    raise RuntimeError(f"git add (additive) failed: {stage_err}")
+
+                ts = datetime.datetime.now(datetime.UTC).isoformat()
+                subject = f"WIP: auto-preserved before teardown [{slug}] [{ts}]"
+                # Trailer, not a different subject: keeps the subject
+                # byte-identical to an ordinary preserve (anything keyed on
+                # that string keeps working) while recording the refusal in
+                # the durable commit itself, not only the rotating log.
+                trailer = (
+                    f"Auto-preserve declined deletions (#3167)\n"
+                    f"Missing-tracked-dirs: {','.join(missing)}\n"
+                    f"Declined-deletions: {len(deleted_paths)}"
+                )
+                commit = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "commit",
+                        "--no-verify",
+                        "--no-gpg-sign",
+                        "-m",
+                        subject,
+                        "-m",
+                        trailer,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if commit.returncode != 0:
+                    raise RuntimeError(f"git commit (additive) failed: {commit.stderr.strip()}")
+
+                rev = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if rev.returncode != 0:
+                    raise RuntimeError(f"git rev-parse HEAD failed: {rev.stderr.strip()}")
+                sha = rev.stdout.strip()
+
+                update = subprocess.run(
+                    ["git", "-C", str(repo_root), "update-ref", ref, sha],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if update.returncode != 0:
+                    raise RuntimeError(f"git update-ref failed: {update.stderr.strip()}")
+
+                logger.warning(
+                    "[worktree-wip-preserved] slug=%s ref=%s sha=%s — uncommitted work "
+                    "(additive only; deletions declined) preserved before teardown; "
+                    "recover with `git checkout %s`.",
+                    slug,
+                    ref,
+                    sha,
+                    ref,
+                )
+                return {
+                    "preserved": True,
+                    "was_clean": False,
+                    "refused": "missing-tracked-dirs",
+                    "missing": missing,
+                    "deleted_paths": len(deleted_paths),
+                    "sha": sha,
+                    "ref": ref,
+                    "errors": [],
+                }
+            except Exception as response_exc:
+                logger.warning(
+                    "[worktree-wip-guard-failed] slug=%s worktree=%s stage=response "
+                    "error=%s — wipe-response step failed; refusing rather than "
+                    "falling through.",
+                    slug,
+                    worktree_dir,
+                    response_exc,
+                )
+                logger.error(
+                    "[worktree-wip-refused-wipe] slug=%s branch=%s missing=%s "
+                    "preserved_paths=0 guard_error=%s — auto-preserve declined to "
+                    "commit a wipe after a salvage-step failure; teardown proceeds.",
+                    slug,
+                    branch or "<unknown>",
+                    ",".join(missing),
+                    response_exc,
+                )
+                return {
+                    "preserved": False,
+                    "was_clean": False,
+                    "refused": "missing-tracked-dirs",
+                    "missing": missing,
+                    "ref": ref,
+                    "errors": [],
+                    "guard_error": str(response_exc),
+                }
+
+        # --- No missing tracked directory: today's unconditional path ---
         add = subprocess.run(
             ["git", "-C", str(worktree_dir), "add", "-A"],
             capture_output=True,
