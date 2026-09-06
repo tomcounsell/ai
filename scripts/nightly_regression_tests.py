@@ -147,7 +147,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -325,6 +325,19 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 # triage sessions file the same title twice.
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
+
+ISSUE_LOOKUP_INSTRUCTION = (
+    "To find out whether an issue already exists, run exactly this ONCE for the "
+    "whole list below and filter the JSON locally on each exact title:\n"
+    "  gh issue list --state all --json number,title,state,stateReason --limit 200\n"
+    "Do NOT use GitHub's search index or the search API to answer this — that "
+    "index lags issue creation by minutes, and reading it inside the lag window "
+    "is how the #2960-#2999 duplicate wave happened (see 8524e765b). The list "
+    "endpoint above sees an issue the instant it exists.\n"
+    "Note: stateReason is the empty string on OPEN rows, not null and not "
+    "absent. Branch on state first and read stateReason only when state is "
+    "CLOSED.\n"
+)
 
 # How many closed issues the closed-state dedup read pulls (#3075 defect 1:
 # a node whose exact-title issue was closed as a duplicate was re-reported as
@@ -1455,20 +1468,41 @@ def carry_dispatched_nodes(
     return sorted(still_failing | set(just_dispatched))
 
 
-def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
+def _build_triage_prompt(
+    dispatch_nodes: list[str],
+    *,
+    dispositions: list[NodeDisposition] | None = None,
+    ledger_path: str | None = None,
+) -> str:
     """Build the default per-node triage prompt with literal, computed titles.
 
     Titles are computed in Python — ``f"Nightly regression: {n}"`` — rather
     than left for the agent to derive, so the same failing node produces a
     byte-identical title on every machine and the prompt itself pins the
-    dedup contract (#2559): the agent must search for the exact title before
-    opening a new issue.
+    dedup contract (#2559).
+
+    The lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
+    with :func:`_build_cascade_prompt` and :func:`_build_seed_prompt` so the
+    three can no longer drift. It hands over a REST list command instead of
+    naming GitHub's index-backed lookup, which lags issue creation by minutes:
+    reading that index inside its own lag window is how the #2960-#2999
+    duplicate wave happened, and ``8524e765b`` established the same principle
+    for this module's own reads a pass before the prompts caught up.
+
+    ``dispositions`` renders what :func:`dispatch_findings` already resolved,
+    one entry per node in the same order. ``None`` and ``[]`` both degrade to
+    the plain prompt, checked before the zip; only a non-empty list of the
+    wrong length raises. ``ledger_path`` appends the session-ledger paragraph,
+    and only a non-``None`` path does — which is what keeps the ledger scoped
+    to this prompt and independently revertible.
     """
     titles = [f"Nightly regression: {n}" for n in dispatch_nodes]
     lines = [
         "Nightly regression detector found confirmed test failures that have not "
-        "been triaged before. For EACH node below, search ALL issues — open AND "
-        "closed — for the EXACT title given. If an OPEN issue exists, comment on "
+        "been triaged before.\n"
+        + ISSUE_LOOKUP_INSTRUCTION
+        + "For EACH node below, match the EXACT title given against that JSON. "
+        "If an OPEN issue exists, comment on "
         "it with any new information. If a CLOSED issue exists, the close reason "
         "decides: closed as not-planned (duplicate/consolidated) — comment there "
         "pointing at the recurrence and do NOT open a new issue, the consolidation "
@@ -1479,8 +1513,36 @@ def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
         "cause, and suggested next steps. Do NOT attempt an auto-hotfix — this is "
         "an investigation-and-file-an-issue task only.\n",
     ]
-    for node, title in zip(dispatch_nodes, titles, strict=True):
-        lines.append(f'- Title: "{title}"\n  Node: {node}')
+    if not dispositions:
+        for node, title in zip(dispatch_nodes, titles, strict=True):
+            lines.append(f'- Title: "{title}"\n  Node: {node}')
+    else:
+        for (node, title), disposition in zip(
+            zip(dispatch_nodes, titles, strict=True), dispositions, strict=True
+        ):
+            lines.append(
+                f'- Title: "{title}"\n  Node: {node}\n'
+                f"  Already resolved by the detector: it read all open and closed "
+                f"issues at {disposition.resolved_at} via "
+                f"{disposition.resolved_against} and found no issue carrying that "
+                f'exact title, so its finding is "{disposition.disposition}". Your '
+                f"own lookup above is a second check covering issues created since "
+                f"that read, not a re-derivation of it."
+            )
+    if ledger_path is not None:
+        lines.append(
+            f"\nSession ledger: {ledger_path}\n"
+            "Read that file FIRST on every turn, before opening anything. Its "
+            '"entries" array is exactly the list above and its "filed" array is '
+            "what this session has already opened. Skip any entry whose node "
+            'already appears in "filed". Immediately after each `gh issue create` '
+            'returns, append {"number": N, "title": ..., "node": ...} to '
+            '"filed" and save the file BEFORE moving on to the next entry — that '
+            "ordering is the whole point, since a turn replayed mid-list reads "
+            "this file to learn what its predecessor already did. If the file is "
+            'missing or cannot be parsed as JSON, treat it as if "filed" were '
+            "empty and rely on the lookup above."
+        )
     return "\n".join(lines)
 
 
@@ -1888,7 +1950,15 @@ def group_setup_error_cascades(
 
 
 def _build_cascade_prompt(cascade: dict) -> str:
-    """Build the umbrella prompt for one cascade — ONE issue, node list collapsed."""
+    """Build the umbrella prompt for one cascade — ONE issue, node list collapsed.
+
+    Its lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
+    with :func:`_build_triage_prompt` and :func:`_build_seed_prompt`: a REST
+    list command rather than GitHub's index-backed lookup, which lags issue
+    creation by minutes and produced the #2960-#2999 duplicate wave when it was
+    read inside that window (``8524e765b``). This builder takes no dispositions
+    and no ledger — see the deferral recorded in the plan for #3170.
+    """
     nodes = cascade["nodes"]
     workers = ", ".join(cascade["workers"]) or "serial run"
     if cascade.get("kind") == "body":
@@ -1909,8 +1979,9 @@ def _build_cascade_prompt(cascade: dict) -> str:
     return (
         "Nightly regression detector found a CASCADE: "
         f"{shape}. This is ONE defect, not "
-        f"{len(nodes)}. Search ALL issues — open AND closed — for the EXACT title "
-        "below. If an OPEN one exists, comment on it with the new occurrence. If a "
+        f"{len(nodes)}.\n" + ISSUE_LOOKUP_INSTRUCTION + "Match the EXACT title "
+        "below against that JSON. If an OPEN one exists, comment on it with the "
+        "new occurrence. If a "
         "CLOSED one exists: closed as not-planned means comment there and do NOT "
         "re-file (its consolidation target is the live tracker); closed as "
         "completed means the recurrence is new information — open exactly ONE new "
@@ -1923,6 +1994,52 @@ def _build_cascade_prompt(cascade: dict) -> str:
         f'Title: "{cascade["title"]}"\n\n'
         f"{error_label}: {cascade['message']}\n\n"
         "Affected node IDs:\n" + "\n".join(f"- {n}" for n in nodes)
+    )
+
+
+def _build_seed_prompt(
+    seed_title: str, seeded_nodes: list[str], *, prior_collection: object = None
+) -> str:
+    """Build the re-baseline seed umbrella prompt (issue #2823).
+
+    Extracted out of :func:`main` so all three issue-filing prompts are named,
+    testable functions: an inline string inside a 200-line function cannot be
+    rendered by a test or scanned by a gate, which is how this prompt's copy of
+    the lookup defect went four passes unnoticed.
+
+    Its lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
+    with :func:`_build_triage_prompt` and :func:`_build_cascade_prompt`: a REST
+    list command rather than GitHub's index-backed lookup, which lags issue
+    creation by minutes and produced the #2960-#2999 duplicate wave when it was
+    read inside that window (``8524e765b``).
+
+    Its dedup rule is deliberately stricter than the per-node one and is
+    reproduced verbatim from the inline original: a closed umbrella is
+    commented on and never re-filed, whatever the close reason, because the
+    seed is a declaration and a re-baseline retry at the same commit must not
+    mint a twin. ``prior_collection`` exists because the text opens with the
+    collection the run moved away from, which is a :func:`main` local derivable
+    from neither other parameter; it is keyword-only and defaulted so a
+    two-positional call stays valid. This builder takes no dispositions and no
+    ledger — see the deferral recorded in the plan for #3170.
+    """
+    seed_size = len(seeded_nodes)
+    return (
+        "Nightly regression detector re-baselined its test collection "
+        f"(old={prior_collection!r}, new={COLLECTION_PATHS!r}). "
+        f"The following {seed_size} node(s) were already failing at the "
+        "moment of the re-baseline and have been absorbed into the seed — "
+        "they are NOT individually filed.\n" + ISSUE_LOOKUP_INSTRUCTION + "The EXACT "
+        f'title to match is "{seed_title}". If an open one exists, comment on '
+        "it. If a closed one exists, comment there and do NOT re-file — the "
+        "seed umbrella is a declaration, and a re-baseline retry at the same "
+        "commit must not mint a twin, whatever the close reason. Only if "
+        "neither exists, open ONE umbrella issue with EXACTLY that title, "
+        "summarizing the "
+        "population, its size, and pointing at the persisted state file "
+        "for the full node list. Do NOT file per-node issues for these. Do "
+        "NOT attempt an auto-hotfix.\n\n"
+        "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in seeded_nodes)
     )
 
 
@@ -2292,11 +2409,99 @@ def partition_already_open(
 DRY_RUN_SESSION_ID = "dry-run-session"
 
 
+@dataclass(frozen=True)
+class NodeDisposition:
+    """One node's pre-resolved filing decision, carried across the dispatch boundary.
+
+    Everything here was already established in :func:`dispatch_findings` against a
+    live REST read of the open and closed issue sets. Handing it to the triage
+    agent is what stops the agent re-deriving a decision Python had already made
+    seconds earlier -- the choke point that survived four passes at the duplicate
+    filing bug (#2559, ``8524e765b``, #3134, #3075) because every one of them
+    widened what the script knew without widening what it said.
+    """
+
+    node: str
+    title: str
+    disposition: str
+    resolved_against: str
+    resolved_at: str
+
+
+def write_triage_ledger(slug: str, entries: list[NodeDisposition]) -> str | None:
+    """Seed ``data/nightly-triage-ledger/{slug}.json`` and return its absolute path.
+
+    The third and cheapest-to-lose of this module's three replay defences. The
+    file records the entries one triage session is permitted to file and an
+    empty ``filed`` array the agent appends to as it goes, so a turn replayed
+    with a fresh context reads what its predecessor already opened instead of
+    starting from zero. The first two defences (a live REST lookup instruction,
+    and the pre-resolved dispositions above) do the real work; this one only has
+    to hold when both are somehow bypassed.
+
+    **Fail-open, deliberately.** Any failure logs a ``WARNING`` naming the slug
+    and returns ``None``; nothing raises into the dispatch path. A ledger that
+    cannot be written must not stop the night from filing, for the same reason
+    :func:`open_issues` returns ``None`` rather than aborting: a silent night
+    during a real regression is the larger harm.
+
+    **The return type is load-bearing.** A path on success, ``None`` on failure
+    and on an empty ``entries`` list. That value is threaded straight into the
+    prompt builder, which emits its ledger paragraph only for a non-``None``
+    path -- so a caller that passes no dispositions gets no file, no paragraph
+    and no dangling instruction to read something that was never created. It is
+    also what makes this defence independently revertible.
+
+    **No file locking, on purpose.** Two sessions share a ledger only when they
+    were dispatched for an identical node set, which the run lock and
+    :func:`compute_dispatch_set` make near-impossible within a machine, and the
+    file is machine-local so two hosts never share one. A lost update degrades
+    the ledger to partial, which falls back to the two stronger defences. The
+    one case worth defending is a same-slug retry landing on a ledger a live
+    session is already appending to, so an existing file whose ``filed`` array
+    is non-empty is left exactly as it is. The write itself goes through a
+    sibling temp file and :func:`os.replace`, so a reader mid-write sees the old
+    content or the new one and never a truncated one -- unparseable JSON is
+    worse for the agent than stale-but-valid JSON.
+    """
+    if not entries:
+        return None
+
+    path = DATA_DIR / "nightly-triage-ledger" / f"{slug}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = None
+            if isinstance(existing, dict) and existing.get("filed"):
+                log(
+                    f"Triage ledger for slug={slug} already records filed issue(s) — "
+                    "leaving it as it is so a same-slug retry cannot erase them"
+                )
+                return str(path.resolve())
+        payload = {
+            "slug": slug,
+            "created_at": datetime.now(UTC).isoformat(),
+            "entries": [asdict(e) if isinstance(e, NodeDisposition) else dict(e) for e in entries],
+            "filed": [],
+        }
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        os.replace(tmp_path, path)
+        return str(path.resolve())
+    except Exception as exc:  # noqa: BLE001  # covers OSError, TypeError, anything
+        log(f"WARNING: could not write triage ledger for slug={slug} ({exc})")
+        return None
+
+
 def maybe_dispatch_triage_session(
     dispatch_nodes: list[str],
     *,
     prompt: str | None = None,
     slug_suffix: str | None = None,
+    dispositions: list[NodeDisposition] | None = None,
     dry_run: bool = False,
 ) -> str | None:
     """Dispatch one triage Eng session for node IDs that have never been filed.
@@ -2312,6 +2517,24 @@ def maybe_dispatch_triage_session(
     triage session for a re-baseline seed instead of one issue per node.
     ``slug_suffix`` overrides the sha256-derived slug, so a retried seed
     dispatch reuses one slug instead of hashing a synthetic node ID.
+
+    ``dispositions`` carries the filing decisions :func:`dispatch_findings`
+    already resolved against a live REST read, one per node, in the same order
+    as ``dispatch_nodes``. It is the whole of what the per-node dispatch hands
+    across this boundary: it seeds the session ledger and it is rendered into
+    the default prompt so the agent confirms a decision rather than re-deriving
+    one. Three callers reach this function -- the per-node dispatch, which
+    passes it; and the cascade-umbrella and re-baseline-seed dispatches, which
+    pre-render their own ``prompt`` and pass none. Because the ledger's entries
+    come from this argument and from nothing else, those two produce no ledger
+    file and no ledger paragraph, with no separate branch to maintain.
+
+    **Ordering matters here.** The ledger write sits *below* the ``dry_run``
+    short-circuit and above the subprocess, so a preview writes no state file
+    and a real dispatch has its ledger on disk the instant the session can
+    start. Putting it above the short-circuit would put state writes back into
+    the one command an operator reaches for to preview a night safely -- the
+    exact defect the sentinel documented below was introduced to fix.
 
     ``dry_run`` short-circuits before the subprocess and returns
     :data:`DRY_RUN_SESSION_ID`. Without it ``--dry-run`` suppressed only the
@@ -2335,14 +2558,21 @@ def maybe_dispatch_triage_session(
         slug_hash = hashlib.sha256(",".join(sorted(set(dispatch_nodes))).encode()).hexdigest()[:8]
         slug = f"nightly-triage-{slug_hash}"
 
-    message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes)
-
     if dry_run:
         log(
             f"[DRY RUN] Would dispatch triage session slug={slug} for "
             f"{len(dispatch_nodes)} node(s); no session created, no issue filed"
         )
         return DRY_RUN_SESSION_ID
+
+    ledger_path = write_triage_ledger(slug, list(dispositions or []))
+    message = (
+        prompt
+        if prompt is not None
+        else _build_triage_prompt(
+            dispatch_nodes, dispositions=dispositions, ledger_path=ledger_path
+        )
+    )
 
     try:
         result = subprocess.run(
@@ -2528,6 +2758,11 @@ def dispatch_findings(
     closed_issue_map = closed_issue_dispositions() if dispatch_nodes else None
     if dispatch_nodes and closed_issue_map is None:
         log("Closed-state dedup disabled for this run (closed issues unreadable) — failing open")
+    # Stamped here, right after the two reads, because this is the instant the
+    # dispositions below are true as of. The triage agent is told this timestamp
+    # so it can treat its own lookup as a check for issues created since, not as
+    # the authority.
+    issue_read_at = datetime.now(UTC).isoformat()
 
     outcome = DispatchOutcome(
         recorded=[],
@@ -2665,7 +2900,34 @@ def dispatch_findings(
         )
         single_nodes = single_nodes[:issue_budget]
 
-    session_id = maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)
+    # Everything still in single_nodes survived partition_already_open and
+    # partition_closed_matches, so the script has already established that it has
+    # no issue in any state — the answer is uniformly "file". Passing that across
+    # the boundary is fix 2 of #3170: four earlier passes each made this function
+    # smarter and then threw the answer away at this one call.
+    read_shape = [
+        name
+        for name, mapping in (("open", open_issue_map), ("closed", closed_issue_map))
+        if mapping is not None
+    ]
+    resolved_against = (
+        f"gh issue list --state all ({'+'.join(read_shape)} REST read)"
+        if read_shape
+        else "no open/closed issue read succeeded this run"
+    )
+    dispositions = [
+        NodeDisposition(
+            node=node,
+            title=f"Nightly regression: {node}",
+            disposition="file",
+            resolved_against=resolved_against,
+            resolved_at=issue_read_at,
+        )
+        for node in single_nodes
+    ]
+    session_id = maybe_dispatch_triage_session(
+        single_nodes, dispositions=dispositions, dry_run=dry_run
+    )
     if session_id is not None:
         outcome.issues_filed += len(single_nodes)
         outcome.recorded.extend(single_nodes)
@@ -2914,22 +3176,8 @@ def main() -> int:
                 f"Nightly regression baseline: {seed_size} nodes absorbed "
                 f"on {current['head_commit']}"
             )
-            seed_prompt = (
-                "Nightly regression detector re-baselined its test collection "
-                f"(old={prev.get('collection')!r}, new={COLLECTION_PATHS!r}). "
-                f"The following {seed_size} node(s) were already failing at the "
-                "moment of the re-baseline and have been absorbed into the seed — "
-                "they are NOT individually filed. Search open AND closed issues for "
-                f'the EXACT title "{seed_title}". If an open one exists, comment on '
-                "it. If a closed one exists, comment there and do NOT re-file — the "
-                "seed umbrella is a declaration, and a re-baseline retry at the same "
-                "commit must not mint a twin, whatever the close reason. Only if "
-                f"neither exists, open ONE umbrella issue with EXACTLY that title, "
-                "summarizing the "
-                "population, its size, and pointing at the persisted state file "
-                "for the full node list. Do NOT file per-node issues for these. Do "
-                "NOT attempt an auto-hotfix.\n\n"
-                "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in confirmed_failing)
+            seed_prompt = _build_seed_prompt(
+                seed_title, confirmed_failing, prior_collection=prev.get("collection")
             )
             triage_session_id = maybe_dispatch_triage_session(
                 [f"seed:{len(confirmed_failing)}"],
