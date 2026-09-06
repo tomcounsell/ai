@@ -19,8 +19,8 @@ Nothing checks that the marker a file lands on is the marker anyone intended.
 
 **Current behavior:**
 
-A test file can be renamed, moved, or split and silently change marker. Two distinct mechanisms
-produce this, both live in the repo today:
+A test file can be renamed, moved, or split and silently change marker. Three distinct mechanisms
+produce this, all live in the repo today. This plan guards the first two and files the third.
 
 1. **Ordering collision.** `FEATURE_MAP` is iterated in dict-insertion order and breaks on first
    hit, so a generic key positioned early beats a specific key positioned late. spike-1 of #2879
@@ -32,11 +32,33 @@ produce this, both live in the repo today:
    inside of a longer word. `test_youtube_transcription.py` tags `messaging` because `transcript`
    is a prefix of `transcription`. `test_long_task_checkpointing.py` tags `validation` because
    `checkpoint` is a prefix of `checkpointing`.
+3. **Mangled stem, out of scope here.** The hook derives the stem with a global `str.replace`, so
+   a basename containing `test_` a second time has that occurrence eaten out of the middle of the
+   name. `tests/tools/test_test_judge.py` yields the stem `judge` and
+   `tests/unit/test_validate_test_impact.py` yields `validate_impact`, so both miss the
+   `FEATURE_MAP` keys (`test_judge`, `validate_test_impact`) written for those exact files. Five
+   basenames are mangled today. **Filed as #3184 and deliberately not fixed here**: correcting the
+   strip moves two files from no marker to a marker, which contradicts this plan's own criterion
+   that `test_youtube_transcription.py` is the only intended marker change. None of the three
+   rules below can see this mechanism.
 
 In every case the collection total is unchanged and the suite stays green, so the loss is
 invisible. Measured against `f3594dd23`: 21 test files sitting inside a package directory whose
-own name resolves to a marker do not carry that marker, and 19 of them carry no marker at all.
+own name resolves to a marker do not carry that marker, and 17 of them carry no marker at all.
 `pytest -m reflections` silently skips almost the entire `tests/unit/reflections/` package.
+
+**What this guard reaches, and what it does not.** Rules R1 and R2 need a package directory to
+compare against, so they run only on the 80 of 834 tracked test files (9.6%) that sit inside a
+themed package: R1 reaches 47, R2 reaches 33. The other 754 files sit directly under a root
+directory and are covered by R3 alone. R3 catches fragment matches suite-wide, and it is blind to
+ordering collisions, because an ordering collision is by definition a genuine whole-token match
+that belongs to the wrong key. Verified against `f3594dd23`: `test_worktree_manager_config.py`
+placed directly under `tests/unit/` resolves to `config` via the key `config`; `config` is a
+contiguous `_`-delimited token of `worktree_manager_config` so R3 passes; and the parent `unit` is
+a known root so R1 and R2 never run. All three rules stay green on a genuine mistag.
+**Ordering collisions are caught only inside a themed package directory.** Reaching the other 754
+files would need a declaration of intent that does not exist for them, so the rules are not widened
+here.
 
 **Desired outcome:**
 
