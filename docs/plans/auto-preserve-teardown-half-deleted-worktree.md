@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -509,11 +509,11 @@ The one agent-facing surface in this subsystem is the sibling `validate_no_destr
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 (unmoved at `bf0a5d577`) describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
-- [ ] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1636-1645`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
-- [ ] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
-- [ ] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
-- [ ] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
+- [x] Update `docs/features/session-isolation.md` — the "**1. Auto-WIP-commit before teardown.**" subsection at line 254 (unmoved at `bf0a5d577`) describes the mechanism as an unconditional four-step sequence. Add the wipe check as step 2, the additive-only branch, the `[worktree-wip-refused-wipe]` log tag, and the corrected statement of what `refs/session-wip/{slug}` is guaranteed to contain (never a commit that deletes tracked directories). The `agent/worktree_manager.py` row in the file-map table at line 307 also needs it named.
+- [x] **Fix the `git stash` contradiction between the two surfaces this task edits — they currently disagree, and a documentarian editing both in one pass will otherwise propagate the false version.** The paragraph beginning "**Why a WIP commit + named ref, not `git stash`.**" at `docs/features/session-isolation.md:263` claims a stash "writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree." That is false, and the function's own docstring (`agent/worktree_manager.py:1636-1645`) says the opposite and is correct: `refs/stash` lives in the **common** ref store, so a stash pushed from a worktree is visible as `stash@{0}` from the main checkout and survives the worktree's removal (verified on git 2.50.1). Replace the doc's sentence with the docstring's actual reasoning — that shared stack is precisely the problem, because every lane on this machine pushes onto the same one so an entry's position is meaningless and a teardown backstop keyed on it would race every peer (issue #2650, shape 1) — and note that `git stash` declines untracked files by default while a WIP commit captures them.
+- [x] Correct the recovery promise in the same document. The docstring and the feature doc both tell a human to run `git checkout refs/session-wip/{slug}` or `git reset --soft HEAD~1`; with the check in place that promise is sound, and the doc should say so explicitly rather than leaving the reader to infer it.
+- [x] Note in the same subsection that `reap_idle_worktree` is the third worktree-removal entry point and deliberately never reaches preserve, so a reader auditing the teardown surface does not have to rediscover it.
+- [x] `docs/features/README.md` — no new row needed (`session-isolation.md` is already indexed); verify its one-line description still reads correctly after the edit.
 
 ### External Documentation Site
 
@@ -521,33 +521,33 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
 
-- [ ] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and staging, describe both wipe branches (additive-only commit vs. no commit at all), state the ordering constraint (before staging) with the reason, and name the `git reset -q` that opens the wipe path along with why it is index-recovery rather than hygiene.
-- [ ] State the fail-open asymmetry in the docstring explicitly: detection failure falls open, response failure refuses. A reader who assumes one uniform rule will "simplify" the two blocks into one and reopen the round-2 blocker.
-- [ ] Update the docstring's Returns block for the `refused` key and the two wipe shapes.
-- [ ] Add a comment at the check site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
-- [ ] Add a comment on the staging call recording that `git add` spells NUL-separated pathspecs `--pathspec-file-nul` and rejects `-z`, that `git add -A` must never be used on the wipe path because it restages the deletions, and that this one call deliberately omits `text=True` because `input` has to be bytes for a NUL-delimited pathspec.
-- [ ] Document the return contract in the docstring's Returns block: `errors` stays `[]` on a refusal, `refused` is the sole discriminator against a git failure, and `missing` / `deleted_paths` carry the detail.
-- [ ] No `config/settings.py` docstring work — the revision dropped both fields.
+- [x] Rewrite the `preserve_uncommitted_worktree_changes` docstring's numbered mechanism list to include the wipe check as step 2, between the status read and staging, describe both wipe branches (additive-only commit vs. no commit at all), state the ordering constraint (before staging) with the reason, and name the `git reset -q` that opens the wipe path along with why it is index-recovery rather than hygiene.
+- [x] State the fail-open asymmetry in the docstring explicitly: detection failure falls open, response failure refuses. A reader who assumes one uniform rule will "simplify" the two blocks into one and reopen the round-2 blocker.
+- [x] Update the docstring's Returns block for the `refused` key and the two wipe shapes.
+- [x] Add a comment at the check site recording why the insertions-ratio predicate was rejected, citing the incident's 223,142 insertions. This is the single most likely thing for a future reader to "simplify."
+- [x] Add a comment on the staging call recording that `git add` spells NUL-separated pathspecs `--pathspec-file-nul` and rejects `-z`, that `git add -A` must never be used on the wipe path because it restages the deletions, and that this one call deliberately omits `text=True` because `input` has to be bytes for a NUL-delimited pathspec.
+- [x] Document the return contract in the docstring's Returns block: `errors` stays `[]` on a refusal, `refused` is the sole discriminator against a git failure, and `missing` / `deleted_paths` carry the detail.
+- [x] No `config/settings.py` docstring work — the revision dropped both fields.
 
 ## Success Criteria
 
-- [ ] On a worktree missing a directory tracked at HEAD **with no other uncommitted work**, `preserve_uncommitted_worktree_changes` writes no commit and no ref, leaves the branch head unmoved, and returns `{"preserved": False, "refused": "missing-tracked-dirs", ...}`.
-- [ ] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
-- [ ] That commit carries a **trailer** recording the refusal (`Auto-preserve declined deletions (#3167)`, `Missing-tracked-dirs:`, `Declined-deletions:`) with the subject line byte-identical to an ordinary preserve, so the durable artifact records the refusal and not only the rotating log.
-- [ ] `errors` is `[]` on both wipe branches and `refused` is the sole discriminator: on a git failure `errors` is truthy and `refused` is absent. Both directions asserted in one test.
-- [ ] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
-- [ ] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
-- [ ] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
-- [ ] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
-- [ ] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:1090`) and `remove_worktree` (`:1880`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
-- [ ] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
-- [ ] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts.
-- [ ] **Failure handling is asymmetric.** A failure of the *detection* read (`ls-tree`, block A) logs WARNING under `[worktree-wip-guard-failed]` and falls through to today's `git add -A` behavior. A failure of the *response* reads (`reset` / `ls-files`, block B, reached only after HEAD has proven a directory missing) logs WARNING under `[worktree-wip-guard-failed]` **and** ERROR under `[worktree-wip-refused-wipe]`, returns the pure-wipe dict, and **leaves the branch head unmoved** — it never falls through to `git add -A`. Asserted by patching each read independently.
-- [ ] The change adds no settings field and no env key.
-- [ ] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
-- [ ] Documentation updated (`/do-docs`), including the `refs/stash` correction in `docs/features/session-isolation.md`.
-- [ ] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
-- [ ] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
+- [x] On a worktree missing a directory tracked at HEAD **with no other uncommitted work**, `preserve_uncommitted_worktree_changes` writes no commit and no ref, leaves the branch head unmoved, and returns `{"preserved": False, "refused": "missing-tracked-dirs", ...}`.
+- [x] On the same worktree **with coexisting edits or new files**, it commits exactly those paths — the resulting commit's diff against its parent has zero deletions — and returns `preserved: True` alongside the `refused` key. The removed directory is still tracked at the new HEAD.
+- [x] That commit carries a **trailer** recording the refusal (`Auto-preserve declined deletions (#3167)`, `Missing-tracked-dirs:`, `Declined-deletions:`) with the subject line byte-identical to an ordinary preserve, so the durable artifact records the refusal and not only the rotating log.
+- [x] `errors` is `[]` on both wipe branches and `refused` is the sole discriminator: on a git failure `errors` is truthy and `refused` is absent. Both directions asserted in one test.
+- [x] Detection survives a partially-staged wipe: calling `git add -A` before preserve does not blind it (the signal reads HEAD, not the index).
+- [x] It still preserves every legitimately dirty tree the existing suite covers — tracked edits, staged edits, untracked-only — through the unchanged `git add -A` path, and still commits deletions made *inside* a surviving directory.
+- [x] After the pure-wipe case the index carries **no staged deletions** (`git diff --cached --diff-filter=D --name-only HEAD` empty), proving both that the check runs before staging and that the wipe path's `reset -q` cleared anything a previous pass staged. (This replaces the earlier "index unmodified" criterion, which the `reset -q` deliberately falsifies.)
+- [x] A wipe whose real work was **already staged by a previous pass** is still preserved: with `git add -A` run before preserve, the additive commit still carries the edit and the new file and still has zero deletions.
+- [x] Both live producers are covered by the one change: `_cleanup_stale_worktree` (`:1090`) and `remove_worktree` (`:1880`). `reap_idle_worktree` is untouched and `TestReapIdleWorktree` stays green.
+- [x] `refs/session-wip/{slug}` names the branch the WIP commit actually landed on, falling back to the `slug` argument on detached HEAD — never `refs/session-wip/HEAD`.
+- [x] A wipe response logs at ERROR under `[worktree-wip-refused-wipe]` with slug, branch, worktree HEAD sha, sorted missing directory names, and preserved/deleted path counts.
+- [x] **Failure handling is asymmetric.** A failure of the *detection* read (`ls-tree`, block A) logs WARNING under `[worktree-wip-guard-failed]` and falls through to today's `git add -A` behavior. A failure of the *response* reads (`reset` / `ls-files`, block B, reached only after HEAD has proven a directory missing) logs WARNING under `[worktree-wip-guard-failed]` **and** ERROR under `[worktree-wip-refused-wipe]`, returns the pure-wipe dict, and **leaves the branch head unmoved** — it never falls through to `git add -A`. Asserted by patching each read independently.
+- [x] The change adds no settings field and no env key.
+- [x] Tests pass (`/do-test` — `scripts/pytest-clean.sh tests/unit/worktree_manager/`)
+- [x] Documentation updated (`/do-docs`), including the `refs/stash` correction in `docs/features/session-isolation.md`.
+- [x] No agent integration wiring needed — asserted by the absence of a new `[project.scripts]` entry in the diff.
+- [x] No xfail conversions required — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/worktree_manager/` returns nothing, so this bug has no expected-failure marker to convert.
 
 ## Team Orchestration
 
@@ -696,24 +696,24 @@ Every row is read the same way: **the command must exit 0.** Anti-criteria are w
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit 0 |
-| Lint clean | `python -m ruff check .` | exit 0 |
-| Format clean | `python -m ruff format --check .` | exit 0 |
-| Refusal tag exists in the producer | `grep -q 'worktree-wip-refused-wipe' agent/worktree_manager.py` | exit 0 |
-| Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit 0 |
-| Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit 0 |
-| Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit 0 |
-| Additive staging reads stdin, not a temp file | `grep -q -- '--pathspec-from-file=-' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — no temp file on the wipe path | `! grep -qE 'tempfile\|NamedTemporaryFile\|mkstemp' agent/worktree_manager.py` | exit 0 |
-| Refusal trailer is emitted | `grep -q 'Auto-preserve declined deletions' agent/worktree_manager.py` | exit 0 |
-| Fail-open asymmetry is tested | `grep -q 'def test_ls_files_failure_after_detection_refuses_and_never_commits' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_guard_detection_failure_falls_open_and_warns' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
-| Wipe path resets the index before computing candidates | `grep -q '"reset", "-q"' agent/worktree_manager.py` | exit 0 |
-| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pure_wipe_carries_no_staged_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit 0 |
-| Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit 0 |
-| Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit 0 |
-| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `test -z "$(git diff --name-only origin/main...HEAD -- bridge/ monitoring/)"` | exit 0 |
-| No stale xfails in scope | `! grep -rq 'xfail' tests/unit/worktree_manager/` | exit 0 |
+| Worktree-manager tests pass | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Refusal tag exists in the producer | `grep -q 'worktree-wip-refused-wipe' agent/worktree_manager.py` | exit code 0 |
+| Fail-open tag exists | `grep -q 'worktree-wip-guard-failed' agent/worktree_manager.py` | exit code 0 |
+| Structural signal is `ls-tree -d HEAD`, not a hardcoded list | `grep -q 'ls-tree --name-only -d HEAD' agent/worktree_manager.py` | exit code 0 |
+| Additive staging uses the correct NUL flag | `grep -q -- '--pathspec-file-nul' agent/worktree_manager.py` | exit code 0 |
+| Additive staging reads stdin, not a temp file | `grep -q -- '--pathspec-from-file=-' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — no temp file on the wipe path | `! grep -qE 'tempfile\|NamedTemporaryFile\|mkstemp' agent/worktree_manager.py` | exit code 0 |
+| Refusal trailer is emitted | `grep -q 'Auto-preserve declined deletions' agent/worktree_manager.py` | exit code 0 |
+| Fail-open asymmetry is tested | `grep -q 'def test_ls_files_failure_after_detection_refuses_and_never_commits' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_guard_detection_failure_falls_open_and_warns' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit code 0 |
+| Wipe path resets the index before computing candidates | `grep -q '"reset", "-q"' agent/worktree_manager.py` | exit code 0 |
+| Regression tests exist | `grep -q 'def test_pure_wipe_writes_no_commit_and_no_ref' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_mixed_wipe_preserves_additions_and_drops_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_partially_staged_wipe_still_detected' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pure_wipe_carries_no_staged_deletions' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py && grep -q 'def test_pre_staged_wipe_is_unstaged_and_additive_work_still_preserved' tests/unit/worktree_manager/test_worktree_manager_uncommitted.py` | exit code 0 |
+| Anti-criterion — no hardcoded top-level directory list | `! grep -qE '\["?(tests\|bridge\|agent\|config)/?"?,' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — the rejected insertions-ratio predicate is absent | `! grep -qE -- '--(numstat\|shortstat)' agent/worktree_manager.py` | exit code 0 |
+| Anti-criterion — the dropped tunables were not reintroduced | `! grep -qE 'wipe_refusal_(min_deleted_files\|deleted_fraction)' config/settings.py` | exit code 0 |
+| Anti-criterion (#3166 No-Go) — no bridge/watchdog code in the diff | `test -z "$(git diff --name-only origin/main...HEAD -- bridge/ monitoring/)"` | exit code 0 |
+| No stale xfails in scope | `! grep -rq 'xfail' tests/unit/worktree_manager/` | exit code 0 |
 
 The `"reset", "-q"` row was mutation-checked in the concern-closing pass, after round 3 found its first form (`grep -q 'reset'`) vacuous — that pattern exits 0 against unmodified `origin/main`, matching the producer docstring's ``git reset --soft HEAD~1`` at line 1662, so it would have certified a build that never added the reset. Re-verified both directions: `grep -q '"reset", "-q"'` exits **1** against `git show origin/main:agent/worktree_manager.py` and exits **0** against a seeded file carrying the argv form, so it bites.
 
