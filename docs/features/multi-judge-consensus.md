@@ -77,7 +77,7 @@ from agent.sdlc_review_consensus import compute_consensus
 
 # Parent skill flow — single record_verdict call writes scalar + side-fields:
 judges = [judge_a_dict, judge_b_dict]
-agg = compute_consensus(judges, rule="any-blocker-wins")
+agg = compute_consensus(judges, rule="any-blocker-wins", expected_judges=2)
 record_verdict(
     session,
     "REVIEW",
@@ -110,6 +110,13 @@ whose changed files are all docs (`docs/**`, `**/*.md`) or all lockfile sync
 (`uv.lock` / `pyproject.toml` only) force the legacy single-judge path. It is
 automatic and per-PR, which is what makes it the right shape for this — cost
 scales with what a PR actually is, not with what someone remembered to export.
+This path is unaffected by the quorum floor below: it is inline prose (the
+"Cost containment" bullet in `docs/sdlc/do-pr-review.md`'s Multi-Judge
+Consensus section, not a script — there is no shape classifier module)
+applied by the executing agent, and it never calls
+`compute_consensus` at all. It posts one judge's verdict directly, with no
+`judges`/`consensus` kwargs on `record_verdict` and no `judges_run` in its
+OUTCOME, so the floor has nothing to trip on that path.
 
 ## Consensus rules
 
@@ -133,6 +140,65 @@ judges ran", never "how many must agree", and there is no K to tune.
 The `_consensus.tied` flag is `true` when judges disagreed (i.e. at least
 one judge approved AND at least one blocked). It is descriptive — the
 verdict is already conservative under either rule.
+
+## Quorum floor (issue #3197)
+
+`compute_consensus` optionally accepts a keyword-only `expected_judges: int
+| None`, the size of the **mandatory declared roster** — today `2`
+(`code-quality`, `risk`) — and never the number of judges dispatched. The
+review skill passes `expected_judges=2`, derived from the same roster list
+it just iterated to dispatch, never a second hardcoded literal
+(`docs/sdlc/do-pr-review.md`'s Multi-Judge Consensus section).
+
+When fewer distinct judges report than the floor, `compute_consensus`
+refuses to run the rule and returns the conservative `CHANGES REQUESTED`
+outcome instead — the same outcome the zero-judge case already used,
+generalized into one shared builder (`_conservative_outcome`; there is no
+second builder and no orphaned `_empty_conservative_outcome` name). The
+consensus metadata carries two additive keys so the shortfall is recorded
+rather than merely inferable from `k`/`n`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `expected_n` | `int \| None` | The declared roster size the caller asserted, verbatim. `None` when the caller declared no expectation (every pre-#3197 call site). |
+| `quorum_shortfall` | `bool` | Always present. `True` iff `expected_n is not None and n < expected_n`. |
+
+**Optional judges are excluded by construction.** The cross-vendor judge
+(issue #1626) is designed to skip under normal operation — gate off,
+trivial diff, API failure. A skip means the parent appends nothing, so `n`
+legitimately sits at the mandatory roster size; that must satisfy the
+floor, not trip it. A cross-vendor *return* raises `n` above the floor and
+must not be penalized either. Both directions are tested in
+`tests/unit/test_review_multi_judge.py::TestComputeConsensusQuorumFloor`
+and `tests/unit/test_cross_vendor_orchestration.py`.
+
+**The guard's limit, stated plainly:** it compares cardinality only, never
+membership. `n < expected_judges` counts distinct `judge_id`s and never
+checks them against the declared roster's contents — a misnamed,
+substituted, or optional judge id satisfies the floor identically to a
+mandatory one. A shortfall proves under-reporting; a satisfied floor does
+not prove the declared roster specifically ran. Closing that gap would
+mean passing roster membership into the function, which moves roster
+ownership out of the caller and is deliberately out of scope.
+
+**A shortfall does not get a distinct verdict token.** It stays
+`CHANGES REQUESTED`, which routes the lane to `/do-patch` and re-dispatches
+the full roster at the next round — self-healing when the cause is
+transient. The cause actually observed (judges failing to spawn) can also
+be persistent, in which case `/do-patch` has no code defect to act on and
+the lane cycles REVIEW ⇄ `/do-patch` until the pipeline's round cap stops
+it. **`quorum_shortfall: true` recurring across consecutive REVIEW rounds
+on the same PR is the signature of a persistent judge-dispatch failure and
+warrants human escalation**, as distinct from a single-round shortfall the
+next round clears. That recurrence is not readable from a single
+`sdlc-tool verdict get` call — `record_verdict` overwrites
+`_verdicts["REVIEW"]` on every write (`tools/sdlc_verdict.py`'s `_apply`
+closure does `verdicts[stage] = record`), so the verdict record answers for
+the current round alone. The surface that actually accumulates is the run
+of aggregate `## Review:` PR comments, one posted per round (see
+[PR-comment ordering invariant](#pr-comment-ordering-invariant) below),
+each naming its own shortfall — that is where the across-rounds evidence
+lives.
 
 ## PR-comment ordering invariant
 
@@ -160,6 +226,12 @@ When multi-judge runs, the OUTCOME block records:
 
 These let operators grep session state for cost (judges-per-PR) and signal
 quality (disagreement rate) without a dedicated dashboard.
+
+On a quorum shortfall (see [Quorum floor](#quorum-floor-issue-3197) above),
+the artifacts instead carry `judges_run` and `quorum_shortfall: true`, and
+**omit `consensus_disagreement`** — that field derives from `tied`, which is
+only meaningful once the rule ran over a full roster, and the rule never
+runs on a shortfall.
 
 ## Back-compat
 

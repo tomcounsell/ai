@@ -245,13 +245,32 @@ expect:
 - The aggregate verdict is derived by `agent.sdlc_review_consensus.compute_consensus`
   with `rule="any-blocker-wins"` — any judge raising a blocker forces
   `CHANGES_REQUESTED`.
+- The parent passes `expected_judges=2` — the size of the mandatory declared
+  roster above, derived from the roster it just dispatched rather than from a
+  second hardcoded literal. Optional judges (the cross-vendor judge) are never
+  counted toward `expected_judges`: an optional judge that returns can only
+  raise `n` above the floor, and one that skips leaves the floor exactly where
+  it was. When fewer distinct judges report than `expected_judges`,
+  `compute_consensus` refuses `APPROVED` and returns `CHANGES REQUESTED` with
+  `quorum_shortfall: true` in the consensus metadata — a degraded single-judge
+  run is recorded as a shortfall, never read back as agreement. The aggregate
+  `## Review:` comment must state the shortfall explicitly rather than posting
+  a bare `CHANGES REQUESTED`.
 - The OUTCOME block includes `judges_run` (int) and `consensus_disagreement` (bool)
-  side-fields when multi-judge runs.
+  side-fields when multi-judge runs. On a `quorum_shortfall`, the artifacts
+  instead carry `judges_run` and `quorum_shortfall: true`, and omit
+  `consensus_disagreement` — that field derives from `tied`, which is only
+  meaningful once the rule has run over a full roster, and the rule never ran
+  on a shortfall. The `notes` field names the degraded run in its first
+  clause (e.g. "1 of 2 judges reported").
 - Cost containment: trivial PRs force the legacy single-judge path. A PR is
   trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
   docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
   `pyproject.toml` only). This is the only cost control on this surface, and
-  it needs no operator action.
+  it needs no operator action. This path never calls `compute_consensus` at
+  all — it posts one judge's verdict directly, with no `judges`/`consensus`
+  kwargs on `record_verdict` and no `judges_run` in its OUTCOME — so the
+  quorum floor above does not apply to it and needs no exemption.
 
 Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-consensus.md).
 

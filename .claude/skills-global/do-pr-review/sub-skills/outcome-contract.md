@@ -68,6 +68,18 @@ consumers into thinking multi-judge ran).
 <!-- OUTCOME {"status":"partial","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1,"judges_run":2,"consensus_disagreement":false},"notes":"Changes requested via 2-of-2 consensus: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
 ```
 
+**Multi-judge quorum shortfall (CHANGES_REQUESTED — fewer distinct judges reported than the declared roster):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","judges_run":1,"quorum_shortfall":true},"notes":"Quorum shortfall: 1 of 2 declared judges reported (risk did not return). Not read as consensus.","failure_reason":"quorum_shortfall — declared roster of 2 fell short, rule did not run","next_skill":"/do-patch"} -->
+```
+On a shortfall, `artifacts` carries `judges_run` and `quorum_shortfall: true`
+and **omits `consensus_disagreement`** — that field derives from `tied`,
+which is only meaningful once the rule has run over a full roster, and the
+rule never runs on a shortfall; reporting `false` would reproduce the exact
+"the judges agreed" misreading this variant exists to avoid. The `notes`
+field names the degraded run in its first clause so a human reading the
+transcript sees the shortfall, not an ordinary rejection.
+
 ## Multi-judge & cross-vendor consensus (optional, only if the context file declares it)
 
 The generic baseline is a **single reviewer**: you evaluate the diff, classify
