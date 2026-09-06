@@ -491,3 +491,42 @@ class TestClearOrphanedWarnStateKey:
         fn, description = MIGRATIONS["clear_orphaned_warn_state_key"]
         assert fn is _migrate_clear_orphaned_warn_state_key
         assert description
+
+
+class TestClearDocsAuditLivenessKeys:
+    """One-shot sweep of the two orphaned ``docs_audit:last_completed_run_*``
+    Redis keys left by the deleted docs-auditor liveness channel (issue #2743).
+
+    Real Popoto/Redis against the test db (autouse ``redis_test_db``). The two
+    key strings are hard-coded in the migration itself since the constants
+    that named them are deleted, so this test hard-codes them too.
+    """
+
+    _TS_KEY = "docs_audit:last_completed_run_ts"
+    _SUMMARY_KEY = "docs_audit:last_completed_run_summary"
+
+    def test_deletes_both_orphaned_keys(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        POPOTO_REDIS_DB.set(self._TS_KEY, "1234567890.0")
+        POPOTO_REDIS_DB.set(self._SUMMARY_KEY, '{"status": "ok"}')
+
+        assert _migrate_clear_docs_audit_liveness_keys(tmp_path) is None
+
+        assert POPOTO_REDIS_DB.exists(self._TS_KEY) == 0
+        assert POPOTO_REDIS_DB.exists(self._SUMMARY_KEY) == 0
+
+    def test_no_op_and_no_error_when_keys_are_already_absent(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        POPOTO_REDIS_DB.delete(self._TS_KEY, self._SUMMARY_KEY)
+
+        assert _migrate_clear_docs_audit_liveness_keys(tmp_path) is None
+
+    def test_registered_in_migrations_dict(self):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        assert "clear_docs_audit_liveness_keys" in MIGRATIONS
+        fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
+        assert fn is _migrate_clear_docs_audit_liveness_keys
+        assert description

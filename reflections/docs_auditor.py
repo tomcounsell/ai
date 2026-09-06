@@ -129,12 +129,10 @@ _RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure
 # automation here runs `gh pr edit`.
 WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
 
-# Redis key namespace for state/locks/liveness.
+# Redis key namespace for state/locks.
 REDIS_LAST_RUN_HASH = "docs_audit:last_run"
 REDIS_RUNNING_KEY = "docs_audit:running:global"
 REDIS_SWEEPER_RUNNING_KEY = "docs_audit:sweeper:running"
-REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
-REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
 REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
 
@@ -2150,47 +2148,6 @@ def _push_branch_and_pr(
     return url
 
 
-def _write_liveness(
-    slug: str,
-    status: str,
-    pr_url: str | None,
-    files_touched: int,
-    vault_narratives_compared: int | None = None,
-    fixes_withheld: int = 0,
-) -> None:
-    """Persist liveness signals for PM monitoring (Phase 2).
-
-    ``vault_narratives_compared`` is emitted into the summary only when not None
-    (i.e. only from the rotation call site that actually ran the vault drift
-    comparison), so "detector ran, found zero drift" is distinguishable from
-    "narrative→page mapping is silently empty/broken".
-
-    ``fixes_withheld`` is emitted only when non-zero, mirroring the same pattern.
-    This is the only durable, queryable surface the rotation produces — the
-    scheduler consumes just ``projects`` from a function reflection's return, so
-    without this a withheld run would be byte-identical to a clean one in Redis.
-    Both extras are keyword params with defaults, so the positional 4-arg/5-arg
-    call contract asserted by ``TestWriteLivenessVaultParam`` is unchanged.
-    """
-    try:
-        r = _get_redis()
-        ts = time.time()
-        r.set(REDIS_LAST_COMPLETED_TS_KEY, str(ts))
-        summary = {
-            "slug": slug,
-            "pr_url": pr_url,
-            "files_touched": files_touched,
-            "status": status,
-        }
-        if vault_narratives_compared is not None:
-            summary["vault_narratives_compared"] = vault_narratives_compared
-        if fixes_withheld:
-            summary["fixes_withheld"] = fixes_withheld
-        r.set(REDIS_LAST_COMPLETED_SUMMARY_KEY, json.dumps(summary))
-    except Exception as e:
-        logger.warning(f"docs_auditor: liveness write failed: {e}")
-
-
 def _update_rotation_hash(project_key: str, paths: list[str]) -> None:
     """Stamp rotation hash with current timestamp for each touched path."""
     try:
@@ -2415,8 +2372,7 @@ def run_docs_auditor() -> dict:
       8. Memory refresh hook (fire-and-forget)
       9. Telegram notification
       10. Update rotation hash
-      11. Liveness signal
-      12. Lock release (try/finally)
+      11. Lock release (try/finally)
     """
     findings: list[str] = []
 
@@ -2447,7 +2403,6 @@ def run_docs_auditor() -> dict:
         # the failure path below, which knows it caused the dirt — this guard,
         # which cannot know, stays quiet (Q4 item 5).
         if _git_dirty(PROJECT_ROOT):
-            _write_liveness("(dirty)", "skipped", None, 0)
             return {
                 "status": "skipped",
                 "findings": ["docs-auditor skipped: working tree dirty"],
@@ -2462,7 +2417,6 @@ def run_docs_auditor() -> dict:
         # 4. Rotation pick
         primary, _last_run = _select_primary_doc(PROJECT_ROOT, project_key)
         if primary is None:
-            _write_liveness("(no-candidates)", "skipped", None, 0)
             return {
                 "status": "skipped",
                 "findings": ["No candidate docs found"],
@@ -2490,7 +2444,6 @@ def run_docs_auditor() -> dict:
         if guard_reason is not None:
             logger.info(f"docs_auditor: {guard_reason}, skipping before any write")
             _update_rotation_hash(project_key, [str(primary)])
-            _write_liveness(slug, "skipped", None, 0, fixes_withheld=0)
             return {
                 "status": "skipped",
                 "findings": [f"docs-auditor skipped: {guard_reason}"],
@@ -2511,8 +2464,7 @@ def run_docs_auditor() -> dict:
         # review before the PR opens — every rotation PR still requires a human
         # merge, but the withheld count must reach every surface this function
         # produces so the human reviewing it sees it, not just a log line:
-        # findings, summary, Telegram, the PR body, and the Redis liveness
-        # summary, which is the only durable queryable one.
+        # findings, the returned summary, Telegram, and the PR body.
         # Telegram has two mutually exclusive senders, and a run can also reach
         # neither. Three cases: files were touched — step 9 sends the pass
         # summary; nothing was touched but fixes were withheld — the zero-diff
@@ -2570,7 +2522,6 @@ def run_docs_auditor() -> dict:
         # 6. Zero-diff gate
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
-            _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
             # Initialized unconditionally (mirroring withheld_note above): the
             # summary f-string below interpolates this on every zero-diff
             # return, including the clean path where the notify call never
@@ -2689,18 +2640,6 @@ def run_docs_auditor() -> dict:
         # 10. Update rotation hash for all touched files
         _update_rotation_hash(project_key, files_touched)
 
-        # 11. Liveness signal (threads the vault-drift compared count — the only
-        # call site that ran the vault comparison; the other 3 stay 4-arg — plus
-        # the withheld count, so Redis distinguishes a withheld run from a clean one).
-        _write_liveness(
-            slug,
-            "ok",
-            pr_url,
-            len(files_touched),
-            vault_narratives_compared,
-            fixes_withheld=fixes_withheld,
-        )
-
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
         )
@@ -2720,7 +2659,7 @@ def run_docs_auditor() -> dict:
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
                 f"{result.get('fixes_applied', 0)} fixes{withheld_note}{suppressed_note}, "
-                f"PR={pr_url}"
+                f"PR={pr_url}; vault {vault_narratives_compared} narratives compared"
             ),
         }
 
@@ -2732,7 +2671,7 @@ def run_docs_auditor() -> dict:
             "summary": f"docs-auditor error: {e}",
         }
     finally:
-        # 12. Lock release
+        # 11. Lock release
         _release_lock(REDIS_RUNNING_KEY)
 
 
