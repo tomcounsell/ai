@@ -783,12 +783,9 @@ scheduler itself runs inside the standalone `python -m reflections`
 subprocess (`reflections/__main__.py`), supervised by its own launchd service
 (`com.valor.reflection-worker`) — a separate process from the bridge and
 worker. `./scripts/valor-service.sh restart` cycles only the bridge, worker,
-and web UI; it does not touch the reflection worker. A machine picks up a
-change to this module on its next `/update`, which unconditionally reinstalls
-the reflection-worker service (`scripts/install_reflection_worker.sh`
-bootouts and re-bootstraps the launchd job) after the worker restart. Until
-that install runs, the standing reflection-worker process keeps executing
-the pre-change module code.
+and web UI; it does not touch the reflection worker. The standing
+reflection-worker process keeps executing the pre-change module code until
+that service is reinstalled or restarted.
 
 ## Operational Cheatsheet
 
