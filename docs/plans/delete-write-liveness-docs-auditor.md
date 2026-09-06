@@ -7,7 +7,7 @@ created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2743
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-06T07:43:49Z
+revision_applied_at: 2026-09-06T08:11:34Z
 ---
 
 # Delete `_write_liveness` from `docs_auditor`
@@ -315,9 +315,13 @@ truncates `output_summary` to 500 characters. A worst-realistic created-PR summa
 files, 137 fixes, withheld note present, Telegram suppressed with the full repo path, a
 real six-digit PR URL) measures **195 characters**, and **227** with the 32-character
 vault clause appended — roughly 273 characters of headroom. The clause therefore stays at
-the end of the string, and there is no reordering fallback. Re-measure once during the
-build to confirm the number, then move on; do not introduce a conditional reorder branch
-that no test would ever exercise. See Risk 1.
+the end of the string, and there is no reordering fallback. The build pins the budget
+with a permanent test rather than a one-off measurement.
+`test_worst_case_summary_stays_under_truncation_budget` drives the created-PR path with a
+worst-case payload and asserts both that the vault clause survives and that
+`len(result["summary"]) < 500`. It is mandated in `## Test Impact`, in task 2 of
+`## Step by Step Tasks`, and by the `Truncation budget pinned` row of `## Verification`.
+Do not introduce a conditional reorder branch that no test would ever exercise. See Risk 1.
 
 **2. Deletion order.** Delete the five call sites first, then the function, then the
 constants. `ruff check` after each step turns the orphaned `vault_narratives_compared`
@@ -385,7 +389,7 @@ was written before #2782 and #2739 added the rest.
       function, so its coverage obligation disappears rather than needing a new test. No
       handler is added by this work.
 - [ ] Confirm no other `except` block in `run_docs_auditor` changes behavior. The outer
-      `except Exception` at `:2726` converts any raise into `{"status": "error"}`; the
+      `except Exception` at `:2727` converts any raise into `{"status": "error"}`; the
       summary-string change must not be able to raise. Assert this: the new clause
       interpolates an `int | None` into an f-string, which cannot raise, but a test that
       drives the created-PR path with `_run_vault_drift_detection` returning `0` and
@@ -411,7 +415,7 @@ was written before #2782 and #2739 added the rest.
       by `{% if r.last_run_summary and r.last_run_summary.output_summary %}`
       (`modal_content.html:59`), so a missing summary renders nothing rather than erroring.
       No change needed; verify the guard is untouched.
-- [ ] The `"error"` return path (`:2726`) carries its own summary and is unaffected by
+- [ ] The `"error"` return path (`:2727`) carries its own summary and is unaffected by
       this work. Confirm by test that an exception inside the rotation still produces a
       summary string the scheduler can forward.
 
@@ -455,6 +459,17 @@ All in `tests/unit/test_docs_auditor_substrate.py`, with one exception noted at 
       compared`; (2) absent on the zero-diff and no-candidates paths, asserting `"vault"`
       does not appear in either summary. There is no `None`-valued case: the detector is
       `-> int` on every path.
+- [ ] **NEW** `test_worst_case_summary_stays_under_truncation_budget`, which pins Risk 1's
+      truncation budget permanently instead of leaving it to a one-time measurement. Drive
+      `run_docs_auditor()` down the created-PR path with a mocked `audit()` result carrying
+      42 `files_touched` entries, `fixes_applied=137`, a non-zero `fixes_withheld` so
+      `withheld_note` populates, a Telegram-suppression path so `suppressed_note`
+      populates, and a six-digit `pr_url`; then assert `len(result["summary"]) < 500` and
+      `"narratives compared" in result["summary"]`. Reuse the `TestHoistedPRGuards` and
+      `TestStep9Suppression` fixture shapes already in this file rather than rebuilding the
+      f-string by hand, so the test exercises the real code path Risk 1 protects. The
+      function name is load-bearing: the `Truncation budget pinned` Verification row greps
+      for it.
 - [ ] `TestStep9Suppression::test_step9_suppression_reaches_summary_before_pr_url`
       (`:1762`, assertion at `:1787`, patch at `:1781`). **UPDATE**: drop the
       `_write_liveness` patch line only. Its ordering invariant
@@ -573,7 +588,8 @@ idempotent.
 
 The opposite window exists too and is equally benign. `/update` runs migrations at Step 3.6
 — "after git pull, before service restart" (`scripts/update/run.py:1629`) — while the
-worker restart happens later in the same run (`:1925` onward). A rotation pass firing
+worker restart happens later in the same run (Step 5 "Service management" at `:2245`,
+with `service.install_worker` at `:2311`). A rotation pass firing
 between those two points executes still-loaded pre-deletion code and can repopulate both
 Redis keys *after* the one-shot sweep has already recorded itself permanently complete,
 since `run_pending_migrations` treats a `None` return as done. This is the same cosmetic
@@ -720,7 +736,7 @@ No agent integration required. This removes an internal function and its Redis w
 
 - [ ] `reflections/docs_auditor.py:132`: the `# Redis key namespace for state/locks/
       liveness.` comment loses its "liveness" clause with the constants.
-- [ ] `reflections/docs_auditor.py:2688-2691`: the "11. Liveness signal" step comment
+- [ ] `reflections/docs_auditor.py:2692-2694`: the "11. Liveness signal" step comment
       above the created-PR call site is deleted with the call, but its explanation of why
       the vault count is threaded from this one site belongs on the new summary clause.
 - [ ] `tests/unit/test_docs_auditor_substrate.py:1322-1328`, `:1960`: class docstring and
@@ -837,6 +853,12 @@ confirm the deletion is total.
   contains `vault 0 narratives compared`); **absent** on the zero-diff and no-candidates
   paths (`"vault"` appears in neither summary). There is no `None`-valued case to test —
   the detector is `-> int` on every path (`:2370`, `:2384-2385`, `:2398`, `:2401`).
+- Add `test_worst_case_summary_stays_under_truncation_budget`, the budget test Risk 1
+  mandates: drive the created-PR path with 42 `files_touched`, `fixes_applied=137`, a
+  non-zero `fixes_withheld`, a suppressed Telegram notification, and a six-digit `pr_url`,
+  then assert `len(result["summary"]) < 500` and `"narratives compared" in
+  result["summary"]`. Use that exact function name; the `Truncation budget pinned`
+  Verification row greps for it.
 - Run `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py`.
 
 ### 3. Add the orphaned-key migration
@@ -932,6 +954,7 @@ Demonstrate the end-to-end claim once instead of assuming it:
 | Deletion guard exists | `grep -c 'class TestLivenessDeadCodeRemoved' tests/unit/test_docs_auditor_substrate.py` | `1` |
 | Vault count rehomed | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | `> 0` |
 | Clause is unconditional | `grep -n 'vault_narratives_compared is not None' reflections/docs_auditor.py \| wc -l` | `0` |
+| Truncation budget pinned | `grep -c 'def test_worst_case_summary_stays_under_truncation_budget' tests/unit/test_docs_auditor_substrate.py` | `1` |
 | Withheld count still asserted behaviorally | `grep -c 'fix(es) withheld" in result\["summary"\]' tests/unit/test_docs_auditor_substrate.py` | `> 0` |
 | Docs clean (literal symbols) | `grep -rn '_write_liveness\|last_completed_run' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| wc -l` | `0` |
 | Docs clean (bare word) | `grep -rni 'liveness' docs/features/docs-auditor.md docs/features/vault-drift-audit.md \| grep -v 'TestLivenessDeadCodeRemoved' \| wc -l` | `0` |
@@ -1069,3 +1092,54 @@ only one arithmetically consistent with the 227-character measurement including 
 | CONCERN | Scope & Value | Risk 1's mitigation orders a permanent regression test — "Pin the budget with one test that builds a worst-case created-PR summary and asserts both that the vault clause survives and that the length stays under 500" — but no section a builder executes from repeats it. `## Technical Approach` item 1 says "Re-measure once during the build to confirm the number, then move on"; task 1 says only to record the number in the PR description; `## Test Impact` and the `## Verification` table contain no length assertion. This is the round-2 defect shape (a mandate landing in prose but not in the task list) recurring in a different section. It is a CONCERN rather than a BLOCKER because nothing here produces wrong code and no check becomes unsatisfiable: Technical Approach item 1 ends with "See Risk 1", so the pointer to the mandate does exist, and a builder following both sections writes the test, re-measures, and adds no reorder branch. | **Accepted on the record.** The concern re-critique bound is exhausted, so this does not gate the build. The builder should write the test; if it is skipped, the risk is a lost regression guard, not an incorrect change — the measured headroom is roughly 273 characters against a 500-character budget. | Add one bullet to task 2 beside the two vault-clause test bullets: drive `run_docs_auditor()` down the created-PR path with a mocked `audit()` result carrying 42 `files_touched` entries, `fixes_applied=137`, a non-zero `fixes_withheld` so `withheld_note` populates, a Telegram-suppression path so `suppressed_note` populates, and a six-digit `pr_url`; then assert `len(result["summary"]) < 500` and `"narratives compared" in result["summary"]`. Reuse the `TestHoistedPRGuards` / `TestStep9Suppression` fixture shapes already in the file rather than rebuilding the f-string by hand, so the test exercises the real code path Risk 1 protects. |
 | NIT | Risk & Robustness, History & Consistency | The round-2 narrative paragraph in this section states the worst-case created-PR summary "holds (196 characters worst-case, 227 with the clause)", while `## Technical Approach` item 1, `## Risk 1`, and `## Success Criteria` all state 195. Only 195 is arithmetically consistent with the 227 figure and the 32-character clause. The disagreement lives entirely in the historical record and changes no pass/fail outcome. | **Corrected above.** The "One correction to the round-2 record" paragraph names 195 as authoritative; the three instructive sections were already correct and are untouched. | |
 | NIT | Structural check | Three file:line citations are off by a few lines, though each names its target unambiguously in prose so a builder locating by symbol still finds it. The `## Documentation` "Inline Documentation" bullet cites `reflections/docs_auditor.py:2688-2691` for the "11. Liveness signal" step comment, which actually sits at `:2692-2694` (`:2689-2690` is the "10. Update rotation hash" step). `## Failure Path Test Strategy` cites the outer `except Exception` at `:2726` twice; it is at `:2727` and `:2726` is blank. `## Race Conditions` cites `scripts/update/run.py:1925` as the worker restart, but that line is the Step 4.5 Telegram auth check — service management is Step 5 at `:2245-2246`. The section's argument (migrations at Step 3.6 precede the restart) is unaffected and correct. | **Accepted on the record.** Cosmetic; each artifact is named by its text and locatable by symbol. | |
+
+**Round-3 disposition (revision pass).** All three round-3 findings are closed in the plan
+text. Nothing else moved: no section restructured, no closed row reopened, no scope added.
+
+- **CONCERN (Risk 1's budget mandate lands in prose but in no executable section)** —
+  closed. The mandate now appears in all three places a builder executes from.
+  `## Test Impact` carries a **NEW** bullet naming
+  `test_worst_case_summary_stays_under_truncation_budget`, with its worst-case payload (42
+  `files_touched`, `fixes_applied=137`, non-zero `fixes_withheld`, suppressed Telegram
+  path, six-digit `pr_url`) and its two assertions. Task 2 of `## Step by Step Tasks`
+  repeats it as a bullet beside the two vault-clause test bullets and pins the exact
+  function name. `## Verification` gains a `Truncation budget pinned` row,
+  `grep -c 'def test_worst_case_summary_stays_under_truncation_budget' tests/unit/test_docs_auditor_substrate.py`
+  expecting `1`. That row is satisfiable by construction because task 2 orders that exact
+  name written, and its `grep -c` form is legitimate here: the hazard that forces `wc -l`
+  on the deletion rows is `grep -c` exiting 1 on a zero count, which a
+  non-zero-expectation row never hits. Measured on the current tree the row returns `0`,
+  and it reaches `1` only by the builder writing the mandated test. `## Technical
+  Approach` item 1 no longer ends with "re-measure once, then move on"; it names the
+  permanent test and its three homes.
+- **NIT (196 vs 195 in the round-2 narrative)** — closed. Round 3's rewrite of this
+  section had already replaced the round-2 narrative wholesale, so no assertion of 196
+  survives anywhere in the plan; re-verified by grep across the whole document. The only
+  remaining occurrences of that figure are the "One correction to the round-2 record"
+  paragraph, which names **195** as authoritative, and the NIT row above, which quotes the
+  superseded wording as the finding itself. The three instructive sections
+  (`## Technical Approach` item 1, `## Risk 1`, `## Success Criteria`) read 195 and were
+  left untouched.
+- **NIT (three drifted citations)** — closed, each re-derived by symbol against the
+  current tree rather than copied from the finding text. The `## Documentation` "Inline
+  Documentation" bullet now cites `reflections/docs_auditor.py:2692-2694` for the
+  "11. Liveness signal" step comment (`:2689-2690` is the "10. Update rotation hash" step
+  and `:2695` is the call the comment introduces). Both `## Failure Path Test Strategy`
+  citations of `run_docs_auditor`'s outer `except Exception` now read `:2727`; `:2726` is
+  blank. `## Race Conditions` no longer cites `scripts/update/run.py:1925`, which is the
+  Step 4.5 Telegram auth check, and instead cites Step 5 "Service management" at `:2245`
+  with `service.install_worker` at `:2311`. The section's argument is unchanged: Step 3.6
+  migrations (`:1629`, re-verified) still precede the restart.
+
+**Citation drift sweep.** Every other `reflections/docs_auditor.py` citation the plan
+carries was re-derived by symbol in the same pass, because concurrent work on
+`FALLBACK_ENG_CHAT` near the top of that file could have shifted every line below it. No
+drift was found. `FALLBACK_ENG_CHAT` is still at `:44`, the Redis-namespace comment at
+`:132`, the two constants at `:136-137`, `_write_liveness` at `:2153-2192` with its own
+`except` at `:2191-2192`, `_run_vault_drift_detection` at `:2370` with `return 0` at
+`:2384-2385`, `return compared` at `:2398`, the `except`-arm `return 0` at `:2401`, all
+five call sites at `:2450`, `:2465`, `:2493`, `:2573`, `:2695`, the vault-count
+assignment at `:2460`, and `withheld_note` at `:2524-2526`.
+`agent/reflection_scheduler.py:648` is still
+`output_summary=str(summary_str)[:500] if summary_str else None`. No task-1 or task-2 line
+number needed correcting.
