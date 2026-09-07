@@ -252,3 +252,187 @@ Worker pops slugless eng session → executor synthesizes `dev-{aid8}` and provi
 **Data prerequisite:** none — `working_dir` is written by no other actor (verified by the exhaustive write-site grep in the Freshness Check).
 **State prerequisite:** none.
 **Mitigation:** `save(update_fields=[...])` writes only the named hash fields, so a concurrent writer touching other fields cannot be clobbered and cannot clobber this one.
+
+## No-Gos (Out of Scope)
+
+Nothing deferred — every relevant item is in scope for this plan. The tempting adjacent work
+(persisting `slug`, adding a `slug ==` match arm, a second `active_worktree_dir` field, reworking
+the `defer_reaction`-gated finalize guard, auditing the file's other linear scans) is listed under
+Rabbit Holes with the reason each one is wrong or separable, and each is anchored by a Verification
+row where it names a forbidden code-level outcome.
+
+## Update System
+
+No update system changes required — this feature is purely internal. It adds no dependency, no
+config file, no entry point, and no schema change, so `scripts/remote-update.sh` and the `/update`
+skill are unaffected. Existing installations need nothing beyond the ordinary code sync: the write
+is to an existing `Field()` on an existing model, and rows written before this change simply carry
+the old (main-checkout) value until their session next runs.
+
+## Popoto Schema Migration
+
+None required. `working_dir` is an existing `Field()` (`models/agent_session.py:186`) and `slug` is
+deliberately not written. No field is added, removed, renamed, or re-typed, so no entry in
+`scripts/update/migrations.py` is warranted. Every write in this plan goes through
+`instance.save(update_fields=[...])`; no raw Redis operation is introduced.
+
+## Agent Integration
+
+No agent integration required — this is a bridge/worker-internal change. It adds no CLI entry
+point to `pyproject.toml [project.scripts]`, no MCP surface, and no new import for
+`bridge/telegram_bridge.py`. The behavior is exercised by the worker's ordinary session-execution
+path, which the existing unit suite drives directly.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Update `docs/features/session-isolation.md`: state that the executor persists the resolved lane path onto the `AgentSession` row, and that `slug` is deliberately never written back because it is a `KeyField` participating in the Redis primary key.
+- [ ] Update `docs/features/worktree-manager.md`: record that the session-table busy predicate matches on the stored `working_dir` only, and that this is now populated for lanes resolved at execution time.
+- [ ] Update `docs/features/scheduled-disk-reclaim.md`: note that the AgentSession probe is no longer blind to execution-time lanes, so the OS-process scan is a backstop rather than the sole working guard.
+- [ ] `docs/features/README.md` needs no new row — all three pages already have entries.
+
+### External Documentation Site
+- [ ] Not applicable; this repo publishes no external docs site.
+
+### Inline Documentation
+- [ ] Comment at the synthesis site (`agent/session_executor.py:1310-1318`) explaining that `slug` stays local because it is a `KeyField` and a mid-flight write forks the Redis row.
+- [ ] Docstring note on `_scan_worktree_sessions` recording that `working_dir` is the deliberate predicate and why `slug` is not (the post-merge self-block in spike-4).
+
+## Success Criteria
+
+- [ ] A slugless eng session's `AgentSession` row carries `working_dir=.worktrees/dev-{aid8}` while it runs
+- [ ] `_scan_worktree_sessions` returns `busy` for a `dev-*` lane held by a non-terminal, `slug=None` session
+- [ ] No production code assigns `.slug` on a hydrated `AgentSession` instance
+- [ ] The end-of-session synthetic cleanup still removes the worktree when the row is terminal, and logs a named WARNING when it is not
+- [ ] A scheduled child never inherits a parent `working_dir` that points inside `.worktrees/`
+- [ ] A failed write-back is logged at WARNING under `[lane-writeback]` and does not fail the session
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (executor)**
+  - Name: `executor-builder`
+  - Role: the lane write-back and the cleanup log upgrade in `agent/session_executor.py`
+  - Agent Type: builder
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Builder (scheduler)**
+  - Name: `scheduler-builder`
+  - Role: the working_dir inheritance guard in `tools/agent_session_scheduler.py`
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer**
+  - Name: `guard-tester`
+  - Role: tests pinning the busy-guard match, both cleanup branches, the failure log, and the inheritance guard
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `lane-validator`
+  - Role: runs the Verification table and confirms every success criterion
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `lane-documentarian`
+  - Role: the three feature-doc updates
+  - Agent Type: documentarian
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Persist the resolved lane path
+- **Task ID**: build-writeback
+- **Depends On**: none
+- **Validates**: tests/unit/test_session_isolation_bypass.py, tests/unit/test_session_executor_reap_marker.py
+- **Informed By**: spike-1 (the parameter is the model instance), spike-2 (`working_dir` is a plain `Field()`), spike-3 (`slug` is a `KeyField` — never write it), spike-5 (the cleanup already handles the blocked result)
+- **Assigned To**: executor-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- In `agent/session_executor.py`, replace the `AgentSession.query.filter(project_key=..., status="running")` linear scan in the session-phase update block with `get_authoritative_session(session.session_id, project_key=session.project_key)`.
+- Assign `agent_session.working_dir = str(working_dir)` only when it differs from `(agent_session.working_dir or "")`, and add `"working_dir"` to `update_fields`.
+- On a failed or skipped write (resolver returned `None`, or `save()` raised), log at WARNING with the literal marker `[lane-writeback]`, naming the session id and the resolved path. Do not raise.
+- Add the comment at the synthesis site recording that `slug` stays local because it is a `KeyField` in the Redis primary key.
+- Upgrade the synthetic-slug cleanup log: when `cleanup_result` carries `blocked_by_session`, emit a WARNING containing the literal `[synthetic-slug]` and the words `cleanup blocked`, naming the session id and the manual `git worktree prune` reclamation, mirroring the neighbouring `runner_reap_failed` message.
+- Do not touch `tools/agent_session_scheduler.py` — `scheduler-builder` owns that file.
+
+### 2. Guard the scheduled-child working_dir inheritance
+- **Task ID**: build-scheduler-guard
+- **Depends On**: none
+- **Validates**: tests/unit/test_agent_session_scheduler_worktree_inheritance.py (create)
+- **Informed By**: spike-6 (the inherited lane path collides with the child's own synthesized slug)
+- **Assigned To**: scheduler-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- In `tools/agent_session_scheduler.py`, import `WORKTREES_DIR` from `agent.worktree_manager` and inherit `parent_session.working_dir` only when the path does not contain that segment.
+- Comment the guard with the concrete failure it prevents: a child synthesizing its own `dev-{aid8}` slug, skipping provisioning because the inherited path already looks like a worktree, then failing `verify_worktree_branch` against another session's live lane.
+- Do not touch `agent/session_executor.py` — `executor-builder` owns that file.
+
+### 3. Pin the behavior with tests
+- **Task ID**: build-tests
+- **Depends On**: build-writeback, build-scheduler-guard
+- **Validates**: tests/unit/test_session_isolation_bypass.py, tests/unit/worktree_manager/test_worktree_manager_busy_guards.py, tests/unit/test_agent_session_scheduler_worktree_inheritance.py
+- **Assigned To**: guard-tester
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- In `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py`, add a case where a non-terminal row has `slug=None` and `working_dir=".worktrees/dev-abcd1234"` and assert `_scan_worktree_sessions` returns `busy`. Mutation-check it: revert the match to the pre-fix stored value and confirm the test fails.
+- In `tests/unit/test_session_isolation_bypass.py`, add a case asserting the executor persists `working_dir` and leaves `slug` unset on the row.
+- Add a case asserting a raising `save()` produces the `[lane-writeback]` WARNING via `caplog` and the session continues.
+- Add both synthetic-cleanup branches: terminal row → worktree removed; non-terminal row → not removed, and the `[synthetic-slug]` `cleanup blocked` WARNING is emitted.
+- Create `tests/unit/test_agent_session_scheduler_worktree_inheritance.py` asserting a worktree-rooted parent `working_dir` is declined and a plain-checkout one is still inherited.
+
+### 4. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-tests
+- **Assigned To**: lane-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Apply the three feature-doc updates listed in the Documentation section.
+- Confirm `docs/features/README.md` already indexes all three pages and add nothing new.
+
+### 5. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-writeback, build-scheduler-guard, build-tests, document-feature
+- **Assigned To**: lane-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table and report each result.
+- Confirm each Success Criteria checkbox against observed output, not against the diff.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Targeted tests pass | `.venv/bin/python -m pytest tests/unit/test_session_isolation_bypass.py tests/unit/worktree_manager/ tests/unit/test_session_executor_reap_marker.py tests/unit/test_agent_session_scheduler_worktree_inheritance.py -q --timeout=420 --timeout-method=thread` | exit code 0 |
+| Lint clean | `.venv/bin/python -m ruff check agent/session_executor.py tools/agent_session_scheduler.py` | exit code 0 |
+| Format clean | `.venv/bin/python -m ruff format --check agent/session_executor.py tools/agent_session_scheduler.py` | exit code 0 |
+| working_dir is persisted | `grep -c "working_dir" agent/session_executor.py` | output > 8 |
+| Write-back marker present | `grep -c "\[lane-writeback\]" agent/session_executor.py` | output > 0 |
+| Authoritative resolver used for the write | `grep -c "get_authoritative_session" agent/session_executor.py` | output > 2 |
+| Cleanup block is loud | `grep -c "cleanup blocked" agent/session_executor.py` | output > 0 |
+| Scheduler guard present | `grep -c "WORKTREES_DIR" tools/agent_session_scheduler.py` | output > 0 |
+| Anti-criterion: slug is never written back | `grep -cE "(session\|agent_session\|_auth)\.slug *=[^=]" agent/session_executor.py` | match count == 0 |
+| Anti-criterion: no slug arm in the busy scan | `grep -cE "getattr\(session, .slug." agent/worktree_manager.py` | match count == 0 |
+| Anti-criterion: no second lane field added | `grep -c "active_worktree_dir" models/agent_session.py` | match count == 0 |
+| Anti-criterion: no raw Redis write | `grep -cE "\.(delete\|srem\|sadd\|zrem)\(" tools/agent_session_scheduler.py` | match count == 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| | | | | |
+
+---
+
+## Open Questions
+
+1. **Scope of the write-back.** This plan persists `working_dir` whenever the executor's resolved path differs from the stored one, not only for synthetic slugs. That is the more correct rule and it widens the blast radius to any lane resolved at execution time. Should it be narrowed to `is_synthetic_slug` for the first landing?
+2. **The leak in Risk 2.** A row stuck at `running` holds its `dev-*` lane indefinitely, and `sweep_worktrees` will not reclaim it because the synthetic branch is never merged. This plan makes that state loud rather than reclaimable. Is an operator-facing log enough, or should the sweep grow an explicit synthetic-lane path?
+3. **The `defer_reaction` finalize gate.** `agent/session_executor.py:2532` skips the completion-exit finalize guard when a reaction is deferred, which is the one ordinary way a session reaches its own cleanup while still `running`. This plan treats that as out of scope and only makes the resulting refusal visible. Worth its own issue?
