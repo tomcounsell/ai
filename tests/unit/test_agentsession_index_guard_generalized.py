@@ -336,6 +336,78 @@ def test_shims_restored_after_rebuild_indexes_raises(monkeypatch):
     lock.release()
 
 
+def test_shim_counts_nondiverged_identityless_row():
+    """Tech Debt 1 (#3199 review): a row whose KEY FIELDS are well-formed --
+    the ``id`` segment stored in the key matches the ``id`` value decoded
+    from the hash -- is NOT diverged. ``session_id`` is a plain ``Field``,
+    not a ``KeyField``, so this row's identity-less-ness (no ``session_id``)
+    is invisible to popoto's key-derivation divergence pre-check: it sails
+    past seam 1 and lands on seam 2, the retained ``on_save`` shim. Before
+    this test, the shim's entire row-key capture/count block
+    (``quarantined_keys.add(...)``) was reached by no test in this suite --
+    neither dropping the ``add(...)`` to a ``pass`` nor skipping the shim
+    install entirely moved any assertion."""
+    from models.agent_session import AgentSession
+
+    r = _redis()
+    rid = "b" * 32
+    key = f"AgentSession:None:{rid}:None:None:None:None"
+    assert len(key.split(":")) == 7, "seed key must match db_key_length"
+    r.hset(key, mapping={"id": msgpack.packb(rid), "status": msgpack.packb("pending")})
+
+    AgentSession.repair_indexes()
+
+    assert AgentSession._last_quarantined_identityless == 1
+    assert r.scard("$IndexF:AgentSession:status:pending") == 0
+
+
+def test_diverged_but_hydrated_row_not_quarantined():
+    """Tech Debt 2 (#3199 review): the identity filter on the divergence
+    seam (``if instance is None or not _filter_hydrated_sessions([instance]):``)
+    is the rule that distinguishes this implementation from the coarser
+    ImportError-degrade path -- a diverged row that IS a fully hydrated
+    session (has ``session_id``, just stored under a stale/mismatched key)
+    must not be counted as identity-less. Before this test, deleting that
+    guard and unconditionally quarantining every diverged key left the whole
+    scoped suite green."""
+    from popoto.models.encoding import encode_popoto_model_obj
+
+    from models.agent_session import AgentSession
+
+    # No hyphens -- popoto escapes "-" as "/-" in Redis keys, and this test's
+    # own segment-count-and-replace logic below intentionally avoids
+    # replicating that escaping (same convention as the task_type/
+    # claude_session_uuid values elsewhere in this file).
+    pk = "test3199divergedhealthy"
+    s = AgentSession(session_id="diverged-healthy", project_key=pk, status="pending")
+    s.save()
+
+    real_key = s._redis_key
+    segments = real_key.split(":")
+    assert segments.count(pk) == 1, "project_key must appear exactly once in the key"
+    idx = segments.index(pk)
+    segments[idx] = f"altered{pk}"
+    diverged_key = ":".join(segments)
+    assert diverged_key != real_key
+
+    r = _redis()
+    # Same hydrated field values (session_id present, project_key still the
+    # ORIGINAL pk) stored under a key whose project_key segment disagrees --
+    # diverged (stored key != key re-derived from the decoded fields), but
+    # NOT identity-less.
+    r.hset(diverged_key, mapping=encode_popoto_model_obj(s))
+
+    # Prove this row actually reaches the divergence seam before relying on
+    # repair_indexes()'s downstream count -- a vacuous test would still pass
+    # if the row were silently ignored instead of diverged.
+    probe = AgentSession.rebuild_indexes()
+    assert diverged_key in (getattr(probe, "diverged_keys", ()) or ())
+
+    AgentSession.repair_indexes()
+
+    assert AgentSession._last_quarantined_identityless == 0
+
+
 def test_reentrant_call_from_another_thread_is_a_noop():
     """A concurrent repair_indexes() call while one is already in-flight must
     not race the shim installs -- it should back off, log, and return (0, 0)."""

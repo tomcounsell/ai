@@ -2411,10 +2411,13 @@ class AgentSession(Model):
         ``cls._meta.fields`` via ``isinstance(f, IndexedField)`` — no
         hardcoded field-name list, so a future 5th IndexedField is
         automatically covered) for the DURATION of the ``rebuild_indexes()``
-        call only remains the SECOND defence: a hypothetical identity-less
-        row whose derived key happens to match its stored key would sail
-        past the divergence pre-check and still needs skipping there. Each
-        shim skips the SADD for identity-less records (rejected by
+        call only remains the SECOND defence: ``session_id`` is a plain
+        ``Field``, not a ``KeyField``, so it is invisible to the divergence
+        pre-check — an identity-less row whose KEY FIELDS are well-formed
+        (the ordinary partially-written shape, not an edge case) derives
+        back to its own stored key, sails past the pre-check, and still
+        needs skipping here. Each shim skips the SADD for identity-less
+        records (rejected by
         ``_filter_hydrated_sessions``) and delegates every healthy record to
         popoto's original ``on_save``. This is scoped to the rebuild path
         only: normal live ``AgentSession(...).save()`` stays unguarded so a
@@ -2638,6 +2641,14 @@ class AgentSession(Model):
                 # Diverged keys are 0 in a healthy keyspace and a non-empty
                 # list is itself a loud popoto WARNING, so this loop's input
                 # is bounded by a broken-deploy signal, not steady state.
+                # NOTE (#3199 review nit): measured 0.175 ms/key serial here,
+                # 14.8x slower than pipelined batching -- seconds, not hours,
+                # at current AgentSession scale. Left un-pipelined on purpose:
+                # the plan's Risk 2 dropped the pipelining mandate for this
+                # loop as out-of-appetite (a settled round-1 critique
+                # resolution); the WARNING above is the documented trigger to
+                # revisit if a real keyspace ever produces a large diverged
+                # list.
                 for key in diverged_keys:
                     try:
                         raw_hash = POPOTO_REDIS_DB.hgetall(key)

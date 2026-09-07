@@ -77,9 +77,11 @@ capture would flood Sentry for the life of the condition).
 
 **Seam 2 — the retained `on_save` shim (second line of defence).** The
 transient shim on each `IndexedField`'s `on_save`, active **only** for the
-duration of the rebuild call, remains installed: a hypothetical identity-less
-row whose derived key happens to match its stored key would sail past the
-divergence pre-check and still needs skipping here. It is generalized: the
+duration of the rebuild call, remains installed: `session_id` is a plain
+`Field`, not a `KeyField`, so it is invisible to the divergence pre-check —
+an identity-less row whose key fields are well-formed (the ordinary
+partially-written shape, not an edge case) derives back to its own stored
+key, sails past the pre-check, and still needs skipping here. It is generalized: the
 field set is computed at runtime from `cls._meta` (rather than naming
 `status`), install is wrapped in a non-reentrant `_repair_lock`, and
 `AgentSession` is excluded from worker Step 1's raw sweep. `repair_indexes()`:
