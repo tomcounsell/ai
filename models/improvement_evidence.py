@@ -134,15 +134,30 @@ class ImprovementEvidence(Model):
 
         Reads the bounded recency partition rather than the whole keyspace, so
         the cost is a function of ``limit`` and not of how long the system has
-        been running. The ``created_at__gt`` bound is what makes that true —
-        popoto only pushes ``limit`` into the sorted-set range read when a
-        ``SortedField`` predicate is present. It is deliberately not wrapped in
-        a ``try``: a swallowed failure here degrades silently into the
-        unbounded scan this method exists to avoid, which is exactly how the
-        defect that motivated this comment survived review. An empty partition
-        returns ``[]`` rather than raising, so there is nothing to fall back to.
+        been running. Two kwargs carry that:
+
+        * ``created_at__gt`` — popoto only pushes ``limit`` into the sorted-set
+          range read when a ``SortedField`` predicate is present.
+        * ``order_by="-created_at"`` — the pushdown reads the sorted set from
+          whichever end the ordering names, and ascending is the default. Bound
+          a partition without saying which end and Redis hands back the oldest
+          page, so a later Python sort can only order rows that were never the
+          right ones. The descending form issues ``ZREVRANGEBYSCORE`` and reads
+          the newest page instead.
+
+        Neither is wrapped in a ``try``: a swallowed failure here degrades
+        silently into the unbounded scan this method exists to avoid. An empty
+        partition returns ``[]`` rather than raising, so there is nothing to
+        fall back to.
         """
-        rows = list(cls.query.filter(project_key=project_key, created_at__gt=_EPOCH, limit=limit))
+        rows = list(
+            cls.query.filter(
+                project_key=project_key,
+                created_at__gt=_EPOCH,
+                order_by="-created_at",
+                limit=limit,
+            )
+        )
         rows.sort(
             key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(tzinfo=UTC),
             reverse=True,

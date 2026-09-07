@@ -17,7 +17,7 @@ is never touched, and every row is written under a test-scoped ``project_key``.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -118,6 +118,36 @@ class TestRecentIsGenuinelyBounded:
         assert kwargs["created_at__gt"].tzinfo is not None
         assert kwargs["limit"] == 7
         assert kwargs["project_key"] == PK
+
+    def test_the_bounded_read_returns_the_newest_page_not_the_oldest(self):
+        """The page has to come off the correct end of the sorted set.
+
+        Sizing is what gives this test its teeth. popoto over-fetches the
+        bounded range read by a margin of 8 members, so a partition of
+        ``limit + 8`` rows or fewer comes back whole and a sort in Python
+        rescues either reading direction. Seeding 20 rows against ``limit=3``
+        puts the two directions on disjoint pages: the ascending read can only
+        see the first 11 rows and its newest three are ``ord-10..ord-8``, while
+        the descending read sees the last 11 and answers ``ord-19..ord-17``.
+        Asserting identities rather than "the stamps are in order" is the other
+        half — the stamps are always in order, because ``recent()`` sorts them.
+        """
+        pk = "test-3177-ordering"
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        for i in range(20):
+            ImprovementEvidence.create(
+                project_key=pk,
+                created_at=base + timedelta(minutes=i),
+                kind="other",
+                classification="unknown",
+                source_ref=f"ord-{i}",
+            )
+
+        rows = ImprovementEvidence.recent(pk, limit=3)
+
+        assert [r.source_ref for r in rows] == ["ord-19", "ord-18", "ord-17"], (
+            "an unordered bounded read pages from the oldest end of the partition"
+        )
 
     def test_a_backend_failure_is_loud_not_swallowed(self):
         """A silent fallback here is what hid the defect for a whole review round.
