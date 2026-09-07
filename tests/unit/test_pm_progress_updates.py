@@ -1,19 +1,16 @@
 """Locking gate for PM evidence-bearing progress updates (#2664 / #3027).
 
-The original #2664 fix taught the PM a phrasebook of measured-safe phrasings
-against the promise gate. #3027 deletes that phrasebook: it trained the PM to
-hunt for wording that clears the gate (e.g. asking permission it does not
-need, "say the word and I'll re-run that"), and it was measured against a
-gate that never ran on the PM's actual delivery path. Grading grammar can
-only ever be satisfied by better grammar — so the fix is not a better table,
-it is a different discriminator entirely: whether the obligation behind a
-forward-looking statement is *durably recorded* (a Job inbound expectation,
-a `schedule_id`, or a PR URL), not how the sentence is phrased.
+The PM prompt must not carry a phrasebook of gate-safe phrasings. A
+phrasebook trains the PM to hunt for wording that clears the gate (asking
+permission it does not need, "say the word and I'll re-run that"), and
+grading grammar can only ever be satisfied by better grammar. The section's
+discriminator is whether the obligation behind a forward-looking statement is
+*durably recorded* (a Job inbound expectation, a `schedule_id`, or a PR URL),
+not how the sentence is phrased.
 
-Deleting the phrasebook carelessly trades over-claiming for silence, which is
-the worse failure (the original symptom this section exists to prevent). So
-the honest core — say only what is already true, stated as present fact —
-must survive verbatim into the replacement.
+Silence is the worse failure than over-claiming (it is the symptom this
+section exists to prevent), so the honest core — say only what is already
+true, stated as present fact — must stay in the prompt verbatim.
 
 Three things are locked here.
 
@@ -197,10 +194,9 @@ class TestPMRoleGuidance:
         low = _read_nonempty(PM_ROLE_PATH).lower()
         for banned in PHRASING_WORKAROUND_STRINGS:
             assert banned not in low, (
-                f"The deleted phrasebook content {banned!r} must not reappear in "
-                "prime-pm-role.md. #3027 deletes the phrasebook because it "
-                "taught wording workarounds against the gate, not because it was "
-                "misplaced — bringing any of it back reintroduces that training."
+                f"Phrasebook content {banned!r} must not appear in "
+                "prime-pm-role.md: a table of gate-safe phrasings teaches wording "
+                "workarounds against the gate (#3027)."
             )
 
 
