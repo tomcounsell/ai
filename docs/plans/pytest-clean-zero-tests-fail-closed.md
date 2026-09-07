@@ -756,11 +756,28 @@ worktree in task 4 as a second, independent check — no longer the only one.
 ### Risk 4: The guard is written but never actually bites
 **Impact:** The worst outcome available — a guard against false greens that is itself a
 false green, exactly the failure this issue reports.
-**Mitigation:** Mutation-check the guard specifically: delete the wrapper's verdict block,
-confirm the new tests go **red**, restore it, confirm they go green. Already demonstrated on
-the prototype (spike-6): with the block deleted an all-fixture-skip run exits **0**; with it
-present the same run exits **1**. This is a Verification row, not only PR prose. Do not
-accept a green test run as evidence that the guard works.
+**Mitigation:** Mutation-check **each** guard separately, through its own env seam, and pair
+every mutation with a control leg.
+
+- **Two seams, because there are two guards.** `PYTEST_CLEAN_SCRIPT` mutates the wrapper's
+  verdict block; `PYTEST_EXECUTED_COUNT_SOURCE` mutates the plugin's counting rule. The rule
+  is where round 1 went wrong twice and is the thing this plan most fears being "simplified"
+  back into the bug — a seam that cannot reach it leaves the most fragile guard unproven.
+  Both are measured-reachable: the settled rule yields `count 0` on an all-skip rootdir at
+  `-n 0` and `-n 2`, the round-1 rule (`outcome != "skipped"`) yields a non-zero count on the
+  same rootdir.
+- **The mutated wrapper must live at `<tmpdir>/scripts/pytest-clean.sh`** with
+  `check-interpreter-pin.sh` beside it. A flat copy aborts at line 195 before pytest starts,
+  turning every test red for a reason that has nothing to do with the deleted block —
+  measured in spike-7, and the shape round 1 of this plan carried.
+- **Every mutation run needs an all-passing control leg.** Red under a mutated copy is only
+  evidence if the *same copy* still exits 0 with a real `N passed` summary on an all-passing
+  rootdir. Without it, any way of breaking the copy reads as "the guard bites" — which is
+  this issue's own failure mode, reproduced inside the check meant to prevent it.
+- **Read the summary line, never the exit code**, on both legs.
+
+Do not accept a green test run as evidence that the guard works, and do not accept a red one
+either until the control leg has been read.
 
 ### Risk 5: The tests pass while exercising the repo's plugin instead of the sandbox's
 **Impact:** The tests go green against `main`'s plugin no matter what the builder writes,
@@ -883,15 +900,28 @@ Not applicable — this repo publishes no external documentation site.
 - [ ] A run in which every test skips exits **non-zero** with the named diagnostic on
       stderr, for all three skip shapes: fixture-level (the `scratch_test_db` shape),
       body-level `pytest.skip()`, and `@pytest.mark.skip`.
-- [ ] A zero-collection run exits non-zero (regression pin — already true at exit 5).
+- [ ] A zero-collection run exits non-zero at **exit 5**, pytest's own status, with no
+      `ZERO TESTS EXECUTED` line (regression pin; the guard does not rewrite it).
+- [ ] A collection error exits **2**, pytest's own status, with no `ZERO TESTS EXECUTED`
+      line — the guard never adds a second headline to an already-red run.
 - [ ] A run with at least one executed test exits with pytest's own status, unchanged —
       an all-passing run stays 0, a run with a failure stays non-zero.
 - [ ] `--version`, `--help`, and `--collect-only` through the wrapper are unaffected.
 - [ ] `tests/unit/test_worktree_venv_absent_guard.py` and
       `tests/unit/test_interpreter_pin_guard.py` pass unmodified.
-- [ ] **Mutation check, per guard**: deleting the wrapper's verdict block turns the new
-      zero-executed tests red; restoring it turns them green. Both outputs pasted in the PR,
-      and the check is also a Verification row.
+- [ ] **Mutation check, guard 1 (wrapper verdict block)**: with the `BEGIN`/`END` range
+      deleted from a sibling-layout copy, the new zero-executed tests go red; the unmutated
+      run is green. Both summary lines pasted in the PR, and the check is a Verification row.
+- [ ] **Mutation-check control leg, guard 1**: the *same mutated copy* still runs an
+      all-passing selection to a real `N passed` summary at exit 0. Without this, red proves
+      only that the copy is broken.
+- [ ] **Mutation check, guard 2 (the counting rule)**: with `PYTEST_EXECUTED_COUNT_SOURCE`
+      pointing at a plugin whose rule is the round-1 defect (`if report.outcome != "skipped"`),
+      the three skip-shape cases go red; with the settled rule they are green. Its own control
+      leg passes.
+- [ ] **The pass-through predicate check drives the wrapper's own body**: it refuses with a
+      distinct message when the sliced function is empty or undefined, and that refusal is
+      exercised under the guard-1 mutation.
 - [ ] **Negative control passes**: the sandbox's own `pytest_executed_count` is the module
       that loads, proven by its `__file__` resolving under `tmp_path`.
 - [ ] `PYTEST_ALLOW_ZERO_TESTS` suppresses the exit **and still prints the diagnostic**,
