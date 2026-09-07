@@ -22,7 +22,7 @@ This plan is the production-path complement to the recursive self-improvement pl
 **Current behavior** (every citation re-read at `bf0a5d5`):
 
 - `_schedule_post_session_extraction` (`agent/session_executor.py:339`) is a sync function that `create_task`s the extraction and swallows every exception at `:388`; `run_post_session_extraction` (`agent/memory_extraction.py:1663`) catches all to WARNING and clears state in `finally`. Shutdown drains for 5s (`worker/__main__.py:1081`). A failed extraction leaves no record and never retries. #1866 held the task references; it did not add durability.
-- Outbound Telegram text dead-letters after `MAX_RELAY_RETRIES=3` into `DeadLetter` (`models/dead_letter.py`; the `_dead_letter_message` call at the retry cap is `bridge/telegram_relay.py:1498-1500`, inside the retry-cap / poll-re-enqueue region `:1490-1536`); `replay_dead_letters` runs from one site, the bridge connect sequence (`bridge/telegram_bridge.py:3073-3075`). Inside `process_outbox`, malformed outbox JSON is silently discarded at `:1337-1339` and an unknown `type` at `:1343-1347` — both `continue` after a WARNING, with the popped entry gone. (`:1533` is `requeue_raw = json.dumps(message)` in the re-queue branch, not a discard; the round-1 critique corrected an earlier misattribution here.) The session archive has its own `_restore_quarantine` table (`agent/session_archive.py:91`). Sessions finalized at `MAX_RECOVERY_ATTEMPTS=2` or on `init_hang` (`agent/agent_session_queue.py:2581-2607`) keep no replayable input. The corrupted-pop path reaps rows (`:2175-2272`).
+- Outbound Telegram text dead-letters after `MAX_RELAY_RETRIES=3` into `DeadLetter` (`models/dead_letter.py`; the `_dead_letter_message` call at the retry cap is `bridge/telegram_relay.py:1499-1501`, inside the retry-cap / poll-re-enqueue region `:1490-1536`); `replay_dead_letters` runs from one site, the bridge connect sequence (`bridge/telegram_bridge.py:3073-3075`). Inside `process_outbox`, malformed outbox JSON is silently discarded at `:1336-1340` and an unknown `type` at `:1344-1348` (each branch runs through to its own `continue`) — both `continue` after a WARNING, with the popped entry gone. (`:1533` is `requeue_raw = json.dumps(message)` in the re-queue branch, not a discard; the round-1 critique corrected an earlier misattribution here.) The session archive has its own `_restore_quarantine` table (`agent/session_archive.py:91`). Sessions finalized at `MAX_RECOVERY_ATTEMPTS=2` or on `init_hang` (`agent/agent_session_queue.py:2581-2607`) keep no replayable input. The corrupted-pop path reaps rows (`:2175-2272`).
 - Outbox, steering (`agent/steering.py`), and `valor:sessions:new` payloads are plain dicts read with `.get()`; the only check is `KNOWN_MESSAGE_TYPES` membership. Popoto booleans round-trip as `"False"`, hence `_truthy()` at `agent/session_pickup.py:76`.
 - Pop is a Python-sorted scan over `status="pending"` under `SET worker:pop_lock:{key} NX EX 5` (`session_pickup.py:117`) and `SET session:runclaim:{id} NX EX 30` (`models/session_lifecycle.py:834`). Once `running`, nothing redelivers on a timer; recovery is the 300s health sweep plus PID-fence inference plus the startup pass (`agent/session_health.py:1077`). `docs/plans/session-recovery-observation-audit.md` §P0 items 7-8 prescribed an execution-lifetime lease with a fencing generation in July; no issue tracks it.
 - `_acquire_pop_lock` (`session_pickup.py:131-134`), `claim_pending_run` (`session_lifecycle.py:858-864`), and `claim_message` (`bridge/dedup.py:188-195`) return success on Redis error with a WARNING and no counter. Documented as deliberate in `bridge-worker-architecture.md` §Redis Pop Lock.
@@ -232,8 +232,8 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - Extend `models/dead_letter.py` in place; migration `dead_letter_stage_backfill` sets `stage="telegram_send"`, `replayable=True`, `attempts=MAX_RELAY_RETRIES` on existing rows.
 - `bridge/dead_letters.py`: `record(stage, payload, reason, replayable)` and `HANDLERS = {stage: replay_fn}`; `replay_dead_letters(client)` becomes the `telegram_send` handler; the bridge connect call site stays as an eager first pass.
 - Writers (all line numbers at baseline `bf0a5d5`):
-  - `bridge/telegram_relay.py` retry cap — the `_dead_letter_message` call at `:1498-1500` already writes a row; lane 2 only adds `stage="telegram_send"` and the new fields to it.
-  - `bridge/telegram_relay.py` **the two real discard branches inside `process_outbox`**: malformed JSON at `:1337-1339` and unknown `type` at `:1343-1347`. Each `continue` becomes `dead_letters.record(stage="outbox_parse", payload=raw, reason=...)` then `continue`. **Do not touch `_dead_letter_message` (`:943-1020`).** Its seven "discard" mentions are deliberate, still-correct drops of an *already dead-lettered* record that has no deliverable Telegram peer; converting them would dead-letter a dead letter. They are the reason a file-wide `grep discard` can never be the verification for this lane.
+  - `bridge/telegram_relay.py` retry cap — the `_dead_letter_message` call at `:1499-1501` already writes a row; lane 2 only adds `stage="telegram_send"` and the new fields to it.
+  - `bridge/telegram_relay.py` **the two real discard branches inside `process_outbox`**: malformed JSON at `:1336-1340` and unknown `type` at `:1344-1348`. Each `continue` becomes `dead_letters.record(stage="outbox_parse", payload=raw, reason=...)` then `continue`. **Do not touch `_dead_letter_message` (`:943-1020`).** Its seven "discard" mentions are deliberate, still-correct drops of an *already dead-lettered* record that has no deliverable Telegram peer; converting them would dead-letter a dead letter. They are the reason a file-wide `grep discard` can never be the verification for this lane.
   - Email relay equivalent discard branch.
   - `finalize_session` for `session_recovery_cap` and `session_init_hang` with `payload_json = {message_text, chat_id, project_key, extra_context}`.
   - The corrupted-pop reaper (`agent/agent_session_queue.py:2175-2272`) with the raw hash.
@@ -245,7 +245,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 - `bridge/wire_schemas.py`; `OutboxPayload` carries the union of the telegram and email shapes documented in `bridge-worker-architecture.md` plus `correlation_id: str | None`; `SteeringPayload` mirrors `agent/steering.py`'s entry dict; `NotifyPayload` mirrors `publish_session_notify`.
 - Writers call `.model_dump_json()`; readers call `.model_validate_json()` and on `ValidationError` call `dead_letters.record(stage=f"{wire}_parse", payload=raw, ...)` and continue.
-- Delete `KNOWN_MESSAGE_TYPES` membership check in favor of a `Literal` on `type`.
+- Replace the `KNOWN_MESSAGE_TYPES` membership check (`bridge/telegram_relay.py:58`, tested at `:1344`) with a typed field on `OutboxPayload`. **The set is `{None, "reaction", "custom_emoji_message", "poll"}` — `None` is a member**, because an ordinary text message carries no `type` key at all. The field must therefore be `type: Literal["reaction", "custom_emoji_message", "poll"] | None = None`. A bare `Literal[...]` without `| None` would dead-letter every plain text message as an `outbox_parse` failure, which is the single highest-volume path in the system; `tests/unit/test_wire_schemas.py` gets a case asserting a payload with no `type` key parses.
 - Delete `_truthy()` at `session_pickup.py:76` only if the field it guards moves to a typed pydantic read in this lane; otherwise leave it and note in Rabbit Holes.
 
 #### Lane 4: fail-open policy and counters
@@ -265,15 +265,15 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 #### Lane 5b: idempotent enqueue seam and reflection key
 
-- Add `idempotency_key: str | None = None` and `status: str = "pending"` to `_push_agent_session` (`agent/agent_session_queue.py:204-231`); thread `status` into `async_create` at `:369`; change the return to `tuple[int, str]` (queue depth, bound `agent_session_id`).
+- Add `idempotency_key: str | None = None` and `status: str = "pending"` to `_push_agent_session` (`agent/agent_session_queue.py:204-233`, the signature block ending on `) -> int:` at `:233`); thread `status` into `async_create` at `:370`; change the return to `tuple[int, str]` (queue depth, bound `agent_session_id`).
 - **There are exactly three production callers**, re-derived at `bf0a5d5` with `grep -rn "_push_agent_session" agent/ tools/ bridge/ worker/ models/ scripts/`:
   1. `agent/agent_session_queue.py:1712` — `depth = await _push_agent_session(...)` inside `enqueue_agent_session`. This is the breaking pattern: once it unpacks a tuple, every test that patches the seam with a stub returning a bare `int` raises `TypeError: cannot unpack non-sequence int`.
   2. `tools/valor_session.py:760`.
   3. `agent/reflection_scheduler.py:754`.
   `retry_agent_session` (`agent/agent_session_queue.py:731`) calls `AgentSession.create(**fields)` directly and never touches the seam; `tools/agent_session_scheduler.py` contains no reference at all. Both were named as callers in the pre-critique draft and are **not** — do not go looking for them.
-- With a key: `SET enqueue:idem:{key} {preallocated_id} NX EX 86400` via `utils.redis_client.text_redis()` in `agent/enqueue_idempotency.py`, placed after the stale-terminal reconcile at `:361` and before `async_create` at `:369`; on a lost race read the bound id back from the key and return it without creating a row. The preallocated id is minted with the same `AutoKeyField` generator Popoto uses so the created row carries it.
-- **Plumb the due value down; do not re-derive it inside the enqueue.** `_enqueue_agent_reflection(entry)` (`agent/reflection_scheduler.py:709`) sees only the registry entry, and so does `run_reflection(entry, state)` (`:597`). The due value is a local inside `is_reflection_due` (`:524`) and is thrown away. It **cannot** be recomputed at the `:635` dispatch site from `state.ran_at`, because `run_reflection` calls `state.mark_started()` at `:607` and `mark_started` does `self.ran_at = time.time(); self.save()` (`models/reflection.py:171-175`) — by `:635` the input has already been clobbered, so a crash-retry would compute a different key. The round-1 critique's "populate it at the `:635` dispatch site" note is corrected here for exactly that reason.
-  1. Extract the `ran_at` recovery that `is_reflection_due` does at `:512-521` (the `isinstance` descriptor guard plus the blank-`every:` `_latest_run_timestamp` fallback) into `_effective_last_run(entry, state) -> float | None`, and call it from both `is_reflection_due` and the new helper.
+- With a key: `SET enqueue:idem:{key} {preallocated_id} NX EX 86400` via `utils.redis_client.text_redis()` in `agent/enqueue_idempotency.py`, placed after the stale-terminal reconcile (the `_delete_stale_terminal_duplicates` block ending at `:369`) and before `async_create` at `:370`; on a lost race read the bound id back from the key and return it without creating a row. The preallocated id is minted with the same `AutoKeyField` generator Popoto uses (`uuid.uuid4().hex`, 32 characters) so the created row carries it. **This is a hard constraint, not a style preference:** `AutoFieldMixin` pins `STRATEGY_LENGTHS = {"uuid4": 32, "ulid": 26, "ksuid": 27}` and a key failing its `is_valid` length check raises `ModelException` from `__init__`, so a readable id such as `f"refl-{name}-{epoch}"` raises rather than silently falling back to a generated one.
+- **Plumb the due value down; do not re-derive it inside the enqueue.** `_enqueue_agent_reflection(entry)` (`agent/reflection_scheduler.py:709`) sees only the registry entry, and so does `run_reflection(entry, state)` (`:597`). The due value is a local inside `is_reflection_due` (`:524`) and is thrown away. It **cannot** be recomputed at the `:635` dispatch site from `state.ran_at`, because `run_reflection` calls `state.mark_started()` at `:608` and `mark_started` does `self.ran_at = time.time(); self.save()` (`models/reflection.py:171-175`) — by `:635` the input has already been clobbered, so a crash-retry would compute a different key. The round-1 critique's "populate it at the `:635` dispatch site" note is corrected here for exactly that reason.
+  1. Extract the `ran_at` recovery that `is_reflection_due` does at `:512-522` (the `isinstance` descriptor guard plus the blank-`every:` `_latest_run_timestamp` fallback) into `_effective_last_run(entry, state) -> float | None`, and call it from both `is_reflection_due` and the new helper.
   2. Add `reflection_due_epoch(entry, state, now) -> float | None`: returns `compute_next_due(entry.schedule, last_run=_effective_last_run(entry, state), now=now)`, or `None` when `entry.schedule` is blank or `compute_next_due` raises `ValueError`.
   3. Call it in the tick loop **immediately after** the `is_reflection_due` check at `:938`, i.e. before any `mark_started`, and pass the result through `run_reflection(entry, state, due_epoch=...)` at `:956` and `:971` (default `None`, so no other caller breaks) and on to `_enqueue_agent_reflection(entry, due_epoch=...)` at `:635`.
 - `_enqueue_agent_reflection` passes `idempotency_key=f"reflection:{entry.name}:{int(due_epoch) // 60 * 60}"` when `due_epoch is not None`, and `idempotency_key=None` otherwise (a scheduleless / manually triggered reflection keeps today's non-idempotent behavior). The `// 60 * 60` floor is the tick period: it absorbs sub-tick jitter so two ticks inside one window agree. No `.timestamp()` call anywhere — `compute_next_due` returns a float.
@@ -383,9 +383,12 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 **Trigger:** owner A stalls past TTL, health loop redelivers, B acquires generation g+1, A wakes and renews
 **Mitigation:** renew is compare-and-set on generation; A's renew returns `False` and A's next write is rejected by `transition_status(generation=g)`
 
-### Race 4: finalize enqueues a job for a session the archive already restored
-**Location:** `finalize_session` vs `session_archive.restore_if_empty`
-**Mitigation:** job key is `(kind, session_id)` with `SET NX` on create; a second enqueue binds to the existing row
+### Race 4: a second enqueue creates a duplicate job for one session
+**Location:** `agent/side_effects.py::enqueue`
+**Trigger:** two enqueues land for the same `(kind, session_id)` — `_execute_agent_session` running twice for one session (health-check revival, retry, manual resume), `session_archive.restore_if_empty` racing the executor, or the fleet-wide `/update` in which every machine runs the `side_effect_job_model` back-enqueue over the same "sessions completed in the last 24h"
+**Data prerequisite:** a `SideEffectJob` row already exists for that pair
+**State prerequisite:** both callers read before either writes
+**Mitigation:** a composite `KeyField` **cannot** provide this, and the plan no longer claims it does. `job_id` is an `AutoKeyField` (a `UniqueKeyField` subclass), so Popoto composes it into the Redis key and its value differs per caller — two enqueues would mint two distinct uuid4 keys and both rows would survive; `kind` is an `IndexedField`, not a KeyField, so it does not bound the key either. Instead `enqueue` runs `SET sideeffect:idem:{kind}:{session_id} {job_id} NX EX 604800` through `utils.redis_client.text_redis()` **before** `SideEffectJob.create(...)`, and on a lost race reads the bound `job_id` back from the key and returns it without creating a row. This is the same single-winner idiom as `agent/enqueue_idempotency.py` (Race 5), reused rather than reinvented; §Key Elements declares it on `SideEffectJob` and the seven-day `EX` matches the model's `Meta.ttl`. It is also the cross-process replacement for the in-memory dedup the deleted `_schedule_post_session_extraction` provided through `_pending_extraction_tasks`, which only ever covered one worker process.
 
 ### Race 5: two callers race on one idempotency key
 **Location:** `agent/enqueue_idempotency.py`
@@ -404,7 +407,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 ## Update System
 
 - `scripts/update/run.py` gains `register_side_effect_drain` and `register_dead_letter_replay` steps through `reflection_register.py`, idempotent like `register_crash_recovery`, pinned to no `project_key` (they run on every machine that runs a worker).
-- Migrations `side_effect_job_model` and `dead_letter_stage_backfill` registered in `MIGRATIONS`. **These two Popoto migrations are the complete migration surface.** No on-disk SQLite migration is needed: lane 2 leaves `agent/session_archive.py`'s `_restore_quarantine` table untouched, so `data/session_archive.db` on every machine keeps its current schema. `agent/session_archive.py` has no `PRAGMA user_version` and only one ad-hoc `ALTER TABLE` at `:143`; building a fleet-wide SQLite migration path is out of this plan's appetite and is the reason the table stays.
+- Migrations `side_effect_job_model` and `dead_letter_stage_backfill` registered in `MIGRATIONS` (`scripts/update/migrations.py:1241`). `side_effect_job_model`'s one-time back-enqueue runs on every machine in the fleet against the same shared Redis, so it must go through `agent.side_effects.enqueue` and inherit the `sideeffect:idem:{kind}:{session_id}` `SET NX` guard (Race 4) — the local `data/migrations_completed.json` marker makes it once-per-machine, not once-per-fleet, and the marker alone would produce one duplicate job row per bridge machine. `dead_letter_stage_backfill` re-saves every existing row so the new `Meta.ttl` applies to them. **These two Popoto migrations are the complete migration surface.** No on-disk SQLite migration is needed: lane 2 leaves `agent/session_archive.py`'s `_restore_quarantine` table untouched, so `data/session_archive.db` on every machine keeps its current schema. `agent/session_archive.py` has no `PRAGMA user_version` and only one ad-hoc `ALTER TABLE` at `:143`; building a fleet-wide SQLite migration path is out of this plan's appetite and is the reason the table stays.
 - No new dependencies. New settings fields default off or safe; `.env.example` gains `FEATURES__SESSION_LEASE_ENABLED` (lane 6) with `# @optional`; no run-claim override exists.
 - **Deploy consequence: a full service restart, fleet-wide.** This is not a hot-reloadable change. Every lane alters code the long-lived processes hold in memory: the bridge's relay and outbox reader (lanes 2, 3, 5a), the worker's pop, finalize, and enqueue paths (lanes 1, 4, 5b), and the reflection process's registry (lanes 1, 2). On every bridge machine, after `/update` pulls the merge: `./scripts/valor-service.sh restart` **and** `worker-restart`. A machine that pulls the code without restarting runs the old bridge against the new models, which is exactly the shape of the #3003 outage (new import, old process, silent stall). Verify per machine with `tail -5 logs/bridge.log` showing "Connected to Telegram".
 
@@ -502,7 +505,7 @@ Five builders run in parallel over one lane worktree. Five files are touched by 
 | `models/session_lifecycle.py` | **dlq-builder** (lane 2) | lane 4 hands the `claim_pending_run` change at `:858-864` (add `record_lock_degradation("claim_pending_run", "closed")`, flip `return True` → `return False`, add the policy docstring line). Lane 2's own edits are the `session_recovery_cap` / `session_init_hang` dead-letter writes. **Lane 1 hands nothing here** — the extraction seam is in `agent/session_executor.py`, not this file (round-2 blocker 1). |
 | `agent/session_executor.py` | **locks-builder** (lane 5a) | lane 1 hands the whole extraction seam: the `_schedule_post_session_extraction(...)` → `enqueue("memory_extraction", ...)` swap at `:2590`, the comment rewrite at `:2575-2586`, the deletion of `_schedule_post_session_extraction` (`:339-398`), `drain_pending_extractions` (`:400`) and the `_pending_extraction_tasks` registry, and the two docstring rewordings at `:589` / `:609`. Lane 5a's own edit is `VALOR_CORRELATION_ID` in `_harness_env` (`:2194`). |
 | `worker/__main__.py` | **locks-builder** (lane 5a) | lane 1 hands the removal of the shutdown drain call and its import (`:1081-1085`). Lane 5a's own edit is `StructuredJsonFormatter` in `_configure_logging` (`:425`). |
-| `agent/agent_session_queue.py` | **seam-builder** (lane 5b) | lane 2 hands the corrupted-pop reaper dead-letter write (`:2175-2272`); lane 3 hands the `_session_notify_listener` parse change (`:1053`). Lane 5b's own edits are `_push_agent_session` (`:204-231`, `:361`, `:369`) and the `enqueue_agent_session` call site (`:1712`). Seam-builder is the owner because the signature change is the one edit that must land coherently with its callers. |
+| `agent/agent_session_queue.py` | **seam-builder** (lane 5b) | lane 2 hands the corrupted-pop reaper dead-letter write (`:2175-2272`); lane 3 hands the `_session_notify_listener` parse change (`:1053`). Lane 5b's own edits are `_push_agent_session` (`:204-233`, the reconcile block ending `:369`, and `async_create` at `:370`) and the `enqueue_agent_session` call site (`:1712`). Seam-builder is the owner because the signature change is the one edit that must land coherently with its callers. |
 | `scripts/update/migrations.py`, `scripts/update/reflection_register.py`, `scripts/update/run.py` | **dlq-builder** (lane 2) | lane 1 hands `side_effect_job_model` (migration), `register_side_effect_drain` (register helper), and its `run.py` step. Lane 2 lands both migrations and both register helpers in one commit so `MIGRATIONS` and the `run.py` step order have a single author. |
 
 Uncontended files stay with their lane: lane 1 owns `models/side_effect_job.py`, `agent/side_effects.py`, `reflections/housekeeping/side_effect_drain.py`, and `agent/messenger.py` (one docstring); lane 2 owns `models/dead_letter.py`, `bridge/dead_letters.py`, `bridge/telegram_relay.py`, the email relay, `agent/session_archive.py`, `reflections/housekeeping/dead_letter_replay.py`, `ui/data/dead_letters.py`; lane 3 owns `bridge/wire_schemas.py`, `agent/steering.py`, `agent/session_pickup.py`'s parse sites; lane 4 owns `agent/lock_policy.py`, `bridge/dedup.py`, `ui/data/locks.py`; lane 5a owns `agent/output_handler.py` (and, per the table above, `agent/session_executor.py` and `worker/__main__.py` as contended files); lane 5b owns `agent/enqueue_idempotency.py`, `agent/reflection_scheduler.py`, `tools/valor_session.py`.
@@ -599,40 +602,142 @@ Commit early with explicit paths (`git add <path>`, never `git add -A`) so a pee
 
 ## Verification
 
-| Check | Command | Expected |
-|-------|---------|----------|
-| SideEffectJob model exported | `.venv/bin/python -c "import models; print(hasattr(models, 'SideEffectJob'))"` | output contains True |
-| Fire-and-forget extraction gone | `grep -rn "_schedule_post_session_extraction\|drain_pending_extractions" agent/ worker/ \| wc -l` | output contains 0 |
-| DeadLetter has stage | `grep -c "stage = IndexedField" models/dead_letter.py` | output > 0 |
-| `process_outbox` dead-letters instead of discarding | `scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -q -k outbox_parse_dead_letters` | exit code 0, ≥1 test collected. The test feeds `process_outbox` one malformed-JSON entry and one `type="nope"` entry and asserts exactly two `DeadLetter` rows with `stage="outbox_parse"` carrying the raw strings. A file-wide `grep discard` cannot be the check here: at `bf0a5d5` it returns 9, and 7 of those are `_dead_letter_message`'s deliberate undeliverable drops (`:943-1020`) that no lane touches and that spell it "dead letter" with a space, so no `grep -v` filter separates them. |
-| Session path writes dead letters at two sites | `grep -rn "dead_letters.record(" models/session_lifecycle.py agent/agent_session_queue.py \| wc -l` | output > 1 |
-| Quarantine table survives (anti-criterion) | `grep -c "CREATE TABLE IF NOT EXISTS _restore_quarantine" agent/session_archive.py` | output contains 1 |
-| Archive quarantine mirrors to a dead letter, guarded | `scripts/pytest-clean.sh tests/unit/test_session_archive_quarantine_dead_letter.py -q` | exit code 0, ≥2 tests collected: one asserts a `DeadLetter(stage="archive_restore")` appears when a row hits `SESSION_ARCHIVE_ROW_ATTEMPT_CAP`; one asserts that with `dead_letters.record` raising, `attempt_count` and `quarantined_at` still commit to SQLite |
-| Two reflections registered | `grep -c "def register_side_effect_drain\|def register_dead_letter_replay" scripts/update/reflection_register.py` | output > 1 |
-| Wire schemas used by readers | `grep -rn "model_validate_json" bridge/telegram_relay.py agent/steering.py agent/agent_session_queue.py \| wc -l` | output > 2 |
-| Degradation counter on all three lock branches | `grep -rn "record_lock_degradation(" agent/session_pickup.py models/session_lifecycle.py bridge/dedup.py \| wc -l` | output contains 3 (exactly one per lock — the three sites enumerated in lane 4) |
-| Run claim fails closed | `scripts/pytest-clean.sh tests/unit/test_lock_policy.py -q -k fail_closed` | exit code 0 |
-| Correlation reaches subprocess | `grep -c "VALOR_CORRELATION_ID" agent/session_executor.py` | output > 0 |
-| Correlation in outbox payload | `grep -c "correlation_id" bridge/wire_schemas.py` | output > 0 |
-| Worker logs JSON | `grep -c "StructuredJsonFormatter" worker/__main__.py` | output > 0 |
-| Seam carries idempotency key | `grep -c "idempotency_key" agent/agent_session_queue.py` | output > 0 |
-| Reflections pass the key | `grep -c "idempotency_key=" agent/reflection_scheduler.py` | output > 0 |
-| Duplicate tick enqueues once | `scripts/pytest-clean.sh tests/unit/test_enqueue_idempotency.py tests/unit/test_reflection_scheduler.py -q -k idempot` | exit code 0 |
-| No break-glass on the run claim | `grep -rn "run_claim_fail_open" config/ models/ agent/ \| wc -l` | output contains 0 |
-| Side-effect and dead-letter tests | `scripts/pytest-clean.sh tests/unit/test_side_effect_jobs.py tests/unit/test_dead_letters.py tests/unit/test_wire_schemas.py -q` | exit code 0 |
-| Anti-criterion: no raw Redis on Popoto keys | `grep -rnE "POPOTO_REDIS_DB\.(hset\|hdel\|sadd\|srem\|zadd\|zrem\|delete)\(" models/side_effect_job.py models/dead_letter.py agent/side_effects.py \| wc -l` | output contains 0 |
-| Non-ORM Redis goes through the accessor | `/usr/bin/grep -c "from utils.redis_client import" agent/lock_policy.py agent/enqueue_idempotency.py` | each file reports > 0 |
-| Anti-criterion: no hand-built Redis client | `/usr/bin/grep -rn "redis.Redis(\|from_url(" agent/lock_policy.py agent/enqueue_idempotency.py agent/side_effects.py \| wc -l` | output contains 0 |
-| Anti-criterion: lease not deleted early | `grep -c "def claim_pending_run" models/session_lifecycle.py` | output > 0 |
-| Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
-| Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
+**Every command below lives in a fenced block, not in a table cell.** Two consecutive critique rounds blocked this plan on an unsatisfiable Verification row, and both were hard to see because the commands were embedded in Markdown table cells: a shell pipe inside a cell has to be written `\|`, and a validator who copy-pastes `... agent/ \| wc -l` into a shell gets three extra filename arguments handed to `grep` instead of a pipe to `wc`. A regex alternation has the same problem in the opposite direction. The fenced block removes the transcription hazard entirely; the table below carries only the id, the claim, the expected value, and what the command returns on `main` **today**.
+
+**`grep` is pinned to `/usr/bin/grep` on every row.** An agent shell can resolve bare `grep` to a `.gitignore`-honoring ugrep, which disagrees with `/usr/bin/grep` about `__pycache__` and returns a different count in the validator's shell than in the author's. Every recursive row additionally passes `--include='*.py'` so a stale `.pyc` can never be counted. Run everything from the repo root.
+
+**Every pytest row asserts a collected count, not just an exit code.** `scripts/pytest-clean.sh` exiting 0 having collected zero tests is a failure, not a pass; read the `N passed` line.
+
+```bash
+# V1  SideEffectJob model exported
+.venv/bin/python -c "import models; print(hasattr(models, 'SideEffectJob'))"
+
+# V2  fire-and-forget extraction symbols gone (definitions AND call sites)
+/usr/bin/grep -rn --include='*.py' -E '^([[:space:]]*(await )?|(async )?def )(_schedule_post_session_extraction|drain_pending_extractions)\(' agent/ worker/ | wc -l
+
+# V3  the extraction seam is a job enqueue, not a create_task
+scripts/pytest-clean.sh tests/unit/test_session_executor_extraction_decoupling.py -q
+
+# V4  the handler's four arguments round-trip through payload_json
+scripts/pytest-clean.sh tests/unit/test_side_effect_jobs.py -q -k payload
+
+# V5  enqueue is single-winner per (kind, session_id)
+scripts/pytest-clean.sh tests/unit/test_side_effect_jobs.py -q -k idempotent
+
+# V6  DeadLetter has stage
+/usr/bin/grep -c "stage = IndexedField" models/dead_letter.py
+
+# V7  process_outbox dead-letters instead of discarding
+scripts/pytest-clean.sh tests/unit/test_bridge_relay.py -q -k outbox_parse_dead_letters
+
+# V8  the session path writes dead letters at its three sites
+/usr/bin/grep -c "dead_letters.record(" models/session_lifecycle.py agent/agent_session_queue.py
+
+# V9  the quarantine table survives (anti-criterion)
+/usr/bin/grep -c "CREATE TABLE IF NOT EXISTS _restore_quarantine" agent/session_archive.py
+
+# V10 archive quarantine mirrors to a dead letter, guarded
+scripts/pytest-clean.sh tests/unit/test_session_archive_quarantine_dead_letter.py -q
+
+# V11 both reflections registered
+/usr/bin/grep -c "def register_side_effect_drain\|def register_dead_letter_replay" scripts/update/reflection_register.py
+
+# V12 wire schemas used by every reader
+/usr/bin/grep -c "model_validate_json" bridge/telegram_relay.py agent/steering.py agent/agent_session_queue.py
+
+# V13 a plain text message (no `type` key) still parses
+scripts/pytest-clean.sh tests/unit/test_wire_schemas.py -q -k type_none
+
+# V14 degradation counter on all three lock branches, one each
+/usr/bin/grep -c "record_lock_degradation(" agent/session_pickup.py models/session_lifecycle.py bridge/dedup.py
+
+# V15 run claim fails closed
+scripts/pytest-clean.sh tests/unit/test_lock_policy.py -q -k fail_closed
+
+# V16 correlation reaches the subprocess
+/usr/bin/grep -c "VALOR_CORRELATION_ID" agent/session_executor.py
+
+# V17 correlation in the outbox payload model
+/usr/bin/grep -c "correlation_id" bridge/wire_schemas.py
+
+# V18 worker logs JSON
+/usr/bin/grep -c "StructuredJsonFormatter" worker/__main__.py
+
+# V19 seam carries the idempotency key
+/usr/bin/grep -c "idempotency_key" agent/agent_session_queue.py
+
+# V20 reflections pass the key
+/usr/bin/grep -c "idempotency_key=" agent/reflection_scheduler.py
+
+# V21 a duplicate tick enqueues once
+scripts/pytest-clean.sh tests/unit/test_enqueue_idempotency.py tests/unit/test_reflection_scheduler.py -q -k idempot
+
+# V22 no break-glass on the run claim (anti-criterion)
+/usr/bin/grep -rn --include='*.py' "run_claim_fail_open" config/ models/ agent/ | wc -l
+
+# V23 the new unit suites pass whole
+scripts/pytest-clean.sh tests/unit/test_side_effect_jobs.py tests/unit/test_dead_letters.py tests/unit/test_wire_schemas.py tests/unit/test_lock_policy.py -q
+
+# V24 anti-criterion: no raw Redis command on a Popoto key
+/usr/bin/grep -nE "POPOTO_REDIS_DB\.(hset|hdel|sadd|srem|zadd|zrem|delete)\(" models/side_effect_job.py models/dead_letter.py agent/side_effects.py | wc -l
+
+# V25 non-ORM Redis goes through the sanctioned accessor
+/usr/bin/grep -c "from utils.redis_client import" agent/lock_policy.py agent/enqueue_idempotency.py agent/side_effects.py
+
+# V26 anti-criterion: no hand-built Redis client
+/usr/bin/grep -nE "redis\.Redis\(|redis\.from_url\(|Redis\.from_url\(" agent/lock_policy.py agent/enqueue_idempotency.py agent/side_effects.py | wc -l
+
+# V27 anti-criterion: the old gates are not deleted in this build
+/usr/bin/grep -c "def claim_pending_run" models/session_lifecycle.py
+
+# V28 format clean
+.venv/bin/python -m ruff format --check .
+
+# V29 lint clean
+.venv/bin/python -m ruff check .
+```
+
+| ID | Check | Expected after the build | On `main` today | Bites? |
+|---|---|---|---|---|
+| V1 | `SideEffectJob` exported from `models` | prints `True` | prints `False` | yes |
+| V2 | fire-and-forget extraction symbols gone | `0` | `4` (two defs at `agent/session_executor.py:339,400`; two call sites at `:2590` and `worker/__main__.py:1083`) | yes |
+| V3 | the extraction seam is a job enqueue | exit 0, ≥1 test passed; the file's assertions on `_schedule_post_session_extraction` are replaced by an assertion that a `SideEffectJob` row exists after `_execute_agent_session` | file exists and passes against the old fire-and-forget behavior | yes — the rewritten assertions fail against the old code |
+| V4 | the four arguments round-trip | exit 0, ≥1 test passed: enqueue with the three payload values, drain, assert the handler received `response_text`, `turn_count`, `is_conversational` verbatim | file absent | yes |
+| V5 | enqueue is single-winner per `(kind, session_id)` | exit 0, ≥1 test passed: two `enqueue` calls for one pair produce one row and the same returned `job_id` | file absent | yes |
+| V6 | `DeadLetter` has `stage` | `1` | `0` | yes |
+| V7 | `process_outbox` dead-letters | exit 0, ≥1 test passed: one malformed-JSON entry and one `type="nope"` entry produce exactly two `DeadLetter(stage="outbox_parse")` rows carrying the raw strings | test absent (`-k` selects nothing) | yes |
+| V8 | session-path dead-letter writers | three lines, each ≥1 total; `models/session_lifecycle.py` ≥2 (`session_recovery_cap`, `session_init_hang`) and `agent/agent_session_queue.py` ≥1 (the corrupted-pop reaper) | both `0` | yes |
+| V9 | quarantine table survives | `1` | `1` | no — anti-criterion by design; it catches a regression, it does not measure progress |
+| V10 | archive mirror is guarded | exit 0, ≥2 tests passed (one for the emission at the attempt cap, one asserting SQLite still commits when `dead_letters.record` raises) | file absent | yes |
+| V11 | both reflections registered | `2` | `0` | yes |
+| V12 | wire schemas parsed by every reader | three lines, each ≥1 | three lines, each `0` | yes |
+| V13 | a text message with no `type` key parses | exit 0, ≥1 test passed | file absent | yes |
+| V14 | degradation counter on all three locks | three lines, each exactly `1` (the import line has no `(` and is not counted) | three lines, each `0` | yes |
+| V15 | run claim fails closed | exit 0, ≥1 test passed | file absent | yes |
+| V16 | correlation reaches the subprocess | ≥1 | `0` | yes |
+| V17 | correlation in the payload model | ≥1 | file absent (`grep` exits 2) | yes |
+| V18 | worker logs JSON | ≥1 | `0` | yes |
+| V19 | seam carries the key | ≥1 | `0` | yes |
+| V20 | reflections pass the key | ≥1 | `0` | yes |
+| V21 | duplicate tick enqueues once | exit 0, ≥2 tests passed | `test_enqueue_idempotency.py` absent | yes |
+| V22 | no break-glass on the run claim | `0` | `0` | no — anti-criterion; owner decision 2 has no code to add, only code to keep out |
+| V23 | new unit suites pass whole | exit 0, ≥1 test passed per file (read the `N passed` line; a zero-collection exit 0 is a failure) | three of four files absent | yes |
+| V24 | no raw Redis on a Popoto key | `0` | `0` on the one file that exists — **and the round-2 form of this row could never have returned anything else.** It was written `grep -rnE "...(hset\|hdel\|...)..."`; under `-E` an escaped `\|` is a literal pipe character, not alternation, so the pattern matched nothing on any input. Proven with a seeded control: a file containing `POPOTO_REDIS_DB.hset(` was **not** matched by the escaped form and **was** matched by the unescaped form above | yes, now that the alternation is unescaped |
+| V25 | accessor used for non-ORM Redis | three lines, each ≥1 (the lazy in-function import still matches) | three files absent | yes |
+| V26 | no hand-built Redis client | `0` | three files absent; the same pattern returns `2` against `utils/redis_client.py`, which is the control proving it bites | yes |
+| V27 | old gates not deleted early | `1` | `1` | no — anti-criterion guarding the lane-6 boundary |
+| V28 | format clean | exit 0 | exit 0 | no — standing gate |
+| V29 | lint clean | exit 0 | exit 0 | no — standing gate |
+
+**Audit statement.** All 29 rows were run verbatim on `main` at revision time. Six do not change value across the build and are labelled as such: V9, V22 and V27 are anti-criteria (they fail only on a regression), and V28/V29 are the repo's standing gates. Every other row moves from a measured `main` value to a value the planned edits reach, and none of them depends on a prose mention, a `__pycache__` artifact, or the validator's choice of `grep` binary. The two structurally-defective rows the critiques found are gone: the file-wide relay `grep discard` (round 1) was replaced by V7 in the previous revision, and the `_schedule_post_session_extraction` count row (round 2) is replaced by V2, whose regex anchors on a definition keyword or on call syntax at the start of a line and therefore cannot be satisfied or defeated by the three surviving prose references at `agent/session_executor.py:589`, `:609` and `agent/messenger.py:243`.
+
 
 ## Critique Results
 
 Round 1 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses (Agent tool unavailable in the stage context). **NEEDS REVISION**: 2 blockers, 5 concerns, 5 nits.
 
 **Revision applied 2026-09-07.** All 12 findings resolved; every citation in every finding was re-derived against `bf0a5d5` and current `main` before the fix was written. Two Implementation Notes did not survive that re-derivation and the plan follows the corrected form, recorded here so a reviewer is not confused by the divergence:
-- Concern 2's note said to populate `due_epoch` "at the `:635` dispatch site" from `state.ran_at`. It cannot be: `run_reflection` calls `state.mark_started()` at `:607`, which writes `ran_at = time.time()` (`models/reflection.py:171-175`), so by `:635` the input is already clobbered and a crash-retry would key differently. Lane 5b computes it in the tick loop beside `is_reflection_due` (`:938`) instead and threads it down.
+- Concern 2's note said to populate `due_epoch` "at the `:635` dispatch site" from `state.ran_at`. It cannot be: `run_reflection` calls `state.mark_started()` at `:608`, which writes `ran_at = time.time()` (`models/reflection.py:171-175`), so by `:635` the input is already clobbered and a crash-retry would key differently. Lane 5b computes it in the tick loop beside `is_reflection_due` (`:938`) instead and threads it down.
 - Concern 3's note said `tests/integration/test_bridge_routing.py:162-164` "must be updated for the two new kwargs". It must not: `TestWorkflowIdAbsent` asserts only that `workflow_id` is *absent* from the signature, which two additive kwargs do not disturb. §Test Impact records it as NO CHANGE.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
