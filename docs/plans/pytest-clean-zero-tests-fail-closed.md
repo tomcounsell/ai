@@ -455,58 +455,102 @@ file** → one of:
 
 ## Failure Path Test Strategy
 
+### The test harness (settled — the round-1 model could not exercise the guard)
+
+`tests/unit/test_worktree_venv_absent_guard.py` was named in round 1 as the structural
+model. It is not usable as one. That file provisions a **fake** `.venv/bin/pytest` (a shell
+script echoing `pytest 0.0 (fake)`, lines 52-54) and drives the wrapper with `--version`, so
+no pytest session ever starts, the plugin never loads, and every new case would land on
+"file absent → pass through": the all-skip test would assert non-zero and receive 0. A
+vacuous green in the tests written to prevent vacuous greens.
+
+The harness that **was built and run** (spike-5, spike-6) is a sandbox rootdir under
+`tmp_path` with four properties, each of which is required and each of which was measured:
+
+| Property | Why |
+|---|---|
+| its own `pyproject.toml` with `[tool.pytest.ini_options]` and an `addopts` of its own | the wrapper resolves `REPO_ROOT` from cwd only when this file matches (`scripts/pytest-clean.sh:35`); the sandbox's own `addopts` also keeps the repo's `-n auto --timeout=420` out of a two-test run |
+| `.git` as a **directory** | a `.git` *file* means linked worktree, which trips the #3033 guard (line 143) before pytest starts |
+| a **symlink** to the repo's real `.venv` | makes `PYTEST_BIN` a real pytest (line 178). The fake-pytest model cannot run a session at all |
+| **no** `.python-version` | `check-interpreter-pin.sh` returns 0 at its "no pin file" early exit (line 33), so the pin guard stays silent on a sandbox that has no pin of its own |
+| a **copy** of `pytest_executed_count.py` written into the sandbox root | the subject under test must be the sandbox's copy, not the repo's |
+
+Measured end to end: an all-skip sandbox driven through `scripts/pytest-clean.sh` produced a
+genuine `2 skipped in 0.01s` and the injected plugin wrote its verdict file.
+
+**Two rules the harness must follow, both of which round 1 identified as false-pass channels:**
+
+1. **Negative control, run before any guard assertion.** Assert the plugin actually loaded
+   from the sandbox:
+   `subprocess.run([sandbox_venv_python, "-c", "import pytest_executed_count as m; print(m.__file__)"], env=sandbox_env)`
+   and assert the printed path is under `tmp_path`. Measured why this matters: with a decoy
+   module of the same name behind the sandbox on `PYTHONPATH`, `-p` resolved to the
+   **sandbox** copy; with the sandbox absent from `PYTHONPATH`, it resolved to the
+   **decoy**. Without this control a test can pass while exercising the repo's plugin, so a
+   builder mutating the plugin would see no change.
+2. **Build every subprocess env from a copy of `os.environ` with `PYTHONPATH` and
+   `PYTEST_CLEAN_COUNT_FILE` removed.** The outer wrapper exports both
+   (`scripts/pytest-clean.sh:168` and the new mint), and a subprocess inherits them, so an
+   ambient-env test passes for the wrong reason.
+
+A real linked worktree with its own `uv sync --extra dev` venv remains in task 4 as the
+`PYTHONPATH`-resolution check the sandbox cannot make (Risk 3), not as the primary harness.
+
 ### Exception Handling Coverage
 - [ ] The plugin's file writes are the only I/O that can raise. A write failure must not
-      take down a test run that would otherwise have succeeded, so `sessionstart` and
-      `sessionfinish` swallow `OSError` — and that is a deliberate fail-*open* on an
-      unwritable temp dir. Assert the observable consequence directly: with an unwritable
-      path, the run still completes and the wrapper still returns pytest's status.
+      take down a test run that would otherwise have succeeded, so the write helper swallows
+      `OSError` — a deliberate fail-*open* on an unwritable temp dir. Assert the observable
+      consequence: with an unwritable count-file path, the run still completes and the
+      wrapper still returns pytest's status.
 - [ ] No `except Exception: pass` blocks are introduced. The one handler is narrow
       (`OSError`) and its behavior is pinned by the test above.
-- [ ] The wrapper's read side must tolerate a missing or unreadable file without a bash
-      error; test by pointing the wrapper at a path it cannot create.
+- [ ] The wrapper's read side tolerates a missing or unreadable file without a bash error:
+      `COUNT_VERDICT="$(cat "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null || true)"` under `set -u`.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty file, whitespace-only file, and a file with unparseable contents each take the
-      **fail-closed** branch, not a bash arithmetic error. A guard that crashes on garbage
-      is a guard that can be bypassed by garbage.
-- [ ] `scripts/pytest-clean.sh` with no arguments at all: pytest runs the full `testpaths`,
-      so this is an ordinary run and must behave as one.
-- [ ] `--version`, `--help`, and an invalid flag (argparse exit 4) each pass through
-      untouched — no session, no file, no guard.
+- [ ] The pass-through allowlist is a **shell-level** unit check, not a pytest-driven one.
+      The count file is minted by the wrapper and written only by the plugin, so no test can
+      seed it with garbage through the wrapper's public surface; driving pytest to produce a
+      truncated file is not reproducible. Assert the `case` predicate directly by sourcing
+      it, or by a small bash loop over `"" collectonly "count 0" "count 1" "count 10" started coun "  "`.
+      This is what makes "fail closed on everything not allowlisted" a tested claim rather
+      than a stated one.
+- [ ] `scripts/pytest-clean.sh` with no arguments at all: pytest runs the sandbox's
+      `testpaths`, so this is an ordinary run and must behave as one.
+- [ ] `--version` and `--help` pass through untouched — no session, no file, no guard.
 
 ### Error State Rendering
-- [ ] The zero-executed diagnostic goes to **stderr**, names the likely cause
-      (test-DB pool exhaustion), names the remedy (`scripts/reap-xdist.sh --apply`), and
-      names the escape hatch. Assert on the message text, not just the exit code — a
-      guard that fires with an unattributable message costs the next agent an hour.
-- [ ] The message must be distinguishable from the three existing wrapper refusals, so a
-      caller reading stderr can tell which guard fired.
+- [ ] The diagnostic goes to **stderr**, leads with `ZERO TESTS EXECUTED (#3195)`, states
+      that the run proves nothing, names the likely cause (test-DB pool exhaustion at
+      fixture setup), names the remedy (`scripts/reap-xdist.sh --apply`), and names the
+      escape hatch. Assert the message text, not just the exit code.
+- [ ] The message is distinguishable from the three existing wrapper refusals (`no usable
+      .venv`, `off-pin interpreter`, `WEDGED`), so a caller reading stderr can tell which
+      guard fired. Pin this by asserting the other three headlines are absent.
+- [ ] With `PYTEST_ALLOW_ZERO_TESTS` set, the message is **still printed** while the exit is
+      0. Assert the message; the exit code alone is not an assertion here.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_worktree_venv_absent_guard.py` — **UPDATE (verify only, expect no
-      change)**. It drives the wrapper via `scripts/pytest-clean.sh --version`, which is
-      the file-absent pass-through path. It must keep passing untouched; if it does not,
-      the guard is wrong about `--version`.
+      change)**. It drives the wrapper via `--version`, the file-absent pass-through path.
+      It must keep passing untouched; if it does not, the guard is wrong about `--version`.
+      Note it is **not** the structural model for the new file (see the harness section).
 - [ ] `tests/unit/test_interpreter_pin_guard.py` — **UPDATE (verify only, expect no
       change)**. Same `--version` drive path, same reasoning.
-- [ ] `tests/unit/test_feature_map_markers.py` — **verify only**. The new test file must
-      resolve to a marker consistently with the guard's rules. Confirmed at plan time:
+- [ ] `tests/unit/test_feature_map_markers.py` — **verify only**. Confirmed at plan time:
       `resolve_marker("test_pytest_clean_zero_tests.py")` returns `(None, None)`, matching
-      both sibling wrapper-guard test files, so no `FEATURE_MAP` entry and no
-      `KNOWN_MISTAGS` entry is needed. Re-confirm after the file is named, since the name
-      is what decides this.
-- [ ] `tests/conftest.py` — **no change**. `scratch_test_db`'s skip is correct behavior
-      and stays; this plan changes what a *consumer* concludes from it, not the fixture.
+      both sibling wrapper-guard test files, so no `FEATURE_MAP` and no `KNOWN_MISTAGS`
+      entry is needed. Re-confirm after the file is named.
+- [ ] `tests/conftest.py` — **no change**. `scratch_test_db`'s skip is correct behavior and
+      stays; this plan changes what a *consumer* concludes from it.
 - [ ] No existing test asserts the wrapper's exit code on a zero-execution run, so nothing
       is invalidated by making that case non-zero.
 
-New coverage lands in one new file, `tests/unit/test_pytest_clean_zero_tests.py`, modeled
-structurally on `tests/unit/test_worktree_venv_absent_guard.py`: build a throwaway rootdir
-in `tmp_path`, invoke the real script against it with `subprocess.run`, assert on exit code
-and stderr. It must **not** use the repo's own `tests/` tree as its subject, and must not
-claim a test-DB slot — the sandbox rootdir keeps both true.
+New coverage lands in one new file, `tests/unit/test_pytest_clean_zero_tests.py`, built on
+the sandbox harness above. It must not point the wrapper at the repo's own `tests/` tree and
+must not claim a test-DB slot — the sandbox rootdir keeps both true, verified in spike-5
+where no slot was taken.
 
 ## Rabbit Holes
 
