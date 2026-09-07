@@ -369,6 +369,18 @@ def create_app() -> FastAPI:
             {"jobs": jobs},
         )
 
+    @app.get("/_partials/pipeline-integrity/", response_class=HTMLResponse)
+    def partial_pipeline_integrity(request: Request):
+        """HTMX partial: dead-letter counts by stage and lock-degradation counts."""
+        from ui.data.dead_letters import get_dead_letter_counts
+        from ui.data.locks import get_lock_policies
+
+        return templates.TemplateResponse(
+            request,
+            "_partials/pipeline_integrity.html",
+            {"dead_letters": get_dead_letter_counts(), "locks": get_lock_policies()},
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""

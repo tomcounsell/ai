@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime
 
 import agent.steering as _steering
+from agent.lock_policy import record_lock_degradation
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -120,6 +121,10 @@ def _acquire_pop_lock(worker_key: str) -> bool:
     Returns True if the lock was acquired, False if already held.
     Uses Popoto's underlying Redis client to avoid new dependencies.
     TTL=5s ensures self-healing if the process crashes while holding the lock.
+
+    Policy: fail open; duplicate work is preferred to a stalled queue. The
+    degradation is counted (``agent/lock_policy.py``) so a Redis blip is
+    visible on the dashboard rather than inferred from its consequences.
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
@@ -130,6 +135,7 @@ def _acquire_pop_lock(worker_key: str) -> bool:
         return bool(acquired)
     except Exception as e:
         logger.warning(f"[worker:{worker_key}] Pop lock acquisition failed (non-fatal): {e}")
+        record_lock_degradation("pop_lock", "open")
         # Fail open: allow the pop to proceed without the lock rather than blocking workers
         return True
 

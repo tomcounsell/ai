@@ -24,6 +24,14 @@
      hx-get="/_partials/analytics/" hx-trigger="revealed" hx-swap="innerHTML">
 </div>
 
+{# ── Pipeline integrity ── #}
+<section id="pipeline-integrity">
+    <h2>Pipeline integrity</h2>
+    <div id="pipeline-integrity-tiles"
+         hx-get="/_partials/pipeline-integrity/" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    </div>
+</section>
+
 {# ── Jobs ── #}
 <section id="jobs">
     <h2>Jobs</h2>

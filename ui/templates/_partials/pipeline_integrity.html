@@ -1,0 +1,26 @@
+{# Pipeline integrity — where work leaves the pipeline, and how often the
+   coordination locks have had to fall back on their declared policy. #}
+<div class="stats-grid">
+    <div class="stats-group">
+        <div class="stats-group-label">Dead letters ({{ dead_letters.total }} total)</div>
+        <div class="stats-group-cards">
+            {% for row in dead_letters.rows %}
+            <div class="stat-card">
+                <span class="stat-card-label">{{ row.stage }}</span>
+                <span class="stat-card-value">{{ row.count }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Lock degradation</div>
+        <div class="stats-group-cards">
+            {% for lock in locks %}
+            <div class="stat-card">
+                <span class="stat-card-label">{{ lock.name }} — fails {{ lock.policy }}</span>
+                <span class="stat-card-value">{{ lock.count }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
