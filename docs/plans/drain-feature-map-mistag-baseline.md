@@ -137,11 +137,104 @@ resolution semantics, `KNOWN_MISTAGS`, and the assignment mechanism in
 
 ## Prior Art
 
-_placeholder_
+
+- **[#3010 / PR #3190]**: *FEATURE_MAP marker-regression guard* — merged
+  2026-09-06. Built `tests/marker_map.py` (the single resolution point shared by
+  the collection hook and the guard), the three rules R1/R2/R3, and the
+  `KNOWN_MISTAGS` baseline. **Succeeded.** Its `## What was considered and
+  rejected` section names "making the package directory authoritative" as
+  deferred to this issue, explicitly because the guard had to exist first to
+  measure the before/after. That precondition is now met.
+- **[#3184]**: *FEATURE_MAP stem uses a global str.replace* — merged
+  2026-09-07 as `8e62c3a50`. Anchored the strip. **Succeeded**, and eliminated
+  mechanism 3 (mangled stem) structurally rather than by exemption. This plan
+  follows the same shape for mechanisms 1 and 2, and #3184 is the precedent for
+  the argument that retiring a rule whose defect class became impossible is
+  correct rather than a weakening.
+- **[#2879 / PRs #2941, #3005]**: *Split the largest test files into per-class
+  modules* — merged Aug 2026. Created the themed package directories. This is
+  the change that made a *directory* signal exist at all; before it, there were
+  no themed packages to be authoritative about. It is also the change that
+  introduced 21 of the 24 baseline violations, silently, with the suite green —
+  the exact scenario #3010 was later built to catch.
+- **[#2946]**: *Split test_output_handler.py and test_memory_extraction.py into
+  theme-grouped packages* — merged. Created `tests/unit/output_handler/` and
+  `tests/unit/memory_extraction/`, two of the four packages whose directory name
+  does not resolve today.
+- **[#2805]**: *line-keyed ALLOWLIST silently un-exempted call sites* —
+  the reason `KNOWN_MISTAGS` is path-keyed. Constrains this plan: entries are
+  deleted, never re-keyed or re-indexed.
+- **[#3031]**: *a stale exemption is a silent hole* — the reason the guard fails
+  on a baseline entry with no matching violation. This is what makes the drain
+  self-proving: a file cannot be fixed without its entry being deleted, and an
+  entry cannot be deleted without the file being fixed.
+- **[#431]**: *Organize test suite: feature markers, e2e tests, index* — March
+  2026, the original introduction of `FEATURE_MAP` and the substring-match
+  resolver. The root of every mechanism this plan closes.
+
+No prior attempt to drain the baseline exists. This is the first.
 
 ## Research
 
-_placeholder_
+
+External research on pytest's marker machinery, because the correctness of the
+whole approach rests on *when* a dynamically-added marker becomes visible to
+`-m`.
+
+**Queries used:**
+- `pytest pytest_collection_modifyitems item.add_marker directory based markers best practice`
+- `pytest add_marker after collection -m keyword expression evaluation order caveat`
+
+**Key findings:**
+
+1. **`-m` sees only the markers present when pytest's own deselection runs.**
+   pytest performs `-m` deselection inside its *own* `pytest_collection_modifyitems`,
+   via `deselect_by_mark`, and `MarkMatcher.from_item` snapshots
+   `{mark.name for mark in item.iter_markers()}` at that moment. A marker added
+   later (in `pytest_collection_finish`, `pytest_runtest_setup`, or a fixture's
+   `request.node.add_marker`) still drives `skip`/`xfail` but is **invisible to
+   `-m`**. Ordering between a conftest hook and pytest's internal one is a pluggy
+   LIFO detail, not a guarantee.
+   ([_pytest.mark source](https://docs.pytest.org/en/stable/_modules/_pytest/mark.html))
+   **How it informs the plan:** the repo's hook already wins this race today —
+   `-m reflections` does select the 34 files whose marker is derived, proving the
+   ordering works. But it is a property of the current plugin stack, not a
+   contract. Therefore **every acceptance measurement in this plan is a real
+   `pytest --collect-only -m <marker>` run, never a unit test of the resolver.**
+   A resolver test would stay green through a hook-ordering regression that
+   silently drops every derived marker from `-m` — precisely the invisible
+   failure #3010 was built to prevent.
+
+2. **`add_marker` is additive over module-level `pytestmark`.** The docs'
+   canonical pattern is exactly this repo's: iterate `items`, call
+   `item.add_marker(...)`. It composes with, rather than replaces, an explicit
+   `pytestmark`.
+   ([Working with custom markers](https://docs.pytest.org/en/stable/example/markers.html))
+   **How it informs the plan:** the effective marker set of a file is *already*
+   `explicit ∪ derived` in the shipped system — which is what makes the 47
+   explicit-marker files coexist quietly with derived ones. An **additive** union
+   of directory and basename markers is therefore consistent with the model
+   already in production; a *replacing* directory rule would be the novel
+   semantics, not the conservative one.
+
+3. **Directory-keyed marking is the documented idiom, and `item.path`
+   (a `pathlib.Path`) is preferred over the deprecated `item.fspath`;** guides
+   specifically warn to compare path *parts* rather than substring-match the
+   path string, to avoid accidental matches.
+   ([mark how-to](https://docs.pytest.org/en/stable/how-to/mark.html))
+   **How it informs the plan:** directory resolution matches on `Path(...).parts`
+   with an **exact** dict lookup, never a substring scan — which is also what
+   makes it order-free.
+
+4. **Unregistered markers warn (and error under `--strict-markers`).**
+   `pyproject.toml` `addopts` is
+   `--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread`,
+   with no `--strict-markers`. **How it informs the plan:** every marker this
+   plan applies (`reflections`, `sessions`, `sdlc`, `messaging`, `git`,
+   `validation`) is already declared in `[tool.pytest.ini_options] markers`, so
+   no registration change is needed — and a verification row asserts that any
+   marker a `DIRECTORY_MAP` entry can produce is a registered one, so a future
+   entry naming a typo'd marker fails loudly instead of warning into the void.
 
 ## Spike Results
 
@@ -153,7 +246,23 @@ _placeholder_
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+
+No previous attempt to drain this baseline exists, so there is no failure to
+analyse. What the table below records instead is why the *two obvious* fixes,
+both surveyed in the issue, are dead on arrival — because a builder who has not
+read the issue will reach for them first.
+
+| Candidate | What it would do | Why it fails |
+|-----------|------------------|--------------|
+| Rename the files | `test_pm_briefings_no_slots_configured.py` → `test_reflections_pm_briefings_no_slots_configured.py` | First-hit-wins ordering is unchanged. `config` (index 45) still beats `reflection` (index 52), so the renamed file still resolves to `config`. **The ordering trap that motivated the guard also blocks the obvious fix.** Verified at `8e62c3a50`. |
+| Add ~9 narrow `FEATURE_MAP` keys | One key per offending basename | Three of the nine must be hand-placed *ahead of* `config`, `sdlc`, and `validation` to win. That is more ordering-sensitive hand-placement — the defect restated as the remedy. It also scales with file count forever: every new file in `reflections/` needs another key. |
+
+**Root cause pattern:** every one of the three mistag mechanisms is a symptom of
+deriving a semantic property (what feature is this test about?) from an
+*ordered substring scan of a filename*. #3184 removed one mechanism by making
+the stem anchored. This plan removes the remaining two by making the signal
+structural: an exact-match directory lookup that cannot collide, and a
+whole-token basename match that cannot fragment.
 
 ## Architectural Impact
 
