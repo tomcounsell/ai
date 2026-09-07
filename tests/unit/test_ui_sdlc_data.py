@@ -1558,7 +1558,7 @@ class TestActiveStatusesSingleDefinition:
     same membership test.
     """
 
-    def test_exactly_one_status_tuple_literal_in_the_module(self):
+    def test_active_statuses_has_exactly_one_literal_in_the_module(self):
         """A second inline tuple is how the two definitions drifted apart before."""
         import inspect
 
@@ -1570,7 +1570,7 @@ class TestActiveStatusesSingleDefinition:
             "a second active-status literal reintroduces the drift this collapsed"
         )
 
-    def test_is_active_reads_the_constant(self):
+    def test_is_active_reads_the_active_statuses_constant(self):
         import inspect
 
         from ui.data.sdlc import PipelineProgress
@@ -1579,7 +1579,7 @@ class TestActiveStatusesSingleDefinition:
         assert "ACTIVE_STATUSES" in source
         assert "waiting_for_children" not in source
 
-    def test_property_and_constant_agree_membership_for_membership(self):
+    def test_active_statuses_and_property_agree_membership_for_membership(self):
         from ui.data.sdlc import ACTIVE_STATUSES, PipelineProgress
 
         candidates = set(ACTIVE_STATUSES) | {
@@ -1593,7 +1593,7 @@ class TestActiveStatusesSingleDefinition:
             progress = PipelineProgress(session_id="x", agent_session_id="x", status=status)
             assert progress.is_active == (status in ACTIVE_STATUSES), status
 
-    def test_in_progress_is_now_active_on_both_paths(self):
+    def test_active_statuses_now_includes_in_progress_on_both_paths(self):
         """The deliberate, tested behavior change: the union was kept."""
         from ui.data.sdlc import ACTIVE_STATUSES, PipelineProgress
 
@@ -1603,7 +1603,7 @@ class TestActiveStatusesSingleDefinition:
             is True
         )
 
-    def test_this_build_adds_no_new_status(self):
+    def test_active_statuses_gains_no_new_status_in_this_build(self):
         """`admitted` arrives with lane 3, not here."""
         from ui.data.sdlc import ACTIVE_STATUSES
 
@@ -1615,7 +1615,7 @@ class TestActiveStatusesSingleDefinition:
             "waiting_for_children",
         }
 
-    def test_stage_state_is_active_is_left_alone(self):
+    def test_stage_state_is_active_does_not_read_active_statuses(self):
         """A third `is_active` exists on StageState. It compares a stage, not a
         session status, and is deliberately untouched."""
         import inspect
