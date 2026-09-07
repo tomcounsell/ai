@@ -78,9 +78,6 @@ is **all-skipped**, measured at exit 0 both serially and under `-n 2`. The fix t
 narrows to that channel, and the issue's proposed "test that a zero-collection run exits
 non-zero" becomes a *regression pin on existing behavior* rather than a fix.
 
-
-## Freshness Check
-
 ## Prior Art
 
 - **#2628 (CLOSED)**: Built the machine-global 15-slot test-DB claim registry and made
@@ -115,9 +112,6 @@ No relevant external findings — this is entirely internal: the behavior of a r
 bash wrapper, this repo's conftest, and pytest/xdist exit-code semantics, all of which
 were measured directly rather than looked up. No external library, API, or ecosystem
 pattern is involved.
-
-
-## Research
 
 ## Spike Results
 
@@ -176,7 +170,6 @@ rootdir, so no repo test-DB slot was claimed and no peer run was disturbed.
 - **Confidence**: high
 - **Impact on plan**: One file, one writer. No merging, no locking, no per-worker
   temp-file cleanup.
-
 
 ## Data Flow
 
@@ -291,15 +284,6 @@ outcome** → wrapper reaps workers → **wrapper reads the file** → one of:
 - **Temp-file hygiene**: created with `mktemp`, removed in the existing `cleanup` trap so
   an interrupted run leaves nothing behind.
 
-
-## Architectural Impact
-
-## Appetite
-
-## Prerequisites
-
-## Solution
-
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
@@ -329,7 +313,6 @@ outcome** → wrapper reaps workers → **wrapper reads the file** → one of:
       guard that fires with an unattributable message costs the next agent an hour.
 - [ ] The message must be distinguishable from the three existing wrapper refusals, so a
       caller reading stderr can tell which guard fired.
-
 
 ## Test Impact
 
@@ -440,13 +423,6 @@ polling or sleep is needed, and none should be added.
 **Mitigation:** This is exactly the sentinel state — a `started` file with no verdict — and
 the three-state protocol already fails closed on it. A truncated/garbage file is covered
 by the unparseable-contents case in the failure-path strategy, which also fails closed.
-
-
-## Rabbit Holes
-
-## Risks
-
-## Race Conditions
 
 ## No-Gos (Out of Scope)
 
