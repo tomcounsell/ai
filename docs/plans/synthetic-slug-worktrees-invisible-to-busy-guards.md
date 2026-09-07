@@ -264,7 +264,7 @@ by symbol, never by trusting a line number from the previous draft.
     continuation row never inherits the previous run's lane path. `working_dir` is **not** in that
     set.
   - Production readers of `exec_cwd` outside the model: none. Inside the model, only
-    `live_fence()`, and that reader is guarded — it returns the newest `spawn_history` entry, or a
+    `live_fence`, and that reader is guarded — it returns the newest `spawn_history` entry, or a
     reconstruction gated on `if self.exec_pid is not None:`. A stamp that writes `exec_cwd` alone,
     with no pid and no history append, is invisible to it.
 - **Confidence**: high
@@ -289,9 +289,13 @@ by symbol, never by trusting a line number from the previous draft.
     `transition_status(session, "pending", ..., reject_from_terminal=False)` — it does not go
     through `continuation_agent_session_fields`, so nothing is reset.
   - the nudge requeue in `agent/agent_session_queue.py` copies the row's fields forward.
-  - `retry_agent_session` copies via `clone_agent_session_fields`, whose docstring is explicit:
-    "Copies everything ... anything omitted here is destroyed." `working_dir` is copied and is not
-    in `_EXECUTION_FENCE_RESET_FIELDS`.
+  - `retry_agent_session` copies via **`continuation_agent_session_fields`**
+    (`agent/agent_session_queue.py`), which starts from `clone_agent_session_fields` — whose
+    docstring is explicit: "Copies everything ... anything omitted here is destroyed" — and then
+    resets every name in `_EXECUTION_FENCE_RESET_FIELDS`. That split is the whole argument: a retry
+    **resets `exec_cwd`** and **carries `working_dir` forward**, because `working_dir` is not on
+    that list. So the stale-lane hazard this spike describes is specific to `working_dir` and
+    structurally absent for `exec_cwd`.
   On the next run, `working_dir = Path(session.working_dir)` names a deleted directory.
   `validate_workspace` fails invariant 1 ("does not exist or is not a directory") and returns
   `allowed_root`, which the executor set to `Path.home() / "src"` — not a git repository. The
@@ -390,7 +394,7 @@ Located by symbol on `d786c8ad2`; line numbers below are pointers, not the citat
   the existing fallback.
 - **Data ownership**: `exec_cwd` gains a second writer — the executor, immediately before harness
   launch — writing the identical value `stamp_execution_spawn` writes moments later from the same
-  local. No other production code reads `exec_cwd` except `AgentSession.live_fence()`, which is
+  local. No other production code reads `exec_cwd` except `AgentSession.live_fence`, which is
   guarded by `spawn_history` / `exec_pid` and is therefore unaffected by a pre-spawn stamp that
   carries neither (verified: `grep -rn exec_cwd` over the production tree returns
   `agent_session_queue.py` (the reset list), `models/agent_session.py`, and nothing else).
@@ -662,10 +666,10 @@ test to update.
 could be read as evidence a process exists.
 **Mitigation:** measured, not assumed. `grep -rn exec_cwd` over the production tree returns exactly
 three sites: the reset list in `agent/agent_session_queue.py`, the field declaration and
-`stamp_execution_spawn` in `models/agent_session.py`, and `AgentSession.live_fence()`. `live_fence`
+`stamp_execution_spawn` in `models/agent_session.py`, and `AgentSession.live_fence`. `live_fence`
 returns the newest `spawn_history` entry, or a reconstruction gated on `if self.exec_pid is not
 None:` — a stamp that writes `exec_cwd` alone, appending no history and setting no pid, is invisible
-to both. Pinned by a test asserting `live_fence()` is `None` on a row that has only the pre-stamp.
+to both. Pinned by a test asserting `live_fence` is `None` on a row that has only the pre-stamp.
 
 ### Risk 6: Scheduled children inherit a lane path
 **Impact:** a scheduled child of a parent whose row carries a lane path inherits it, synthesizes its
@@ -723,9 +727,11 @@ pid fence, which the executor's does not touch.
 **Data prerequisite:** none.
 **State prerequisite:** none.
 **Mitigation:** `save(update_fields=[...])` writes only the named hash fields, so a concurrent
-writer touching other fields cannot be clobbered and cannot clobber this one. `exec_cwd` is
-additionally on `_UPDATED_AT_OMISSION_OK_FIELDS`, so a partial save carrying it produces no
-`updated_at`-omission warning noise.
+writer touching other fields cannot be clobbered and cannot clobber this one. The save also carries
+`updated_at` — it is already the first entry in that block's `update_fields` — so the row's
+freshness stamp advances with the write and `AgentSession.save`'s omission check never engages.
+(`_UPDATED_AT_OMISSION_OK_FIELDS` is irrelevant here: its downgrade requires the *entire*
+`update_fields` set to be on the allowlist, and this one is not.)
 
 ## No-Gos (Out of Scope)
 
@@ -797,7 +803,7 @@ busy guard behaves exactly as it does today, which is a safe intermediate state.
       working guard.
 - [ ] Update `docs/features/agent-session-fenced-execution-record.md`: `exec_cwd` now has a second
       writer (the executor, pre-spawn) and a second reader (the busy scan). Record that a pre-spawn
-      stamp carries no pid and no `spawn_history` entry, so `live_fence()` is unaffected.
+      stamp carries no pid and no `spawn_history` entry, so `live_fence` is unaffected.
 - [ ] `docs/features/README.md` needs no new row — all four pages already have entries. Confirm
       during the docs task rather than assuming.
 
@@ -830,7 +836,7 @@ busy guard behaves exactly as it does today, which is a safe intermediate state.
       launches, not only after the first spawn
 - [ ] The row's `working_dir` and `slug` are unchanged by execution — no production code in this
       plan's changed files assigns either on a hydrated `AgentSession`
-- [ ] A pre-spawn `exec_cwd` stamp leaves `AgentSession.live_fence()` returning `None`
+- [ ] A pre-spawn `exec_cwd` stamp leaves `AgentSession.live_fence` returning `None`
 - [ ] A raising or cancelled session is finalized before the synthetic cleanup runs, so the lane is
       removed rather than permanently blocked
 - [ ] An auto-continue exit leaves the continuation's `pending` row untouched and preserves the lane
@@ -874,7 +880,7 @@ edits another's file. Commit early with explicit paths.
 - **Test engineer**
   - Name: `guard-tester`
   - Role: tests pinning the two-field match (both arms, plus the negatives), the pre-spawn stamp,
-    `live_fence()` staying `None`, all three cleanup branches, the failure log, and the inheritance
+    `live_fence` staying `None`, all three cleanup branches, the failure log, and the inheritance
     guard. Mutation-checks each guard and re-measures after every review round.
   - Agent Type: test-engineer
   - Resume: true
@@ -1001,7 +1007,7 @@ this weekend. Locate every symbol named below by name, never by the line numbers
   re-read by stable `id`):
   - a slugless eng session's row carries `exec_cwd` naming `.worktrees/dev-{aid8}`, while
     `reloaded.slug is None` and `reloaded.working_dir` is unchanged from what was created.
-  - `live_fence()` is `None` on a row carrying only the pre-stamp (no pid, no `spawn_history`).
+  - `live_fence` is `None` on a row carrying only the pre-stamp (no pid, no `spawn_history`).
   - a raising `save()` in the session-phase block produces the `[lane-writeback]` WARNING via
     `caplog` and the session still proceeds.
   - terminal-row cleanup branch: the worktree is removed.
@@ -1114,7 +1120,7 @@ in the Verification table reproduced exactly as recorded.
 | CONCERN | Risk & Robustness | The pre-stamp sits inside the `if agent_session:` branch of a lookup the same file documents as racy (`agent/session_executor.py:2470`, "race on status=\"running\" filter ... see issue #917"). On a miss there is no else-branch stamp, and `SessionRunner(agent_session=None, ...)` makes the runner skip its stamp too (`if self._agent_session is not None:`, `agent/session_runner/runner.py:696`), so `exec_cwd` stays `None` for the whole session. Success Criterion 3 is written unconditionally. | pending | Scope criterion 3 to the resolved-row case and record the degradation in Race 1. Do NOT add an else-branch stamp on the outer `session` — that is a second hydrated copy, and stamping it is the duplicate-row write the dropped-resolver-swap argument was about. The correct disposition is to accept and state the gap: previously invisible for the entire session, now invisible only when the row lookup races. |
 | CONCERN | Risk & Robustness | The Reversibility claim ("a stale `exec_cwd` in a terminal row is skipped by the scan's status filter, and a continuation resets the field") omits spike-8's own leg 1: `valor-session resume` calls `transition_status(session, "pending", ..., reject_from_terminal=False)` on the same row (`tools/valor_session.py:1159-1161`) and never touches `_EXECUTION_FENCE_RESET_FIELDS`, so a resumed row re-enters the scan non-terminal carrying the previous run's lane path. | pending | `_EXECUTION_FENCE_RESET_FIELDS` is consumed only by `continuation_agent_session_fields` (`agent/agent_session_queue.py:196-201`), never by `transition_status`. State the resume path and its chosen outcome in Reversibility, and add one pure `_scan_worktree_sessions` unit row: `status="pending"`, `exec_cwd=".worktrees/dev-abcd1234"`, `working_dir=<main checkout>`, no such directory on disk, asserting `busy` — the scan never stats the path, so a deleted lane is indistinguishable from a live one. |
 | CONCERN | History & Consistency | The success criterion "An auto-continue exit leaves the continuation's `pending` row untouched and preserves the lane" holds only on `_enqueue_nudge`'s main path. On the fallback path (`if reread_session is None:`, `agent/session_executor.py:687`) the fresh row comes from `continuation_agent_session_fields`, which resets `exec_cwd` and copies `working_dir` (the main checkout), so the lane is removed as it is today. Spike-9 also justifies that path with "`get_authoritative_session`'s tie-break prefers the `running` record" — but the fallback is entered precisely because that resolver returned `None`. | pending | No code change follows: the guard as specified (`_auth is not None and _auth.status == "running"`) is already correct on both paths. Scope the criterion and the Task 4 test row to the main nudge path (`transition_status(session, "pending", ...)`, `agent/session_executor.py:759-763`), asserting both `reloaded.status == "pending"` and that the worktree directory still exists. Do not attempt the same assertion on a forced-fallback variant — there the lane is legitimately removed. Rewrite spike-9's fallback sentence to say the resolver already returned `None`, so the guard no-ops. |
-| NIT | Scope & Value | `AgentSession.live_fence` is a `@property` (`models/agent_session.py:1236-1237`), not a method. Success Criterion 5, Risk 5's mitigation, and the Task 4 test bullet all write `live_fence()`, which raises `TypeError: 'NoneType' object is not callable` on the expected value. | pending | Write `assert reloaded.live_fence is None` in all three places. |
+| NIT | Scope & Value | `AgentSession.live_fence` is a `@property` (`models/agent_session.py:1236-1237`), not a method. Success Criterion 5, Risk 5's mitigation, and the Task 4 test bullet all write `live_fence()`, which raises `TypeError: 'NoneType' object is not callable` on the expected value. | **APPLIED** — Success Criterion 5, Risk 5, spike-7, Architectural Impact, Documentation, Team Orchestration, and Task 4 all now write the property form; Task 4's bullet reads `assert reloaded.live_fence is None`. | Write `assert reloaded.live_fence is None` in all three places. |
 | NIT | History & Consistency | Spike-8's third leg names `clone_agent_session_fields` as the function `retry_agent_session` copies through. It actually calls `continuation_agent_session_fields` (`agent/agent_session_queue.py:765`). The conclusion survives (that function starts from clone and resets only the fence fields, so `working_dir` is still carried forward) and the correction strengthens the plan, because `exec_cwd` IS reset on retry. | pending | Name the correct function and note the split it demonstrates: retry resets `exec_cwd`, carries `working_dir` forward. |
 | NIT | Scope & Value | Race 4 states "`exec_cwd` is additionally on `_UPDATED_AT_OMISSION_OK_FIELDS`, so a partial save carrying it produces no `updated_at`-omission warning noise." The downgrade applies only when every field in the save is on that allowlist (`models/agent_session.py:1008`), and this save carries `updated_at` itself, so the omission check never engages. | pending | Drop the sentence or replace it with the reason that holds: the save includes `updated_at`. |
 
@@ -1123,7 +1129,7 @@ in the Verification table reproduced exactly as recorded.
 | Severity | Critic | Finding (abridged; the full text is in the git history of this file at `98c5e8bd5`) | Addressed By | Disposition |
 |----------|--------|--------|--------------|---------------------|
 | BLOCKER | Risk & Robustness | The persisted lane path outlives the lane. Synthetic cleanup deletes `.worktrees/dev-{aid8}` in the `finally` while the row keeps naming it; `valor-session resume`, the nudge requeue, and `retry_agent_session` via `clone_agent_session_fields` all re-execute or copy that row. Next run, `Path(session.working_dir)` names a deleted dir, `validate_workspace` falls back to `~/src`, and `git worktree add` runs outside any repository. Architectural Impact's "a stale lane path in a terminal row is ignored by every reader" is false. | spike-8; Rabbit Holes; Architectural Impact; Verification anti-criterion | **ACCEPTED — root cause removed, not patched.** Verified every leg on `d786c8ad2`: `valor-session resume` calls `transition_status(..., "pending", reject_from_terminal=False)` on the same row with no reset; `clone_agent_session_fields` copies `working_dir` and its docstring is explicit that anything omitted is destroyed; `_EXECUTION_FENCE_RESET_FIELDS` contains `exec_cwd` and not `working_dir`; `validate_workspace` returns `allowed_root` on a nonexistent path and the executor passes `Path.home() / "src"`. Rather than add the two compensating edits the critique proposed, **the plan no longer writes `working_dir` at all** — so there is no stale path to clean up, no re-seed guard to maintain, and one fewer invariant for a future reader to preserve. The reversibility claim the finding called false is deleted and replaced with the measured statement. |
-| BLOCKER | History & Consistency | `AgentSession.exec_cwd` already carries the resolved lane with the correct lifecycle — stamped on every spawn by `stamp_execution_spawn(..., cwd=self._working_dir, ...)` and already reset on continuation. Matching `_scan_worktree_sessions` on `exec_cwd` closes the blind spot without BLOCKER 1's hazard. The Rabbit Hole rejecting "a second field" misses that the field already exists and is already populated. | spike-7; Solution; Technical Approach; Rabbit Holes; Task 1 | **ACCEPTED AND ADOPTED.** Every claim re-verified by symbol on `d786c8ad2`: the field declaration, the `save(update_fields=[..., "exec_cwd", ...])` inside `stamp_execution_spawn`, the `cwd=self._working_dir` call in `runner.py::_on_turn_spawn`, `self._working_dir` being the executor's resolved lane, and `"exec_cwd"` in `_EXECUTION_FENCE_RESET_FIELDS`. Two things measured beyond the finding: (i) production readers of `exec_cwd` outside the model are **none**, and the sole in-model reader `live_fence()` is gated on `spawn_history` / `exec_pid`, so a pre-spawn stamp is invisible to it (Risk 5, with a pinning test); (ii) the finding's own acknowledged trade — that `exec_cwd` lands at spawn, widening Race 1 — is **closed** by having the executor pre-stamp `exec_cwd` in the session-phase save block, the exact seam the earlier draft was going to write `working_dir` at. So Race 1 is as narrow as the earlier draft claimed, with none of the lifecycle cost. The Rabbit Hole is rewritten to say the field exists. |
+| BLOCKER | History & Consistency | `AgentSession.exec_cwd` already carries the resolved lane with the correct lifecycle — stamped on every spawn by `stamp_execution_spawn(..., cwd=self._working_dir, ...)` and already reset on continuation. Matching `_scan_worktree_sessions` on `exec_cwd` closes the blind spot without BLOCKER 1's hazard. The Rabbit Hole rejecting "a second field" misses that the field already exists and is already populated. | spike-7; Solution; Technical Approach; Rabbit Holes; Task 1 | **ACCEPTED AND ADOPTED.** Every claim re-verified by symbol on `d786c8ad2`: the field declaration, the `save(update_fields=[..., "exec_cwd", ...])` inside `stamp_execution_spawn`, the `cwd=self._working_dir` call in `runner.py::_on_turn_spawn`, `self._working_dir` being the executor's resolved lane, and `"exec_cwd"` in `_EXECUTION_FENCE_RESET_FIELDS`. Two things measured beyond the finding: (i) production readers of `exec_cwd` outside the model are **none**, and the sole in-model reader `live_fence` is gated on `spawn_history` / `exec_pid`, so a pre-spawn stamp is invisible to it (Risk 5, with a pinning test); (ii) the finding's own acknowledged trade — that `exec_cwd` lands at spawn, widening Race 1 — is **closed** by having the executor pre-stamp `exec_cwd` in the session-phase save block, the exact seam the earlier draft was going to write `working_dir` at. So Race 1 is as narrow as the earlier draft claimed, with none of the lifecycle cost. The Rabbit Hole is rewritten to say the field exists. |
 | CONCERN | Risk & Robustness | spike-5 covers only the completion exit. `_execute_agent_session` has one top-level try/finally and no top-level except, so cleanup runs on exception and cancellation exits where the finalize guard (inside `if not chat_state.defer_reaction:`) never ran — the lane leaks permanently, since this cleanup is the only pass and `sweep_worktrees` requires `merged_via_tree`. | spike-5 (rewritten); spike-9; Solution; Race 2; Risk 2; Task 2 | **ACCEPTED.** Structure re-measured: `awk 'NR>=1160 && NR<=2740 && /^    (except\|finally\|else)/'` over `agent/session_executor.py` returns exactly one hit, the `finally`. The pre-finalize guard is in scope, written in the shape the finding specified, with `force=True` explicitly forbidden and the `_session_recorded_reap_failure` skip left winning. Two additions from spike-9: the `status == "running"` predicate is documented as the reason hoisting out of the `defer_reaction` conditional is safe (the nudge paths leave the row `pending`), and `task` is resolved via `locals().get("task")` because it is bound partway through the body and would raise `NameError` in the `finally` on an early-raising exit. |
 | CONCERN | Scope & Value | The `get_authoritative_session` swap changes `_session_type`, which drives harness `SESSION_TYPE` env, the ENG/TEAMMATE permission branch, and runner dispatch; the resolver applies no status filter. | Technical Approach; Rabbit Holes; Task 2; Verification anti-criterion | **ACCEPTED — the swap is dropped entirely, which is stronger than the guard the finding proposed.** Verified `get_authoritative_session` applies no status filter. Since the plan no longer writes `working_dir`, the only remaining write is `exec_cwd`, and the wrong-duplicate hazard the swap was meant to fix is **benign for this predicate**: `_scan_worktree_sessions` iterates every non-terminal row, so a stamp landing on any duplicate still makes the lane read busy. The session-phase hydration is left byte-identical, `_session_type` is provably unchanged, and an anti-criterion row asserts the literal is still present so the swap cannot be reintroduced silently. |
 | CONCERN | Scope & Value | The broad write rule ("any session whose resolved `working_dir` differs") is asserted, never spiked; every Task 3 case exercises only the synthetic shape. | Technical Approach; Task 4; Success Criteria | **ACCEPTED, and the rule dissolves.** `exec_cwd` is stamped unconditionally on every spawn today, so there is no new broad-vs-narrow rule to justify — the real-slug case is the same code path. Per Open Question ruling 1 (do not narrow on safety grounds), nothing is gated on `is_synthetic_slug`. The untested half the finding named is now a required test row: a real-slug session with `slug="sdlc-1218"` and `exec_cwd=".worktrees/sdlc-1218"` must read `busy`, and a separate row pins the `exec_cwd=None` fallback so the old arm cannot regress. |
