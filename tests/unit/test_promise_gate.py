@@ -511,13 +511,11 @@ class TestSDKTimeout:
     def test_timeout_falls_through_to_heuristic_with_timeout_source(self, tmp_path, monkeypatch):
         """A real ``anthropic.APITimeoutError`` from the SDK call is its own
         discriminator: the caller must fall through to the heuristic AND
-        audit it as ``source="promise_gate_timeout"`` — distinct from the
-        generic ``"promise_gate_heuristic"`` fallthrough (previous test in
-        this class), which fires when the LLM call fails for any OTHER
-        reason. Before the dead-code fix (bridge/promise_gate.py), this
-        distinction was unreachable: ``_PromiseTimeoutError`` was caught but
-        never raised, so every fallthrough — timeout or otherwise — audited
-        as ``"promise_gate_heuristic"``.
+        audit it as ``source="promise_gate_timeout"``, distinct from the
+        generic ``"promise_gate_heuristic"`` fallthrough that fires when the
+        LLM call fails for any other reason. The timeout must propagate out
+        of ``_evaluate_promise_async`` for that distinction to exist; a
+        swallowed timeout would audit as a generic heuristic fallthrough.
         """
         import httpx
 
