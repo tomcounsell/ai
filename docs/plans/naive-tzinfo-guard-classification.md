@@ -384,9 +384,19 @@ File ownership is disjoint by construction: `models-builder` owns `models/agent_
 
 ## Critique Results
 
+Round 1 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses. **NEEDS REVISION**: 2 blockers, 5 concerns, 2 nits.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| BLOCKER | Risk & Robustness | `created_at` is `SortedField(type=datetime, partition_by="project_key")` (`models/agent_session.py:165`), not a `DatetimeField`, and is absent from `_DATETIME_FIELDS` (`:744-757`) — so the `__setattr__` choke point the Data Flow section names does not cover it. The `:2225` deletion's stated premise is false. | | `__setattr__` gates on `if name in self._DATETIME_FIELDS` (`:795`); the real coercion for `created_at` is `_normalize_kwargs` (`:885-891`), and only at construction. Any test for this deletion must leave `started_at` unset so it reaches the `created_at` fallback. |
+| BLOCKER | History & Consistency | Verification row "No stale popoto-strips claim" is wrong in both directions. Over-reach: 7 `strips tzinfo` hits exist and two are owned by no task (`models/agent_session.py:2569`, `tools/agent_session_scheduler.py:47`), so the row is guaranteed red. Under-detection: `monitoring/session_watchdog.py:57` and `reflections/crash_recovery.py:176` carry the stale claim in other words and are invisible to it. | | Measured pre-state: 7 for `strips tzinfo`, plus 2 for `SortedField stores them` / `round-trips values as NAIVE`, across 8 files. Widen to an alternation over all three phrasings and either own the two extra sites or scope the grep to owned files. |
+| CONCERN | Risk & Robustness | `_heal_future_updated_at` is the healer #1645 motivated; its loop `except` means a naive value would make it silently skip exactly the corrupted rows it exists to repair. | | The handler wraps `for record in all_sessions:` (`:1085-1105`) and continues. Assert on the returned heal count, not on absence of a raise. |
+| CONCERN | Risk & Robustness | Verification row "No naive writer reintroduced" omits `created_at` entirely and matches only the literal `datetime.now()` — missing `utcnow()`, `replace(tzinfo=None)`, and naive `fromisoformat` results. | | `datetime.utcnow()` is the highest-value addition; it reads as correct and is how #1645 shipped. |
+| CONCERN | Scope & Value | Success Criteria bullet 1 states no checkable number, and its implied arithmetic ignores `utils/utc.py:28` (excluded by shape) and `ui/data/sdlc.py:823,838` (keeps not counted among the eighteen). | | Measured pre-state: 31 hits for the widened sweep across the 9 directories, 1 for the `getattr` shape. State the post-state as an integer. |
+| CONCERN | Scope & Value | Five named roles for a Small-appetite change of five deleted branches, eighteen comments, and four docstrings. The three-way builder split exists only to enforce a file-ownership rule one builder makes moot. | | Keep `validate-mutation` as a separate agent regardless — a builder mutation-checking its own tests is the #3173 failure. |
+| CONCERN | History & Consistency | `docs/features/utc-timestamps.md:87` is cited three times as authority for not consolidating, while task 5 rewrites that exact sentence. The justification does not survive the plan's own doc edit. | | Lead with the independent reason (`to_unix_ts` returns a float; most keeps need an aware datetime) and cite the doc only as corroboration. |
+| NIT | History & Consistency | Rabbit Holes bullet 2 says "sixteen keeps"; every other count says eighteen. | | |
+| NIT | Scope & Value | Rabbit Holes bullet 2 and No-Gos bullet 3 make the same argument in nearly the same words. | | |
 
 ---
 
