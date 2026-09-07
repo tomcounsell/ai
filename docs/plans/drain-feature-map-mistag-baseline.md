@@ -24,7 +24,7 @@ wins. `tests/unit/reflections/test_pm_briefings_builder.py` contains no
 `FEATURE_MAP` key at all, so it gets no marker. Its neighbour
 `test_pm_briefings_no_slots_configured.py` gets `config`, because `config` is a
 literal substring of `configured`. `test_sdlc_progress_check.py` gets `sdlc`,
-because `sdlc` sits at insertion index 16 and `reflection` at index 52. The
+because `sdlc` sits at insertion index 16 and `reflections` at 45. The
 directory these three files live in is named `reflections` and every one of them
 is a reflections test, and the resolver never looks at it.
 
@@ -423,10 +423,11 @@ and is the single most important thing not to regress.
 
 No previous attempt to drain this baseline exists, so there is no failure to
 analyse. What the table below records instead is why the *two obvious* fixes,
-both surveyed in the issue, are dead on arrival — because a builder who has not
-read the issue will reach for them first.
+both surveyed in the issue, are the wrong trade — because a builder who has not
+read the issue will reach for them first, and because the issue's own reason for
+rejecting the first one is factually wrong.
 
-| Candidate | What it would do | Why it fails |
+| Candidate | What it would do | Why it is not the answer |
 |-----------|------------------|--------------|
 | Rename the files | Prefix each violating basename with its package name: `test_pm_briefings_no_slots_configured.py` → `test_reflections_pm_briefings_no_slots_configured.py` | **Works, for 19 of 21 — and is still the wrong trade.** The issue body claims it cannot work because `config` beats `reflection`; that is false (`reflections` 45, `reflection` 46, `config` 47, so the renamed file resolves to `reflections`). It genuinely fails only for `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py`, where `sdlc` at index 16 wins. The real objections are the ones renaming cannot answer: it touches 19 files to encode the directory name a second time, it fixes neither R2 nor R3, and it must be repeated by hand for **every file anyone ever adds** to a themed package, enforced by nothing but a guard entry after the fact. It converts a structural defect into a naming convention. |
 | Add ~9 narrow `FEATURE_MAP` keys | One key per offending basename | Three of the nine must be hand-placed *ahead of* `config`, `sdlc`, and `validation` to win. That is more ordering-sensitive hand-placement — the defect restated as the remedy. It also scales with file count forever: every new file in `reflections/` needs another key. |
@@ -794,9 +795,11 @@ disposition below is in it unless stated otherwise.
   and it works. Deriving it (any directory containing a `conftest.py`? any
   directory not in `DIRECTORY_MAP`?) invites exactly the kind of implicit rule
   this plan is removing.
-- **Chasing why the filed measurement said 39/6.** It was measured at a
-  different commit with a method nobody wrote down. The re-measurement is the
-  answer; archaeology on the old number buys nothing.
+- **Further archaeology on the 39/6 figure.** Three reconstructions of the
+  `f3594dd23` conditions were already tried during planning and none reproduces
+  it (Freshness Check). That is enough: the re-measurement is the answer, and a
+  fourth attempt to reverse-engineer a method nobody wrote down buys nothing.
+  Record the corrected number, do not hunt the old one.
 
 ## Risks
 
