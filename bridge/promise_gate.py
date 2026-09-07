@@ -42,7 +42,7 @@ Public surface
 * ``evaluate_promise_async(...) -> PromiseVerdict`` — the async core
   ``evaluate_promise`` wraps. Use directly from an already-running event
   loop (e.g. the drafter's main path) instead of the sync wrapper, which
-  raises inside a running loop.
+  falls back to the regex heuristic inside a running loop.
 * ``cli_check_or_exit(text, transport, session_id) -> None`` — the
   CLI helper. Calls ``evaluate_promise`` and on BLOCK prints the
   recovery template to stderr + ``sys.exit(1)``. There is **no
@@ -828,7 +828,7 @@ async def evaluate_promise_async(
             ``"drafter"``. Logged in the audit JSONL.
         session_id: Optional session_id for audit JSONL (logged literally)
             and session_events emission (best-effort lookup via
-            ``AgentSession.query.get``; no-op on synthetic IDs). Never
+            ``AgentSession.get_by_id``; no-op on synthetic IDs). Never
             used for state-driven gate judgment.
         classifier_verdict: Optional pre-computed classification result.
             When provided, short-circuits the LLM call. Kept for backward
@@ -1008,7 +1008,7 @@ def _run_async_safely(coro):
             # asyncio.run raises BEFORE it ever touches `coro`, so the
             # eagerly-created coroutine is neither awaited nor closed. Close it
             # deterministically here — otherwise it leaks and CPython emits
-            # `coroutine '_evaluate_promise_async' was never awaited` at
+            # `coroutine '_evaluate_promise_llm_or_heuristic' was never awaited` at
             # GC/teardown, which wedges the full pytest suite (#2120, follow-up
             # to #2118). This branch is only reachable under a test harness /
             # async caller; production reaches _run_async_safely from a sync CLI

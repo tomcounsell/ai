@@ -327,10 +327,10 @@ The `source` discriminator takes one of:
 | `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`, heuristic-only); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
-Roughly 40 rows written before this instrumentation existed carry no `kind`
-field at all (and no `elapsed_ms`/`queue_wait_ms`); every reader of this
-JSONL — including the measurement tool below — must tolerate that shape
-rather than assuming `kind` is always present.
+Rows written before this instrumentation existed carry no `kind` field
+(and no `elapsed_ms`/`queue_wait_ms`); every reader of this JSONL, including
+the measurement tool below, must tolerate that shape rather than assuming
+`kind` is always present. The tool reports how many such rows it saw.
 
 Empty-input calls (empty / whitespace-only / `None` text) write **no**
 audit entry. Every other branch writes one.
@@ -380,6 +380,18 @@ documented as a follow-up).
   (default 8000, `# @optional` in `.env.example`). Longer text skips the
   model and gets the heuristic, audited with the `_oversize` source
   suffix, so per-call token cost and latency are bounded by construction.
+* The budget and the measurement above cover this gate alone. A Telegram
+  group-chat delivery from a non-SDLC session through
+  `agent/output_handler.py` pays two inline Haiku calls in series: the
+  drafter's main-path gate (`draft_message`, default `use_llm=True`) and
+  then the Read-the-Room pass (`read_the_room`, unconditional for that
+  session class since #3174; DMs are never room-read). Both acquire slots
+  from the same process-wide semaphore
+  (`agent/anthropic_client.py::semaphore_slot`), so under load the second
+  call's queue wait includes the first's occupancy. The per-delivery wall
+  time on that path is therefore roughly gate plus RTR, not the gate figure
+  by itself; RTR's latency is not sampled by this gate's audit rows. See
+  [Read-the-Room Pre-Send Pass](read-the-room.md).
 
 The SDK-level timeout is separate from the budget and is not a
 wall-clock ceiling. The call uses the RTR-correct pattern

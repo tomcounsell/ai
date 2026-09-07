@@ -739,14 +739,14 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
 
     ``use_llm`` (Task 5, #3027) selects the judgment layer:
 
-    * ``False`` (short-output path, and the Stop-hook's ``use_llm=False``
-      ``draft_message`` call) — the regex-only heuristic
+    * ``False`` (short-output path, and the ``use_llm=False``
+      ``draft_message`` calls in the Stop hook and the email bridge) — the
+      regex-only heuristic
       (``_evaluate_promise_heuristic``, zero LLM calls, so the short path's
       latency guarantee holds). Audited as ``source="promise_gate_drafter"``.
-    * ``True`` (the composed/main path for the three real delivery callers —
-      ``agent/output_handler.py``, ``bridge/email_bridge.py``, and
-      ``draft_message``'s own main return when NOT called with
-      ``use_llm=False``) — the LLM-primary path via
+    * ``True`` (the composed/main path for the Telegram delivery caller,
+      ``agent/output_handler.py``, and any other ``draft_message`` main
+      return NOT called with ``use_llm=False``) — the LLM-primary path via
       ``bridge.promise_gate._evaluate_promise_llm_or_heuristic`` (same
       SDK-timeout / semaphore-bound / heuristic-fallthrough contract as the
       CLI's ``evaluate_promise_async``). Audited as
@@ -1273,9 +1273,9 @@ async def draft_message(
         and "```" not in raw_response
     ):
         short_violations = _validate_for_medium(raw_response, medium)
-        # Gate the exact verbatim bytes the short path would ship (issue #2421
-        # — this branch previously returned before the promise check, making
-        # the gate structurally unreachable for replies under the threshold).
+        # Gate the exact verbatim bytes the short path would ship (issue #2421):
+        # the gate runs on this branch too, so replies under the threshold are
+        # not structurally exempt from it.
         # Short path: always heuristic-only (use_llm=False), regardless of the
         # caller's use_llm — this is the latency guarantee the short-output
         # branch exists to preserve.
