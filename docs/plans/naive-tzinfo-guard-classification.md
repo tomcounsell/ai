@@ -25,7 +25,7 @@ revision_applied_at: 2026-09-07T02:35:50Z
 | The `getattr` shape the sweep regex misses | `getattr\([a-z_.]+, "tzinfo", None\) is None` | **1** (`reflections/crash_recovery.py:186`) |
 | **Total work set** | | **32** |
 | Stale 1.8.0 prose, one phrasing | `strips tzinfo` | **7** |
-| Stale 1.8.0 prose, all three phrasings | `strips tzinfo\|SortedField stores them\|round-trips values as NAIVE` | **9** across 9 files |
+| Stale 1.8.0 prose, all three phrasings | `strips tzinfo\|SortedField stores them\|round-trips values as NAIVE` | **9** across 8 files (`models/agent_session.py` carries two) |
 
 The authoritative sweep is the issue's, run verbatim:
 
@@ -356,8 +356,8 @@ Every number below is a measured pre-state at `4b5a13184` with `/usr/bin/grep`, 
 
 - [ ] **The main sweep goes 31 → 28** and **the `getattr` sweep goes 1 → 0**, over the nine directories `agent/ models/ monitoring/ reflections/ bridge/ tools/ worker/ utils/ ui/`, excluding tests. That is the four deletions and nothing else. Total work set 32 → 28.
 - [ ] **The stale-prose sweep goes 9 → 0** under the three-phrasing alternation `strips tzinfo|SortedField stores them|round-trips values as NAIVE`, over the same nine directories. Every one of the nine is owned by a task in this plan.
-- [ ] Every one of the 28 surviving guards carries a one-line reason naming its non-popoto input source, or is one of the nine verified-untouched sites listed in the Solution.
-- [ ] All four deletions have a test that reads the value back through popoto and asserts an observable result, and **each test has been shown individually to go red** when a naive value is forced into its own fixture. Four separate red blocks are pasted in the PR body.
+- [ ] Every one of the 28 surviving guards carries a one-line reason naming its non-popoto input source, or is one of the nine verified-untouched sites listed in the Solution. **Checked by two Verification rows**, not by inspection: a diff-based comment count across the twelve annotated files with a floor of 19, and task 0's `reason written` column reading `yes` for all nineteen.
+- [ ] All four deletions have a test that reads the value back through popoto and asserts an observable result, and **each test has been shown individually to go red** under its own mutation shape from task 4 — naive `updated_at` with `save(preserve_updated_at=True)` for tests 1 and 3, naive `completed_at` with a plain `save()` for test 2, and a `datetime` assigned to the float `Chat.updated_at` for test 4. Four separate red blocks are pasted in the PR body. A uniform "force a naive datetime" recipe does not satisfy this criterion; it is a measured no-op on three of the four.
 - [ ] The PR body carries a **per-site verdict table with one row per site — 32 rows** — each giving the classification and its reason, plus the exact total site count and the re-run sweep output.
 - [ ] The PR body carries the **#3207 consumer audit table** and states that this lane discharges #3207's audit ask.
 - [ ] `docs/features/utc-timestamps.md` no longer describes the inline guards as "intentionally left untouched" and does record the two escape hatches.
@@ -397,7 +397,8 @@ A builder that mutation-checks its own tests is the #3173 failure this plan exis
 - **Agent Type**: builder
 - **Parallel**: false
 - Run both sweep shapes and the three-phrasing prose alternation with `/usr/bin/grep`, each piped to `wc -l`. **Count, never `head`.** Expect 31, 1, and 9. A different number means the tree moved; reconcile before changing anything.
-- Write the 32-row verdict table (site, classification, reason) into the working notes. It is the PR body's centrepiece, so it is built first, not reconstructed at the end.
+- Write the 32-row verdict table into the working notes with four columns: **site, classification, reason, `reason written`**. It is the PR body's centrepiece, so it is built first, not reconstructed at the end.
+- The `reason written` column starts at `no` for the nineteen annotate-keeps and `n/a` for the four deletes and the nine verified-untouched keeps. Tasks 1-3 flip each `no` to `yes` as the comment lands, and task 6 asserts every one of the nineteen reads `yes`. This column is what turns the issue's headline closing condition — a one-line reason on every mixed-input survivor — from an assertion into a count.
 - Confirm the two Prerequisites rows pass.
 
 ### 1. Delete the `_heal_future_updated_at` guard and annotate the `models/agent_session.py` keeps
@@ -504,8 +505,10 @@ A builder that mutation-checks its own tests is the #3173 failure this plan exis
 - **Assigned To**: mutation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row, with `/usr/bin/grep` for every grep row.
-- Confirm the PR body carries: the **32-row** per-site verdict table, the exact total site count, the re-run sweep output, the four separate mutation red blocks, and the #3207 consumer audit table with the statement that this lane discharges #3207's audit ask.
+- Run every Verification row, with `/usr/bin/grep` for every grep row and the nine directories spelled out literally — never through an unquoted shell variable, which under zsh silently returns 0 and reads as a pass on two of the rows.
+- Assert task 0's `reason written` column reads `yes` for all **19** annotate-keeps, and that the diff-based comment-count row clears its floor of 19. Both, not one: the floor row cannot tell nineteen reasons from one long comment block, and the column cannot prove the comments reached the diff.
+- For batch 2, read the **four new node ids by name** out of the run's collected output rather than trusting the passed count. Three passing files mask a fourth that was never collected, and the summary line looks identical either way.
+- Confirm the PR body carries: the **32-row** per-site verdict table including the `reason written` column, the exact total site count, the re-run sweep output, the four separate mutation red blocks, and the #3207 consumer audit table with the statement that this lane discharges #3207's audit ask.
 
 ## Verification
 
