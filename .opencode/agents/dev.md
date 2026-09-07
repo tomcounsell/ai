@@ -4,6 +4,7 @@ description: Developer subagent for eng sessions — owns the SDLC pipeline (pla
   PM session on first need and CONTINUED across turns and process restarts via agent
   continuation; never spawn a second dev for the same session.
 mode: subagent
+model: anthropic/claude-opus-4-5
 color: success
 ---
 <!-- opencode-sync: generated from .claude/agents/dev.md -->

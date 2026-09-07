@@ -222,6 +222,8 @@ valor-telegram send --chat "Dev: Valor" "Reading the docs now, will come back wi
 
 See `docs/features/promise-gate.md` for the full architecture (LLM-first with regex fail-closed-only fallback, two-channel telemetry, mixed `session_id` provenance per CLI, latency budget, failure modes).
 
+`python -m tools.promise_gate_measurement` reports latency (elapsed and queue-wait) percentiles by audit source/transport from `logs/classification_audit.jsonl` plus `ask_coverage` contradiction flags from the separate `--ask-coverage-file` sample; it is the recorded entry criterion for the deferred #3035 phase-4 decision — see `docs/features/promise-gate.md` §Phase-4 measurement tool.
+
 ### Ask as a Poll (`valor-ask-poll`)
 
 Ask a blocked agent's question as a **native Telegram poll**, so the human unblocks it with one tap
