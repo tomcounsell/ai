@@ -38,7 +38,7 @@ Every user-visible message passes through `bridge/message_drafter.py::draft_mess
 
 ## API
 
-### `draft_message(raw_response, session=None, *, medium="telegram", persona=None) -> MessageDraft`
+### `draft_message(raw_response, session=None, *, medium="telegram", persona=None, use_llm=True) -> MessageDraft`
 
 The sole public entry point. Everything else is an implementation detail.
 
@@ -50,6 +50,7 @@ The sole public entry point. Everything else is an implementation detail.
 | `session` | `AgentSession \| None` | `None` | Enriches the draft with SDLC stage progress, persona/mode context, and linkifies PR/issue numbers. |
 | `medium` | `str` | `"telegram"` | Discriminator for per-medium validator rules. `"telegram"` or `"email"`. |
 | `persona` | `str \| None` | `None` | Optional tone hint. Orthogonal to medium. Not used today. |
+| `use_llm` | `bool` | `True` | Whether the main (composed) path's promise gate may use its LLM-primary judgment layer (issue #3027). The short-output early return NEVER uses the LLM regardless of this flag — it always evaluates via the zero-cost heuristic. Two production callers pass `use_llm=False`: `agent/hooks/stop.py`, which runs inline on the Stop hook's 10-second harness-wall critical path where this repo has already had a SIGKILL incident (`docs/features/memory-hook-performance.md`) from an inline LLM round-trip, and `bridge/email_bridge.py::EmailOutputHandler.send`, a call site with no bounce wiring to act on a block verdict (#3124). The relay handler in `agent/output_handler.py` drafts Telegram and email deliveries through one call with the default `use_llm=True`, so email sent that way IS LLM-gated. |
 
 **Returns `MessageDraft`:**
 
@@ -67,7 +68,7 @@ class MessageDraft:
                                                 # to re-identify a referent (#2694)
 ```
 
-Note: `was_drafted` has been removed. The drafter no longer calls any LLM — the agent's own text is used after narration stripping and structural composition. There is no Haiku/OpenRouter rewrite path.
+The drafter never rewrites the agent's text — it is used verbatim after narration stripping and structural composition. There is no Haiku/OpenRouter rewrite path. The drafter's main path does make one LLM call per message (the promise-gate honesty check, `use_llm=True` by default — see `_evaluate_drafter_promise` below); that call judges whether to ship the text as-is, it never alters it.
 
 ### Pass-through flow
 
@@ -77,7 +78,7 @@ Note: `was_drafted` has been removed. The drafter no longer calls any LLM — th
 2. Apply deterministic structural composition (`_compose_structured_draft`) — emoji prefix, SDLC stage line, bullet/question parsing, link footer.
 3. Run `_validate_for_medium` on the composed text.
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
-5. If `_evaluate_drafter_promise` fires (agent made a promise without substance — "will do", "I'll follow up" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. **Both** promotions happen on **both** return points — the short-output early return (see below) and this main-path return — so neither a wire-format violation (issue #1955) nor an empty promise (issue #2421) ever ships silently regardless of message length. Every gate decision writes a `source="promise_gate_drafter"` audit entry to `logs/classification_audit.jsonl`. All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
+5. If `_evaluate_drafter_promise` fires (agent made a promise without substance — "will do", "I'll follow up" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. **Both** promotions happen on **both** return points — the short-output early return (see below) and this main-path return — so neither a wire-format violation (issue #1955) nor an empty promise (issue #2421) ever ships silently regardless of message length. Every gate decision writes an audit entry to `logs/classification_audit.jsonl` — `source="promise_gate_drafter"` on the heuristic-only judgment (short path, and the forced `use_llm=False` calls in the Stop hook and `EmailOutputHandler.send`), or `source="promise_gate_drafter_llm"` / `"...drafter_heuristic"` / `"...drafter_timeout"` / `"...drafter_oversize"` on the LLM-primary main path, depending on which layer produced the verdict. All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
 7. Populate `open_questions` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
 8. Return `MessageDraft(text=<composed>, context_summary=..., open_questions=..., violations=[...])`.
@@ -140,9 +141,52 @@ Dispatcher. Routes to `validate_telegram` or `validate_email` based on `medium`,
 
 Renders violations as a `⚠️` note for the review-gate presentation shown to the agent.
 
-### `_evaluate_drafter_promise(text, *, medium, session=None) -> PromiseVerdict`
+### `_evaluate_drafter_promise(text, *, medium, session=None, use_llm=False) -> PromiseVerdict`
 
-Shared drafter promise-gate chokepoint (issue #2421) called by both `draft_message` return paths. Evaluates `bridge.promise_gate._evaluate_promise_heuristic` (regex-only — no LLM call, so the short path's latency guarantee holds) on the exact text about to ship, covering both behavioral-change patterns ("got it / will do") and forward-deferral patterns ("I'll follow up / stay tuned / more soon"). Honors the `PROMISE_GATE_ENABLED` kill switch (disabled → never blocks, still writes an `allow / gate_disabled` audit entry) and writes a best-effort `source="promise_gate_drafter"` entry to `logs/classification_audit.jsonl` on every decision. Returns the `PromiseVerdict`; callers promote `action == "block"` to `needs_self_draft=True`. A BLOCK downgrades to ALLOW (`promise_recorded_override`) when the session's bound Job carries an open PM-recorded promise — the Job-scoped override of the advisory flow (durability M3, #2494). See [Promise Gate](promise-gate.md) for the full contract, including the terminal-flush coverage (#2423).
+Shared drafter promise-gate chokepoint (issue #2421) — the **single
+chokepoint** called by both `draft_message` return paths, so a decision made
+here is the only decision that determines whether text ships or gets
+bounced back for self-draft. `use_llm` (issue #3027) selects the judgment
+layer:
+
+* `use_llm=False` — regex-only `bridge.promise_gate._evaluate_promise_heuristic`,
+  **zero LLM calls**. Used by the short-output early return (< `SHORT_OUTPUT_THRESHOLD`
+  chars) regardless of the caller's `use_llm`, and by any caller that
+  explicitly passes `use_llm=False` on the main path: `agent/hooks/stop.py`
+  (see below) and `bridge/email_bridge.py::EmailOutputHandler.send` (that call
+  site has no bounce wiring, #3124). Audited as `source="promise_gate_drafter"`.
+* `use_llm=True` — the LLM-primary path via
+  `bridge.promise_gate._evaluate_promise_llm_or_heuristic` (same SDK-timeout
+  / bounded-semaphore / heuristic-fallthrough contract as the CLI's
+  `evaluate_promise_async`). Used by the main (composed) path for the
+  relay handler (`agent/output_handler.py`), which drafts both its Telegram
+  and its email deliveries through one call — this is `draft_message`'s
+  default. Audited as `source="promise_gate_drafter_llm"`,
+  `"...drafter_heuristic"`, `"...drafter_timeout"`, or `"...drafter_oversize"`
+  depending on which layer produced the verdict.
+
+**Zero-LLM guarantee on the short path is test-enforced**, not just
+documented: `tests/unit/test_message_drafter.py::TestMainPathLLMWiring::test_short_path_issues_zero_llm_calls`
+patches the LLM call to raise on invocation and asserts the short-output
+branch never triggers it, regardless of the `draft_message`-level `use_llm`
+the caller passed.
+
+Covers both behavioral-change patterns ("got it / will do") and
+forward-deferral patterns ("I'll follow up / stay tuned / more soon") on the
+heuristic branch; the LLM branch covers the same two classes plus anything
+outside what a regex can express (e.g. "still working on this"). Honors the
+`PROMISE_GATE_ENABLED` kill switch (checked before either judgment layer
+runs, so a disabled gate never pays for an LLM call either — disabled →
+never blocks, still writes an `allow / gate_disabled` audit entry under
+`source="promise_gate_drafter_disabled"`, the string to grep for the
+disabled state on this route). Returns the `PromiseVerdict`; callers
+promote `action == "block"` to `needs_self_draft=True`. A BLOCK downgrades
+to ALLOW (`promise_recorded_override`) when the session's bound Job carries
+an open PM-recorded inbound expectation — the Job-scoped override of the
+advisory flow (durability M3, #2494), applied identically regardless of
+`use_llm`. See [Promise Gate](promise-gate.md) for the full contract,
+including the path coverage table and the terminal-flush route (#2423),
+which stays heuristic-only.
 
 ## Steering-first flag handling
 
@@ -164,7 +208,7 @@ This bounce uses `CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION` in place of the base `S
 
 Unlike every other blocking flag, this check **sets** `needs_self_draft` rather than riding an existing one. Wiring it only into the existing `needs_self_draft` return sites would never fire in the case the feature exists for: a clean `"which PR do you mean?"` returns `needs_self_draft=False` and is sent.
 
-The check cannot hard-exit a CLI send. It lives in `agent/output_handler.py`, not in the promise gate, whose `cli_check_or_exit` consumer calls `sys.exit(1)` on a block across five CLI call sites. Extending that gate would have hard-failed a legitimate `python -m tools.send_message "which one do you mean?"`. `bridge/promise_gate.py` and `bridge/read_the_room.py` are byte-identical to `main`. Full contract: [Context-Recall Advisory](context-recall-advisory.md).
+The check cannot hard-exit a CLI send. It lives in `agent/output_handler.py`, not in the promise gate, whose `cli_check_or_exit` consumer calls `sys.exit(1)` on a block across five CLI call sites. Extending that gate would have hard-failed a legitimate `python -m tools.send_message "which one do you mean?"`. Full contract: [Context-Recall Advisory](context-recall-advisory.md).
 
 ### Sequential self-draft loop bound
 
@@ -219,7 +263,7 @@ This is **defense-in-depth**. The primary fix is the drafter-at-the-handler wiri
 - **No persona-specific drafter skips.** Medium and persona stay orthogonal.
 - **No retry loops on drafter failure.** One attempt, one fallback path.
 - **No Telegraph (telegra.ph) integration.** `.txt` attachment is the long-form delivery mechanism.
-- **No server-side LLM rewriting.** The agent's own text is used verbatim. Haiku/OpenRouter are not called by the drafter.
+- **No server-side LLM rewriting.** The agent's own text is used verbatim; OpenRouter is not called by the drafter at all. The promise gate's main-path honesty check does call Haiku (`use_llm=True` by default — see `_evaluate_drafter_promise`), but that call only judges whether the text ships, it never rewrites it.
 
 ## Format rules by medium
 
@@ -275,7 +319,7 @@ Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.m
 After the drafter finalises `delivery_text`, three optional layers may intercept the message before it reaches the outbox:
 
 1. **Redundancy filter** (`bridge/redundancy_filter.py`, issue #1205) — deterministic bigram-Jaccard guard for SDLC sessions. Runs first. Suppresses near-verbatim PM status repeats within a time window. See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md).
-2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — opt-in Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
+2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — unconditional Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
 3. **Context-recall** (`bridge/context_recall.py`, issue #2694) — Haiku verdict on short, question-shaped output. Holds the message and bounces it through the self-draft loop with a history-read command instead of suppressing it. On by default (`CONTEXT_RECALL_OUTBOUND_ENABLED`). See [Context-Recall Advisory](context-recall-advisory.md).
 
 The first two queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability. Context-recall neither suppresses nor reacts: the message is returned to its author to rewrite, and on self-draft budget exhaustion the original is sent unchanged.
@@ -311,9 +355,13 @@ Added for [Telegram Poll Questions](telegram-poll-questions.md) (#2701).
 A poll question is validated by the drafter but is **never composed** by it:
 
 ```python
-def validate_poll_question(question: str) -> list[Violation]:
+def validate_poll_question(question: str, *, session_id: str | None = None) -> list[Violation]:
     """Validate a poll question against the telegram_poll medium. No composition."""
-    return _validate_for_medium(question, "telegram_poll")
+    violations = _validate_for_medium(question, "telegram_poll")
+    # Heuristic promise gate; a block is a non-blocking Violation and an audit row
+    # (source="promise_gate_poll", or "promise_gate_poll_disabled" under the kill switch).
+    ...
+    return violations
 ```
 
 **Why a new public entry point rather than routing through `draft_message`.** `_validate_for_medium`

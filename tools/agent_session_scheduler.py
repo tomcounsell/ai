@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent.constants import WORKER_DOWN_THRESHOLD_S
+from agent.worktree_manager import WORKTREES_DIR
 from config.enums import SessionType
 from models.reflection import Reflection
 from models.session_lifecycle import NON_TERMINAL_STATUSES
@@ -43,10 +44,10 @@ from tools._sdlc_utils import _resolve_target_repo_fallback
 def _to_ts(val):
     """Convert datetime or float to Unix timestamp.
 
-    Delegates to ``utils.utc.to_unix_ts`` which treats naive datetimes as UTC
-    (Popoto strips tzinfo on save). Directly calling ``val.timestamp()`` on a
-    naive datetime would interpret it as machine-local time and silently offset
-    every derived age by the machine's UTC offset.
+    Delegates to ``utils.utc.to_unix_ts`` which treats naive datetimes as
+    UTC. Directly calling ``val.timestamp()`` on a naive datetime would
+    interpret it as machine-local time and silently offset every derived age
+    by the machine's UTC offset.
     """
     from utils.utc import to_unix_ts
 
@@ -431,7 +432,16 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 inherited_correlation_id = parent_session.correlation_id
             if parent_session.classification_type:
                 inherited_classification_type = parent_session.classification_type
-            if parent_session.working_dir:
+            # Do not inherit a parent working_dir that points inside a lane
+            # worktree (#3176). A scheduled child synthesizes its own slug
+            # and provisions its own worktree; inheriting a parent's lane
+            # path makes it skip that provisioning (the path already looks
+            # like a worktree) and then fail verify_worktree_branch against
+            # another session's live lane. This is pre-existing and
+            # independent of the busy-guard fix: `valor-session create`
+            # already sets working_dir to `.worktrees/{slug}` for slugged
+            # sessions today.
+            if parent_session.working_dir and WORKTREES_DIR not in parent_session.working_dir:
                 working_dir = parent_session.working_dir
             # Inherit priority from parent unless explicitly overridden
             if not args.priority and parent_session.priority:

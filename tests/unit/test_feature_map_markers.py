@@ -3,8 +3,9 @@
 Fails when a test file's FEATURE_MAP marker does not resolve as intended, so a
 mistag surfaces as a red check on the pull request that introduces it rather
 than as coverage that quietly stopped running. See
-docs/features/feature-map-marker-guard.md for the three mistag mechanisms and
-what the three rules below can and cannot see.
+docs/features/feature-map-marker-guard.md for the mistag mechanisms (two live;
+the mangled stem was fixed by #3184) and what the three rules below can and
+cannot see.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from tests.marker_map import (
     FEATURE_MAP,
     KNOWN_MISTAGS,
     _partition_packages,
+    _stem,
     check_r1,
     check_r2,
     check_r3,
@@ -75,18 +77,35 @@ def test_known_mistags_all_carry_a_prose_reason():
 
 
 # ---------------------------------------------------------------------------
-# Stem fidelity: the two files that move if the stem expression is
-# re-derived (removeprefix/removesuffix/anchored regex) instead of copied
-# verbatim. These are the cheapest possible tripwire for mechanism 3 (#3184).
+# Stem fidelity: these pin the anchored strip shipped by #3184 -- `test_` comes
+# off the front only and `.py` off the end only, so a basename carrying
+# `test_` a second time keeps it. All five tracked basenames of that shape are
+# covered. The two below resolve to a FEATURE_MAP key written for them; the
+# three further down resolve to no marker either way, so they assert `_stem`
+# directly rather than a vacuously-green `resolve_marker` tuple.
 # ---------------------------------------------------------------------------
 
 
 def test_stem_fidelity_test_judge():
-    assert resolve_marker("test_test_judge.py") == (None, None)
+    assert resolve_marker("test_test_judge.py") == ("tools", "test_judge")
 
 
 def test_stem_fidelity_validate_test_impact():
-    assert resolve_marker("test_validate_test_impact.py") == (None, None)
+    assert resolve_marker("test_validate_test_impact.py") == ("validation", "validate_test_impact")
+
+
+def test_stem_unmangled_conftest_autouse_monkeypatch_order():
+    assert _stem("test_conftest_autouse_monkeypatch_order.py") == (
+        "conftest_autouse_monkeypatch_order"
+    )
+
+
+def test_stem_unmangled_conftest_isolation_guards():
+    assert _stem("test_conftest_isolation_guards.py") == "conftest_isolation_guards"
+
+
+def test_stem_unmangled_test_redis_server_resolution():
+    assert _stem("test_test_redis_server_resolution.py") == "test_redis_server_resolution"
 
 
 def test_youtube_transcription_retagged_to_tools():

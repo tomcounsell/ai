@@ -25,10 +25,14 @@ def _make_session(
     status: str,
     session_id: str = "sess-1",
     agent_session_id: str = "agt-1",
+    exec_cwd: str | None = None,
+    slug: str | None = None,
 ) -> SimpleNamespace:
     """Build a duck-typed AgentSession stand-in for busy-check tests."""
     return SimpleNamespace(
         working_dir=working_dir,
+        exec_cwd=exec_cwd,
+        slug=slug,
         status=status,
         session_id=session_id,
         agent_session_id=agent_session_id,
@@ -336,6 +340,130 @@ class TestScanWorktreeSessions:
         with patch.dict(sys.modules, {"models.agent_session": None}):
             result = _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows)
         assert result == ("busy", "0_INJ", "agt-1")
+
+
+class TestScanWorktreeSessionsExecCwd:
+    """The two-field match added for #3176: exec_cwd read before working_dir.
+
+    Every case here injects rows via ``sessions=`` so it exercises the
+    matcher directly without a Popoto query mock.
+    """
+
+    def test_synthetic_shape_matches_on_exec_cwd(self):
+        """slug=None, exec_cwd names the lane, working_dir names main."""
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="running",
+                session_id="0_DEV",
+                agent_session_id="agt-DEV",
+                exec_cwd="/fake/repo/.worktrees/dev-abcd1234",
+                slug=None,
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "dev-abcd1234", sessions=rows) == (
+            "busy",
+            "0_DEV",
+            "agt-DEV",
+        )
+
+    def test_real_slug_shape_matches_on_exec_cwd(self):
+        """A real slugged session also reads busy via exec_cwd — the half
+        the earlier draft asserted and never tested."""
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="running",
+                session_id="0_SDLC",
+                agent_session_id="agt-SDLC",
+                exec_cwd="/fake/repo/.worktrees/sdlc-1218",
+                slug="sdlc-1218",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows) == (
+            "busy",
+            "0_SDLC",
+            "agt-SDLC",
+        )
+
+    def test_fallback_arm_unchanged_when_exec_cwd_none(self):
+        """exec_cwd=None must not short-circuit the working_dir read."""
+        rows = [
+            _make_session(
+                working_dir="/fake/repo/.worktrees/sdlc-1218",
+                status="running",
+                session_id="0_FB",
+                exec_cwd=None,
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218", sessions=rows) == (
+            "busy",
+            "0_FB",
+            "agt-1",
+        )
+
+    def test_relative_exec_cwd_resolves_against_repo_root(self):
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="running",
+                session_id="0_REL",
+                exec_cwd=".worktrees/dev-abcd1234",
+            ),
+        ]
+        result = _scan_worktree_sessions(Path("/tmp"), "dev-abcd1234", sessions=rows)
+        assert result[0] == "busy"
+        assert result[1] == "0_REL"
+
+    def test_exec_cwd_near_miss_does_not_match(self):
+        """The segment-prefix guard applies to exec_cwd too (Risk 5 of #2712)."""
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="running",
+                exec_cwd="/fake/repo/.worktrees/dev-abcd1234-other",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "dev-abcd1234", sessions=rows) == (
+            "clear",
+            "",
+            "",
+        )
+
+    def test_terminal_row_with_matching_exec_cwd_reads_clear(self):
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="completed",
+                exec_cwd="/fake/repo/.worktrees/dev-abcd1234",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "dev-abcd1234", sessions=rows) == (
+            "clear",
+            "",
+            "",
+        )
+
+    def test_resumed_row_deleted_lane_still_reads_busy(self):
+        """C3: a valor-session resume'd row can carry a deleted lane's
+        exec_cwd. The scan matches on the stored string and never stats
+        the path, so it stays busy for a directory that no longer exists
+        on disk — accepted (fail-safe direction), not a bug."""
+        rows = [
+            _make_session(
+                working_dir="/fake/repo",
+                status="pending",
+                session_id="0_RESUMED",
+                exec_cwd="/fake/repo/.worktrees/dev-abcd1234",
+            ),
+        ]
+        # No filesystem entry at all is made for the lane — the scan must
+        # not stat it.
+        assert _scan_worktree_sessions(Path("/fake/repo"), "dev-abcd1234", sessions=rows) == (
+            "busy",
+            "0_RESUMED",
+            "agt-1",
+        )
 
 
 class TestFetchLiveSessions:

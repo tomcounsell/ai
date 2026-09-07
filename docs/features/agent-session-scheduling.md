@@ -140,7 +140,7 @@ Child sessions inherit from the parent:
 - `correlation_id` (end-to-end tracing)
 - `chat_id` (output routing)
 - `classification_type` (SDLC/Q&A classification)
-- `working_dir` (project working directory)
+- `working_dir`, unless the parent's `working_dir` points inside a lane worktree (`.worktrees/`) — a child synthesizes its own slug and provisions its own worktree, so it always falls back to the project's default `working_directory` instead of a parent's live lane path (issue #3176)
 - `priority` (unless explicitly overridden)
 
 ### Parent Lifecycle

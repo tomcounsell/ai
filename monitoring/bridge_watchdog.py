@@ -939,7 +939,8 @@ def run_health_check() -> bool:
         try:
             lock_data = json.loads(RECOVERY_LOCK.read_text())
             lock_time = datetime.fromisoformat(lock_data.get("started", ""))
-            # Ensure lock_time is tz-aware for comparison (legacy files may be naive)
+            # Keep: the recovery-lock JSON is a plain file, not a popoto read,
+            # and may carry no offset.
             if lock_time.tzinfo is None:
                 lock_time = lock_time.replace(tzinfo=UTC)
             age = (utc_now() - lock_time).total_seconds()

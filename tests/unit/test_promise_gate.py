@@ -11,6 +11,7 @@ Plan: docs/plans/sdlc-1219.md (issue #1219).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from unittest.mock import MagicMock, patch
@@ -508,16 +509,22 @@ class TestCliCheckOrExit:
 
 class TestSDKTimeout:
     def test_timeout_falls_through_to_heuristic_with_timeout_source(self, tmp_path, monkeypatch):
+        """A real ``anthropic.APITimeoutError`` from the SDK call is its own
+        discriminator: the caller must fall through to the heuristic AND
+        audit it as ``source="promise_gate_timeout"``, distinct from the
+        generic ``"promise_gate_heuristic"`` fallthrough that fires when the
+        LLM call fails for any other reason. The timeout must propagate out
+        of ``_evaluate_promise_async`` for that distinction to exist; a
+        swallowed timeout would audit as a generic heuristic fallthrough.
+        """
+        import httpx
+
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
 
         async def _timeout(text):
-            # Simulate the LLM helper returning None *because* of a timeout —
-            # this matches the behaviour of _evaluate_promise_async on
-            # APITimeoutError (returns None). The timeout discriminator is
-            # surfaced by the caller's _PromiseTimeout exception path; here
-            # we exercise the simpler "LLM returned None → heuristic" route.
-            return None
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            raise promise_gate.anthropic.APITimeoutError(request=request)
 
         with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_timeout):
             v = evaluate_promise(
@@ -525,12 +532,109 @@ class TestSDKTimeout:
                 transport="telegram",
                 session_id=None,
             )
-        # Heuristic catches the forward-deferral, and the audit log records
-        # one of the heuristic-source discriminators.
         assert v.action == "block"
         assert log_path.exists()
         contents = log_path.read_text()
-        assert "promise_gate_heuristic" in contents or "promise_gate_timeout" in contents
+        assert "promise_gate_timeout" in contents
+        assert "promise_gate_heuristic" not in contents
+
+    def test_llm_none_falls_through_to_heuristic_with_heuristic_source(self, tmp_path, monkeypatch):
+        """The generic "LLM returned None" fallthrough (no API key, parse
+        failure, non-timeout SDK exception already swallowed inside
+        ``_evaluate_promise_async``) audits as ``source="promise_gate_heuristic"``
+        — never ``"promise_gate_timeout"``, which is reserved for the actual
+        timeout discriminator (previous test)."""
+        log_path = tmp_path / "audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        async def _unavailable(text):
+            return None
+
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_unavailable):
+            v = evaluate_promise(
+                "I'll come back with thoughts",
+                transport="telegram",
+                session_id=None,
+            )
+        assert v.action == "block"
+        assert log_path.exists()
+        contents = log_path.read_text()
+        assert "promise_gate_heuristic" in contents
+        assert "promise_gate_timeout" not in contents
+
+    def test_semaphore_acquire_timeout_is_a_timeout_row_without_queue_wait(self, monkeypatch):
+        """``semaphore_slot(timeout=...)`` raises ``TimeoutError`` from
+        ``__aenter__`` before the slot is held, so ``_queue_wait_ms`` is never
+        set: the outcome is the ``timeout`` suffix with ``queue_wait_ms`` of
+        ``None`` while ``elapsed_ms`` is still measured. The SDK-timeout
+        counterpart (next test) is the ``timeout`` row that does carry a
+        queue-wait sample."""
+        import asyncio
+
+        class _NeverAcquires:
+            async def __aenter__(self):
+                raise TimeoutError("semaphore acquire timed out")
+
+            async def __aexit__(self, *exc):
+                return None
+
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+        monkeypatch.setattr(promise_gate, "semaphore_slot", lambda timeout=None: _NeverAcquires())
+
+        verdict, suffix, elapsed_ms, queue_wait_ms = asyncio.run(
+            promise_gate._evaluate_promise_llm_or_heuristic("I'll come back with thoughts")
+        )
+        assert suffix == "timeout"
+        assert verdict.action == "block"
+        assert queue_wait_ms is None
+        assert elapsed_ms >= 0
+
+    def test_sdk_timeout_after_acquire_is_a_timeout_row_with_queue_wait(self, monkeypatch):
+        """Once the slot is held, ``_queue_wait_ms`` is set before the SDK
+        call, so an ``anthropic.APITimeoutError`` raised by the client yields
+        the ``timeout`` suffix WITH a measured ``queue_wait_ms``. Together with
+        the previous test this pins both halves of the documented contract:
+        the field is present exactly when the acquire succeeded."""
+        import asyncio
+
+        import httpx
+
+        class _AcquiresImmediately:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *exc):
+                return None
+
+        class _TimingOutMessages:
+            async def create(self, **kwargs):
+                request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+                raise promise_gate.anthropic.APITimeoutError(request=request)
+
+        class _TimingOutClient:
+            def __init__(self, **kwargs):
+                self.messages = _TimingOutMessages()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+        monkeypatch.setattr(
+            promise_gate, "semaphore_slot", lambda timeout=None: _AcquiresImmediately()
+        )
+        monkeypatch.setattr(promise_gate.anthropic, "AsyncAnthropic", _TimingOutClient)
+
+        verdict, suffix, elapsed_ms, queue_wait_ms = asyncio.run(
+            promise_gate._evaluate_promise_llm_or_heuristic("I'll come back with thoughts")
+        )
+        assert suffix == "timeout"
+        assert verdict.action == "block"
+        assert queue_wait_ms is not None
+        assert queue_wait_ms >= 0
+        assert elapsed_ms >= queue_wait_ms
 
 
 # === Audit JSONL ordering / kill-switch first-write ===
@@ -650,3 +754,110 @@ class TestRunAsyncSafelyNoLeak:
 
         asyncio.run(_drive())
         assert closed["seen"], "coroutine was not closed on the running-loop branch"
+
+
+# === LLM input cap ===
+
+
+class TestSyncWrapperUnderRunningLoop:
+    """``evaluate_promise`` keeps its ``PromiseVerdict`` contract when an event
+    loop is already running on the calling thread.
+
+    ``_run_async_safely`` returns ``None`` there (it cannot ``asyncio.run``),
+    so the sync wrapper must evaluate step 4 with the heuristic and still
+    audit the row; ``cli_check_or_exit`` reads ``verdict.action`` outside its
+    fail-open guard and would crash on ``None``.
+    """
+
+    def test_returns_heuristic_verdict_and_audits(self):
+        import asyncio
+
+        from bridge import promise_gate
+
+        async def _drive():
+            return promise_gate.evaluate_promise(
+                "I'll come back with the results later.", transport="telegram", session_id="cli-x"
+            )
+
+        verdict = asyncio.run(_drive())
+        assert isinstance(verdict, promise_gate.PromiseVerdict)
+        assert verdict.action == "block"
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert [r["source"] for r in rows] == ["promise_gate_heuristic"]
+        assert rows[0]["transport"] == "telegram"
+        assert rows[0]["elapsed_ms"] is not None
+
+    def test_cli_guard_does_not_crash(self):
+        import asyncio
+
+        from bridge import promise_gate
+
+        async def _drive():
+            promise_gate.cli_check_or_exit(
+                "Deployed the fix; tests pass.", transport="telegram", session_id=None
+            )
+
+        asyncio.run(_drive())
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert [r["source"] for r in rows] == ["promise_gate_heuristic"]
+        assert rows[0]["action"] == "allow"
+
+
+class TestLlmInputCap:
+    """Texts longer than ``PROMISE_GATE_LLM_MAX_INPUT_CHARS`` never reach the
+    model: the helper runs the heuristic and reports the ``oversize`` suffix
+    so the skip is queryable by audit source."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_text_skips_llm_and_reports_oversize(self, monkeypatch):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "50")
+        called = False
+
+        async def _fake(text):
+            nonlocal called
+            called = True
+            return PromiseVerdict(action="allow", reason="llm")
+
+        text = "I'll follow up once the deploy finishes and report back. " * 3
+        assert len(text) > 50
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_fake):
+            (
+                verdict,
+                suffix,
+                elapsed_ms,
+                queue_wait_ms,
+            ) = await promise_gate._evaluate_promise_llm_or_heuristic(text)
+
+        assert called is False
+        assert suffix == "oversize"
+        assert queue_wait_ms is None
+        assert elapsed_ms >= 0
+        # The heuristic still decides: this text is a forward deferral.
+        assert verdict.action == "block"
+
+    @pytest.mark.asyncio
+    async def test_text_at_cap_still_reaches_llm(self, monkeypatch):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "50")
+        text = "x" * 50
+        with _patch_llm("allow", reason="llm-said-so"):
+            verdict, suffix, _, _ = await promise_gate._evaluate_promise_llm_or_heuristic(text)
+        assert suffix == "llm"
+        assert verdict.reason == "llm-said-so"
+
+    @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
+    def test_unusable_env_value_falls_back_to_default(self, monkeypatch, raw):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", raw)
+        assert promise_gate._llm_max_input_chars() == promise_gate._LLM_MAX_INPUT_CHARS_DEFAULT
+
+    @pytest.mark.asyncio
+    async def test_drafter_main_path_audits_oversize_source(self, monkeypatch):
+        """The drafter's ``use_llm=True`` path prefixes the suffix, so an
+        oversize skip lands as ``promise_gate_drafter_oversize``."""
+        from bridge.message_drafter import _evaluate_drafter_promise
+
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "20")
+        text = "Everything is merged and deployed to production. " * 2
+        with _patch_llm("allow"):
+            await _evaluate_drafter_promise(text, medium="telegram", use_llm=True)
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert rows[-1]["source"] == "promise_gate_drafter_oversize"

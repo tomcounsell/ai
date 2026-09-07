@@ -339,7 +339,8 @@ def _read_last_connected() -> datetime | None:
         from datetime import UTC
 
         ts = datetime.fromisoformat(raw)
-        # Ensure timezone-aware
+        # Keep: the last-connected file is a plain text timestamp, not a
+        # popoto read, and may carry no offset.
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         # Clamp future timestamps to now

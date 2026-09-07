@@ -43,6 +43,7 @@ Read these in order:
 | [Headless Session Runner](features/headless-session-runner.md) | How a turn actually runs: the `claude -p` subprocess, env handling, teardown |
 | [Session Lifecycle](features/session-lifecycle.md) | The 14-state `AgentSession` lifecycle, from enqueue to completion |
 | [Feature Index](features/README.md) | Every implemented feature, with a doc for each |
+| [Improvement Charter](improvement-charter.md) | Tom's north star for Valor's self-improvement loop: who Valor is becoming, the four objectives, how they trade off, and what the controller may do without asking |
 
 ## Quick Start
 

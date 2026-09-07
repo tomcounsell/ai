@@ -1,11 +1,11 @@
 """Single source of truth for pytest FEATURE_MAP marker resolution.
 
 `tests/conftest.py::pytest_collection_modifyitems` auto-applies a feature marker
-to every collected test by taking the module basename, stripping ``test_`` and
-``.py``, and substring-matching the remainder against ``FEATURE_MAP`` in
-insertion order, first hit wins. That coupling is silent: a test file can be
-renamed, moved, or split and land under the wrong marker (or none) with the
-collection total unchanged and the suite staying green.
+to every collected test by taking the module basename, stripping a leading
+``test_`` and a trailing ``.py``, and substring-matching the remainder against
+``FEATURE_MAP`` in insertion order, first hit wins. That coupling is silent: a
+test file can be renamed, moved, or split and land under the wrong marker (or
+none) with the collection total unchanged and the suite staying green.
 
 This module is the single home of ``FEATURE_MAP`` and ``resolve_marker()`` so
 Path A (marker assignment, at collection time, in ``tests/conftest.py``) and
@@ -21,9 +21,9 @@ runs on a bare interpreter with no venv:
     python tests/marker_map.py --report
     python tests/marker_map.py --count
 
-See docs/features/feature-map-marker-guard.md for the three mistag mechanisms,
-what the three rules below can and cannot see, and how to respond when the
-guard goes red.
+See docs/features/feature-map-marker-guard.md for the mistag mechanisms (two
+live; the mangled stem was fixed by #3184), what the three rules below can and
+cannot see, and how to respond when the guard goes red.
 """
 
 from __future__ import annotations
@@ -292,18 +292,20 @@ def _stem(basename: str) -> str:
 
     The one implementation of the stem expression. `resolve_marker` and
     `resolve_marker_whole_token` both call this, so the two resolvers cannot
-    drift apart, and #3184 has exactly one line to change instead of two.
+    drift apart.
     """
-    # Global str.replace of *every* occurrence, not a leading-prefix strip --
-    # copied verbatim from the shipped hook
-    # (tests/conftest.py::pytest_collection_modifyitems). It mangles the five
-    # basenames containing "test_" twice (tracked as #3184, e.g.
-    # test_test_judge.py -> "judge" instead of "test_judge"). Do NOT
-    # "clean this up" with a prefix/suffix-stripping helper or a pattern
-    # substitution: each of those retags tests/tools/test_test_judge.py and
-    # tests/unit/test_validate_test_impact.py, silently gaining them a
-    # marker and breaking the byte-identical-behavior requirement.
-    return basename.replace("test_", "").replace(".py", "")
+    # Anchored strip: "test_" only at the front, ".py" only at the end (#3184).
+    # A global str.replace ate every occurrence, so a basename carrying "test_"
+    # a second time lost it out of the middle -- test_test_judge.py stemmed to
+    # "judge" and test_conftest_isolation_guards.py to "confisolation_guards",
+    # missing FEATURE_MAP keys written for those exact files. Measured over all
+    # tracked test files, anchoring moves exactly two: tests/tools/
+    # test_test_judge.py gains "tools" and tests/unit/test_validate_test_impact.py
+    # gains "validation". Nothing loses a marker and the audit stays at 0 new,
+    # 0 stale. Keep it anchored; `removeprefix`/`removesuffix` are exact, are
+    # no-ops on a miss, and need no `re` import, which keeps this module
+    # runnable on a bare interpreter.
+    return basename.removeprefix("test_").removesuffix(".py")
 
 
 def resolve_marker(basename: str) -> tuple[str | None, str | None]:

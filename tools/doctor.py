@@ -1575,8 +1575,9 @@ def _check_session_archive_freshness() -> CheckResult:
 def _recent_quarantine_suffix() -> str:
     """Read the most recent repair_indexes() identity-less quarantine count.
 
-    `AgentSession.repair_indexes()` (issue #2207's generalized A1 guard)
-    persists its per-pass quarantine count to a plain Redis key
+    `AgentSession.repair_indexes()` (issue #2207's generalized A1 guard,
+    re-based on row identity by #3199) persists its per-pass de-duplicated
+    quarantine ROW count to a plain Redis key
     (`_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY`, TTL-bounded) precisely so a
     detect-only, freshly-started `python -m tools.doctor` process can see it
     -- the in-memory `AgentSession._last_quarantined_identityless` class
@@ -1596,7 +1597,7 @@ def _recent_quarantine_suffix() -> str:
         count = int(raw)
         if count <= 0:
             return ""
-        return f" (most recent repair_indexes() quarantined {count} identity-less hash re-add(s))"
+        return f" (most recent repair_indexes() quarantined {count} identity-less row(s))"
     except Exception:
         return ""
 
@@ -1612,9 +1613,10 @@ def _check_agentsession_index_drift() -> CheckResult:
 
     The message also surfaces (informationally -- never gates pass/fail) the
     most recent repair_indexes() identity-less quarantine count (issue
-    #2207's generalized A1 guard) via `_recent_quarantine_suffix()`, so a
-    healthy-looking index that is only healthy because the guard is actively
-    quarantining phantom re-adds is visible here rather than silent.
+    #2207's generalized A1 guard, re-based on row identity by #3199) via
+    `_recent_quarantine_suffix()`, so a healthy-looking index that is only
+    healthy because the guard is actively quarantining phantom rows is
+    visible here rather than silent.
     """
     name = "agentsession-index-drift"
     category = "Services"

@@ -95,3 +95,26 @@ class TestCleanupGating:
         )
         # The skip and the delete are mutually exclusive branches.
         assert "SKIPPING worktree cleanup" in src
+
+    def test_finally_block_carries_pre_finalize_guard(self):
+        """Source guard (#3176): a pre-finalize guard must sit ahead of the
+        cleanup_after_merge call so a still-`running` row (every raising or
+        cancelled exit) does not permanently block its own removal."""
+        import inspect
+
+        src = inspect.getsource(session_executor)
+        assert "synthetic-cleanup pre-finalize" in src
+        assert '_auth.status == "running"' in src
+        # The guard's failure mode must resolve `task` defensively — a raise
+        # before `task = BackgroundTask(...)` must not raise NameError here.
+        assert 'locals().get("task")' in src
+
+    def test_finally_block_logs_blocked_cleanup_loudly(self):
+        """Source guard (#3176): a refused cleanup (blocked_by_session) must
+        emit a named [synthetic-slug] ... cleanup blocked WARNING mirroring
+        the neighbouring runner_reap_failed message."""
+        import inspect
+
+        src = inspect.getsource(session_executor)
+        assert "blocked_by_session" in src
+        assert "cleanup blocked" in src

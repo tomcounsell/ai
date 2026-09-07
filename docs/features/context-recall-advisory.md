@@ -99,11 +99,9 @@ The check **sets** `needs_self_draft` rather than riding an existing one, becaus
 
 | Rejected | Why |
 |----------|-----|
-| Extending the promise gate's LLM pass | Its verdict is consumed by `cli_check_or_exit`, which calls `sys.exit(1)` on a block across five CLI call sites. A context-recall block would hard-fail a legitimate `python -m tools.send_message "which one do you mean?"`. There is also no shared call to piggyback on: the drafter path uses the regex-only `_evaluate_promise_heuristic`, never the LLM. |
+| Extending the promise gate's LLM pass | Its verdict is consumed by `cli_check_or_exit`, which calls `sys.exit(1)` on a block across five CLI call sites. A context-recall block would hard-fail a legitimate `python -m tools.send_message "which one do you mean?"`. The two checks also stay separate calls on purpose: a prefiltered text always contains a `?`, and the drafter's zero-LLM short path requires that no `?` be present, so every text context-recall evaluates takes the drafter's **main** path and gets its own promise-gate Haiku verdict (see [Promise Gate](promise-gate.md)). Folding context recall into that verdict would couple a send-or-bounce decision to a CLI exit path. |
 | `bridge/read_the_room.py` | Excludes DMs outright — precisely where "which one?" is most likely. It has no PM feedback path at all. |
-| An LLM call inside `draft_message` | The drafter is deliberately LLM-free; putting a model call inside it would reverse a shipped architectural decision. |
-
-Both modules are byte-identical to `main`.
+| An LLM call inside `draft_message` | The drafter's main path already runs one model call, the promise-gate verdict, and its short path is zero-LLM by test-enforced guarantee. A second call inside the drafter would either double the main path's latency budget or breach the short path's guarantee. Context recall runs as its own step after `draft_message` returns, on the delivery text. |
 
 ## Failing open
 

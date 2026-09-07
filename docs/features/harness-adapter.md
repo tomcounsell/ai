@@ -158,10 +158,38 @@ now the function's unconditional body. Regression-tested by
         "route": {"type": "string", "enum": ["user", "complete", "continue"]},
         "message": {"type": "string"},
         "file_paths": {"type": "array", "items": {"type": "string"}},
+        "blocked_reason": {"type": "string"},
+        "ask_coverage": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string"},
+                    "disposition": {
+                        "type": "string",
+                        "enum": ["delivered", "blocked", "declined", "not_started"],
+                    },
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
     },
     "required": ["route", "message"],
 }
 ```
+
+`blocked_reason` (issue #2158) is the structured escape hatch that lets a PM
+finalize a non-terminal SDLC pipeline as `complete` when the work is
+genuinely blocked, abandoned, or superseded, without the runner's
+ledger-aware completion guard refusing and re-routing it. `ask_coverage`
+(issue #3027) forces the PM to enumerate the human ask's clauses and their
+dispositions on every turn so a dropped clause becomes visible instead of
+structurally undetectable. Both are optional and additive — turns that omit
+them behave exactly as before. `ask_coverage` is in phase A of a two-phase
+rollout: it is present in `properties` but deliberately **not** in
+`required` yet; tightening it to required is a separate follow-up gated on
+the `SCHEMA_ROUTING_FALLBACK_METRIC` staying flat over a soak window,
+tracked by #3035.
 
 Every top-level role turn requests this schema via `TurnRequest.json_schema`,
 which the adapter passes through to `--json-schema`. Per Task 2.1's empirical

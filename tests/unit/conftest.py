@@ -150,6 +150,35 @@ def _reset_llm_degraded_memo():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_promise_audit_log(tmp_path_factory):
+    """Redirect the promise-gate audit log to a per-test file for every unit test.
+
+    Every gated send route (CLI ``evaluate_promise``, the drafter's short,
+    main and poll paths, the terminal flush) writes a row through
+    ``bridge.promise_gate._write_promise_audit``, whose default target is the
+    repo's live ``logs/classification_audit.jsonl``: the file
+    ``tools/promise_gate_measurement.py`` samples for the latency budget.
+    Any unit test that drafts a message would otherwise land fixture text and
+    fake ``elapsed_ms`` samples in that measurement. Redirecting here, rather
+    than per module, means the next drafter-calling test module cannot
+    regress it. Tests that assert on audit rows read
+    ``promise_gate._AUDIT_LOG_PATH`` and see the redirected file.
+
+    Same private ``pytest.MonkeyPatch`` context as ``_redirect_llm_marker_dir``
+    above, for the same teardown-order reason (#3147).
+    """
+    from bridge import promise_gate
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            promise_gate,
+            "_AUDIT_LOG_PATH",
+            tmp_path_factory.mktemp("promise-audit") / "classification_audit.jsonl",
+        )
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _no_live_embedding_provider():
     """Null out popoto's global embedding provider for every unit test.
 

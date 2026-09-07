@@ -285,7 +285,7 @@ No new CLI entry points or MCP surfaces. The change is internal to the existing 
 ### Feature Documentation
 - [ ] Rewrite `docs/features/promise-gate.md` — obligation-keyed two-layer contract as current state: discriminator (recorded obligation, not grammar), path coverage table (short/main/terminal-flush/CLI), audit vocabulary incl. `promise_gate_drafter_llm` + `elapsed_ms`, retained rules (heuristic-as-backstop, fail postures, kill switch, advisory stance). No "formerly" narration.
 - [ ] Update `docs/features/message-drafter.md` — main-path LLM judgment, short-path zero-LLM guarantee (now test-enforced), single-chokepoint invariant.
-- [ ] Update `docs/features/eng-session-architecture.md` (or the PM-turn schema's home doc) — `ask_coverage` field, disposition footer, two-phase rollout state.
+- [x] Update `docs/features/harness-adapter.md`, the PM-turn schema's home doc — `ask_coverage` field, disposition footer, two-phase rollout state.
 - [ ] Verify `docs/features/README.md` index rows for the touched docs still describe them accurately.
 
 ### Inline Documentation
