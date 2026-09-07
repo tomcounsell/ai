@@ -205,13 +205,14 @@ assumed.
 
 ### Key Elements
 
-- **A bootstrap-driven probe**: `_run_probe` launches the child with `-S`, so the ambient `site-packages` is never processed, and hands it a generated bootstrap script that reproduces the three startup steps the test actually cares about — `sys.argv`, the fake site dir's `.pth` processing, and the script-directory insert.
+- **A bootstrap-driven probe** (the one isolation mechanism): `_run_probe` hands the child a generated bootstrap script that reproduces the three startup steps the test cares about — `sys.argv`, the fake site dir's `.pth` processing, and the script-directory insert. Because the child's `argv[0]` is the bootstrap (a path outside any `valor-bridge` checkout), the ambient `_valor_checkout_pin.pth` no-ops during `site` processing, and the fake site dir becomes the only thing that can pin anything (spike-2b).
+- **`-S -P` as hardening on that same invocation**: `-S` skips the venv's `site-packages` wholesale, so a *future* ambient shim that does not consult `argv[0]` (an unconditional `sys.path` append, a venv `sitecustomize`) cannot leak in either. `-P` keeps the bootstrap's own directory off the child's path so the sibling test measures real startup ordering (spike-2c). Neither flag is what fixes today's bug; both are cheap and both are stated for what they do.
 - **A restored negative control**: with no ambient shim reachable, `pinned=False` measures only what the fake site dir set up.
 - **An isolation guard**: the probe reports whether the script's own checkout root reached `sys.path`, and the negative control asserts it did not. Re-contamination then fails with "an ambient pin fired" rather than an expected-string flip.
 
 ### Flow
 
-`_run_probe(pinned=False)` → child starts with `-S`, no ambient `site-packages` → bootstrap sets `sys.argv = [script]` → `site.addsitedir(fake_site_dir)` runs the test's `.pth` files (no pin present) → bootstrap inserts `dirname(script)` at `sys.path[0]` → script imports `agentx` → prints `primary primary`, `ambient_pin=False` → assertion passes on both fields.
+`_run_probe(pinned=False)` → child starts on the bootstrap under `-S -P`; the ambient `.pth` is not processed at all, and would no-op even if it were → bootstrap sets `sys.argv = [script]` → `site.addsitedir(fake_site_dir)` runs the test's `.pth` files (no pin present) → bootstrap inserts `dirname(script)` at `sys.path[0]` → script imports `agentx` → prints `primary primary False` → assertion passes on all three fields.
 
 ### Technical Approach
 
@@ -221,11 +222,12 @@ assumed.
   3. `site.addsitedir(site_dir)`
   4. `sys.path.insert(0, os.path.dirname(os.path.abspath(target)))` — CPython's own step, which happens after `site`
   5. `runpy.run_path(target, run_name="__main__")`
-- Invoke as `[sys.executable, "-S", str(boot), str(script), str(site_dir)]`. `-S` is what drops the venv's `site-packages`; keeping `sys.executable` keeps the interpreter version identical to the one running the suite.
+- Invoke as `[sys.executable, "-S", "-P", str(boot), str(script), str(site_dir)]`. Keeping `sys.executable` keeps the interpreter version identical to the one running the suite. Pass `-P` as a flag rather than restoring `PYTHONSAFEPATH` (the same switch) so an env-scrub refactor cannot silently drop it.
 - Scrub the child env of every `PYTHON*` variable and set `PYTHONNOUSERSITE=1`. `PYTHONPATH` is no longer needed at all — the bootstrap replaces the `sitecustomize` hop — so the `sitecustomize` file and its `customize/` directory come out of both end-to-end tests.
 - Extend the probe script in `test_worktree_script_imports_worktree_package_only_with_the_pin` to print a third field: whether `str(worktree.resolve())` is in `sys.path`. Assert `"primary primary False"` unpinned and `"worktree worktree True"` pinned. Compare resolved paths (spike-4) so the guard cannot pass vacuously on macOS.
+- Change the probe in `test_primary_script_is_unaffected_by_the_pin` from `print(agentx.WHICH, sys.path[1])` to `print(agentx.WHICH, sys.path)` (spike-5), so the equality assertion compares the whole search path instead of one slot that is constant for reasons unrelated to `pin()`.
 - Leave `tools/checkout_pin.py` and `scripts/update/redis_flush_guard_pth.py` untouched. The production pin is correct; only its test's environment was wrong.
-- Add a short comment above `_run_probe` recording *why* `-S` is mandatory: the venv running this suite ships the shim under test, so an ordinary child would measure the shim twice and the control never.
+- Add a comment above `_run_probe` recording *why* the bootstrap is mandatory and what each flag buys: the venv running this suite ships the shim under test, an ordinary child measures the shim twice and the control never, the bootstrap's `argv[0]` is what disarms that shim, and `-S -P` close the same door against shims that do not read `argv[0]`.
 
 ## Failure Path Test Strategy
 
@@ -238,12 +240,14 @@ assumed.
 
 ### Error State Rendering
 - [ ] The failure mode this plan cares about is a *wrong pass*, not a wrong render. The guard field is the render: on re-contamination the assertion diff names the ambient pin instead of showing two package labels.
-- [ ] Confirm by mutation before review: delete `-S` from the invocation and re-run; the test must fail on the ambient-pin field, not merely on the label. Paste that red output into the PR.
+- [ ] **Mutation M1 — negative control (the primary check).** Revert `_run_probe` to the pre-fix invocation `[sys.executable, str(script)]`, restore `PYTHONPATH=str(site_dir / "customize")` on the child env, and temporarily re-create `site_dir/customize/sitecustomize.py` in the test body. Re-run `tests/unit/test_checkout_pin.py::TestEndToEnd::test_worktree_script_imports_worktree_package_only_with_the_pin`. **Measured red on this machine at `78447df87`:** `AssertionError: assert 'worktree worktree True' == 'primary primary False'`. Restore, re-run, confirm green. Paste both outputs into the PR.
+- [ ] **Mutation M2 — positive assertion (complementary check).** Delete the `sys.argv = [target]` line from the generated bootstrap, leaving the invocation otherwise untouched. **Measured red on this machine:** the pinned probe prints `primary primary False` where `worktree worktree True` is expected, because `pin()` then reads the bootstrap's own path. This proves the bootstrap's argv rewrite is load-bearing rather than decorative. Restore and re-run.
+- [ ] **Do not use "delete `-S`" as a mutation.** It was measured on this machine and does **not** bite: the child still prints `primary primary False` unpinned and `worktree worktree True` pinned, because the ambient shim is disarmed by the bootstrap's `argv[0]`, not by `-S` (spike-2b). A validator reporting that mutation green would be recording a false green on this plan's central claim.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_checkout_pin.py::TestEndToEnd::test_worktree_script_imports_worktree_package_only_with_the_pin` — UPDATE: probe prints a third field, both assertions gain the ambient-pin expectation, `sitecustomize` scaffolding removed.
-- [ ] `tests/unit/test_checkout_pin.py::TestEndToEnd::test_primary_script_is_unaffected_by_the_pin` — UPDATE: same `_run_probe` change reaches it; `sitecustomize` scaffolding removed. Its `sys.path[1]` assertion holds under the bootstrap (spike-3) and stays as-is.
+- [ ] `tests/unit/test_checkout_pin.py::TestEndToEnd::test_primary_script_is_unaffected_by_the_pin` — UPDATE: same `_run_probe` change reaches it; `sitecustomize` scaffolding removed; probe changed from `sys.path[1]` to the whole `sys.path` (spike-5). Note what this test is and is not: it is an **equality-under-no-op** check — it proves the pin shim ran and changed nothing for a script inside the venv's own checkout — not a positive proof that the pin fires. The positive proof lives in the worktree test and in `TestPinDecision`. Under the bootstrap without `-P`, its old `sys.path[1]` was the bootstrap's own directory, a constant identical on both sides for reasons unrelated to `pin()`; `-P` plus the whole-path comparison is what restores its meaning.
 - [ ] `tests/unit/test_checkout_pin.py` `_run_probe` helper and its docstring — UPDATE: bootstrap-driven, with the `-S` rationale recorded.
 - [ ] `tests/unit/test_checkout_pin.py::TestPinDecision`, `::TestDeclaresProject` — no change. They drive `pin()` with explicit `argv`/`path` lists and never start an interpreter.
 - [ ] `tests/unit/test_redis_flush_guard_pth_installer.py` — no change. It asserts installer file contents, never interpreter startup.
@@ -252,7 +256,7 @@ assumed.
 
 - **Adding an env kill-switch to `pin()`.** #3206's second option. It puts a production foot-gun (a variable that silently disables checkout isolation fleet-wide) into `tools/checkout_pin.py`, which today reads no environment at all, to solve a problem that lives entirely in the test.
 - **Building a throwaway venv per probe.** Correct and hermetic, and it turns a 7-second file into a minute-plus of `uv venv` per parametrization for no additional proof.
-- **Switching to `sys._base_executable`.** Measured working (spike-1), but four documented failure modes mean it can silently degrade to `sys.executable` on some machine and quietly restore the bug this plan is closing.
+- **Switching to (or adding) `sys._base_executable`.** Measured working (spike-1), but four documented failure modes mean it can silently degrade to `sys.executable` on some machine and quietly restore the bug this plan is closing. It is not carried alongside the bootstrap either — exactly one isolation mechanism ships, and a second one that can silently degrade would make it harder, not easier, to tell which one is holding.
 - **Auditing all 72 test files that spawn `sys.executable`.** The pin only fires for a script whose nearest `.git` ancestor declares `valor-bridge`, and `test_checkout_pin.py` is the only test that builds such a fake checkout. Re-deriving that across the whole suite buys nothing.
 - **"Fixing" the assertion by flipping the expected string to `worktree worktree`.** That is what the contaminated environment already produces; it would make the test green and meaningless.
 
@@ -264,11 +268,11 @@ assumed.
 
 ### Risk 2: The bootstrap drifts from real interpreter startup
 **Impact:** The test proves a simulation rather than the mechanism, and a future change to `site` ordering goes unnoticed.
-**Mitigation:** The bootstrap reproduces exactly the two ordering facts the pin depends on — `sys.argv` set before `.pth` processing, script dir inserted after it — and both are asserted, not assumed: the positive assertion fails if `argv` is wrong (spike-2), and the sibling test's `sys.path[1]` fails if the insert order is wrong (spike-3). The decision table in `TestPinDecision` covers `pin()`'s logic independently.
+**Mitigation:** The bootstrap reproduces the two ordering facts the pin depends on — `sys.argv` set before `.pth` processing, script dir inserted after it — and both are asserted, not assumed: mutation M2 shows the positive assertion goes red when `argv` is wrong (measured), and the sibling test's whole-`sys.path` comparison fails if the insert order is wrong (spike-3, spike-5). With `-P` the ordering matches real startup for both end-to-end tests, not just the worktree one. The decision table in `TestPinDecision` covers `pin()`'s logic independently.
 
 ### Risk 3: The guard field passes vacuously
 **Impact:** A future re-contamination goes unnoticed because the guard compares unresolved paths and always reports `False`.
-**Mitigation:** spike-4 caught exactly this; the guard compares `worktree.resolve()`. The mutation check in Failure Path Test Strategy (delete `-S`, expect a red on the guard field) proves the guard bites before review.
+**Mitigation:** spike-4 caught exactly this; the guard compares `worktree.resolve()`. Mutation M1 in Failure Path Test Strategy proves the guard bites before review — measured red at `78447df87` as `assert 'worktree worktree True' == 'primary primary False'`, which flips the guard field as well as both labels.
 
 ## Race Conditions
 
