@@ -934,10 +934,20 @@ so no rule's tests are deleted. What changes is the data those tests run against
 
 ### Risk 1: A rename breaks a reference that is not an import
 **Impact:** The 21 modules are referenced by name in 4 live test comments, 2
-`tests/README.md` rows, 3 feature docs, and 17 archived plans. None is an
-import, so **nothing fails** — the suite stays green while the documentation
-quietly points at files that no longer exist. This is the failure mode most
-likely to actually happen, and the least likely to be noticed.
+`tests/README.md` rows, 3 feature docs, 17 archived plans, and **2 active plans
+owned by other lanes**. Most of those are prose: no import, so nothing fails, and
+the suite stays green while the documentation quietly points at files that no
+longer exist. That is the failure mode most likely to happen and least likely to
+be noticed.
+
+**The 2 active plans are the exception, and they fail loudly.**
+`docs/plans/expectation_blocked_state.md` (#2862) and
+`docs/plans/naive-tzinfo-guard-classification.md` (#3181, `status: Ready`) name
+renamed basenames inside runnable `scripts/pytest-clean.sh` commands and
+`**Validates**:` fields. A shell command naming a moved path exits non-zero, so
+for these two the "nothing fails" reasoning above does not hold — another lane's
+builder hits a hard error attributable to this change. They are enumerated in the
+Documentation section's sweep table with their exact line numbers.
 **Mitigation:** The doc sweep is a numbered task with its own verification row,
 not a bullet inside another task. After the renames, `git grep -n` for each of
 the 21 old basenames across the whole repo must return **only** hits inside
@@ -1005,8 +1015,14 @@ behavior.
 **Impact:** A merge conflict on a file where a bad resolution silently changes
 markers, or a new file added to `tests/unit/reflections/` while this work is in
 flight, which would arrive with a non-conforming name and fire R1.
-**Mitigation:** Both known adjacent lanes are resolved: #3184 is merged, #3195
-touches `scripts/pytest-clean.sh` only. The build re-runs the full audit and the
+**Mitigation:** Four adjacent lanes, not two. #3184 is merged and #3195 touches
+`scripts/pytest-clean.sh` only — both resolved. The plan-time survey stopped
+there and was wrong to: **#2862 and #3181 both carry executable references to
+renamed basenames** in their plan docs, and #3181 is `status: Ready` and may
+build concurrently. Their handling is Documentation-section work (update the
+paths) plus a coordination note on each issue from the PR description; see
+Risk 1. Do not edit another lane's live plan silently — the edit and the note go
+together. The build re-runs the full audit and the
 doc-reference grep at the merge head rather than quoting plan-time numbers. A new
 non-conforming file arriving mid-flight surfaces as an R1 violation, which is the
 guard working; the remedy is to rename it too and say so in the PR.
@@ -1041,6 +1057,14 @@ so all workers reach identical results with no shared state.
 specified in Step by Step Tasks: renames first (pure `git mv`, so rename
 detection stays at 100%), then content edits. Reversing that order costs `git
 log --follow` on three files (Risk 4).
+
+**One task-ordering hazard, now encoded as a dependency edge rather than left to
+prose.** Task 4's gate (the old-basename grep must print nothing) reads
+`tests/marker_map.py`, which still holds all 21 old basenames as
+`KNOWN_MISTAGS` keys until task 2 deletes them. Task 4 therefore declares
+`Depends On: do-renames, content-edits`. This is a false-failure hazard in a
+sequential plan, not a concurrency race — the fix is the same either way: state
+the dependency the prose already assumed.
 
 ## No-Gos (Out of Scope)
 
@@ -1172,6 +1196,23 @@ therefore weighted toward the sweep rather than toward new writing.
   a historical plan can still find the file, and add no commentary: an archived
   plan is a record, and the only edit it wants is one that keeps its pointers
   resolvable.
+- [ ] **Two ACTIVE plans owned by other lanes name renamed basenames inside
+  runnable commands.** These are not the archived case: an archived plan wants a
+  resolvable pointer, an active plan wants its owner told. Update the paths *and*
+  post a coordination note on each tracking issue from the PR description.
+
+  | Plan | Issue / status | Lines | Old → new |
+  |---|---|---|---|
+  | `docs/plans/expectation_blocked_state.md` | #2862, `status: Planning` | 130, 195, 252, 280 | `tests/unit/reflections/test_expectation_reconciler.py` → `test_reflections_expectation_reconciler.py` |
+  | `docs/plans/naive-tzinfo-guard-classification.md` | #3181, **`status: Ready`** | 273, 430, 537 | `tests/unit/reflections/test_daily_log_aggregator.py` → `test_reflections_daily_log_aggregator.py` |
+
+  Both name the file in a `**Validates**:` field *and* inside a
+  `scripts/pytest-clean.sh` command that a builder will actually run — line 195
+  and line 280 of the first, line 537 of the second. A shell command naming a
+  moved path exits non-zero, so for these two the usual "prose drifts silently"
+  reasoning does not apply. #3181 is `status: Ready` and may enter BUILD
+  concurrently with this lane, which is why its owner gets told rather than
+  discovering it from a failing command.
 - [ ] `docs/features/README.md` — check whether the guard's index row summary is
   still accurate. It should be; the rule set is unchanged. Update only if the row
   quotes a baseline count.
@@ -1429,13 +1470,26 @@ buys nothing on a change this shape, and a builder and a documentarian editing
 
 ### 4. Documentation sweep
 - **Task ID**: sweep-docs
-- **Depends On**: do-renames
+- **Depends On**: do-renames, content-edits
 - **Assigned To**: sweep-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
+- **Why the second dependency.** This task's own gate is "the grep must print
+  nothing", and `tests/marker_map.py` carries all 21 old basenames as literal
+  `KNOWN_MISTAGS` dict keys until `content-edits` deletes them. Depending on
+  `do-renames` alone would let this task run against the plan's own unfinished
+  work and fail its gate on a file the documentarian has no mandate to edit —
+  a false failure. Do **not** fix that by excluding `tests/marker_map.py` from
+  the grep: that exclusion would also hide a genuinely missed reference in the
+  resolver's own comments. After `content-edits` lands, the two retained
+  survivors (`session_runner/test_schema_routing.py`,
+  `hooks/test_pre_tool_use_foreground_subagents.py`) are not in the sweep list,
+  so the loop goes clean.
 - Work the Documentation section: the four factual passages plus two basenames
   in `docs/features/feature-map-marker-guard.md`, the three other feature docs,
-  `tests/README.md`, and the 17 archived plans.
+  `tests/README.md`, the 17 archived plans, and the **2 active plans** (#2862,
+  #3181) in the sweep table — the latter also get a coordination note on their
+  tracking issues via the PR description.
 - **The verification is a grep, run at this task's own head rather than trusted
   from the plan-time enumeration** (another lane may have added a reference):
 
