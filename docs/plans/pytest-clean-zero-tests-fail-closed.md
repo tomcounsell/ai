@@ -450,20 +450,216 @@ by the unparseable-contents case in the failure-path strategy, which also fails 
 
 ## No-Gos (Out of Scope)
 
+- [SEPARATE-SLUG #2535] Fixing the underlying test-DB pool contention. Exhaustion past
+  ~5 concurrent agents is the trigger for the skip channel, but relieving it is the
+  concurrent-run-corruption work already tracked on #2535. This plan makes the symptom
+  legible, which is a prerequisite for measuring that work, not a substitute for it.
+- [SEPARATE-SLUG #2535] Turning `scratch_test_db`'s pool-exhaustion `pytest.skip` into a
+  hard error under CI-style runs. The issue itself flags this as a separate question. It
+  changes a shared fixture's contract for every consumer and belongs with the pool work.
+- Nothing else is deferred. Every item the issue raises that this plan can finish — the
+  zero-collection regression pin, the fully-skipped test, the wrapper change, the docs — is
+  in scope and enumerated in Step by Step Tasks.
+
 ## Update System
+
+No update system changes required. `scripts/pytest-clean.sh` and the new plugin module are
+both plain repo files that arrive with any `git pull`; `/update` already syncs the checkout
+and runs `uv sync`. The plugin adds no dependency, no config file, and no migration, and
+the guard needs no state carried across versions. Existing installations get the new
+behavior on their next pull with no action.
 
 ## Agent Integration
 
+No agent integration required. `scripts/pytest-clean.sh` is already the sanctioned way
+every agent runs tests (CLAUDE.md, Commands), invoked through the Bash tool. This change
+alters what that existing surface returns; it adds no CLI entry point in
+`pyproject.toml [project.scripts]`, no MCP tool, and nothing the bridge imports.
+
+The one integration-shaped consequence is worth stating so it is not mistaken for missing
+work: **every caller that reads the wrapper's exit code inherits the fix without being
+touched.** `/do-build`'s mutation checks, `/do-pr-review`'s and `/do-plan-critique`'s
+verification rows, and the machine-readable `## Verification` runner all already branch on
+that exit code. That is precisely why the fix belongs in the wrapper.
+
 ## Documentation
+
+### Feature Documentation
+- [ ] Create `docs/features/pytest-clean-zero-test-guard.md` — what the guard detects, the
+      three-state file protocol, why output parsing was rejected (#2574 stall watcher), the
+      escape-hatch env var, and the measured exit-code table from spike-1 so the next
+      reader does not have to re-derive which channels already fail closed.
+- [ ] Add a row to the `docs/features/README.md` index table.
+- [ ] Update `docs/features/test-concurrency-coordination.md` — it is the standing home for
+      the pool/claim story and must now say that a pool-exhausted run fails closed at the
+      wrapper instead of reading green.
+
+### External Documentation Site
+Not applicable — this repo publishes no external documentation site.
+
+### Inline Documentation
+- [ ] Header comment in the new plugin module: why it exists, why the controller is the
+      sole writer, and the three file states with their meanings.
+- [ ] Block comment in `scripts/pytest-clean.sh` above the guard, matching the house style
+      of the #3033 and #2574 guards: the failure it prevents, the measured evidence, and
+      the issue number.
+- [ ] `CLAUDE.md`'s "Non-obvious behavior" bullet on `scripts/pytest-clean.sh` gains the
+      zero-executed refusal alongside the existing off-pin and worktree-venv aborts.
 
 ## Success Criteria
 
+- [ ] A fully-skipped run through the wrapper exits **non-zero** with a named diagnostic on
+      stderr.
+- [ ] A zero-collection run through the wrapper exits non-zero (regression pin — this is
+      already true at exit 5 and must stay true).
+- [ ] A run with at least one executed test exits with pytest's own status, unchanged —
+      pass stays 0, failure stays non-zero.
+- [ ] `--version`, `--help`, and `--collect-only` through the wrapper are unaffected.
+- [ ] `tests/unit/test_worktree_venv_absent_guard.py` and
+      `tests/unit/test_interpreter_pin_guard.py` pass unmodified.
+- [ ] **Mutation check, per guard**: reverting the wrapper's post-run check to a bare
+      `exit "$PYTEST_EXIT"` turns the new zero-executed tests red; restoring it turns them
+      green. Both outputs pasted in the PR.
+- [ ] The guard's escape-hatch env var disables it, verified by a test.
+- [ ] Verified on a real linked worktree, not only in a `tmp_path` sandbox.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (wrapper + plugin)**
+  - Name: `wrapper-builder`
+  - Role: The plugin module and the wrapper's guard — the entire behavior change.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (tests)**
+  - Name: `guard-test-builder`
+  - Role: `tests/unit/test_pytest_clean_zero_tests.py` and the mutation-check evidence.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `guard-validator`
+  - Role: Verifies the guard bites, on a real worktree as well as in a sandbox.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `guard-documentarian`
+  - Role: The Documentation section's tasks.
+  - Agent Type: documentarian
+  - Resume: true
+
 ## Step by Step Tasks
 
+### 1. Executed-count reporter plugin
+- **Task ID**: build-plugin
+- **Depends On**: none
+- **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create)
+- **Informed By**: spike-2 (the three-state file protocol), spike-3 (controller is the sole writer)
+- **Assigned To**: wrapper-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add a repo-local pytest plugin module that reads its output path from an env var and does nothing when that var is unset.
+- `pytest_sessionstart`: write the `started` sentinel. Return early in workers (`hasattr(config, "workerinput")`).
+- `pytest_runtest_logreport`: count reports representing an executed outcome. Passed, failed, xfailed, xpassed and setup/teardown errors count; skipped and deselected do not.
+- `pytest_sessionfinish`: write `collectonly` when `config.option.collectonly` is set, otherwise the final count. Controller only.
+- Wrap the writes in a narrow `OSError` handler so an unwritable path degrades to today's behavior instead of failing the run.
+- Header comment per the Inline Documentation task.
+
+### 2. Wrapper guard
+- **Task ID**: build-wrapper
+- **Depends On**: build-plugin
+- **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create), tests/unit/test_worktree_venv_absent_guard.py, tests/unit/test_interpreter_pin_guard.py
+- **Informed By**: spike-1 (only the all-skipped channel returns 0), spike-2 (no output capture)
+- **Assigned To**: wrapper-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Mint the count-file path with `mktemp`, export it, and remove it in the existing `cleanup` trap.
+- Prepend `-p <plugin>` ahead of `"$@"` so caller-supplied `-p` flags still apply.
+- After `wait "$PYTEST_PID"` and the existing reap, read the file and apply the three-state protocol: absent → pass through; `collectonly` → pass through; positive count → pass through; `count 0` → fail closed; sentinel-only, empty, or unparseable → fail closed.
+- Emit a stderr diagnostic distinguishable from the three existing refusals, naming the pool-exhaustion cause, `scripts/reap-xdist.sh --apply`, and the escape-hatch env var.
+- Honor the escape-hatch env var, defaulting to on, in the style of `PYTEST_STALL_LIMIT_S=0`.
+- Preserve the existing exit code on every pass-through path. Do not reorder or alter the preflight guards, the stall watcher, or the reaping.
+
+### 3. Guard tests
+- **Task ID**: build-tests
+- **Depends On**: build-wrapper
+- **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create)
+- **Informed By**: spike-1 (the measured exit-code table is the oracle)
+- **Assigned To**: guard-test-builder
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Build sandbox rootdirs under `tmp_path` (a `pyproject.toml` with `[tool.pytest.ini_options]`, a `tests/` dir, a `.venv/bin/pytest`), following `tests/unit/test_worktree_venv_absent_guard.py`. Never point the wrapper at the repo's own `tests/` tree, and never claim a test-DB slot.
+- Cases: all-skipped → non-zero with the diagnostic; zero-collected → non-zero; at least one passing test → 0; a failing test → pytest's own non-zero; `--collect-only` → 0; `--version` → 0; escape hatch set → all-skipped returns 0; a caller's own `-p no:cacheprovider` still applies.
+- Failure-path cases from the Failure Path Test Strategy: unwritable count-file path, empty file, garbage file.
+- Pin the diagnostic's text, not only the exit code.
+
+### 4. Validate the guard actually bites
+- **Task ID**: validate-guard
+- **Depends On**: build-tests
+- **Assigned To**: guard-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Mutation check: revert the wrapper's post-run check to a bare `exit "$PYTEST_EXIT"`, run the new tests, confirm **red**. Restore, confirm **green**. Capture both outputs verbatim for the PR.
+- Re-run `tests/unit/test_worktree_venv_absent_guard.py` and `tests/unit/test_interpreter_pin_guard.py` unmodified and confirm they pass.
+- Run `tests/unit/test_feature_map_markers.py` and confirm the new test file's marker resolution needs no `FEATURE_MAP` or `KNOWN_MISTAGS` entry.
+- Provision a real linked worktree with its own `.venv` and confirm the plugin loads and the guard fires there — the `tmp_path` sandbox does not prove `PYTHONPATH` resolution in a real worktree (Risk 3).
+- Run a normal targeted suite through the wrapper and confirm the exit code and terminal output are unchanged from today.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-guard
+- **Assigned To**: guard-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Execute every task in the Documentation section.
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: guard-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the Verification table.
+- Confirm every Success Criteria checkbox, including the pasted mutation-check evidence.
+
 ## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Guard tests pass | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q` | exit code 0 |
+| Wrapper refuses an all-skipped run | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k all_skipped` | exit code 0 |
+| Wrapper still passes a run that executed tests | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k executed` | exit code 0 |
+| Escape hatch disables the guard | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k escape_hatch` | exit code 0 |
+| Sibling wrapper guards still pass | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q` | exit code 0 |
+| Marker guard still passes | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q` | exit code 0 |
+| Wrapper unaffected by --version | `scripts/pytest-clean.sh --version` | exit code 0 |
+| Guard is wired into the wrapper | `grep -c PYTEST_EXECUTED scripts/pytest-clean.sh` | output > 2 |
+| Feature doc exists | `test -f docs/features/pytest-clean-zero-test-guard.md` | exit code 0 |
+| Feature doc is indexed | `grep -c pytest-clean-zero-test-guard docs/features/README.md` | output > 0 |
+| Output parsing was not introduced (anti-criterion, spike-2) | `grep -cE "tee " scripts/pytest-clean.sh` | match count == 0 |
+| Count file is minted per run, not a fixed path (anti-criterion, Race 1) | `grep -c "COUNT_FILE=/tmp/" scripts/pytest-clean.sh` | match count == 0 |
+| conftest's scratch_test_db skip untouched (anti-criterion, No-Gos) | `git diff --quiet origin/main -- tests/conftest.py` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
 ---
 
 ## Open Questions
+
+1. **Escape-hatch naming.** The plan assumes an env var in the `PYTEST_*` family matching
+   `PYTEST_STALL_LIMIT_S`'s precedent. Any objection to that family, or a preferred name?
+2. **Where the plugin module lives.** `tests/` keeps it beside the conftest it is
+   reasoning about, but the wrapper is also run from directories whose `tests/` tree is not
+   this repo's. A repo-root module is more clearly the wrapper's own. Preference?
+3. **Should a fully-skipped run be non-zero for humans too, or only under agent
+   invocation?** The plan says always, with an escape hatch, on the grounds that a
+   run proving nothing should never read as proof. Worth confirming that a human hitting
+   a platform-gated all-skip selection getting a refusal is acceptable.
+
