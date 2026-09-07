@@ -64,12 +64,13 @@ CHAT_LOG_MAX_ENTRIES = 50
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
 # Plain (non-Popoto-managed) Redis key used to persist the most recent
-# repair_indexes() identity-less quarantine count across process boundaries
-# (issue #2207). AgentSession._last_quarantined_identityless is an in-memory
-# class attribute -- only visible within the process that populated it -- so
-# it alone cannot answer "did the last repair_indexes() run (worker Step 2,
-# hourly agent-session-cleanup reflection, scripts/update/run.py) see
-# anything?" from a freshly-started `python -m tools.doctor` process. This
+# repair_indexes() de-duplicated identity-less-row quarantine count across
+# process boundaries (issue #2207, re-based on row identity under popoto
+# 1.9.0's divergence guard by #3199). AgentSession._last_quarantined_identityless
+# is an in-memory class attribute -- only visible within the process that
+# populated it -- so it alone cannot answer "did the last repair_indexes() run
+# (worker Step 2, hourly agent-session-cleanup reflection, scripts/update/run.py)
+# see anything?" from a freshly-started `python -m tools.doctor` process. This
 # key gives the doctor `agentsession-index-drift` check a durable signal.
 # Grain of salt: name/TTL are provisional/tunable, not load-bearing.
 _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY = (
@@ -686,13 +687,31 @@ class AgentSession(Model):
     # Matches the worktree-using stages in resolve_branch_for_stage().
     _ENG_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
-    # Per-pass count of identity-less (session_id-less) hashes the last
-    # repair_indexes() rebuild refused to re-add to the status index (issue
-    # #2101). This is a per-pass event count, NOT a cumulative keyspace gauge —
-    # a growing raw AgentSession:* hash count from an unfixed write source is a
-    # separate concern (see the plan's Risk 4). Optionally surfaced on the
-    # dashboard.
+    # De-duplicated count of identity-less (session_id-less) rows the last
+    # repair_indexes() pass quarantined, across every IndexedField and via
+    # either seam that can catch one -- popoto 1.9.0's divergence pre-check
+    # (the primary path; see the "A1 rebuild guard" docstring above the
+    # method) and the retained on_save shim (issue #2101, generalized
+    # #2207). A row seen through both seams counts once. This is a per-pass
+    # ROW count, NOT a cumulative keyspace gauge and NOT a per-field
+    # invocation count -- a growing raw AgentSession:* hash count from an
+    # unfixed write source is a separate concern (see the plan's Risk 4).
+    # Optionally surfaced on the dashboard.
     _last_quarantined_identityless: int = 0
+
+    # Latches the Sentry capture (not the log) on the decode-import degrade
+    # path in repair_indexes() to once per process. decode_popoto_model_hashmap
+    # is a popoto internal (popoto/models/encoding.py); if a future popoto
+    # moves or renames it, the identity filter on diverged keys can no longer
+    # import it and repair_indexes() degrades to the unfiltered
+    # len(diverged_keys) sum. That condition is permanent for the life of the
+    # process, and repair_indexes() runs on worker startup, the hourly
+    # agent-session-cleanup reflection (agent/session_health.py), and
+    # opportunistically from session pickup (agent/session_pickup.py) -- an
+    # unlatched capture would be an unthrottled fleet-wide error-level Sentry
+    # stream for as long as the condition lasts. logger.error stays
+    # unconditional on every degraded pass; only the Sentry call is latched.
+    _decode_degrade_reported: bool = False
 
     @property
     def worker_key(self) -> str:
@@ -2361,31 +2380,46 @@ class AgentSession(Model):
         to repopulate the class set, KeyField, and SortedField indexes from
         actual hashes.
 
-        A1 rebuild guard (issue #2101, generalized #2207): popoto's
-        rebuild_indexes() scan_iters every ``AgentSession:*`` hash and runs
-        ``field.on_save`` for EVERY field in a generic loop
-        (base.py:2849-2856). Because every ``IndexedField`` decodes SOME
-        value off an identity-less / near-empty hash (no ``session_id`` —
-        e.g. ``status`` defaults to ``"pending"``), any such phantom hash
-        gets re-SADDed into that field's ``$IndexF:AgentSession:<field>:<value>``
-        set on every rebuild — the phantom re-inflation leak. This applies
-        to ALL current IndexedFields (``status``, ``task_type``,
-        ``claude_session_uuid``), not just ``status``.
-        ``query.filter(...)`` then drops these via
+        A1 rebuild guard (issue #2101, generalized #2207, re-based on row
+        identity by #3199): historically popoto's rebuild_indexes() scan_iterd
+        every ``AgentSession:*`` hash and ran ``field.on_save`` for EVERY
+        field in a generic loop, unconditionally. Because every
+        ``IndexedField`` decodes SOME value off an identity-less /
+        near-empty hash (no ``session_id`` — e.g. ``status`` defaults to
+        ``"pending"``), any such phantom hash got re-SADDed into that
+        field's ``$IndexF:AgentSession:<field>:<value>`` set on every
+        rebuild — the phantom re-inflation leak. This applied to ALL
+        IndexedFields (``status``, ``task_type``, ``claude_session_uuid``),
+        not just ``status``. ``query.filter(...)`` then drops these via
         ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
         stays 0 while ``scard`` climbs.
 
-        To stop it WITHOUT reimplementing popoto's rebuild loop, we install a
-        transient shim on EVERY IndexedField's ``on_save`` (enumerated at
-        runtime from ``cls._meta.fields`` via ``isinstance(f, IndexedField)``
-        — no hardcoded field-name list, so a future 5th IndexedField is
+        Under popoto >= 1.9.0, the PRIMARY seam that now catches this is
+        upstream: ``rebuild_indexes()`` added a divergence pre-check that
+        compares each scanned row's stored Redis key against the key
+        re-derived from its decoded values, and skips (into
+        ``RebuildIndexesResult.diverged_keys``) any row whose keys disagree
+        — an identity-less row can never derive back to its stored key, so
+        it is always skipped there, *before* reaching ``field.on_save``.
+        The leak is still prevented; what changed is which seam catches it.
+
+        To count what THIS seam catches WITHOUT reimplementing popoto's
+        rebuild loop, each diverged key is re-decoded and identity-tested
+        with the same ``_filter_hydrated_sessions`` check (see "Technical
+        Approach" in the #3199 plan). A retained transient shim on EVERY
+        IndexedField's ``on_save`` (enumerated at runtime from
+        ``cls._meta.fields`` via ``isinstance(f, IndexedField)`` — no
+        hardcoded field-name list, so a future 5th IndexedField is
         automatically covered) for the DURATION of the ``rebuild_indexes()``
-        call only. Each shim skips the SADD for identity-less records
-        (rejected by ``_filter_hydrated_sessions``) and delegates every
-        healthy record to popoto's original ``on_save``. This is scoped to
-        the rebuild path only: normal live ``AgentSession(...).save()`` stays
-        unguarded so a legitimate brand-new session is still indexed (the
-        inverse-bug guard).
+        call only remains the SECOND defence: a hypothetical identity-less
+        row whose derived key happens to match its stored key would sail
+        past the divergence pre-check and still needs skipping there. Each
+        shim skips the SADD for identity-less records (rejected by
+        ``_filter_hydrated_sessions``) and delegates every healthy record to
+        popoto's original ``on_save``. This is scoped to the rebuild path
+        only: normal live ``AgentSession(...).save()`` stays unguarded so a
+        legitimate brand-new session is still indexed (the inverse-bug
+        guard). A row caught by both seams in the same pass counts once.
 
         Install-inside-try invariant: all per-field shims are installed
         INSIDE the ``try`` block (not before it), so that if installing a
@@ -2418,15 +2452,16 @@ class AgentSession(Model):
 
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions
-            indexed during rebuild. The identity-less quarantine count (summed
-            across all IndexedFields) is exposed separately via
-            ``cls._last_quarantined_identityless`` + a WARNING log (the
-            2-tuple arity is preserved for existing unpackers).
+            indexed during rebuild. The identity-less quarantine count
+            (de-duplicated rows, across all IndexedFields and both seams) is
+            exposed separately via ``cls._last_quarantined_identityless`` + a
+            WARNING log (the 2-tuple arity is preserved for existing
+            unpackers).
         """
         from popoto.models.query import POPOTO_REDIS_DB
 
         from agent.session_health import _filter_hydrated_sessions
-        from config.popoto_floor import assert_popoto_floor
+        from config.popoto_floor import assert_popoto_floor, installed_popoto_version
 
         # Ordering constraint (issue #2536): this MUST precede the $IndexF scan
         # below, which DELETES index keys at the end of its loop -- teardown the
@@ -2471,7 +2506,10 @@ class AgentSession(Model):
             # Enumerate every IndexedField at runtime -- no hardcoded list,
             # so a future new IndexedField is automatically covered.
             indexed_fields = [f for _, f in cls._meta.fields.items() if isinstance(f, IndexedField)]
-            quarantined = [0]
+            # Row-scoped, not event-scoped (#3199): a set of Redis keys, so a
+            # row seen through both the on_save shim and popoto's divergence
+            # pre-check counts once, not twice.
+            quarantined_keys: set[str] = set()
 
             def _make_identityless_skip_shim(field, orig_on_save):
                 # A classmethod is a non-data descriptor, so an instance
@@ -2487,7 +2525,15 @@ class AgentSession(Model):
                     # session_id). _filter_hydrated_sessions is the
                     # canonical identity check -- reuse it exactly.
                     if not _filter_hydrated_sessions([model_instance]):
-                        quarantined[0] += 1
+                        row_key = getattr(model_instance, "_redis_key", None)
+                        if not row_key:
+                            try:
+                                row_key = model_instance.db_key.redis_key
+                            except Exception:
+                                row_key = None
+                        # An unkeyable row is still counted once, via a
+                        # synthetic token unique to this shim invocation.
+                        quarantined_keys.add(row_key or f"__unkeyable__:{id(model_instance)}")
                         logger.debug(
                             "[repair_indexes] skipped %s-index re-add for identity-less hash",
                             field_name or field,
@@ -2515,7 +2561,11 @@ class AgentSession(Model):
                         )
                     orig = f.on_save  # bound classmethod, captured fresh per field, inside the loop
                     f.on_save = _make_identityless_skip_shim(f, orig)
-                rebuilt_count = cls.rebuild_indexes()
+                # result carries .diverged_keys under popoto >= 1.9.0
+                # (RebuildIndexesResult, an int subclass); rebuilt_count stays
+                # a plain int so the returned 2-tuple is byte-identical.
+                result = cls.rebuild_indexes()
+                rebuilt_count = int(result)
             finally:
                 # Restore driven from the FULL enumerated field list, not
                 # "fields observed installed" -- each pop is a safe no-op
@@ -2525,12 +2575,118 @@ class AgentSession(Model):
         finally:
             lock.release()
 
-        cls._last_quarantined_identityless = quarantined[0]
-        if quarantined[0] > 0:
+        # Fold in the divergence seam (primary path under popoto >= 1.9.0):
+        # popoto's rebuild_indexes() skips a row into .diverged_keys BEFORE
+        # reaching field.on_save whenever the row's stored key disagrees
+        # with the key re-derived from its decoded values -- which an
+        # identity-less row always does, so under 1.9.0 this seam, not the
+        # shim above, carries the phantom-hash traffic. A getattr guard
+        # (not isinstance) so a future popoto that returns a plain int
+        # degrades gracefully to the shim-only count instead of raising.
+        diverged_keys = getattr(result, "diverged_keys", ()) or ()
+        if diverged_keys:
+            try:
+                from popoto.models.encoding import decode_popoto_model_hashmap
+            except ImportError:
+                # decode_popoto_model_hashmap is a popoto internal
+                # (popoto/models/encoding.py, not exported from
+                # popoto/__init__.py). If it moves, degrade to the
+                # unfiltered sum -- exactly the counting rule issue comment
+                # 5563793165 directs, just coarser than the identity-filtered
+                # count below. Report loudly (logger.error unconditionally;
+                # Sentry latched to once per process -- see the
+                # _decode_degrade_reported class attribute's docstring).
+                # config/popoto_floor.py is deliberately NOT extended with
+                # this probe: it fails open by policy, and repair_indexes()
+                # runs on worker startup and an hourly reflection, where a
+                # false positive would block index repair fleet-wide.
+                quarantined_keys.update(diverged_keys)
+                logger.error(
+                    "[repair_indexes] decode_popoto_model_hashmap is not importable from "
+                    "popoto.models.encoding (installed popoto %s) -- the identity filter on "
+                    "diverged keys is disabled; degrading to the unfiltered diverged-key count "
+                    "(%d row(s)). A diverged-but-healthy row (e.g. a datetime-key-"
+                    "canonicalization mismatch) may now be miscounted as identity-less.",
+                    installed_popoto_version() or "unknown",
+                    len(diverged_keys),
+                )
+                if not cls._decode_degrade_reported:
+                    cls._decode_degrade_reported = True
+                    try:
+                        import sentry_sdk
+
+                        sentry_sdk.capture_message(
+                            "[repair_indexes] decode_popoto_model_hashmap import failed -- "
+                            "quarantine count degraded to the unfiltered diverged-key sum",
+                            level="error",
+                        )
+                    except Exception:
+                        # Sentry capture must never crash the caller -- the
+                        # ERROR log above is already the loud signal of
+                        # record even if Sentry is unreachable.
+                        logger.warning(
+                            "[repair_indexes] Sentry capture_message failed", exc_info=True
+                        )
+            else:
+                # One HGETALL per diverged key, no pipeline batching: this
+                # is the raw-Redis exception #3 for this method (alongside
+                # the $IndexF scan and the plain counter key below) -- a
+                # diverged row is unindexed and identity-less by
+                # construction, so AgentSession.query.filter(...) cannot
+                # reach it; this is the only way to observe it at all. It is
+                # non-mutating and bypasses no on_save/on_delete hook.
+                # Diverged keys are 0 in a healthy keyspace and a non-empty
+                # list is itself a loud popoto WARNING, so this loop's input
+                # is bounded by a broken-deploy signal, not steady state.
+                for key in diverged_keys:
+                    try:
+                        raw_hash = POPOTO_REDIS_DB.hgetall(key)
+                    except Exception as read_err:
+                        # Could not even read the row -- treat as
+                        # identity-less rather than silently dropping it.
+                        quarantined_keys.add(key)
+                        logger.debug(
+                            "[repair_indexes] raw hash read failed for diverged key %s "
+                            "(counted as identity-less): %s",
+                            key,
+                            read_err,
+                        )
+                        continue
+                    if not raw_hash:
+                        # The row is GONE, not identity-less -- a vanished
+                        # row cannot be re-inflated into any index, so it is
+                        # not quarantine by this counter's own definition.
+                        # Matches the rule test_gone_hash_orphan_cleared_by_
+                        # wholekey_rebuild already asserts.
+                        logger.debug(
+                            "[repair_indexes] diverged key %s has no backing hash -- gone, "
+                            "not quarantined",
+                            key,
+                        )
+                        continue
+                    try:
+                        instance = decode_popoto_model_hashmap(cls, raw_hash, source_redis_key=key)
+                    except Exception as decode_err:
+                        # A decode that raises is certainly not a hydrated
+                        # session -- treat as identity-less.
+                        quarantined_keys.add(key)
+                        logger.debug(
+                            "[repair_indexes] decode failed for diverged key %s "
+                            "(counted as identity-less): %s",
+                            key,
+                            decode_err,
+                        )
+                        continue
+                    if instance is None or not _filter_hydrated_sessions([instance]):
+                        quarantined_keys.add(key)
+
+        cls._last_quarantined_identityless = len(quarantined_keys)
+        if quarantined_keys:
             logger.warning(
-                "[repair_indexes] quarantined %d identity-less AgentSession hash re-add(s) "
-                "across %d IndexedField(s) (no session_id)",
-                quarantined[0],
+                "[repair_indexes] quarantined %d identity-less AgentSession row(s) this pass "
+                "(popoto's divergence pre-check plus the retained on_save shim, across %d "
+                "IndexedField(s), de-duplicated; no session_id)",
+                len(quarantined_keys),
                 len(indexed_fields),
             )
 
@@ -2543,7 +2699,7 @@ class AgentSession(Model):
         try:
             POPOTO_REDIS_DB.set(
                 _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY,
-                quarantined[0],
+                len(quarantined_keys),
                 ex=_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS,
             )
         except Exception as persist_err:
