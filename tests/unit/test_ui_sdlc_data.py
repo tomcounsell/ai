@@ -1546,3 +1546,82 @@ class TestIssueKeyedLedgerRouting:
 
         session = _make_mock_session(stage_states=None, issue_number=None, issue_url=None)
         assert _session_has_stage_data(session) is False
+
+
+class TestActiveStatusesSingleDefinition:
+    """#3177: one definition of "this pipeline is live", not two.
+
+    ``ACTIVE_STATUSES`` and ``PipelineProgress.is_active`` used to carry two
+    different literals — the constant included ``in_progress`` and the property
+    did not — so a session in that status was retained as active by the
+    dashboard filter and reported inactive by the property. They are now the
+    same membership test.
+    """
+
+    def test_exactly_one_status_tuple_literal_in_the_module(self):
+        """A second inline tuple is how the two definitions drifted apart before."""
+        import inspect
+
+        from ui.data import sdlc
+
+        source = inspect.getsource(sdlc)
+        # The one literal is the ACTIVE_STATUSES assignment itself.
+        assert source.count('"waiting_for_children"') == 1, (
+            "a second active-status literal reintroduces the drift this collapsed"
+        )
+
+    def test_is_active_reads_the_constant(self):
+        import inspect
+
+        from ui.data.sdlc import PipelineProgress
+
+        source = inspect.getsource(PipelineProgress.is_active.fget)
+        assert "ACTIVE_STATUSES" in source
+        assert "waiting_for_children" not in source
+
+    def test_property_and_constant_agree_membership_for_membership(self):
+        from ui.data.sdlc import ACTIVE_STATUSES, PipelineProgress
+
+        candidates = set(ACTIVE_STATUSES) | {
+            "completed",
+            "failed",
+            "abandoned",
+            "killed",
+            "admitted",
+        }
+        for status in candidates:
+            progress = PipelineProgress(session_id="x", agent_session_id="x", status=status)
+            assert progress.is_active == (status in ACTIVE_STATUSES), status
+
+    def test_in_progress_is_now_active_on_both_paths(self):
+        """The deliberate, tested behavior change: the union was kept."""
+        from ui.data.sdlc import ACTIVE_STATUSES, PipelineProgress
+
+        assert "in_progress" in ACTIVE_STATUSES
+        assert (
+            PipelineProgress(session_id="x", agent_session_id="x", status="in_progress").is_active
+            is True
+        )
+
+    def test_this_build_adds_no_new_status(self):
+        """`admitted` arrives with lane 3, not here."""
+        from ui.data.sdlc import ACTIVE_STATUSES
+
+        assert set(ACTIVE_STATUSES) == {
+            "running",
+            "pending",
+            "in_progress",
+            "active",
+            "waiting_for_children",
+        }
+
+    def test_stage_state_is_active_is_left_alone(self):
+        """A third `is_active` exists on StageState. It compares a stage, not a
+        session status, and is deliberately untouched."""
+        import inspect
+
+        from ui.data.sdlc import StageState
+
+        source = inspect.getsource(StageState.is_active.fget)
+        assert "in_progress" in source
+        assert "ACTIVE_STATUSES" not in source
