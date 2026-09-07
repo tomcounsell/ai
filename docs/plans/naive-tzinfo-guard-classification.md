@@ -1,11 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3181
-last_comment_id:
+last_comment_id: 5564069727
 ---
 
 # Classify the remaining naive-tzinfo guards by the #3173 rule
