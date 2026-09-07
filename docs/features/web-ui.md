@@ -70,15 +70,34 @@ ui/
 
 ## Adding a New Dashboard
 
-1. Create a data layer in `ui/data/your_dashboard.py`
-2. Create a router in `ui/routers/your_dashboard.py`
-3. Create templates in `ui/templates/your_dashboard/`
-4. Mount the router in `ui/app.py`:
+Routes are declared **inline in `ui/app.py`** inside `create_app()`. There is no
+`ui/routers/` package; the dashboard is small enough that a router layer added
+indirection without adding structure.
+
+1. Create a data layer in `ui/data/your_dashboard.py`. Synchronous `def`
+   handlers, not `async def` — Popoto uses synchronous Redis calls and FastAPI
+   runs sync handlers in a threadpool. Import models inside the function, not at
+   module scope, so an import cycle in the model layer cannot take the UI down.
+2. Create templates in `ui/templates/your_dashboard/`.
+3. Add the route inside `create_app()` in `ui/app.py`, returning
+   `templates.TemplateResponse`:
    ```python
-   from ui.routers.your_dashboard import router
-   app.include_router(router, prefix="/your-dashboard")
+   @app.get("/_partials/your_dashboard/", response_class=HTMLResponse)
+   def partial_your_dashboard(request: Request):
+       from ui.data.your_dashboard import get_summary
+
+       return templates.TemplateResponse(
+           request, "your_dashboard/summary.html", {"summary": get_summary()}
+       )
    ```
-5. Add a card to `ui/templates/index.html`
+4. Add a card to `ui/templates/index.html` that pulls the partial with HTMX:
+   ```html
+   <div hx-get="/_partials/your_dashboard/" hx-trigger="revealed, every 60s"
+        hx-swap="innerHTML"></div>
+   ```
+
+The `/_partials/` prefix is the convention for HTMX fragments: they return HTML
+fragments rather than whole pages, and are never linked directly.
 
 ## Lifecycle
 

@@ -17,6 +17,7 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | `update.txt` | Update status file | Overwritten each update |
 | `checkpoints/` | Session checkpoint data for resume | Pruned automatically by checkpoint manager |
 | `experiments/` | Legacy autoexperiment corpora, retained as evidence (#3177 removed the script). See `experiments/README.md` | Retain indefinitely; do not prune |
+| `improvement_content/` | Retention root for improvement-controller artifacts (experiment manifests, judge envelopes) written through `models/verifying_artifact_store.py`. Content-addressed; every load is re-hashed. Override with `POPOTO_IMPROVEMENT_CONTENT_PATH` | Retain while the evaluation citing an artifact is retained; deleting one invalidates that verdict's evidence |
 | `media/` | Downloaded media files from Telegram | Pruned after processing |
 | `pipeline/` | SDLC pipeline state files (one subdir per slug) | Cleaned up when PRs merge |
 | `process_state/` | Process-level state tracking | Ephemeral; auto-recreated |
