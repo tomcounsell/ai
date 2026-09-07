@@ -1,11 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3199
-last_comment_id:
+last_comment_id: 5563793165
 ---
 
 # AgentSession quarantine counter goes blind under popoto 1.9.0's divergence guard
@@ -93,6 +93,15 @@ three healthy-keyspace `== 0` assertions still bite.
   only.
 
 **Active plans in `docs/plans/` overlapping this area:** none.
+
+**Issue comments incorporated:** comment `5563793165` (2026-09-07, from the nightly triage that
+closed #3203/#3204/#3205/#3207 into this issue). It independently reaches the same mechanism this
+plan's recon found — the divergence pre-check at `popoto/models/base.py` ~:3270 `continue`s before
+`field.on_save`, so the shim never runs and the persisted doctor key is written as 0 on every pass
+while the phantom condition is live. It also settles two open threads: the nightly host **does**
+carry popoto 1.9.0 and **did** run on 2026-09-06 at `25e4df925` (the 09-05 gap was a one-night miss,
+not a stale install), and the repo-wide audit of naive `updated_at` comparisons belongs to #3181,
+not here.
 
 **Notes:** The bug reproduces at the current HEAD, so the premise is live. The issue body's stated
 hypothesis (popoto 1.9.0's "single hydration per `list()`") is wrong and is corrected in the issue's
@@ -381,9 +390,11 @@ not a hydrated session) and counted once. No exception, no retry.
   and any change to `agent/session_archive.py`. It is the aware-vs-naive datetime decode contract
   from #3173/PR #3180, a different 1.9.0 change, and it is already in flight as a separate
   direct-to-main hotfix on the same tracking issue. Touching it here would collide with that lane.
-- [SEPARATE-SLUG #3199] Verifying that the nightly host runs popoto 1.9.0 and that the 2026-09-05
-  nightly executed. That is a fleet-state question about a machine this lane cannot reach, and it
-  stays on the tracking issue.
+- [EXTERNAL] The nightly-host question the issue body raised is already answered in comment
+  `5563793165`: the host carries popoto 1.9.0 and ran on 2026-09-06 at `25e4df925`, so the 09-05
+  gap was a one-night miss. No fleet action is taken from this lane.
+- [SEPARATE-SLUG #3181] The repo-wide audit of naive `updated_at` datetime comparisons. Comment
+  `5563793165` assigns it to #3181 explicitly; duplicating it here would fork that audit.
 - [ORDERED] Closing #3199. The issue closes only when both halves have landed, so this PR says
   `Refs #3199`, never `Closes`.
 
@@ -610,11 +621,18 @@ through `scripts/pytest-clean.sh`, never bare `pytest`, and never the full suite
 
 ## Open Questions
 
-1. The counter's unit changes from "shim invocations across all indexed fields" to "identity-less
-   rows quarantined". Nothing outside the doctor suffix consumes it, and the doctor text is being
-   updated with it — but if any dashboard or alert threshold is keyed to the old
-   three-times-larger number, say so now.
-2. `test_quarantine_count_sums_across_all_indexed_fields` is being rewritten rather than deleted,
-   trading counter arithmetic for a direct assertion that all three `$IndexF` sets stay clean.
-   That is a stronger guard on the #2207 generalization, but it does drop the only test that ever
-   asserted the counter aggregates across fields. Acceptable?
+Both questions this plan raised are answered by issue comment `5563793165`, which is the
+supervisor's own direction, so neither blocks the critique stage.
+
+1. **Counter unit.** Resolved: the comment directs "sum `len(diverged_keys)` into `quarantined[0]`",
+   which is row-scoped counting. This plan adopts it, adding de-duplication (so a row seen through
+   both seams counts once) and an identity filter on the diverged keys (so a healthy row that
+   diverges on key canonicalization — the sibling archive half's failure mode — cannot masquerade as
+   phantom drift on the doctor surface). Nothing outside `tools/doctor.py::_recent_quarantine_suffix`
+   consumes the number, and that text is updated with it.
+2. **Rewriting `test_quarantine_count_sums_across_all_indexed_fields`.** Resolved by consequence: the
+   comment's counting rule yields five for five ghosts, and that test asserts fifteen. The comment
+   names only the three `== 0` assertions as things to re-verify; this `>= n_ghosts * 3` assertion is
+   the fourth consequence it does not mention, and it cannot survive the directed fix. The rewrite
+   keeps the node and strengthens it — asserting all three `$IndexF` sets stay clean is a more direct
+   statement of the #2207 generalization than counter arithmetic ever was.
