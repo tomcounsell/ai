@@ -1,6 +1,6 @@
 """Expectation reconciler (#2708): orphaned-lane recovery from Job expectations.
 
-Mirrors tests/unit/reflections/test_sdlc_progress_check.py's posture: every
+Mirrors tests/unit/reflections/test_reflections_progress_check.py's posture: every
 external boundary is faked via monkeypatch; failures log-and-continue; the
 shipped-work guard is the sole respawn collision guard.
 """

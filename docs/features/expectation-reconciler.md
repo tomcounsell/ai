@@ -89,4 +89,4 @@ the expectation is still open — a PM discharge racing the tick always wins.
 
 - [`durability-model.md`](durability-model.md) — the expectation primitive
   itself (schema, chokepoint-derived status, rest derivation, discharge).
-- Tests: `tests/unit/reflections/test_expectation_reconciler.py`.
+- Tests: `tests/unit/reflections/test_reflections_expectation_reconciler.py`.

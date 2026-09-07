@@ -241,4 +241,4 @@ def test_activity_to_signals_empty_activity_returns_empty_dict():
 # from this module when the legacy `daily_report.run()` orchestration was
 # retired (issue #1292). Per-project chat resolution now lives in the
 # dispatcher (`reflections.pm_briefings.delivery`); see
-# `tests/unit/reflections/test_pm_briefings_delivery.py`.
+# `tests/unit/reflections/test_reflections_pm_briefings_delivery.py`.

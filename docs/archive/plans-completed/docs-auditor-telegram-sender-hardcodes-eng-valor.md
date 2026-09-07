@@ -584,11 +584,11 @@ falls back to `Eng: Valor`. That is the correct outcome and requires no special-
       path — degrades silently to `{"status": "error"}` and the existing assertion still
       passes. Both new suppression tests drive the *suppressed* path and would also pass, so
       this is the only test that can catch it.
-- [ ] `tests/unit/reflections/test_utilities_resolve_eng_group.py` — **no change**.
+- [ ] `tests/unit/reflections/test_reflections_utilities_resolve_eng_group.py` — **no change**.
       `resolve_eng_group` itself is untouched; its direct tests stay as-is.
-- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` — **no change**. The other
+- [ ] `tests/unit/reflections/test_reflections_upvote_lanes.py` — **no change**. The other
       consumer is untouched.
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py` — **no change**. Covers
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` — **no change**. Covers
       the git surface, not notifications.
 
 ## Rabbit Holes
@@ -829,7 +829,7 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Task ID**: build-routing
 - **Depends On**: none
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`,
-  `tests/unit/reflections/test_docs_auditor_git_surface.py`
+  `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`
 - **Informed By**: Freshness Check (current line numbers), Settled Decisions 1-4,
   Technical Approach (the ladder)
 - **Assigned To**: `auditor-routing-builder`
@@ -948,8 +948,8 @@ than `grep -c`'s exit 1, which a validator reading exit codes would score as a f
 | Sender uses the resolver | `grep -q 'resolve_eng_group' reflections/docs_auditor.py` | exit code 0 |
 | Both call sites thread the repo root | `test "$(grep -c 'repo_root=PROJECT_ROOT' reflections/docs_auditor.py)" -ge 3` | exit code 0 (2 notify sites + the existing `audit()` call). **Weak check, not proof:** a count cannot tell *which* three lines matched, so a build threading the root at one notify site plus an unrelated kwarg satisfies it. The authoritative check for Risk 1 is the three `notify.call_args.kwargs["repo_root"]` assertions in Task 2; a validator must not read this row as a substitute. |
 | Routing tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
-| Git-surface tests still pass | `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py -q` | exit code 0 |
-| Resolver's own tests untouched and green | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_resolve_eng_group.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
+| Git-surface tests still pass | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_docs_auditor_git_surface.py -q` | exit code 0 |
+| Resolver's own tests untouched and green | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_utilities_resolve_eng_group.py tests/unit/reflections/test_reflections_upvote_lanes.py -q` | exit code 0 |
 | Anti-criterion: no #3072 file touched | `! git diff --name-only origin/main...HEAD \| grep -qE 'expectation_reconciler\|sentry_triage\|stall_advisory\|sdlc_progress\|memory_consolidation\|nightly_regression_tests'` | exit code 0 |
 | Anti-criterion: the sweep did not widen | `test "$(git grep -lF '"Eng: Valor"' -- '*.py' \| grep -v '^tests/' \| grep -v '^reflections/docs_auditor.py' \| wc -l)" -eq 6` | exit code 0 — the six #3072 sender files, verified at plan time: `expectation_reconciler`, `sdlc_progress`, `sentry_triage`, `stall_advisory`, `scripts/memory_consolidation`, `scripts/nightly_regression_tests`. The two prompt files use single quotes and are deliberately outside this double-quoted sweep. |
 | Feature doc no longer pins the chat | `! grep -q 'Eng: Valor. Telegram chat' docs/features/docs-auditor.md` | exit code 0 — broader than the old `notifies the ...` anchor, so a reintroduced claim in any phrasing fails |

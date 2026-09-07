@@ -16,6 +16,8 @@ pytest tests/unit/ -n0
 pytest tests/integration/ -n0
 
 # By feature (works across all levels)
+# The counts below predate several file splits and are low; run the selector
+# for the current number rather than quoting them.
 pytest -m sdlc                   # All SDLC pipeline tests (516)
 pytest -m messaging              # All messaging tests (327)
 pytest -m sessions               # All session tests (293)
@@ -296,7 +298,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_docs_auditor_substrate.py` | 196 | Documentation reference validation |
-| unit | `test_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
+| unit | `test_reflections_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
 | unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
 | unit | `test_validate_no_gos_justification.py` | 77 | No-Gos section justification validation |
 | unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |
@@ -325,6 +327,18 @@ tests/
 | unit | `test_reflections_scheduling.py` | 19 | Launchd infrastructure |
 | unit | `test_reflection_model.py` | 12 | Reflection model: mark_completed(), run_history append |
 | integration | `test_reflections_redis.py` | 20 | Reflection persistence |
+
+The 23 files in `tests/unit/reflections/` and `tests/integration/reflections/` all
+carry this marker too. Every one of them leads with `test_reflections_` by
+construction: #3175 renamed the 20 that did not, because a basename is the only
+thing `FEATURE_MAP` looks at, and `pytest -m reflections` was collecting 36 of
+the packages' 399 tests. A new file in either package must follow the same
+convention or rule R1 will fail the guard.
+
+| Level | Package | Files | Description |
+|-------|---------|------:|-------------|
+| unit | `tests/unit/reflections/` | 21 | Daily log, PM briefings, docs auditor, expectation reconciler, SDLC progress/upvote lanes |
+| integration | `tests/integration/reflections/` | 2 | PM briefings dispatch and end-to-end |
 
 ### `tools` — Individual tool tests
 
@@ -551,9 +565,12 @@ for what each rule can and cannot see):
   wrong (see the feature doc's coverage-boundary section).
 
 - **A fragment match.** The winning key does not have to be a whole word: `config` is a
-  literal substring of `configured`, so `test_pm_briefings_no_slots_configured.py` tags
-  `config` even though nothing named "config" was intended. Guard rule R3 catches this
-  one suite-wide, with no package-directory signal required.
+  literal substring of `configured`. `test_pm_briefings_no_slots_configured.py` used to
+  tag `config` on exactly that fragment, even though nothing named "config" was
+  intended. #3175 renamed it to `test_reflections_pm_briefings_no_slots_configured.py`,
+  so its stem now hits `reflections` first and the accidental `config` tag is gone.
+  Guard rule R3 catches this class suite-wide, with no package-directory signal
+  required.
 
 A `--collect-only` total-count check cannot catch any of these: the total is unchanged,
 only the tagging moves. So when splitting a file:

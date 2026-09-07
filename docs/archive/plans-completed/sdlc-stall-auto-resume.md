@@ -770,26 +770,26 @@ boundary is the direct `_R.get` on `session:issuelock:{N}`, which does raise.
 The existing suite encodes v1's notification-only contract. Several tests assert exactly the
 behavior this plan reverses and must change rather than be added around.
 
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_happy_path_emits_single_alert` —
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_happy_path_emits_single_alert` —
       REPLACE: the happy path now emits a steering message and **no** alert.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_no_alert_when_session_active_or_unknown`
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_no_alert_when_session_active_or_unknown`
       — REPLACE: rewrite against the direct lock read (`live` / `free` / `unknown`) instead of
       `_has_active_session`.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_alert_when_only_terminal_sessions` —
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_alert_when_only_terminal_sessions` —
       UPDATE: terminal sessions now mean "resume target available", not "alert".
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — any case asserting "no session → alert"
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py` — any case asserting "no session → alert"
       — REPLACE: no session is now the create rung, not an escalation.
 - [ ] `tests/**` covering `tools/valor_session.py::cmd_create` — UNCHANGED, but re-run as the
       regression check for the `create_session` extraction. Grep at build time rather than working
       from an enumerated list.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_dedup_suppresses_second_alert` —
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_dedup_suppresses_second_alert` —
       REPLACE with the ladder regression: N ticks over an unchanged sha, spanning more than the old
       6-hour cooldown, produce exactly one human message.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_dedup_redis_unavailable_skips_alert`
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_dedup_redis_unavailable_skips_alert`
       — UPDATE: retarget from the alert key to the escalation key.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_has_active_session_handles_redis_failure`
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_has_active_session_handles_redis_failure`
       — DELETE: `_has_active_session` is removed; superseded by the lock-read failure test.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — tests for draft PRs, closed issues,
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py` — tests for draft PRs, closed issues,
       missing branches, gh/git failures, cwd threading, and the canonical return shape are UNCHANGED
       and must keep passing.
 - [ ] `tests/unit/test_stall_advisory_ledger_skip.py` — UNCHANGED, but re-run: the shared

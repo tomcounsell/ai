@@ -860,7 +860,7 @@ the `.py` and `.md` finding categories share one per-run budget.
 
 The git surface — staging, the scoped restore, the sweeper's close path, and
 the withheld-PR exemption — is real-git-only, in
-`tests/unit/reflections/test_docs_auditor_git_surface.py`: a real repository
+`tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: a real repository
 on disk with a real bare remote, and a synchronous `gh`-only dispatcher
 (`monkeypatch.setattr(docs_auditor.subprocess, "run", dispatcher)`) that
 delegates every non-`gh` command to the real `subprocess.run`. No blanket

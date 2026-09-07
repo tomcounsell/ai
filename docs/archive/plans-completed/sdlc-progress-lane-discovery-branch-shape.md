@@ -250,13 +250,13 @@ Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-
 
 ## Test Impact
 
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_gh_pr_list_filters_non_sdlc_branches` (`:1266-1276`) — REPLACE: it asserts `session/some-feature` is *excluded*, which is precisely the bug. Rewrite as `test_lane_pr_list_admits_the_session_namespace`: `session/sdlc-1395` and `session/some-feature` both admitted, `dependabot/update` excluded, draft excluded.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_gh_pr_list_filenotfound_returns_empty` (`:1255-1259`) — UPDATE: retarget to `_list_open_lane_prs`; assertion is unchanged.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — UPDATE: every `monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", ...)` site (`:311`, `:931`, `:971`, `:1124`, `:1134`, `:1219`, `:1225`, `:1233`, `:1243`, `:1301`, `:1309`) is retargeted to the new name, and the `_pr(...)` factory gains a `closing` parameter defaulting to the PR's own issue.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_create_rung_records_a_human_named_slug_verbatim` (`:618-643`) — UPDATE the docstring only. It currently states the branch filter "is the only thing standing between a human-named lane and a correctly-named session"; after this change that sentence is false and the test's justification for exercising `_attempt_action` directly no longer holds. The assertions stay.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py:579-590` — UPDATE: the comment block describing the shape filter as the boundary goes stale.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_gh_pr_list_filters_non_sdlc_branches` (`:1266-1276`) — REPLACE: it asserts `session/some-feature` is *excluded*, which is precisely the bug. Rewrite as `test_lane_pr_list_admits_the_session_namespace`: `session/sdlc-1395` and `session/some-feature` both admitted, `dependabot/update` excluded, draft excluded.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_gh_pr_list_filenotfound_returns_empty` (`:1255-1259`) — UPDATE: retarget to `_list_open_lane_prs`; assertion is unchanged.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py` — UPDATE: every `monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", ...)` site (`:311`, `:931`, `:971`, `:1124`, `:1134`, `:1219`, `:1225`, `:1233`, `:1243`, `:1301`, `:1309`) is retargeted to the new name, and the `_pr(...)` factory gains a `closing` parameter defaulting to the PR's own issue.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py::test_create_rung_records_a_human_named_slug_verbatim` (`:618-643`) — UPDATE the docstring only. It currently states the branch filter "is the only thing standing between a human-named lane and a correctly-named session"; after this change that sentence is false and the test's justification for exercising `_attempt_action` directly no longer holds. The assertions stay.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py:579-590` — UPDATE: the comment block describing the shape filter as the boundary goes stale.
 - [ ] `tests/integration/test_sdlc_stall_auto_resume_e2e.py:78-82` — UPDATE: the `stalled_lane` fixture monkeypatches `_list_open_sdlc_prs` with a 3-key dict; retarget the name and add `closingIssuesReferences`. Consider flipping `_BRANCH` to a human-named branch so the e2e path proves the fix end to end.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — ADD: a resolver suite covering all three rungs, the two ambiguity cases (spike-3's real #2746 shape: two closing refs; and two ledger records for one `pr_number`), the `target_repo is None` path, and each rung's exception fall-through.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py` — ADD: a resolver suite covering all three rungs, the two ambiguity cases (spike-3's real #2746 shape: two closing refs; and two ledger records for one `pr_number`), the `target_repo is None` path, and each rung's exception fall-through.
 
 **Redis mechanism (mandatory).** This file is 100% `fake_redis` / `monkeypatch` today and references `PipelineLedger` nowhere. The new resolver tests **monkeypatch `PipelineLedger.query`**, consistent with the file's existing `fake_query` fixture (`:247`); no real Redis and no Popoto bring-up. Post-#2683 (test-DB ownership) a unit test that quietly claims a DB is exactly the rotation class that issue closed.
 
@@ -410,7 +410,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 ### 0. Run spike-5 and the red regression test
 - **Task ID**: build-red
 - **Depends On**: none
-- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Validates**: `tests/unit/reflections/test_reflections_progress_check.py`
 - **Informed By**: spike-5 (nothing has verified the worker's checkout can resolve human-named lane branches, and that gate now decides whether the fix delivers anything)
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
@@ -421,7 +421,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 ### 1. Widen the corpus filter and implement the issue resolution ladder
 - **Task ID**: build-discovery
 - **Depends On**: build-red
-- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Validates**: `tests/unit/reflections/test_reflections_progress_check.py`
 - **Informed By**: spike-1 (a ledger-only read resolves almost nothing — a ladder is required), spike-2 (`closingIssuesReferences` arrives free in the corpus call), spike-3 (multi-ref PRs are real; #2746 declares two)
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
@@ -443,7 +443,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 ### 2. Add the per-tick target dedupe and action cap
 - **Task ID**: build-brakes
 - **Depends On**: build-discovery
-- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Validates**: `tests/unit/reflections/test_reflections_progress_check.py`
 - **Informed By**: the critique's finding that `_pick_steer_target` is project-wide (`:544-596`), so a count cap alone lets one session be told to work several issues in one tick
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
@@ -458,7 +458,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 ### 3. Complete the test surface
 - **Task ID**: build-tests
 - **Depends On**: build-brakes
-- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`, `tests/integration/test_sdlc_stall_auto_resume_e2e.py`
+- **Validates**: `tests/unit/reflections/test_reflections_progress_check.py`, `tests/integration/test_sdlc_stall_auto_resume_e2e.py`
 - **Informed By**: spike-3 (use #2746's real two-ref shape)
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
@@ -498,7 +498,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Unit tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_sdlc_progress_check.py -q` | exit code 0 |
+| Unit tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_progress_check.py -q` | exit code 0 |
 | Integration e2e passes | `scripts/pytest-clean.sh tests/integration/test_sdlc_stall_auto_resume_e2e.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
@@ -516,7 +516,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 
 The raw-Redis row is written with repeated `-e` patterns and **no alternation pipes at all**. This is deliberate and the reason is worth stating, because two earlier attempts at this row shipped broken. Inside `grep -E`, a backslash-escaped pipe is a *literal* character, so `'\.(hgetall\|hget\|scan_iter)\('` matches nothing — ever — and the gate guarding the never-raw-Redis rule cannot go red. The obvious fix (unescape the pipes) cannot be written here: a bare `|` inside a markdown table cell breaks the row, and escaping it to survive the table is exactly what re-broke the pattern the second time. Dropping alternation entirely is the only form that is correct both as shell and as a table cell. The row is also `!`-formed so a clean run exits 0, matching the two rows above and staying safe under a `set -e` runner. **The builder must confirm this row goes red against a deliberately-introduced violation before trusting it green** — a gate that cannot fail is worse than no gate.
 
-The two "must not appear" rows use `! grep -rq` rather than a count compared to zero: `grep -c` exits 1 on zero matches (which a `set -e` runner scores as failure) and `grep -rc` prints a per-file count line rather than a single number. They also carry a **paraphrase constraint**: this plan mandates rewritten docstrings and comments explaining what changed, and if the builder names a deleted identifier in that new prose the gate trips on its own documentation. Say "the old branch-shape filter", never the removed name. Note `tests/unit/reflections/test_sdlc_progress_check.py:621` currently quotes both removed identifiers verbatim in a docstring this plan already schedules for rewriting.
+The two "must not appear" rows use `! grep -rq` rather than a count compared to zero: `grep -c` exits 1 on zero matches (which a `set -e` runner scores as failure) and `grep -rc` prints a per-file count line rather than a single number. They also carry a **paraphrase constraint**: this plan mandates rewritten docstrings and comments explaining what changed, and if the builder names a deleted identifier in that new prose the gate trips on its own documentation. Say "the old branch-shape filter", never the removed name. Note `tests/unit/reflections/test_reflections_progress_check.py:621` currently quotes both removed identifiers verbatim in a docstring this plan already schedules for rewriting.
 
 ## Critique Results
 

@@ -39,12 +39,12 @@ runs everywhere the suite already runs needs no second execution path.
    key positioned early beats a specific key positioned late.
    `test_worktree_manager_config.py` tags `config`, not `git`, because
    `config` sits ahead of `worktree_manager` in insertion order.
-   `tests/unit/reflections/test_sdlc_progress_check.py` tags `sdlc` for the
+   `tests/unit/reflections/test_reflections_progress_check.py` tags `sdlc` for the
    same reason (`sdlc` is ahead of `reflection`). **Guard rule R1** below
    catches this — but only inside a themed package directory.
 2. **Fragment match.** The match is a bare substring, not a whole token, so a
    pattern can match inside a longer word. `config` is a literal substring
-   of `configured`, so `test_pm_briefings_no_slots_configured.py` tags
+   of `configured`, so `test_reflections_pm_briefings_no_slots_configured.py` tags
    `config`. `checkpoint` is a prefix of `checkpointing`, so
    `test_long_task_checkpointing.py` tags `validation`. **Guard rule R3**
    catches this suite-wide.
@@ -88,9 +88,9 @@ winning `FEATURE_MAP` key must appear in the stem as a contiguous run of
 `_`-delimited tokens, not as a fragment inside a longer word.
 
 **The coverage boundary, stated plainly.** R1 and R2 need a package directory
-to compare against, so together they reach only **80 of 835 tracked test
-files (9.6%)** — R1 47 files, R2 33. The other 755 files sit directly under a
-root directory (`tests/unit/`, `tests/integration/`, ...) and are covered by
+to compare against, so together they reach only **82 of 840 tracked test
+files (9.8%)** — R1 49 files, R2 33 (re-derived 2026-09-07, after #3175). The
+other 758 files sit directly under a root directory (`tests/unit/`, `tests/integration/`, ...) and are covered by
 R3 alone, which cannot see an ordering collision: an ordering collision is by
 definition a genuine whole-token match that happens to belong to the wrong
 key, so R3 agrees with it. **Worked example:**
@@ -119,25 +119,41 @@ where a line-number-keyed `ALLOWLIST` silently un-exempted call sites when
 unrelated merges shifted line numbers. The stale-exemption assertion follows
 [#3031](https://github.com/tomcounsell/ai/issues/3031), where an exemption
 that no longer matched anything was a silent hole rather than a caught
-regression. The baseline holds 24 pre-existing paths (21 from R1, 2 from R2,
-1 further from R3) and can only shrink; draining it is
-[#3175](https://github.com/tomcounsell/ai/issues/3175).
+regression. The baseline can only shrink.
+[#3175](https://github.com/tomcounsell/ai/issues/3175) drained it from 24
+pre-existing paths (21 from R1, 2 from R2, 1 further from R3) down to **2**,
+by renaming the 21 offending files rather than by changing any rule. Measured
+2026-09-07, the rules now find **0 from R1, 2 from R2, 0 from R3**.
+
+The two survivors satisfy the second branch of #3175's acceptance criterion 1
+— a baseline may be non-empty when "every remaining entry has a reason that is
+a deliberate policy choice rather than an unaddressed defect". Both are R2
+findings on files that are correctly marked: R2 fires on the *siblings'*
+absence of a marker, not on the named file's presence of one, and the only
+remedies are to mark 21 sibling files nobody has asked to select or to rename
+a correctly-named file to hide from the rule. `KNOWN_MISTAGS` reasons carry the
+literal token `POLICY`, and `test_known_mistags_holds_only_policy_entries`
+fails any entry that lacks it — so a third entry earns its place by stating a
+policy, never by deferring a fix to a future issue.
 
 ## What was considered and rejected
 
-- **Requiring every file to carry a marker.** 555 of 835 files (66.5%)
-  resolve to no marker at all. A must-be-marked rule would need a 555-entry
+- **Requiring every file to carry a marker.** 538 of 840 files (64.0%)
+  resolve to no marker at all. A must-be-marked rule would need a 538-entry
   exemption list on day one — a manifest pretending to be a guard, not a
   guard.
 - **A whole-package exemption (`EXEMPT_DIRS`-shaped mechanism).** The
   measured baseline populates zero such entries, so it would ship with
   neither bracketing assertion ever exercised — the exact silent-hole shape
   #3031 warns against, reintroduced inside the mechanism meant to close it.
-- **Making the package directory authoritative over the basename.** Gains 39
-  markers and corrects 6 with zero losses, but it makes rule R1 tautological
-  (the file's marker would be *defined* as the directory's marker, so "they
-  match" proves nothing). Filed as #3175, which needs this guard to exist
-  first so it can measure its own before/after.
+- **Making the package directory authoritative over the basename.** Re-measured
+  for #3175 it gains **17** markers and corrects **4** with zero losses (the
+  "39 and 6" figure recorded here when the guard shipped did not reproduce).
+  Still rejected, and #3175 reinforces why: it makes rule R1 tautological (the
+  file's marker would be *defined* as the directory's marker, so "they match"
+  proves nothing). #3175 took remedy 1 from the ladder below instead — rename
+  the files — which drains the same baseline while leaving all three rules
+  live and able to fire on the next regression.
 
 ## Responding to a red guard
 

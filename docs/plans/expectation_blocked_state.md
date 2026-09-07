@@ -127,7 +127,7 @@ Lane cannot deliver → `job_tool expectation-block` → entry carries `blocked`
 ## Test Impact
 
 - [ ] `tests/unit/test_job_model.py` — UPDATE: add a `TestBlockedExpectations` class (block, unblock, discharge-preserves-annotation, absent key reads as not blocked, unknown code rejected, corrupt goal refuses, `has_open_expectations` and `status` unchanged by block).
-- [ ] `tests/unit/reflections/test_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; escalation seam writes `attempts_exhausted`; a refused write (corrupt goal) still escalates.
+- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; escalation seam writes `attempts_exhausted`; a refused write (corrupt goal) still escalates.
 - [ ] `tests/unit/test_job_tool.py` — UPDATE: two new subcommands, Room scope, error conversion.
 - [ ] `tests/unit/test_promise_advisory.py` — no change: the gate clears on an open inbound expectation; a blocked inbound expectation is still open (asserted by one new row in `test_job_model.py`, not here).
 
@@ -192,7 +192,7 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - [ ] `has_open_expectations`, `status="active"` forcing, and rest-by-age are unchanged by a block; documented in rule 9.
 - [ ] Entries without the key read as not blocked (test on a hand-written legacy entry).
 - [ ] A corrupt goal refuses block/unblock (test), and the reconciler still escalates when the annotation write is refused.
-- [ ] Tests pass (`scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_expectation_reconciler.py tests/unit/test_job_tool.py -n 2`).
+- [ ] Tests pass (`scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_reflections_expectation_reconciler.py tests/unit/test_job_tool.py -n 2`).
 - [ ] Documentation updated per the Documentation section.
 
 ## Team Orchestration
@@ -249,7 +249,7 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 ### 3. Reconciler: skip, finding, escalation-seam write
 - **Task ID**: build-reconciler
 - **Depends On**: build-model
-- **Validates**: tests/unit/reflections/test_expectation_reconciler.py
+- **Validates**: tests/unit/reflections/test_reflections_expectation_reconciler.py
 - **Assigned To**: reconciler-backoff-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -277,7 +277,7 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Model, reconciler, tool tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_expectation_reconciler.py tests/unit/test_job_tool.py -n 2 -q` | exit code 0 |
+| Model, reconciler, tool tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_reflections_expectation_reconciler.py tests/unit/test_job_tool.py -n 2 -q` | exit code 0 |
 | Lint clean | `python -m ruff check models/job.py tools/job_tool.py reflections/expectation_reconciler.py` | exit code 0 |
 | Format clean | `python -m ruff format --check models/job.py tools/job_tool.py reflections/expectation_reconciler.py` | exit code 0 |
 | No new index (anti-criterion, #2494 No-Go) | `grep -c "IndexedField(" models/job.py` | output contains 2 |

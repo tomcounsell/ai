@@ -270,7 +270,7 @@ The build re-runs these three as Verification rows so the audit is a checked cla
 - [ ] `tests/integration/test_updated_at_heal.py::_popoto_encode_datetime` and `::_seed_future_updated_at` — **DELETE** (explicit disposition, not left to build judgement). Once the fixtures are rewritten onto the ORM shape these two helpers have no remaining caller in the file, and leaving a raw-Redis seeding helper in place is an invitation for the next lane to reuse the exact shape this plan bans. Task 1 removes them and asserts by `/usr/bin/grep` that neither name survives anywhere under `tests/`. If a caller outside this file turns up, that caller is rewritten onto the ORM shape too rather than the helpers being kept.
 - [ ] `tests/unit/test_agent_session_updated_at_utc.py` — UPDATE: re-anchor its assertions on the aware-decode contract, and drop any assertion that depends on the deleted naive branch.
 - [ ] `tests/unit/test_session_health_trusted_clock.py` — UPDATE: it references `_heal_future_updated_at`; verify it is unaffected and, if it asserts naive handling, re-anchor it.
-- [ ] `tests/unit/reflections/test_daily_log_aggregator.py` — UPDATE: add the reaching test for `_collect_sessions` here rather than in a new file; it already owns this collector.
+- [ ] `tests/unit/reflections/test_reflections_daily_log_aggregator.py` — UPDATE: add the reaching test for `_collect_sessions` here rather than in a new file; it already owns this collector.
 - [ ] `tests/unit/test_crash_recovery_gates.py` — UPDATE: add the reaching test for the resumable-session filter here.
 - [ ] `tests/unit/reflections/test_reflections_redis_quality_audit.py` — CREATE (path pinned): the `Chat.updated_at` float round-trip assertion and its mutation target live here. `tests/unit/reflections/` already exists as a package. The path is fixed rather than optional because the Verification batch-2 row names this node id; an "either here or there" choice puts the fourth test somewhere no Verification row runs, while batch 2 still reports a healthy non-zero passed count from the other three files and the omission is invisible.
 - [ ] `tests/unit/test_reflection_pool_bulkhead.py` — NO CHANGE: it is the only existing test naming `redis_quality_audit`, but it covers the bulkhead, not the field type. It stays in batch 2 as a regression check that the dead-branch removal did not disturb the audit's `status: "ok"` shape.
@@ -427,7 +427,7 @@ A builder that mutation-checks its own tests is the #3173 failure this plan exis
 ### 2. Delete the three reflections guards
 - **Task ID**: build-reflections
 - **Depends On**: build-models
-- **Validates**: `tests/unit/reflections/test_daily_log_aggregator.py`, `tests/unit/test_crash_recovery_gates.py`, `tests/unit/test_reflection_pool_bulkhead.py`
+- **Validates**: `tests/unit/reflections/test_reflections_daily_log_aggregator.py`, `tests/unit/test_crash_recovery_gates.py`, `tests/unit/test_reflection_pool_bulkhead.py`
 - **Assigned To**: tz-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -534,7 +534,7 @@ A builder that mutation-checks its own tests is the #3173 failure this plan exis
 | Check | Command | Expected |
 |-------|---------|----------|
 | Scoped tests, batch 1 | `./scripts/pytest-clean.sh tests/integration/test_updated_at_heal.py tests/unit/test_agent_session_updated_at_utc.py tests/unit/test_session_health_trusted_clock.py` | summary line reports a **non-zero** passed count, 0 failed |
-| Scoped tests, batch 2 | `./scripts/pytest-clean.sh tests/unit/reflections/test_daily_log_aggregator.py tests/unit/test_crash_recovery_gates.py tests/unit/reflections/test_reflections_redis_quality_audit.py tests/unit/test_reflection_pool_bulkhead.py` | summary line reports a **non-zero** passed count, 0 failed. The four **new** node ids must also appear by name in the run's collected output — a passed count alone cannot distinguish "all four ran" from "three ran and the fourth was never collected". |
+| Scoped tests, batch 2 | `./scripts/pytest-clean.sh tests/unit/reflections/test_reflections_daily_log_aggregator.py tests/unit/test_crash_recovery_gates.py tests/unit/reflections/test_reflections_redis_quality_audit.py tests/unit/test_reflection_pool_bulkhead.py` | summary line reports a **non-zero** passed count, 0 failed. The four **new** node ids must also appear by name in the run's collected output — a passed count alone cannot distinguish "all four ran" from "three ran and the fourth was never collected". |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Heal guard gone | `/usr/bin/grep -c "updated_at_utc.tzinfo is None" models/agent_session.py` | pre-state 1 → **0** |
