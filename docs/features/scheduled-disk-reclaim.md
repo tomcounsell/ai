@@ -122,6 +122,22 @@ for a `session/nightly-baseline` branch that never existed, landing on
 `unmerged`. That accident inverts the moment a branchless lane is ever
 treated as reapable, so the guard is now explicit rather than incidental.
 
+### The AgentSession probe is no longer blind to execution-time lanes (issue #3176)
+
+Before this fix, a slugless eng session that synthesized its lane at
+execution time (`dev-{aid8}`, issue #1272) ran inside `.worktrees/dev-{aid8}/`
+while its stored `AgentSession.working_dir` still named the main checkout —
+`_scan_worktree_sessions` matched on `working_dir` alone, so every busy-check
+wrapper above reported that lane `clear` while a session was live in it. Only
+the OS-process scan (`_worktree_has_live_process`) saw it. The scan now also
+reads `AgentSession.exec_cwd`, the execution-scoped field the executor stamps
+with the resolved lane before harness launch, so the sweep sees the lane the
+same way whether it was resolved at enqueue time or at execution time. The
+OS-process scan goes back to being a backstop for a foreign process with no
+registered session (issue #2305 defect 3), rather than the only guard that
+worked for this class of lane. Full detail:
+[`session-isolation.md` § Worktree Busy Guard](session-isolation.md#worktree-busy-guard-issue-1357).
+
 ### The busy-check posture, and why there are two functions
 
 `worktree_busy_check()` is **fail-open**: an unreachable Redis reads the same as
