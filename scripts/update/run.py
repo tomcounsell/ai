@@ -165,6 +165,7 @@ class UpdateResult:
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
+    improvement_collect_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
@@ -1241,6 +1242,31 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not upr.success:
             log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
             _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
+
+        # Step 1.6585: Ensure the improvement-evidence-collect reflection is
+        # registered (#3177) via the same generalized register path. Same
+        # ordering rationale as Steps 1.655-1.658: runs BEFORE Step 1.66's
+        # vault→config copy so the entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle. Without this tick nothing
+        # writes ImprovementEvidence and the improvement loop observes nothing.
+        log("Ensuring improvement-evidence-collect reflection is registered...", v)
+        result.improvement_collect_register_result = (
+            reflection_register.register_improvement_collect(project_dir)
+        )
+        icr = result.improvement_collect_register_result
+        if icr.action == "registered":
+            log(
+                "improvement-evidence-collect reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif icr.action == "noop":
+            log("improvement-evidence-collect reflection already registered", v)
+        elif icr.action == "skipped":
+            log(f"improvement-evidence-collect registration skipped: {icr.detail}", v)
+        if not icr.success:
+            log(f"WARN: improvement-evidence-collect registration: {icr.detail}", v, always=True)
+            _append_warning(result, f"improvement-evidence-collect registration: {icr.detail}")
 
         # Step 1.659: Repoint reflection callables onto the modules that own them.
         # Two migration families share one table: the `agent.sustainability.*` shim

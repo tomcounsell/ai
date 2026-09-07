@@ -1238,6 +1238,27 @@ def _migrate_clear_docs_audit_liveness_keys(project_dir: Path) -> str | None:
         return None
 
 
+def _migrate_retire_task_type_profile(project_dir: Path) -> str | None:
+    """Delete the orphaned TaskTypeProfile keyspace (issue #3177).
+
+    Subtractive counterpart to the additive Improvement* registration below.
+    ``models/task_type_profile.py`` was deleted whole, which leaves its hashes
+    and its ``delegation_recommendation`` index sets unreachable through the
+    ORM. This runs the standalone script, which re-declares a minimal stub so
+    the ORM can reach the keyspace once more and delete rows properly, index
+    membership included (see scripts/migrate_retire_task_type_profile.py).
+
+    Idempotent: a second run enumerates zero rows. Returns None on success,
+    error string on failure.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_retire_task_type_profile.py",
+        label="retire_task_type_profile",
+        args=("--apply",),
+    )
+
+
 def _migrate_confirm_improvement_models_readable(project_dir: Path) -> str | None:
     """Confirm the eight new Improvement* models (issue #3177) import and read.
 
@@ -1398,6 +1419,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_job_promises_to_expectations,
         "Rewrite Job goal promises as inbound expectations and clear the retired "
         "has_open_promises index sets (issue #2708)",
+    ),
+    "retire_task_type_profile": (
+        _migrate_retire_task_type_profile,
+        "Delete the orphaned TaskTypeProfile keyspace and its index sets after "
+        "the model was removed whole (issue #3177)",
     ),
     "confirm_improvement_models_readable": (
         _migrate_confirm_improvement_models_readable,

@@ -81,8 +81,14 @@ _LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS = 7 * 86400
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
-# TRM task type vocabulary — used for TaskTypeProfile keying and delegation decisions.
-# Pattern-based derivation in tools/session_tags.py auto_tag_session() Rule 7.
+# TRM task type vocabulary — read by tools/session_tags.py, which derives a
+# session's task_type from pattern rules in auto_tag_session().
+# "rework-triggered" is historical only: its rule read the writerless
+# rework_triggered field and was removed with it in #3177, so nothing derives
+# that value any more. The entry stays because existing rows carry it and the
+# $IndexF:AgentSession:task_type:rework-triggered set is real. Rework is now
+# derived from ImprovementEvidence rows classified "architectural", which have
+# an actual writer.
 TASK_TYPE_VOCABULARY = {
     "sdlc-build",
     "sdlc-test",
@@ -219,7 +225,6 @@ class AgentSession(Model):
     branch_name = Field(null=True)
     tags = ListField(null=True)
     task_type = IndexedField(null=True)  # TRM task category (see TASK_TYPE_VOCABULARY)
-    rework_triggered = Field(null=True)  # "true"/"false" — session retried prior output
 
     # === Structured event log (replaces history, summary, result_text, stage_states) ===
     session_events = ListField(null=True)  # List of SessionEvent dicts
