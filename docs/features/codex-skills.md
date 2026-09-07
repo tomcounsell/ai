@@ -13,7 +13,8 @@ instructions and not generated search-and-replace output.
   is deliberately outside automatic repository discovery.
 - `~/.agents/skills/`: user installation of the general skills, available across repos.
 
-From the checkout containing this change:
+From the checkout containing this change, use the repository Python environment
+(or another interpreter with PyYAML, already declared in pyproject.toml):
 
 ```sh
 python3 scripts/codex_skills.py check
@@ -68,8 +69,8 @@ models, or APIs are installed or authorized by skill discovery itself.
 ## Maintenance and verification
 
 `.agents/skills-manifest.json` maps every source skill to its native target, records
-source-file hashes, and enumerates bundled resources. `check` validates one-to-one
-coverage, this collection's two-field YAML subset, description uniqueness, required
+source-file hashes for converted skills, and enumerates bundled resources. `check` validates complete converted-source and registered-target
+coverage, safe YAML frontmatter and required name/description fields, description uniqueness, required
 resources, local Markdown links, global-link portability, Python syntax, and source
 drift. It does not make network calls or execute imported helper code. Reference
 links inside fenced examples are excluded. Backtick CLI paths and semantic tool
@@ -78,7 +79,9 @@ verification.
 
 After a Claude skill changes, review the corresponding Codex procedure and its
 resources, then update only that entry's source hashes to acknowledge the reviewed
-version. For a new skill, add its matching inventory entry and resource paths.
+version. For a new Codex-only skill, add its inventory entry and resource paths with
+`"source": null` and `"source_files": {}`. Converted skills keep their real Claude
+source and hashes. A native-only entry cannot hide an existing Claude source.
 Do not regenerate native prose from the Claude source: the differences are deliberate.
 For substantial native changes, also run OpenAI's skill-creator quick_validate.py on
 the changed folders and examine realistic positive and negative trigger examples.
@@ -91,7 +94,8 @@ python3 -m unittest discover -s scripts/tests -p test_codex_skills.py
 
 They exercise dry-run, complete copied resources, idempotent reruns, managed updates,
 unmanaged/edited/symlink conflict preservation, missing resources, source drift,
-broken/nonportable links, and project/global scope. A real input/output regression also checks that ebook page-number removal preserves
+broken/nonportable links, project/global scope, native-only installation, ordinary
+YAML scalar/block forms, and rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
 paragraphs. The skill helpers' syntax and archive CLI help are checked without contacting its service. Live deployment, mail,
 social publication, managed-agent launches, and other external effects are not run as
 part of conversion validation.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate the Codex skill collection and install its global skills as managed copies.
 
-Standard library only. Installation refuses unmanaged or locally edited destinations;
+Requires PyYAML (included in the repository environment). Installation refuses
+unmanaged or locally edited destinations;
 it never edits Codex settings, installs connectors, or executes skill helper scripts.
 """
 
@@ -57,22 +58,32 @@ def inventory(root: Path) -> list[dict]:
         source_base = "skills-global" if scope == "global" else "skills"
         if entry["target"] != f".agents/{target_base}/{name}":
             raise ValueError(f"Invalid target for {name}")
-        if entry["source"] != f".claude/{source_base}/{name}/SKILL.md":
+        if entry["source"] is None:
+            if entry["source_files"]:
+                raise ValueError(f"Native-only skill {name} must have empty source_files")
+        elif entry["source"] != f".claude/{source_base}/{name}/SKILL.md":
             raise ValueError(f"Invalid source for {name}")
     return entries
 
 
 def metadata(path: Path) -> tuple[str, str]:
-    """Validate this collection's deliberate two-field YAML subset, without PyYAML.
-
-    Descriptions are JSON-quoted strings, a valid YAML subset. The bundled OpenAI
-    quick_validate.py provides independent full-YAML validation during authoring.
-    """
-    match = re.match(r"\A---\nname: ([^\n]+)\ndescription: (.+)\n---\n", path.read_text())
+    """Parse safe YAML and validate required Codex discovery metadata."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ValueError("PyYAML is required; use the repository Python environment") from exc
+    match = re.match(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", path.read_text(), re.M | re.S)
     if not match:
-        raise ValueError("Expected name and JSON-quoted description frontmatter")
-    name, raw = match.groups()
-    description = json.loads(raw)
+        raise ValueError("Expected YAML frontmatter enclosed by --- lines")
+    try:
+        fields = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML frontmatter: {exc}") from exc
+    if not isinstance(fields, dict):
+        raise ValueError("Frontmatter must be a mapping")
+    name, description = fields.get("name"), fields.get("description")
+    if not isinstance(name, str):
+        raise ValueError("Skill name must be a string")
     if not NAME.fullmatch(name) or len(name) >= 64 or name != path.parent.name:
         raise ValueError("Skill name must match its folder and be under 64 characters")
     if not isinstance(description, str) or not description.strip() or len(description) > 1024:
@@ -101,7 +112,7 @@ def check(root: Path) -> dict:
         for base in (".agents/skills", ".agents/skills-global")
         for p in (root / base).glob("*/SKILL.md")
     }
-    if source_paths != {e["source"] for e in entries}:
+    if source_paths != {e["source"] for e in entries if e["source"] is not None}:
         errors.append("Claude source inventory differs: review newly added/removed skills")
     if target_paths != {e["target"] for e in entries}:
         errors.append("Codex target inventory differs: every skill needs one registered target")
@@ -116,13 +127,14 @@ def check(root: Path) -> dict:
             bundled = files(folder)
             if set(bundled) != set(entry["resources"]):
                 errors.append(f"{name}: bundled resources differ from inventory")
-            source_folder = (root / entry["source"]).parent
-            current_source = {
-                (source_folder / rel).relative_to(root).as_posix(): digest
-                for rel, digest in files(source_folder).items()
-            }
-            if current_source != entry["source_files"]:
-                errors.append(f"{name}: Claude source changed; review the Codex equivalent")
+            if entry["source"] is not None:
+                source_folder = (root / entry["source"]).parent
+                current_source = {
+                    (source_folder / rel).relative_to(root).as_posix(): digest
+                    for rel, digest in files(source_folder).items()
+                }
+                if current_source != entry["source_files"]:
+                    errors.append(f"{name}: Claude source changed; review the Codex equivalent")
             for rel in bundled:
                 path = folder / rel
                 if path.suffix == ".py":
@@ -251,7 +263,7 @@ def main() -> int:
         "check", help="Check all source/target coverage, metadata, links, and drift"
     )
     lint.add_argument("--json", action="store_true", help="Emit a machine-readable report")
-    deploy = sub.add_parser("install", help="Copy the 43 global skills into user discovery")
+    deploy = sub.add_parser("install", help="Copy registered global skills into user discovery")
     deploy.add_argument("--target", type=Path, default=Path.home() / ".agents/skills")
     deploy.add_argument(
         "--dry-run", action="store_true", help="Validate and show changes without writing"

@@ -134,6 +134,59 @@ class SkillInstallationTests(unittest.TestCase):
         self.assertFalse((self.target / "project-only").exists())
         self.assertEqual(skills.check(self.root)["project"], 1)
 
+    def test_native_only_global_skill_installs_without_claude_source(self):
+        import shutil
+
+        shutil.rmtree(self.source)
+        manifest = self.root / skills.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["skills"][0].update(source=None, source_files={})
+        manifest.write_text(json.dumps(data))
+        self.assertTrue(skills.check(self.root)["ok"])
+        skills.install(self.root, self.target)
+        self.assertEqual(skills.files(self.target / "example"), skills.files(self.native))
+        self.assertEqual(skills.install(self.root, self.target)["changed"], [])
+
+    def test_native_entry_cannot_hide_an_existing_claude_source(self):
+        manifest = self.root / skills.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["skills"][0].update(source=None, source_files={})
+        manifest.write_text(json.dumps(data))
+        self.assertFalse(skills.check(self.root)["ok"])
+
+    def test_standard_yaml_forms_are_installable(self):
+        forms = [
+            "name: example\ndescription: Create example reports when requested.",
+            "description: 'Create example reports.'\nname: example",
+            'name: example\ndescription: "Create example reports."',
+            "name: example\ndescription: >-\n  Create example reports\n  when requested.",
+            (
+                "name: example\ndescription: |\n  Create example reports.\n"
+                "metadata:\n  short-description: Reports"
+            ),
+        ]
+        for frontmatter in forms:
+            with self.subTest(frontmatter=frontmatter):
+                (self.native / "SKILL.md").write_text(
+                    "---\n" + frontmatter + "\n---\n\nWrite the report.\n"
+                )
+                self.assertTrue(skills.check(self.root)["ok"])
+                skills.install(self.root, self.target)
+                self.assertEqual(skills.files(self.target / "example"), skills.files(self.native))
+
+    def test_invalid_required_metadata_fails(self):
+        for frontmatter in [
+            "name: 123\ndescription: Reports",
+            "name: example\ndescription: [one, two]",
+            "name: example",
+            "name: example\ndescription: ''",
+            "name: wrong-name\ndescription: Reports",
+            "name: example\ndescription: [unclosed",
+        ]:
+            with self.subTest(frontmatter=frontmatter):
+                (self.native / "SKILL.md").write_text("---\n" + frontmatter + "\n---\nBody\n")
+                self.assertFalse(skills.check(self.root)["ok"])
+
 
 class EbookCleanupTests(unittest.TestCase):
     def test_page_number_removal_preserves_paragraphs(self):
