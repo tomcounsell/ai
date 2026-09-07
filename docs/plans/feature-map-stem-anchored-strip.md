@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3184
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-07T02:19:31Z
 ---
 
 # FEATURE_MAP stem: anchored prefix/suffix strip
@@ -281,15 +283,39 @@ untagged).
   would make the two-file blast radius unprovable.
 
 - The builder must **re-run the measurement rather than trust this plan's
-  numbers**. The `--report` CLI makes this a two-command control:
+  numbers**. Derive the baseline from **git object content**, never by stashing:
 
   ```bash
-  git stash && python3 tests/marker_map.py --report > /tmp/before.txt && git stash pop
-  python3 tests/marker_map.py --report > /tmp/after.txt
-  diff /tmp/before.txt /tmp/after.txt
+  WORK=$(mktemp -d)                     # never a fixed /tmp/<name> — see below
+  BASE=$(git merge-base HEAD origin/main)
+  git show "$BASE:tests/marker_map.py" > "$WORK/marker_map_base.py"
+  python3 -c "import importlib.util as u; s=u.spec_from_file_location('mm','$WORK/marker_map_base.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('\n'.join(m._report_lines(m.iter_test_files())))" > "$WORK/before.txt"
+  python3 tests/marker_map.py --report > "$WORK/after.txt"
+  diff "$WORK/before.txt" "$WORK/after.txt"
   ```
 
   The diff must show exactly two lines changed, both gaining a marker.
+
+- **Never use `git stash` for the baseline.** `refs/stash` is repo-wide, shared
+  by every worktree of this checkout, and this repo routinely has 10+ concurrent
+  agent worktrees with foreign stash entries already on the stack. `git stash` on
+  a clean tree creates no entry and still exits 0, so a `git stash && … && git
+  stash pop` chain proceeds to pop **another lane's stash** into this worktree,
+  corrupting both. The `git show` recipe above runs the old resolver over the
+  current file list with zero working-tree mutation, which is strictly better
+  evidence anyway.
+
+- **Never use a fixed `/tmp/<name>` for any artifact.** Concurrent lanes on this
+  machine would clobber each other, and a clobbered baseline that happens to
+  match yields a passing check that proves nothing. Allocate `WORK=$(mktemp -d)`
+  once and pass it forward explicitly.
+
+- **Pin every `git diff` comparison to the merge-base, never `origin/main`.**
+  `main` moves constantly here (it advanced twice during this plan's own
+  authoring), and #3175 is OPEN against `KNOWN_MISTAGS` in this very file. A row
+  written against `origin/main` fires against a PR that never touched the list
+  once #3175 lands. `git merge-base HEAD origin/main` is stable for the life of
+  the branch and measures only what *this* branch changed.
 
 - The three comment sites to repair, all of which currently forbid this change:
   1. `tests/marker_map.py:296-306` — `_stem`'s docstring and the "Do NOT clean
@@ -375,8 +401,10 @@ untagged).
   is load-bearing for 836 files. Out of scope, and it would confound the
   before/after `--report` diff that proves this change is correct.
 - **Chasing the `docs/features/README.md` "24 pre-existing violations" wording.**
-  The audit prints 25 violations across 24 paths. The index line is about the
-  baseline's path count and is not made wrong by this change. Leave it.
+  The audit prints 25 violations across 24 paths, so that line carries a
+  pre-existing off-by-one between path count and violation count. It predates
+  this change and is unaffected by it. Leave it; fixing it here would put an
+  unrelated edit in the diff.
 
 ## Risks
 
@@ -425,11 +453,19 @@ synchronously inside the audit. The audit's only external read is a
   violations, mechanisms 1 and 2). This plan measured that its change leaves that
   list byte-identical — 0 new violations, 0 stale entries — so no edit there is
   needed or permitted here.
-- [SEPARATE-SLUG #3175] Reordering or extending `FEATURE_MAP` to give the three
-  still-unmarked members of the population (`test_conftest_*.py`,
-  `test_test_redis_server_resolution.py`) a marker. Their stems become correct
-  under this plan; whether they *deserve* a marker is a mapping question that
-  belongs with the baseline drain.
+- [SEPARATE-SLUG #3175] Reordering or extending `FEATURE_MAP` for any reason.
+  This plan needs no such edit, and a marker-neutral reorder would slip past the
+  `--report` diff while still being scope creep, so the Verification table
+  carries an explicit anti-criterion against it.
+
+Nothing else is deferred. In particular, the three still-unmarked members of the
+population (`test_conftest_autouse_monkeypatch_order.py`,
+`test_conftest_isolation_guards.py`, `test_test_redis_server_resolution.py`) are
+**not** deferred work: this plan fixes their stems, and the measurement shows
+they then resolve to `(None, None)` with `run_audit()` reporting them as neither
+new nor stale violations. No `FEATURE_MAP` key targets them and none is wanted,
+so there is nothing left to track. They are outside `KNOWN_MISTAGS`, so #3175
+would never have picked them up either.
 
 ## Update System
 
@@ -467,6 +503,14 @@ which already work and are unchanged by this plan.
       ("Do NOT 'clean this up' with a prefix/suffix-stripping helper"). Replace
       with the anchored rationale and the measured two-file effect, and drop the
       now-satisfied "#3184 has exactly one line to change" note.
+- [ ] Rewrite the **module docstring** cross-reference in `tests/marker_map.py`
+      (around line 24): "See docs/features/feature-map-marker-guard.md for the
+      three mistag mechanisms…". After this change one of those three is fixed
+      rather than tracked. Note the location: this line sits above the
+      `from __future__ import annotations` import, **outside** the ~290-308 range
+      cited above, so a builder scoped to that range will miss it. Either keep
+      the count accurate ("two live mechanisms, one fixed") or reword to "the
+      mistag mechanisms", and land it with the guard-doc rewrite.
 - [ ] Rewrite the section header above the stem-fidelity fixtures in
       `tests/unit/test_feature_map_markers.py` (lines 77-82) so it describes the
       fixtures as pinning the anchored strip rather than guarding against it.
@@ -479,8 +523,10 @@ which already work and are unchanged by this plan.
       **exactly two changed lines**: `tests/tools/test_test_judge.py` gaining
       `tools`, `tests/unit/test_validate_test_impact.py` gaining `validation`.
 - [ ] **Zero** test files lose a marker they carried before the change.
-- [ ] `python3 tests/marker_map.py --audit` exits 0, reporting 25 known
-      violations, 0 new, 0 stale — with `KNOWN_MISTAGS` unmodified.
+- [ ] `python3 tests/marker_map.py --audit` exits 0 reporting **0 new, 0 stale**,
+      with `KNOWN_MISTAGS` unmodified. The known-violation *count* it prints is a
+      property of `KNOWN_MISTAGS` (which #3175 owns and any new test file can
+      move), so it is recorded as an observation, never asserted as a criterion.
 - [ ] Both `test_stem_fidelity_*` fixtures still exist, inverted to assert the
       fixed tuples.
 - [ ] All five mangled basenames have a committed fixture asserting their
@@ -517,20 +563,9 @@ The lead agent orchestrates and does not build directly.
 
 ## Step by Step Tasks
 
-### 1. Capture the pre-change baseline
-- **Task ID**: baseline-report
-- **Depends On**: none
-- **Validates**: n/a (measurement task)
-- **Assigned To**: stem-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- On an unmodified checkout, run `python3 tests/marker_map.py --report > /tmp/marker_before.txt`
-- Run `python3 tests/marker_map.py --audit` and record its exact output
-- Commit nothing; these artifacts are the control for task 3
-
-### 2. Anchor the stem expression
+### 1. Anchor the stem expression and prove the blast radius
 - **Task ID**: build-stem
-- **Depends On**: baseline-report
+- **Depends On**: none
 - **Validates**: tests/unit/test_feature_map_markers.py
 - **Informed By**: Freshness Check (2 of 836 files move; audit stays green)
 - **Assigned To**: stem-builder
@@ -539,24 +574,21 @@ The lead agent orchestrates and does not build directly.
 - In `tests/marker_map.py::_stem`, replace the global-replace expression with
   `basename.removeprefix("test_").removesuffix(".py")`
 - Rewrite `_stem`'s docstring and comment so they no longer forbid this change
+- Rewrite the module docstring's "the three mistag mechanisms" cross-reference
+  (`tests/marker_map.py`, above the `from __future__` import) — mechanism 3 is
+  now fixed, not merely tracked
 - Do not touch `FEATURE_MAP` or `KNOWN_MISTAGS`
-
-### 3. Prove the blast radius is exactly two files
-- **Task ID**: measure-diff
-- **Depends On**: build-stem
-- **Assigned To**: stem-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Run `python3 tests/marker_map.py --report > /tmp/marker_after.txt`
-- `diff /tmp/marker_before.txt /tmp/marker_after.txt` — must show exactly two
-  changed lines, both gaining a marker, none losing one
-- Run `python3 tests/marker_map.py --audit` — must print 25 known, 0 new, 0 stale
+- Measure the blast radius with the stash-free `git show` recipe in the
+  Technical Approach, using `WORK=$(mktemp -d)` — **never `git stash`, never a
+  fixed `/tmp/<name>`**
+- The diff must show exactly two changed lines, both gaining a marker, none
+  losing one; `python3 tests/marker_map.py --audit` must report `0 new, 0 stale`
 - **If either check disagrees, stop and report.** Do not edit `KNOWN_MISTAGS` to
   make the audit pass
 
-### 4. Update and extend the stem fixtures
+### 2. Update and extend the stem fixtures
 - **Task ID**: build-fixtures
-- **Depends On**: measure-diff
+- **Depends On**: build-stem
 - **Validates**: tests/unit/test_feature_map_markers.py
 - **Assigned To**: stem-builder
 - **Agent Type**: builder
@@ -569,20 +601,26 @@ The lead agent orchestrates and does not build directly.
 - Rewrite the section header comment above them
 - Run `./scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q`
 
-### 5. Independent blast-radius validation
+### 3. Independent blast-radius validation
 - **Task ID**: validate-blast-radius
 - **Depends On**: build-fixtures
 - **Assigned To**: blast-radius-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-derive the before/after comparison from `git stash` rather than reusing
-  `/tmp/marker_before.txt`, so the control cannot inherit the branch's change
+- Re-derive the before/after comparison **independently**, from
+  `git show $(git merge-base HEAD origin/main):tests/marker_map.py` into a fresh
+  `mktemp -d`, so the control cannot inherit the branch's change or the
+  builder's artifacts. **Do not `git stash`** — `refs/stash` is repo-wide and
+  shared with every concurrent lane
 - Confirm exactly two files move and none lose a marker
-- Confirm `KNOWN_MISTAGS` is untouched (`git diff` on `tests/marker_map.py`
-  shows no line mentioning `Drain tracked by #3175`)
+- Confirm `KNOWN_MISTAGS` is untouched:
+  `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py` shows no
+  line mentioning `Drain tracked by #3175`
+- Confirm `FEATURE_MAP` is untouched: the same diff adds/removes no
+  `"key": "value"` entry line
 - Confirm both newly-marked test files still collect and pass
 
-### 6. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-blast-radius
 - **Assigned To**: guard-documentarian
@@ -590,8 +628,10 @@ The lead agent orchestrates and does not build directly.
 - **Parallel**: false
 - Rewrite mechanism 3 in `docs/features/feature-map-marker-guard.md`
 - Confirm no doc still says the mangled stem is deliberately unfixed
+- Confirm the `tests/marker_map.py` module-docstring cross-reference agrees with
+  the rewritten doc (task 1 changes it; this task verifies the two match)
 
-### 7. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: blast-radius-validator
@@ -611,7 +651,8 @@ The lead agent orchestrates and does not build directly.
 | Edge cases unchanged | `python3 -c "import sys;sys.path.insert(0,'.');from tests.marker_map import resolve_marker as r;assert r('')==(None,None);assert r('test_.py')==(None,None);assert r('test_sdlc.py')==('sdlc','sdlc');assert r('test_config.py')==('config','config');assert r('test_youtube_transcription.py')==('tools','youtube');print('OK')"` | exit code 0 |
 | No global `test_` replace remains in the stem | `grep -c 'replace("test_"' tests/marker_map.py` | match count == 0 |
 | Both stem-fidelity fixtures still exist | `grep -c 'def test_stem_fidelity_' tests/unit/test_feature_map_markers.py` | output contains `2` |
-| Anti-criterion: `KNOWN_MISTAGS` untouched (#3175 stays out of scope) | `git diff origin/main -- tests/marker_map.py \| grep -c '^[-+].*Drain tracked by #3175'` | match count == 0 |
+| Anti-criterion: `KNOWN_MISTAGS` untouched (#3175 stays out of scope) | `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -c '^[-+].*Drain tracked by #3175'` | match count == 0 |
+| Anti-criterion: `FEATURE_MAP` neither reordered nor extended | `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -cE '^[-+] *"[a-z_]+": "'` | match count == 0 |
 | Anti-criterion: no comment still forbids the anchored strip | `grep -c 'clean this up' tests/marker_map.py` | match count == 0 |
 | Anti-criterion: no doc still calls mechanism 3 unfixed | `grep -c 'left unfixed here' docs/features/feature-map-marker-guard.md` | match count == 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -625,10 +666,18 @@ bite rather than passing vacuously; each must return `0` after the change:
 - `grep -c 'left unfixed here' docs/features/feature-map-marker-guard.md` → `1`
 - `grep -c 'replace("test_"' tests/marker_map.py` → `1`
 
-The `KNOWN_MISTAGS` anti-criterion is the inverse shape: it reads `0` on a clean
-tree and must *stay* `0`, so its red-state proof is to add a throwaway edit to a
-`Drain tracked by #3175` line and confirm the count becomes non-zero before
-reverting it. Paste all four results into the PR description.
+The two `git diff` anti-criteria are the inverse shape: they read `0` on a clean
+tree and must *stay* `0`, so their red-state proof is to inject a throwaway edit
+and confirm the count goes non-zero before reverting. Both were proven this way
+at plan time:
+
+- `FEATURE_MAP` row: clean → `0`; after inserting one `"zzz_probe": "tools",`
+  entry → `1`. Reverted, back to `0`.
+- `KNOWN_MISTAGS` row: same method against a `Drain tracked by #3175` line.
+  Confirmed the two rows are independent — the FEATURE_MAP injection left the
+  `#3175` count at `0`, so neither row masks the other.
+
+Paste all five results into the PR description.
 
 Two anchors were rejected during planning for failing exactly this test.
 `grep -rn 'Do NOT .clean this up'` returns `0` on the unmodified checkout —
@@ -639,16 +688,16 @@ here` names the stale claim itself.
 
 ## Critique Results
 
-Round 1 — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses, at plan hash `sha256:b72e627f…`, baseline `de229ee46`. Verdict: **NEEDS REVISION** (1 blocker, 6 concerns, 2 nits).
+Round 1 — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses, at plan hash `sha256:b72e627f…`, baseline `de229ee46`. Verdict: **NEEDS REVISION** (1 blocker, 6 concerns, 2 nits). **All 9 addressed in the round-1 revision** (see Addressed By).
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Solution/Technical Approach and Task 5 establish the baseline with `git stash && ... && git stash pop`. `refs/stash` is repo-wide, shared by every worktree; 10+ agent worktrees are live and 3 foreign stash entries exist right now. On a clean tree `git stash` creates no entry and exits 0, so the `&&` chain proceeds and `git stash pop` applies ANOTHER LANE'S stash into this worktree. | pending | Delete both `git stash` instructions. Derive the baseline from git object content: `BASE=$(git merge-base HEAD origin/main)`; `git show "$BASE:tests/marker_map.py" > $WORK/marker_map_base.py`; load it by path with `importlib.util.spec_from_file_location` and call `m._report_lines(m.iter_test_files())`. Runs the OLD resolver over the CURRENT file list with zero working-tree mutation. Run from the repo root: `iter_test_files()` shells to `git ls-files` against the process cwd. |
-| CONCERN | Risk & Robustness | Baseline artifacts use fixed absolute paths (`/tmp/before.txt`, `/tmp/marker_before.txt`). Many agents run concurrently against this repo, so two lanes clobber each other and `diff` compares against a foreign baseline. The failure is silent and green-looking. | pending | `WORK=$(mktemp -d)` once in Task 1; reference `"$WORK/before.txt"` / `"$WORK/after.txt"` everywhere. Never a fixed `/tmp/<name>` in a repo where `git worktree list` reports concurrent lanes. Pass `$WORK` forward explicitly to Tasks 3 and 5, or have each task recompute the baseline from git. |
-| CONCERN | Risk & Robustness | The `KNOWN_MISTAGS` anti-criterion runs `git diff origin/main`, resolving the remote head at execution time. `main` moves constantly (it advanced twice during this plan's authoring), and #3175 is OPEN and targets `KNOWN_MISTAGS` in this exact file. If #3175 lands first, the row fires against a PR that never touched the list. | pending | Pin to the branch point: `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -c '^[-+].*Drain tracked by #3175'` with `match count == 0`. The merge-base is stable for the life of the branch, so the row measures only what THIS branch changed. |
-| CONCERN | Scope & Value | The same invariant is stated twice at different brittleness, and the stricter one is wrong. Verification asserts only `0 new, 0 stale`; Success Criteria demands the audit report `25 known` violations. The literal 25 derives from `KNOWN_MISTAGS`, which this plan does not own and #3175 exists to shrink. | pending | The audit line is `f"OK: {len(violations)} known, baselined violation(s); 0 new, 0 stale."` in `main()`. `len(violations)` is a property of `KNOWN_MISTAGS`, not of the stem. Drop the literal count from the Success Criterion and assert the `0 new, 0 stale` substring only. |
-| CONCERN | Scope & Value | No-Go 2 (`Reordering or extending FEATURE_MAP`) names a forbidden code-level outcome but carries no inverse Verification row, while No-Go 1 does. The `--report` diff catches marker MOVES, but a marker-neutral FEATURE_MAP reorder or key insertion (the exact shape #3010 shipped with its `reflections` key) passes that diff while being the edit No-Go 2 forbids. | pending | Add: `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -cE '^[-+] *"[a-z_]+": "'` with `match count == 0`. FEATURE_MAP entries are the only lines matching `"key": "value"` at indent — KNOWN_MISTAGS values are parenthesized tuples spanning lines — so the pattern is specific to the forbidden edit. |
-| CONCERN | History & Consistency | Documentation enumerates three prose sites to repair but misses a fourth pointing at the doc from the other direction: `tests/marker_map.py` line 24 (module docstring) says "See docs/features/feature-map-marker-guard.md for the three mistag mechanisms". After this change one of those three is fixed, not merely tracked, so the pointer's framing no longer matches the code — the same stale-cross-reference class the plan calls its highest-cost failure mode in Risk 3. | pending | The line is in the MODULE docstring, above `from __future__ import annotations` — outside the ~290-308 range the plan cites, so a builder scoped to that range will not see it. Either keep the count accurate ("two live mechanisms, one fixed") or reword to "the mistag mechanisms". Land it in the same commit as the guard-doc rewrite. |
-| CONCERN | History & Consistency | Prior Art and No-Gos define #3175's scope incompatibly. Prior Art says #3175's scope is "the 24 paths in KNOWN_MISTAGS" and is "disjoint" from this plan; No-Go 2 then defers to #3175 the marker question for three files the plan itself establishes are NOT in KNOWN_MISTAGS. The `[SEPARATE-SLUG]` validator only confirms the issue exists, so this passes mechanically while orphaning the work. | pending | The plan's own measurement settles it: under the anchored stem those three resolve to `(None, None)` and `run_audit()` reports them neither new nor stale, so no rule wants them marked. Rewrite No-Go 2 as a statement of fact and drop the `[SEPARATE-SLUG #3175]` tag rather than reassigning it — with no deferred work left there is nothing to track. |
-| NIT | Scope & Value | Three named agents across seven tasks for a one-line change. Tasks 1-3 are one builder's linear sequence (capture baseline, edit, diff) split into three hand-offs, while Appetite says "Solo dev" with 0 PM check-ins. | pending | n/a (NIT) |
-| NIT | History & Consistency | The Rabbit Hole tells the builder to leave `docs/features/README.md` reading "24 pre-existing violations" while the audit prints 25, justified as "not made wrong by this change" — which reads as though the line is accurate when it is a pre-existing off-by-one between path count and violation count. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | Solution/Technical Approach and Task 5 establish the baseline with `git stash && ... && git stash pop`. `refs/stash` is repo-wide, shared by every worktree; 10+ agent worktrees are live and 3 foreign stash entries exist right now. On a clean tree `git stash` creates no entry and exits 0, so the `&&` chain proceeds and `git stash pop` applies ANOTHER LANE'S stash into this worktree. | Technical Approach now derives the baseline via `git show $(git merge-base HEAD origin/main):tests/marker_map.py` into `mktemp -d`; both `git stash` instructions deleted (Technical Approach + task 3). An explicit "Never use `git stash`" rule states why. | Delete both `git stash` instructions. Derive the baseline from git object content: `BASE=$(git merge-base HEAD origin/main)`; `git show "$BASE:tests/marker_map.py" > $WORK/marker_map_base.py`; load it by path with `importlib.util.spec_from_file_location` and call `m._report_lines(m.iter_test_files())`. Runs the OLD resolver over the CURRENT file list with zero working-tree mutation. Run from the repo root: `iter_test_files()` shells to `git ls-files` against the process cwd. |
+| CONCERN | Risk & Robustness | Baseline artifacts use fixed absolute paths (`/tmp/before.txt`, `/tmp/marker_before.txt`). Many agents run concurrently against this repo, so two lanes clobber each other and `diff` compares against a foreign baseline. The failure is silent and green-looking. | Technical Approach adds "Never use a fixed `/tmp/<name>`"; tasks now use `WORK=$(mktemp -d)`. | `WORK=$(mktemp -d)` once in Task 1; reference `"$WORK/before.txt"` / `"$WORK/after.txt"` everywhere. Never a fixed `/tmp/<name>` in a repo where `git worktree list` reports concurrent lanes. Pass `$WORK` forward explicitly to Tasks 3 and 5, or have each task recompute the baseline from git. |
+| CONCERN | Risk & Robustness | The `KNOWN_MISTAGS` anti-criterion runs `git diff origin/main`, resolving the remote head at execution time. `main` moves constantly (it advanced twice during this plan's authoring), and #3175 is OPEN and targets `KNOWN_MISTAGS` in this exact file. If #3175 lands first, the row fires against a PR that never touched the list. | Both `git diff` Verification rows now pin to `$(git merge-base HEAD origin/main)`; Technical Approach adds the merge-base rule; task 3 restated. | Pin to the branch point: `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -c '^[-+].*Drain tracked by #3175'` with `match count == 0`. The merge-base is stable for the life of the branch, so the row measures only what THIS branch changed. |
+| CONCERN | Scope & Value | The same invariant is stated twice at different brittleness, and the stricter one is wrong. Verification asserts only `0 new, 0 stale`; Success Criteria demands the audit report `25 known` violations. The literal 25 derives from `KNOWN_MISTAGS`, which this plan does not own and #3175 exists to shrink. | Success Criteria now asserts `0 new, 0 stale` only; the known-violation count is recorded as an observation. | The audit line is `f"OK: {len(violations)} known, baselined violation(s); 0 new, 0 stale."` in `main()`. `len(violations)` is a property of `KNOWN_MISTAGS`, not of the stem. Drop the literal count from the Success Criterion and assert the `0 new, 0 stale` substring only. |
+| CONCERN | Scope & Value | No-Go 2 (`Reordering or extending FEATURE_MAP`) names a forbidden code-level outcome but carries no inverse Verification row, while No-Go 1 does. The `--report` diff catches marker MOVES, but a marker-neutral FEATURE_MAP reorder or key insertion (the exact shape #3010 shipped with its `reflections` key) passes that diff while being the edit No-Go 2 forbids. | New Verification row: `grep -cE '^[-+] *"[a-z_]+": "'` over the merge-base diff. Red-state proven (0 clean, 1 with an injected key). | Add: `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -cE '^[-+] *"[a-z_]+": "'` with `match count == 0`. FEATURE_MAP entries are the only lines matching `"key": "value"` at indent — KNOWN_MISTAGS values are parenthesized tuples spanning lines — so the pattern is specific to the forbidden edit. |
+| CONCERN | History & Consistency | Documentation enumerates three prose sites to repair but misses a fourth pointing at the doc from the other direction: `tests/marker_map.py` line 24 (module docstring) says "See docs/features/feature-map-marker-guard.md for the three mistag mechanisms". After this change one of those three is fixed, not merely tracked, so the pointer's framing no longer matches the code — the same stale-cross-reference class the plan calls its highest-cost failure mode in Risk 3. | Documentation gains an explicit module-docstring item noting it sits outside the ~290-308 range; task 1 makes the edit, task 4 verifies it matches the doc. | The line is in the MODULE docstring, above `from __future__ import annotations` — outside the ~290-308 range the plan cites, so a builder scoped to that range will not see it. Either keep the count accurate ("two live mechanisms, one fixed") or reword to "the mistag mechanisms". Land it in the same commit as the guard-doc rewrite. |
+| CONCERN | History & Consistency | Prior Art and No-Gos define #3175's scope incompatibly. Prior Art says #3175's scope is "the 24 paths in KNOWN_MISTAGS" and is "disjoint" from this plan; No-Go 2 then defers to #3175 the marker question for three files the plan itself establishes are NOT in KNOWN_MISTAGS. The `[SEPARATE-SLUG]` validator only confirms the issue exists, so this passes mechanically while orphaning the work. | No-Go 2 rewritten to forbid any `FEATURE_MAP` edit; the three latent files are now stated as not-deferred with the measurement, and the `#3175` misattribution is gone. | The plan's own measurement settles it: under the anchored stem those three resolve to `(None, None)` and `run_audit()` reports them neither new nor stale, so no rule wants them marked. Rewrite No-Go 2 as a statement of fact and drop the `[SEPARATE-SLUG #3175]` tag rather than reassigning it — with no deferred work left there is nothing to track. |
+| NIT | Scope & Value | Three named agents across seven tasks for a one-line change. Tasks 1-3 are one builder's linear sequence (capture baseline, edit, diff) split into three hand-offs, while Appetite says "Solo dev" with 0 PM check-ins. | Tasks 1-3 collapsed into a single `build-stem` task; graph renumbered to 5 tasks. | n/a (NIT) |
+| NIT | History & Consistency | The Rabbit Hole tells the builder to leave `docs/features/README.md` reading "24 pre-existing violations" while the audit prints 25, justified as "not made wrong by this change" — which reads as though the line is accurate when it is a pre-existing off-by-one between path count and violation count. | Rabbit Hole reworded: the off-by-one is named as pre-existing rather than implied correct. | n/a (NIT) |
