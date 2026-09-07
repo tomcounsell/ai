@@ -416,6 +416,9 @@ def _format_ts(ts: str | float | None) -> str:
             dt = datetime.fromtimestamp(ts, tz=UTC)
         else:
             dt = datetime.fromisoformat(str(ts))
+            # Keep: `ts` is a CLI-facing str | float | None union, not
+            # exclusively a popoto read, and the string form may carry no
+            # offset.
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")

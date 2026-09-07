@@ -66,14 +66,18 @@ def _as_unix_ts(val: Any) -> float | None:
     """Coerce a datetime / int / float / ISO-string to a Unix timestamp.
 
     Mirrors ``utils.utc.to_unix_ts`` semantics (naive datetimes are treated
-    as UTC — Popoto strips tzinfo on save) without importing it: this module
-    stays stdlib-only so ``agent/crash_signature.py`` can import it where it
-    deliberately cannot import ``agent/session_health.py``. Returns ``None``
-    when the value cannot be coerced.
+    as UTC) without importing it: this module stays stdlib-only so
+    ``agent/crash_signature.py`` can import it where it deliberately cannot
+    import ``agent/session_health.py``. popoto 1.9.0 decodes every stored
+    datetime as aware UTC; the naive-tzinfo branches below exist for the
+    ISO-string and non-popoto ``datetime`` inputs this general-purpose
+    coercer also accepts. Returns ``None`` when the value cannot be coerced.
     """
     if val is None:
         return None
     if isinstance(val, datetime):
+        # Keep: this coercer accepts datetime | int | float | str from
+        # mixed callers, not exclusively popoto reads.
         if val.tzinfo is None:
             val = val.replace(tzinfo=UTC)
         return val.timestamp()
@@ -84,6 +88,7 @@ def _as_unix_ts(val: Any) -> float | None:
             dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return None
+        # Keep: an ISO string from a non-popoto source may carry no offset.
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()

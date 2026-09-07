@@ -50,6 +50,8 @@ def _row_age_s(row: dict) -> float:
         created = datetime.fromisoformat(row["created_at"])
     except (KeyError, TypeError, ValueError):
         return 0.0
+    # Keep: `row` is a raw Redis dict, not a popoto read, and its
+    # `created_at` string may carry no offset.
     if created.tzinfo is None:
         created = created.replace(tzinfo=UTC)
     return (datetime.now(UTC) - created).total_seconds()
@@ -247,6 +249,8 @@ def heartbeat_age_s() -> float | None:
             return None
         value = raw.decode() if isinstance(raw, bytes) else str(raw)
         stamped = datetime.fromisoformat(value)
+        # Keep: `value` is a raw Redis string, not a popoto read, and may
+        # carry no offset.
         if stamped.tzinfo is None:
             stamped = stamped.replace(tzinfo=UTC)
         return (datetime.now(UTC) - stamped).total_seconds()

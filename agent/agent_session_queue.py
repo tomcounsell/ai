@@ -1360,7 +1360,8 @@ def _check_restart_flag() -> bool:
     try:
         timestamp_str = flag_content.split()[0]
         flag_time = datetime.fromisoformat(timestamp_str)
-        # Ensure timezone-aware comparison
+        # Keep: the restart-flag file is written by a plain-text timestamp,
+        # not read from popoto, and may carry no offset.
         if flag_time.tzinfo is None:
             flag_time = flag_time.replace(tzinfo=UTC)
         flag_age = datetime.now(UTC) - flag_time
@@ -2988,6 +2989,8 @@ def _cli_show_status() -> None:
     now_ts = time.time()
 
     def _to_ts_safe(val):
+        # Keep: general-purpose coercer accepting datetime | int | float from
+        # mixed callers, not exclusively popoto reads.
         if val is None:
             return 0.0
         if isinstance(val, datetime):

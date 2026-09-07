@@ -41,16 +41,22 @@ def utc_iso() -> str:
 def to_unix_ts(val) -> float | None:
     """Convert a datetime/float/ISO-string to a Unix timestamp.
 
-    Naive datetimes are treated as UTC (Popoto strips tzinfo on save), avoiding
-    the default Python behavior where ``.timestamp()`` on a naive datetime
-    interprets it as machine-local time — which silently offsets every age
-    calculation by the machine's UTC offset (e.g., 7h on UTC+7 hosts).
+    Naive datetimes are treated as UTC, avoiding the default Python behavior
+    where ``.timestamp()`` on a naive datetime interprets it as machine-local
+    time — which silently offsets every age calculation by the machine's UTC
+    offset (e.g., 7h on UTC+7 hosts). popoto 1.9.0 decodes every stored
+    datetime as aware UTC; the naive-tzinfo branches below are for callers
+    passing a `created_at` (no `__setattr__` coercion), an ISO string, or a
+    plain float from a non-popoto source — this is the repo's canonical
+    coercer and every caller outside popoto is a candidate producer.
 
     Returns None when the input cannot be coerced.
     """
     if val is None:
         return None
     if isinstance(val, datetime):
+        # Keep: general-purpose coercer accepting datetime | int | float |
+        # str from mixed callers, not exclusively popoto reads.
         if val.tzinfo is None:
             val = val.replace(tzinfo=UTC)
         return val.timestamp()
@@ -61,6 +67,7 @@ def to_unix_ts(val) -> float | None:
             dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             return None
+        # Keep: an ISO string from a non-popoto source may carry no offset.
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()
