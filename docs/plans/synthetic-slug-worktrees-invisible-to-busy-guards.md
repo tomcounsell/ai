@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -880,11 +880,11 @@ busy guard behaves exactly as it does today, which is a safe intermediate state.
 
 ## Success Criteria
 
-- [ ] `_scan_worktree_sessions` returns `busy` for a `dev-*` lane held by a non-terminal, `slug=None`
+- [x] `_scan_worktree_sessions` returns `busy` for a `dev-*` lane held by a non-terminal, `slug=None`
       row whose `exec_cwd` names the lane and whose `working_dir` names the main checkout
-- [ ] `_scan_worktree_sessions` still returns `busy` for the pre-existing `working_dir`-only shape
+- [x] `_scan_worktree_sessions` still returns `busy` for the pre-existing `working_dir`-only shape
       (real slug, lane in `working_dir`, `exec_cwd` unset) — the fallback arm does not regress
-- [ ] **When the session-phase row lookup resolves** — the `if agent_session:` branch — a slugless
+- [x] **When the session-phase row lookup resolves** — the `if agent_session:` branch — a slugless
       eng session's row carries `exec_cwd=.worktrees/dev-{aid8}` before the harness launches, not
       only after the first spawn. **Accepted residual (C2):** that lookup is
       `AgentSession.query.filter(project_key=..., status="running")` and the file itself documents
@@ -896,25 +896,25 @@ busy guard behaves exactly as it does today, which is a safe intermediate state.
       lane was invisible for every session, now only for one whose row lookup races. **Do not** add
       an else-branch stamp on the outer `session` object — that is a second hydrated copy, and
       stamping it is precisely the duplicate-row write the dropped resolver-swap argument rejected
-- [ ] The row's `working_dir` and `slug` are unchanged by execution — no production code in this
+- [x] The row's `working_dir` and `slug` are unchanged by execution — no production code in this
       plan's changed files assigns either on a hydrated `AgentSession`
-- [ ] A pre-spawn `exec_cwd` stamp leaves `AgentSession.live_fence` returning `None`
-- [ ] A raising or cancelled session is finalized before the synthetic cleanup runs, so the lane is
+- [x] A pre-spawn `exec_cwd` stamp leaves `AgentSession.live_fence` returning `None`
+- [x] A raising or cancelled session is finalized before the synthetic cleanup runs, so the lane is
       removed rather than permanently blocked
-- [ ] An auto-continue exit **on `_enqueue_nudge`'s main path** — the one that re-reads the row and
+- [x] An auto-continue exit **on `_enqueue_nudge`'s main path** — the one that re-reads the row and
       calls `transition_status(session, "pending", ...)` — leaves the continuation's `pending` row
       untouched and preserves the lane. **Scoped deliberately (C4):** on the fallback path
       (`reread_session is None`) the fresh row is built from `continuation_agent_session_fields`,
       which resets `exec_cwd` and copies the main-checkout `working_dir`, so the lane is removed as
       it is today. No code change follows — the guard as specified
       (`_auth is not None and _auth.status == "running"`) is already correct on both paths
-- [ ] The end-of-session synthetic cleanup logs a named `[synthetic-slug] ... cleanup blocked`
+- [x] The end-of-session synthetic cleanup logs a named `[synthetic-slug] ... cleanup blocked`
       WARNING when removal is refused
-- [ ] A failed `exec_cwd` stamp is logged at WARNING under `[lane-writeback]` and does not fail the
+- [x] A failed `exec_cwd` stamp is logged at WARNING under `[lane-writeback]` and does not fail the
       session
-- [ ] A scheduled child never inherits a parent `working_dir` that points inside `.worktrees/`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A scheduled child never inherits a parent `working_dir` that points inside `.worktrees/`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
