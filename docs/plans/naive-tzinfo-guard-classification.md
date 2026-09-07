@@ -443,10 +443,49 @@ A builder that mutation-checks its own tests is the #3173 failure this plan exis
 - **Agent Type**: validator
 - **Parallel**: false
 - **Non-optional.** Runs alone, after the builder has committed and stopped. No author edits during this task.
-- For each of the four new tests, **individually**: force a naive datetime into that one test's fixture (write the field with `datetime.now()` rather than `datetime.now(UTC)`), re-run **that node alone** via `scripts/pytest-clean.sh`, confirm it fails, revert that mutation, then move to the next. Re-measure after each. Mutating all four at once and reading one red run proves nothing about any individual test.
+- Work **one test at a time**: apply that test's mutation, re-run **that node alone** via `scripts/pytest-clean.sh`, confirm it is red, revert the mutation, re-run the node to confirm it is green again, then move to the next. Mutating all four at once and reading one red run proves nothing about any individual test.
 - Read the result off the pytest summary line. A run reporting "0 passed" or collecting nothing is a failed measurement, not a pass (#3195).
 - Capture each failing output verbatim as its own block; the four blocks go in the PR body as the non-vacuity proof.
-- Report any test that stayed green — that test does not ship as-is.
+- **There is no uniform mutation.** Each test gets the shape below, chosen for the mechanism that would otherwise swallow it. Every shape was exercised against this tree before it was written down; the measured outcome is the expected red, so a validator run that disagrees with it is a signal about the build, not about the recipe.
+
+**Test 1 — `_heal_future_updated_at` (`models/agent_session.py`), field `updated_at`.**
+
+| | |
+|---|---|
+| Fixture (green) | `s = AgentSession.create(...)`; `s.updated_at = datetime.now(UTC) + timedelta(hours=7)`; `s.save(preserve_updated_at=True)`; re-read through `AgentSession.query.all()`; assert `AgentSession._heal_future_updated_at() == 1`. |
+| Mutation | On that same fixture line only, `.replace(tzinfo=None)` the future value. Keep `preserve_updated_at=True`. |
+| Mechanism it defeats | Both. `preserve_updated_at=True` returns at `:996-1004` before `self.updated_at = utc_now()` (`:1020`), so the naive value survives the write; the ORM path encodes `isoformat()` (no legacy `%Y%m%dT` shape), so it survives the read. |
+| Measured | Round-trip returned `tzinfo=None`, value byte-identical. With the guard present the heal returned **1**. With the guard removed, `updated_at_utc <= now` raises `TypeError: can't compare offset-naive and offset-aware datetimes`, which the per-record `except Exception` at `:1105-1108` swallows — the record is skipped and the heal returns **0**, so the `== 1` assertion fails. **Red.** |
+| Do not | Use `_seed_future_updated_at` / `_popoto_encode_datetime` from `tests/integration/test_updated_at_heal.py`. Their legacy payload decodes aware regardless of input tzinfo, so the mutation is a no-op — and they write raw Redis on a Popoto key. If the existing test uses them, that is the vacuous shape flagged in Test Impact: rewrite it onto the ORM fixture above. |
+
+**Test 2 — `_collect_sessions` (`reflections/pm_briefings/daily_log.py`), field `completed_at`.**
+
+| | |
+|---|---|
+| Fixture (green) | `s.completed_at = <aware datetime inside the target day>`; plain `s.save()`; assert the session appears in the returned items. |
+| Mutation | `.replace(tzinfo=None)` on that `completed_at`. Plain `save()` is correct here — no flag. |
+| Mechanism it defeats | The legacy encoder only. `save()` stamps `updated_at` and nothing else, so `completed_at` is never re-stamped and `preserve_updated_at` is irrelevant. |
+| Measured | Naive `completed_at` round-tripped naive. With the guard removed, `start <= ts <= end` raises `TypeError`. That comparison sits **outside** every `try` in the function — the inner one wraps only the `datetime.fromtimestamp` float branch, and the two outer ones cover the import and the query — so the error propagates out of `_collect_sessions` and the test **errors**. A pytest error, not an assertion failure. **Red**; record it as red, not as a broken run. |
+
+**Test 3 — resumable-session filter (`reflections/crash_recovery.py`), field `updated_at`.**
+
+| | |
+|---|---|
+| Fixture (green) | Create a session whose `status` is in `RESUMABLE_STATUSES` (`abandoned`, `completed`, `failed`, `killed`); `s.updated_at = datetime.now(UTC) - timedelta(minutes=5)`; `s.save(preserve_updated_at=True)`; assert the session appears in `recent`. |
+| Mutation | `.replace(tzinfo=None)` on that value, `preserve_updated_at=True` retained. |
+| Mechanism it defeats | Both, exactly as test 1 — it is the same field on the same model. |
+| Measured | Round-trip naive. With the guard, the session is in `recent`. With the guard removed, `updated > cutoff` raises `TypeError`, caught by the per-session `except Exception` at `:191-198`, and the session is dropped from `recent` — the membership assertion fails. **Red.** |
+
+**Test 4 — dead `isinstance(_ua, datetime)` branch (`reflections/audits/redis_quality_audit.py`), field `Chat.updated_at`.**
+
+| | |
+|---|---|
+| Fixture (green) | `Chat(chat_id=..., chat_name=..., updated_at=<float>)`; `save()`; re-read through `Chat.query`; assert `isinstance(chat.updated_at, float)`. |
+| Mutation | **Not a naive datetime** — `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`), so tz-awareness is meaningless on it. The falsifier of the deadness claim is *a datetime in the field at all*: `chat.updated_at = datetime.now(UTC)` then `chat.save()`. |
+| Mechanism it defeats | Neither of the two above — this test has no datetime write path to defend. It defeats the different failure mode: an assertion that would hold vacuously if the field could in fact carry a datetime. |
+| Measured | The in-memory assignment succeeds (the attribute reads back as a `datetime`), and then `save()` raises `popoto ModelException: Model instance parameters invalid. Failed to save.` The test goes red **at the fixture line, before its own assertion**. That traceback *is* test 4's red block, and it is the stronger result: the field cannot hold a datetime, so the `isinstance(_ua, datetime)` branch at `:60-62` is unreachable by construction, which is precisely the dead-code verdict. Record the `ModelException` as the red evidence; do **not** read it as an inconclusive or broken run. |
+
+- Report any test that stayed green under its own mutation — that test does not ship as-is.
 
 ### 5. Documentation
 - **Task ID**: document-feature
