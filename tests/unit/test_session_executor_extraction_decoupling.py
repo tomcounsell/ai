@@ -1,229 +1,123 @@
-"""Unit tests for extraction-finalization decoupling (hotfix #1055).
+"""Post-session extraction is a durable job, not a fire-and-forget task (#3183).
 
-These tests verify the invariants of the fire-and-forget extraction scheduler
-that was added to ``agent/session_executor.py``:
+Extraction used to be an ``asyncio.create_task`` the worker held in memory
+(hotfix #1055). It is now a ``SideEffectJob`` row written at the end of
+``_execute_agent_session``, drained out of process by the
+``side-effect-drain`` reflection. These tests pin the properties that made the
+old scheduler safe and the ones the row adds:
 
-- Extraction failures never propagate out of ``_execute_agent_session``.
-- The PM nudge (``_handle_dev_session_completion``) fires while extraction
-  is still pending — proving the #987 ordering is preserved and the #1055
-  stall pattern cannot reoccur.
-- Duplicate schedules for the same session_id are deduplicated.
-- ``drain_pending_extractions`` returns immediately when no tasks are
-  pending (first-deploy case).
+- The enqueue happens at the end of ``_execute_agent_session``, and it is an
+  enqueue rather than a ``create_task``.
+- ``payload_json`` carries ``response_text``, ``turn_count`` and
+  ``is_conversational``, so the #1822 trivial-session gate survives the
+  process boundary. Reading either signal inside the drain would not: teardown
+  clears the in-memory turn tracker, which is why they are captured by value.
+- An enqueue failure is non-fatal at that call site. A raise there would skip
+  the session teardown that follows it.
 """
 
-import asyncio
-import logging
+import inspect
+import json
 
 import pytest
 
 from tests.unit.session_lookup_mock import wire_session_lookup
 
 
-@pytest.fixture(autouse=True)
-def _clear_pending_tasks():
-    """Reset the module-level _pending_extraction_tasks between tests."""
-    from agent import session_executor as se
+class TestExtractionSeamIsAJobEnqueue:
+    """The seam is a durable row, and the old machinery is gone."""
 
-    se._pending_extraction_tasks.clear()
-    yield
-    # Cancel any leaked tasks so test teardown is clean
-    for task in list(se._pending_extraction_tasks.values()):
-        if not task.done():
-            task.cancel()
-    se._pending_extraction_tasks.clear()
+    def test_fire_and_forget_scheduler_is_gone(self):
+        """The in-memory scheduler and its shutdown drain no longer exist.
 
-
-class TestScheduleExtractionDecoupling:
-    """Verify fire-and-forget scheduler semantics."""
-
-    @pytest.mark.asyncio
-    async def test_extraction_error_does_not_propagate(self, monkeypatch):
-        """asyncio.TimeoutError inside the extraction task is swallowed by the wrapper."""
-        from agent import session_executor as se
-
-        async def _raise_timeout(session_id, response_text, project_key=None, **kwargs):
-            raise TimeoutError("simulated extraction timeout")
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _raise_timeout,
-        )
-
-        # Synchronous call — no await.
-        se._schedule_post_session_extraction("sess-err-1", "response text")
-
-        # Wait for the background task to complete (it will swallow the error).
-        task = se._pending_extraction_tasks.get("sess-err-1")
-        # If the task already ran to completion + done-callback popped it, task is None.
-        if task is not None:
-            try:
-                await asyncio.wait_for(task, timeout=2.0)
-            except TimeoutError:
-                task.cancel()
-                raise AssertionError("wrapper task did not complete")
-
-        # If we got here, the asyncio.TimeoutError was swallowed by the wrapper.
-        # Also confirm nothing is left pending for this session_id.
-        assert "sess-err-1" not in se._pending_extraction_tasks
-
-    @pytest.mark.asyncio
-    async def test_pm_nudge_fires_while_extraction_pending(self, monkeypatch):
-        """Scheduler is synchronous; extraction task is not done when scheduler returns."""
-        from agent import session_executor as se
-
-        # Stub extraction to suspend cooperatively — the task should still be
-        # pending immediately after the scheduler returns.
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
-            await asyncio.sleep(10)
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
-        )
-
-        se._schedule_post_session_extraction("sess-slow-1", "response text")
-
-        task = se._pending_extraction_tasks.get("sess-slow-1")
-        assert task is not None, "task must be registered immediately"
-        # The critical #1055 invariant: scheduler is synchronous and returned
-        # before the extraction task completed. `.done()` is False proves it.
-        assert task.done() is False, (
-            "extraction task must still be pending when scheduler returns — "
-            "proves the PM nudge path is not blocked by extraction latency"
-        )
-
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    @pytest.mark.asyncio
-    async def test_duplicate_schedule_is_deduplicated(self, monkeypatch, caplog):
-        """Calling _schedule_post_session_extraction twice with same session_id dedupes."""
-        from agent import session_executor as se
-
-        caplog.set_level(logging.INFO, logger="agent.session_executor")
-
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
-            await asyncio.sleep(5)
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
-        )
-
-        se._schedule_post_session_extraction("s1", "first call")
-        first_task = se._pending_extraction_tasks["s1"]
-
-        se._schedule_post_session_extraction("s1", "second call")
-        # Dict entry should be identical task object — second call no-ops.
-        assert se._pending_extraction_tasks["s1"] is first_task, (
-            "second schedule must not replace the first task"
-        )
-        assert any("already in-flight for s1" in rec.message for rec in caplog.records), (
-            "must log INFO with 'already in-flight for s1'"
-        )
-
-        first_task.cancel()
-        try:
-            await first_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    @pytest.mark.asyncio
-    async def test_drain_pending_extractions_noop_when_empty(self, caplog):
-        """drain_pending_extractions returns in ~0s and emits no WARNING when empty."""
-        import time
-
-        from agent import session_executor as se
-
-        # Ensure empty state
-        assert se._pending_extraction_tasks == {}
-
-        caplog.set_level(logging.WARNING, logger="agent.session_executor")
-
-        start = time.time()
-        await se.drain_pending_extractions(timeout=5.0)
-        elapsed = time.time() - start
-
-        assert elapsed < 0.2, (
-            f"drain must return almost immediately when no tasks are pending "
-            f"(got {elapsed:.2f}s) — "
-            "protects graceful shutdown from unnecessary 5s wait on first-deploy"
-        )
-        # No WARNING messages should have been emitted for the empty case
-        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert not warning_records, (
-            f"empty-drain must not log WARNING (got {[r.message for r in warning_records]})"
-        )
-
-    @pytest.mark.asyncio
-    async def test_scheduler_is_sync_def_not_async(self):
-        """Structural invariant: _schedule_post_session_extraction is sync (review guard)."""
-        import inspect
-
-        from agent import session_executor as se
-
-        assert not inspect.iscoroutinefunction(se._schedule_post_session_extraction), (
-            "_schedule_post_session_extraction MUST be declared 'def', not 'async def' — "
-            "any awaiting would regress #987 and #1055. See hotfix #1055 docstring."
-        )
-
-    @pytest.mark.asyncio
-    async def test_cancellation_does_not_propagate_past_wrapper(self, monkeypatch):
-        """Cancelling a scheduled task raises CancelledError inside the wrapper.
-
-        The wrapper re-raises CancelledError (preserving cancellation semantics
-        for shutdown drain). The caller (scheduler or drain) is responsible for
-        not letting CancelledError propagate to user-visible paths.
+        Their presence would mean two extraction paths, and the one that
+        cannot survive a worker restart would still be live.
         """
         from agent import session_executor as se
 
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
-            await asyncio.sleep(30)
+        assert not hasattr(se, "_schedule_post_session_extraction")
+        assert not hasattr(se, "drain_pending_extractions")
+        assert not hasattr(se, "_pending_extraction_tasks")
 
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
+    def test_executor_enqueues_rather_than_creating_a_task(self):
+        """``_execute_agent_session`` reaches extraction through ``enqueue``."""
+        from agent import session_executor as se
+
+        source = inspect.getsource(se._execute_agent_session)
+        assert 'enqueue(\n                "memory_extraction",' in source, (
+            "the extraction seam must be a SideEffectJob enqueue"
+        )
+        assert "post_session_extraction" not in source, (
+            "no in-process extraction task may survive at the seam"
         )
 
-        se._schedule_post_session_extraction("sess-cancel", "text")
-        task = se._pending_extraction_tasks["sess-cancel"]
-        task.cancel()
+    def test_enqueue_writes_the_gate_signals_into_the_payload(self, monkeypatch):
+        """The three payload values round-trip through ``payload_json``.
 
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        ``turn_count`` and ``is_conversational`` are the #1822 trivial-session
+        gate. They are captured before teardown and snapshotted into the row;
+        re-deriving either in the drain minutes later would silently restore
+        the bug they were added to fix.
+        """
+        from agent import side_effects
+
+        created = {}
+
+        class _FakeJob:
+            @staticmethod
+            def create(**kwargs):
+                created.update(kwargs)
+                return None
+
+        class _FakeRedis:
+            def set(self, *args, **kwargs):
+                return True
+
+            def get(self, key):
+                return None
+
+        monkeypatch.setattr(side_effects, "SideEffectJob", _FakeJob)
+        monkeypatch.setattr("utils.redis_client.text_redis", lambda: _FakeRedis())
+
+        side_effects.enqueue(
+            "memory_extraction",
+            "sess-gate",
+            "valor",
+            {"response_text": "text", "turn_count": 1, "is_conversational": False},
+        )
+
+        payload = json.loads(created["payload_json"])
+        assert payload == {
+            "response_text": "text",
+            "turn_count": 1,
+            "is_conversational": False,
+        }
+        assert created["session_id"] == "sess-gate"
+        assert created["status"] == "pending"
+
+
+class TestEnqueueFailureIsNonFatalAtTheSeam:
+    """A Redis error at the seam must cost an extraction, never a teardown."""
+
+    def test_seam_wraps_the_enqueue(self):
+        """The call site carries its own try/except with a non-fatal log.
+
+        ``enqueue()`` itself keeps raising — the migration back-enqueue depends
+        on that — so the guard has to live here. The statement sits inside
+        ``_execute_agent_session`` with no enclosing try, and a raise would
+        skip the error-case snapshot, the steering-queue rescue, and the
+        reaction/nudge path to the end of the function.
+        """
+        from agent import session_executor as se
+
+        source = inspect.getsource(se._execute_agent_session)
+        head = source[: source.index('enqueue(\n                "memory_extraction",')]
+        assert head.rstrip().endswith("try:"), "the enqueue must sit directly under a try:"
+        assert "SideEffectJob enqueue failed (non-fatal)" in source
 
 
 class TestTrivialSessionGateSignals:
-    """Issue #1822 Fix 2: capture helpers + signal threading through the scheduler."""
-
-    @pytest.mark.asyncio
-    async def test_turn_count_and_origin_threaded_to_extraction(self, monkeypatch):
-        """The scheduler forwards turn_count + is_conversational by value."""
-        from agent import session_executor as se
-
-        captured = {}
-
-        async def _capture(session_id, response_text, project_key=None, **kwargs):
-            captured.update(kwargs)
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _capture,
-        )
-
-        se._schedule_post_session_extraction(
-            "sess-gate", "text", turn_count=1, is_conversational=False
-        )
-        task = se._pending_extraction_tasks.get("sess-gate")
-        if task is not None:
-            await asyncio.wait_for(task, timeout=2.0)
-
-        assert captured.get("turn_count") == 1
-        assert captured.get("is_conversational") is False
+    """Issue #1822 Fix 2: the capture helpers the payload is built from."""
 
     def test_is_conversational_session_telegram_origin(self):
         """A session with initial_telegram_message is conversational (must always extract)."""
@@ -259,3 +153,30 @@ class TestTrivialSessionGateSignals:
         monkeypatch.setattr("models.agent_session.AgentSession", fake_cls)
 
         assert se._capture_turn_count("whatever") is None
+
+
+class TestCorrelationReachesTheSubprocess:
+    """Lane 5a: the harness env carries the session's correlation id."""
+
+    def test_harness_env_declares_correlation_id(self):
+        from agent import session_executor as se
+
+        source = inspect.getsource(se._execute_agent_session)
+        assert '"VALOR_CORRELATION_ID": cid or ""' in source
+
+
+@pytest.mark.asyncio
+async def test_run_due_is_a_noop_at_limit_zero(monkeypatch):
+    """``run_due(limit=0)`` touches nothing at all."""
+    from agent import side_effects
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("run_due(limit=0) must not read Redis")
+
+    monkeypatch.setattr(side_effects, "SideEffectJob", _boom)
+    assert await side_effects.run_due(limit=0) == {
+        "ran": 0,
+        "failed": 0,
+        "dead_lettered": 0,
+        "skipped": 0,
+    }

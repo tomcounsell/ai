@@ -41,6 +41,8 @@ if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     except ImportError:
         pass
 
+from bridge.log_format import StructuredJsonFormatter  # noqa: E402
+
 logger = logging.getLogger("worker")
 
 # Shared mutable state (shutdown_requested, etc.) lives in agent.session_state.
@@ -434,16 +436,18 @@ def _configure_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    handlers: list[logging.Handler] = [
-        logging.StreamHandler(sys.stderr),
-        logging.FileHandler(str(log_file)),
-    ]
-    for handler in handlers:
-        handler.setFormatter(formatter)
+    # The file handler emits JSON so worker logs can be joined to the bridge's
+    # on correlation_id, agent_session_id, and session_id — the bridge has done
+    # this since #1817 and the worker's half of every journey was plain text
+    # (#3183 lane 5a). stderr stays human-readable: it is what a person tails.
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(str(log_file))
+    file_handler.setFormatter(StructuredJsonFormatter())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    for handler in handlers:
+    for handler in (stream_handler, file_handler):
         root_logger.addHandler(handler)
 
 
@@ -1072,17 +1076,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         await drain_pending_completions(timeout=15.0)
     except Exception as e:
         logger.warning(f"Completion drain failed: {e}")
-
-    # Drain in-flight post-session extractions (hotfix #1055).
-    # Ordering: after worker-task wait (so every extraction that will be scheduled
-    # has been scheduled), before health/notify/reflection cancels (so the event
-    # loop is still running and pending extractions can cooperate with cancel).
-    try:
-        from agent.session_executor import drain_pending_extractions
-
-        await drain_pending_extractions(timeout=5.0)
-    except Exception as e:
-        logger.warning(f"Extraction drain failed: {e}")
 
     # Drain in-flight calendar heartbeats (issue #2590). Same ordering rationale
     # as the extraction drain above: the loop is still running, so a heartbeat
