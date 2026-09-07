@@ -1238,6 +1238,52 @@ def _migrate_clear_docs_audit_liveness_keys(project_dir: Path) -> str | None:
         return None
 
 
+def _migrate_confirm_improvement_models_readable(project_dir: Path) -> str | None:
+    """Confirm the eight new Improvement* models (issue #3177) import and read.
+
+    Purely additive: eight brand-new model classes, no field added to and no
+    field removed from an existing model, so there is nothing to backfill and
+    no index set to strip. This entry exists so ``run_pending_migrations()``
+    carries a durable marker for the schema version that introduced them —
+    without it there is no record on a machine that the improvement keyspace
+    was ever registered, and a later subtractive migration has no predecessor
+    to reason from.
+
+    Read-only: it imports each class and runs one bounded, project-scoped
+    query per model to prove the keyspace resolves. Writes nothing. Returns
+    None on success, error string on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models import (
+            ImprovementCase,
+            ImprovementCharter,
+            ImprovementEvaluation,
+            ImprovementEvidence,
+            ImprovementExperiment,
+            ImprovementInvestigation,
+            ImprovementModelRevision,
+            ImprovementRelease,
+        )
+
+        for model in (
+            ImprovementCharter,
+            ImprovementEvidence,
+            ImprovementModelRevision,
+            ImprovementCase,
+            ImprovementInvestigation,
+            ImprovementExperiment,
+            ImprovementEvaluation,
+            ImprovementRelease,
+        ):
+            list(model.query.filter(project_key="valor"))[:1]
+        return None
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -1352,6 +1398,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_job_promises_to_expectations,
         "Rewrite Job goal promises as inbound expectations and clear the retired "
         "has_open_promises index sets (issue #2708)",
+    ),
+    "confirm_improvement_models_readable": (
+        _migrate_confirm_improvement_models_readable,
+        "Register the eight additive Improvement* models (issue #3177) and "
+        "confirm their keyspace resolves",
     ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,

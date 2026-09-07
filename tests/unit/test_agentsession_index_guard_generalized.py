@@ -432,3 +432,59 @@ def test_reentrant_call_from_another_thread_is_a_noop():
         lock.release()
 
     assert result == (0, 0)
+
+
+# --- #3177: the same runtime IndexedField enumeration, applied to the eight
+# improvement records. The guard above derives its field set from
+# `isinstance(f, IndexedField)` rather than a hardcoded name list, which means
+# any model that grows an index is covered automatically — provided the index
+# is one the guard can afford. These tests pin that affordability for the new
+# models: an index whose value space is unbounded turns the rebuild pass into
+# a scan over one Redis set per distinct value.
+
+
+def _improvement_models():
+    import models as m
+
+    return [getattr(m, name) for name in sorted(m.__all__) if name.startswith("Improvement")]
+
+
+def test_improvement_models_are_enumerated_by_the_runtime_derivation():
+    """All eight improvement records expose IndexedFields the same way AgentSession does."""
+    from popoto import IndexedField
+
+    models_seen = _improvement_models()
+    assert len(models_seen) == 8, [m.__name__ for m in models_seen]
+
+    for model in models_seen:
+        indexed = {name for name, f in model._meta.fields.items() if isinstance(f, IndexedField)}
+        # Every improvement record carries at least one lifecycle index, and
+        # never more than two. More than that is a modeling smell, not a
+        # performance one: it means the record is tracking several orthogonal
+        # lifecycles and should be two records.
+        assert 1 <= len(indexed) <= 2, f"{model.__name__} indexes {indexed}"
+
+
+def test_improvement_model_indexes_are_low_cardinality():
+    """No improvement index may hold an id, digest, counter, or timestamp.
+
+    The concrete vocabularies live in tests/unit/test_improvement_models.py.
+    This is the structural half: whatever those vocabularies say, an index on a
+    field whose *name* marks it unbounded is rejected here, so a future field
+    added without touching that vocabulary map still fails.
+    """
+    from popoto import IndexedField
+
+    unbounded_markers = ("_id", "_at", "digest", "version", "revision", "count", "trials")
+
+    for model in _improvement_models():
+        for name, f in model._meta.fields.items():
+            if not isinstance(f, IndexedField):
+                continue
+            assert name != "id"
+            for marker in unbounded_markers:
+                assert marker not in name, (
+                    f"{model.__name__}.{name} is indexed and its name marks it unbounded "
+                    f"({marker!r}). rebuild_indexes() would scan one Redis set per distinct "
+                    "value."
+                )
