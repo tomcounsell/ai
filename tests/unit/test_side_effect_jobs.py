@@ -204,7 +204,7 @@ class TestNotDue:
     """``next_attempt_at`` is what makes the backoff real."""
 
     @pytest.mark.asyncio
-    async def test_a_job_due_in_the_future_is_not_run(self, jobs, monkeypatch):
+    async def test_a_not_due_job_is_never_run(self, jobs, monkeypatch):
         """The row that catches a dropped ``__lte`` predicate.
 
         Dropping it would run every pending job on every 60s tick, erasing the
