@@ -48,7 +48,8 @@ the judgment layer used is a deliberate per-route choice, not an oversight:
 |---|---|---|---|---|
 | Drafter short path (raw output < 200 chars, no SDLC session, no artifacts, no `?`, no fenced code) | `draft_message`'s early return → `_evaluate_drafter_promise(..., use_llm=False)` | Heuristic only (regex `_evaluate_promise_heuristic`) — **zero LLM calls, test-enforced** | `promise_gate_drafter` | Bounds per-message latency on brief replies; short replies are the highest-risk population for empty promises (#2421), so the gate has to be free to run on every one of them |
 | Drafter main path (everything else) | `draft_message`'s main return → `_evaluate_drafter_promise(..., use_llm=True)` | LLM-primary (`_evaluate_promise_llm_or_heuristic`), regex fail-closed-only fallback | `promise_gate_drafter_llm` / `promise_gate_drafter_heuristic` / `promise_gate_drafter_timeout` / `promise_gate_drafter_oversize` | The composed, longer reply is where forward-deferral prose actually lives (the Incident A class); the real caller is `agent/output_handler.py`, defaulting `use_llm=True` |
-| Email outbound (`bridge/email_bridge.py::EmailOutputHandler.send`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | Email has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the call site only reads `draft.text` and there is no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring on this transport, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so the call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
+| Relay-handler delivery, Telegram and email (`agent/output_handler.py`, one `draft_message(text, session=..., medium=drafter_medium)` call with `drafter_medium` = `"email"` when `transport == "email"`, otherwise `"telegram"`) | `draft_message`'s main return with the default `use_llm=True` | LLM-primary, same as the drafter main path | `promise_gate_drafter_llm` / `..._heuristic` / `..._timeout` / `..._oversize` (transport column carries `email` or `telegram`) | This is the caller with bounce wiring: a `block` verdict sets `needs_self_draft=True` and the handler routes it through `_inject_self_draft_steering` before either `_send_via_email_outbox` or the Telegram outbox, so the verdict can change what ships on both transports. The medium only changes drafting rules, not the gate |
+| Email bridge's own handler (`bridge/email_bridge.py::EmailOutputHandler.send`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | This call site has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the handler only reads `draft.text` and has no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so this one call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
 | Stop hook (`agent/hooks/stop.py`) | Explicit `draft_message(..., use_llm=False)` | Heuristic only, forced regardless of message length | `promise_gate_drafter` (same sources as the short path) | Runs inline on the Stop hook's 10-second harness-wall critical path; an inline LLM round-trip there repeats the documented 126/131 SIGKILL incident (`docs/features/memory-hook-performance.md`) — the fix was "detach, don't bound," not "add a timeout around a Haiku call" |
 | Poll questions (`TelegramRelayOutputHandler.send_poll`) | `validate_poll_question` → `_evaluate_promise_heuristic` directly | Heuristic only | `promise_gate_poll` / `promise_gate_poll_disabled` (transport `telegram_poll`; `session_id` is the sending session's id, or `null` for a session-less send, whose outbox is keyed by chat id instead); a block is surfaced as a non-blocking `Violation(rule="poll_question_promise")` and the poll still sends | Poll questions reach Telegram without ever calling `draft_message`, so they would otherwise ship with zero honesty checking; a poll question is a structured artifact, not a prose reply worth an LLM round-trip. Residual (no LLM backstop) tracked in #3094 |
 | Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | `agent/session_health._gate_terminal_promise` | Heuristic only — **the one known-uncovered route**: it never reaches the LLM layer | `terminal_flush` | No live agent exists at flush time to consume an LLM-derived revise-or-override advisory; there is nobody left to self-draft a rewrite, so the heuristic backstop is what actually ships the substitution. Residual (no LLM backstop) tracked in #3094 |
@@ -221,11 +222,16 @@ The phrase '{quoted offending phrase}' was rejected.
 Your session is ending. Do not promise future work. Choose one of:
   (a) Deliver findings now: 'I did X with evidence Y'
   (b) State explicitly that you didn't: 'I didn't do X because Y'
+  (c) If the work legitimately cannot finish this turn, schedule a real
+      check-in and cite it:
+        python -m tools.agent_session_scheduler checkin \
+          --prompt "<what to do when it fires>" --in 30m
+      then include the returned 'schedule_id=<hex>' in your message.
 
-See docs/features/promise-gate.md for the full contract.
+See docs/features/promise-gate.md and docs/features/checkin-primitive.md.
 ```
 
-The agent's loop sees the error, applies one of the two
+The agent's loop sees the error, applies one of the three
 contractually-acceptable shapes, and re-emits. The second call almost
 always passes.
 
@@ -301,11 +307,14 @@ via the `_write_promise_audit` helper. The entry shape:
 `class_` is optional in the verdict tool schema (only `action` and `reason`
 are required) — a real Haiku call can return `action="block"` with
 `class_=None`. Never assert on `class_` in a test; assert on `action` (and,
-where relevant, on `reason`'s text). `elapsed_ms`/`queue_wait_ms` are present
-whenever the call actually reached the LLM-attempt code path (any of the
-`llm`/`heuristic`/`timeout` suffixes below, on both the CLI and drafter
-namespaces); they are omitted on the kill-switch and classifier-delegation
-short-circuits, which never call the LLM and have nothing to time.
+where relevant, on `reason`'s text). `elapsed_ms` is present on every row
+that ran a judgment, including the zero-LLM `promise_gate_drafter` and
+`promise_gate_poll` rows; it is omitted only on the kill-switch and
+classifier-delegation short-circuits, which have nothing to time.
+`queue_wait_ms` is present only when the LLM attempt reached the semaphore
+acquire (the `llm` and `timeout` suffixes, and a `heuristic` fallthrough
+after acquiring); it is omitted on every `oversize` row, on the no-API-key
+heuristic fallthrough, and on every zero-LLM row.
 
 The `source` discriminator takes one of:
 
@@ -316,7 +325,7 @@ The `source` discriminator takes one of:
 | `promise_gate_timeout` | CLI path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
 | `promise_gate_disabled` | CLI path: kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter does not populate this) |
-| `promise_gate_drafter` | Drafter short path (`use_llm=False`, the <200-char early return, the Stop hook's forced-heuristic call, and the email outbound path's pinned `use_llm=False` main-path call, see `EmailOutputHandler.send`) |
+| `promise_gate_drafter` | Drafter short path (`use_llm=False`, the <200-char early return, the Stop hook's forced-heuristic call, and the email bridge's own handler's pinned `use_llm=False` main-path call, `bridge/email_bridge.py::EmailOutputHandler.send`; the relay handler's email deliveries are LLM-gated and use the suffixed sources below) |
 | `promise_gate_drafter_disabled` | Drafter path: kill switch was on (any length) — records `action="allow" / reason="gate_disabled"`. Distinct from `promise_gate_drafter` so the disabled state is greppable by source on this route, mirroring `promise_gate_disabled` on the CLI path |
 | `promise_gate_drafter_llm` | Drafter main path (`use_llm=True`): LLM Haiku call returned a parseable verdict |
 | `promise_gate_drafter_heuristic` | Drafter main path: LLM unavailable / parse failure → fell through to regex |
@@ -339,7 +348,7 @@ audit entry. Every other branch writes one.
 
 The gate also emits `promise_gate.blocked`, `promise_gate.disabled`,
 and `promise_gate.timeout` session_events via best-effort
-`AgentSession.query.get(session_id)` (Popoto ORM, never raw Redis
+`AgentSession.get_by_id(session_id)` (Popoto ORM, never raw Redis
 per CLAUDE.md). On real-session hit, the event is appended to
 `session.session_events` and the session is saved. On miss
 (synthetic `cli-{epoch}` ID, stale ID, lookup error), session_events
@@ -569,9 +578,12 @@ sed -i '' '/^PROMISE_GATE_ENABLED=/d' ~/Desktop/Valor/.env
 ### Tuning the LLM prompt
 
 The forward-deferral and behavioral-change few-shot examples live in
-`bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter does not
-have its own classifier system prompt — empty-promise detection runs via
-`_evaluate_drafter_promise` (a regex/heuristic helper), not a Haiku call.
-If telemetry shows a class of false-positives the LLM cannot catch from
-text alone, the `PROMISE_GATE_SYSTEM_PROMPT` in `bridge/promise_gate.py`
-is the right knob to turn (for the CLI send paths that call `evaluate_promise`).
+`bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. There is one prompt for
+every LLM-gated route: the CLI send paths (`evaluate_promise` /
+`evaluate_promise_async`) and the drafter main path
+(`_evaluate_drafter_promise(..., use_llm=True)`, which calls the same
+`_evaluate_promise_llm_or_heuristic`) all send it. Only the heuristic-only
+routes (short path, Stop hook, `EmailOutputHandler.send`, poll questions) are
+unaffected by it. If telemetry shows a class of false-positives the LLM cannot
+catch from text alone, this prompt is the knob to turn, and it changes the
+verdict on every composed relay-handler delivery as well as on CLI sends.

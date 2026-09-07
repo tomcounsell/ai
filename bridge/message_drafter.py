@@ -740,13 +740,15 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
     ``use_llm`` (Task 5, #3027) selects the judgment layer:
 
     * ``False`` (short-output path, and the ``use_llm=False``
-      ``draft_message`` calls in the Stop hook and the email bridge) — the
+      ``draft_message`` calls in the Stop hook and
+      ``bridge.email_bridge.EmailOutputHandler.send``) — the
       regex-only heuristic
       (``_evaluate_promise_heuristic``, zero LLM calls, so the short path's
       latency guarantee holds). Audited as ``source="promise_gate_drafter"``.
-    * ``True`` (the composed/main path for the Telegram delivery caller,
-      ``agent/output_handler.py``, and any other ``draft_message`` main
-      return NOT called with ``use_llm=False``) — the LLM-primary path via
+    * ``True`` (the composed/main path for the relay handler,
+      ``agent/output_handler.py``, which drafts both its Telegram and its
+      email deliveries through one call, and any other ``draft_message``
+      main return NOT called with ``use_llm=False``) — the LLM-primary path via
       ``bridge.promise_gate._evaluate_promise_llm_or_heuristic`` (same
       SDK-timeout / semaphore-bound / heuristic-fallthrough contract as the
       CLI's ``evaluate_promise_async``). Audited as
@@ -1200,7 +1202,11 @@ async def draft_message(
        on BOTH return paths: the short-output early return (which gates the
        verbatim raw_response bytes it ships — issue #2421) and this main-path
        return (which gates the narration-stripped text). Every gate decision
-       writes a source="promise_gate_drafter" audit entry. All promoted
+       writes an audit entry: source="promise_gate_drafter" on the
+       heuristic-only judgment, "promise_gate_drafter_llm" /
+       "..._heuristic" / "..._timeout" / "..._oversize" on the LLM-primary
+       main path, and "promise_gate_drafter_disabled" when the kill switch
+       is off. All promoted
        drafts route through the self-draft steering path
        (agent/output_handler.py:429-441), where a local_file_path_reference
        violation adds an attach-via-`--file` instruction telling the agent to
@@ -1236,9 +1242,11 @@ async def draft_message(
             "detach, don't bound" — do NOT try to reintroduce an LLM call
             there behind a timeout; this pin is permanent.
             **TEMPORARY** for ``bridge/email_bridge.py``
-            (``EmailOutputHandler.send``): email has no bounce path, so a
-            `block` verdict cannot alter delivery and an LLM round-trip
-            there is cost without enforcement. Lift this pin only after
+            (``EmailOutputHandler.send``): that handler has no bounce
+            wiring, so a `block` verdict cannot alter delivery and an LLM
+            round-trip there is cost without enforcement. The relay
+            handler's email route (``agent/output_handler.py``) has the
+            bounce wiring and keeps the default. Lift this pin only after
             wiring the bounce path tracked in #3124.
 
     Returns:
