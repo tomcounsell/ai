@@ -302,11 +302,13 @@ No race conditions identified. Every change is the removal or rewording of a syn
 
 ## No-Gos (Out of Scope)
 
+- `models/job.py`. **Already done under #3173** and out of scope. It contributes zero hits to either sweep shape, so no arithmetic in this plan depends on it.
 - [SEPARATE-SLUG #3199] `models/agent_session.py` index-repair and identityless-quarantine work. That lane owns `~:2476-2528`; this plan does not touch it.
-- [SEPARATE-SLUG #3199] The `test_session_archive` naive-round-trip node and the quarantine-counter trio. Same lane, same file, different failure.
-- Consolidating the eighteen keep-sites onto `utils.utc.to_unix_ts`. **Not deferred to a ticket — deliberately rejected**: `to_unix_ts` returns a float and ten of the keeps need an aware `datetime`, so the consolidation is not available for most of them, and `docs/features/utc-timestamps.md:87` records the standing decision to leave the remaining inline helpers alone.
-- `utils/utc.py:28` (`to_local`). **Not deferred — out of shape**: it *raises* on a naive input as a validation contract rather than coercing one. It is not the guard this classification is about.
-- `tools/memory_search/cli.py:389,396`. **Not deferred — out of shape**: it unconditionally stamps UTC on `strptime` output of a CLI argument. There is no conditional guard to classify.
+- [SEPARATE-SLUG #3199] `agent/session_archive.py` and `tests/unit/test_session_archive.py` — the #3207 node and the archive datetime contract. This plan reads the restore path as evidence and records the ingress finding; it changes nothing there.
+- Consolidating the nineteen annotated keep-sites onto `utils.utc.to_unix_ts`. **Not deferred to a ticket — deliberately rejected**, on an argument that stands without appeal to any document this plan edits: `to_unix_ts` returns a `float`, and ten of the keeps need an aware `datetime` for subtraction, so the consolidation is simply unavailable for most of them. (`docs/features/utc-timestamps.md` recorded a compatible standing decision, but that sentence is one this plan's task 5 rewrites, so it corroborates rather than justifies.)
+- `utils/utc.py:28` (`to_local`). **Not deferred — out of shape**: it *raises* on a naive input as a validation contract rather than coercing one. It is not the guard this classification is about, and it is the one sweep hit counted among the 32 that receives no change.
+- `tools/memory_search/cli.py:389,396`. **Not deferred — out of shape**: it unconditionally stamps UTC on `strptime` output of a CLI argument. There is no conditional guard to classify, and it matches neither sweep shape.
+- `agent/session_telemetry.py:111` (`datetime.utcnow().isoformat()`) and `tools/valor_telegram.py:310` (`replace(tzinfo=None)` on both sides of one comparison). **Recorded by the #3207 audit, not changed**: neither compares a popoto value against a naive `now`.
 
 ## Update System
 
@@ -331,124 +333,126 @@ The one agent-visible surface in scope is indirect: `reflections/pm_briefings/da
 Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
-- [ ] Rewrite the four stale rationale blocks named in the Solution section (`utils/utc.py:41-49`, `agent/session_runner/liveness.py:66-72`, `tools/session_progress.py:200-203`, `monitoring/session_watchdog.py:54-59`).
-- [ ] Give every other keep-site a one-line reason naming its non-popoto input source, per the issue's closing condition.
-- [ ] Delete the two now-false comment blocks that accompany deletions (`models/agent_session.py:1088`, `reflections/pm_briefings/daily_log.py:381`) and the four-line block at `reflections/crash_recovery.py:176-179`.
+- [ ] Rewrite the six stale rationale blocks on keep-sites named in the Solution section: `utils/utc.py:44`, `agent/session_runner/liveness.py:69`, `tools/session_progress.py:201`, `tools/agent_session_scheduler.py:47`, `models/agent_session.py:2569`, `monitoring/session_watchdog.py:57`.
+- [ ] Give every one of the nineteen annotated keep-sites a one-line reason naming its non-popoto input source, per the issue's closing condition.
+- [ ] Delete the three now-false comment blocks that accompany deletions: `models/agent_session.py:1089`, `reflections/pm_briefings/daily_log.py:380`, and the four-line block at `reflections/crash_recovery.py:176-179`.
 
 ## Success Criteria
 
-- [ ] The sweep, re-run in both shapes and across all directories including `utils/` and `ui/`, returns exactly the eighteen keep-sites plus the six #3173 survivors — and no delete-site.
-- [ ] Every surviving guard carries a one-line reason naming its non-popoto input source.
-- [ ] All five deletions have a test that reads the value back through popoto, and each test has been shown to go red when a naive value is forced into its fixture. The red output is pasted in the PR body.
-- [ ] The PR body records the verdict for every site, delete and keep alike.
+Every number below is a measured pre-state at `4b5a13184` with `/usr/bin/grep`, so each criterion is checkable by arithmetic rather than by judgement.
+
+- [ ] **The main sweep goes 31 → 28** and **the `getattr` sweep goes 1 → 0**, over the nine directories `agent/ models/ monitoring/ reflections/ bridge/ tools/ worker/ utils/ ui/`, excluding tests. That is the four deletions and nothing else. Total work set 32 → 28.
+- [ ] **The stale-prose sweep goes 9 → 0** under the three-phrasing alternation `strips tzinfo|SortedField stores them|round-trips values as NAIVE`, over the same nine directories. Every one of the nine is owned by a task in this plan.
+- [ ] Every one of the 28 surviving guards carries a one-line reason naming its non-popoto input source, or is one of the nine verified-untouched sites listed in the Solution.
+- [ ] All four deletions have a test that reads the value back through popoto and asserts an observable result, and **each test has been shown individually to go red** when a naive value is forced into its own fixture. Four separate red blocks are pasted in the PR body.
+- [ ] The PR body carries a **per-site verdict table with one row per site — 32 rows** — each giving the classification and its reason, plus the exact total site count and the re-run sweep output.
+- [ ] The PR body carries the **#3207 consumer audit table** and states that this lane discharges #3207's audit ask.
 - [ ] `docs/features/utc-timestamps.md` no longer describes the inline guards as "intentionally left untouched" and does record the two escape hatches.
-- [ ] No behaviour change: `reflections/pm_briefings/daily_log.py` still collects a session with a real `completed_at`, `redis_quality_audit` still returns `status: "ok"`, `crash_recovery` still filters by `updated_at`.
-- [ ] Tests pass (`/do-test`)
+- [ ] No behaviour change: `reflections/pm_briefings/daily_log.py` still collects a session with a real `completed_at`, `redis_quality_audit` still returns `status: "ok"`, `crash_recovery` still filters by `updated_at`, `_heal_future_updated_at` still returns a non-zero count for a future-dated row.
+- [ ] Scoped tests pass, with a **non-zero passed count read off the pytest summary line** for every batch. Exit 0 alone is not a pass (#3195).
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-The lane is small and the risk is concentrated in one place — proving the tests are not vacuous. The split is by file-ownership so two builders never write the same file.
+The lane is small and the risk is concentrated in one place — proving the tests are not vacuous. Two roles, and the split between them is the one that carries risk rather than the one that carries files.
 
 ### Team Members
 
-- **Builder (models + agent)**
-  - Name: `models-builder`
-  - Role: the two `models/agent_session.py` deletions and their tests
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (reflections)**
-  - Name: `reflections-builder`
-  - Role: the three reflections deletions (`daily_log.py`, `crash_recovery.py`, `redis_quality_audit.py`) and their tests
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (keep-site annotation)**
-  - Name: `annotation-builder`
-  - Role: the eighteen keep-site reasons and the four stale-prose rewrites, across `utils/`, `agent/`, `bridge/`, `monitoring/`, `tools/`
+- **Builder**
+  - Name: `tz-builder`
+  - Role: all four deletions, all nineteen keep-site reasons, the six stale-prose rewrites, the new tests, and the doc update. One agent owns every file, so no file-ownership rule is needed.
   - Agent Type: builder
   - Resume: true
 
 - **Validator (mutation check)**
   - Name: `mutation-validator`
-  - Role: for each of the five new tests, force a naive value into the fixture and confirm the test goes red; capture the output
+  - Role: for each of the four new tests, individually force a naive value into that test's fixture, re-run that node, confirm it goes red, revert, and move to the next. Capture each red block separately.
   - Agent Type: validator
   - Resume: true
 
-- **Documentarian**
-  - Name: `utc-documentarian`
-  - Role: `docs/features/utc-timestamps.md`
-  - Agent Type: documentarian
-  - Resume: true
+The builder and the validator never run concurrently, and the validator gets sole ownership of the checkout while it mutates. An author edit landing during a mutation run corrupts the measurement in both directions: the run can go red for the author's reason, or green because the mutation was overwritten. The builder commits and stops; the validator then runs alone.
 
-File ownership is disjoint by construction: `models-builder` owns `models/agent_session.py`, `reflections-builder` owns `reflections/**`, `annotation-builder` owns everything else. `annotation-builder` must not edit the two files the other builders own, even for a keep-site comment — the two `models/agent_session.py` keeps (`:801`, `:906`) belong to `models-builder`.
+A builder that mutation-checks its own tests is the #3173 failure this plan exists to avoid, which is why this one split survives the roster collapse.
 
 ## Step by Step Tasks
 
-### 1. Delete the two `models/agent_session.py` guards
-- **Task ID**: build-models
+### 0. Re-measure the pre-state and build the 32-row verdict table
+- **Task ID**: measure-prestate
 - **Depends On**: none
-- **Validates**: `tests/integration/test_updated_at_heal.py`, `tests/unit/test_agent_session_updated_at_utc.py`, `tests/integration/test_lifecycle_transition.py`
-- **Assigned To**: models-builder
+- **Validates**: the numbers every later task and Verification row is checked against
+- **Assigned To**: tz-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- Delete the `updated_at_utc.tzinfo is None` branch in `_heal_future_updated_at` (`:1092`) and the now-false comment above it.
-- Replace the `prev_time if prev_time.tzinfo else prev_time.replace(tzinfo=UTC)` ternary in `log_lifecycle_transition` (`:2225`) with `prev_time`. Leave the sibling `isinstance(prev_time, int | float)` branch alone — it is a type branch.
-- Add a one-line reason to the two keep-sites in this file (`__setattr__` at `:801`, `_normalize_kwargs` at `:906`) naming ISO-string ingress as the non-popoto source, and noting these two are what make the deletions elsewhere safe.
-- Add a test per deletion that persists an `AgentSession` through popoto, re-reads it, and asserts the aware value flows through without raising. Do not construct the session in memory.
+- **Parallel**: false
+- Run both sweep shapes and the three-phrasing prose alternation with `/usr/bin/grep`, each piped to `wc -l`. **Count, never `head`.** Expect 31, 1, and 9. A different number means the tree moved; reconcile before changing anything.
+- Write the 32-row verdict table (site, classification, reason) into the working notes. It is the PR body's centrepiece, so it is built first, not reconstructed at the end.
+- Confirm the two Prerequisites rows pass.
+
+### 1. Delete the `_heal_future_updated_at` guard and annotate the `models/agent_session.py` keeps
+- **Task ID**: build-models
+- **Depends On**: measure-prestate
+- **Validates**: `tests/integration/test_updated_at_heal.py`, `tests/unit/test_agent_session_updated_at_utc.py`, `tests/unit/test_session_health_trusted_clock.py`
+- **Assigned To**: tz-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Delete the `updated_at_utc.tzinfo is None` branch in `_heal_future_updated_at` (`:1092`) and the now-false comment at `:1089`.
+- **Leave `log_lifecycle_transition` (`:2225`) alone** — it is a keep. Add its one-line reason: `created_at` sits outside `_DATETIME_FIELDS`, so `__setattr__` never coerces it, and the archive-restore leg passes a `fromisoformat` result as a constructor kwarg.
+- Add a one-line reason to `__setattr__` (`:801`) and `_normalize_kwargs` (`:906`) naming ISO-string and float ingress as the non-popoto sources, **and recording what each does not cover**: `__setattr__` fires only for `_DATETIME_FIELDS`; neither fires for a constructor kwarg already typed as a datetime.
+- Rewrite the stale prose at `:2569` (`cleanup_expired`).
+- Add one test for the deletion: persist an `AgentSession` with a future-dated `updated_at` through popoto, re-read it, call `_heal_future_updated_at`, and **assert the returned count is 1**. Do not construct the session in memory; do not assert merely "no raise" — the per-record `except` swallows it.
 
 ### 2. Delete the three reflections guards
 - **Task ID**: build-reflections
-- **Depends On**: none
+- **Depends On**: build-models
 - **Validates**: `tests/unit/reflections/test_daily_log_aggregator.py`, `tests/unit/test_crash_recovery_gates.py`, `tests/unit/test_reflection_pool_bulkhead.py`
-- **Assigned To**: reflections-builder
+- **Assigned To**: tz-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- `daily_log.py:382`: collapse the ternary to `ts = ca`, delete the false comment on `:381`, keep the `else` float branch.
+- **Parallel**: false
+- `daily_log.py:382`: collapse the ternary to `ts = ca`, delete the false comment on `:380`, keep the `else` float branch. Keep the mixed-input guard at `:352` and give it its reason.
 - `crash_recovery.py:186`: delete the `getattr(updated, "tzinfo", None) is None` branch and the four-line comment block at `:176-179`. Keep the surrounding `except Exception` handler and its warning.
 - `redis_quality_audit.py:60-62`: delete the whole `isinstance(_ua, datetime)` block as dead code and simplify to `days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)`. Justify it in the diff as a dead-branch removal — `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`) and line 55 already compares it to a float. Drop the now-unused `datetime`/`UTC` imports if nothing else in the file needs them.
-- Add a reaching test per deletion. For `redis_quality_audit`, the test asserts `Chat.updated_at` is a `float` after a popoto round-trip — that is the claim the dead-branch verdict rests on.
+- Add a reaching test per deletion, each asserting an observable result: `_collect_sessions` returns the session in its items; the crash-recovery filter puts the session in `recent`; and for `redis_quality_audit`, `Chat.updated_at` is a `float` after a popoto round-trip — that is the claim the dead-branch verdict rests on.
 
-### 3. Annotate the keep-sites and correct the stale prose
+### 3. Annotate the remaining keep-sites and correct the stale prose
 - **Task ID**: build-annotations
-- **Depends On**: none
-- **Validates**: `python -m ruff check .`
-- **Assigned To**: annotation-builder
+- **Depends On**: build-reflections
+- **Validates**: `python -m ruff check .`, `python -m ruff format --check .`
+- **Assigned To**: tz-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- Rewrite the four stale rationale blocks: `utils/utc.py:41-49`, `agent/session_runner/liveness.py:66-72`, `tools/session_progress.py:200-203`, `monitoring/session_watchdog.py:54-59`. Say what is true now (popoto 1.9.0 decodes aware; the guard exists for the ISO-string / float / non-popoto producers the coercer also accepts) rather than what is no longer true.
+- **Parallel**: false
+- Rewrite the remaining stale rationale blocks: `utils/utc.py:44`, `agent/session_runner/liveness.py:69`, `tools/session_progress.py:201`, `tools/agent_session_scheduler.py:47`, `monitoring/session_watchdog.py:57`. Say what is true now (popoto 1.9.0 decodes aware; the guard exists for the ISO-string / float / non-popoto producers the coercer also accepts) rather than what is no longer true. For `session_watchdog.py`, name the real reason from #777: float and naive-string inputs on a non-UTC host.
 - Add a one-line reason to each remaining keep-site naming its actual input source: the restart-flag file, the recovery-lock JSON, the last-connected file, the raw Redis strings, the `gh` API output, the CLI argument.
-- Do not edit `models/agent_session.py` or anything under `reflections/` — those belong to tasks 1 and 2.
-- Do not edit `agent/session_health.py`, `agent/session_pickup.py`, or `ui/data/sdlc.py` — already settled.
+- Do not edit `agent/session_health.py`, `agent/session_pickup.py`, or `ui/data/sdlc.py` — already settled. Do not edit `agent/session_archive.py` — #3199 owns it.
+- Re-run the three-phrasing prose sweep; it must now be 0.
 
-### 4. Mutation-check the five new tests
+### 4. Mutation-check the four new tests, one at a time
 - **Task ID**: validate-mutation
 - **Depends On**: build-models, build-reflections
 - **Assigned To**: mutation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- For each of the five new tests: force a naive datetime into its fixture (write the field with `datetime.now()` rather than `datetime.now(UTC)`), re-run the node, and confirm it fails.
-- Capture the failing output verbatim; it goes in the PR body as the non-vacuity proof.
-- Revert every mutation. Report any test that stayed green — that test does not ship as-is.
+- **Non-optional.** Runs alone, after the builder has committed and stopped. No author edits during this task.
+- For each of the four new tests, **individually**: force a naive datetime into that one test's fixture (write the field with `datetime.now()` rather than `datetime.now(UTC)`), re-run **that node alone** via `scripts/pytest-clean.sh`, confirm it fails, revert that mutation, then move to the next. Re-measure after each. Mutating all four at once and reading one red run proves nothing about any individual test.
+- Read the result off the pytest summary line. A run reporting "0 passed" or collecting nothing is a failed measurement, not a pass (#3195).
+- Capture each failing output verbatim as its own block; the four blocks go in the PR body as the non-vacuity proof.
+- Report any test that stayed green — that test does not ship as-is.
 
 ### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-models, build-reflections, build-annotations
-- **Assigned To**: utc-documentarian
-- **Agent Type**: documentarian
+- **Depends On**: build-annotations
+- **Assigned To**: tz-builder
+- **Agent Type**: builder
 - **Parallel**: false
-- Update `docs/features/utc-timestamps.md:87` per the Documentation section.
-- Add the escape-hatch subsection (`POPOTO_DATETIME_KEY_LEGACY`; naive writes round-trip naive).
+- Update `docs/features/utc-timestamps.md:87` per the Documentation section: replace the "three older helpers ... intentionally left untouched" clause with the settled verdict.
+- Add the escape-hatch subsection (`POPOTO_DATETIME_KEY_LEGACY` must stay unset; a deliberately naive write still round-trips naive) and a note that `created_at` has no `__setattr__` coercion.
 
-### 6. Final validation
+### 6. Final validation and PR body assembly
 - **Task ID**: validate-all
 - **Depends On**: validate-mutation, document-feature
 - **Assigned To**: mutation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row.
-- Confirm the PR body carries a verdict for all twenty-three sites and the mutation-check red output.
+- Run every Verification row, with `/usr/bin/grep` for every grep row.
+- Confirm the PR body carries: the **32-row** per-site verdict table, the exact total site count, the re-run sweep output, the four separate mutation red blocks, and the #3207 consumer audit table with the statement that this lane discharges #3207's audit ask.
 
 ## Verification
 
