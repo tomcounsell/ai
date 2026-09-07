@@ -238,11 +238,153 @@ whole approach rests on *when* a dynamically-added marker becomes visible to
 
 ## Spike Results
 
-_placeholder_
+
+All five spikes ran during planning at `8e62c3a50`. Every number below is
+reproducible from the repo; the builder should not re-investigate these.
+
+### spike-1: Does #3184's anchored stem move the baseline?
+- **Assumption**: "the 21/2/1 baseline was measured before #3184 and may no longer hold"
+- **Method**: code-read + `python tests/marker_map.py --audit` at `8e62c3a50`
+- **Finding**: **It does not move it at all.** 25 violations across 24 paths,
+  21 R1 / 2 R2 / 2 R3, `KNOWN_MISTAGS` 24 entries, audit exit 0 (`0 new, 0 stale`).
+  The two files #3184 retagged (`test_test_judge.py` → `tools`,
+  `test_validate_test_impact.py` → `validation`) both sit directly under a
+  `KNOWN_ROOT_DIRS` parent and were never in the baseline.
+- **Confidence**: high
+- **Impact on plan**: no rebase is pending; `8e62c3a50` is the build baseline.
+
+### spike-2: Re-measure the "directory authoritative" gain
+- **Assumption**: "+39 markers, 6 corrected, 0 lost, as filed"
+- **Method**: prototype — replay the resolver over `git ls-files` with a
+  directory-first rule
+- **Finding**: **Does not reproduce.** At `8e62c3a50` the directory rule yields
+  **+17 files newly marked, +21 marker applications, 4 corrected, 0 files left
+  unmarked**. The 4 corrected files are `test_docs_auditor_git_surface.py`
+  (`validation`), `test_pm_briefings_no_slots_configured.py` (`config`),
+  `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py` (`sdlc`).
+- **Confidence**: high
+- **Impact on plan**: the 39/6 figure is stale in both the issue and
+  `docs/features/feature-map-marker-guard.md`; correcting the doc is a task.
+  More importantly it exposes the additive-vs-replacing fork: under a
+  *replacing* rule those 4 files lose a marker, breaking acceptance criterion 3
+  verbatim; under an *additive* union none does.
+
+### spike-3: What do explicit `pytest.mark.<feature>` declarations do here?
+- **Assumption**: "FEATURE_MAP is the only source of feature markers"
+- **Method**: code-read — scan all 838 tracked test files for
+  `pytest.mark.<registered feature>`
+- **Finding**: **False. 47 files carry an explicit feature marker**, and
+  `tests/unit/test_feature_map_markers.py` cannot see any of them. Nine of the
+  47 declare a marker that *differs* from their derived one and keep both.
+  `tests/integration/reflections/test_pm_briefings_e2e.py` is a `KNOWN_MISTAGS`
+  entry that already declares `pytest.mark.reflections`, and
+  `tests/unit/test_long_task_checkpointing.py` declares `pytest.mark.sdlc`
+  alongside its fragment-matched `validation`.
+- **Confidence**: high
+- **Impact on plan**: decisive for the additive design. The shipped system
+  *already* composes explicit and derived markers additively, so unioning the
+  directory marker in is a continuation of the existing model rather than a new
+  one. It also softens the one marker removal below: the file that loses
+  `validation` keeps its explicit `sdlc`.
+
+### spike-4: What does whole-token basename matching cost?
+- **Assumption**: "requiring whole-token matches will strip markers off many files"
+- **Method**: prototype — resolve all 838 basenames with
+  `resolve_marker_whole_token` and diff against `resolve_marker`
+- **Finding**: **2 files lose a marker, 0 files change marker.** The two are
+  exactly the two R3 violations: `test_pm_briefings_no_slots_configured.py`
+  loses `config` (matched inside `configured`) and
+  `test_long_task_checkpointing.py` loses `validation` (matched inside
+  `checkpointing`). Nothing else in the suite depends on a fragment match.
+- **Confidence**: high
+- **Impact on plan**: whole-token matching is affordable as the *resolution*
+  semantics, not merely as a detector. It also makes new keys order-free: with
+  `checkpoint` no longer matching `checkpointing`, a `checkpointing` key can be
+  added anywhere in the dict and win, which is how
+  `test_long_task_checkpointing.py` keeps `validation` with zero hand-placement.
+
+### spike-5: Is `item.nodeid` a rootdir-relative path with directories?
+- **Assumption**: "the collection hook can see the file's package directory"
+- **Method**: prototype — a throwaway pytest plugin printing `item.nodeid`,
+  `Path(nodeid).parent`, and `item.path.relative_to(config.rootpath)` during a
+  real collection, invoked with explicit subdirectory arguments
+- **Finding**: confirmed and stable. Invoked as
+  `pytest tests/unit/reflections tests/unit/hooks`, every item reported
+  `NODEID_PATH=tests/unit/reflections/test_daily_log_aggregator.py`,
+  `PARENT=tests/unit/reflections`, and an `item.path`-derived value **identical**
+  to the nodeid path. The nodeid is rootdir-relative regardless of the
+  invocation arguments.
+- **Confidence**: high
+- **Impact on plan**: the hook can resolve the directory from `item.nodeid`
+  alone. `item.path` is the more idiomatic modern accessor but requires
+  `config.rootpath` to relativize; both are correct, and the plan uses
+  `item.nodeid` to keep the hook's signature unchanged and its input identical
+  to the string the guard audits from `git ls-files`. Keeping Path A and Path B
+  on the same string shape is the property #3010 exists to protect.
+
+### spike-6: Measure the full proposed end state
+- **Assumption**: "the combined change drains the baseline to empty"
+- **Method**: prototype — replay `DIRECTORY_MAP ∪ whole-token basename` over
+  all 838 files
+- **Finding**:
+
+  | Metric | Before | After |
+  |---|---|---|
+  | files with ≥1 derived marker | 284 | **327** (+43) |
+  | derived marker applications | 284 | **331** (+47) |
+  | files losing a derived marker | — | **1** |
+  | `tests/unit/reflections/` on `reflections` | 2 / 20 | **20 / 20** |
+  | `tests/integration/reflections/` on `reflections` | 0 / 2 | **2 / 2** |
+  | packages still subject to R2 | 4 | **1** (`memory_extraction`, uniform → no violation) |
+
+  Per-marker census: `reflections` 28 → 48, `sessions` 43 → 61,
+  `messaging` 61 → 67, `sdlc` 85 → 89, `config` 6 → 5. Every other marker
+  unchanged. **The single file that loses a marker is
+  `tests/unit/reflections/test_pm_briefings_no_slots_configured.py`, which loses
+  `config` and gains `reflections`.**
+- **Confidence**: high
+- **Impact on plan**: `KNOWN_MISTAGS` drains to empty, and the one marker
+  removal is a named, measured, deliberate policy decision rather than a
+  side effect (see Open Questions).
 
 ## Data Flow
 
-_placeholder_
+
+Two paths read the same resolver. That is the invariant #3010 established, and
+this plan must not break it.
+
+**Path A — marker assignment, at collection time**
+
+1. **Entry point**: `pytest` collects test items.
+2. `tests/conftest.py::pytest_collection_modifyitems(items)` runs, ahead of
+   pytest's internal `deselect_by_mark`.
+3. For each item it takes `item.nodeid.split("::")[0]` → a rootdir-relative
+   path such as `tests/unit/reflections/test_pm_briefings_builder.py`
+   (spike-5). **Today it discards everything but the basename.**
+4. It calls `tests/marker_map.py::resolve_marker(basename)` → a single marker
+   or `None`, and calls `item.add_marker(...)` when non-`None`.
+5. **Output**: pytest's `deselect_by_mark` snapshots
+   `{m.name for m in item.iter_markers()}` — explicit `pytestmark` plus
+   whatever step 4 added — and applies `-m`.
+
+**Path B — the guard, at test time**
+
+1. **Entry point**: `tests/unit/test_feature_map_markers.py`, or
+   `python tests/marker_map.py --audit` on a bare interpreter.
+2. `iter_test_files()` shells `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`
+   → the same rootdir-relative path strings Path A sees, from the index rather
+   than the filesystem.
+3. `check_r1` / `check_r2` / `check_r3` call the **same** `resolve_marker`, and
+   `_partition_packages` groups by full parent path.
+4. **Output**: `(violations, new_mistags, stale_exemptions)`, bracketed against
+   `KNOWN_MISTAGS` in both directions.
+
+**What changes.** Step A3 stops discarding the directory and step A4 applies a
+*set* of markers. Step B3's rules change shape. Both keep calling one function
+in `tests/marker_map.py`. The failure mode this ordering prevents — Path A and
+Path B disagreeing about what a file resolves to, so the guard certifies a
+marker the collector never applied — is the reason `tests/marker_map.py` exists
+and is the single most important thing not to regress.
 
 ## Why Previous Fixes Failed
 
@@ -266,7 +408,40 @@ whole-token basename match that cannot fragment.
 
 ## Architectural Impact
 
-_placeholder_
+
+- **New dependencies**: none. `tests/marker_map.py` must stay standard-library
+  only and must not import `pytest` — it runs on a bare interpreter
+  (`python tests/marker_map.py --audit`). The new code is `dict` lookups and
+  `pathlib`.
+- **Interface changes**: `resolve_marker(basename) -> (marker, key)` stays, as
+  the basename-only resolver used by the guard's rules and by every existing
+  fixture. A new `resolve_markers(path) -> frozenset[str]` becomes the
+  path-aware entry point the collection hook calls. `tests/conftest.py`'s hook
+  signature is unchanged.
+- **Coupling**: **reduced.** A file's marker stops depending on the insertion
+  position of unrelated `FEATURE_MAP` keys. Directory resolution is an exact
+  dict lookup, so it is order-free by construction; whole-token basename
+  matching removes the remaining class of accidental collisions (spike-4
+  measured the ordering-dependence it removes: two fragment matches, nothing
+  else).
+- **Data ownership**: `tests/marker_map.py` remains the sole owner of marker
+  resolution. It gains a second table, `DIRECTORY_MAP`, keyed by exact
+  directory name.
+- **Reversibility**: high. The change is confined to two test-infrastructure
+  files plus their guard and docs. Nothing in `agent/`, `bridge/`, `tools/`, or
+  `worker/` is touched, no Popoto model changes, no migration. Reverting the
+  commit restores the previous markers exactly.
+- **Blast radius**: `tests/marker_map.py`, `tests/conftest.py`,
+  `tests/unit/test_feature_map_markers.py`, `docs/features/feature-map-marker-guard.md`.
+  Nothing imports `tests/marker_map.py` outside `tests/`
+  (verified: `git grep -l marker_map` returns those three files only).
+- **Systemic risk worth naming**: the marker set is a *selection* mechanism, and
+  widening it widens what `-m X` collects. 43 files gain a marker, so
+  `pytest -m sessions` grows from 43 to 61 files. That is the intended gain, but
+  it also means anyone using `-m "not X"` to *exclude* work will exclude more
+  than before. No CI path in this repo uses a negated feature marker
+  (`addopts` carries none, and `scripts/pytest-clean.sh` passes markers through
+  only when a caller supplies them), so the effect is confined to interactive use.
 
 ## Appetite
 
