@@ -100,6 +100,11 @@ reap_workers() {
 
 cleanup() {
     reap_workers
+    # Interrupted-run hygiene for the #3195 count file: minted further down,
+    # but `set -u` requires the guarded expansion since cleanup can run
+    # before the mint (e.g. an early preflight abort).
+    [ -n "${PYTEST_CLEAN_COUNT_FILE-}" ] && rm -f "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null
+    return 0
 }
 
 # Trap every interesting signal. The leading "-" on the action tells
@@ -166,6 +171,33 @@ fi
 # prepending REPO_ROOT pins imports to the code actually under test. In the
 # primary checkout this is a no-op (same path the editable install adds).
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# Zero-executed guard (#3195), mint and injection. A run in which every
+# selected test is skipped executes nothing and exits 0 -- indistinguishable
+# by exit code alone from a real pass, so a mutation check reading this
+# wrapper's exit code reports a broken guard as bitten. The realistic trigger
+# is on this machine already: tests/conftest.py's scratch_test_db fixture
+# calls pytest.skip() when the 15-slot test-DB pool is exhausted, which
+# happens routinely past ~5 concurrent agents. The verdict-reading half of
+# this guard lives further down, bracketed by its own BEGIN/END seam.
+#
+# PYTEST_CLEAN_COUNT_FILE is minted UNCONDITIONALLY -- no `:-` default. An
+# inherited value from an enclosing wrapper invocation (this plan's own tests
+# run the wrapper under the wrapper) must be discarded, not honored, or a
+# nested run would overwrite its parent's verdict.
+PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"
+export PYTEST_CLEAN_COUNT_FILE
+
+# The plugin injection is gated on the module existing in the INVOKING
+# checkout ($REPO_ROOT, never $SCRIPT_ROOT -- pointing at $SCRIPT_ROOT would
+# let the primary checkout's plugin serve a worktree run, the exact #3033
+# bleed this wrapper exists to prevent). A checkout without the module runs
+# exactly as it does today instead of aborting: six lanes share this
+# machine, so an unimportable `-p` module on `main` would take all of them
+# down at once. `set --` is the only rewrite that preserves "$@" quoting.
+if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then
+    set -- -p pytest_executed_count "$@"
+fi
 
 # Resolve the interpreter that owns this repo's dependencies. A bare `pytest`
 # resolves from PATH, which on a machine with a user-site pytest picks an
@@ -307,5 +339,68 @@ fi
 # Calling reap here is idempotent with the EXIT trap but covers the
 # case where the user pressed Ctrl-C.
 reap_workers
+
+# Read and remove the #3195 count file. Tolerate a missing/unreadable file
+# without a bash error under `set -u`; no test can seed it with garbage
+# through the wrapper's public surface (only the plugin writes it), so an
+# absent read here just means no session ran (e.g. --version, --help).
+COUNT_VERDICT="$(cat "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null || true)"
+rm -f "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null
+
+# BEGIN zero-executed guard (#3195)
+# One pass-through predicate, not a state enumeration: passes through on an
+# absent file (no session ran), a collectonly verdict, or a count of at
+# least one. Everything else fails closed -- count 0, a surviving "started"
+# sentinel (the plugin's sessionfinish never ran, e.g. the wedge watcher
+# killed the controller), an empty file, a truncated write, unparseable
+# bytes. Inverting the test this way is what makes the guard total: a state
+# nobody anticipated lands on the safe side by construction rather than by
+# having been enumerated.
+#
+# This is a named function, not an inline `case`, so a test can slice its
+# body out of the script under test and drive the real predicate, rather
+# than retyping the patterns in a copy that passes unchanged when the
+# wrapper's own `case` is deleted. The multi-line shape below (opening brace
+# on its own line, a bare `}` at column 0) is load-bearing, not cosmetic:
+# the test's slice is `sed -n '/^verdict_passes_through()/,/^}/p'`, and this
+# script has no line starting with `}` anywhere after this point -- a
+# one-line `esac; }` form would make that slice run to EOF and swallow the
+# `exit "$PYTEST_EXIT"` below, and sourcing it under `set -u` would die on
+# `PYTEST_EXIT: unbound variable` before the test's own refusals could fire.
+verdict_passes_through() {
+    case "$1" in
+        ""|collectonly)  return 0 ;;   # no session ran, or a collect-only run
+        "count "[1-9]*)  return 0 ;;   # at least one test executed
+        *)               return 1 ;;   # count 0, started, truncated, garbage
+    esac
+}
+
+# Gated on pytest's own exit being 0: the guard may only ever convert a
+# green into a red. A collection error (exit 2) and a zero-collected run
+# (exit 5) already carry their own correct, loud headline; firing here too
+# would rewrite their exit code and print a pool-exhaustion diagnostic over
+# an unrelated failure. A wedge is already non-zero, so this gate also keeps
+# the WEDGED banner as the only headline on that path. The all-skip channel
+# this guard exists for exits 0 today, so nothing is lost by the gate.
+if [ "$PYTEST_EXIT" -eq 0 ] && ! verdict_passes_through "$COUNT_VERDICT"; then
+    echo "" >&2
+    echo "pytest-clean: ZERO TESTS EXECUTED (#3195) — this run proves nothing." >&2
+    echo "  Every selected test skipped (or the run otherwise produced no" >&2
+    echo "  executed/failed report), so a green exit here would mean nothing" >&2
+    echo "  was verified." >&2
+    echo "" >&2
+    echo "  Likely cause: the 15-slot machine-global test-DB pool is exhausted" >&2
+    echo "  (tests/conftest.py's scratch_test_db fixture skips on contention)," >&2
+    echo "  which happens routinely past ~5 concurrent agents on this machine." >&2
+    echo "" >&2
+    echo "  Remedy:       scripts/reap-xdist.sh --apply" >&2
+    echo "  Escape hatch: set PYTEST_ALLOW_ZERO_TESTS to suppress this exit" >&2
+    echo "                (the diagnostic still prints; only the exit changes)." >&2
+    echo "" >&2
+    if [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ]; then
+        exit 1
+    fi
+fi
+# END zero-executed guard (#3195)
 
 exit "$PYTEST_EXIT"
