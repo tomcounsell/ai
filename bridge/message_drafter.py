@@ -750,9 +750,9 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
       ``bridge.promise_gate._evaluate_promise_llm_or_heuristic`` (same
       SDK-timeout / semaphore-bound / heuristic-fallthrough contract as the
       CLI's ``evaluate_promise_async``). Audited as
-      ``source="promise_gate_drafter_llm"``, ``"...drafter_heuristic"``, or
-      ``"...drafter_timeout"`` depending on which layer actually produced
-      the verdict.
+      ``source="promise_gate_drafter_llm"``, ``"...drafter_heuristic"``,
+      ``"...drafter_timeout"``, or ``"...drafter_oversize"`` depending on
+      which layer actually produced the verdict.
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch, read fresh on every
     call: when disabled, an ``action="allow" / reason="gate_disabled"``

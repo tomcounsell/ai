@@ -729,7 +729,7 @@ class TestLlmInputCap:
     @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
     def test_unusable_env_value_falls_back_to_default(self, monkeypatch, raw):
         monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", raw)
-        assert promise_gate._llm_max_input_chars() == 8000
+        assert promise_gate._llm_max_input_chars() == promise_gate._LLM_MAX_INPUT_CHARS_DEFAULT
 
     @pytest.mark.asyncio
     async def test_drafter_main_path_audits_oversize_source(self, monkeypatch):

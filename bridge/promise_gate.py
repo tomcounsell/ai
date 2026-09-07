@@ -528,13 +528,16 @@ _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 # ``_oversize`` source suffix so the skip is queryable. Provisional/tunable:
 # 8000 chars is roughly 2k tokens, about twice the Telegram message ceiling
 # and well above any reply the drafter would deliver as prose.
+_LLM_MAX_INPUT_CHARS_DEFAULT = 8000
+
+
 def _llm_max_input_chars() -> int:
     raw = os.environ.get("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "")
     try:
-        value = int(raw) if raw.strip() else 8000
+        value = int(raw) if raw.strip() else _LLM_MAX_INPUT_CHARS_DEFAULT
     except ValueError:
-        value = 8000
-    return value if value > 0 else 8000
+        value = _LLM_MAX_INPUT_CHARS_DEFAULT
+    return value if value > 0 else _LLM_MAX_INPUT_CHARS_DEFAULT
 
 
 def _write_promise_audit(

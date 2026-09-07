@@ -207,7 +207,7 @@ This bounce uses `CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION` in place of the base `S
 
 Unlike every other blocking flag, this check **sets** `needs_self_draft` rather than riding an existing one. Wiring it only into the existing `needs_self_draft` return sites would never fire in the case the feature exists for: a clean `"which PR do you mean?"` returns `needs_self_draft=False` and is sent.
 
-The check cannot hard-exit a CLI send. It lives in `agent/output_handler.py`, not in the promise gate, whose `cli_check_or_exit` consumer calls `sys.exit(1)` on a block across five CLI call sites. Extending that gate would have hard-failed a legitimate `python -m tools.send_message "which one do you mean?"`. `bridge/promise_gate.py` and `bridge/read_the_room.py` are byte-identical to `main`. Full contract: [Context-Recall Advisory](context-recall-advisory.md).
+The check cannot hard-exit a CLI send. It lives in `agent/output_handler.py`, not in the promise gate, whose `cli_check_or_exit` consumer calls `sys.exit(1)` on a block across five CLI call sites. Extending that gate would have hard-failed a legitimate `python -m tools.send_message "which one do you mean?"`. Full contract: [Context-Recall Advisory](context-recall-advisory.md).
 
 ### Sequential self-draft loop bound
 
@@ -318,7 +318,7 @@ Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.m
 After the drafter finalises `delivery_text`, three optional layers may intercept the message before it reaches the outbox:
 
 1. **Redundancy filter** (`bridge/redundancy_filter.py`, issue #1205) — deterministic bigram-Jaccard guard for SDLC sessions. Runs first. Suppresses near-verbatim PM status repeats within a time window. See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md).
-2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — opt-in Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
+2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — unconditional Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
 3. **Context-recall** (`bridge/context_recall.py`, issue #2694) — Haiku verdict on short, question-shaped output. Holds the message and bounces it through the self-draft loop with a history-read command instead of suppressing it. On by default (`CONTEXT_RECALL_OUTBOUND_ENABLED`). See [Context-Recall Advisory](context-recall-advisory.md).
 
 The first two queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability. Context-recall neither suppresses nor reacts: the message is returned to its author to rewrite, and on self-draft budget exhaustion the original is sent unchanged.
@@ -354,9 +354,13 @@ Added for [Telegram Poll Questions](telegram-poll-questions.md) (#2701).
 A poll question is validated by the drafter but is **never composed** by it:
 
 ```python
-def validate_poll_question(question: str) -> list[Violation]:
+def validate_poll_question(question: str, *, session_id: str | None = None) -> list[Violation]:
     """Validate a poll question against the telegram_poll medium. No composition."""
-    return _validate_for_medium(question, "telegram_poll")
+    violations = _validate_for_medium(question, "telegram_poll")
+    # Heuristic promise gate; a block is a non-blocking Violation and an audit row
+    # (source="promise_gate_poll", or "promise_gate_poll_disabled" under the kill switch).
+    ...
+    return violations
 ```
 
 **Why a new public entry point rather than routing through `draft_message`.** `_validate_for_medium`

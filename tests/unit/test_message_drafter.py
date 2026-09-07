@@ -21,6 +21,21 @@ from config.enums import SessionType
 from models.agent_session import SDLC_STAGES
 
 
+@pytest.fixture(autouse=True)
+def _isolate_audit(tmp_path, monkeypatch):
+    """Redirect the promise-gate audit log to a per-test file.
+
+    Every gated route the drafter exposes (short path, main path, poll)
+    writes a row through ``bridge.promise_gate._write_promise_audit``, whose
+    default target is the repo's live ``logs/classification_audit.jsonl``,
+    the file ``tools/promise_gate_measurement.py`` samples for the latency
+    budget. Without this redirect, unit-test fixtures land in that sample.
+    """
+    from bridge import promise_gate
+
+    monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", tmp_path / "classification_audit.jsonl")
+
+
 def _mock_session_with_stages(stage_dict, links=None):
     """Create a MagicMock session with proper stage_states for PipelineStateMachine."""
     session = MagicMock()
@@ -1714,15 +1729,14 @@ class TestPollQuestionHeuristicGate:
 
         return [json.loads(line) for line in path.read_text().splitlines()]
 
-    def test_every_poll_decision_writes_an_audit_row(self, tmp_path, monkeypatch):
+    def test_every_poll_decision_writes_an_audit_row(self):
         """The poll route is queryable like every other gated route: a
         ``telegram_poll`` row with ``source="promise_gate_poll"`` on both
         verdicts, carrying the sending session's id."""
         from bridge import promise_gate
         from bridge.message_drafter import validate_poll_question
 
-        log_path = tmp_path / "classification_audit.jsonl"
-        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+        log_path = promise_gate._AUDIT_LOG_PATH
 
         validate_poll_question(
             "I'll come back with the results — proceed to stage?", session_id="sess-1"
@@ -1736,12 +1750,11 @@ class TestPollQuestionHeuristicGate:
         assert {r["session_id"] for r in rows} == {"sess-1"}
         assert all("elapsed_ms" in r for r in rows)
 
-    def test_kill_switch_still_writes_a_disabled_audit_row(self, tmp_path, monkeypatch):
+    def test_kill_switch_still_writes_a_disabled_audit_row(self, monkeypatch):
         from bridge import promise_gate
         from bridge.message_drafter import validate_poll_question
 
-        log_path = tmp_path / "classification_audit.jsonl"
-        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+        log_path = promise_gate._AUDIT_LOG_PATH
         monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
 
         validate_poll_question("I'll come back with the results — proceed to stage?")
