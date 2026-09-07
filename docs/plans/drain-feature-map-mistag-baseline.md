@@ -1070,7 +1070,7 @@ file is updated.
 ## Update System
 
 
-No update system changes required. The change is confined to `tests/`, the two
+No update system changes required. The change is confined to `tests/`, the
 documents describing it, and nothing that `/update` propagates:
 
 - No new dependency, so `scripts/update/deps.py` and the pin set are untouched.
@@ -1081,9 +1081,15 @@ documents describing it, and nothing that `/update` propagates:
 - No migration. `data/migrations_completed.json` and
   `scripts/update/migrations.py` are untouched — this plan changes no Popoto
   model and writes nothing to Redis.
-- Existing installations need nothing. The next `git pull` gives every machine
-  the new resolution, and marker resolution is recomputed from scratch on every
-  collection with no persisted state to migrate.
+- Existing installations need nothing. The next `git pull` delivers the renamed
+  files; marker resolution is recomputed from scratch on every collection with
+  no persisted state to migrate.
+
+One operator note worth recording, though it needs no code: a machine with a
+**stale `.pyc` or a stale worktree** can keep an old module path alive after a
+pull that renamed it. Standard `git pull` handles this (the old file is deleted,
+so its bytecode is orphaned and never imported by name), and none of the renamed
+modules is imported by name anywhere, so there is no import to break.
 
 ## Agent Integration
 
@@ -1091,72 +1097,98 @@ documents describing it, and nothing that `/update` propagates:
 No agent integration required. This is test infrastructure with no runtime
 surface:
 
-- **No new CLI entry point.** `tests/marker_map.py` already has a
-  `python tests/marker_map.py --audit | --report | --count` interface, invoked
+- **No new CLI entry point.** `tests/marker_map.py` keeps its existing
+  `python3 tests/marker_map.py --audit | --report | --count` interface, invoked
   by path rather than through `pyproject.toml [project.scripts]`, deliberately
-  so it runs on a bare interpreter with no venv. `--report` changes its output
-  format (a marker *set* per line instead of a single marker) and gains no new
-  subcommand. No `valor-*` entrypoint is added or changed.
+  so it runs on a bare interpreter with no venv. No flag is added or changed and
+  no `valor-*` entrypoint is touched.
 - **The bridge does not import it.** `git grep -ln marker_map` returns three
   code files, all under `tests/`. `bridge/telegram_bridge.py`, `worker/`, and
-  `agent/` have no path to this module.
+  `agent/` have no path to this module. None of the 21 renamed test modules is
+  imported by production code either.
 - **No MCP surface.** Nothing in `mcp_servers/` or `.mcp.json` changes.
 - **How the agent reaches it**: through the Bash tool, running
-  `python tests/marker_map.py --audit` or `pytest -m <marker>` — both of which
-  already work and neither of which changes shape. The `--audit` output text
-  changes (new rule names), so any prose telling the agent what a red audit
-  means is updated in `docs/features/feature-map-marker-guard.md`.
+  `python3 tests/marker_map.py --audit` or `pytest -m <marker>`. Both already
+  work and neither changes shape — the audit's output format is unchanged, only
+  the number in `OK: N known, baselined violation(s)` moves from 25 to 2.
+- **One behavioral note the agent will observe**: `pytest -m reflections` starts
+  collecting 362 more tests suite-wide (544 → 906). An agent that used
+  `-m reflections` as a fast smoke check will find it meaningfully slower, and
+  correct for the first time.
 
 ## Documentation
 
 
+The renames break prose, and prose failures are silent. This section is
+therefore weighted toward the sweep rather than toward new writing.
+
 ### Feature Documentation
-- [ ] Rewrite `docs/features/feature-map-marker-guard.md`. It is the guard's
-  reference and this plan invalidates four of its sections:
-  - `## Three mistag mechanisms` — mechanisms 1 and 2 join mechanism 3 as
-    structurally closed. Rewrite as "what used to go wrong and what closed it",
-    with the closing change named for each (#3184, this plan).
-  - `## The three rules, and what each can and cannot see` — becomes R2 and R4.
-    The retirement of R1 and R3 is stated with its argument, not glossed.
-  - **`## The coverage boundary, stated plainly`** — the "80 of 835 tracked test
-    files (9.6%)" figure is superseded. Re-derive and restate it: directory
-    intent now reaches 81 files across 9 mapped packages, and the 757 files
-    under a root directory are covered by resolution semantics rather than by a
-    rule. Say plainly what is still uncovered.
-  - **`## What was considered and rejected`** — the entry "Making the package
-    directory authoritative … Gains 39 markers and corrects 6" is now both
-    *adopted* and *numerically wrong*. Replace it with the measured +43 files /
-    +47 applications / 1 loss, and move it out of the rejected list.
-  - `## Exemptions` and `## Responding to a red guard` — `KNOWN_MISTAGS` is
-    empty, `UNMAPPED_PACKAGES` is new, and the remediation ladder changes (add a
-    `DIRECTORY_MAP` entry is now the first move, renaming the file is no longer
-    the first).
-- [ ] Update `tests/README.md`: the auto-tagging description at line 116 says
-  markers come from the filename, which is no longer the whole truth, and the
-  per-marker counts it publishes (`sdlc` 516, `messaging` 327, `sessions` 293)
-  all move. Regenerate the counts from a real collection rather than editing
-  them by hand.
-- [ ] `docs/features/README.md` — check whether the guard's index row summary
-  still describes it accurately after the rule set changes; update if not.
+- [ ] Update `docs/features/feature-map-marker-guard.md`. This plan **does not**
+  change the guard's rules, so the document's structure survives; four factual
+  passages move:
+  - `## Exemptions: KNOWN_MISTAGS, keyed by path only` — the baseline is 2
+    entries, not 24, and both are policy entries. State the acceptance-criterion-1
+    disjunction the two survivors satisfy, and what would justify a third.
+  - `## The three rules, and what each can and cannot see` — R1, R2, and R3 all
+    survive and all still fire on future regressions. Only the *population*
+    changed. Update the "21 from R1, 2 from R2, 1 further from R3" counts to
+    0 / 2 / 0 and say when they were measured.
+  - `## The coverage boundary, stated plainly` — "80 of 835 tracked test files
+    (9.6%) — R1 47 files, R2 33 ... the other 755" is drifted. Re-derived at
+    `6c865fb5f`: **81 of 838 (9.7%) — R1 48, R2 33, and 757 files** sit directly
+    under a `KNOWN_ROOT_DIRS` parent. The renames do not move these numbers
+    (package membership is unchanged), so this is a drift correction, not a
+    consequence of the change.
+  - `## What was considered and rejected` → "Making the package directory
+    authoritative. Gains 39 markers and corrects 6 with zero losses" — the
+    number is wrong; re-measured it gains **17** and corrects **4**. The option
+    stays *rejected* and this plan reinforces why: it would make R1 tautological.
+    Add that #3175 chose the rename remedy instead, which is remedy 1 in this
+    document's own `## Responding to a red guard` ladder.
+  - Two of the renamed basenames are named in this file
+    (`test_pm_briefings_no_slots_configured.py`, `test_sdlc_progress_check.py`)
+    and must be updated to their new names.
+- [ ] Update `docs/features/docs-auditor.md:863` —
+  `tests/unit/reflections/test_docs_auditor_git_surface.py` →
+  `test_reflections_docs_auditor_git_surface.py`.
+- [ ] Update `docs/features/expectation-reconciler.md:92` —
+  `test_expectation_reconciler.py` → `test_reflections_expectation_reconciler.py`.
+- [ ] Update `docs/features/plan-migration-invariant.md:199` —
+  `test_merged_branch_cleanup.py` → `test_reflections_merged_branch_cleanup.py`.
+- [ ] Update `tests/README.md`: the index row at line 299
+  (`test_docs_auditor_git_surface.py`) and the prose at line 554 naming
+  `test_pm_briefings_no_slots_configured.py` as the `configured` fragment-match
+  example. That example is now *fixed*, so the sentence becomes a description of
+  what the rename corrected rather than of a live defect. Add a `reflections`
+  index row reflecting the package's 22 files. Leave the badly-stale headline
+  counts (`sdlc` 516, `messaging` 327, `sessions` 293) alone beyond a one-line
+  note that they predate several splits — fixing them is not this change's job
+  and pretending otherwise hides real drift behind a rename.
+- [ ] Sweep `docs/archive/plans-completed/` — 17 archived plans name 20 of the
+  21 old basenames. Update each reference to the new path so a reader following
+  a historical plan can still find the file, and add no commentary: an archived
+  plan is a record, and the only edit it wants is one that keeps its pointers
+  resolvable.
+- [ ] `docs/features/README.md` — check whether the guard's index row summary is
+  still accurate. It should be; the rule set is unchanged. Update only if the row
+  quotes a baseline count.
 
 ### Inline Documentation
-- [ ] `DIRECTORY_MAP` gets a docstring explaining that it is exact-match and
-  therefore order-free, and that this is the specific property `FEATURE_MAP`
-  lacks.
-- [ ] `KNOWN_MISTAGS` keeps its docstring, rewritten: still the only exemption
-  mechanism, still path-keyed (#2805), still bracketed both ways (#3031),
-  currently empty and expected to stay that way.
-- [ ] `UNMAPPED_PACKAGES` documents why a package is deliberately unmapped and
-  that it is bracketed in both directions.
-- [ ] `resolve_markers` documents the union semantics and, explicitly, that it
-  never removes a marker the basename resolves to — the property acceptance
-  criterion 3 rests on.
-- [ ] The `_stem` docstring names `resolve_marker_whole_token` as one of its two
-  callers. Task 4 collapses that function into `resolve_marker`, which would
-  leave the docstring pointing at something that no longer exists — update it in
-  the same change rather than after (**verified at plan time**: the older
-  "#3184 has exactly one line to change" sentence is already gone, rewritten by
-  #3184 itself, so there is nothing else stale in this docstring).
+- [ ] `KNOWN_MISTAGS`'s module docstring currently ends "Draining this baseline
+  is #3175; it can only shrink, never grow". Rewrite: the drain happened, the
+  two survivors are policy entries, and the shrink-only property still holds.
+- [ ] The new `"checkpointing": "validation"` key carries the comment explaining
+  why its position is free — that both keys map to the same marker, so R3's
+  marker-vs-marker comparison is order-independent. This is the sentence that
+  stops a future reader from "tidying" it into a position that looks more
+  deliberate.
+- [ ] The module docstring's opening paragraph describes the substring-match
+  coupling and says a test file "can be renamed, moved, or split and land under
+  the wrong marker". Still true and still the point; leave it.
+- [ ] Comment-only references in `tests/unit/conftest.py:168`,
+  `tests/unit/test_plan_migration_invariant.py:155`,
+  `tests/unit/test_reflections_package.py:528`, and
+  `tests/integration/test_worker_liveness_ingestion.py:61`.
 
 ### External Documentation Site
 - Not applicable. This repo has no Sphinx/MkDocs/Read the Docs site; `docs/` is
@@ -1165,40 +1197,68 @@ surface:
 ## Success Criteria
 
 
-- [ ] `python tests/marker_map.py --audit` exits 0 with zero violations, not
-      zero *new* violations — the report line reads `0 known, baselined
-      violation(s); 0 new, 0 stale`.
-- [ ] `KNOWN_MISTAGS == {}`. **Acceptance criterion 1 from the issue**, met by
-      emptying rather than by reasoning about residual entries.
-- [ ] `pytest -m reflections --collect-only` over `tests/unit/reflections/` and
-      `tests/integration/reflections/` collects **396 of 396** tests with zero
-      deselected, up from 34 of 396. **Acceptance criterion 2.**
-- [ ] The before/after marker census over all 838 tracked files shows exactly
-      one file losing exactly one marker
-      (`tests/unit/reflections/test_pm_briefings_no_slots_configured.py` losing
-      `config`), and that loss is ratified in Open Questions. **Acceptance
-      criterion 3**, checked mechanically against a committed snapshot rather
-      than by inspection.
-- [ ] 43 files gain a marker; per-marker census matches spike-6
-      (`reflections` 28→48, `sessions` 43→61, `messaging` 61→67, `sdlc` 85→89,
-      `config` 6→5, all others unchanged).
-- [ ] Every retired rule has a replacement proven red before green, with the
-      failure output pasted into the PR: remove the directory branch → the
-      real-collection mutation test fails; revert to substring matching → the
-      `checkpointing` fixture fails; empty `DIRECTORY_MAP` → `run_audit()`
-      raises.
-- [ ] `tests/conftest.py::pytest_collection_modifyitems` has direct test
-      coverage for the first time, against a real pytest collection rather than
-      a resolver call.
-- [ ] Every value in `DIRECTORY_MAP` and `FEATURE_MAP` is a marker registered in
-      `pyproject.toml`, asserted by a test that parses the file.
-- [ ] `tests/marker_map.py` still runs on a bare interpreter: standard library
-      only, no `pytest` import, no file-content reading.
-- [ ] Full `tests/unit/` suite green via `scripts/pytest-clean.sh`.
+**Lane close conditions.** These two are the conditions the lane closes on,
+stated verbatim:
+
+- [ ] `python3 tests/marker_map.py --audit` reports `0 new, 0 stale` with the
+      shrunken baseline.
+- [ ] `pytest --collect-only -q -m reflections tests/unit/reflections/` collects
+      the package.
+
+Concretely, the first prints
+`OK: 2 known, baselined violation(s); 0 new, 0 stale.` and exits 0, and the
+second collects every test in the package with none deselected.
+
+**Issue acceptance criteria.**
+
+- [ ] **AC1** — `KNOWN_MISTAGS` "is empty, **or** every remaining entry has a
+      reason that is a deliberate policy choice rather than an unaddressed
+      defect." Met by the **second branch**: 2 entries remain, both R2, both
+      files correctly marked, both reasons rewritten to say so and asserted by
+      `test_known_mistags_holds_only_policy_entries`. The disjunction is the
+      issue's own wording and this plan meets it as written rather than
+      manufacturing scope from the stricter half.
+- [ ] **AC2** — `pytest -m reflections` collects the reflections packages.
+      Over `tests/unit/reflections/` and `tests/integration/reflections/`:
+      **396 of 396**, zero deselected, up from 34 of 396. Suite-wide,
+      `-m reflections` goes 544 → 906 tests.
+- [ ] **AC3** — no test file loses a marker it currently has. Met for 837 of
+      838 files. The single exception is
+      `test_reflections_pm_briefings_no_slots_configured.py` losing `config`, a
+      marker it acquired because `config` is a literal substring of `configured`.
+      Ratified in Open Questions; `-m config` goes 127 → 123 tests.
+
+**Mechanical checks.**
+
+- [ ] `check_r1(files) == []` and `check_r3(files) == []`; `check_r2(files)`
+      returns exactly the two policy paths.
+- [ ] `KNOWN_MISTAGS` has exactly 2 entries, both containing `POLICY` in their
+      reason, and neither is a renamed path (#2805: entries are deleted, not
+      re-keyed).
+- [ ] `python3 tests/marker_map.py --count` returns 838 before and after — no
+      rename collided with an existing basename.
+- [ ] Derived-marker census moves exactly as measured: 284 → 301 files marked,
+      `reflections` 28 → 48, `sdlc` 85 → 83, `messaging` 61 → 62, `config`
+      6 → 5, `validation` 9 → 8, everything else unchanged. Zero files lose a
+      derived marker entirely.
+- [ ] Effective selector counts, from real `--collect-only -m` runs over
+      `tests/`: `-m sdlc` 2859 → 2859, `-m validation` 428 → 428, `-m messaging`
+      1271 → 1276, `-m reflections` 544 → 906, `-m config` 127 → 123. Every one
+      read as a **count**, never as an exit code (#3195).
+- [ ] `git show --stat --find-renames` on the rename commit lists 21 `R100`
+      entries and zero adds or deletes; `git log --follow` reaches pre-rename
+      history for all 21.
+- [ ] `git grep -n` for each of the 21 old basenames returns hits only inside
+      this plan document.
+- [ ] Full `tests/unit/` suite green via `scripts/pytest-clean.sh`, read as a
+      passed count.
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean.
-- [ ] Documentation updated (`docs/features/feature-map-marker-guard.md`,
-      `tests/README.md`), including the corrected 39/6 figure and the
-      re-derived coverage boundary.
+- [ ] Documentation updated: `docs/features/feature-map-marker-guard.md`
+      (including the corrected 17/4 figure and the re-derived 81-of-838 coverage
+      boundary), `docs/features/docs-auditor.md`,
+      `docs/features/expectation-reconciler.md`,
+      `docs/features/plan-migration-invariant.md`, `tests/README.md`, and the 17
+      archived plans.
 - [ ] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
       tests/` returns nothing related to marker resolution (verified at plan
       time: the suite carries no xfail for this defect).
