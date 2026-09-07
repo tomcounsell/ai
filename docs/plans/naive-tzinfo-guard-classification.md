@@ -141,51 +141,88 @@ The coding is an hour. The review is the expensive part, because a reviewer has 
 
 ### Key Elements
 
-- **The verdict table**: one row per site, with its input source and its disposition. It is the deliverable; the code change follows from it mechanically.
-- **Five deletions**: guards whose only inbound source is a popoto model field.
-- **Eighteen keeps**: guards with at least one non-popoto source, each given a one-line docstring reason.
-- **Five prose corrections**: comments and docstrings that assert popoto 1.8.0 behaviour as fact. Three sit on keep-sites and must be rewritten; two sit on delete-sites and go away with the guard.
-- **Five non-vacuous tests**: one per deletion, each constructed so that it fails if the deletion is wrong.
+- **The verdict table**: one row per site, with its input source and its disposition. It is the deliverable; the code change follows from it mechanically. 32 rows, all of which land in the PR body.
+- **Four deletions**: guards whose only inbound source is a popoto model field.
+- **Twenty-eight keeps**, of which **nineteen** get a new one-line reason and nine are already settled or out of shape (see the breakdown below).
+- **Nine prose corrections**: comments and docstrings that assert popoto 1.8.0 behaviour as fact, across three phrasings. Six sit on keep-sites and must be rewritten; three sit on delete-sites and go away with the guard.
+- **Four non-vacuous tests**: one per deletion, each constructed so that it fails if the deletion is wrong, and each mutation-checked individually.
 
 ### Flow
 
-Sweep → classify each site by inbound source → delete / keep+annotate → add a reaching test per deletion → re-run the sweep and the `getattr`-shaped variant → the survivors are exactly the eighteen keeps.
+Sweep (both shapes, `/usr/bin/grep`) → classify each of the 32 sites by inbound source → delete / keep+annotate → add a reaching test per deletion → mutation-check each test on its own → re-run both sweep shapes → the survivors are exactly the 28 keeps.
 
 ### Technical Approach
 
-**The rule, restated.** A `tzinfo is None` coercion goes when a popoto model field is provably its only inbound source. It stays when the coercer also accepts floats, ISO strings, Telegram timestamps, or file mtimes.
+**The rule, restated (from #3173).** **Delete** the guard where popoto is provably the only inbound source of the value. **Keep** it, routed through the module's own general-purpose coercer, where inputs are genuinely mixed — Telegram `message.date`, ISO strings, epoch floats, file mtimes, `datetime.fromisoformat` of external data.
 
-**Delete (5).**
+**Delete (4).**
 
 | Site | Function | Inbound source | Why the guard is dead |
 |---|---|---|---|
-| `models/agent_session.py:1092` | `_heal_future_updated_at` | `record.updated_at` from `cls.query.all()` | Pure popoto read. The `# Popoto strips tzinfo on load` comment above it goes too. |
-| `models/agent_session.py:2225` | `log_lifecycle_transition` | `self.started_at or self.created_at` | Both are `DatetimeField`. The sibling `isinstance(prev_time, int \| float)` branch is a *type* branch, not a tz guard — **it stays**. |
-| `reflections/pm_briefings/daily_log.py:382` | `_collect_sessions` | `s.completed_at` from `AgentSession.query.filter(status="completed")` | Pure popoto read. Its `# Popoto strips tzinfo on save` comment goes too. The surrounding `else` branch that coerces a float via `datetime.fromtimestamp` is a type branch and stays. |
-| `reflections/crash_recovery.py:186` | resumable-session filter | `s.updated_at` from the resumable query | Pure popoto read. The four-line comment block at `:176` asserting "tzinfo stripped on read" goes with it. |
+| `models/agent_session.py:1092` | `_heal_future_updated_at` | `record.updated_at` from `cls.query.all()` | Pure popoto read. `updated_at` **is** in `_DATETIME_FIELDS`, so every assignment coerces; the constructor-kwarg and archive-restore legs are covered by the Risk 1 writer audit. The `# Popoto strips tzinfo on load` comment at `:1089` goes too. |
+| `reflections/pm_briefings/daily_log.py:382` | `_collect_sessions` | `s.completed_at` from `AgentSession.query.filter(status="completed")` | Pure popoto read; `completed_at` is in `_DATETIME_FIELDS`. Its `# Popoto strips tzinfo on save` comment at `:380` goes too. The surrounding `else` branch that coerces a float via `datetime.fromtimestamp` is a *type* branch and stays. |
+| `reflections/crash_recovery.py:186` | resumable-session filter | `s.updated_at` from the resumable query | Pure popoto read. The four-line comment block at `:176-179` asserting "round-trips values as NAIVE" goes with it. |
 | `reflections/audits/redis_quality_audit.py:61` | dead-channel scan | `chat.updated_at` | **Dead code, not a stale guard.** `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`) and line 55 already compares it against the float `month_ago`. The `isinstance(_ua, datetime)` branch has never been reachable. Delete the whole branch, leaving `days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)`. |
 
-**Keep (18).** Grouped by why:
+**Reclassified from delete to keep: `models/agent_session.py:2225`** (`log_lifecycle_transition`, `prev_time = self.started_at or self.created_at`). Critique round 1 established that the original rationale — "both are `DatetimeField`" — is false. `created_at` is `SortedField(type=datetime, partition_by="project_key")` (`:165`) and is absent from `_DATETIME_FIELDS` (`:744-757`), so `__setattr__`'s coercion at `:795` never fires for it. Its only coercion is `_normalize_kwargs` (`:885-891`), which runs at construction and only for `int | float`. Because `prev_time` falls back to `created_at` whenever a session never started, this site reads the one field in the whole sweep with **no ingress choke point at all** — a naive datetime handed as a constructor kwarg, today or by a future caller, lands naive with nothing to catch it, and the archive-restore leg (`agent/session_archive.py:441-449`) passes exactly that shape. Under the #3173 rule popoto is therefore not provably the sole inbound source, so the guard **stays** and gets a one-line reason naming the two ingress paths. The sibling `isinstance(prev_time, int | float)` branch is a *type* branch and also stays.
 
-- *ISO strings from files and raw Redis*: `agent/agent_session_queue.py:1364` (restart-flag file), `monitoring/bridge_watchdog.py:943` (recovery-lock JSON), `bridge/telegram_bridge.py:343` (last-connected file), `bridge/poll_registry.py:299`, `bridge/poll_reconcile.py:53`, `bridge/poll_reconcile.py:250`.
-- *ISO strings from an external API*: `reflections/pm_briefings/daily_log.py:352` (`_iso_in_window`, parsing `gh` output).
-- *General-purpose coercers accepting `datetime | int | float | str`*: `agent/session_runner/liveness.py:77` and `:87`, `monitoring/session_watchdog.py:65`, `tools/session_progress.py:214` and `:224`, `agent/agent_session_queue.py:2994`, `tools/valor_session.py:419`.
-- *The repo's canonical coercer*: `utils/utc.py:54` and `:64` (`to_unix_ts`). **Outside the issue's declared directory set** — the sweep never looked at `utils/` — but it is the single source of truth `docs/features/utc-timestamps.md:87` points every read-path caller at, and its docstring still says "Popoto strips tzinfo on save". Guards stay; docstring is corrected.
-- *Model ingress normalisation*: `models/agent_session.py:801` (`__setattr__`) and `:906` (`_normalize_kwargs`). These two are the reason the five deletions are safe and must be called out as such in their docstrings — deleting them would invalidate this entire plan.
-- *Already settled, untouched here*: `ui/data/sdlc.py:823` and `:838` (`_safe_float`) — also outside the declared directory set, but PR #3180 already annotated it with the correct mixed-input reason. Verified, no change.
-- *Already settled by #3173, untouched here*: `agent/session_health.py:403`, `:730`, `:6302`; `agent/session_pickup.py:52`, `:387`, `:600`.
+**Keep (28).** Grouped by why:
 
-**Prose corrections on keep-sites (4).** Each currently states popoto 1.8.0 behaviour as present tense:
-- `agent/session_runner/liveness.py:66-72` — "naive datetimes are treated as UTC — Popoto strips tzinfo on save". Rewrite: popoto 1.9.0 decodes aware; the guard exists for the ISO-string and float inputs this coercer also accepts.
-- `tools/session_progress.py:200-203` — same claim, same correction, keeping the "one definition" delegation note.
-- `monitoring/session_watchdog.py:54-59` — "matching how Popoto SortedField stores them". Rewrite to name the real reason (#777): the float and naive-string inputs, on a non-UTC host.
-- `utils/utc.py:41-49` (`to_unix_ts`) — "Naive datetimes are treated as UTC (Popoto strips tzinfo on save)". This is the docstring the other three defer to, so correcting it is what actually retires the claim; the others merely stop repeating it.
+*Nineteen keeps that get a new one-line reason:*
 
-**Testing the deletions non-vacuously.** This is where #3173's review found the defect, so each test states its own falsifiability:
+- *ISO strings from files and raw Redis* (6): `agent/agent_session_queue.py:1364` (restart-flag file), `monitoring/bridge_watchdog.py:943` (recovery-lock JSON), `bridge/telegram_bridge.py:343` (last-connected file), `bridge/poll_registry.py:299`, `bridge/poll_reconcile.py:53`, `bridge/poll_reconcile.py:250`.
+- *ISO strings from an external API* (1): `reflections/pm_briefings/daily_log.py:352` (`_iso_in_window`, parsing `gh` output).
+- *General-purpose coercers accepting `datetime | int | float | str`* (7): `agent/session_runner/liveness.py:77` and `:87`, `monitoring/session_watchdog.py:65`, `tools/session_progress.py:214` and `:224`, `agent/agent_session_queue.py:2994`, `tools/valor_session.py:419`.
+- *The repo's canonical coercer* (2): `utils/utc.py:54` and `:64` (`to_unix_ts`). **Outside the issue's declared directory set** — the sweep never looked at `utils/` — but it is the single source of truth every read-path caller is pointed at, and its docstring still says "Popoto strips tzinfo on save". Guards stay; docstring is corrected.
+- *Model ingress normalisation* (2): `models/agent_session.py:801` (`__setattr__`) and `:906` (`_normalize_kwargs`). These two are why the four deletions are safe and must be called out as such — deleting them would invalidate this plan. Their reasons must also record what they do **not** cover: `__setattr__` only fires for `_DATETIME_FIELDS` (so never for `created_at`), and neither fires for a constructor kwarg that is already a datetime.
+- *No ingress choke point* (1): `models/agent_session.py:2225` (`log_lifecycle_transition`) — the reclassification above.
+
+*Nine keeps verified and left untouched:*
+
+- *Already settled by #3173* (6): `agent/session_health.py:403`, `:730`, `:6302`; `agent/session_pickup.py:52`, `:387`, `:600`. Re-litigating them burns review time and produces no diff.
+- *Already annotated by PR #3180* (2): `ui/data/sdlc.py:823` and `:838` (`_safe_float`) — outside the declared directory set, and already carrying the correct mixed-input reason. Verified, no change.
+- *Out of shape* (1): `utils/utc.py:28` (`to_local`) — it *raises* on a naive input as a validation contract rather than coercing one. It is not the guard this classification is about, and it is counted here only so the sweep arithmetic closes.
+
+**Prose corrections (9 sites, 3 phrasings).** Measured with one alternation, `/usr/bin/grep -rniE "strips tzinfo|SortedField stores them|round-trips values as NAIVE"`. Every one of the nine is owned by a task in this plan — that is what makes the Verification row reachable.
+
+Six sit on keep-sites and are rewritten:
+- `utils/utc.py:44` (`to_unix_ts` docstring) — "Naive datetimes are treated as UTC (Popoto strips tzinfo on save)". This is the docstring the others defer to, so correcting it is what actually retires the claim.
+- `agent/session_runner/liveness.py:69` — same claim. Rewrite: popoto 1.9.0 decodes aware; the guard exists for the ISO-string and float inputs this coercer also accepts.
+- `tools/session_progress.py:201` — same claim, same correction, keeping the "one definition" delegation note.
+- `tools/agent_session_scheduler.py:47` (`_to_ts` docstring) — "(Popoto strips tzinfo on save)". Same correction; keep the real reason it states, which is that `.timestamp()` on a naive value reads machine-local.
+- `models/agent_session.py:2569` (`cleanup_expired`) — "to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo)." Same correction. **These last two were owned by no task in critique round 1**, which is exactly why the old Verification row could never reach zero.
+- `monitoring/session_watchdog.py:57` — "matching how Popoto SortedField stores them". Rewrite to name the real reason (#777): the float and naive-string inputs, on a non-UTC host.
+
+Three sit on delete-sites and are removed with the guard: `models/agent_session.py:1089`, `reflections/pm_briefings/daily_log.py:380`, `reflections/crash_recovery.py:176-179`.
+
+**Testing the deletions non-vacuously.** This is where #3173's review found the defect, so each test states its own falsifiability, and **mutation-checking each test individually is a non-optional build task, not a review nicety** (task 4):
 - Build the fixture by *writing through popoto and reading back*, never by constructing the object in memory — an in-memory `AgentSession(...)` never exercises decode and would pass with or without the guard.
-- Assert on the aware value the function produces, and assert the function does not raise. A naive value reaching the deleted line would raise `TypeError` on the naive/aware comparison downstream, which is the signal the test is really watching for.
-- For `redis_quality_audit.py`, the test asserts `Chat.updated_at` is a float after a round-trip — that is the claim that makes the branch dead, and it is checkable without touching the audit at all.
-- Mutation-check each test: re-insert the guard's inverse (force a naive value into the fixture) and confirm the test goes red. A test that stays green under that mutation is vacuous and does not ship.
+- **Assert on the function's observable result, never merely on "it did not raise."** In three of the four sites the exception path is swallowed, so "no raise" is satisfied by the failure mode itself. Specifically: `_heal_future_updated_at` wraps its per-record body in `except Exception` and continues (`:1085-1108`), so a naive value makes it *silently skip the very rows it exists to repair* — the test must assert on the **returned heal count** (a future-dated fixture must produce `count == 1`), not on absence of a raise. `_collect_sessions` must assert the session appears in the returned items. `crash_recovery`'s filter must assert the session appears in `recent`.
+- For `redis_quality_audit.py`, the test asserts `Chat.updated_at` is a `float` after a popoto round-trip — that is the claim that makes the branch dead, and it is checkable without touching the audit at all.
+- **Mutation-check each test on its own**, one at a time, re-measuring after each: force a naive value into that one test's fixture and confirm that test goes red. A test that stays green under its own mutation is vacuous and does not ship. Mutating all four at once and reading a single red run proves nothing about any individual test.
+
+## #3207 Consumer Audit
+
+#3207 was closed as a duplicate into #3199, but #3199 is scoped to index repair and quarantine counters and does not touch the audit #3207 asked for. **This plan discharges it.** The ask: audit the `updated_at` / `created_at` / `completed_at` / `scheduled_at` consumers for naive comparison sites, because a surviving comparison against a naive `datetime.utcnow()` now raises `TypeError` on aware popoto values, and age arithmetic that assumed naive-local shifts by the host offset.
+
+The named consumer classes and their pre-state, measured at `4b5a13184` with `/usr/bin/grep`:
+
+| #3207 consumer | Site | Pre-state verdict |
+|---|---|---|
+| Watchdog liveness / staleness | `monitoring/session_watchdog.py::_to_timestamp` (`:52-70`) | Routes every read through one coercer. Aware-safe. Stale prose only (`:57`) — task 3. |
+| Session-recovery drip | `reflections/agents/session_recovery_drip.py:71-75` | Delegates to `utils.utc.to_unix_ts`. Aware-safe, no naive comparison. |
+| `agent/session_health.py` | `_ts` (`:398-408`), `_at_rest_coerce_ts` (`:722-736`), heartbeat age (`:6294-6308`) | Settled by #3173. Aware-safe. |
+| Stale cleanup | `monitoring/session_tracker.py::cleanup_stale_sessions` (`:174-189`) | Compares against `utc_now()`, and its `Session` dataclass is stamped from `utc_now()` at `:84-91` — in-memory, never popoto. Aware-on-aware. |
+| Stale cleanup (persisted) | `models/agent_session.py::cleanup_expired` (`:2560-2578`) | Delegates to `to_unix_ts`. Aware-safe. Stale prose only (`:2569`) — task 3. |
+| Dashboard age columns | `ui/data/sdlc.py` — every field read goes through `_safe_float` (`:823`, `:838`); ages computed from floats (`:461-464`, `:1007-1012`) | Aware-safe, already annotated by PR #3180. |
+
+**Audit result to record in the PR body:** no naive comparison site survives. Three corroborating repo-wide measurements, all pinned to `/usr/bin/grep` over `agent/ models/ monitoring/ reflections/ bridge/ tools/ worker/ utils/ ui/ scripts/` excluding tests:
+
+- `datetime.utcnow()` — **1** hit, `agent/session_telemetry.py:111`, which formats an ISO string for a log line and is compared against nothing. Out of shape; recorded, not changed.
+- bare `datetime.now()` (no `tz=`) — **0** hits in code (2 hits are prose inside `utils/utc.py` telling callers not to).
+- `replace(tzinfo=None)` — **1** hit, `tools/valor_telegram.py:310`, which strips *both* sides of its own comparison symmetrically. Out of shape; recorded, not changed.
+
+The build re-runs these three as Verification rows so the audit is a checked claim rather than a remembered one, and task 6 confirms the audit table reaches the PR body.
 
 ## Failure Path Test Strategy
 
