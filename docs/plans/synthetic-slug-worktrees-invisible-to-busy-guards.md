@@ -1090,10 +1090,35 @@ The working tree was restored byte-for-byte after each seeded mutation (`git dif
 
 ## Critique Results
 
-**Revision pass complete.** Every finding below is dispositioned. The critique's central argument —
-that `exec_cwd` already carries the resolved lane with the right lifecycle — was verified and
-**adopted**, which restructured the plan: the `working_dir` write that was the earlier draft's
-central mechanism is now an anti-criterion.
+### Round 2 — 2026-09-07 — READY TO BUILD (with concerns)
+
+Critics: Risk & Robustness, Scope & Value, History & Consistency (FULL depth). Mode: sequential
+lenses (Agent tool unavailable: not in tool list) — no finding below was independently corroborated.
+Findings: 7 total (0 blockers, 4 concerns, 3 nits).
+
+**All nine round-1 findings verified closed by measurement at main HEAD**, not by reading the plan's
+claims. `working_dir` and `slug` are written nowhere in the three changed files (both anti-criterion
+greps return no output, exit 1); `exec_cwd` is declared at `models/agent_session.py:346`, assigned
+and persisted by `stamp_execution_spawn`, called with `cwd=self._working_dir` at
+`agent/session_runner/runner.py:702`, and listed in `_EXECUTION_FENCE_RESET_FIELDS`
+(`agent/agent_session_queue.py:136`); `_execute_agent_session` has its sole top-level `try` and
+`finally` and no top-level `except`; `get_authoritative_session` applies no status filter;
+`test_session_isolation_bypass.py` drives no executor while `test_teammate_cold_start_finalize.py`
+matches the template shape claimed; verification row 1 now runs `scripts/pytest-clean.sh` and reads
+the passed count off the summary line; #3209 and #3210 both exist and are OPEN. Every red-state row
+in the Verification table reproduced exactly as recorded.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | The literal guard expression `_runner_final_status(_task.error, _agent_session)` with `_task = locals().get("task")` raises `AttributeError` on `None.error` on exactly the early-raise path the guard exists for. The prose says it degrades to `"failed"`, but the naive repair (pass `None` through) hits `_runner_final_status(None, None)`, which returns `"completed"` (`agent/session_executor.py:120-122`) — silently finalizing a session that crashed before starting a runner as a success. | pending | Write `_guard_status = _runner_final_status(_task.error, _agent_session) if _task is not None else "failed"`. Do NOT write `_runner_final_status(getattr(_task, "error", None), _agent_session)` — with `_task` unbound that returns `"completed"`, the opposite of the intended degradation. The Task 4 test row must assert the resulting status is `"failed"`, not merely that no `NameError` escapes. |
+| CONCERN | Risk & Robustness | The pre-stamp sits inside the `if agent_session:` branch of a lookup the same file documents as racy (`agent/session_executor.py:2470`, "race on status=\"running\" filter ... see issue #917"). On a miss there is no else-branch stamp, and `SessionRunner(agent_session=None, ...)` makes the runner skip its stamp too (`if self._agent_session is not None:`, `agent/session_runner/runner.py:696`), so `exec_cwd` stays `None` for the whole session. Success Criterion 3 is written unconditionally. | pending | Scope criterion 3 to the resolved-row case and record the degradation in Race 1. Do NOT add an else-branch stamp on the outer `session` — that is a second hydrated copy, and stamping it is the duplicate-row write the dropped-resolver-swap argument was about. The correct disposition is to accept and state the gap: previously invisible for the entire session, now invisible only when the row lookup races. |
+| CONCERN | Risk & Robustness | The Reversibility claim ("a stale `exec_cwd` in a terminal row is skipped by the scan's status filter, and a continuation resets the field") omits spike-8's own leg 1: `valor-session resume` calls `transition_status(session, "pending", ..., reject_from_terminal=False)` on the same row (`tools/valor_session.py:1159-1161`) and never touches `_EXECUTION_FENCE_RESET_FIELDS`, so a resumed row re-enters the scan non-terminal carrying the previous run's lane path. | pending | `_EXECUTION_FENCE_RESET_FIELDS` is consumed only by `continuation_agent_session_fields` (`agent/agent_session_queue.py:196-201`), never by `transition_status`. State the resume path and its chosen outcome in Reversibility, and add one pure `_scan_worktree_sessions` unit row: `status="pending"`, `exec_cwd=".worktrees/dev-abcd1234"`, `working_dir=<main checkout>`, no such directory on disk, asserting `busy` — the scan never stats the path, so a deleted lane is indistinguishable from a live one. |
+| CONCERN | History & Consistency | The success criterion "An auto-continue exit leaves the continuation's `pending` row untouched and preserves the lane" holds only on `_enqueue_nudge`'s main path. On the fallback path (`if reread_session is None:`, `agent/session_executor.py:687`) the fresh row comes from `continuation_agent_session_fields`, which resets `exec_cwd` and copies `working_dir` (the main checkout), so the lane is removed as it is today. Spike-9 also justifies that path with "`get_authoritative_session`'s tie-break prefers the `running` record" — but the fallback is entered precisely because that resolver returned `None`. | pending | No code change follows: the guard as specified (`_auth is not None and _auth.status == "running"`) is already correct on both paths. Scope the criterion and the Task 4 test row to the main nudge path (`transition_status(session, "pending", ...)`, `agent/session_executor.py:759-763`), asserting both `reloaded.status == "pending"` and that the worktree directory still exists. Do not attempt the same assertion on a forced-fallback variant — there the lane is legitimately removed. Rewrite spike-9's fallback sentence to say the resolver already returned `None`, so the guard no-ops. |
+| NIT | Scope & Value | `AgentSession.live_fence` is a `@property` (`models/agent_session.py:1236-1237`), not a method. Success Criterion 5, Risk 5's mitigation, and the Task 4 test bullet all write `live_fence()`, which raises `TypeError: 'NoneType' object is not callable` on the expected value. | pending | Write `assert reloaded.live_fence is None` in all three places. |
+| NIT | History & Consistency | Spike-8's third leg names `clone_agent_session_fields` as the function `retry_agent_session` copies through. It actually calls `continuation_agent_session_fields` (`agent/agent_session_queue.py:765`). The conclusion survives (that function starts from clone and resets only the fence fields, so `working_dir` is still carried forward) and the correction strengthens the plan, because `exec_cwd` IS reset on retry. | pending | Name the correct function and note the split it demonstrates: retry resets `exec_cwd`, carries `working_dir` forward. |
+| NIT | Scope & Value | Race 4 states "`exec_cwd` is additionally on `_UPDATED_AT_OMISSION_OK_FIELDS`, so a partial save carrying it produces no `updated_at`-omission warning noise." The downgrade applies only when every field in the save is on that allowlist (`models/agent_session.py:1008`), and this save carries `updated_at` itself, so the omission check never engages. | pending | Drop the sentence or replace it with the reason that holds: the save includes `updated_at`. |
+
+### Round 1 — dispositions (all closed; verified by measurement in round 2)
 
 | Severity | Critic | Finding (abridged; the full text is in the git history of this file at `98c5e8bd5`) | Addressed By | Disposition |
 |----------|--------|--------|--------------|---------------------|
