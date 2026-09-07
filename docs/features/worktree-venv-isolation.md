@@ -237,7 +237,20 @@ line appended to `config/personas/engineer.md` in the worktree only:
 "STALE (32730 -> 32786)" after it; the same command on the primary checkout's
 own script stayed "current". `tests/unit/test_checkout_pin.py` pins the
 decision table and runs the two-checkout scenario in a real subprocess with
-the `.pth` present and absent.
+the `.pth` present and absent. The venv running that suite ships
+`_valor_checkout_pin.pth` itself (installed by the fleet-wide install path
+above), so the probe subprocess runs through an explicit bootstrap script
+under `-S -P` rather than a bare `[sys.executable, script]` invocation: the
+bootstrap's `argv[0]` sits outside any checkout, and that is what would disarm
+the ambient pin during the child's `site` processing were it to run; under the
+shipped `-S -P` invocation there is no *ambient* `site` processing to disarm
+(the bootstrap still calls `site.addsitedir` on the fake site dir itself), so
+the "without the pin" run stays a real negative control. `-S` is hermeticity
+against a future ambient shim that does not read `argv[0]`; `-P` is not that —
+it keeps the bootstrap's own directory off the child's `sys.path` so the
+probe's search path matches real CPython startup, which is what makes the
+sibling test's whole-`sys.path` comparison meaningful. Neither flag is the
+mechanism that fixes this (#3201).
 
 ### Guard relaxation (#2050 coordination)
 
