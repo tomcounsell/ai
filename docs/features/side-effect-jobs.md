@@ -84,12 +84,34 @@ its own `try` — a raise there would skip the error-case snapshot, the
 steering-queue rescue, and the reaction/nudge path to the end of the function,
 so a Redis error must cost an extraction, never a teardown.
 
+A lost race is not silent: `enqueue` takes a keyword-only `merge_on_lost_race`
+(default `True`) that decides what happens to the row it binds to. A
+`session_id` is shared across every turn of a conversation, so the same
+`(kind, session_id)` pair is enqueued repeatedly as a session resumes. With the
+default on, the losing caller's payload overwrites the still-`pending` row so
+the drain always runs the latest turn's data rather than a stale earlier one;
+a `running` row is left untouched since its handler has already read its
+arguments. `scripts/update/migrations.py`'s fleet-wide back-enqueue passes
+`merge_on_lost_race=False`: it mints a synthetic placeholder payload only to
+satisfy the handler's signature and must never overwrite a live pending job's
+real payload with it. The per-turn caller and the dead-letter replay caller
+(`bridge/dead_letters.py::_replay_side_effect`) both keep the default.
+
 ## Retry and give-up
 
 `min(30 * 2**attempts, 900)` seconds of backoff, up to `MAX_JOB_ATTEMPTS` (4).
 At the cap the job becomes `DeadLetter(stage="extraction")` and the row is
 deleted; the dead letter is replayable, so a human can re-enqueue it from the
-dashboard once the underlying cause is fixed.
+dashboard once the underlying cause is fixed. When the dead-letter write
+itself fails, the row is requeued pending with backoff instead of being
+deleted, so a failing handler is never silently discarded for want of a place
+to record it.
+
+A tick cancelled mid-handler — an `asyncio.CancelledError` from a worker
+shutdown, or any other `BaseException` that is not an ordinary handler
+failure — releases the claimed row back to `pending` with its attempt count
+unchanged and re-raises, so the next tick retries it without spending one of
+its four attempts on a shutdown that was never the job's fault.
 
 One bad job never stops the batch. A handler that raises is caught per job, and
 a `kind` with no registered handler is dead-lettered immediately rather than

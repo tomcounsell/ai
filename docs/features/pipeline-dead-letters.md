@@ -63,8 +63,18 @@ The mirror is wrapped so a Redis failure can never abort the SQLite transaction.
 `bridge/dead_letters.py` holds a per-stage handler registry. The
 `dead-letter-replay` reflection (300s) walks the replayable rows of every stage
 that has a handler, hands each to it, and deletes the row on success. A handler
-that raises bumps `attempts`; at `MAX_REPLAY_ATTEMPTS` (3) `replayable` flips
-false and the row ages out on its TTL.
+that raises, or declines by returning `False`, bumps `attempts`; at
+`MAX_REPLAY_ATTEMPTS` (3) `replayable` flips false and the row ages out on its
+TTL.
+
+The `extraction` stage's handler declines rather than re-enqueueing when the
+reconstructed payload cannot satisfy the `SideEffectJob` handler's signature
+(`inspect.signature(handler).bind(...)`). Re-enqueueing anyway would recreate
+the identical job, which fails identically and is offered for replay again —
+a self-sustaining cycle with no exit, since a successful re-enqueue always
+deletes the letter regardless of whether the new job can actually run.
+Declining routes the row through the attempt counter above instead, so it
+eventually stops being offered.
 
 `telegram_send` is not in the registry: its replay needs a live Telethon client,
 so the bridge connect sequence drives it as an eager first pass on every
