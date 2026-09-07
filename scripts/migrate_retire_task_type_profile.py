@@ -28,7 +28,9 @@ sets pointing at keys that no longer exist, which is a worse state than the one
 this script is cleaning up — and it would violate the repo's
 no-raw-Redis-on-Popoto-keys rule besides.
 
-Idempotent: a second run enumerates zero rows and exits 0.
+Idempotent: a second run enumerates zero rows and exits 0. Retryable: a run
+in which any row failed to delete exits non-zero, so ``run_pending_migrations``
+leaves the migration unmarked and the next ``/update`` runs it again.
 
 Residue bound if this migration never runs on some machine: the retired model
 declared ``Meta.ttl = 7776000`` (90 days), so every hash self-expires within 90
@@ -46,7 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from popoto import AutoKeyField, IndexedField, KeyField, Model  # noqa: E402
+from popoto import AutoKeyField, IndexedField, KeyField, Model, SortedField  # noqa: E402
 
 # stream=sys.stdout is load-bearing: scripts/update/migrations.py captures this
 # script's streams into logs/update.log, and Python's default StreamHandler
@@ -59,28 +61,46 @@ logger = logging.getLogger(__name__)
 class TaskTypeProfile(Model):
     """Minimal stub resolving to the retired model's keyspace.
 
-    Field set is the key structure plus the one ``IndexedField``, which is all
-    the ORM needs to delete a row and drop it from its index set. The retired
-    aggregate fields (``session_count``, ``avg_turns``, ``rework_rate``,
-    ``failure_stage_distribution``, ``last_updated``) are absent on purpose:
-    popoto ignores unknown hash fields on load, so their presence in Redis does
-    not block the delete, and re-declaring them here would invite a reader to
-    mistake this stub for a revival of the model.
+    The field set is the key structure plus **every field that owns a Redis key
+    outside the row hash**, because ``Model.delete()`` de-indexes by iterating
+    ``_meta.fields`` and firing each field's ``on_delete`` hook. A field the stub
+    does not declare gets no hook, so its key survives the delete with nothing
+    left that can ever reach it. Two such fields exist:
+
+    - ``delegation_recommendation`` (``IndexedField``) — its ``$IndexF`` set.
+    - ``last_updated`` (``SortedField(type=float, partition_by="project_key")``)
+      — its sorted set. Redis cannot expire a single zset member, so an orphaned
+      member outlives the 90-day hash TTL forever. This is the one field whose
+      omission produces exactly the "index sets pointing at keys that no longer
+      exist" state the module docstring above argues against.
+
+    The purely scalar aggregates (``session_count``, ``avg_turns``,
+    ``rework_rate``, ``failure_stage_distribution``) live inside the row hash and
+    are removed with it, so they stay absent: popoto ignores unknown hash fields
+    on load, and re-declaring them would invite a reader to mistake this stub for
+    a revival of the model.
     """
 
     id = AutoKeyField()
     project_key = KeyField()
     task_type = KeyField()
     delegation_recommendation = IndexedField(default="structured")
+    last_updated = SortedField(type=float, partition_by="project_key")
 
 
-def retire(apply: bool = False) -> int:
-    """Delete every TaskTypeProfile row. Returns the number of rows handled."""
-    try:
-        rows = list(TaskTypeProfile.query.filter())
-    except Exception as exc:  # noqa: BLE001
-        logger.error("TaskTypeProfile enumeration failed: %s", exc)
-        raise
+def retire(apply: bool = False, rows: list | None = None) -> int:
+    """Delete every TaskTypeProfile row. Returns the number of rows handled.
+
+    ``rows`` lets the caller enumerate once and compare the handled count with
+    the row count, which is what makes a partial pass exit non-zero instead of
+    being recorded as permanently complete.
+    """
+    if rows is None:
+        try:
+            rows = list(TaskTypeProfile.query.filter())
+        except Exception as exc:  # noqa: BLE001
+            logger.error("TaskTypeProfile enumeration failed: %s", exc)
+            raise
 
     if not rows:
         logger.info("TaskTypeProfile keyspace is already empty; nothing to retire.")
@@ -99,8 +119,8 @@ def retire(apply: bool = False) -> int:
             row.delete()
             deleted += 1
         except Exception as exc:  # noqa: BLE001
-            # One wedged row must not strand the rest; the TTL backstop covers
-            # whatever this pass cannot remove.
+            # One wedged row must not strand the rest — but the shortfall is
+            # reported to the caller, which turns it into a non-zero exit.
             logger.warning("TaskTypeProfile row delete failed: %s", exc)
     logger.info("Deleted %d of %d TaskTypeProfile row(s).", deleted, len(rows))
     return deleted
@@ -115,8 +135,26 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        retire(apply=args.apply)
+        rows = list(TaskTypeProfile.query.filter())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("TaskTypeProfile enumeration failed: %s", exc)
+        return 1
+    try:
+        handled = retire(apply=args.apply, rows=rows)
     except Exception:
+        return 1
+    if args.apply and handled < len(rows):
+        # Exit non-zero so scripts/update/migrations.py returns an error string
+        # and run_pending_migrations leaves the name OUT of the completed set.
+        # A run that deleted nothing must be retried, not recorded as done:
+        # once a migration name is marked complete it never runs again, and the
+        # class this stub stands in for no longer exists to be re-declared.
+        logger.error(
+            "Retired %d of %d TaskTypeProfile row(s); leaving the migration "
+            "unmarked so the next /update retries it.",
+            handled,
+            len(rows),
+        )
         return 1
     return 0
 

@@ -79,6 +79,14 @@ EVIDENCE_CLASSIFICATIONS: tuple[str, ...] = (
 #: Provisional/tunable.
 DEDUP_WINDOW = 500
 
+#: Lower bound for the recency range read in :meth:`ImprovementEvidence.recent`.
+#: ``SortedField(type=datetime)`` compares against a ``datetime``; an ``int``
+#: raises ``AttributeError: 'int' object has no attribute 'tzinfo'`` and turns
+#: the bounded read into a silent full-partition scan. The epoch is the widest
+#: honest bound: every live row is newer than it, and its presence is what makes
+#: popoto push ``limit`` down into the sorted-set range read.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
 
 class ImprovementEvidence(Model):
     """One observation the improvement loop can reason from.
@@ -126,14 +134,15 @@ class ImprovementEvidence(Model):
 
         Reads the bounded recency partition rather than the whole keyspace, so
         the cost is a function of ``limit`` and not of how long the system has
-        been running.
+        been running. The ``created_at__gt`` bound is what makes that true —
+        popoto only pushes ``limit`` into the sorted-set range read when a
+        ``SortedField`` predicate is present. It is deliberately not wrapped in
+        a ``try``: a swallowed failure here degrades silently into the
+        unbounded scan this method exists to avoid, which is exactly how the
+        defect that motivated this comment survived review. An empty partition
+        returns ``[]`` rather than raising, so there is nothing to fall back to.
         """
-        try:
-            rows = list(cls.query.filter(project_key=project_key, created_at__gt=0, limit=limit))
-        except Exception:
-            # A bare filter is the fallback when the sorted partition is empty
-            # or the popoto range form is unavailable; correctness over speed.
-            rows = list(cls.query.filter(project_key=project_key))
+        rows = list(cls.query.filter(project_key=project_key, created_at__gt=_EPOCH, limit=limit))
         rows.sort(
             key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(tzinfo=UTC),
             reverse=True,

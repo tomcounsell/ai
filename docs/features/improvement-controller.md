@@ -86,13 +86,33 @@ rather than ending it.
 
 | Adapter | Reads | Writes |
 |---|---|---|
-| `collect_corrections` | Recent session transcripts, via `reflections.utilities.CORRECTION_PATTERNS` | One `correction` row per session that needed correcting |
+| `collect_corrections` | Inbound `AgentSession.chat_message_log` turns and Tom-sourced `Memory` rows, via `reflections.utilities.CORRECTION_PATTERNS` | One `correction` row per session that needed correcting, plus one per correcting memory |
 | `collect_inspirations` | `Memory` rows with `source="human"` — the links Tom sends | One `inspiration` row per memory, preserving the text, its reference, and its date |
 | `collect_expectation_coverage` | Open outbound expectations on Jobs | One `owner_liveness` row per gone owner, plus one coverage row per tick |
 
 `expectation_reconciler` additionally records its shipped-work signal at the
 point it computes it, so "how often did a lane ship without discharging its
 expectation?" becomes answerable.
+
+**Both correction inputs have a named production writer.** That is the whole
+point: the retired delegation aggregate was structurally always zero because the
+session flag it averaged had nobody writing it, and retiring that shape is why
+this system exists. So the detector reads only fields something fills in:
+
+| Input | Production writer | Dedup identity |
+|---|---|---|
+| `AgentSession.chat_message_log` entries with `direction="in"` | `bridge/dispatch.py::_append_inbound_chat_log`, on every inbound Telegram message | `source_session_id` |
+| `Memory` rows with `source="human"` | `bridge/telegram_bridge.py` (`Memory.safe_save(..., source="human")`), on every inbound human message with a resolved project | `source_ref="memory:{id}"` |
+
+`AgentSession.log_path` is deliberately not read. Its only assigner,
+`bridge/session_transcript.py::start_transcript`, has no production caller, so a
+detector keyed on it can never fire — measured at 0 of 58 rows on the machine
+that owns `valor`. `tests/unit/test_improvement_evidence.py::TestDetectorInputsHaveProductionWriters`
+pins all three facts.
+
+The memory partition is enumerated **once per tick** and shared by the correction
+detector and the inspiration adapter (`human_memories`), so the tick's one
+expensive read stays one read.
 
 **Classification is uncertain evidence, never a verdict.** `classify_correction`
 answers `unknown` for the common case and only claims `architectural` when the
@@ -119,9 +139,20 @@ Machine pinning is inherited from `register_reflection`'s existing
 `_this_machine_owns_valor` guard, not re-implemented, so only the machine that
 owns the `valor` project schedules the tick.
 
-The tick runs whether or not `ImprovementSettings.enabled` is set. The
-controller stays off until it is switched on; evidence accumulates either way,
-so the first thing the controller reads is history rather than nothing.
+### The kill switch
+
+`ImprovementSettings.enabled` (`IMPROVEMENT__ENABLED`) gates every write in
+`reflections/improvement_collect.py`. False — the default — means
+`run_improvement_collect` returns `status="skipped"` and writes nothing, which
+is exactly what `config/settings.py` and `.env.example` promise it means. So an
+`/update` that registers the reflection does not, by itself, start a
+15-minute writer against production Redis.
+
+Registration is independent of the switch, so turning collection on is a single
+`IMPROVEMENT__ENABLED=true` in the vault `.env` on the machine that owns the
+project — no re-registration, and evidence starts accumulating from that moment.
+Turning it back off is the same edit in reverse; no hand edit of the vault
+`reflections.yaml` is needed to stop the writes.
 
 ## Settings
 

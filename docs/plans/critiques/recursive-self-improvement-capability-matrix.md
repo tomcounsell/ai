@@ -43,7 +43,7 @@ later reconstructs one from the corpora.
 | `ImprovementSettings` in `config/settings.py` | yes | yes, `enabled=False` | no | n/a |
 | `IMPROVEMENT__ENABLED` declared and read | yes | unset everywhere | no | n/a |
 | `VerifyingArtifactStore` | yes | no writer yet — lanes 4 and 5 write the first artifact | no | unknown |
-| Correction detector (`collect_corrections`) | yes | on the next `/update` of the owning machine | **no** | unknown |
+| Correction detector (`collect_corrections`) | yes | registered on the next `/update` of the owning machine; writes only once `IMPROVEMENT__ENABLED=true` | **no** | unknown |
 | Memory-inspiration adapter (`collect_inspirations`) | yes | same | **no** | unknown |
 | Expectation coverage adapter | yes | same | **no** | unknown |
 | Shipped-work evidence at the reconciler's own site | yes | with the next reconciler run | **no** | unknown |
@@ -52,11 +52,19 @@ later reconstructs one from the corpora.
 | Dashboard: coverage + intervention-burden partials | yes | yes | no | n/a |
 
 **The honest reading of this lane.** Evidence collection is implemented and
-registered; on merge day `ImprovementEvidence` is empty, because no correction
-may have occurred yet. That is why the plan's merge-day gate is
-`count() >= 0` plus a render smoke test rather than `count() > 0`. It graduates
-to `count() > 0` after a week of normal use, checked by hand and recorded on
-#3177.
+registered; on merge day `ImprovementEvidence` is empty, because the master
+switch is off and no correction may have occurred yet either way. That is why
+the plan's merge-day gate is `count() >= 0` plus a render smoke test rather than
+`count() > 0`. Graduation to `count() > 0` needs two things, in this order:
+`IMPROVEMENT__ENABLED=true` in the vault `.env` on the machine that owns
+`valor`, then a week of normal use, checked by hand and recorded on #3177.
+
+**The detector's inputs both have production writers**, which is the property
+the retired instrumentation lacked: inbound `AgentSession.chat_message_log`
+entries (`bridge/dispatch.py::_append_inbound_chat_log`) and `Memory` rows with
+`source="human"` (`bridge/telegram_bridge.py`). `AgentSession.log_path` is not
+read — its only assigner has no production caller, which would reproduce the
+exact defect the table below records as retired.
 
 ## Retired instrumentation
 
