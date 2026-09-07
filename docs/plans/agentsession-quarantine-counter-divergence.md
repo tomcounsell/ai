@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -563,16 +563,16 @@ wrapper, no bridge import.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agentsession-pending-index-leak.md` — describe the two-seam quarantine
+- [x] Update `docs/features/agentsession-pending-index-leak.md` — describe the two-seam quarantine
       (popoto's divergence pre-check plus the retained `on_save` shim) and state the counter's unit
       as de-duplicated identity-less rows per pass.
-- [ ] Update `docs/features/agentsession-index-drift-detection.md` — correct the description of what
+- [x] Update `docs/features/agentsession-index-drift-detection.md` — correct the description of what
       the quarantine suffix counts. It quotes the old literal verbatim at `:122`
       ("quarantined 3 identity-less hash re-add(s)"), so it must move with the f-string.
-- [ ] Update `docs/features/popoto-index-hygiene.md` — it quotes the same literal verbatim at `:109`
+- [x] Update `docs/features/popoto-index-hygiene.md` — it quotes the same literal verbatim at `:109`
       and lists `tools/doctor.py` / `_recent_quarantine_suffix()` in its surface table at `:186`.
       Correct the quoted example to the new row phrasing.
-- [ ] `docs/features/README.md` index — verify the three entries above still describe their pages
+- [x] `docs/features/README.md` index — verify the three entries above still describe their pages
       accurately; add no new page (this is a correction, not a new feature).
 
 ### External Documentation Site
@@ -584,63 +584,63 @@ Both comment blocks below were located by symbol at `1ad6cbf97`, not carried ove
 draft. The round-3 nit is correct that the previously-cited `:68-78` range was wrong and that a
 second, more directly stale block was missing; both are now named.
 
-- [ ] Rewrite the "A1 rebuild guard" paragraph and the "Returns" note in the `repair_indexes()`
+- [x] Rewrite the "A1 rebuild guard" paragraph and the "Returns" note in the `repair_indexes()`
       docstring to name popoto 1.9.0's divergence pre-check as the primary quarantine seam.
-- [ ] Update the module-level comment at `models/agent_session.py:66-74` describing the persisted
+- [x] Update the module-level comment at `models/agent_session.py:66-74` describing the persisted
       Redis key. (The block ends at `:74`; `:75-78` are the
       `_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY` / `_TTL_SECONDS` constant definitions, not prose.)
-- [ ] Update the comment block at `models/agent_session.py:689-694`, directly above
+- [x] Update the comment block at `models/agent_session.py:689-694`, directly above
       `_last_quarantined_identityless: int = 0` at `:695`. This is the block that states the unit
       most directly and is the most stale: it says the counter is what the rebuild "refused to
       re-add to the **status index**" and that "This is a **per-pass event count**". Under
       row-scoped counting across all three `IndexedField`s both clauses are wrong — reword to
       de-duplicated identity-less **rows** quarantined this pass, across every indexed field, via
       either seam. Keep the block's standing caveat that this is not a cumulative keyspace gauge.
-- [ ] Document the new `_decode_degrade_reported: bool = False` class attribute added beside
+- [x] Document the new `_decode_degrade_reported: bool = False` class attribute added beside
       `_last_quarantined_identityless`: what it latches (the Sentry capture only), why
       (`repair_indexes()` runs on worker startup, the hourly reflection, and session pickup, and the
       condition it reports is permanent), and that `logger.error` is deliberately left unlatched.
-- [ ] Comment the `try/except ImportError` at the call site with why the degrade is correct (issue
+- [x] Comment the `try/except ImportError` at the call site with why the degrade is correct (issue
       comment `5563793165`'s counting rule, just unfiltered) and why `config/popoto_floor.py` is
       deliberately not the place for this check (it fails open by policy).
-- [ ] Reword the `tools/doctor.py` suffix f-string at `:1599` to the row unit, and the two
+- [x] Reword the `tools/doctor.py` suffix f-string at `:1599` to the row unit, and the two
       docstrings that repeat the old unit around it — `_recent_quarantine_suffix` (`:1576-1586`,
       "per-pass quarantine count" at `:1579`) and `_check_agentsession_index_drift`
       (`:1613-1615`, "identity-less quarantine count").
 
 ## Success Criteria
 
-- [ ] `test_repair_does_not_reinflate_from_identityless_hashes`,
+- [x] `test_repair_does_not_reinflate_from_identityless_hashes`,
       `test_task_type_index_does_not_reinflate_from_identityless_hashes`, and the rewritten
       sum test all pass.
-- [ ] The scoped run reports 0 failed and at least 13 passed — a "0 passed" summary line is a failed
+- [x] The scoped run reports 0 failed and at least 13 passed — a "0 passed" summary line is a failed
       verification, not a pass.
-- [ ] Each of the three `== 0` assertions at `test_agentsession_pending_index_leak.py:217`, `:248`,
+- [x] Each of the three `== 0` assertions at `test_agentsession_pending_index_leak.py:217`, `:248`,
       and `:265` is individually mutation-checked red and the evidence is pasted into the PR body.
-- [ ] `agentsession:repair_indexes:last_quarantined_identityless` holds a non-zero value after a
+- [x] `agentsession:repair_indexes:last_quarantined_identityless` holds a non-zero value after a
       repair over a seeded identity-less keyspace, and `tools.doctor._recent_quarantine_suffix()`
       returns a non-empty string — asserted by a new test, not only by hand.
-- [ ] `_make_identityless_skip_shim` is still installed on every `IndexedField` and still restored in
+- [x] `_make_identityless_skip_shim` is still installed on every `IndexedField` and still restored in
       the `finally`.
-- [ ] A forced `ImportError` on `decode_popoto_model_hashmap` degrades the counter to the unfiltered
+- [x] A forced `ImportError` on `decode_popoto_model_hashmap` degrades the counter to the unfiltered
       `len(diverged_keys)` sum, keeps `repair_indexes()` returning its 2-tuple, and emits the loud
       `logger.error` + Sentry report — asserted by a test, not only by inspection. The test stubs
       `AgentSession.rebuild_indexes` before removing the symbol (the one-step version cannot reach
       the branch) and resets `_decode_degrade_reported`, and the production handler stays
       `except ImportError`, never widened to `except Exception`.
-- [ ] The Sentry capture on the degrade path fires at most once per process
+- [x] The Sentry capture on the degrade path fires at most once per process
       (`_decode_degrade_reported`) while `logger.error` fires on every pass — asserted by that same
       test, so the recurring-path flood Risk 5 names cannot regress in silently.
-- [ ] The doctor suffix reports the row unit: `tools/doctor.py:1599` no longer says "identity-less
+- [x] The doctor suffix reports the row unit: `tools/doctor.py:1599` no longer says "identity-less
       hash re-add(s)", and `tools.doctor._recent_quarantine_suffix()` renders the new wording. No
       test asserts on that literal today, so nothing else has to move with it.
-- [ ] `config/popoto_floor.py` and `tests/unit/test_popoto_floor.py` are untouched by this PR. The
+- [x] `config/popoto_floor.py` and `tests/unit/test_popoto_floor.py` are untouched by this PR. The
       files this PR may change are `models/agent_session.py`, `tools/doctor.py`, the two named test
       files, and docs.
-- [ ] `tests/unit/test_session_archive.py` and `agent/session_archive.py` are untouched by this PR.
-- [ ] PR body says `Refs #3199`.
-- [ ] Tests pass (`/do-test`, scoped)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `tests/unit/test_session_archive.py` and `agent/session_archive.py` are untouched by this PR.
+- [x] PR body says `Refs #3199`.
+- [x] Tests pass (`/do-test`, scoped)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
