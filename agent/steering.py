@@ -51,6 +51,8 @@ import json
 import logging
 import time
 
+from pydantic import ValidationError
+
 logger = logging.getLogger(__name__)
 
 ABORT_KEYWORDS = frozenset({"stop", "cancel", "abort", "nevermind"})
@@ -117,12 +119,21 @@ def _parse_entry(raw, key: str, *, destructive: bool) -> dict | None:
     A peek leaves the entry on the list for the next drain to handle, so it
     only logs — dead-lettering there would write one row per peek for the same
     entry.
+
+    Only ``ValidationError`` is caught, which is what a malformed or
+    schema-violating entry raises; pydantic reports a JSON syntax error the
+    same way, so this covers everything the ``json.JSONDecodeError`` branch
+    it replaced covered. Anything else — a client handing back a value that
+    is not text at all, say — is a fault in the caller or the Redis layer
+    rather than a bad message, and it still raises out of the drain the way
+    it always has. Swallowing those would convert a broken reader into a
+    silent stream of dead letters.
     """
     from bridge.wire_schemas import SteeringPayload
 
     try:
-        return SteeringPayload.model_validate_json(raw).model_dump(exclude_none=True)
-    except Exception as e:  # noqa: BLE001 -- pydantic ValidationError or bad bytes
+        return SteeringPayload.model_validate_json(raw).model_dump(exclude_unset=True)
+    except ValidationError as e:
         logger.warning(f"[steering] Invalid entry in queue {key}: {raw!r} ({e})")
         if destructive:
             try:
@@ -139,6 +150,17 @@ def _parse_entry(raw, key: str, *, destructive: bool) -> dict | None:
         return None
 
 
+# Upper bound on one destructive drain. A steering list holds a handful of
+# entries; this exists so the LPOP loop below can never spin without end.
+MAX_DRAIN_ENTRIES = 10_000
+
+# How many entries in a row may fail validation before the drain gives up.
+# Every failure LPOPs an entry and writes a dead letter, so a list of nothing
+# but malformed entries would otherwise shred itself into DeadLetter rows.
+# Stopping leaves the rest queued for someone to look at.
+MAX_CONSECUTIVE_PARSE_FAILURES = 20
+
+
 def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
     """Destructively drain one steering list via sequential LPOPs (FIFO).
 
@@ -151,17 +173,41 @@ def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
             is never filtered, so every message that exists today behaves
             exactly as it does today. An entry with a missing or non-numeric
             ``timestamp`` is kept (fail open).
+
+    Two bounds stop the LPOP loop. ``MAX_DRAIN_ENTRIES`` caps the loop
+    outright: before entries were validated, a raw value the JSON parse could
+    not handle raised out of this function and ended the drain, and now
+    ``_parse_entry`` catches everything and ``continue``s, so without a bound
+    a reader whose ``lpop`` never returns ``None`` would spin forever.
+    ``MAX_CONSECUTIVE_PARSE_FAILURES`` stops earlier and matters more: each
+    failure has already LPOPped its entry and written a dead letter, so a
+    list of nothing but malformed entries would shred itself into DeadLetter
+    rows. Giving up leaves the remainder queued for inspection. A steering
+    list is a handful of entries in practice, so reaching either bound is a
+    bug report and both are logged as one.
     """
     r = _get_redis()
     now = time.time()
     messages: list[dict] = []
-    while True:
+    consecutive_failures = 0
+    for _ in range(MAX_DRAIN_ENTRIES):
         raw = r.lpop(key)
         if raw is None:
             break
         msg = _parse_entry(raw, key, destructive=True)
         if msg is None:
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_PARSE_FAILURES:
+                logger.error(
+                    "[steering] Stopping the drain of %s after %d consecutive "
+                    "unparseable entries. The rest stay queued rather than "
+                    "becoming dead letters.",
+                    key,
+                    consecutive_failures,
+                )
+                break
             continue
+        consecutive_failures = 0
         age = _is_expired(msg, max_age_seconds, now)
         if age is not None:
             logger.info(
@@ -173,6 +219,14 @@ def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
             )
             continue
         messages.append(msg)
+    else:
+        logger.error(
+            "[steering] Drain of %s stopped at the %d-entry bound; "
+            "the list is longer than any real steering queue, or lpop is "
+            "not draining it. Remaining entries stay queued.",
+            key,
+            MAX_DRAIN_ENTRIES,
+        )
     return messages
 
 

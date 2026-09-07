@@ -922,6 +922,12 @@ class TestHealthCheckNoProgressRecovery:
         ):
             # Redis sustainability guards return falsy → proceed normally.
             mock_redis.get.return_value = None
+            # An empty steering queue. Without these the mock hands the
+            # startup-steering drain a truthy MagicMock for every LPOP, so the
+            # drain never sees the end of a list that does not exist and every
+            # entry it invents fails validation.
+            mock_redis.lpop.return_value = None
+            mock_redis.lrange.return_value = []
             mock_cls.query.async_filter = AsyncMock(side_effect=_mock_async_filter)
             # transition_status is called via save() internally; mock save to no-op.
             session.save = MagicMock()
@@ -1656,6 +1662,11 @@ class TestPublishSessionNotify:
 
         payload = _json.loads(payload_json)
         assert payload == {
+            # Wire-schema version stamp every payload carries
+            # (bridge/wire_schemas.py::NotifyPayload). The writer emits 1
+            # today, pinned here the way tests/unit/test_wire_schemas.py
+            # already does.
+            "v": 1,
             "chat_id": "chat-9",
             "session_id": "notify-sess",
             "worker_key": "my-worker",

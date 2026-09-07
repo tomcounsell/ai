@@ -2119,15 +2119,16 @@ class TestKeySelection:
         assert _texts(_room_queue_key(ROOM + "-empty")) == ["hello"]
         assert _texts(_queue_key("")) == []
 
-    def test_payload_shape_is_unchanged(self):
+    def test_payload_shape_is_the_wire_schema(self):
+        """The writer's key set, plus the ``v`` stamp every wire payload carries."""
         session_id = _uid("test_keysel_payload")
         push_steering_message(session_id, "hi", "Tom", room_id=ROOM + "-shape")
         (entry,) = _raw(_room_queue_key(ROOM + "-shape"))
-        assert set(entry) == {"text", "sender", "timestamp", "is_abort"}
+        assert set(entry) == {"v", "text", "sender", "timestamp", "is_abort"}
 
         push_steering_message(session_id, "hi", "Tom", target_agent="dev", room_id=ROOM + "-shape2")
         (entry,) = _raw(_room_queue_key(ROOM + "-shape2"))
-        assert set(entry) == {"text", "sender", "timestamp", "is_abort", "target_agent"}
+        assert set(entry) == {"v", "text", "sender", "timestamp", "is_abort", "target_agent"}
 
     def test_originating_push_stamps_now(self):
         session_id = _uid("test_keysel_stamp")
@@ -2312,7 +2313,7 @@ class TestLegPreservation:
             room_id=room,
         )
         (entry,) = _raw(_room_queue_key(room))
-        assert set(entry) == {"text", "sender", "timestamp", "is_abort"}
+        assert set(entry) == {"v", "text", "sender", "timestamp", "is_abort"}
 
     def test_runner_requeue_carries_target_agent(self):
         """The runner used to strip ``target_agent`` on requeue — it must not."""
@@ -2324,7 +2325,7 @@ class TestLegPreservation:
             {"text": "do X", "sender": "Tom", "_leg": "room", "target_agent": "dev"}
         )
         (entry,) = _raw(_room_queue_key(room))
-        assert set(entry) == {"text", "sender", "timestamp", "is_abort", "target_agent"}
+        assert set(entry) == {"v", "text", "sender", "timestamp", "is_abort", "target_agent"}
         assert entry["target_agent"] == "dev"
 
 

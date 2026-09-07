@@ -20,6 +20,7 @@ delivery. Steering is deliberately correlation-free (see #3177).
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -60,11 +61,19 @@ class OutboxPayload(_Wire):
 
 
 class SteeringPayload(_Wire):
-    """One entry on a steering list (legacy per-session key or a Room key)."""
+    """One entry on a steering list (legacy per-session key or a Room key).
+
+    ``timestamp`` is deliberately loose. The Room leg's age bound fails open
+    on an entry it cannot date (``agent.steering._is_expired``) because
+    dropping such an entry deletes a steer silently, and a required ``float``
+    here would turn that documented fail-open into a hard reject — on a
+    destructive drain, into a dead letter. The union keeps whatever the
+    writer sent and lets the age bound go on deciding it is undatable.
+    """
 
     text: str
     sender: str
-    timestamp: float
+    timestamp: float | str | None = None
     is_abort: bool = False
     target_agent: str | None = None
 
@@ -81,12 +90,19 @@ class NotifyPayload(_Wire):
 def dump(payload: _Wire) -> str:
     """Serialise a wire payload, omitting keys the writer left unset.
 
-    ``exclude_none`` keeps the on-wire shape identical to the hand-built
-    dicts these models replace: a text message still carries no ``type`` key
-    and no ``file_paths`` key, so a reader that predates this change (an
-    older bridge mid-deploy) sees exactly what it saw before.
+    ``exclude_unset`` is the rule, not ``exclude_none``. The hand-built dicts
+    these models replace omitted a key by not writing it and wrote an
+    explicit null when the value was genuinely null — a notify payload for a
+    session with no chat carried ``"chat_id": null``, and a reader that
+    predates this change must still see it. ``exclude_none`` cannot tell
+    those two apart and drops both, which silently narrows the wire.
+
+    ``v`` is stamped back on afterwards: no writer sets it explicitly, so
+    ``exclude_unset`` would otherwise strip the version off every payload.
     """
-    return payload.model_dump_json(exclude_none=True)
+    data = json.loads(payload.model_dump_json(exclude_unset=True))
+    data["v"] = payload.v
+    return json.dumps(data)
 
 
 __all__ = [
