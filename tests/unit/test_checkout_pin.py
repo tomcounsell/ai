@@ -3,9 +3,11 @@ the checkout the script lives in, even through another checkout's venv.
 
 The decision tests drive ``pin()`` with explicit ``argv``/``path`` lists and
 never touch the running interpreter. The end-to-end test builds two fake
-checkouts plus a fake site directory and runs a real subprocess through it,
-with the pin's ``.pth`` present and absent, so the mechanism is proved at the
-moment it matters (``site`` processing) rather than by inspection.
+checkouts plus a fake site directory and runs a real subprocess through a
+bootstrap interpreter isolated from the venv's own ambient pin (see
+``_run_probe``), with the pin's ``.pth`` present and absent, so the mechanism
+is proved at the moment it matters (``site`` processing) rather than by
+inspection.
 """
 
 from __future__ import annotations
@@ -151,23 +153,61 @@ class TestDeclaresProject:
         assert checkout_pin.declares_project(str(Path(__file__).resolve().parents[2])) is True
 
 
+_BOOTSTRAP = textwrap.dedent(
+    """
+    import os
+    import runpy
+    import site
+    import sys
+
+    target, site_dir = sys.argv[1:3]
+    sys.argv = [target]
+    site.addsitedir(site_dir)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(target)))
+    runpy.run_path(target, run_name="__main__")
+    """
+)
+
+
 def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
-    """Run ``script`` in a fresh interpreter whose ``site`` processing adds
-    ``site_dir`` (via a sitecustomize on PYTHONPATH), so its ``.pth`` files
-    run at the real moment: after ``sys.argv`` is set, before the script."""
+    """Run ``script`` through a bootstrap interpreter isolated from the venv
+    that runs this test suite.
+
+    The venv running this suite ships ``_valor_checkout_pin.pth`` in its own
+    ``site-packages`` -- the production copy of the mechanism under test,
+    installed fleet-wide by ``scripts/update/redis_flush_guard_pth.py`` since
+    #3141. An ordinary ``[sys.executable, script]`` invocation processes that
+    ambient ``.pth`` during ``site`` startup before this test's own fake site
+    dir gets a say, so the "without the pin" run stops being a control at all
+    (#3201): it measures the ambient shim instead of the fixture.
+
+    The bootstrap script (``_BOOTSTRAP``) is what disarms the ambient shim:
+    the child's ``argv[0]`` becomes the bootstrap itself, a path outside any
+    checkout, so ``checkout_pin.checkout_root_of`` returns ``None`` and the
+    ambient ``pin()`` no-ops even though its ``.pth`` still runs.
+    ``sys.argv = [target]`` must happen *before* ``site.addsitedir`` processes
+    any ``.pth``, so the fake site dir's own pin (when present) sees the real
+    target rather than the bootstrap's path. ``-S`` additionally skips the
+    venv's ``site-packages`` outright -- hermeticity against a *future*
+    ambient shim that does not consult ``argv[0]`` (an unconditional
+    ``sys.path`` append, a venv ``sitecustomize``); it is not what fixes
+    today's bug. ``-P`` keeps the bootstrap's own directory off the child's
+    ``sys.path`` so the probe's search path matches what real CPython startup
+    produces (spikes 2b/2c/3 in the #3201 plan).
+    """
     pth = site_dir / _PIN_PTH_FILENAME
     if pinned:
         pth.write_text(_PIN_PTH_CONTENT)
     elif pth.exists():
         pth.unlink()
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("PYTHONPATH", "PYTHONSAFEPATH", "PYTHONNOUSERSITE")
-    }
-    env["PYTHONPATH"] = str(site_dir / "customize")
+
+    boot = site_dir.parent / "_boot.py"
+    boot.write_text(_BOOTSTRAP)
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    env["PYTHONNOUSERSITE"] = "1"
     proc = subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, "-S", "-P", str(boot), str(script), str(site_dir)],
         capture_output=True,
         text=True,
         env=env,
@@ -194,41 +234,37 @@ class TestEndToEnd:
         script = worktree / "scripts" / "probe.py"
         script.write_text(
             textwrap.dedent(
-                """
+                f"""
                 import sys
                 import agentx
-                print(agentx.WHICH, sys.modules["_early_probe"].SEEN)
+                print(
+                    agentx.WHICH,
+                    sys.modules["_early_probe"].SEEN,
+                    str({str(worktree.resolve())!r} in sys.path),
+                )
                 """
             )
         )
 
         site_dir = tmp_path / "site"
         site_dir.mkdir()
-        (site_dir / "customize").mkdir()
-        (site_dir / "customize" / "sitecustomize.py").write_text(
-            f"import site\nsite.addsitedir({str(site_dir)!r})\n"
-        )
         (site_dir / _PIN_SHIM_FILENAME).write_text(_PIN_SOURCE_PATH.read_text())
         (site_dir / "_editable_impl_fake.pth").write_text(f"{primary}\n")
         (site_dir / "_early_probe.py").write_text("import agentx\nSEEN = agentx.WHICH\n")
         (site_dir / "zzz_early_probe.pth").write_text("import _early_probe\n")
 
-        assert _run_probe(site_dir, script, pinned=False) == "primary primary"
-        assert _run_probe(site_dir, script, pinned=True) == "worktree worktree"
+        assert _run_probe(site_dir, script, pinned=False) == "primary primary False"
+        assert _run_probe(site_dir, script, pinned=True) == "worktree worktree True"
 
     def test_primary_script_is_unaffected_by_the_pin(self, tmp_path):
         primary = _checkout(tmp_path / "primary")
         (primary / "agentx").mkdir()
         (primary / "agentx" / "__init__.py").write_text("WHICH = 'primary'\n")
         script = primary / "scripts" / "probe.py"
-        script.write_text("import agentx, sys\nprint(agentx.WHICH, sys.path[1])\n")
+        script.write_text("import agentx, sys\nprint(agentx.WHICH, sys.path)\n")
 
         site_dir = tmp_path / "site"
         site_dir.mkdir()
-        (site_dir / "customize").mkdir()
-        (site_dir / "customize" / "sitecustomize.py").write_text(
-            f"import site\nsite.addsitedir({str(site_dir)!r})\n"
-        )
         (site_dir / _PIN_SHIM_FILENAME).write_text(_PIN_SOURCE_PATH.read_text())
         (site_dir / "_editable_impl_fake.pth").write_text(f"{primary}\n")
 
