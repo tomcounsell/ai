@@ -26,6 +26,8 @@ import socket
 import time
 from typing import NamedTuple
 
+from agent.lock_policy import record_lock_degradation
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,6 +232,57 @@ def update_session(
         session.save()
 
 
+def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
+    """Preserve a session's input on a terminal sink that never delivered it.
+
+    Two stages reach here, and they differ in exactly one way that matters:
+    whether replaying the input is meaningful.
+
+    ``session_recovery_cap`` is a session that ran, was recovered up to
+    MAX_RECOVERY_ATTEMPTS and never progressed. Its input is intact and
+    re-enqueuing it is a reasonable human decision, so the row is replayable.
+
+    ``session_init_hang`` is a session whose runner produced zero output. The
+    #2181 circuit breaker exists because re-spawning that identical input
+    reproduces the identical hang, so the row is deliberately NOT replayable:
+    it is evidence for a human, never something to auto-retry.
+
+    Best-effort and exception-isolated. A dead-letter write that raised here
+    would abort a terminal transition, which is strictly worse than losing the
+    record of a session that was already lost.
+    """
+    try:
+        from bridge import dead_letters
+
+        payload = {
+            "session_id": getattr(session, "session_id", None),
+            "agent_session_id": getattr(session, "agent_session_id", None),
+            "message_text": getattr(session, "message_text", None),
+            "chat_id": getattr(session, "chat_id", None),
+            "project_key": getattr(session, "project_key", None),
+            "extra_context": getattr(session, "extra_context", None),
+        }
+        project_key = getattr(session, "project_key", None)
+        if stage == "session_init_hang":
+            dead_letters.record(
+                "session_init_hang",
+                payload,
+                reason,
+                replayable=False,
+                project_key=project_key,
+            )
+        else:
+            dead_letters.record(
+                "session_recovery_cap",
+                payload,
+                reason,
+                replayable=True,
+                project_key=project_key,
+            )
+    except Exception as e:  # noqa: BLE001 -- never block a terminal transition
+        logger.debug("[lifecycle] terminal dead-letter write failed (non-fatal): %s", e)
+
+
 def finalize_session(
     session,
     status: str,
@@ -240,6 +293,7 @@ def finalize_session(
     skip_parent: bool = False,
     reject_from_terminal: bool = True,
     emit_telemetry: bool = True,
+    dead_letter_stage: str | None = None,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -284,6 +338,11 @@ def finalize_session(
             session is already terminal and the caller is trying to transition it to
             a different terminal status. Pass False for intentional terminal->terminal
             re-classification (e.g., escalating abandoned->failed on timeout).
+        dead_letter_stage: Keyword-only. When set, the session's input is
+            preserved as a DeadLetter of this stage before the terminal write.
+            Used by the two session-path sinks that end a session having never
+            delivered its work: ``session_recovery_cap`` and
+            ``session_init_hang``. Best-effort; never blocks the finalize.
 
     Raises:
         ValueError: If session is None or status is not terminal.
@@ -542,6 +601,9 @@ def finalize_session(
     # reaper WANTS to find a still-alive detached harness whose session went
     # terminal, then reap it under the fence compare (a recycled pid reads as
     # "not ours"). Retaining the fence keeps that reap possible.
+    if dead_letter_stage:
+        _record_terminal_dead_letter(session, dead_letter_stage, reason)
+
     session.save()
 
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.
@@ -834,8 +896,14 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
     NOT a general-purpose lock manager -- it exists solely to gate this one
     transition.
 
-    Fails OPEN (returns ``True``) on Redis errors: a Redis hiccup degrades
-    to today's CAS-only protection rather than starving the pending queue.
+    Policy: fail closed; a duplicate ``claude -p`` on one worktree corrupts
+    git state. On a Redis error this returns ``False`` and the caller skips
+    the session, so a prolonged Redis degradation stalls pickup rather than
+    risking two harnesses on one checkout. There is deliberately no
+    break-glass override (owner decision, #3183): the pop lock retries on the
+    next loop iteration anyway, and the degradation counter
+    (``agent/lock_policy.py``) makes the stall visible on the dashboard
+    instead of leaving it to be inferred from a corrupted worktree.
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
@@ -845,11 +913,12 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
         return bool(acquired)
     except Exception as e:
         logger.warning(
-            "[session-lifecycle] run-claim acquisition failed for %s (failing open): %s",
+            "[session-lifecycle] run-claim acquisition failed for %s (failing closed): %s",
             session_id,
             e,
         )
-        return True
+        record_lock_degradation("claim_pending_run", "closed")
+        return False
 
 
 # ── Issue-level SDLC ownership lock (issues #1954, #2003) ───────────────
@@ -1252,10 +1321,11 @@ def touch_issue_lock(
             then renew it to the max-lifetime ceiling with no supervisor
             behind it.
 
-    Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
-    ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
-    degrades to no cross-process protection rather than wedging the SDLC
-    pipeline. Each fail-open logs the swallowed error CLASS explicitly.
+    Fails OPEN (returns ``acquired=True``) on any Redis exception: a Redis
+    hiccup degrades to no cross-process protection rather than wedging the
+    SDLC pipeline, because the cost of two supervisors racing one issue is a
+    duplicated stage, not a corrupted checkout. Each fail-open logs the
+    swallowed error CLASS explicitly.
     A ``renew_only`` call is the ONE exception and fails CLOSED
     (``acquired=False``): reporting ownership it cannot verify is exactly
     the "renew a lease you do not hold" shape the mode exists to eliminate,

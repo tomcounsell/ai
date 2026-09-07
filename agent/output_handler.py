@@ -274,6 +274,7 @@ def build_telegram_outbox_payload(
     reply_to: int | None,
     session_id: str,
     file_paths: list[str] | None = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the telegram outbox payload dict for ``telegram:outbox:{session_id}``.
 
@@ -283,12 +284,13 @@ def build_telegram_outbox_payload(
     the wire shape is defined exactly once.  It performs no I/O and has no side
     effects.
 
-    The returned dict matches the shape consumed by the Telegram relay
-    (``bridge/telegram_relay.py``): ``chat_id``, ``reply_to``, ``text``,
-    ``session_id``, ``timestamp``, and — only when attachments are supplied —
-    ``file_paths``.  The ``file_paths`` key is OMITTED entirely when
-    ``file_paths`` is falsy (empty list or ``None``), preserving the original
-    conditional-key behaviour of the inline dict this helper replaces.
+    The shape is declared once, as ``bridge.wire_schemas.OutboxPayload``, and
+    that model is what the relay validates the entry against on the way out:
+    ``v``, ``chat_id``, ``reply_to``, ``text``, ``session_id``, ``timestamp``,
+    and — only when supplied — ``file_paths`` and ``correlation_id``.  Those
+    two are the only keys omitted when unset; every other key is always
+    written, ``reply_to`` as an explicit null when the message replies to
+    nothing.  That is the shape of the inline dict this helper replaced.
 
     Args:
         chat_id: Target Telegram chat identifier.
@@ -296,21 +298,41 @@ def build_telegram_outbox_payload(
         reply_to: Message ID to reply to, or ``None``.
         session_id: Session identifier used for the outbox key.
         file_paths: Optional list of attachment paths.
+        correlation_id: The session's correlation id, so a delivered message
+            can be tied back to the intake that produced it.
 
     Returns:
         A dict payload ready to be JSON-serialised and pushed onto
         ``telegram:outbox:{session_id}``.
     """
-    payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "reply_to": reply_to,
-        "text": text,
-        "session_id": session_id,
-        "timestamp": time.time(),
-    }
-    if file_paths:
-        payload["file_paths"] = file_paths
-    return payload
+    from bridge import wire_schemas
+    from bridge.wire_schemas import OutboxPayload
+
+    # `correlation_id` is a lineage tag the message does not need in order to
+    # be delivered. Before the payload was typed, a caller reading it off a
+    # session got whatever was there and it rode along unvalidated; now a
+    # non-string would raise out of this builder, and the one caller on the
+    # send path turns that into a dropped message. Losing the tag is the
+    # right trade, so drop it here rather than let it cost a delivery.
+    if not isinstance(correlation_id, str):
+        correlation_id = None
+
+    # Conditional keys are omitted by not setting them, which is the whole of
+    # the rule `wire_schemas.to_dict` then applies: the writer's keys, and
+    # only those. The hand-built dict this replaced always wrote `reply_to`,
+    # including as an explicit null on the highest-volume path (an ordinary
+    # message replying to nothing), and never carried `type` or `project_key`
+    # at all — both of which a blanket dump of the model would invent.
+    payload = OutboxPayload(
+        chat_id=chat_id,
+        reply_to=reply_to,
+        text=text,
+        session_id=session_id,
+        timestamp=time.time(),
+        **({"file_paths": file_paths} if file_paths else {}),
+        **({"correlation_id": correlation_id} if correlation_id else {}),
+    )
+    return wire_schemas.to_dict(payload)
 
 
 def build_telegram_poll_outbox_payload(
@@ -1177,7 +1199,12 @@ class TelegramRelayOutputHandler:
             return DeliveryOutcome.sent
 
         payload = build_telegram_outbox_payload(
-            chat_id, delivery_text, reply_to, session_id, effective_file_paths
+            chat_id,
+            delivery_text,
+            reply_to,
+            session_id,
+            effective_file_paths,
+            correlation_id=getattr(session, "correlation_id", None),
         )
 
         queue_key = f"telegram:outbox:{session_id}"

@@ -103,6 +103,15 @@ minimal `function`-type entry:
 - `priority` is one of `urgent`, `high`, `normal`, `low`.
 - `callable` is the dotted path to the per-file `run` — point it at the new module directly, not at a compatibility shim.
 
+**A reflection that must ship with its feature's code registers itself instead.**
+`config/reflections.yaml` is gitignored and clobbered from the vault on every
+`/update`, so a hand-edit never reaches another machine. Add an idempotent
+wrapper in `scripts/update/reflection_register.py` (the `register_*` family) and
+call it from `scripts/update/run.py` before the vault→config copy step. The
+`side-effect-drain` and `dead-letter-replay` registrations are the current
+examples; see [Reflections](reflections.md#code-registered-reflections) for the
+mechanism.
+
 ## Async-Safety
 
 Reflection callables run inside the scheduler's asyncio event loop. A blocking call inside an `async def run()` freezes the whole scheduler and can starve the worker heartbeat. There are two safe shapes:

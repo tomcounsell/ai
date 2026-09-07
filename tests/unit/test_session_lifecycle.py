@@ -358,12 +358,18 @@ class TestClaimPendingRun:
         assert first is True
         assert second is False
 
-    def test_claim_fails_open_on_redis_error(self):
-        """A Redis error must fail OPEN (return True), not starve the queue."""
+    def test_claim_fails_closed_on_redis_error(self):
+        """A Redis error must fail CLOSED (return False).
+
+        Two ``claude -p`` processes on one worktree corrupt git state, so a
+        Redis degradation stalls pickup rather than risking that. The pop
+        lock retries on the next loop iteration, and the degradation is
+        counted so the stall is visible rather than inferred (#3183 lane 4).
+        """
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.side_effect = RuntimeError("redis down")
             result = claim_pending_run("test-runclaim-fresh", worker_id="worker-A")
-        assert result is True
+        assert result is False
 
     def test_ttl_is_short(self):
         """RUN_CLAIM_TTL_SECONDS must be short -- only needs to cover the

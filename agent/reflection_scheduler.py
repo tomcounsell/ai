@@ -492,6 +492,51 @@ def _latest_run_timestamp(name: str) -> float | None:
         return None
 
 
+def _effective_last_run(entry: ReflectionEntry, state: Reflection) -> float | None:
+    """The last-run timestamp to schedule from, or None for "never run".
+
+    Two recoveries live here, and both must be applied identically wherever a
+    due time is computed — ``is_reflection_due`` and ``reflection_due_epoch``
+    disagreeing would give a reflection one answer for "is it due" and a
+    different one for "which window is this", which is exactly what an
+    idempotency key must not have.
+
+    1. Popoto hands back the Field descriptor rather than ``None`` when the
+       value is unset, so a non-numeric ``ran_at`` reads as absent.
+    2. A blank ``every:`` record (``ran_at`` lost during an index-rebuild
+       race) would otherwise look like "never run" and burst-fire on every
+       tick; the true last run is recovered from ReflectionRun history.
+       Scoped to ``every:`` because ``cron:`` anchors on ``now`` (never
+       immediately-due on a blank record) and ``at:`` is a one-shot.
+    """
+    ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+    if (
+        ran_at is None
+        and entry.schedule
+        and entry.schedule.partition(":")[0].strip().lower() == "every"
+    ):
+        ran_at = _latest_run_timestamp(entry.name)
+    return ran_at
+
+
+def reflection_due_epoch(entry: ReflectionEntry, state: Reflection, now: float) -> float | None:
+    """The due time this tick is firing for, or None when there is no schedule.
+
+    This is the value an agent reflection's idempotency key is derived from,
+    and it MUST be read in the tick loop beside ``is_reflection_due`` — before
+    anything calls ``state.mark_started()``. ``mark_started`` writes
+    ``ran_at = time.time()``, so computing the due time any later reads an
+    input that has already been clobbered, and a crash-retry of the same tick
+    would then key on a different window and enqueue a second session.
+    """
+    if not entry.schedule:
+        return None
+    try:
+        return compute_next_due(entry.schedule, last_run=_effective_last_run(entry, state), now=now)
+    except ValueError:
+        return None
+
+
 def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> bool:
     """Check if a reflection is due to run.
 
@@ -508,18 +553,9 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     Returns:
         True if the reflection should be enqueued.
     """
-    # Guard against Popoto returning the Field descriptor when value is None.
-    ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+    ran_at = _effective_last_run(entry, state)
 
     if entry.schedule:
-        # Burst-fire guard: a blank ``every:`` record (ran_at lost during an
-        # index-rebuild race) would be treated as "never run" and fire on every
-        # tick. Recover the true last-run from ReflectionRun history so the job
-        # stays suppressed until its real interval elapses. Scoped to ``every:``
-        # because ``cron:`` anchors on ``now`` (never immediately-due on a blank
-        # record) and ``at:`` is a one-shot.
-        if ran_at is None and entry.schedule.partition(":")[0].strip().lower() == "every":
-            ran_at = _latest_run_timestamp(entry.name)
         try:
             next_due = compute_next_due(entry.schedule, last_run=ran_at, now=now)
         except ValueError as e:
@@ -594,7 +630,9 @@ def _get_memory_rss() -> int | None:
         return None
 
 
-async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
+async def run_reflection(
+    entry: ReflectionEntry, state: Reflection, due_epoch: float | None = None
+) -> None:
     """Execute a single reflection and update its state.
 
     Includes memory instrumentation (before/after RSS snapshots) and
@@ -603,6 +641,11 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
     Args:
         entry: The registry entry describing the reflection
         state: The Redis state record to update
+        due_epoch: The due time this run is firing for, read by the tick loop
+            BEFORE ``mark_started()`` clobbers ``ran_at``. Agent reflections
+            derive their idempotency key from it. None (the default) keeps the
+            non-idempotent behaviour for a scheduleless or manually triggered
+            run, and for every caller that does not pass it.
     """
     logger.info("[reflection] Starting: %s (%s)", entry.name, entry.execution_type)
     state.mark_started()
@@ -632,7 +675,7 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             # Agent-type reflections are enqueued to the session queue
             # instead of executed directly
             result = await asyncio.wait_for(
-                _enqueue_agent_reflection(entry),
+                _enqueue_agent_reflection(entry, due_epoch=due_epoch),
                 timeout=timeout,
             )
 
@@ -706,15 +749,25 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
                 )
 
 
-async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
+async def _enqueue_agent_reflection(entry: ReflectionEntry, due_epoch: float | None = None) -> None:
     """Enqueue an agent-type reflection as a PM session in the session queue.
 
     Agent-type reflections use the `command` field as a natural-language prompt
     sent to a PM session. The session runs asynchronously; this function returns
     once the session is enqueued (not when it completes).
 
+    The session id is minted from the wall clock, so two ticks inside one due
+    window used to enqueue two sessions for the same work. With ``due_epoch``
+    the enqueue is single-winner under
+    ``reflection:{name}:{due window}``: the second tick binds to the first
+    session instead of creating another. The window is floored to the 60s tick
+    period so sub-tick jitter cannot put two ticks in different windows.
+
     Args:
         entry: The registry entry with the command (prompt) to enqueue.
+        due_epoch: The due time this run is firing for. None leaves the
+            enqueue non-idempotent, which is right for a scheduleless or
+            manually triggered reflection: there is no window to key on.
     """
     import os
 
@@ -751,7 +804,10 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     ts_suffix = str(int(utc_now().timestamp() * 1000))
     session_id = f"0_{ts_suffix}"
 
-    await _push_agent_session(
+    idempotency_key = (
+        f"reflection:{entry.name}:{int(due_epoch) // 60 * 60}" if due_epoch is not None else None
+    )
+    _depth, agent_session_id = await _push_agent_session(
         project_key=project_key,
         session_id=session_id,
         working_dir=str(project_root),
@@ -760,11 +816,14 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
         chat_id="0",
         telegram_message_id=0,
         session_type="eng",
+        idempotency_key=idempotency_key,
     )
     logger.info(
-        "[reflection] Enqueued agent reflection '%s' as session %s",
+        "[reflection] Enqueued agent reflection '%s' as session %s (agent_session=%s, key=%s)",
         entry.name,
         session_id,
+        agent_session_id,
+        idempotency_key,
     )
 
 
@@ -938,6 +997,12 @@ class ReflectionScheduler:
                 if not is_reflection_due(entry, state, now):
                     continue
 
+                # Read the due window HERE, before anything calls
+                # mark_started(): that write clobbers `ran_at`, and a due time
+                # computed after it would put a crash-retry of this same tick
+                # in a different window (#3183 lane 5b).
+                due_epoch = reflection_due_epoch(entry, state, now)
+
                 # Execute or enqueue
                 if entry.execution_type == "function":
                     # Per-tick cap: defer excess function-type reflections to the
@@ -953,7 +1018,7 @@ class ReflectionScheduler:
                     logger.info("[reflection] %s is due, executing", entry.name)
                     # Run function-type reflections as background tasks
                     task = asyncio.create_task(
-                        run_reflection(entry, state),
+                        run_reflection(entry, state, due_epoch=due_epoch),
                         name=f"reflection-{entry.name}",
                     )
                     self._running_tasks[entry.name] = task
@@ -968,7 +1033,7 @@ class ReflectionScheduler:
                 else:
                     logger.info("[reflection] %s is due, executing", entry.name)
                     # Agent-type reflections are enqueued to session queue
-                    await run_reflection(entry, state)
+                    await run_reflection(entry, state, due_epoch=due_epoch)
 
                 enqueued += 1
 

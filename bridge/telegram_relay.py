@@ -31,8 +31,11 @@ import logging
 import os
 
 import redis
+from pydantic import ValidationError
 from telethon.errors import FloodWaitError
 
+from bridge import dead_letters, wire_schemas
+from bridge.wire_schemas import OutboxPayload
 from utils.peer import numeric_peer
 
 logger = logging.getLogger(__name__)
@@ -54,8 +57,10 @@ RELAY_FLOOD_WAIT_BUFFER_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_BUFFER_SECS"
 RELAY_FLOOD_WAIT_MAX_SLEEP_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_MAX_SLEEP_SECS", "300"))
 RELAY_FLOOD_WAIT_MAX = int(os.environ.get("RELAY_FLOOD_WAIT_MAX", "10"))
 
-# Known message types accepted by the relay dispatcher
-KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message", "poll"}
+# The accepted message types live on `bridge.wire_schemas.OutboxPayload.type`
+# as a `Literal[...] | None`, so the relay dispatcher's accepted set and the
+# wire schema can no longer drift apart. `None` is a member by construction:
+# an ordinary text message carries no `type` key.
 
 
 class _DeliveredNoId:
@@ -1010,6 +1015,9 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
                 chat_id=chat_id_int,
                 reply_to=int(reply_to) if reply_to else None,
                 text=text,
+                reason=reason,
+                attempts=int(message.get("_relay_attempts") or 0),
+                project_key=message.get("project_key"),
             )
             logger.warning(
                 f"Relay: dead-lettered message for chat {chat_id} ({reason}, {len(text)} chars)"
@@ -1333,19 +1341,33 @@ async def process_outbox(telegram_client) -> int:
 
                 processed += 1
 
+                # The wire shape is declared once, in bridge/wire_schemas.py.
+                # Validation subsumes the old ad-hoc JSON parse AND the
+                # KNOWN_MESSAGE_TYPES membership check: `type` is a Literal on
+                # the model, and it admits None because a plain text message
+                # carries no `type` key at all. Either failure leaves the
+                # entry as a dead letter holding the raw string rather than
+                # discarding it, which is what this loop used to do (#3183).
                 try:
-                    message = json.loads(raw)
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning(f"Relay: skipping malformed queue entry in {key}: {e}")
-                    continue
-
-                # Validate message type before dispatch
-                msg_type = message.get("type")
-                if msg_type not in KNOWN_MESSAGE_TYPES:
-                    logger.warning(
-                        f"Relay: unknown message type '{msg_type}', discarding: {message}"
+                    payload = OutboxPayload.model_validate_json(raw)
+                except ValidationError as e:
+                    logger.warning(f"Relay: unparseable queue entry in {key}: {e}")
+                    await dead_letters.arecord(
+                        "outbox_parse",
+                        raw,
+                        f"outbox payload failed validation in {key}: {e}",
+                        replayable=False,
                     )
                     continue
+
+                # Downstream handlers read a plain dict (and mutate it: the
+                # retry counter, the re-queue). `exclude_unset` reproduces the
+                # entry exactly as the writer put it on the wire: the keys it
+                # sent, including an explicit `"reply_to": null`, and none of
+                # the optional fields the model declares but this payload
+                # never carried.
+                message = wire_schemas.to_dict(payload)
+                msg_type = payload.type
 
                 # Dispatch to handler with unified error handling
                 success = False

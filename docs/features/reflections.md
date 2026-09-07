@@ -68,6 +68,8 @@ This is the mechanism behind the current registrations:
 - `crash-recovery`
 - `memory-distill-backfill` — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3)
 - `sdlc-upvote-pickup` (`register_sdlc_upvote_pickup` in `scripts/update/reflection_register.py`) — cron-scheduled (`0 6-22/2 * * *`, PT), project-scoped, function-type reflection running `reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes`. Picks up the oldest open `upvote`-labeled issue per project and starts an autonomously anchored SDLC lane. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
+- `side-effect-drain` (`register_side_effect_drain`) — 60s, runs due `SideEffectJob` rows: post-session memory extraction, backed off on failure and dead-lettered when it exhausts its attempts. See [Side-Effect Jobs](side-effect-jobs.md).
+- `dead-letter-replay` (`register_dead_letter_replay`) — 300s, replays replayable `DeadLetter` rows through their stage handlers and evicts per-stage overflow. See [Pipeline Dead Letters](pipeline-dead-letters.md).
 
 The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`).
 

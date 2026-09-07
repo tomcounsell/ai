@@ -89,10 +89,16 @@ field-drop runs via the `/update` migration (`steering_queue_drain`).
 The remaining findings from #1817 ship as their own issues and PRs:
 
 - **B (duplicate execution):** atomic per-message claim before enqueue (B1); atomic
-  pending to running claim (B2).
+  pending to running claim (B2). Both shipped as short `SET NX` gates that returned
+  success on a Redis error with no counter; #3183 gave each a **declared policy and a
+  degradation counter**, and flipped B2's run claim to fail closed. See
+  [Bridge/Worker Architecture](bridge-worker-architecture.md#declared-policy-per-lock).
 - **C (data integrity):** parent-in-`waiting_for_children` re-finalize sweep (C1); clock-skew
   freshness (C2); ghost index-member reconcile (C3); guarded `projects.json` last-known-good
   read (C4, PR #1861).
 - **D (brittleness):** `claude` CLI version pin + startup contract-check (D1); immediate PTY
   pid persistence + broadened reaper (D2); held fire-and-forget tasks (D3); off-path
-  notify-listener liveness probe (D4).
+  notify-listener liveness probe (D4). D3 held the task references but added no durability;
+  #3183 replaced the fire-and-forget task with a durable
+  [`SideEffectJob`](side-effect-jobs.md) row that survives a worker restart, retries on a
+  backoff, and dead-letters what it cannot land.

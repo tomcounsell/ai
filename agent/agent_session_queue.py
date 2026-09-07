@@ -25,7 +25,6 @@ tests/unit/test_no_reexport_hub.py fails if any come back.
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -35,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from popoto.exceptions import ModelException
+from pydantic import ValidationError
 
 # Shared mutable session-tracking state. Imported as a module, not as names, so
 # the mutation sites below write through to the owning module rather than to a
@@ -76,6 +76,7 @@ from agent.session_state import (
     _send_callbacks,
     _starting_workers,
 )
+from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
@@ -229,9 +230,11 @@ async def _push_agent_session(
     extra_context_overrides: dict | None = None,
     model: str | None = None,
     requires_real_chrome: bool = False,
+    idempotency_key: str | None = None,
+    status: str = "pending",
     **_kwargs,
-) -> int:
-    """Create an agent session in Redis and return the pending queue depth for this chat.
+) -> tuple[int, str]:
+    """Create an agent session in Redis; return the queue depth and the session's id.
 
     Queue is keyed by chat_id so different chat groups for the same project
     can run in parallel. project_key is preserved on the model for config lookup.
@@ -250,6 +253,22 @@ async def _push_agent_session(
             session concurrently with another requires_real_chrome=True session
             (issue #1256, Decision 2). Default False keeps the existing
             non-serialized scheduling behavior for ordinary sessions.
+        idempotency_key: When set, this enqueue is single-winner under that
+            key: the first caller binds it to an ``agent_session_id`` and
+            creates the row; every later caller with the same key returns the
+            bound id without creating a second session. Callers that can be
+            retried (a reflection tick, a crash-retry of one) pass a key
+            derived from what makes the work the same work. None keeps the
+            unconditional create every other caller wants.
+        status: The status the row is created in. ``pending`` is the queue's
+            own entry state; a caller that admits work through a different
+            gate can name its own.
+
+    Returns:
+        ``(pending queue depth for this chat, agent_session_id)``. The id is
+        what an idempotent caller needs: on a lost race it is the id of the
+        session that already exists, so the caller can act on it rather than
+        discovering the duplicate later.
     """
     # Stopgap (#1633): refuse NEW parent-attached session creation at the
     # queue chokepoint. Covers every enqueue caller and fires before any
@@ -367,9 +386,39 @@ async def _push_agent_session(
     except Exception as e:
         logger.warning(f"Failed to reconcile stale terminal duplicates for {session_id}: {e}")
 
+    # Single-winner binding, after the stale-terminal reconcile and before the
+    # create (#3183 lane 5b). The key has to be bound before the row exists:
+    # bind it after, and two callers both find nothing and both create.
+    #
+    # A loser whose winner died between the SET NX and the create finds the key
+    # bound but no row, and creates it under the SAME preallocated id (Race 5).
+    # That is why `bind` hands back the id rather than the caller reading one
+    # off a row that may not be there.
+    bound_id: str | None = None
+    if idempotency_key:
+        from agent.enqueue_idempotency import bind
+
+        bound_id, won = await asyncio.to_thread(bind, idempotency_key)
+        if not won:
+            existing = await asyncio.to_thread(AgentSession.get_by_id, bound_id)
+            if existing:
+                logger.info(
+                    "Enqueue for session_id=%s bound to existing session %s (key=%s)",
+                    session_id,
+                    bound_id,
+                    idempotency_key,
+                )
+                depth = await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+                return depth, bound_id
+
     await AgentSession.async_create(
+        # `id=`, never `agent_session_id=`: AgentSession.__init__ pops the
+        # latter as the AutoKeyField's read name and drops it WITHOUT raising,
+        # which would leave the idempotency key pointing at a session that
+        # does not exist.
+        **({"id": bound_id} if bound_id else {}),
         project_key=project_key,
-        status="pending",
+        status=status,
         priority=priority,
         created_at=datetime.now(tz=UTC),
         session_id=session_id,
@@ -443,13 +492,13 @@ async def _push_agent_session(
             _wk = slug
         else:
             _wk = project_key
-        payload = json.dumps(
-            {
-                "chat_id": chat_id,
-                "session_id": session_id,
-                "worker_key": _wk,
-                "is_project_keyed": _wk == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=chat_id,
+                session_id=session_id,
+                worker_key=_wk,
+                is_project_keyed=_wk == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         await asyncio.to_thread(POPOTO_REDIS_DB.publish, channel, payload)
@@ -457,7 +506,13 @@ async def _push_agent_session(
     except Exception as e:
         logger.warning(f"Failed to publish session notification for {session_id}: {e}")
 
-    return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+    depth = await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+    if bound_id is None:
+        rows = await asyncio.to_thread(
+            lambda: AgentSession.rows_for_session_id(session_id, status=status)
+        )
+        bound_id = rows[0].agent_session_id if rows else ""
+    return depth, bound_id
 
 
 def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, bool]:
@@ -922,13 +977,13 @@ def publish_session_notify(session) -> None:
 
         worker_key = session.worker_key
         project_key = getattr(session, "project_key", None)
-        payload = json.dumps(
-            {
-                "chat_id": getattr(session, "chat_id", None),
-                "session_id": getattr(session, "session_id", None),
-                "worker_key": worker_key,
-                "is_project_keyed": worker_key == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=getattr(session, "chat_id", None),
+                session_id=getattr(session, "session_id", None),
+                worker_key=worker_key,
+                is_project_keyed=worker_key == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         POPOTO_REDIS_DB.publish(channel, payload)
@@ -1178,19 +1233,33 @@ async def _session_notify_listener() -> None:
                     if message["type"] != "message":
                         continue
                     try:
-                        data = json.loads(message["data"])
-                        wk = data.get("worker_key") or data.get("chat_id")
-                        is_pk = data.get("is_project_keyed", False)
-                        session_id = data.get("session_id")
+                        data = wire_schemas.NotifyPayload.model_validate_json(message["data"])
+                        wk = data.worker_key or data.chat_id
                         if wk is not None:
                             logger.info(
                                 "Received session notify: worker_key=%s session_id=%s",
                                 wk,
-                                session_id,
+                                data.session_id,
                             )
-                            loop.call_soon_threadsafe(notify_queue.put_nowait, (wk, is_pk))
-                    except json.JSONDecodeError as e:
-                        logger.warning("Session notify: bad JSON payload: %s", e)
+                            loop.call_soon_threadsafe(
+                                notify_queue.put_nowait, (wk, data.is_project_keyed)
+                            )
+                    except ValidationError as e:
+                        # A wake this thread cannot parse is a lost wake: the
+                        # session waits for the 5-minute health sweep instead.
+                        # Keep the raw message so that is diagnosable (#3183).
+                        logger.warning("Session notify: payload failed validation: %s", e)
+                        try:
+                            from bridge import dead_letters
+
+                            dead_letters.record(
+                                "notify_parse",
+                                str(message.get("data")),
+                                f"session-notify payload failed validation: {e}",
+                                replayable=False,
+                            )
+                        except Exception as dl_exc:  # noqa: BLE001
+                            logger.debug("notify dead-letter write failed: %s", dl_exc)
                     except Exception as e:
                         logger.warning("Session notify: error processing message: %s", e)
             except Exception as e:
@@ -1710,7 +1779,7 @@ async def enqueue_agent_session(
     if revival_context:
         log_large_field("revival_context", revival_context)
 
-    depth = await _push_agent_session(
+    depth, _agent_session_id = await _push_agent_session(
         project_key=project_key,
         session_id=session_id,
         working_dir=working_dir,
@@ -2194,6 +2263,27 @@ async def _worker_loop(
                     worker_key,
                     e,
                 )
+
+                # The reaper below deletes the corrupted row, so this is the
+                # last moment anything knows the row existed (#3183 lane 2).
+                # A corrupted record often carries no usable session_id, which
+                # is exactly why the row is unreplayable and why the exception
+                # text is the payload.
+                try:
+                    from bridge import dead_letters
+
+                    dead_letters.record(
+                        "session_corrupt_row",
+                        {"worker_key": worker_key, "error": repr(e)},
+                        f"corrupted AgentSession at the queue head for worker_key={worker_key}",
+                        replayable=False,
+                    )
+                except Exception as _dl_exc:  # noqa: BLE001 -- never re-kill the loop
+                    logger.debug(
+                        "[worker:%s] corrupted-pop dead-letter write failed: %s",
+                        worker_key,
+                        _dl_exc,
+                    )
 
                 # Best-effort head-of-queue cleanup via the existing ORM reaper.
                 # The return value is DELIBERATELY IGNORED: the reaper is

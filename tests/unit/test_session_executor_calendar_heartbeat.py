@@ -86,7 +86,7 @@ class TestScheduleCalendarHeartbeat:
 
 
 class TestDrainPendingCalendarHeartbeats:
-    """Verify shutdown drain semantics mirror drain_pending_extractions."""
+    """Verify the shutdown drain completes fast tasks and cancels slow ones."""
 
     @pytest.mark.asyncio
     async def test_noop_when_empty(self):

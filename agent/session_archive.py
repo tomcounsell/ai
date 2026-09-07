@@ -428,6 +428,28 @@ def _record_row_failure(conn: sqlite3.Connection, archived_id: str, exc: Excepti
             archived_id,
             attempt_count,
         )
+        # Observability mirror only (#3183 lane 2). The _restore_quarantine
+        # table above stays authoritative: it is the cold-start skip list AND
+        # the per-row attempt counter, and it lives on disk precisely to
+        # survive an emptied Redis, which is the event the archive exists to
+        # recover from. The dead letter is replayable=False for the same
+        # reason -- retrying a poison row is what the quarantine prevents.
+        # Wrapped so a Redis failure can never abort the SQLite transaction
+        # that is the durable record.
+        try:
+            from bridge import dead_letters
+
+            dead_letters.record(
+                "archive_restore",
+                {"archived_id": archived_id, "attempt_count": attempt_count},
+                f"session archive row quarantined after {attempt_count} failed rehydrations: {exc}",
+                replayable=False,
+            )
+        except Exception as dl_exc:  # noqa: BLE001 -- mirror must never break the record
+            logger.debug(
+                "[session_archive] quarantine dead-letter mirror failed (non-fatal): %s",
+                dl_exc,
+            )
 
 
 def _rehydrate_row(row: sqlite3.Row) -> None:

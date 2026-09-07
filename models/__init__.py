@@ -15,6 +15,7 @@ Provides fast, queryable Redis models for all persistent data:
 - KnowledgeDocument: knowledge base indexed documents with embeddings
 - DocumentChunk: per-chunk embeddings for fine-grained document search
 - PRReviewAudit: deduplication tracker for PR review audit findings
+- SideEffectJob: durable post-session side effects, retried by the drain reflection
 - ImprovementCharter: immutable versions of the improvement controller's charter
 - ImprovementEvidence: durable observations the improvement loop reasons from
 - ImprovementModelRevision: revisions of the system's model of itself
@@ -57,6 +58,7 @@ from models.pr_review_audit import PRReviewAudit  # noqa: E402
 from models.reflection import Reflection  # noqa: E402
 from models.reflection_ignore import ReflectionIgnore  # noqa: E402
 from models.room import Room  # noqa: E402
+from models.side_effect_job import SideEffectJob  # noqa: E402
 from models.teammate_metrics import TeammateMetrics  # noqa: E402
 from models.telegram import TelegramMessage  # noqa: E402
 
@@ -82,6 +84,7 @@ __all__ = [
     "Job",
     "PRReviewAudit",
     "Reflection",
+    "SideEffectJob",
     "ReflectionIgnore",
     "Room",
     "TeammateMetrics",

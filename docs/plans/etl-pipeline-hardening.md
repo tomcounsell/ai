@@ -431,16 +431,16 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ## Documentation
 
-- [ ] Create `docs/features/pipeline-dead-letters.md`: the one model, stages, replay reflection, dashboard tile, manual replay tool
-- [ ] Create `docs/features/side-effect-jobs.md`: the job model, handler registry, drain reflection, how to add a kind
-- [ ] Create `docs/features/wire-schemas.md`: the three payload models, versioning rule, parse-failure disposition
-- [ ] Update `docs/features/bridge-worker-architecture.md`: Redis Pop Lock section states per-lock policy and the counter; outbox payload table references `OutboxPayload`; Worker Output Delivery notes `correlation_id`
-- [ ] Update `docs/features/delivery-integrity-hardening.md`: follow-up workstreams table points B2 and D3 remainders at this plan
-- [ ] Update `docs/features/correlation-ids.md`: subprocess env and outbox hops
-- [ ] Update `docs/features/subconscious-memory.md`: post-session extraction is a `SideEffectJob`
-- [ ] Update `docs/features/reflections.md` and `docs/features/adding-reflection-tasks.md`: the two new reflections and the `reflection_register.py` path
-- [ ] Update `docs/features/dashboard.md`: two new tiles
-- [ ] Add rows to `docs/features/README.md` and `docs/tools-reference.md`
+- [x] Create `docs/features/pipeline-dead-letters.md`: the one model, stages, replay reflection, dashboard tile, manual replay tool
+- [x] Create `docs/features/side-effect-jobs.md`: the job model, handler registry, drain reflection, how to add a kind
+- [x] Create `docs/features/wire-schemas.md`: the three payload models, versioning rule, parse-failure disposition
+- [x] Update `docs/features/bridge-worker-architecture.md`: Redis Pop Lock section states per-lock policy and the counter; outbox payload table references `OutboxPayload`; Worker Output Delivery notes `correlation_id`
+- [x] Update `docs/features/delivery-integrity-hardening.md`: follow-up workstreams table points B2 and D3 remainders at this plan
+- [x] Update `docs/features/correlation-ids.md`: subprocess env and outbox hops
+- [x] Update `docs/features/subconscious-memory.md`: post-session extraction is a `SideEffectJob`
+- [x] Update `docs/features/reflections.md` and `docs/features/adding-reflection-tasks.md`: the two new reflections and the `reflection_register.py` path
+- [x] Update `docs/features/dashboard.md`: two new tiles
+- [x] Add rows to `docs/features/README.md` and `docs/tools-reference.md`
 
 ## Success Criteria
 

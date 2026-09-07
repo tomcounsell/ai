@@ -15,7 +15,6 @@ from telethon.errors import FloodWaitError
 
 from bridge.telegram_relay import (
     DELIVERED_NO_ID,
-    KNOWN_MESSAGE_TYPES,
     MAX_RELAY_RETRIES,
     OUTBOX_KEY_PATTERN,
     RELAY_BATCH_SIZE,
@@ -48,12 +47,25 @@ class TestRelayConstants:
         assert MAX_RELAY_RETRIES == 3
 
     def test_known_message_types(self):
-        assert KNOWN_MESSAGE_TYPES == {None, "reaction", "custom_emoji_message", "poll"}
+        """The accepted set now lives on the wire schema's `type` Literal.
+
+        `None` must stay a member: an ordinary text message carries no `type`
+        key, and it is the highest-volume path in the system.
+        """
+        from typing import get_args
+
+        from bridge.wire_schemas import OutboxPayload
+
+        accepted = set(get_args(get_args(OutboxPayload.model_fields["type"].annotation)[0]))
+        assert accepted == {"reaction", "custom_emoji_message", "poll"}
+        assert OutboxPayload.model_validate_json('{"text": "hi"}').type is None
 
     def test_poll_is_a_known_type(self):
-        """#2701: an unknown type is discarded with no retry, which for a poll
-        would be a stuck agent."""
-        assert "poll" in KNOWN_MESSAGE_TYPES
+        """#2701: an unknown type is dead-lettered with no retry, which for a
+        poll would be a stuck agent."""
+        from bridge.wire_schemas import OutboxPayload
+
+        assert OutboxPayload(type="poll").type == "poll"
 
 
 class TestSendQueuedMessage:
@@ -408,6 +420,9 @@ class TestDeadLetterMessage:
             chat_id=12345,
             reply_to=67890,
             text="Failed message",
+            reason="max retries exceeded",
+            attempts=0,
+            project_key=None,
         )
 
     @pytest.mark.asyncio
@@ -1050,6 +1065,9 @@ class TestDeadLetterGuard:
             chat_id=-1003900483201,
             reply_to=None,
             text="message to supergroup",
+            reason="max retries exceeded",
+            attempts=0,
+            project_key=None,
         )
 
     @pytest.mark.asyncio
@@ -1976,3 +1994,75 @@ class TestPollDeadLetterAndFallback:
         assert payload["_relay_attempts"] == 0  # its own retry budget
         assert payload["reply_to"] == 5
         assert payload["text"] == "Q?\n\n1. a\n2. b"
+
+
+class TestOutboxParseDeadLetters:
+    """An entry the relay cannot dispatch is preserved, not discarded (#3183).
+
+    Both branches have already LPOPped the entry, so `continue` used to lose
+    it with only a warning. The raw string now lands on a dead letter, which
+    is the only thing that makes the loss diagnosable after the fact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_outbox_parse_dead_letters_malformed_and_unknown_type(self):
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        unknown_type = json.dumps({"chat_id": "1", "text": "x", "type": "nope"})
+        mock_redis.lpop.side_effect = ["{not json at all", unknown_type, None]
+
+        recorded = []
+
+        async def _arecord(*args, **kwargs):
+            recorded.append((args, kwargs))
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.dead_letters.arecord", new=_arecord),
+        ):
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 0
+        assert len(recorded) == 2, "one row per lost entry"
+        stages = [args[0] for args, _ in recorded]
+        assert stages == ["outbox_parse", "outbox_parse"]
+
+        payloads = [args[1] for args, _ in recorded]
+        assert payloads[0] == "{not json at all", "the raw string is the evidence"
+        assert payloads[1] == unknown_type
+        assert all(kwargs["replayable"] is False for _, kwargs in recorded), (
+            "an entry that failed validation cannot be meaningfully re-sent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_plain_text_message_still_dispatches(self):
+        """The `type`-less payload is the highest-volume path in the system.
+
+        A Literal without `| None` on the wire model would dead-letter every
+        ordinary reply.
+        """
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [
+            json.dumps({"chat_id": "1", "text": "hello", "session_id": "s"}),
+            None,
+        ]
+
+        recorded = []
+
+        async def _arecord(*args, **kwargs):
+            recorded.append(args)
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.dead_letters.arecord", new=_arecord),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            mock_send.return_value = 99
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        assert recorded == []

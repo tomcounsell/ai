@@ -12,6 +12,7 @@ Every test cleans up the AgentSession/PipelineLedger records it creates.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -530,6 +531,184 @@ class TestClearDocsAuditLivenessKeys:
         fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
         assert fn is _migrate_clear_docs_audit_liveness_keys
         assert description
+
+
+class _FakeCountQuery:
+    """Stand-in for ``Memory.query.filter(...)``: only ``.count()`` is used."""
+
+    def count(self):
+        return 0
+
+
+class _FakeMemoryQuery:
+    @staticmethod
+    def filter(**kwargs):
+        return _FakeCountQuery()
+
+
+class _FakeMemory:
+    query = _FakeMemoryQuery()
+
+
+class _FakeSession:
+    def __init__(self, session_id: str, completed_at, project_key: str = "test-migration"):
+        self.session_id = session_id
+        self.completed_at = completed_at
+        self.project_key = project_key
+
+
+class _FakeSessionQuery:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def filter(self, **kwargs):
+        return self._rows
+
+
+class _FakeAgentSession:
+    def __init__(self, rows: list):
+        self.query = _FakeSessionQuery(rows)
+
+
+class TestSideEffectJobMigrationPayload:
+    """The back-enqueue must give the handler a payload it can bind (#3183 review blocker 3).
+
+    ``scripts/update/migrations.py:1286`` used to call ``enqueue()`` with no
+    payload at all. ``run_post_session_extraction`` requires ``response_text``
+    positionally (``agent/memory_extraction.py:1663-1669``), so every
+    back-enqueued job raised ``TypeError`` on all 4 attempts, became a
+    ``DeadLetter(stage="extraction", replayable=True)``, and the replay path
+    re-enqueued the identical payload-less job forever. Hermetic: the
+    ``AgentSession``/``Memory`` lookups and ``agent.side_effects.enqueue``
+    are all faked so this test exercises exactly the payload construction,
+    not the shared test Redis db's accumulated session history.
+    """
+
+    def test_back_enqueue_payload_satisfies_the_handler_signature(self, monkeypatch):
+        import inspect
+
+        from agent.memory_extraction import run_post_session_extraction
+        from scripts.update.migrations import _migrate_side_effect_job_model
+
+        session_id = f"test-mig-sideeffect-{uuid.uuid4().hex[:8]}"
+        fake_session = _FakeSession(session_id, datetime.now(UTC))
+
+        monkeypatch.setattr("models.agent_session.AgentSession", _FakeAgentSession([fake_session]))
+        monkeypatch.setattr("models.memory.Memory", _FakeMemory)
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.side_effects.enqueue",
+            lambda *a, **k: calls.append((a, k)) or "fake-job-id",
+        )
+
+        result = _migrate_side_effect_job_model(Path("."))
+
+        assert result is None
+        assert len(calls) == 1, "the migration must back-enqueue exactly one job"
+        args, kwargs = calls[0]
+        assert args[0] == "memory_extraction"
+        assert args[1] == session_id
+        payload = args[3] if len(args) > 3 else kwargs.get("payload")
+        assert payload == {"response_text": ""}
+
+        # The concrete defect: a payload-less call cannot bind
+        # run_post_session_extraction's signature and raises TypeError on
+        # every attempt. A payload of {"response_text": ""} must bind clean.
+        inspect.signature(run_post_session_extraction).bind(session_id, **payload)
+
+
+class TestMigrationNeverClobbersALivePendingRow:
+    """The back-enqueue must not destroy a live pending job's real payload
+    (#3183 review round 2 blocker).
+
+    Blocker 3's fix gave the migration's back-enqueue a payload
+    (``{"response_text": ""}``). Blocker 2's fix made a lost ``enqueue``
+    race call ``_merge_payload_into_pending``, which replaces
+    ``payload_json`` outright on any still-``pending`` row
+    (``agent/side_effects.py:163-192``). Put together: if a live session's
+    real extraction job is still pending when the migration runs against the
+    same session_id -- exactly the fleet scenario the migration's own
+    docstring describes, machines 2..N running the one-shot migration
+    against Redis a machine already on new code has written to -- the
+    migration's empty payload overwrites the real one. The job then
+    "succeeds" having extracted nothing, with no dead letter and no trace.
+
+    Real Popoto/Redis, not the FakeJobs/FakeRedis doubles above: the
+    round-1 tech debt item on this same file names FakeJobs's ``save()`` as
+    a no-op that cannot model Popoto's full-hash overwrite, and this is
+    precisely the overwrite in question. The autouse ``redis_test_db``
+    fixture (see module docstring) scopes this to the isolated test db.
+
+    The fix: ``scripts/update/migrations.py``'s back-enqueue now passes
+    ``merge_on_lost_race=False``, which makes a lost race a no-op on the
+    bound row instead of a payload replacement
+    (``agent/side_effects.py:103-160``). This test calls
+    ``side_effects.enqueue`` directly with that exact kwarg -- the same call
+    the migration makes -- rather than going through
+    ``_migrate_side_effect_job_model``'s ``AgentSession``/``Memory`` lookups,
+    which ``TestSideEffectJobMigrationPayload`` above already covers.
+    """
+
+    def test_a_live_pending_rows_real_payload_survives_the_migrations_enqueue(self):
+        from agent import side_effects
+        from models.side_effect_job import SideEffectJob
+
+        session_id = f"test-mig-clobber-{uuid.uuid4().hex[:8]}"
+        real_payload = {
+            "response_text": "a" * 400,
+            "turn_count": 3,
+            "is_conversational": True,
+        }
+        try:
+            # A live per-turn caller already has a job pending for this
+            # session -- the row the migration must not touch.
+            job_id = side_effects.enqueue("memory_extraction", session_id, "valor", real_payload)
+
+            # The migration's own back-enqueue for the same (kind,
+            # session_id): a lost race against the guard the first enqueue
+            # already bound. merge_on_lost_race=False matches
+            # scripts/update/migrations.py's call exactly.
+            side_effects.enqueue(
+                "memory_extraction",
+                session_id,
+                "valor",
+                {"response_text": ""},
+                merge_on_lost_race=False,
+            )
+
+            row = SideEffectJob.query.get(job_id=job_id)
+            assert row is not None
+            stored = json.loads(row.payload_json)
+            assert stored == real_payload, (
+                f"CLOBBERED: the migration's empty payload replaced the real one. now={stored!r}"
+            )
+        finally:
+            side_effects.release_idempotency("memory_extraction", session_id)
+            for leftover in SideEffectJob.query.filter(session_id=session_id):
+                leftover.delete()
+
+    def test_without_the_flag_the_same_scenario_still_clobbers(self):
+        """Control: proves the assertion above is real, not vacuous.
+
+        Same setup, default ``merge_on_lost_race=True`` (the live per-turn
+        caller's own default, unchanged by this fix) -- the pre-fix
+        behavior this blocker was filed against.
+        """
+        from agent import side_effects
+        from models.side_effect_job import SideEffectJob
+
+        session_id = f"test-mig-clobber-ctrl-{uuid.uuid4().hex[:8]}"
+        real_payload = {"response_text": "real turn content"}
+        try:
+            job_id = side_effects.enqueue("memory_extraction", session_id, "valor", real_payload)
+            side_effects.enqueue("memory_extraction", session_id, "valor", {"response_text": ""})
+            row = SideEffectJob.query.get(job_id=job_id)
+            assert json.loads(row.payload_json) == {"response_text": ""}
+        finally:
+            side_effects.release_idempotency("memory_extraction", session_id)
+            for leftover in SideEffectJob.query.filter(session_id=session_id):
+                leftover.delete()
 
 
 class TestImprovementMigrationRegistration:

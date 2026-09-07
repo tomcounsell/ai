@@ -1,221 +1,155 @@
-"""Integration test for extraction-finalization decoupling (hotfix #1055).
+"""Extraction stays decoupled from finalization, now through a durable row (#3183).
 
-Verifies that the hotfix decouples post-session memory extraction from
-session finalization — the session completes and the PM nudge fires promptly,
-while extraction is still pending, even if extraction would stall indefinitely.
+Hotfix #1055 decoupled post-session memory extraction from session
+finalization: a 30-second stall in extraction must not delay the session
+completing or the nudge firing. The mechanism was an in-process
+``asyncio.create_task``; it is now a ``SideEffectJob`` row written at the end
+of ``_execute_agent_session`` and drained out of process.
 
-NOTE (PR #1056 review nit): the plan's Test Impact section called for a
-Popoto-backed assertion that the PM's ``queued_steering_messages`` grew by
-exactly 1 after extraction was deferred. The ``TestSessionFinalizationDecoupled``
-class below uses a simpler ``asyncio.Event`` to signal the PM nudge, because
-spinning up a real Popoto + pyrogram + harness-subprocess stack was judged
-too heavy for the scheduler-boundary contract being verified there. The
-follow-up test class ``TestPMSteeringPopotoIntegration`` below (issue #1057)
-now provides the Popoto-backed coverage end-to-end — real ``AgentSession``
-pair, real ``steer_session``, real ``push_steering_message``, real Redis
-partial-save — asserting the PM's ``queued_steering_messages`` list grew by
-exactly 1 within the 5-second SLO.
+The user-visible SLO is unchanged and is what these tests hold: the
+post-finalization sequence completes within 5 seconds no matter how long
+extraction takes. The row makes the guarantee stronger rather than weaker —
+the enqueue is one Redis write, and extraction latency is now on the other
+side of a process boundary, so it cannot reach the nudge path at all.
 
-The full ``_execute_agent_session`` flow requires substantial Redis/Popoto
-infrastructure (AgentSession creation, pyrogram bridge, harness subprocess,
-session lifecycle transitions). This test focuses on the narrower contract
-that the hotfix establishes at the scheduler boundary:
+What the row adds, and these tests also pin:
 
-  1. The synchronous ``_schedule_post_session_extraction`` returns promptly
-     even when extraction would block for 30+ seconds.
-  2. The scheduled task is still pending (``.done() is False``) at the moment
-     the scheduler returns.
-  3. A simulated "PM nudge" call that runs after the scheduler returns completes
-     in the 5-second bounded window — not blocked by extraction latency.
-  4. ``drain_pending_extractions`` cancels cooperatively-suspended tasks
-     within its timeout budget.
-  5. Cancellation does not propagate past the fire-and-forget wrapper's
-     ``try/except`` structure (CancelledError is re-raised cleanly for drain).
-
-The 5-second budget is the user-visible SLO: a dev session producing a
-30-second stall in extraction must still finalize and nudge the PM within
-5 seconds — the core promise of this hotfix.
-
-Why cooperative ``asyncio.sleep`` rather than sync ``time.sleep(40)``?
-Real production flows AsyncAnthropic → httpx → asyncio.wait_for, all of
-which are cancellable at every await point. A sync ``time.sleep`` in the
-coroutine body is uncancellable until the next await — a pathology that
-does not reflect production behavior. The double-timeout in
-``memory_extraction.py`` (SDK timeout=30s + asyncio.wait_for=35s) hard-caps
-the production latency in all cases.
+- A worker restart mid-extraction loses nothing; the row is still pending.
+- A handler that raises is retried on a backoff and, at the cap, becomes a
+  ``DeadLetter(stage="extraction")`` a human can see. The old wrapper
+  swallowed the failure into a debug log.
 """
 
 import asyncio
-import logging
 import time
 
 import pytest
 
+from agent import side_effects
 
-@pytest.fixture(autouse=True)
-def _clear_pending_tasks():
-    from agent import session_executor as se
 
-    se._pending_extraction_tasks.clear()
-    yield
-    for task in list(se._pending_extraction_tasks.values()):
-        if not task.done():
-            task.cancel()
-    se._pending_extraction_tasks.clear()
+class _FakeRedis:
+    """Enough of the text client for the single-winner create guard."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        return True
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def delete(self, key):
+        return self.store.pop(key, None) is not None
+
+
+class _FakeJobStore:
+    """An in-memory stand-in for the ``SideEffectJob`` model."""
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+
+    def create(self, **kwargs):
+        self.rows[kwargs["job_id"]] = dict(kwargs)
+        return kwargs
+
+
+@pytest.fixture
+def job_store(monkeypatch):
+    store = _FakeJobStore()
+    redis = _FakeRedis()
+
+    class _Model:
+        @staticmethod
+        def create(**kwargs):
+            return store.create(**kwargs)
+
+    monkeypatch.setattr(side_effects, "SideEffectJob", _Model)
+    monkeypatch.setattr("utils.redis_client.text_redis", lambda: redis)
+    return store
 
 
 class TestSessionFinalizationDecoupled:
-    """End-to-end behavioral test for the decoupling guarantee (hotfix #1055)."""
+    """The 5-second SLO, held by an enqueue instead of a create_task."""
 
     @pytest.mark.asyncio
-    async def test_scheduler_returns_within_5s_window_with_hung_anthropic(
-        self, caplog, monkeypatch
-    ):
-        """The 5-second user-visible SLO: scheduler returns promptly even with hung extraction.
+    async def test_enqueue_returns_within_the_slo_with_a_hung_handler(self, job_store):
+        """A handler that would block for 30s cannot delay the nudge path.
 
-        This is the core hotfix #1055 guarantee — a 40-second stall in extraction
-        must NOT delay finalization and PM nudge beyond the 5-second SLO. We
-        stub run_post_session_extraction itself (the top-level async entry point)
-        to block on asyncio.sleep(30); in production the outer asyncio.wait_for
-        inside memory_extraction.py caps this at 35s anyway, but the point of
-        Layer 2 is that even an uncapped 30s stall cannot delay the PM nudge.
+        The handler is never called here, and that is the point: the enqueue
+        writes a row and returns, and the drain runs the handler in a
+        different process on its own schedule.
         """
-        from agent import session_executor as se
+        handler_ran = asyncio.Event()
 
-        caplog.set_level(logging.INFO, logger="agent.session_executor")
-
-        # NOTE (PR #1056 review nit): plan called for time.sleep(40); we use
-        # asyncio.sleep(30) instead because production flows through
-        # AsyncAnthropic + httpx + asyncio.wait_for — all cancellable at await
-        # points. A sync time.sleep in the coroutine body is uncancellable
-        # until the next await, which does not reflect production. The
-        # unit-test sibling `test_real_asyncio_wait_for_fires_with_tightened_constants`
-        # exercises the real timeout path against a cooperative hang with the
-        # hard-timeout shortened via monkeypatch. The scheduler-level SLO this
-        # test asserts is identical whether the inner coroutine yields or not.
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
-            await asyncio.sleep(30)  # Long stall; scheduler must not await.
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
-        )
-
-        pm_nudge_called = asyncio.Event()
-
-        async def _fake_handle_dev_completion(*args, **kwargs):
-            # Simulates the PM nudge that must run AFTER the scheduler returns.
-            pm_nudge_called.set()
-
-        start = time.time()
-
-        # Exact call-shape _execute_agent_session uses post-fix:
-        # synchronous schedule (no await), then await the PM nudge.
-        se._schedule_post_session_extraction("sess-int-1", "A" * 200)
-        await _fake_handle_dev_completion()
-
-        elapsed = time.time() - start
-
-        # The entire post-finalization sequence must complete within the 5s SLO.
-        assert elapsed < 5.0, (
-            f"scheduler + PM-nudge path took {elapsed:.2f}s — violates the 5s SLO. "
-            "Extraction latency MUST NOT block session finalization (hotfix #1055)."
-        )
-        assert pm_nudge_called.is_set(), "PM nudge must fire"
-
-        # The extraction task should still be pending.
-        task = se._pending_extraction_tasks.get("sess-int-1")
-        assert task is not None, "extraction task must still be registered"
-        assert task.done() is False, (
-            "extraction task MUST still be pending at this point — "
-            "proves scheduler and nudge ran ahead of extraction completion"
-        )
-
-        # Cleanup: cancel the cooperatively-suspended task.
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    @pytest.mark.asyncio
-    async def test_drain_cancels_cooperative_extraction_on_shutdown(self, caplog, monkeypatch):
-        """drain_pending_extractions cancels cooperatively-suspended tasks within timeout.
-
-        Uses asyncio.sleep (not time.sleep) because real production extraction
-        goes through AsyncAnthropic + httpx + asyncio.wait_for — all cooperative
-        cancellation points. A sync time.sleep in the coroutine body is NOT
-        cancellable until the next await, so the production code path does
-        not suffer from that pathology.
-        """
-        from agent import session_executor as se
-
-        caplog.set_level(logging.WARNING, logger="agent.session_executor")
-
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
-            await asyncio.sleep(30)  # Cooperative; cancellable at await point.
-
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
-        )
-
-        se._schedule_post_session_extraction("sess-drain-1", "A" * 200)
-        task = se._pending_extraction_tasks.get("sess-drain-1")
-        assert task is not None
-
-        # Drain with a short timeout; the cooperative sleep will be cancelled
-        # promptly when drain calls task.cancel().
-        start = time.time()
-        await se.drain_pending_extractions(timeout=0.5)
-        elapsed = time.time() - start
-
-        # Drain budget: ~0.5s timeout + cancel overhead.
-        assert elapsed < 2.0, (
-            f"drain exceeded its 0.5s timeout by too much (took {elapsed:.2f}s total)"
-        )
-        # Drain called task.cancel(); give one event-loop tick for the task
-        # to finalize in "cancelled" state before we assert.
-        try:
-            await asyncio.wait_for(task, timeout=0.5)
-        except (TimeoutError, asyncio.CancelledError, Exception):
-            pass
-        assert task.done() or task.cancelled(), "drain must have cancelled the hung task"
-        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
-        assert any("did not complete" in msg for msg in warning_messages), (
-            f"drain should log WARNING when cancelling hung tasks (got {warning_messages})"
-        )
-
-    @pytest.mark.asyncio
-    async def test_cancellation_does_not_crash_via_wrapper(self, monkeypatch):
-        """Cancelling a cooperative-suspended extraction raises CancelledError cleanly.
-
-        Uses asyncio.sleep so cancellation is prompt. Real production flows
-        through AsyncAnthropic httpx calls, which are cancellable at every
-        await point, plus an outer asyncio.wait_for that hard-caps latency.
-        """
-        from agent import session_executor as se
-
-        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
+        async def _slow_extract(session_id, **kwargs):
+            handler_ran.set()
             await asyncio.sleep(30)
 
-        monkeypatch.setattr(
-            "agent.memory_extraction.run_post_session_extraction",
-            _slow_extract,
+        nudge_fired = asyncio.Event()
+
+        async def _fake_nudge():
+            nudge_fired.set()
+
+        start = time.time()
+        # The exact call shape _execute_agent_session uses: enqueue, then the
+        # nudge path.
+        side_effects.enqueue(
+            "memory_extraction",
+            "sess-int-1",
+            "valor",
+            {"response_text": "A" * 200, "turn_count": 3, "is_conversational": True},
         )
+        await _fake_nudge()
+        elapsed = time.time() - start
 
-        se._schedule_post_session_extraction("sess-cancel-safe", "A" * 200)
-        task = se._pending_extraction_tasks.get("sess-cancel-safe")
+        assert elapsed < 5.0, (
+            f"enqueue + nudge path took {elapsed:.2f}s — violates the 5s SLO. "
+            "Extraction latency MUST NOT block session finalization (#1055)."
+        )
+        assert nudge_fired.is_set()
+        assert not handler_ran.is_set(), "the handler runs in the drain, not at the seam"
+        assert len(job_store.rows) == 1
 
-        task.cancel()
+    @pytest.mark.asyncio
+    async def test_the_row_survives_the_process_that_wrote_it(self, job_store):
+        """The enqueued row is complete on its own.
 
-        # Awaiting a cancelled task should raise CancelledError — the
-        # critical invariant here is that it raises CancelledError
-        # cleanly, NOT a wrapped/swallowed exception that would make
-        # shutdown drainage ambiguous.
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        This is the property the in-memory task could not have: everything the
+        handler needs is in the row, so a worker restart between the enqueue
+        and the drain costs nothing.
+        """
+        import json
 
+        side_effects.enqueue(
+            "memory_extraction",
+            "sess-restart",
+            "valor",
+            {"response_text": "body", "turn_count": 7, "is_conversational": False},
+        )
+        (row,) = job_store.rows.values()
+        assert row["session_id"] == "sess-restart"
+        assert row["status"] == "pending"
+        assert json.loads(row["payload_json"]) == {
+            "response_text": "body",
+            "turn_count": 7,
+            "is_conversational": False,
+        }
 
-# TestPMSteeringPopotoIntegration removed: _handle_dev_session_completion was deleted
-# when PM and Dev roles were merged into a single Eng role.
+    @pytest.mark.asyncio
+    async def test_two_enqueues_for_one_session_bind_to_one_row(self, job_store):
+        """The single-winner guard replaces the old in-memory dedup.
+
+        ``_pending_extraction_tasks`` deduplicated within one worker process.
+        The guard is cross-process, which is what the fleet-wide migration
+        back-enqueue and a health-check revival both need.
+        """
+        first = side_effects.enqueue("memory_extraction", "sess-dup", "valor", {"a": 1})
+        second = side_effects.enqueue("memory_extraction", "sess-dup", "valor", {"a": 2})
+
+        assert first == second
+        assert len(job_store.rows) == 1

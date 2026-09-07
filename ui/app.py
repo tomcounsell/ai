@@ -369,6 +369,18 @@ def create_app() -> FastAPI:
             {"jobs": jobs},
         )
 
+    @app.get("/_partials/pipeline-integrity/", response_class=HTMLResponse)
+    def partial_pipeline_integrity(request: Request):
+        """HTMX partial: dead-letter counts by stage and lock-degradation counts."""
+        from ui.data.dead_letters import get_dead_letter_counts
+        from ui.data.locks import get_lock_policies
+
+        return templates.TemplateResponse(
+            request,
+            "_partials/pipeline_integrity.html",
+            {"dead_letters": get_dead_letter_counts(), "locks": get_lock_policies()},
+        )
+
     @app.get("/_partials/improvement/coverage/", response_class=HTMLResponse)
     def partial_improvement_coverage(request: Request, project_key: str = "valor"):
         """HTMX partial: what the improvement loop is actually observing (#3177).
