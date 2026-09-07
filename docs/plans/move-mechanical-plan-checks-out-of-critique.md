@@ -2,7 +2,7 @@
 status: Planning
 type: chore
 revision_applied: true
-revision_applied_at: 2026-09-07T03:29:51Z
+revision_applied_at: 2026-09-07T03:43:39Z
 tracking: https://github.com/tomcounsell/ai/issues/3178
 appetite: Small
 ---
@@ -11,199 +11,120 @@ appetite: Small
 
 ## Problem
 
-Critic subagents spend LLM budget re-deriving facts a shell command could establish. In the one run measured (#2733 / PR #3174), round 3 produced 11 findings of which 6 were mechanically checkable — a verification command that does not behave as the plan claims, a `file:line` citation asserting something false, a declared appetite contradicting the plan's own counts, a disposition table missing an entry. Only 5 needed judgment.
+Critic subagents spend LLM budget re-deriving facts a cheap deterministic check could establish. In the run that motivated this (#2733 / PR #3174), a third-round critique produced findings of which several were mechanically checkable rather than judgment: a `file:line` citation asserting something false about the code, and Verification commands that did not behave as the plan claimed.
 
-Two of those reproduce directly:
+Five rounds of critique on this plan established which half of that is real.
 
-- Six Verification rows phrased "match count == 0" were satisfied by a bare `grep -c`, which prints `0` and **exits 1**. Re-verified here: `grep -c nonexistent_token README.md` → prints `0`, exit `1`. A validator gating on exit status reads six correct results as failures.
-- The plan asserted a call site was "not inside a `try`". False: `draft_message` is called at `agent/output_handler.py:754` inside a `try` opened at `:751` with `except Exception` at `:885`.
+**A citation that resolves but asserts something false is a genuine, recurring defect.** The original evidence: a plan claimed a call site was "not inside a `try`" when `draft_message` is called at `agent/output_handler.py:754` inside a `try` opened at `:751` with `except Exception` at `:885`. This plan then reproduced the same class twice more — citing a plan document that migrated to the archive between authoring and critique, and citing `SKILL.md:132` for content that lives at `:148-151`.
 
-Neither needs a model. Both cost a critic round.
+**Executing or evaluating the Verification table is not.** Round 5 measured it and the case collapsed in two independent directions, both documented under Decision D4.
 
 ## Appetite
 
-**Small.** One new module, one test file, one wiring point, one doc. The coding is a focused session. Parts B and C below are explicitly *not* in this appetite.
+**Extra small.** An extension to one existing structural check. No new module, no console script, no CLI, no fixture harness.
 
 ## Solution
 
-A `plan-lint` pass that runs before the first critic is dispatched and reports mechanical defects in a plan document, so critics receive a plan whose checkable claims are already true.
+Extend `do-plan-critique/SKILL.md` **Step 2c** from *"does this path exist"* to *"does the cited line say what the plan claims"*.
 
-**Scope narrowed after round-1 critique (Blocker 3).** The critique established that `do-plan-critique/SKILL.md` Step 2 (header at `:132`, the 2c bullets at `:148-151`) already runs structural checks at this exact pipeline point on this exact document:
+Step 2c already extracts file paths from a plan and reports non-existent ones. It stops at existence. The extension resolves each `path:line` citation and emits the cited line's text into the structural-check output, so a citation that resolves but misdescribes the code is visible to critics before they spend a finding deriving it.
 
-| Existing step | What it already does | Originally-planned check it covers |
-|---|---|---|
-| 2c Internal References | Extracts file paths from the plan, reports non-existent ones; extracts Test Impact test paths and verifies they exist | Citation resolution (partly), disposition completeness (partly) |
-| 2d Prerequisite Status | Runs each **prerequisite's** check command and reports pass/fail | Command execution — but only for prerequisites |
-| 2e Cross-Reference Consistency | Success criteria map to tasks; No-Gos absent from Solution; Rabbit Holes absent from tasks | Disposition completeness (rest) |
+That is the whole change.
 
-Building all three originally-planned checks would emit two findings per fact, which is precisely the finding-volume problem this plan exists to reduce. So Part A reduces to the two things Step 2 genuinely does not do:
-
-1. **Statically evaluate the `## Verification` table.** Step 2d touches *prerequisite* commands only; Verification-table rows are never checked at critique time. This is the gap that produced the original evidence — `grep -c` rows whose real exit status is 1 while the row reads as a success condition, and an over-broad `grep -rn` that would fire on correct work. Plan-lint evaluates recognised row shapes natively rather than running them (Decision D3).
-2. **Compare cited line *content*, not just path existence.** Step 2c answers "does this file exist"; it cannot catch a citation that resolves but asserts something false — the `agent/output_handler.py` "not inside a `try`" case. Extend 2c rather than duplicating it.
-
-**Dropped, with rationale (round-2 Blocker 3).** `## Problem` names four mechanically-checkable categories from the original run. Part A ships checks for two. The other two are excluded deliberately:
-
-| Category from `## Problem` | Disposition |
-|---|---|
-| Verification command does not behave as claimed | **Shipped** — check 1. |
-| `file:line` citation asserting something false | **Shipped** — check 2. |
-| Disposition table missing an entry present in the diff | **Dropped** — `SKILL.md` Steps 2c and 2e already extract Test Impact paths and cross-check tasks against criteria. A standalone differ would emit a second finding for the same fact. |
-| Declared appetite contradicting the plan's own counts | **Dropped** — this is not mechanically decidable. "Small appetite" versus a task list's true size is a judgment about effort, not a countable property, and the round-1 instance was found by a critic weighing scope, not by counting. Automating it would produce false positives on any plan whose task list is long but shallow. It stays with the Scope & Value critic, which is where it was caught. |
-
-Two of four is therefore the intended coverage, not an oversight. `## Problem`'s framing is evidence of what critics spend rounds on; it is not a specification of what Part A automates.
+**Explicitly cut (Decision D4):** evaluating or executing the `## Verification` table, in every form — subprocess, allowlisted subprocess, and native Python re-implementation alike.
 
 ## Technical Approach
 
-**Where it lives: a standalone module invoked by the critique skill.** `tools/plan_lint.py` with a `plan-lint` console script, called from `/do-plan-critique` before critic dispatch. Rejected alternatives: inside `/do-plan` (the author checking its own work is the weaker position, and a revision pass would need to re-run it anyway); as a pre-commit hook (plans commit incrementally by design, so a blocking hook would fire on every partial write).
+The citation check is backward-looking: a `file:line` reference describes code that exists *now*, so it can be checked *now*. This is the property the Verification table lacks, and it is why one survives and the other does not.
 
-**Findings are advisory, reported to `/do-plan` as a revision.** Not blocking. The two existing plan-document validators block, but they check for *presence* of a required section — a binary fact. Plan-lint reports *behavioral* mismatches whose correct resolution is sometimes "the expectation was written loosely", not "the plan is wrong". Blocking on a judgment call would trade critic rounds for lint rounds.
+Implementation sits inside the existing Step 2c pass. For each extracted `path:line`:
 
-**No execution at all — Decision D3, superseding D1 and D2 (round-4 blockers).** Four consecutive rounds found an escape in the execution path, each one layer deeper than the last: shell-versus-argv contradiction (r2), interpreter escape via `sh -c` and `python -c` (r3), and now flag-level escape inside an allowlisted binary. Round 4 demonstrated `git -c diff.external='touch /tmp/poc; #' diff` executing an arbitrary command with `shell=False`, an allowlisted binary, an allowlisted subcommand, and no shell metacharacter; and `python -m` running any module's `__main__`, where `python -m worker` is this repo's documented session execution engine.
+- resolve the path relative to the repo root; report unresolvable paths exactly as Step 2c does today
+- if a line number is present and in range, emit that line's text alongside the citation
+- if the line number is out of range, report it as a drifted citation
 
-The generalisation is that **any binary rich enough to be useful in a verification row is rich enough to be an execution primitive.** Each round's fix was a fresh assertion about which invocations are safe, and each was falsified. A fifth narrowing would be the same move a fourth time.
-
-So plan-lint executes nothing. It **re-implements a recognised set of row shapes natively in Python** — `pathlib` and `re`, no `subprocess` anywhere in the module:
-
-| Row shape | Evaluated as |
-|---|---|
-| `test -f/-d/-e PATH` | `Path(PATH).is_file()` / `.is_dir()` / `.exists()` |
-| `grep [-c/-q/-l/-r/-n/-i] PATTERN PATH…` | `re` over the file set, reporting match count and the exit status real `grep` would return |
-| `git grep [-l/-c] PATTERN [-- PATHS]` | same, scoped to tracked files |
-| `ls PATH`, `wc -l PATH`, `head`/`tail -n N PATH` | direct file reads |
-
-Anything else is reported `not statically checkable: <reason>` and left for the critics. This is the same honesty the skipped-row model had, without the subprocess.
-
-**Measured coverage (2026-09-07, whole corpus, 5,505 command rows).** 44.5% match a natively-evaluable shape — `grep` alone is 2,204 rows, the single dominant form and the originating defect class. For comparison, the r3 execution design cleared 58.6% after its allowlist. The ~14-point gap is entirely `python` (1,396 rows) and `pytest` / `pytest-clean.sh` (1,026), which are precisely the two vectors round 4 demonstrated. **The coverage execution bought over static evaluation is exactly the coverage that carried the risk.**
-
-Native evaluation is also *better* than execution on the shapes it covers, not merely safer: plan-lint knows `grep -c` returns 1 on no match, so it can state the claimed-versus-actual mismatch directly rather than inferring it from an exit code it would have to interpret anyway.
-
-**What this deletes.** The `--execute` flag, the metacharacter screen, the argv[0] allowlist and its table, the process-group timeout kill, the stdout cap and scrub, and Decisions D1 and D2 in full. Every round-1 through round-4 finding about command safety is resolved by removal rather than by another mitigation. It also resolves round 4's finding that `plan-lint` was absent from its own allowlist, and the `scripts/pytest-clean.sh` versus `./scripts/pytest-clean.sh` path-form mismatch — neither list exists any more.
-
-**Findings never edit the plan body.** The findings block is attached to the **critique input**, not written into the plan document. This is deliberate and load-bearing: #1760 documents that a revision pass which edits plan text busts `compute_plan_hash` and re-stales the just-recorded verdict, looping PLAN↔CRITIQUE indefinitely. Attaching to the critique input keeps plan-lint outside that mechanism entirely.
-
-**Parsing.** The `## Verification` table is a stable three-column markdown form (`| Check | Command | Expected |`) with the command in backticks. Prevalence is high but drifts as plans are authored and archived, so this plan deliberately records no fixed count — see Rabbit Holes. The `Expected` column is free text.
+No subprocess, no shell, no execution of any plan-authored string. The check reads files and reports what it read.
 
 ## Freshness Check
 
-**Re-run at `cd5f0572e` (2026-09-06T16:37Z), superseding the round-1 baseline `d4d1519b2`.**
+Re-run at `5ee947700` (2026-09-07). The `agent/output_handler.py:751/754/885` try/except claim holds. `docs/sdlc/do-plan-critique.md` is 186 lines. `SKILL.md` Step 2 header is at `:132` with the 2c bullets at `:148-151`. Prior-art issue #1760 is CLOSED; #3178 OPEN; PR #3174 MERGED.
 
-Round-1 critique caught this section asserting "Unchanged" while two of the plan's own Verification rows had already broken. Commit `bf0a5d577` ("Migrate completed plan: rtr-unconditional-2733", 2026-09-06) moved `docs/plans/rtr-unconditional-2733.md` to `docs/archive/plans-completed/`, after the recorded baseline. The rows citing it returned `FileNotFoundError`, exit 1 — not the recorded "printed 25, exit 0".
-
-That is the citation-drift class this plan exists to catch, occurring in this plan, between authoring and critique. It is the strongest available argument for the tool and is retained here deliberately rather than quietly corrected.
-
-**Disposition: Minor drift.** The claims hold; two citations moved. Remediation:
-
-- Verification rows no longer cite any document under `docs/plans/`. Plans migrate to `docs/archive/plans-completed/` on completion, so any such citation has a scheduled expiry. Rows now use a committed fixture under `tests/fixtures/` instead.
-- Counts of the form "N of M plans" are removed throughout. Measured at this HEAD they are 24 top-level plans, 13 done, 20 top-level carrying a `## Verification` section — already different from the values the round-1 critique measured hours earlier. A number that drifts between critique rounds does not belong in a plan.
-- `docs/sdlc/do-plan-critique.md` exists (186 lines); the Documentation task no longer says "or create it".
+**Disposition: Unchanged** for everything this narrowed plan still depends on.
 
 ## Research
 
-Phase 0.7 skipped: this work is purely internal — repo skills, a repo-local module, and plan-document format. No external libraries, APIs, or ecosystem patterns are involved. The one question with external literature (whether cross-critic duplication is a sound saturation proxy) belongs to Part C, which this plan defers.
+Phase 0.7 skipped: purely internal — one repo skill and its structural-check step. No external libraries, APIs, or ecosystem patterns.
 
 ## Prior Art
 
-**#1760 — `investigation: /do-sdlc PLAN↔CRITIQUE router never converges to BUILD (notes-only revision re-stales a clean verdict)`** (closed 2026-07-11). This is the load-bearing prior art and it directly constrains scope.
-
-It documents the same loop from the other end: a revision pass embeds critique notes into the plan text and sets `revision_applied: true`, which busts the plan hash and re-stales the just-recorded verdict, sending the router back to re-critique indefinitely. Both observed runs "had to manually drive the BUILD stage against a plan that was already marked build-ready, with zero code-correctness blockers ever raised."
-
-It also records a lineage of five prior dead-end fixes to this router area: `3e1e3dae` (#1668), `6e943ea9` (#1639), `5bc6243a` (#1638/#1640/#1641), `8218c5af` (#1554), `627e3cf0` (#1755).
+**#1760 — `/do-sdlc` PLAN↔CRITIQUE router never converges to BUILD** (closed 2026-07-11). Documents a revision pass that embeds critique notes into plan text, busting the plan hash and re-staling a recorded verdict, looping indefinitely. It records a lineage of five prior dead-end fixes: `3e1e3dae` (#1668), `6e943ea9` (#1639), `5bc6243a` (#1638/#1640/#1641), `8218c5af` (#1554), `627e3cf0` (#1755).
 
 ## Why Previous Fixes Failed
 
-Every fix in that lineage adjusted *when the router re-dispatches* — stale-verdict supersession, empty-verdict dead-ends, re-fire guards. None reduced *how many findings each round produces*. The loop kept running because each pass minted fresh non-blocking prose findings, and the machinery had no way to run out of them.
-
-That is the gap this plan targets, and it is why the ordering matters: **the concern re-critique bound is best understood as the circuit breaker for this known-recurring loop.** Removing or loosening it (issue #3178 Part C) without first reducing finding volume would remove a brake from a mechanism that has already resisted five repairs. Part A reduces the input to the loop and touches no router logic, so it is safe to land alone and makes any later Part C decision measurable rather than speculative.
+Every fix in that lineage adjusted *when the router re-dispatches*. None reduced *how many findings each round produces*. This plan targets finding volume instead — and, after five rounds, targets only the portion of it that is genuinely mechanical.
 
 ## Step by Step Tasks
 
-1. **`tools/plan_lint.py`** — parse the `## Verification` table; extract commands, the `Expected` text, and `file:line` citations from the whole document.
-2. **Shape recogniser** — classify each row's command into a supported shape or `not statically checkable`, with the reason. No `subprocess` import anywhere in the module; a test asserts its absence.
-3. **Native evaluators** — `pathlib`/`re` implementations for the `test`, `grep`, `git grep`, `ls`, `wc`, `head`/`tail` shapes, each reporting the value and the exit status the real command would have returned.
-4. **Citation content check** — for each `path:line`, resolve it and emit the cited line's text so a citation that resolves but asserts something false is visible. This extends `SKILL.md` Step 2c rather than duplicating its existence check.
-5. **Report format** — a markdown findings block attached to the critique input. It must not write into the plan body (see Technical Approach, #1760).
-6. **Console script** — register `plan-lint` in `pyproject.toml [project.scripts]`.
-7. **Wire into `/do-plan-critique`** — invoke at the single call site, before critic dispatch, and attach the findings block to the critique input. **Fail-open is mandatory at this site:** wrap the invocation so that a non-zero exit or any exception from `plan-lint` is caught and critic dispatch proceeds regardless. The failure must land in an observable sink, not be silently swallowed — emit it into the critique report's header alongside the Mode line, so a reader can tell 'plan-lint found nothing' apart from 'plan-lint never ran'. Plan-lint must never be able to block a critique round — that would violate the No-Go against skipping them.
-8. **Fixture + tests** — `tests/fixtures/plan_lint_sample.md`, a committed plan-shaped document that never migrates. It must carry, verbatim: the six `grep -c`-style rows from the original evidence, one row whose shape is unsupported such as a `python -m` invocation (to exercise `not statically checkable`), and one `file:line` citation that resolves but asserts something false. Plus `tests/unit/test_plan_lint.py` covering each.
+1. **Extend Step 2c** in `.claude/skills-global/do-plan-critique/SKILL.md`: resolve `path:line` citations, emit the cited line's text, and report out-of-range line numbers as drifted citations.
+2. **Record the severity** in the same bullet list Step 2c already uses: a drifted or out-of-range citation is a CONCERN, consistent with "non-existent file path → CONCERN".
+3. **Repo addendum note** in `docs/sdlc/do-plan-critique.md` describing the extension at its existing structural-check section.
 
 ## Failure Path Test Strategy
 
-- A Verification command that times out → row reported `timeout`, lint continues, exit status unaffected.
-- A denylisted command → row reported `skipped: not auto-executable`, never executed. Assert the subprocess was not invoked.
-- A malformed or absent `## Verification` section → lint reports "no verification table" and exits 0. A plan without one is valid; absence is not a defect.
-- A `file:line` citation whose file was deleted → reported as unresolved, not raised.
-- Plan-lint itself raising → the critique skill proceeds to critic dispatch regardless. Lint is advisory; it must never be able to block a critique round.
+- An unreadable or binary file → the citation is reported unresolvable; the structural pass continues and the verdict is unaffected.
+- A path that resolves but has fewer lines than the citation → reported as drifted, not raised.
+- A citation with no line number → existing Step 2c behavior, unchanged.
+- The extension raising for any reason must not block critic dispatch; the structural check is advisory input to critics, never a gate.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_plan_lint.py` — NEW: parser, executor, denylist, citation resolver, and the fail-open path.
-- [ ] No existing tests are affected. `tools/plan_lint.py` is a new module with no importers; wiring into `/do-plan-critique` edits a skill markdown body, which carries no test coverage today. Verified: `grep -rl "plan_lint" tests/` returns nothing.
+No existing tests affected. The change edits skill markdown, which carries no test coverage in this repo today. Verified: `grep -rl "plan_lint" tests/` returns nothing, and no test asserts on Step 2c output.
 
 ## Rabbit Holes
 
-- **The free-text `Expected` column.** Observed forms include `exit code 1`, `output contains 2`, and `match count == 0`. Do **not** build a general expectation-grammar interpreter. Report claimed text alongside actual behavior and let the reader compare. Constraining the vocabulary is a separate change to the plan template.
-- **Do not rewrite the Verification-table format.** Most existing plans use it, and the count drifts as plans are archived — which is why no fixed figure appears in this plan.
-- **Do not extend into linting prose quality.** Mechanical checks only; judgment stays with critics.
+- **Do not evaluate or execute the Verification table.** Five rounds of critique closed this; D4 records why.
+- **Do not build a general citation-claim checker.** Emitting the cited line for a human or critic to compare is the deliverable. Judging whether the prose *around* the citation matches the line is judgment, and stays with critics.
+- **Do not rewrite the Verification-table format.**
 
 ## No-Gos
 
-Load-bearing, from the issue's Non-goals — these are the repo owner's stated position:
+From the repo owner, load-bearing and unchanged across five rounds:
 
 - Do **not** reduce planning thoroughness.
 - Do **not** skip or shorten critique rounds, reduce roster size, or lower the round bound.
 - Do **not** defer tech-debt review findings to follow-up issues.
 
-The goal is strictly to change *what critics spend their budget on*, never *how much checking happens*.
-
-Also out of scope for this plan: Part B (post-revision sweep) and Part C (convergence-based exit). Part C is deferred with reasoning recorded under Why Previous Fixes Failed.
+This change alters *what critics spend budget on*, never *how much checking happens*.
 
 ## Update System
 
-No update-system changes required. `tools/plan_lint.py` ships inside the repo and reaches every machine through the normal `scripts/remote-update.sh` pull. The `plan-lint` console script is installed by the existing `uv sync` step in that script, the same path every other `tools.*` entry point already uses. No new dependency, config file, or migration.
+No update-system changes. The edit ships inside the repo and reaches every machine through the normal `scripts/remote-update.sh` pull. No new dependency, config file, or migration.
 
 ## Agent Integration
 
-A `plan-lint` console script is registered in `pyproject.toml [project.scripts]`, which is how the agent reaches it via Bash. No bridge-internal import is needed: the caller is the `/do-plan-critique` skill body, which invokes it as a shell command like every other `sdlc-tool` step. No new Telegram-facing surface.
+No agent integration required. The change edits a skill body that the critique pass already executes; there is no new CLI entry point and no bridge-internal import.
 
 ## Documentation
 
-- [ ] Create `docs/features/plan-lint.md` — what the checks are, the denylist and its limits, why findings are advisory, and the #1760 relationship.
-- [ ] Add a row to `docs/features/README.md` index table.
-- [ ] Insert a pre-dispatch lint paragraph into `docs/sdlc/do-plan-critique.md` (186 lines, exists), leaving the roster-barrier and finalize-block sections undisturbed.
+- [ ] Update `docs/sdlc/do-plan-critique.md` (186 lines, exists) to describe the Step 2c citation-content extension at its structural-check section.
+- [ ] No `docs/features/` page: this is a step inside an existing skill, not a feature with its own surface.
 
 ## Verification
 
-Every command below was re-executed against `origin/main` at `cd5f0572e` (2026-09-06T16:37Z) before being written down; the "Pre-build actual" column records what it really did. Rows are read from stdout unless the row says "exit code".
-
-**No row cites a document under `docs/plans/`.** Round-1 critique found two rows broken by the archive migration of a completed plan. Plans migrate on completion, so citing one from a Verification table gives that row a scheduled expiry. Rows now target a committed fixture instead.
+Re-executed at `5ee947700` before being written down. Every row is a plain argv-form command; no row depends on an exit status that inverts on the no-match path.
 
 | Check | Command | Expected | Pre-build actual |
 |---|---|---|---|
-| Module exists | `test -f tools/plan_lint.py` | exit code 0 | exit 1 (absent, as expected pre-build) |
-| Console script registered | `grep -q '^plan-lint' pyproject.toml` | exit code 0 | exit 1 (absent, as expected pre-build) |
-| Fixture exists | `test -f tests/fixtures/plan_lint_sample.md` | exit code 0 | exit 1 (absent, as expected pre-build) |
-| Lint parses the fixture without executing | `plan-lint tests/fixtures/plan_lint_sample.md` | exit code 0, findings block on stdout, no command run | n/a — not yet built |
-| No subprocess in the module | `grep -c subprocess tools/plan_lint.py` | prints 0 (read from stdout; the command itself exits 1 on no match) | n/a — not yet built |
-| Tests pass | `scripts/pytest-clean.sh tests/unit/test_plan_lint.py` | exit code 0 | n/a — file does not exist yet |
-| Lint targets a non-migrating fixture | `grep -q tests/fixtures/plan_lint_sample.md docs/plans/move-mechanical-plan-checks-out-of-critique.md` | exit code 0 | exit 0 |
-
-**Every row above is argv-safe: no `;`, no `$(`, no pipes, no redirection.** This is deliberate, and it is the plan holding itself to Decision D2 — a row containing a shell metacharacter would be reported `skipped: requires shell` by the very tool this plan builds, which would make the table unrunnable by its own linter.
-
-Round 2 removed two rows that violated this. Both used `test "$(…)"` subshells to work around the exit-status trap, and both would now be skipped rather than executed. The surviving row's replacement avoids the trap a second way — by asserting a boolean with `grep -q` instead of comparing a count:
-
-- The fixture row previously counted occurrences and recorded `printed 4`. The real count was `5` when written and `6` by round 2, drifting as the plan was edited. An absolute count of a string inside the document that contains the count is self-referential and cannot be kept true. `grep -q` asserts the property actually being checked — the fixture is referenced — and cannot drift.
-- The greenfield row (`git grep -l plan_lint -- tests/` expecting no match) was dropped entirely. It could only ever pass *before* the build; task 8 adds a test that references `plan_lint`, so the row was guaranteed to invert the moment the work landed. A Verification row that must fail after the work completes is not a verification.
-
-The exit-status trap that motivated this plan is still real — `grep -c` prints `0` and exits `1` on no match — which is exactly why no row here depends on it.
+| Step 2c section exists to extend | `grep -q "2c. Internal References" .claude/skills-global/do-plan-critique/SKILL.md` | exit code 0 | exit 0 |
+| Repo addendum exists | `test -f docs/sdlc/do-plan-critique.md` | exit code 0 | exit 0 |
+| No plan-lint module was built | `test -e tools/plan_lint.py` | exit code 1 (nothing to build) | exit 1 |
 
 ## Success Criteria
 
-- `plan-lint <plan.md>` executes every non-denylisted Verification row and prints claimed vs. actual exit code and stdout for each.
-- Run against `tests/fixtures/plan_lint_sample.md`, it flags every row whose command exits non-zero on the no-match path while the row's Expected reads as a success condition. The fixture carries that pattern, adapted from the original evidence in `docs/archive/plans-completed/rtr-unconditional-2733.md`. **No count is asserted here.** Round 4 found the earlier "six rows" claim wrong — the true number in that source is smaller, and it was the fourth count-based claim in this plan to be falsified. The criterion is a property, not a tally.
-- It resolves `file:line` citations and surfaces the cited line text.
-- A row whose shape is unsupported is reported `not statically checkable` with its reason, and no subprocess is spawned for it. The module imports no `subprocess`, asserted by test.
-- Plan-lint raising an exception leaves critique dispatch unaffected.
-- `/do-plan-critique` runs it before dispatching critics and passes the findings block into the critique input.
+- Step 2c resolves `path:line` citations and emits the cited line's text in its structural-check output.
+- An out-of-range line number is reported as a drifted citation.
+- The citation check never blocks critic dispatch.
+- No module, console script, CLI flag, fixture harness, or subprocess is added anywhere by this plan.
 - No change to round counts, roster size, or the concern re-critique bound.
 
 ## Critique Results
@@ -285,45 +206,41 @@ Both blockers are residue from the r3 patch: the allowlist inversion reached one
 |---|---|---|---|
 | BLOCKER | Risk & Robustness | `git -c diff.external='touch /tmp/poc; #' diff` executes an arbitrary command through an allowlisted binary and allowlisted subcommand, with `shell=False`, no shell metacharacter, and no argument matching the rejection list. Demonstrated in the worktree, not reasoned. The allowlist constrained subcommands but never global flags, defeating the read-only premise the design rested on. | **Resolved by removal** — Decision D3. Plan-lint executes nothing; there is no allowlist to escape. |
 | BLOCKER | Risk & Robustness | `python`/`python3 -m` runs any module's `__main__`. Refusing `-c` does not bound it — `python -m worker` is this repo's documented session execution engine, so a Verification row could launch a worker under `--execute`. | **Resolved by removal** — Decision D3. |
-| BLOCKER | History & Consistency **+** the concurrent critique (independent corroboration) | Third false "Resolved" in this plan: the round-2 disposition claimed the `op`/`security` gap became "a single list, stated once", but `## Decisions` D1 still carried the old list, was never updated to the r3 allowlist model, and no D2 entry existed despite `## Technical Approach` citing "Decision D2" as governing. The concurrent critique reached the same defect from the other direction — the allowlist inversion had landed in one section and not the six a builder implements from. | **Resolved** — r4. `## Decisions` rewritten: D1 marked SUPERSEDED with its history, D2 retired, D3 added as the operative decision. The inversion problem is moot because the allowlist no longer exists. |
-| CONCERN | Scope & Value | The "Stated cost, measured" paragraph reported the shell-screen-only figure (~75%) although it followed the allowlist's introduction; the allowlist-inclusive figure is 58.6%, a real 17-point drop driven mainly by 706 bare `pytest` rows the allowlist refused. | **Resolved** — r4. Both figures are superseded by the D3 measurement: 44.5% natively evaluable, stated against the 58.6% execution figure so the ~14-point trade is explicit, with the gap identified as exactly the `python` and `pytest` rows that carried the demonstrated risk. |
+| BLOCKER | History & Consistency **+** the concurrent critique (independent corroboration) | Third false "Resolved" in this plan: the round-2 disposition claimed the `op`/`security` gap became "a single list, stated once", but `
 
-**Also adopted from the concurrent critique:** the fixture's unsatisfiable "six rows" requirement (corrected to a property, no count asserted — the fourth count-based claim falsified in this plan); `plan-lint` being absent from its own execution allowlist, which would have made this plan's own rows unrunnable by its own tool; the `scripts/pytest-clean.sh` versus `./scripts/pytest-clean.sh` path-form mismatch; and the fail-open wiring needing an observability sink rather than a silent swallow. The first three are moot under D3; the fourth is applied to task 7.
+### Round 5 — 2026-09-07
 
-## Decisions` compounds it — it holds D1 alone, whose controls 1 and 2 *are* the two denylists, and carries no D2 entry at all though the Technical Approach cites "Decision D2" as governing. A builder working the task list and ticking the Success Criteria ships the rejected control and documents it as the design. | pending | Two skip strings now exist and are not interchangeable: `skipped: requires shell, not auto-executable` (metacharacter screen, control 2) and `skipped: not on the execution allowlist` (allowlist screen, control 3). Task 3, the Failure Path row and both Success Criteria must each name the one they mean, because the tests assert on these strings and a test written against the old `skipped: not auto-executable` passes on an implementation that never built the allowlist. Keep the argument-token rejection (`.env`, dotfiles, `Desktop/Valor`, `credentials`, `*.pem`, `id_rsa`, out-of-worktree) as a live control when rewriting D1 — the allowlist does not make it redundant, since an allowlisted `grep` or `sed -n` can still target `.env`; driver-verified that `/Users/tomcounsell/src/ai/.env` is a symlink to `/Users/tomcounsell/Desktop/Valor/.env` and is therefore readable from any worktree. |
-| BLOCKER | History & Consistency (Archaeologist) | The fixture requirement is unsatisfiable against the source it cites. Task 8 (:139) orders the builder to carry "verbatim: the six `grep -c`-style rows from the original evidence", and the Success Criterion (:214) says plan-lint "flags the six `grep -c`-style rows whose actual exit status is 1", preserved at `docs/archive/plans-completed/rtr-unconditional-2733.md:876,886-895`. Driver-measured against that document: exactly **four** rows are phrased `match count == 0` (:887, :888, :893, :894), and no sixth candidate exists anywhere in the file — the other `grep -c` rows in the cited range (:876, :886, :889, :890, :895) expect `output contains 2` or `output > 0` and exit 0 on a match, so they are not the defect class. Two of the four (:893, :894) are `git diff origin/main -- <path> \| grep -c …` pipelines, which D2 reports `skipped: requires shell` and never executes. Only **two** rows are simultaneously the defect class and executable under D2. The figure "six" traces to the #2733 plan's own critique NIT at :918, which carries `Addressed By: pending` — an unverified count inherited from a finding never applied. This is the citation-drift class the plan exists to catch, inherited into the plan's own acceptance criterion. | pending | The fixture needs three distinct row classes from `:886-895`, not one bundle. (1) The two executable defect-class rows verbatim — `grep -c "^## Rollout" docs/features/read-the-room.md` and `grep -ci "flip criterion" docs/features/read-the-room.md`, both expecting `match count == 0`; driver-confirmed both print `0` and exit `1` today, the exact claimed-vs-actual mismatch check 1 must surface. (2) One of the two pipeline rows (:893 or :894) verbatim, which then satisfies task 8's separate "one row whose command contains a shell metacharacter" requirement rather than needing a synthesized row. (3) A control row expecting `output > 0`, e.g. `grep -c "is_group_chat" docs/features/read-the-room.md` (exits 0), so the test proves plan-lint distinguishes the defect class from an ordinary passing `grep -c` row instead of flagging every `grep -c`. The fixture's rows must not be re-executed against live repo paths in the test — assert on recorded expected/actual pairs, or `docs/features/read-the-room.md` becomes a live dependency of a fixture the plan requires never to drift. |
-| CONCERN | Risk & Robustness (Skeptic) | `plan-lint` is not on its own execution allowlist, so this plan's Verification rows 4 and 5 (:197-198) resolve argv[0] to a binary the r3 allowlist does not permit and are reported `skipped: not on the execution allowlist`. The paragraph at :202 asserts the table is "the plan holding itself to Decision D2" and that a skipped row "would make the table unrunnable by its own linter", but it screens only for shell metacharacters — the r2 form of D2. The r3 allowlist added a second way for a row to be skipped and this self-consistency claim was not re-checked against it, so 2 of 7 rows are unrunnable by the tool this plan builds while the plan claims the opposite. | pending | If `plan-lint` is added to the allowlist, guard the recursion at the executor: before running a row, compare `shutil.which(argv[0])` against the resolved path of `sys.argv[0]`/`__file__` and refuse a self-invocation with `skipped: self-invocation refused`. Without that guard, `plan-lint <this plan> --execute` executes row 5, which is itself `plan-lint <fixture> --execute` — bounded today only because the fixture happens to carry no plan-lint row, which is an accident of fixture content, not a control. The alternative fix is smaller: amend :202 to state rows 4-5 are expected `skipped: not on the execution allowlist` and are covered by `tests/unit/test_plan_lint.py` instead. |
-| CONCERN | Scope & Value (User) | The allowlist entry is written as the bare relative path `scripts/pytest-clean.sh` (:86), but the corpus this tool exists to lint writes the command both ways. Driver-measured across `docs/plans/` and `docs/archive/plans-completed/`: 437 rows use the bare form and 126 use `./scripts/pytest-clean.sh`. A literal argv[0] string comparison against the table as written skips all 126 with `skipped: not on the execution allowlist`, and the reader sees a skip reason that reads like a safety refusal rather than a path-spelling mismatch. This is silent coverage loss in the one place the plan works hardest to be honest about coverage — "Stated cost, measured" accounts for metacharacter skips at 21.1% and says nothing about spelling-driven skips. | pending | Normalize before matching rather than adding spellings to the table: compare `os.path.relpath(os.path.realpath(argv0), worktree_root)` against the entry. Guard the traversal case first — a normalized result starting with `..` resolves outside the worktree and must be refused, which is the rule :88 already applies to arguments. Do not resolve repo-script entries via `shutil.which`: a PATH lookup would let a same-named script elsewhere on the machine satisfy a repo-path allowlist entry. |
-| CONCERN | Risk & Robustness (Operator) | The mandatory fail-open at the wiring site has no observability sink. Task 7 (:138) says a non-zero exit, timeout or exception is "logged and discarded" and dispatch proceeds regardless, but the wiring site is a skill markdown body that `## Test Impact` (:152) itself says "carries no test coverage today", and no artifact records whether plan-lint ran. A permanently-failing plan-lint — missing console script after a partial `uv sync`, an import error, a parse crash on a new plan shape — is indistinguishable from one that ran and found nothing. That silence confounds Open Question 2, whose purpose is measuring whether Part A reduces findings per round: a null result cannot be read as "no effect" when "never executed" produces the identical signal. | pending | In task 7, make the findings block unconditional: on success it carries the rows; on any failure it carries the single line `plan-lint: UNAVAILABLE (<exception class or exit code>)`. The wiring must never emit an absent or empty block, because absence is what makes the failure invisible. Since the block attaches to the critique input and reaches `## Critique Results` at finalize, that one line makes "did lint run this round" answerable from the committed plan alone — no new logging infrastructure, no change to the fail-open guarantee. |
-| NIT | Scope & Value (User) | The evidence is a single run (#2733 / PR #3174) and the plan says so openly, which is honest, but available corroboration is not cited. On 2026-09-05, five of eight parallel SDLC lanes stopped at the two-round critique cap with round-2 findings that were plan-text residue or small named fixes, and all five converged in exactly one more round; the stage trails are on issues #3167, #2743, #3170, #2764 and #3072. That is the structural pattern Part A addresses, at n=5 rather than n=1. | pending | — |
+**Verdict:** NEEDS REVISION — 5 blockers, 2 concerns. **This round ended the feature's main check.**
+**Critics:** Risk & Robustness, Scope & Value, History & Consistency. **Mode:** independent roster (3 critics). Gate: `{"complete": true, "missing": [], "ungrounded": []}`, 3/3.
 
-**Clean in this round:** every cited SHA resolves at HEAD (`bf0a5d577` subject and 2026-09-06 13:44 date match the plan text; `d4d1519b2`, `cd5f0572e`, `d5ba0ce45`; all five #1760-lineage SHAs `3e1e3dae`, `6e943ea9`, `5bc6243a`, `8218c5af`, `627e3cf0`). #1760's quoted title matches verbatim and it is CLOSED; PR #3174 is MERGED. `SKILL.md:132` is the Step 2 header and the 2c bullets sit at :149-151 under the :148 sub-header, inside the range the plan cites. `agent/output_handler.py` still calls `draft_message` at :754 inside a `try` opened at :751 with `except Exception` at :885. `docs/sdlc/do-plan-critique.md` is 186 lines as stated. All seven `## Verification` rows re-executed at HEAD match their recorded Pre-build actuals, including `grep -rl "plan_lint" tests/` returning nothing. The r3 allowlist genuinely closes the round-3 `sh -c` / `python3 -c` bypass, and the Freshness Check baseline `cd5f0572e`, though 21 commits behind HEAD, has broken no claim in the document.
+| Severity | Critics | Finding | Addressed By |
+|---|---|---|---|
+| BLOCKER | Scope & Value | **The defect essentially never occurs.** All 799 corpus `grep -c` rows whose Expected reads as a zero/no-match claim were checked: the trap this plan was built to catch — correct output paired with a misleading exit code — produced almost no real findings. Native evaluation would silently confirm rows rather than surface anything. | **Resolved by cutting the check** — Decision D4. |
+| BLOCKER | Scope & Value | **The false-positive rate is near total, and it is a category error.** Of 26 open plans carrying a `## Verification` section, exactly one uses the "Pre-build actual" reconciling column — this plan, which invented it for itself in round 1. The other 25 describe **post-build** state, so evaluating a forward-looking row at critique time reports a mismatch that is correct about the tree and wrong about the plan. Demonstrated against a live `Planning`-status plan. | **Resolved by cutting the check** — D4. |
+| BLOCKER | Risk & Robustness **+** History & Consistency (independent corroboration) | `## Decisions` and `## Failure Path Test Strategy` still carried D1/D2-era text contradicting D3: the Decisions block declared "No `subprocess` import exists in the module" and two lines later listed `subprocess.run(..., timeout=N, ...)` as a control, with a Reasoning paragraph asserting execution was necessary. | **Resolved** — r5 wholesale rewrite. |
+| BLOCKER | History & Consistency **+** Scope & Value (independent corroboration) | Stale execute-and-denylist language survived in four builder-facing sections — Failure Path Test Strategy, Test Impact, Documentation, Success Criteria — the last contradicting itself within one list. A literal build from those sections would have reconstructed the four-times-falsified executor D3 existed to remove. | **Resolved** — r5 wholesale rewrite of every affected section, rather than the anchored patching that produced this residue four rounds running. |
+| BLOCKER | History & Consistency | Task 8 still demanded "the six `grep -c`-style rows" after round 4 corrected that count everywhere except the section a builder implements the fixture from. Fifth falsified count-based claim in this plan. | **Resolved** — the fixture and task no longer exist under D4. |
+| CONCERN | Risk & Robustness | The shape table claimed to report "the exit status real `grep` would return" but ignored `grep`'s exit 2 on error, and specified Python `re` where `grep` uses POSIX BRE — `\|` alternation and `[[:alpha:]]` classes differ, so a pattern valid in one dialect and not the other yields a wrong verdict: a false finding of exactly the kind this plan exists to eliminate. | **Moot** — D4. |
+| CONCERN | Risk & Robustness | The `git grep` row claimed scoping to "tracked files" while D3 forbade `subprocess`, leaving no stated mechanism short of parsing `.git/index`. | **Moot** — D4. |
+
+**Outcome.** Rounds 1-4 hardened an execution design against escalating escapes. Round 5 asked whether the thing being hardened was worth having and measured that it was not. The plan drops from a module, console script, CLI flag, fixture harness and wiring point to a single extension of an existing structural check. Appetite falls from Small to Extra Small; the document loses a third of its length.
 
 ## Decisions
 
-### D1. Executing plan-authored shell — resolved (critique round 1, 2026-09-06)
+**D1 and D2 — RETIRED.** Opt-in execution behind `--execute`, bounded first by a denylist and then by an argv[0] allowlist. Rounds 2-4 falsified each bounding attempt in turn, ending with a demonstrated `git -c diff.external=…` arbitrary execution with every stated control in force.
 
-**Decision (SUPERSEDED by D3, round 4).** Execution was opt-in behind `--execute`, with a denylist and later an allowlist bounding what could run. Four rounds of critique falsified each bounding attempt in turn; the final one demonstrated arbitrary execution through `git -c diff.external=…` with every stated control in force. D1 and D2 are retired in full.
+**D3 — RETIRED.** Native Python re-implementation of recognised row shapes, replacing execution. Removed the escape surface but did not survive round 5's measurement.
 
-**Decision D3 — plan-lint executes nothing.** Recognised row shapes are re-implemented natively in Python (`pathlib`/`re`); everything else is reported `not statically checkable`. No `subprocess` import exists in the module, and a test asserts its absence. See `## Technical Approach` for the shape table and the measured 44.5% coverage.
+**D4 — the Verification table is not checkable at critique time, in any implementation.** Two independent measurements, both round 5:
 
-1. The destructive-pattern denylist, matched **after** shell-quote normalization (`shlex.split` then rejoin) so quote-concatenation (`r'm' -rf .`) cannot slip a denylisted verb past a raw-text regex.
-2. A **read-side** denylist keyed on argument tokens — `.env`, `Desktop/Valor`, `credentials`, `*.pem`, `id_rsa` — plus the bare commands `env`, `printenv`, `set`. Matches are reported `skipped: not auto-executable`, the same as a destructive match.
-3. A hard per-row timeout with process-group termination (`subprocess.run(..., timeout=N, start_new_session=True)`, then `os.killpg` on `TimeoutExpired`).
-4. A cap and a secrets scrub on captured stdout **before** it reaches any artifact a later stage can commit.
+1. **The defect essentially never occurs.** All 799 corpus `grep -c` rows whose Expected reads as a zero/no-match claim were checked. The specific trap this plan was built to catch — correct output paired with a misleading exit code — produced almost no real findings. Native evaluation would silently confirm rows rather than surface anything.
+2. **The false-positive rate is near total, and it is a category error rather than a bug.** Of 26 open plans carrying a `## Verification` section, exactly **one** uses the "Pre-build actual" reconciling column — this plan, which invented it for itself in round 1. The other 25 use a bare `Check | Command | Expected` form describing **post-build** state. Evaluating a forward-looking row before the build reports a mismatch that is correct about the tree and wrong about the plan.
 
-**Reasoning.** All three critics converged on a hybrid rather than a clean (a) or (b), for three independent reasons that compose.
+A check that almost never finds a true defect and reports a false one on nearly every row would increase critic load, which is the opposite of this issue's purpose. Cutting it is the finding, not a retreat from it.
 
-The default belongs at report-only because that is this repo's posture on an ambiguous safety call. `op` fails closed and reports rather than degrading; the standing rules on pattern process kills and raw Redis writes remove the judgment call from automation instead of enumerating the bad shapes. A denylist is structurally the opposite move — it executes everything it did not think of — and this plan's own text already conceded it "is a mitigation, not a guarantee." The two existing plan-document validators cited as precedent block synchronously at pre-commit with the authoring agent present; plan-lint runs unattended inside a possibly-overnight pipeline. Same shell, materially different blast radius.
-
-The pipeline still has to execute, because the plan's one evidenced value driver is check 1, and check 1 is inert without execution. A parse-only pass can repeat what a row *claims*; only running it reveals that a `grep -c` row reading as success actually exits 1. So a default-off flag protects the ad hoc human invocation, which is where opt-in genuinely earns its keep, at no cost to the automated path.
-
-The controlling insight is that the flag alone closes nothing. The real exposure is not whether a command runs but what happens to its stdout afterward. `~/Desktop/Valor/.env` is a symlink target reachable from any worktree by the invoking user, so "the lane's own worktree" bounds file *writes* and gives no protection against reads. A perfectly ordinary row — `cat .env`, `printenv` — passes every verb-based check, and captured stdout has a stated path into a findings block that the critique finalize step commits and pushes to `main`. Controls 2 and 4 above, not the flag, are what close that path.
-
-**Scope note.** This decision changes no round count, roster size, or the concern re-critique bound, and touches no router logic. It stays inside Part A.
+**What survives.** Citation-content checking, which is backward-looking and has three recorded instances in this plan's own history.
 
 ## Open Questions
 
-1. **Advisory vs. blocking.** The plan argues advisory. If lint findings are routinely ignored, blocking becomes the stronger position. Worth revisiting after real runs.
-2. **Part C interaction.** Given #1760's five-fix lineage, does landing Part A measurably reduce findings per round? If it does not, the saturation hypothesis behind Part C loses its main support and should be reconsidered rather than built.
-3. **Does the review side need the same treatment?** `/do-pr-review` findings were not categorized in the measured run, so there is no evidence yet either way.
+1. Should a drifted citation be a CONCERN or a NIT? The plan proposes CONCERN by analogy with Step 2c's existing "non-existent file path → CONCERN", but a line number off by a few after a refactor is arguably cosmetic.
+2. Is the `docs/sdlc/do-plan-critique.md` addendum needed at all, or is the skill-body edit self-documenting?
