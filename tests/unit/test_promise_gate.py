@@ -562,6 +562,32 @@ class TestSDKTimeout:
         assert "promise_gate_heuristic" in contents
         assert "promise_gate_timeout" not in contents
 
+    def test_semaphore_acquire_timeout_is_a_timeout_row_without_queue_wait(self, monkeypatch):
+        """``semaphore_slot(timeout=...)`` raises ``TimeoutError`` from
+        ``__aenter__`` before the slot is held, so ``_queue_wait_ms`` is never
+        set: the outcome is the ``timeout`` suffix with ``queue_wait_ms`` of
+        ``None`` while ``elapsed_ms`` is still measured. Only an SDK timeout
+        (previous tests) carries a queue-wait sample."""
+        import asyncio
+
+        class _NeverAcquires:
+            async def __aenter__(self):
+                raise TimeoutError("semaphore acquire timed out")
+
+            async def __aexit__(self, *exc):
+                return None
+
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+        monkeypatch.setattr(promise_gate, "semaphore_slot", lambda timeout=None: _NeverAcquires())
+
+        verdict, suffix, elapsed_ms, queue_wait_ms = asyncio.run(
+            promise_gate._evaluate_promise_llm_or_heuristic("I'll come back with thoughts")
+        )
+        assert suffix == "timeout"
+        assert verdict.action == "block"
+        assert queue_wait_ms is None
+        assert elapsed_ms >= 0
+
 
 # === Audit JSONL ordering / kill-switch first-write ===
 

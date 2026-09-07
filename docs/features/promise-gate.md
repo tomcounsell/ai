@@ -319,7 +319,8 @@ semaphore acquire succeeded (the `llm` suffix, an SDK-timeout `timeout` row,
 and a `heuristic` fallthrough after acquiring); it is omitted on a
 semaphore-acquire timeout (also a `timeout` row, since `semaphore_slot`
 raises before the wait is recorded), on every `oversize` row, on the
-no-API-key heuristic fallthrough, and on every zero-LLM row.
+no-API-key heuristic fallthrough, on the sync API's running-loop heuristic
+fallthrough, and on every zero-LLM row.
 
 The `source` discriminator takes one of:
 

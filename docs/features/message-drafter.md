@@ -68,7 +68,7 @@ class MessageDraft:
                                                 # to re-identify a referent (#2694)
 ```
 
-Note: `was_drafted` has been removed. The drafter never rewrites the agent's text — it is used verbatim after narration stripping and structural composition. There is no Haiku/OpenRouter rewrite path. The drafter's main path does make one LLM call per message (the promise-gate honesty check, `use_llm=True` by default — see `_evaluate_drafter_promise` below); that call judges whether to ship the text as-is, it never alters it.
+The drafter never rewrites the agent's text — it is used verbatim after narration stripping and structural composition. There is no Haiku/OpenRouter rewrite path. The drafter's main path does make one LLM call per message (the promise-gate honesty check, `use_llm=True` by default — see `_evaluate_drafter_promise` below); that call judges whether to ship the text as-is, it never alters it.
 
 ### Pass-through flow
 
