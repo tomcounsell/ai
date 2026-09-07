@@ -183,6 +183,60 @@ def _is_check_table_header(header_cells: list[str]) -> bool:
     return any(cell.strip().lower() == "command" for cell in header_cells[:3])
 
 
+def _resolve_check_columns(header_cells: list[str]) -> tuple[int, int, int]:
+    """Locate the Check, Command and Expected columns by header NAME.
+
+    Reading columns 0, 1 and 2 positionally (the pre-#3194 behavior) misreads
+    every table that carries a leading annotation column. ``| # | Check |
+    Command | Expected |`` -- the shape authors use to cross-reference rows
+    from Success Criteria -- still passes the ``Command``-among-the-first-three
+    recognition test, and each row was then read as Check=``#``,
+    Command=``Check``, Expected=``Command``: the check's prose was shelled out,
+    failing at exit 127 against code that was fine.
+
+    A name that is present wins. For a role with no column of its own name, the
+    canonical ``Check | Command | Expected`` adjacency places it relative to
+    Command: the column immediately before Command is the check name, the one
+    immediately after is the expectation. That keeps the fixture heading
+    ``Anti-criterion | Command | Expected`` reading exactly as it always has,
+    and resolves ``| # | Anti-criterion | Command | Expected |`` correctly too.
+    Positions 0-2 are the fallback only when no header name is recognizable at
+    all, or when adjacency runs off the end of the row.
+    """
+    lowered = [cell.strip().lower() for cell in header_cells]
+    width = len(lowered)
+
+    def named(name: str) -> int | None:
+        return lowered.index(name) if name in lowered else None
+
+    check_idx = named("check")
+    command_idx = named("command")
+    expected_idx = named("expected")
+
+    if command_idx is None:
+        # Nothing to anchor adjacency on. `_is_check_table_header` admits a
+        # block only when a column is literally named Command, so in practice
+        # this is unreachable; positions 0-2 are the honest answer if it is not.
+        return 0, 1, 2
+
+    taken = {i for i in (check_idx, command_idx, expected_idx) if i is not None}
+
+    def fallback(preferred: int, default: int) -> int:
+        for candidate in (preferred, default):
+            if 0 <= candidate < width and candidate not in taken:
+                return candidate
+        return next((i for i in range(width) if i not in taken), default)
+
+    if check_idx is None:
+        check_idx = fallback(command_idx - 1, 0)
+        taken.add(check_idx)
+    if expected_idx is None:
+        expected_idx = fallback(command_idx + 1, 2)
+        taken.add(expected_idx)
+
+    return check_idx, command_idx, expected_idx
+
+
 def _block_data_rows(block: list[str]) -> list[str]:
     """A block's rows after its header and (if present) its separator row."""
     rows = block[1:]
@@ -202,8 +256,9 @@ def parse_verification_table(markdown: str) -> ParsedTable:
     ``Command`` column among its first three) contributes its data rows as
     checks; the expected column count comes from its own header, so a table
     that carries an extra annotation column is read correctly instead of
-    having every row rejected. Only the first three columns of a check table
-    are used: Check, Command, Expected.
+    having every row rejected. The Check, Command and Expected cells are
+    located by header name (see :func:`_resolve_check_columns`), so a leading
+    ``#`` column or a trailing ``Notes`` column shifts nothing.
 
     A non-check table becomes a non-failing :class:`SkippedTable`. When the
     section has pipe-blocks but none of them is a check table, that is a loud
@@ -265,6 +320,7 @@ def parse_verification_table(markdown: str) -> ParsedTable:
 
     for block, header_cells in check_blocks:
         expected_columns = max(len(header_cells), 3)
+        check_idx, command_idx, expected_idx = _resolve_check_columns(header_cells)
 
         for row in _block_data_rows(block):
             cells = split_row_cells(row)
@@ -283,9 +339,9 @@ def parse_verification_table(markdown: str) -> ParsedTable:
                 )
                 continue
 
-            name = cells[0]
-            command = cells[1].strip("`")
-            expected = cells[2]
+            name = cells[check_idx]
+            command = cells[command_idx].strip("`")
+            expected = cells[expected_idx]
 
             if not name or not command or not expected:
                 malformed.append(

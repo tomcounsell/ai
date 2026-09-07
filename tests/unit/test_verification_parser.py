@@ -602,3 +602,82 @@ class TestPerBlockTableScoping:
 
     def test_parsed_table_carries_skipped_field(self):
         assert "skipped" in ParsedTable.__dataclass_fields__
+
+
+# ---------------------------------------------------------------------------
+# Header-name column resolution (#3194)
+# ---------------------------------------------------------------------------
+
+
+class TestHeaderNameColumnResolution:
+    """Check / Command / Expected are located by header NAME, not by position.
+
+    Reading columns 0-2 positionally made `| # | Check | Command | Expected |`
+    -- the shape authors use to cross-reference rows from Success Criteria --
+    execute its Check prose as a shell command: 18 spurious FAILs at exit 127
+    and 2 on the #3170 lane, with every row then run by hand.
+    """
+
+    def test_leading_index_column_is_not_read_as_the_check_name(self):
+        md = (
+            "## Verification\n\n"
+            "| # | Check | Command | Expected |\n|--|--|--|--|\n"
+            "| 1 | Tests pass | `pytest -q` | exit code 0 |\n"
+        )
+        parsed = parse_verification_table(md)
+        assert parsed.malformed == []
+        assert len(parsed.checks) == 1
+        assert parsed.checks[0].name == "Tests pass"
+        assert parsed.checks[0].command == "pytest -q"
+        assert parsed.checks[0].expected == "exit code 0"
+
+    def test_trailing_extra_column_resolves_by_name(self):
+        md = (
+            "## Verification\n\n"
+            "| Check | Command | Expected | Notes |\n|--|--|--|--|\n"
+            "| Tests pass | `pytest -q` | exit code 0 | nightly |\n"
+        )
+        parsed = parse_verification_table(md)
+        assert parsed.malformed == []
+        assert len(parsed.checks) == 1
+        assert parsed.checks[0].name == "Tests pass"
+        assert parsed.checks[0].command == "pytest -q"
+        assert parsed.checks[0].expected == "exit code 0"
+
+    def test_header_names_are_matched_case_insensitively(self):
+        md = (
+            "## Verification\n\n"
+            "| # | CHECK | command | Expected |\n|--|--|--|--|\n"
+            "| 1 | Tests pass | `pytest -q` | exit code 0 |\n"
+        )
+        parsed = parse_verification_table(md)
+        assert parsed.malformed == []
+        assert parsed.checks[0].name == "Tests pass"
+        assert parsed.checks[0].command == "pytest -q"
+
+    def test_unnamed_check_column_falls_back_beside_command(self):
+        """`Anti-criterion` is a real heading in tests/fixtures/verification/.
+        With no column literally named Check, the one before Command is it."""
+        md = (
+            "## Verification\n\n"
+            "| # | Anti-criterion | Command | Expected |\n|--|--|--|--|\n"
+            "| 1 | No debug prints | `grep -c X /dev/null` | match count == 0 |\n"
+        )
+        parsed = parse_verification_table(md)
+        assert parsed.malformed == []
+        assert parsed.checks[0].name == "No debug prints"
+        assert parsed.checks[0].command == "grep -c X /dev/null"
+        assert parsed.checks[0].expected == "match count == 0"
+
+    def test_plain_three_column_table_is_unchanged(self):
+        """The control: the shape that already worked still resolves to 0-1-2."""
+        md = (
+            "## Verification\n\n"
+            "| Check | Command | Expected |\n|--|--|--|\n"
+            "| Tests pass | `pytest -q` | exit code 0 |\n"
+        )
+        parsed = parse_verification_table(md)
+        assert parsed.malformed == []
+        assert parsed.checks[0].name == "Tests pass"
+        assert parsed.checks[0].command == "pytest -q"
+        assert parsed.checks[0].expected == "exit code 0"
