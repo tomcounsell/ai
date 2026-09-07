@@ -1244,9 +1244,9 @@ therefore weighted toward the sweep rather than toward new writing.
 **Lane close conditions.** These two are the conditions the lane closes on,
 stated verbatim:
 
-- [ ] `python3 tests/marker_map.py --audit` reports `0 new, 0 stale` with the
+- [x] `python3 tests/marker_map.py --audit` reports `0 new, 0 stale` with the
       shrunken baseline.
-- [ ] `pytest --collect-only -q -m reflections tests/unit/reflections/` collects
+- [x] `pytest --collect-only -q -m reflections tests/unit/reflections/` collects
       the package.
 
 Concretely, the first prints
@@ -1255,18 +1255,18 @@ second collects every test in the package with none deselected.
 
 **Issue acceptance criteria.**
 
-- [ ] **AC1** — `KNOWN_MISTAGS` "is empty, **or** every remaining entry has a
+- [x] **AC1** — `KNOWN_MISTAGS` "is empty, **or** every remaining entry has a
       reason that is a deliberate policy choice rather than an unaddressed
       defect." Met by the **second branch**: 2 entries remain, both R2, both
       files correctly marked, both reasons rewritten to say so and asserted by
       `test_known_mistags_holds_only_policy_entries`. The disjunction is the
       issue's own wording and this plan meets it as written rather than
       manufacturing scope from the stricter half.
-- [ ] **AC2** — `pytest -m reflections` collects the reflections packages.
+- [x] **AC2** — `pytest -m reflections` collects the reflections packages.
       Over `tests/unit/reflections/` and `tests/integration/reflections/`:
       **396 of 396**, zero deselected, up from 34 of 396. Suite-wide,
       `-m reflections` goes 544 → 906 tests.
-- [ ] **AC3** — no test file loses a marker it currently has. Met for 837 of
+- [x] **AC3** — no test file loses a marker it currently has. Met for 837 of
       838 files. The single exception is
       `test_reflections_pm_briefings_no_slots_configured.py` losing `config`, a
       marker it acquired because `config` is a literal substring of `configured`.
@@ -1274,36 +1274,36 @@ second collects every test in the package with none deselected.
 
 **Mechanical checks.**
 
-- [ ] `check_r1(files) == []` and `check_r3(files) == []`; `check_r2(files)`
+- [x] `check_r1(files) == []` and `check_r3(files) == []`; `check_r2(files)`
       returns exactly the two policy paths.
-- [ ] `KNOWN_MISTAGS` has exactly 2 entries, both containing `POLICY` in their
+- [x] `KNOWN_MISTAGS` has exactly 2 entries, both containing `POLICY` in their
       reason, and neither is a renamed path (#2805: entries are deleted, not
       re-keyed).
-- [ ] `python3 tests/marker_map.py --count` returns 838 before and after — no
+- [x] `python3 tests/marker_map.py --count` returns 838 before and after — no
       rename collided with an existing basename.
-- [ ] Derived-marker census moves exactly as measured: 284 → 301 files marked,
+- [x] Derived-marker census moves exactly as measured: 284 → 301 files marked,
       `reflections` 28 → 48, `sdlc` 85 → 83, `messaging` 61 → 62, `config`
       6 → 5, `validation` 9 → 8, everything else unchanged. Zero files lose a
       derived marker entirely.
-- [ ] Effective selector counts, from real `--collect-only -m` runs over
+- [x] Effective selector counts, from real `--collect-only -m` runs over
       `tests/`: `-m sdlc` 2859 → 2859, `-m validation` 428 → 428, `-m messaging`
       1271 → 1276, `-m reflections` 544 → 906, `-m config` 127 → 123. Every one
       read as a **count**, never as an exit code (#3195).
-- [ ] `git show --stat --find-renames` on the rename commit lists 21 `R100`
+- [x] `git show --stat --find-renames` on the rename commit lists 21 `R100`
       entries and zero adds or deletes; `git log --follow` reaches pre-rename
       history for all 21.
-- [ ] `git grep -n` for each of the 21 old basenames returns hits only inside
+- [x] `git grep -n` for each of the 21 old basenames returns hits only inside
       this plan document.
 - [ ] Full `tests/unit/` suite green via `scripts/pytest-clean.sh`, read as a
       passed count.
-- [ ] `python -m ruff check` and `python -m ruff format --check` clean.
-- [ ] Documentation updated: `docs/features/feature-map-marker-guard.md`
+- [x] `python -m ruff check` and `python -m ruff format --check` clean.
+- [x] Documentation updated: `docs/features/feature-map-marker-guard.md`
       (including the corrected 17/4 figure and the re-derived 81-of-838 coverage
       boundary), `docs/features/docs-auditor.md`,
       `docs/features/expectation-reconciler.md`,
       `docs/features/plan-migration-invariant.md`, `tests/README.md`, and the 17
       archived plans.
-- [ ] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
+- [x] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
       tests/` returns nothing related to marker resolution (verified at plan
       time: the suite carries no xfail for this defect).
 
