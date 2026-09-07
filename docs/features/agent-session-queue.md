@@ -172,8 +172,10 @@ Key design points of the `ModelException` handler:
   **every** `IndexedField` (`status`, `task_type`, `claude_session_uuid` — enumerated at
   runtime from `cls._meta`, never hardcoded): identity-less (`session_id`-less) hashes are
   refused re-add to any of those fields' `$IndexF:AgentSession:*` sets (counted via
-  `AgentSession._last_quarantined_identityless`, summed across fields, + WARNING log), while
-  healthy records delegate to unmodified popoto. The guard is scoped to the rebuild path only —
+  `AgentSession._last_quarantined_identityless`, a de-duplicated **row** count across popoto's
+  divergence pre-check and this shim, + WARNING log — see [AgentSession Pending-Index Phantom
+  Leak](agentsession-pending-index-leak.md#the-a1-rebuild-guard-two-seams-one-de-duplicated-row-count)),
+  while healthy records delegate to unmodified popoto. The guard is scoped to the rebuild path only —
   live `AgentSession(...).save()` still indexes a legitimate new pending session (inverse-bug
   guard) — and install is wrapped in a non-reentrant `_repair_lock` so overlapping
   `repair_indexes()` calls can't race the shim install/restore. Gone-hash orphans are cleared
