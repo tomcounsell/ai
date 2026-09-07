@@ -305,28 +305,34 @@ def build_telegram_outbox_payload(
         A dict payload ready to be JSON-serialised and pushed onto
         ``telegram:outbox:{session_id}``.
     """
+    from bridge import wire_schemas
     from bridge.wire_schemas import OutboxPayload
 
+    # `correlation_id` is a lineage tag the message does not need in order to
+    # be delivered. Before the payload was typed, a caller reading it off a
+    # session got whatever was there and it rode along unvalidated; now a
+    # non-string would raise out of this builder, and the one caller on the
+    # send path turns that into a dropped message. Losing the tag is the
+    # right trade, so drop it here rather than let it cost a delivery.
+    if not isinstance(correlation_id, str):
+        correlation_id = None
+
+    # Conditional keys are omitted by not setting them, which is the whole of
+    # the rule `wire_schemas.to_dict` then applies: the writer's keys, and
+    # only those. The hand-built dict this replaced always wrote `reply_to`,
+    # including as an explicit null on the highest-volume path (an ordinary
+    # message replying to nothing), and never carried `type` or `project_key`
+    # at all — both of which a blanket dump of the model would invent.
     payload = OutboxPayload(
         chat_id=chat_id,
         reply_to=reply_to,
         text=text,
         session_id=session_id,
         timestamp=time.time(),
-        file_paths=file_paths or None,
-        correlation_id=correlation_id,
+        **({"file_paths": file_paths} if file_paths else {}),
+        **({"correlation_id": correlation_id} if correlation_id else {}),
     )
-    # Only `file_paths` and `correlation_id` are conditional. The hand-built
-    # dict this replaced always wrote `reply_to`, including as an explicit
-    # null on the highest-volume path (an ordinary message replying to
-    # nothing), so a blanket `exclude_none=True` would silently drop it — and
-    # would drop `text`, `chat_id` or `session_id` too the moment any of them
-    # were ever None. Omit the two optional keys by name instead.
-    dumped = payload.model_dump()
-    for optional_key in ("file_paths", "correlation_id"):
-        if dumped.get(optional_key) is None:
-            del dumped[optional_key]
-    return dumped
+    return wire_schemas.to_dict(payload)
 
 
 def build_telegram_poll_outbox_payload(

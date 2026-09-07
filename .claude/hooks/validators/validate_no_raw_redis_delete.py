@@ -273,6 +273,8 @@ _POPOTO_CONTEXT = [
     # name only makes the guard fire more often, and dropping one is a
     # fail-open change with no evidence behind it.
     "SessionEvent",
+    "SideEffectJob",
+    "side_effect_job",
     "TaskTypeProfile",
     "TelegramMessage",
     "TeammateMetrics",

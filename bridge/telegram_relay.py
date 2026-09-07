@@ -34,7 +34,7 @@ import redis
 from pydantic import ValidationError
 from telethon.errors import FloodWaitError
 
-from bridge import dead_letters
+from bridge import dead_letters, wire_schemas
 from bridge.wire_schemas import OutboxPayload
 from utils.peer import numeric_peer
 
@@ -1366,7 +1366,7 @@ async def process_outbox(telegram_client) -> int:
                 # sent, including an explicit `"reply_to": null`, and none of
                 # the optional fields the model declares but this payload
                 # never carried.
-                message = payload.model_dump(exclude_unset=True)
+                message = wire_schemas.to_dict(payload)
                 msg_type = payload.type
 
                 # Dispatch to handler with unified error handling

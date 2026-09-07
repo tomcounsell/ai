@@ -21,7 +21,7 @@ delivery. Steering is deliberately correlation-free (see #3177).
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -87,22 +87,34 @@ class NotifyPayload(_Wire):
     is_project_keyed: bool = False
 
 
-def dump(payload: _Wire) -> str:
-    """Serialise a wire payload, omitting keys the writer left unset.
+def to_dict(payload: _Wire) -> dict[str, Any]:
+    """The wire form of ``payload`` as a dict: the keys its writer set, plus ``v``.
 
     ``exclude_unset`` is the rule, not ``exclude_none``. The hand-built dicts
     these models replace omitted a key by not writing it and wrote an
     explicit null when the value was genuinely null — a notify payload for a
-    session with no chat carried ``"chat_id": null``, and a reader that
-    predates this change must still see it. ``exclude_none`` cannot tell
-    those two apart and drops both, which silently narrows the wire.
+    session with no chat carried ``"chat_id": null``, and an outbox entry
+    replying to nothing carried ``"reply_to": null``. A reader that predates
+    this change must still see both. ``exclude_none`` cannot tell an omitted
+    key from a null one and drops both, which silently narrows the wire;
+    ``exclude_defaults`` would drop a value the writer deliberately set to
+    the default. Only ``exclude_unset`` reproduces what the writer wrote.
 
     ``v`` is stamped back on afterwards: no writer sets it explicitly, so
     ``exclude_unset`` would otherwise strip the version off every payload.
+
+    The round trip through ``model_dump_json`` rather than ``model_dump``
+    keeps the serialisation pydantic's, so an ``extra="allow"`` field a newer
+    writer added survives with the type it went out as.
     """
-    data = json.loads(payload.model_dump_json(exclude_unset=True))
+    data: dict[str, Any] = json.loads(payload.model_dump_json(exclude_unset=True))
     data["v"] = payload.v
-    return json.dumps(data)
+    return data
+
+
+def dump(payload: _Wire) -> str:
+    """Serialise a wire payload, omitting keys the writer left unset."""
+    return json.dumps(to_dict(payload))
 
 
 __all__ = [
@@ -110,4 +122,5 @@ __all__ = [
     "OutboxPayload",
     "SteeringPayload",
     "dump",
+    "to_dict",
 ]
