@@ -634,7 +634,7 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 ### 2. Records and settings
 - **Task ID**: build-records
 - **Depends On**: none
-- **Validates**: `tests/unit/test_improvement_models.py` (create), `tests/unit/test_agentsession_index_guard_generalized.py`, `tests/unit/test_settings.py`
+- **Validates**: `tests/unit/test_improvement_models.py` (create), `tests/unit/test_agentsession_index_guard_generalized.py`, `tests/unit/test_settings.py`, `tests/unit/test_env_declaration_readers.py`
 - **Informed By**: recon (flat layout, schema-gate docstring, `project_key` partition, bounded recency sort); spike-5 (per-field store)
 - **Assigned To**: records-builder
 - **Agent Type**: builder
@@ -653,7 +653,7 @@ Lanes 1 and 2 are this plan's first `/do-build`. Lanes 3 through 6 are child iss
 ### 3. Evidence and reuse seams
 - **Task ID**: build-seams
 - **Depends On**: build-records
-- **Validates**: `tests/unit/test_length_safe_content_store.py`, `tests/unit/test_task_type_profile.py`, `tests/unit/test_session_tags.py`, `tests/unit/test_improvement_evidence.py` (create)
+- **Validates**: `tests/unit/test_length_safe_content_store.py`, `tests/unit/test_session_tags.py`, `tests/unit/test_session_lifecycle.py`, `tests/integration/test_session_finalize.py`, `tests/unit/test_reflection_register.py`, `tests/unit/test_improvement_evidence.py` (create). `tests/unit/test_task_type_profile.py` is DELETED by this task, not validated by it
 - **Informed By**: recon (correction detector transient; `_shipped_evidence` discarded; `rework_triggered` unwritten); spike-5 (archive path unverified); critique blocker 2 (the old anti-criterion matched a dead field)
 - **Assigned To**: seams-builder
 - **Agent Type**: builder
