@@ -230,6 +230,57 @@ def update_session(
         session.save()
 
 
+def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
+    """Preserve a session's input on a terminal sink that never delivered it.
+
+    Two stages reach here, and they differ in exactly one way that matters:
+    whether replaying the input is meaningful.
+
+    ``session_recovery_cap`` is a session that ran, was recovered up to
+    MAX_RECOVERY_ATTEMPTS and never progressed. Its input is intact and
+    re-enqueuing it is a reasonable human decision, so the row is replayable.
+
+    ``session_init_hang`` is a session whose runner produced zero output. The
+    #2181 circuit breaker exists because re-spawning that identical input
+    reproduces the identical hang, so the row is deliberately NOT replayable:
+    it is evidence for a human, never something to auto-retry.
+
+    Best-effort and exception-isolated. A dead-letter write that raised here
+    would abort a terminal transition, which is strictly worse than losing the
+    record of a session that was already lost.
+    """
+    try:
+        from bridge import dead_letters
+
+        payload = {
+            "session_id": getattr(session, "session_id", None),
+            "agent_session_id": getattr(session, "agent_session_id", None),
+            "message_text": getattr(session, "message_text", None),
+            "chat_id": getattr(session, "chat_id", None),
+            "project_key": getattr(session, "project_key", None),
+            "extra_context": getattr(session, "extra_context", None),
+        }
+        project_key = getattr(session, "project_key", None)
+        if stage == "session_init_hang":
+            dead_letters.record(
+                "session_init_hang",
+                payload,
+                reason,
+                replayable=False,
+                project_key=project_key,
+            )
+        else:
+            dead_letters.record(
+                "session_recovery_cap",
+                payload,
+                reason,
+                replayable=True,
+                project_key=project_key,
+            )
+    except Exception as e:  # noqa: BLE001 -- never block a terminal transition
+        logger.debug("[lifecycle] terminal dead-letter write failed (non-fatal): %s", e)
+
+
 def finalize_session(
     session,
     status: str,
@@ -240,6 +291,7 @@ def finalize_session(
     skip_parent: bool = False,
     reject_from_terminal: bool = True,
     emit_telemetry: bool = True,
+    dead_letter_stage: str | None = None,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -284,6 +336,11 @@ def finalize_session(
             session is already terminal and the caller is trying to transition it to
             a different terminal status. Pass False for intentional terminal->terminal
             re-classification (e.g., escalating abandoned->failed on timeout).
+        dead_letter_stage: Keyword-only. When set, the session's input is
+            preserved as a DeadLetter of this stage before the terminal write.
+            Used by the two session-path sinks that end a session having never
+            delivered its work: ``session_recovery_cap`` and
+            ``session_init_hang``. Best-effort; never blocks the finalize.
 
     Raises:
         ValueError: If session is None or status is not terminal.
@@ -542,6 +599,9 @@ def finalize_session(
     # reaper WANTS to find a still-alive detached harness whose session went
     # terminal, then reap it under the fence compare (a recycled pid reads as
     # "not ours"). Retaining the fence keeps that reap possible.
+    if dead_letter_stage:
+        _record_terminal_dead_letter(session, dead_letter_stage, reason)
+
     session.save()
 
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.

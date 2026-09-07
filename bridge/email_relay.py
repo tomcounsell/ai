@@ -155,7 +155,17 @@ async def _process_one(r, key: str, raw: str) -> tuple[bool, bool]:
     try:
         message = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as e:
+        # Already LPOPped, so returning here used to lose the payload with no
+        # trace. Keep the raw string on a dead letter (#3183 lane 2).
         logger.warning(f"Email relay: malformed JSON in {key}: {e}")
+        from bridge import dead_letters
+
+        await dead_letters.arecord(
+            "outbox_parse",
+            raw,
+            f"email relay: malformed JSON in {key}: {e}",
+            replayable=False,
+        )
         return False, False
 
     normalized = _normalize_payload(message)

@@ -2194,6 +2194,27 @@ async def _worker_loop(
                     e,
                 )
 
+                # The reaper below deletes the corrupted row, so this is the
+                # last moment anything knows the row existed (#3183 lane 2).
+                # A corrupted record often carries no usable session_id, which
+                # is exactly why the row is unreplayable and why the exception
+                # text is the payload.
+                try:
+                    from bridge import dead_letters
+
+                    dead_letters.record(
+                        "session_corrupt_row",
+                        {"worker_key": worker_key, "error": repr(e)},
+                        f"corrupted AgentSession at the queue head for worker_key={worker_key}",
+                        replayable=False,
+                    )
+                except Exception as _dl_exc:  # noqa: BLE001 -- never re-kill the loop
+                    logger.debug(
+                        "[worker:%s] corrupted-pop dead-letter write failed: %s",
+                        worker_key,
+                        _dl_exc,
+                    )
+
                 # Best-effort head-of-queue cleanup via the existing ORM reaper.
                 # The return value is DELIBERATELY IGNORED: the reaper is
                 # best-effort head-of-queue cleanup, and the periodic

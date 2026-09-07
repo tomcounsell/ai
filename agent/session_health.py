@@ -3712,6 +3712,7 @@ async def _apply_recovery_transition(
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_recovery_cap",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
@@ -3750,6 +3751,7 @@ async def _apply_recovery_transition(
                     f"kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_init_hang",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, init hang circuit break)
             try:

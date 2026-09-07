@@ -33,6 +33,7 @@ import os
 import redis
 from telethon.errors import FloodWaitError
 
+from bridge import dead_letters
 from utils.peer import numeric_peer
 
 logger = logging.getLogger(__name__)
@@ -1010,6 +1011,9 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
                 chat_id=chat_id_int,
                 reply_to=int(reply_to) if reply_to else None,
                 text=text,
+                reason=reason,
+                attempts=int(message.get("_relay_attempts") or 0),
+                project_key=message.get("project_key"),
             )
             logger.warning(
                 f"Relay: dead-lettered message for chat {chat_id} ({reason}, {len(text)} chars)"
@@ -1336,7 +1340,16 @@ async def process_outbox(telegram_client) -> int:
                 try:
                     message = json.loads(raw)
                 except (json.JSONDecodeError, TypeError) as e:
+                    # The entry is already popped, so continuing here used to
+                    # lose it silently. Keep the raw string so it is at least
+                    # visible and diagnosable (#3183 lane 2).
                     logger.warning(f"Relay: skipping malformed queue entry in {key}: {e}")
+                    await dead_letters.arecord(
+                        "outbox_parse",
+                        raw,
+                        f"malformed JSON in {key}: {e}",
+                        replayable=False,
+                    )
                     continue
 
                 # Validate message type before dispatch
@@ -1344,6 +1357,13 @@ async def process_outbox(telegram_client) -> int:
                 if msg_type not in KNOWN_MESSAGE_TYPES:
                     logger.warning(
                         f"Relay: unknown message type '{msg_type}', discarding: {message}"
+                    )
+                    await dead_letters.arecord(
+                        "outbox_parse",
+                        raw,
+                        f"unknown message type {msg_type!r} in {key}",
+                        replayable=False,
+                        project_key=message.get("project_key"),
                     )
                     continue
 
