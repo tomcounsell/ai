@@ -329,11 +329,14 @@ tests/
 | integration | `test_reflections_redis.py` | 20 | Reflection persistence |
 
 The 23 files in `tests/unit/reflections/` and `tests/integration/reflections/` all
-carry this marker too. Every one of them leads with `test_reflections_` by
-construction: #3175 renamed the 20 that did not, because a basename is the only
-thing `FEATURE_MAP` looks at, and `pytest -m reflections` was collecting 36 of
-the packages' 399 tests. A new file in either package must follow the same
-convention or rule R1 will fail the guard.
+resolve to this marker. #3175 renamed 20 of them to lead with `test_reflections_`,
+because a basename is the only thing `FEATURE_MAP` looks at, and
+`pytest -m reflections` was collecting 36 of the packages' 399 tests. Two already
+led with that prefix; the remaining file, `test_stall_advisory_reflection.py`,
+resolves through the singular `reflection` key instead. Rule R1 asks only that a
+file's derived marker equal its package's, so a new file here must resolve to
+`reflections` — leading with `test_reflections_` is the reliable way to get
+there.
 
 | Level | Package | Files | Description |
 |-------|---------|------:|-------------|

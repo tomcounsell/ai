@@ -284,7 +284,14 @@ def test_whole_token_single_token_stem_matches():
 
 def test_whole_token_rejects_fragment_at_single_token():
     # "checkpoint" must not whole-token-match inside the single token
-    # "checkpointing".
+    # "checkpointing". Since the explicit "checkpointing" key was added, this
+    # stem does get a whole-token hit, so what the assertion proves is narrower
+    # than "nothing matched": under first-hit-wins, the earlier-positioned
+    # "checkpoint" would have been the key returned had it matched, and it was
+    # not. That rests on "checkpoint" preceding "checkpointing" in FEATURE_MAP,
+    # an order test_checkpointing_key_position_is_free deliberately leaves free
+    # -- so read this as a fragment-rejection check at the current order, not an
+    # order-independent one.
     assert resolve_marker_whole_token("test_checkpointing.py")[1] != "checkpoint"
 
 

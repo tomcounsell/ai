@@ -39,15 +39,23 @@ runs everywhere the suite already runs needs no second execution path.
    key positioned early beats a specific key positioned late.
    `test_worktree_manager_config.py` tags `config`, not `git`, because
    `config` sits ahead of `worktree_manager` in insertion order.
-   `tests/unit/reflections/test_reflections_progress_check.py` tags `sdlc` for the
-   same reason (`sdlc` is ahead of `reflection`). **Guard rule R1** below
-   catches this — but only inside a themed package directory.
+   `test_sdlc_progress_check.py` used to tag `sdlc` for the same reason
+   (`sdlc` is ahead of `reflection`);
+   [#3175](https://github.com/tomcounsell/ai/issues/3175) renamed it to
+   `test_reflections_progress_check.py`, which resolves `reflections`.
+   **Guard rule R1** below catches this — but only inside a themed package
+   directory.
 2. **Fragment match.** The match is a bare substring, not a whole token, so a
    pattern can match inside a longer word. `config` is a literal substring
-   of `configured`, so `test_reflections_pm_briefings_no_slots_configured.py` tags
-   `config`. `checkpoint` is a prefix of `checkpointing`, so
-   `test_long_task_checkpointing.py` tags `validation`. **Guard rule R3**
-   catches this suite-wide.
+   of `configured`, so `test_pm_briefings_no_slots_configured.py` used to tag
+   `config`; #3175 renamed it to
+   `test_reflections_pm_briefings_no_slots_configured.py`, whose stem hits
+   `reflections` first. `checkpoint` is a prefix of `checkpointing`, so
+   `test_long_task_checkpointing.py` matched `checkpoint` as a fragment, and
+   **guard rule R3** flagged it until #3175 added an explicit
+   `"checkpointing": "validation"` key. Substring and whole-token resolution
+   now agree on `validation` for that file, so R3 is silent on it. R3 catches
+   this class suite-wide wherever no such disambiguating key exists.
 3. **Mangled stem.** A stem taken with an unanchored strip loses `test_`
    wherever it appears, not just at the front, so a basename carrying `test_`
    twice has the second occurrence eaten out of the middle:

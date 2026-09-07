@@ -976,7 +976,7 @@ can land last or be dropped.
 ### 3. B1 — Atomic per-message claim (PR3)
 - **Task ID**: build-b1-claim
 - **Depends On**: none
-- **Validates**: tests/**/test_dedup.py, tests/**/test_dispatch.py (UPDATE)
+- **Validates**: tests/**/test_dedup.py, tests/**/test_bridge_dispatch.py (UPDATE)
 - **Assigned To**: claims-builder
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true
