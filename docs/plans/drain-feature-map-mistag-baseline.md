@@ -78,7 +78,9 @@ never about configuration — `config` matched inside the word `configured`.
 ## Freshness Check
 
 
-**Baseline commit:** `8e62c3a5095cac702835e56fbd2f0910574270da`
+**Baseline commit:** `6c865fb5f` (`tests/` byte-identical to
+`8e62c3a5095cac702835e56fbd2f0910574270da`; the two commits between them touch
+only `docs/plans/`)
 **Issue filed at:** 2026-09-05T12:51:18Z (body last edited 2026-09-06T08:09:47Z)
 **Disposition:** Minor drift — one filed measurement does not reproduce, and one
 material fact was absent from the write-up. The premise holds in full.
@@ -92,16 +94,14 @@ material fact was absent from the write-up. The premise holds in full.
   counts it once; `docs/features/feature-map-marker-guard.md` describes it as
   "21 from R1, 2 from R2, 1 further from R3", which is the same 24 paths.
 - "`config` sits at insertion index 45 and `reflection` at 52" — **FALSE, and
-  the issue body's rename argument fails with it.** Re-derived at `8e62c3a50`:
-  `sdlc` 16, `reflections` **45**, `reflection` **46**, `config` **47**.
-  `reflections` sits *ahead* of `config`, so
+  the issue body's case against renaming fails with it.** Re-derived at
+  `6c865fb5f`: `sdlc` 16, `reflections` **45**, `reflection` **46**, `config`
+  **47**. `reflections` sits *ahead* of `config`, so
   `test_reflections_pm_briefings_no_slots_configured.py` resolves to
   `reflections`, not `config`. Issue comment 5557939734 caught this against
-  `f3594dd23` (indices 44/45 there) and this plan confirms it still holds after
-  #3010 and #3184. **Renaming is a working remedy for 19 of the 21 R1 files**,
-  not the dead end the issue body describes; the two survivors are
-  `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py`, blocked by
-  `sdlc` at index 16. Corrected in Why Previous Fixes Failed below.
+  `f3594dd23` (indices 44/45 there) and it still holds after #3010 and #3184.
+  **This is the correction the whole plan turns on**: renaming is a working
+  remedy, not the dead end the issue body describes.
 - "`pytest -m reflections` skips almost the whole `tests/unit/reflections/`
   package" — **holds and is now quantified**: 34 of 396 collected.
 - `tests/unit/session_runner/test_schema_routing.py` "alone among 18 siblings"
@@ -111,55 +111,68 @@ material fact was absent from the write-up. The premise holds in full.
 - `tests/unit/test_long_task_checkpointing.py` fragment match — **holds**
   (`resolved='validation'` via key `checkpoint` inside `checkpointing`).
 
-**Drift 1 — the headline measurement does not reproduce.** The issue and
-`docs/features/feature-map-marker-guard.md` both state that making the package
-directory authoritative "gains 39 markers and corrects 6 with zero losses",
-measured at `f3594dd23`, and issue comment 5557939734 re-asserts that it
-"reproduces unchanged". Replayed at `8e62c3a50` the same change gains **17 files
-newly marked / 21 marker applications** and corrects **4**.
+**Drift 1 — the "39 markers / 6 corrected" measurement does not reproduce.**
+The issue and `docs/features/feature-map-marker-guard.md` both state that making
+the package directory authoritative "gains 39 markers and corrects 6 with zero
+losses", measured at `f3594dd23`, and issue comment 5557939734 re-asserts that
+it "reproduces unchanged". Replayed at this baseline the same change yields
+**17 files newly marked and 4 corrected**, and three reconstructions of the
+`f3594dd23` conditions all return 17/4. The figure is treated as wrong.
 
-Three reconstructions of the `f3594dd23` conditions were tried and **none**
-produces 39/6: (a) counting parents without the `KNOWN_ROOT_DIRS` exclusion
-(17/4), (b) the pre-#3010 `FEATURE_MAP` with the `reflections` and `youtube`
-keys removed, under the pre-#3184 global-`replace` stem (17/4), and (c) that
-same map under the anchored stem (17/4). The figure does not reproduce under any
-of them, so it is treated as wrong rather than as measuring something this plan
-has failed to reproduce. The plan uses the re-measured numbers throughout;
-correcting `docs/features/feature-map-marker-guard.md` is a documentation task
-below.
+This plan **does not adopt the directory-authoritative change**, so the number no
+longer sizes any decision here — but it still sits in the feature doc as a
+rejected option's cost estimate, and a wrong number in a rejection rationale is
+worth one line to fix. Correcting it is a documentation task below, not a
+premise of the Solution.
 
-**Drift 2 — a material fact absent from the write-up.** 47 tracked test files
-carry an explicit `pytest.mark.<feature>`, which the guard cannot see. This is
-not a drift in the code, it is a gap in the issue's survey, and it changes the
-right answer (see Solution). `tests/integration/reflections/test_pm_briefings_e2e.py`
-sits in `KNOWN_MISTAGS` while declaring `pytest.mark.reflections` itself.
+**Drift 2 — a material fact absent from the write-up.** 99 tracked test files
+carry an explicit `pytestmark` line, and 47 carry an explicit
+`pytest.mark.<feature>`, which the guard cannot see. This is not a drift in the
+code, it is a gap in the issue's survey, and it is the mechanism this plan uses
+to preserve the three second-order markers renaming would otherwise shed.
+`tests/integration/reflections/test_pm_briefings_e2e.py` sits in `KNOWN_MISTAGS`
+while declaring `pytest.mark.reflections` itself.
+
+**A structural fact the write-up omits, load-bearing for anything path-shaped.**
+`_partition_packages` keys by **full parent path**, deliberately, and its
+docstring says so: two same-named packages in different trees "are two
+independent packages with two independent intents".
+`tests/unit/test_feature_map_markers.py:313
+test_r1_does_not_merge_same_named_packages` encodes that invariant with
+synthetic `tests/unit/worktree_manager/` vs `tests/integration/worktree_manager/`
+files, and `tests/unit/reflections/` and `tests/integration/reflections/` are a
+**live** same-name pair among the 11 tracked test packages. This plan changes no
+keying and adds no name-keyed table, so the invariant is untouched — recorded
+here so no later step contradicts it.
 
 **Issue comments incorporated:** one, `5557939734` (2026-09-06, scope
 reconciliation from #3010's critique round 2). Both of its substantive findings
 are adopted: the scope is **24 paths**, not the 21 the title states (21 R1 + 2 R2
 + 1 R3), and the issue body's `reflection`-at-index-52 claim is wrong. Its third
 assertion — that the 39/6 measurement reproduces — is the one point this plan
-contradicts, with the three failed reconstructions recorded above. `#3184`, which
+contradicts, with three failed reconstructions recorded above. `#3184`, which
 the comment asks to be "sequenced together" with this work, has since merged.
 
 **Cited sibling issues/PRs re-checked:**
 
-- **#3010** — CLOSED 2026-09-06T12:58:06Z, merged as PR #3190
-  (`d14685728`). The guard, `tests/marker_map.py`, and
+- **#3010** — CLOSED 2026-09-06T12:58:06Z, merged as PR #3190 (`d14685728`).
+  The guard, `tests/marker_map.py`, and
   `docs/features/feature-map-marker-guard.md` are all on `main`. This is the
   precondition the feature doc records for #3175, and it is satisfied.
 - **#3184** — CLOSED 2026-09-07T08:04:43Z, merged as `8e62c3a50`. `_stem` now
   uses `removeprefix("test_")` / `removesuffix(".py")`. **The rebase this plan
-  was warned to expect has already happened**: `8e62c3a50` is `origin/main`, the
-  baseline for every number here. #3184 explicitly declared `KNOWN_MISTAGS` out
-  of scope and in scope for #3175, and it moved the baseline by exactly zero
-  entries — re-measured after the stem change, the audit still reports 25/24.
+  was warned to expect has already happened.** #3184 explicitly declared
+  `KNOWN_MISTAGS` out of scope and in scope for #3175, and it moved the baseline
+  by exactly zero entries. It also **retired no rule** — R1/R2/R3 all still fire
+  at 21/2/2 after it merged, re-measured for this revision.
+- **#3072** — the precedent rename. `git mv` on test files, new basenames
+  checked against the resolver, prose references swept in the same change.
 - **#2879 / #2946** — CLOSED. The per-theme test-file splits (PRs #2941, #3005)
   are what *created* `tests/unit/reflections/`, `session_runner/`, `hooks/`,
   `memory_extraction/`, and `output_handler/` as packages. They are the origin
-  of the R1/R2 population, not a fix for it.
+  of the R1/R2 population.
 - **#2805** — the line-keyed-`ALLOWLIST` lesson that makes `KNOWN_MISTAGS`
-  path-keyed. Still binding; this plan removes entries, never re-keys them.
+  path-keyed. Still binding; this plan deletes entries, never re-keys them.
 - **#3031** — the stale-exemption lesson. Still binding, and load-bearing here:
   draining a file's violation without deleting its baseline entry fails the
   guard, which is exactly the property that makes this drain verifiable.
@@ -174,19 +187,19 @@ the comment asks to be "sequenced together" with this work, has since merged.
   `validation`. **Measured effect on this issue's baseline: none.**
 
 **Active plans in `docs/plans/` overlapping this area:**
-Two, neither of them blocking.
+One, and it is not blocking.
 
-- `docs/plans/feature-map-stem-anchored-strip.md` (`tracking:` → #3184) is the
-  adjacent lane. Its work is **merged**, so the overlap is historical rather
-  than live. This plan does not edit that document. The two share
-  `tests/marker_map.py`; #3184 owned `_stem`, this plan owns `FEATURE_MAP`
-  resolution semantics, `KNOWN_MISTAGS`, and the assignment mechanism in
-  `tests/conftest.py`.
 - `docs/plans/pytest-clean-zero-tests-fail-closed.md` (`tracking:` → #3195,
   `status: Ready`) touches `scripts/pytest-clean.sh` only. It names
   `tests/marker_map.py` in its own Freshness Check as a coordination note and
-  explicitly adds no `FEATURE_MAP` entry. **Disjoint file sets; no
-  coordination needed beyond not landing both in one branch.**
+  explicitly adds no `FEATURE_MAP` entry. **Disjoint file sets; no coordination
+  needed beyond not landing both in one branch.** Its subject matter *is*
+  relevant to this plan's testing discipline: a pool-exhausted run can print
+  nothing and exit 0, so every measurement below reads a passed/collected count
+  rather than an exit code.
+- The #3184 lane's plan is **archived** at
+  `docs/archive/plans-completed/feature-map-stem-anchored-strip.md`, not active
+  in `docs/plans/`. Its work is merged; the overlap is historical.
 
 ## Prior Art
 
@@ -299,128 +312,140 @@ marker the collection hook derives.
 ## Spike Results
 
 
-All five spikes ran during planning at `8e62c3a50`. Every number below is
-reproducible from the repo; the builder should not re-investigate these.
+All spikes ran during planning; every number was **re-derived at `6c865fb5f`
+during this revision** rather than carried forward. The builder should not
+re-investigate these, but every one is reproducible in under a minute.
 
 ### spike-1: Does #3184's anchored stem move the baseline?
 - **Assumption**: "the 21/2/1 baseline was measured before #3184 and may no longer hold"
-- **Method**: code-read + `python tests/marker_map.py --audit` at `8e62c3a50`
+- **Method**: code-read + `python3 tests/marker_map.py --audit`
 - **Finding**: **It does not move it at all.** 25 violations across 24 paths,
-  21 R1 / 2 R2 / 2 R3, `KNOWN_MISTAGS` 24 entries, audit exit 0 (`0 new, 0 stale`).
-  The two files #3184 retagged (`test_test_judge.py` → `tools`,
-  `test_validate_test_impact.py` → `validation`) both sit directly under a
+  21 R1 / 2 R2 / 2 R3, `KNOWN_MISTAGS` 24 entries, audit exit 0
+  (`0 new, 0 stale`). The two files #3184 retagged both sit directly under a
   `KNOWN_ROOT_DIRS` parent and were never in the baseline.
 - **Confidence**: high
-- **Impact on plan**: no rebase is pending; `8e62c3a50` is the build baseline.
+- **Impact on plan**: no rebase is pending; this is the build baseline.
 
-### spike-2: Re-measure the "directory authoritative" gain
-- **Assumption**: "+39 markers, 6 corrected, 0 lost, as filed"
-- **Method**: prototype — replay the resolver over `git ls-files` with a
-  directory-first rule
-- **Finding**: **Does not reproduce.** At `8e62c3a50` the directory rule yields
-  **+17 files newly marked, +21 marker applications, 4 corrected, 0 files left
-  unmarked**. The 4 corrected files are `test_docs_auditor_git_surface.py`
-  (`validation`), `test_pm_briefings_no_slots_configured.py` (`config`),
-  `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py` (`sdlc`).
-- **Confidence**: high
-- **Impact on plan**: the 39/6 figure is stale in both the issue and
-  `docs/features/feature-map-marker-guard.md`; correcting the doc is a task.
-  More importantly it exposes the additive-vs-replacing fork: under a
-  *replacing* rule those 4 files lose a marker, breaking acceptance criterion 3
-  verbatim; under an *additive* union none does.
+### spike-2: Does renaming actually clear R1?
+- **Assumption**: "renaming cannot work, because `config` beats `reflection`" (the issue body's claim)
+- **Method**: prototype — replay `check_r1` / `check_r2` / `check_r3` over the
+  838-file list with the 21 R1 basenames rewritten
+- **Finding**: **The claim is false and renaming clears R1 completely.** With
+  each of the 21 violating basenames rewritten to carry its package name as the
+  leading token, and one `FEATURE_MAP` key added:
 
-### spike-3: What do explicit `pytest.mark.<feature>` declarations do here?
-- **Assumption**: "FEATURE_MAP is the only source of feature markers"
-- **Method**: code-read — scan all 838 tracked test files for
-  `pytest.mark.<registered feature>`
-- **Finding**: **False. 47 files carry an explicit feature marker**, and
-  `tests/unit/test_feature_map_markers.py` cannot see any of them. Nine of the
-  47 declare a marker that *differs* from their derived one and keep both.
-  `tests/integration/reflections/test_pm_briefings_e2e.py` is a `KNOWN_MISTAGS`
-  entry that already declares `pytest.mark.reflections`, and
-  `tests/unit/test_long_task_checkpointing.py` declares `pytest.mark.sdlc`
-  alongside its fragment-matched `validation`.
-- **Confidence**: high
-- **Impact on plan**: decisive for the additive design. The shipped system
-  *already* composes explicit and derived markers additively, so unioning the
-  directory marker in is a continuation of the existing model rather than a new
-  one. It also softens the one marker removal below: the file that loses
-  `validation` keeps its explicit `sdlc`.
+  | Rule | Before | After |
+  |---|---|---|
+  | `check_r1` | 21 | **0** |
+  | `check_r2` | 2 | **2** |
+  | `check_r3` | 2 | **0** |
 
-### spike-4: What does whole-token basename matching cost?
-- **Assumption**: "requiring whole-token matches will strip markers off many files"
-- **Method**: prototype — resolve all 838 basenames with
-  `resolve_marker_whole_token` and diff against `resolve_marker`
-- **Finding**: **2 files lose a marker, 0 files change marker.** The two are
-  exactly the two R3 violations: `test_pm_briefings_no_slots_configured.py`
-  loses `config` (matched inside `configured`) and
-  `test_long_task_checkpointing.py` loses `validation` (matched inside
-  `checkpointing`). Nothing else in the suite depends on a fragment match.
 - **Confidence**: high
-- **Impact on plan**: whole-token matching is affordable as the *resolution*
-  semantics, not merely as a detector. It also makes new keys order-free: with
-  `checkpoint` no longer matching `checkpointing`, a `checkpointing` key can be
-  added anywhere in the dict and win, which is how
-  `test_long_task_checkpointing.py` keeps `validation` with zero hand-placement.
+- **Impact on plan**: this is the Solution. `KNOWN_MISTAGS` goes 24 → 2.
 
-### spike-5: Is `item.nodeid` a rootdir-relative path with directories?
-- **Assumption**: "the collection hook can see the file's package directory"
-- **Method**: prototype — a throwaway pytest plugin printing `item.nodeid`,
-  `Path(nodeid).parent`, and `item.path.relative_to(config.rootpath)` during a
-  real collection, invoked with explicit subdirectory arguments
-- **Finding**: confirmed and stable. Invoked as
-  `pytest tests/unit/reflections tests/unit/hooks`, every item reported
-  `NODEID_PATH=tests/unit/reflections/test_daily_log_aggregator.py`,
-  `PARENT=tests/unit/reflections`, and an `item.path`-derived value **identical**
-  to the nodeid path. The nodeid is rootdir-relative regardless of the
-  invocation arguments.
+### spike-3: Naive prefixing is not enough — two files need a token *replaced*
+- **Assumption**: "prefix every violating basename with its package name and R1 clears"
+- **Method**: prototype — the naive prefix rule
+  (`test_X.py` → `test_<pkg>_X.py`) applied to all 21, then `check_r1`
+- **Finding**: **Naive prefixing fixes 19 of 21.** The two survivors are
+  `tests/unit/reflections/test_sdlc_progress_check.py` and
+  `tests/unit/reflections/test_sdlc_upvote_lanes.py`. Prefixing yields
+  `test_reflections_sdlc_progress_check.py`, whose stem still contains the
+  token `sdlc` at insertion index 16 — ahead of `reflections` at 45 — so
+  first-hit resolution still returns `sdlc` and R1 still fires. The leading
+  `sdlc` token must be **replaced**, not prefixed:
+  `test_sdlc_progress_check.py` → `test_reflections_progress_check.py`.
 - **Confidence**: high
-- **Impact on plan**: the hook can resolve the directory from `item.nodeid`
-  alone. `item.path` is the more idiomatic modern accessor but requires
-  `config.rootpath` to relativize; both are correct, and the plan uses
-  `item.nodeid` to keep the hook's signature unchanged and its input identical
-  to the string the guard audits from `git ls-files`. Keeping Path A and Path B
-  on the same string shape is the property #3010 exists to protect.
+- **Impact on plan**: the rename table below is explicit per file rather than
+  generated by a rule, and the verification asserts `check_r1 == 0` rather than
+  trusting the naming convention.
+
+### spike-4: Is the `checkpointing` key order-sensitive?
+- **Assumption**: "adding a narrow key means more ordering-sensitive hand-placement — the defect restated as the remedy" (the issue's objection)
+- **Method**: prototype — insert `"checkpointing": "validation"` at the **front**
+  of `FEATURE_MAP` and at the **back**, and compare R3
+- **Finding**: **Order-independent, and the reason is structural.** R3 compares
+  `resolve_marker` against `resolve_marker_whole_token` and fires when the two
+  disagree about the *marker*, not the key.
+
+  | Placement | `resolve_marker` | `resolve_marker_whole_token` | `check_r3` |
+  |---|---|---|---|
+  | front | `('validation', 'checkpointing')` | `('validation', 'checkpointing')` | **0** |
+  | back | `('validation', 'checkpoint')` | `('validation', 'checkpointing')` | **0** |
+
+  Both `checkpoint` and `checkpointing` map to `validation`, so whichever key
+  wins the substring scan, the marker is the same and the rules agree. **This
+  key needs no hand-placement at all**, which is the direct answer to the
+  issue's objection: the objection is right about keys that must outrank an
+  existing key, and this key does not have to outrank anything.
+- **Confidence**: high
+- **Impact on plan**: exactly one `FEATURE_MAP` key is added, its position is
+  free, and the plan says so in the code comment beside it.
+
+### spike-5: Does an explicit `pytestmark` really compose with the derived marker?
+- **Assumption**: "adding `pytest.mark.sdlc` to a file whose basename derives `reflections` keeps both selectors working"
+- **Method**: prototype — real `pytest --collect-only -m` runs against a file
+  already in this shape
+- **Finding**: **Confirmed against production code, not a synthetic fixture.**
+  `tests/unit/test_reflection_arm.py` derives `reflections` from its basename
+  and declares `pytest.mark.sdlc` explicitly. `--collect-only -m sdlc` collects
+  **10 of 10**; `--collect-only -m reflections` collects **10 of 10**. 99
+  tracked test files carry an explicit `pytestmark`; 5 declare a feature marker
+  that differs from their derived one and keep both.
+- **Confidence**: high
+- **Impact on plan**: the three marker-preservation edits are a use of a shipped,
+  exercised mechanism rather than a new one. This is what makes "0 files lose a
+  marker" achievable alongside the renames.
 
 ### spike-6: Measure the full proposed end state
-- **Assumption**: "the combined change drains the baseline to empty"
-- **Method**: prototype — replay `DIRECTORY_MAP ∪ whole-token basename` over
-  all 838 files
+- **Assumption**: "21 renames plus one key plus three `pytestmark` lines drains the baseline to 2 policy entries with no coverage loss"
+- **Method**: prototype — replay resolution over all 838 files with the rename
+  map applied, then real `--collect-only -m` runs for the five affected markers
 - **Finding**:
 
   | Metric | Before | After |
   |---|---|---|
-  | files with ≥1 derived marker | 284 | **327** (+43) |
-  | derived marker applications | 284 | **331** (+47) |
-  | files losing a derived marker | — | **1** |
-  | `tests/unit/reflections/` on `reflections` | 2 / 20 | **20 / 20** |
-  | `tests/integration/reflections/` on `reflections` | 0 / 2 | **2 / 2** |
-  | packages still subject to R2 | 4 | **1** (`memory_extraction`, uniform → no violation) |
+  | `check_r1` / `check_r2` / `check_r3` | 21 / 2 / 2 | **0 / 2 / 0** |
+  | `KNOWN_MISTAGS` entries | 24 | **2** |
+  | files with a derived marker | 284 | **301** (+17) |
+  | files losing a derived marker entirely | — | **0** |
+  | files whose derived marker changes value | — | **4** |
+  | reflections packages carrying `reflections` | 2 / 22 | **22 / 22** |
 
-  Per-marker census: `reflections` 28 → 48, `sessions` 43 → 61,
-  `messaging` 61 → 67, `sdlc` 85 → 89, `config` 6 → 5. Every other marker
-  unchanged. **The single file that loses a marker is
-  `tests/unit/reflections/test_pm_briefings_no_slots_configured.py`, which loses
-  `config` and gains `reflections`.**
+  **Derived-marker census** (what `resolve_marker` returns): `reflections`
+  28 → 48, `sdlc` 85 → 83, `messaging` 61 → 62, `config` 6 → 5,
+  `validation` 9 → 8. Every other marker unchanged.
+
+  **Effective-selector census** (what `-m` collects, suite-wide, out of 17001
+  tests), after the three `pytestmark` preservations:
+
+  | Selector | Before | After | Why |
+  |---|---|---|---|
+  | `-m reflections` | 544 | **906** | +362, the whole point |
+  | `-m sdlc` | 2859 | **2859** | the 154 tests in the two `test_sdlc_*` files are preserved by explicit `pytest.mark.sdlc` |
+  | `-m validation` | 428 | **428** | the 27 tests in `test_docs_auditor_git_surface.py` preserved by explicit `pytest.mark.validation` |
+  | `-m messaging` | 1271 | **1276** | +5, `tests/unit/bridge/test_dispatch.py` gains `messaging` |
+  | `-m config` | 127 | **123** | −4, the one deliberate removal |
+
 - **Confidence**: high
-- **Impact on plan**: `KNOWN_MISTAGS` drains to empty, and the one marker
-  removal is a named, measured, deliberate policy decision rather than a
-  side effect (see Open Questions).
+- **Impact on plan**: the only coverage change anywhere in the suite is `-m
+  config` losing the 4 tests in `test_pm_briefings_no_slots_configured.py`, a
+  file that has nothing to do with configuration. That is the single ratification
+  the plan asks for.
 
 ## Data Flow
 
 
 Two paths read the same resolver. That is the invariant #3010 established, and
-this plan must not break it.
+this plan does not touch either one.
 
 **Path A — marker assignment, at collection time**
 
 1. **Entry point**: `pytest` collects test items.
 2. `tests/conftest.py::pytest_collection_modifyitems(items)` runs, ahead of
    pytest's internal `deselect_by_mark`.
-3. For each item it takes `item.nodeid.split("::")[0]` → a rootdir-relative
-   path such as `tests/unit/reflections/test_pm_briefings_builder.py`
-   (spike-5). **Today it discards everything but the basename.**
+3. For each item it takes the module basename from
+   `item.nodeid.split("::")[0]`.
 4. It calls `tests/marker_map.py::resolve_marker(basename)` → a single marker
    or `None`, and calls `item.add_marker(...)` when non-`None`.
 5. **Output**: pytest's `deselect_by_mark` snapshots
@@ -430,7 +455,7 @@ this plan must not break it.
 **Path B — the guard, at test time**
 
 1. **Entry point**: `tests/unit/test_feature_map_markers.py`, or
-   `python tests/marker_map.py --audit` on a bare interpreter.
+   `python3 tests/marker_map.py --audit` on a bare interpreter.
 2. `iter_test_files()` shells `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`
    → the same rootdir-relative path strings Path A sees, from the index rather
    than the filesystem.
@@ -439,38 +464,46 @@ this plan must not break it.
 4. **Output**: `(violations, new_mistags, stale_exemptions)`, bracketed against
    `KNOWN_MISTAGS` in both directions.
 
-**What changes.** Step A3 stops discarding the directory and step A4 applies a
-*set* of markers. Step B3's rules change shape. Both keep calling one function
-in `tests/marker_map.py`. The failure mode this ordering prevents — Path A and
-Path B disagreeing about what a file resolves to, so the guard certifies a
-marker the collector never applied — is the reason `tests/marker_map.py` exists
-and is the single most important thing not to regress.
+**What changes: nothing in the flow.** Both paths keep calling
+`resolve_marker(basename)`, unchanged in signature and unchanged in
+implementation. The change is entirely in the *inputs*: 21 basenames become
+different strings, `FEATURE_MAP` gains one key, three files gain an explicit
+`pytestmark`, and `KNOWN_MISTAGS` loses 22 entries.
+
+That is the property that makes this remedy cheap to review. The failure mode
+#3010 exists to prevent — Path A and Path B disagreeing about what a file
+resolves to — cannot be introduced by a change that edits neither path. The
+guard's verdict after the change means exactly what it meant before it.
 
 ## Why Previous Fixes Failed
 
 
 No previous attempt to drain this baseline exists, so there is no failure to
-analyse. What the table below records instead is why the *two obvious* fixes,
-both surveyed in the issue, are the wrong trade — because a builder who has not
-read the issue will reach for them first, and because the issue's own reason for
-rejecting the first one is factually wrong.
+analyse. What this section records instead is the correction that makes the
+Solution possible, because the issue body rejects the chosen remedy on a
+factually wrong basis and a builder who reads only the issue will not attempt it.
 
-| Candidate | What it would do | Why it is not the answer |
-|-----------|------------------|--------------|
-| Rename the files | Prefix each violating basename with its package name: `test_pm_briefings_no_slots_configured.py` → `test_reflections_pm_briefings_no_slots_configured.py` | **Works, for 19 of 21 — and is still the wrong trade.** The issue body claims it cannot work because `config` beats `reflection`; that is false (`reflections` 45, `reflection` 46, `config` 47, so the renamed file resolves to `reflections`). It genuinely fails only for `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py`, where `sdlc` at index 16 wins. The real objections are the ones renaming cannot answer: it touches 19 files to encode the directory name a second time, it fixes neither R2 nor R3, and it must be repeated by hand for **every file anyone ever adds** to a themed package, enforced by nothing but a guard entry after the fact. It converts a structural defect into a naming convention. |
-| Add ~9 narrow `FEATURE_MAP` keys | One key per offending basename | Three of the nine must be hand-placed *ahead of* `config`, `sdlc`, and `validation` to win. That is more ordering-sensitive hand-placement — the defect restated as the remedy. It also scales with file count forever: every new file in `reflections/` needs another key. |
+| Candidate | What it would do | Verdict |
+|-----------|------------------|---------|
+| **Rename the files** *(chosen)* | Rewrite each violating basename so its leading token is its package's name | **Works, and is the guard's own documented first remedy.** The issue body says it "does not reliably work" because `config` beats `reflection`. Re-derived: `reflections` sits at index 45 and `config` at 47, so the renamed file resolves to `reflections`. The one real obstacle is narrower than the issue claims and is handled: two `test_sdlc_*` files need the leading `sdlc` token **replaced** rather than prefixed (spike-3), because `sdlc` sits at index 16. With that, R1 goes to 0. |
+| Add ~9 narrow `FEATURE_MAP` keys | One key per offending basename | **Rejected, and the issue's reasoning is right.** Three of the nine would have to be hand-placed *ahead of* `config`, `sdlc`, and `validation` to win a first-hit scan. That is more ordering-sensitive hand-placement — the defect restated as the remedy. The single key this plan does add is exempt from that objection because it outranks nothing: `checkpoint` and `checkpointing` both map to `validation`, so its position is free (spike-4). |
+| Make the package directory authoritative | Resolve the marker from the directory, with `FEATURE_MAP` as fallback | **Rejected.** It hollows out the guard: R1's whole job is asking "does this file's marker match its directory's?", and defining the marker *as* the directory's makes the question unanswerable. Retiring R1 one day after #3010 shipped it trades a working detector for an argument. It also needs a second table (`DIRECTORY_MAP`) keyed by directory, a new rule to guard *that* table, and a per-package exemption list — new mechanism to police a change whose whole justification was removing mechanism. |
 
-The correction matters beyond bookkeeping: a reviewer who checks the issue's
-index claim will find it wrong and may conclude the whole "renaming is blocked"
-premise was invented. It was not — it is right for 2 files and wrong for 19, and
-the case against renaming rests on maintenance cost rather than impossibility.
+**Root cause pattern:** the mistags are a symptom of deriving a semantic property
+(what feature is this test about?) from an ordered substring scan of a filename.
+There are two honest responses: change the derivation, or change the filenames.
+#3184 changed the derivation once, narrowly and structurally, by anchoring the
+stem. This plan changes the filenames, because the filenames are the thing that
+is actually wrong — `test_pm_briefings_builder.py` in `tests/unit/reflections/`
+is a reflections test with a name that does not say so. Renaming it is not
+encoding the directory name a second time; it is the file finally saying what it
+is.
 
-**Root cause pattern:** every one of the three mistag mechanisms is a symptom of
-deriving a semantic property (what feature is this test about?) from an
-*ordered substring scan of a filename*. #3184 removed one mechanism by making
-the stem anchored. This plan removes the remaining two by making the signal
-structural: an exact-match directory lookup that cannot collide, and a
-whole-token basename match that cannot fragment.
+The maintenance objection to renaming — "it must be repeated by hand for every
+file anyone ever adds" — is real and is answered by the guard, not by the plan.
+R1 fires on the next file added to a themed package with a non-conforming name,
+which is exactly the enforcement a naming convention needs and exactly what
+#3010 built. Retiring R1 would remove it.
 
 ## Architectural Impact
 
