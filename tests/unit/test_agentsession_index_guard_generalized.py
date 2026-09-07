@@ -139,16 +139,31 @@ def test_quarantine_count_persisted_to_redis_key_for_doctor():
 def test_diverged_key_decode_failure_is_counted_not_raised(monkeypatch):
     """A decode that raises for a diverged key must not fail repair_indexes()
     -- a row that cannot even be decoded is certainly not a hydrated session,
-    so it is counted as identity-less rather than propagating the
-    exception."""
+    so it is counted as identity-less rather than propagating the exception.
+
+    Same structural hazard as the ImportError test: popoto's own
+    rebuild_indexes() imports and calls decode_popoto_model_hashmap for
+    EVERY scanned row (not just diverged ones) before repair_indexes()'s own
+    diverged-key loop ever runs, under the bare try/finally with no except.
+    A decode stub that raises unconditionally therefore raises out of
+    popoto's own call first, unrelated to the branch under test. Stub
+    rebuild_indexes() itself (as the ImportError-degrade test does) so only
+    the call-site import/call inside repair_indexes()'s diverged-key loop is
+    exercised."""
     import popoto.models.encoding as encoding_module
+    from popoto.models.base import RebuildIndexesResult
 
     from models.agent_session import AgentSession
 
     pk = "test-3199-decode-raises"
     n_ghosts = 3
-    for j in range(n_ghosts):
-        _seed_identityless_hash(pk, f"ghostdecode{j:024d}")
+    seeded_keys = [_seed_identityless_hash(pk, f"ghostdecode{j:024d}") for j in range(n_ghosts)]
+
+    monkeypatch.setattr(
+        AgentSession,
+        "rebuild_indexes",
+        classmethod(lambda cls: RebuildIndexesResult(0, seeded_keys)),
+    )
 
     def _boom(*args, **kwargs):
         raise ValueError("simulated decode failure")
