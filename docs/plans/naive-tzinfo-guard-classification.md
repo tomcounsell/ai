@@ -12,26 +12,49 @@ last_comment_id: 5564069727
 
 ## Problem
 
-Twenty-three `tzinfo is None` coercion guards are scattered across thirteen files. Every one of them was written against popoto 1.8.0, which round-tripped `DatetimeField` values as naive datetimes. popoto 1.9.0 decodes stored datetimes as aware UTC, so some of those guards now defend against a state that cannot occur, and several carry comments that assert the old behaviour as fact.
+**Thirty-two** naive-tzinfo coercion sites are scattered across sixteen files outside `models/job.py`. Every one of them was written against popoto 1.8.0, which round-tripped `DatetimeField` values as naive datetimes. popoto 1.9.0 decodes stored datetimes as aware UTC, so some of those guards now defend against a state that cannot occur, and nine carry comments that assert the old behaviour as fact.
+
+**The measured pre-state**, all numbers taken with `/usr/bin/grep` (never the interactive shell's `grep`, which is `ugrep` here and honours `.gitignore`, so it can legitimately return a smaller set):
+
+| Measurement | Command | Count |
+|---|---|---|
+| Issue's own sweep, 7 declared directories | the sweep command below over `agent/ models/ monitoring/ reflections/ bridge/ tools/ worker/` | **26** across 14 files |
+| Same sweep widened to `utils/ ui/` | same command, 9 directories | **31** across 16 files |
+| The `getattr` shape the sweep regex misses | `getattr\([a-z_.]+, "tzinfo", None\) is None` | **1** (`reflections/crash_recovery.py:186`) |
+| **Total work set** | | **32** |
+| Stale 1.8.0 prose, one phrasing | `strips tzinfo` | **7** |
+| Stale 1.8.0 prose, all three phrasings | `strips tzinfo\|SortedField stores them\|round-trips values as NAIVE` | **9** across 9 files |
+
+The authoritative sweep is the issue's, run verbatim:
+
+```bash
+/usr/bin/grep -rn --include='*.py' -E "tzinfo is None|not [a-z_.]+\.tzinfo\b|\.tzinfo else [a-z_.]+\.replace\(tzinfo=UTC\)" \
+  agent/ models/ monitoring/ reflections/ bridge/ tools/ worker/ | /usr/bin/grep -v /tests/
+```
+
+This plan works from the widened 9-directory form plus the `getattr` shape, because `utils/utc.py` is the coercer the rest of the repo defers to and `ui/data/sdlc.py` is named in the doc this plan rewrites. Every count in this document is a piped `wc -l`, never a `head` window read as a complete set.
 
 **Current behavior:**
-Nothing is broken. The cost is that every lane touching one of these files has to re-derive, from scratch, whether the guard in front of it is load-bearing. Worse, five of the guards carry prose that is now actively wrong ("Popoto strips tzinfo on load", "matching how Popoto SortedField stores them"), so a reader who trusts the comment reaches the wrong conclusion. One site (`reflections/audits/redis_quality_audit.py:61`) guards a field that has never been a datetime at all.
+Nothing is broken. The cost is that every lane touching one of these files has to re-derive, from scratch, whether the guard in front of it is load-bearing. Worse, nine of the sites carry prose that is now actively wrong ("Popoto strips tzinfo on load", "matching how Popoto SortedField stores them", "round-trips values as NAIVE"), so a reader who trusts the comment reaches the wrong conclusion. One site (`reflections/audits/redis_quality_audit.py:61`) guards a field that has never been a datetime at all.
 
 **Desired outcome:**
-Every site in the sweep carries a settled verdict. Popoto-only guards are gone, with a test that would have caught the deletion if it were wrong. Mixed-input guards stay, each with a one-line docstring reason that a future reader can trust. A re-run of the sweep returns only the mixed-input survivors.
+Every one of the 32 sites carries a settled verdict. Popoto-only guards are gone, with a test that would have caught the deletion if it were wrong. Mixed-input guards stay, each with a one-line reason that a future reader can trust. A re-run of both sweep shapes returns exactly the surviving keeps and no delete-site.
+
+**This plan also discharges the audit asked for in #3207** (closed as a duplicate into #3199): the `updated_at` / `created_at` / `completed_at` / `scheduled_at` consumers that do naive comparisons. See the **#3207 Consumer Audit** section.
 
 ## Freshness Check
 
-**Baseline commit:** `de229ee46` (recon), re-anchored at plan time to `d27b94f2d`
+**Baseline commit:** `de229ee46` (recon), re-anchored at revision time to `4b5a13184`
+**Grep binary pinned for every measurement in this plan:** `/usr/bin/grep`. The interactive shell's `grep -r` here is `ugrep` and honours `.gitignore`, so two sweeps can legitimately disagree on counts. Any Verification row re-run with a different binary is not a re-run of this row.
 **Issue filed at:** 2026-09-05 (follow-up to #3173 / PR #3180, merged `2aecc7c93`)
 **Disposition:** Minor drift
 
-**File:line references re-verified:** all 26 sweep hits were re-derived from a live run of the issue's own grep at `de229ee46`. Every path the issue names still exists; the per-site line numbers in this plan are the measured ones, not the issue's.
+**File:line references re-verified:** all 32 sites were re-derived from live runs of the issue's own grep (plus the `getattr` shape) at `4b5a13184` with `/usr/bin/grep`. Every path the issue names still exists; the per-site line numbers in this plan are the measured ones, not the issue's.
 
 **Cited sibling issues/PRs re-checked:**
 - #3173 / PR #3180 — closed, merged at `2aecc7c93`. It is the source of the classification rule, and it left `agent/session_health.py` and `agent/session_pickup.py` classified as keeps.
-- #3199 — **open**, and it edits `models/agent_session.py` in the `repair_indexes` region (~:2476-2528). This plan edits `:1092` and `:2225` of the same file. Disjoint regions, but the lanes will both be writing `models/agent_session.py`; whichever lands second rebases.
-- #3207 — closed. It was the `test_session_archive` naive-round-trip node split out of #3199.
+- #3199 — **open**, and it edits `models/agent_session.py` in the `repair_indexes` region (~:2476-2528). This plan edits `:1089-1093`, `:2225` and `:2569` of the same file. Disjoint regions, but the lanes will both be writing `models/agent_session.py`; whichever lands second rebases.
+- #3207 — closed as a **duplicate into #3199**, not "split out of" it. Its first suggested next step — audit the `updated_at` / `created_at` / `completed_at` / `scheduled_at` consumers for naive comparison sites — was never discharged by #3199, which is scoped to index repair and quarantine counters. This plan discharges it; see **#3207 Consumer Audit**.
 
 **Commits on main since issue was filed (touching referenced files):** none. `git log 2aecc7c93..de229ee46` is 131 commits and not one of them touches any file in the sweep set. The code the issue describes is byte-identical to the code this plan changes.
 
@@ -67,10 +90,19 @@ The only flow that matters is how a datetime reaches a guard. There are exactly 
 
 **Shape A — popoto-only (guard is dead):**
 1. **Entry point**: application code assigns an aware `datetime` (or a float) to a `DatetimeField` on an `AgentSession`.
-2. **`AgentSession.__setattr__` (`models/agent_session.py:795-812`)**: a float becomes `datetime.fromtimestamp(value, tz=UTC)`; an ISO string is parsed and stamped UTC; a datetime passes through untouched. **This is the choke point that makes Shape A safe** — nothing naive gets past it unless the caller hands it a naive datetime object, and no caller does.
+2. **`AgentSession.__setattr__` (`models/agent_session.py:795-812`)**: a float becomes `datetime.fromtimestamp(value, tz=UTC)`; an ISO string is parsed and stamped UTC; a datetime passes through untouched.
 3. **`DatetimeField.format_value_pre_save` → `encoding.py` encoder**: stored as `obj.isoformat()`, offset included.
 4. **`_decode_datetime` on read**: aware, for both the modern and the legacy stored shapes.
 5. **Output**: `record.updated_at` is aware. `if record.updated_at.tzinfo is None` can never be true.
+
+**Two corrections to the choke-point story, both load-bearing** (raised as a blocker in critique round 1 and verified at `4b5a13184`):
+
+- **`__setattr__` gates on `if name in self._DATETIME_FIELDS` (`:795`), and `created_at` is not in that set** (`_DATETIME_FIELDS` at `:744-757` lists `scheduled_at`, `started_at`, `updated_at`, `completed_at`, `response_delivered_at`, `last_authored_at`, `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`). `created_at` is `SortedField(type=datetime, partition_by="project_key")` (`:165`), and **nothing in `__setattr__` touches it**. Its only coercion is `_normalize_kwargs` (`:885-891`): it defaults to `datetime.now(tz=UTC)` when absent and converts `int | float` via `fromtimestamp(tz=UTC)` — at construction only, and never for a datetime that is already a datetime.
+- **Construction bypasses `__setattr__` entirely.** popoto's `Model.__init__` does `self.__dict__.update(kwargs)` (noted in this repo at `models/agent_session.py:880-884`), so `_normalize_kwargs` is the *whole* of the ingress coercion for a constructor kwarg, for every field — not just `created_at`.
+
+**Shape A-prime — the archive restore leg.** `agent/session_archive.py::_rehydrate_row` (`:433-449`) reconstructs a session from a SQLite payload: `_deserialize_payload` (`:206-225`) calls `datetime.fromisoformat(value)` on each archived timestamp string **with no offset stamping**, and the result is handed to `AgentSession(id=..., **fields)` — a constructor kwarg, so `__setattr__` never sees it and `_normalize_kwargs` passes a datetime straight through. `save(preserve_updated_at=isinstance(ts, datetime))` then writes it verbatim rather than re-stamping.
+
+The loop is nonetheless closed for the deletions this plan makes: the archived string is `.isoformat()` of a live value, live values come from a popoto read (aware on 1.9.0, kill switch off) or from one of the five construction sites (all aware — see Risk 1), so the restore leg can only *preserve* naiveness, never manufacture it. That is why it is a longer derivation, not a blocker — and it is why the `created_at` fallback at `:2225` is reclassified as a **keep** below: `created_at` is the one field in the sweep with no `__setattr__` coercion at all, so it has no choke point to close the loop against a future caller.
 
 **Shape B — mixed input (guard is load-bearing):**
 1. **Entry point**: a timestamp arrives from outside popoto — an ISO string in a lock file or a flag file, a `gh` API response, a raw Redis string, a `TelegramMessage.date`, an epoch float, a CLI argument.
