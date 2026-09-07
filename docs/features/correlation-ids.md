@@ -16,6 +16,15 @@ Every message journey through the system now carries a shared `correlation_id` -
    - `agent/session_executor.py` reads `session.correlation_id` and threads it into session-event payloads for tracing (replacing the internally-generated `request_id`); the `get_agent_response_sdk()` call site described here was deleted in #2000 along with the rest of the dead SDK path
    - `bridge/session_transcript.py` includes it in the transcript file header
    - `agent/session_logs.py` receives it via `extra_context` in snapshot metadata
+   - `agent/session_executor.py` exports it into the harness subprocess env as
+     `VALOR_CORRELATION_ID`, so the `claude -p` process and everything it
+     spawns share the journey's id rather than starting a new one
+   - `agent/output_handler.py` puts it on the outbox payload
+     (`bridge.wire_schemas.OutboxPayload.correlation_id`), which closes the
+     loop: the id that entered at message receipt comes back out at delivery
+
+   The subprocess and outbox hops (#3183) closed the two ends of the journey
+   that were previously dark — the work itself, and the delivery.
 
 4. **Auto-continue inheritance**: The delete-and-recreate copy set is derived from `AgentSession._meta`, so `correlation_id` is preserved across the pattern used by `_enqueue_continuation()`. Continuation sessions inherit the parent's correlation_id.
 
@@ -26,8 +35,10 @@ Every message journey through the system now carries a shared `correlation_id` -
 To trace a complete message journey:
 
 ```bash
-# Find all log lines for a specific correlation ID
-grep "abc123def456" logs/bridge.log
+# Find all log lines for a specific correlation ID. logs/worker.log is JSON
+# (one object per line), so it joins to the bridge's structured lines on
+# correlation_id, agent_session_id, and session_id.
+grep "abc123def456" logs/bridge.log logs/worker.log
 
 # Find the transcript header
 grep "correlation_id=abc123def456" logs/sessions/*/transcript.txt

@@ -34,6 +34,13 @@ Telegram → Bridge (Telethon)
 
 The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegram without importing any Telegram client code. This preserves the bridge/worker separation boundary: the worker writes to Redis, and the bridge reads from Redis and delivers via Telethon.
 
+Every outbox payload carries the session's `correlation_id` when it has one, so
+a delivered message can be tied back to the intake that produced it. The
+worker's own file log is JSON (`bridge.log_format.StructuredJsonFormatter`) for
+the same reason: `logs/worker.log` and `logs/bridge.log` join on
+`correlation_id`, `agent_session_id`, and `session_id`. stderr stays
+human-readable. See [Correlation IDs](correlation-ids.md).
+
 ### Output Handler Chain
 
 ```
@@ -114,7 +121,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
 | Redis key (system) | the per-project system Room's inbox list (`models/room.py::Room.inbox_key`, `{project_key}\|system`) — derived transport for chatless sessions; no relay drains it, the durable record IS the delivery |
 | Redis key (reaction, system transport) | none — a `system`-transport `react()` is dropped (DEBUG log + `FileOutputHandler` dual-write only), never written to the system Room's inbox |
-| Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) |
+| Telegram payload | `bridge.wire_schemas.OutboxPayload`: `{"v", "chat_id", "reply_to", "text", "session_id", "timestamp"}` plus `file_paths` and `correlation_id` when set -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) and validated by `process_outbox` on the way out. Keys left unset are omitted rather than written as nulls. See [Wire Schemas](wire-schemas.md) |
 | Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload. |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |
@@ -408,6 +415,35 @@ A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query�
 - If lock is held: returns `None` immediately (caller will retry on next event-loop iteration)
 - Fail-open: if Redis is unreachable, `_acquire_pop_lock()` returns `True` so workers are not blocked
 - The two paths are **not re-entrant**: `_pop_agent_session()` acquires, does its work, and **releases** the lock before returning. The sync fallback branch only runs after `_pop_agent_session()` returns `None` (lock already released), so it acquires a fresh lock — no nesting.
+
+#### Declared policy per lock
+
+Three short-lived Redis locks gate the pipeline. Each states its policy in its
+own docstring, and each calls `agent/lock_policy.py::record_lock_degradation`
+on the branch where Redis failed it, so a degradation is counted rather than
+inferred from its consequences.
+
+| Lock | Policy | Why |
+|---|---|---|
+| `pop_lock` (`agent/session_pickup.py`) | fail **open** | Duplicate work beats a stalled queue. |
+| `claim_message` (`bridge/dedup.py`) | fail **open** | A Redis hiccup must not silently drop a message; the durable cursor-coupled dedup set is the fallback. |
+| `claim_pending_run` (`models/session_lifecycle.py`) | fail **closed** | Two `claude -p` processes on one worktree corrupt git state. |
+
+`claim_pending_run` returning `False` on a Redis error means a prolonged
+degradation stalls pickup rather than risking a duplicate harness on one
+checkout. There is deliberately **no break-glass override**: the pop lock
+retries on the next loop iteration anyway, and the counter makes the stall
+visible on the dashboard.
+
+The counter is `HINCRBY {project}:locks:degraded "{name}:{policy}"` through
+`utils.redis_client.text_redis()`, so the tile renders the count beside the
+policy it was taken under. It measures *degradation*, not fail-open
+specifically — a lock that fails closed is degraded too. The counter write
+swallows its own errors: observability must never be able to change a lock's
+answer.
+
+`/_partials/pipeline-integrity/` renders these counts beside the
+[dead-letter counts by stage](pipeline-dead-letters.md).
 
 ### CLI Session Isolation (`create_local()`)
 

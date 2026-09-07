@@ -628,6 +628,23 @@ states = query_stage_states(issue_number=704)
 
 Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
 
+### Dead Letters (`tools.dead_letters`)
+
+Operator break-glass for the pipeline's dead-letter rows: what has been lost,
+and re-running the stages whose loss can be replayed. Deliberately not an MCP
+tool — replaying is a rare, destructive-adjacent action a human takes after
+reading the dashboard tile.
+
+```bash
+python -m tools.dead_letters list                      # row counts per stage
+python -m tools.dead_letters replay --stage extraction # re-run one stage's replayable rows
+python -m tools.dead_letters evict                     # trim each stage back to its cap
+```
+
+`replay --stage telegram_send` is refused: it needs a live Telethon client, and
+the bridge already replays that stage on every connect. See
+[Pipeline Dead Letters](features/pipeline-dead-letters.md).
+
 ## OfficeCLI
 
 Standalone binary at `~/.local/bin/officecli` for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). No dependencies, no Office installation needed. Installed and updated automatically by the update system (`scripts/update/officecli.py`).
