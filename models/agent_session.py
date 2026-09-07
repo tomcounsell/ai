@@ -83,12 +83,12 @@ SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "
 
 # TRM task type vocabulary — read by tools/session_tags.py, which derives a
 # session's task_type from pattern rules in auto_tag_session().
-# "rework-triggered" is historical only: its rule read the writerless
-# rework_triggered field and was removed with it in #3177, so nothing derives
-# that value any more. The entry stays because existing rows carry it and the
-# $IndexF:AgentSession:task_type:rework-triggered set is real. Rework is now
+# "rework-triggered" is historical only. The rule that derived it read a
+# session field no production code ever wrote, so it never fired; #3177 removed
+# the field and the rule together. The vocabulary entry stays because existing
+# rows carry the value and the matching $IndexF set is real. Rework is now
 # derived from ImprovementEvidence rows classified "architectural", which have
-# an actual writer.
+# an actual writer. See docs/features/improvement-controller.md.
 TASK_TYPE_VOCABULARY = {
     "sdlc-build",
     "sdlc-test",

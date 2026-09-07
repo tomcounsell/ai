@@ -573,12 +573,14 @@ class ImprovementSettings(BaseModel):
     default, a charter is an authorization, and the controller can amend
     neither.
 
-    There is deliberately **no** ``daily_question_ceiling`` field. The ceiling
-    is zero and the capability does not exist: the controller asks Tom nothing.
-    It resolves uncertainty from Tom-sourced memories and online research, and
-    records what it cannot resolve as a provisional assumption with its
-    evidence. A Verification row in the plan fails the build if a question path
-    reappears.
+    There is deliberately **no** setting bounding how many questions the
+    controller may ask a human per day. The bound is zero and the capability
+    does not exist: the controller asks Tom nothing. It resolves uncertainty
+    from Tom-sourced memories and online research, and records what it cannot
+    resolve as a provisional assumption with its evidence, surfaced on the
+    dashboard as an assumption rather than a fact. An anti-criterion in
+    ``docs/plans/recursive-self-improvement.md`` fails the build if a question
+    path reappears anywhere in bridge/, tools/, config/, models/, or ui/.
 
     Budget is two units, neither of them a per-experiment dollar ceiling for
     Claude. Claude work runs on the subscription and is budgeted as SDLC lane

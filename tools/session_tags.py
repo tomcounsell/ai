@@ -162,10 +162,11 @@ def _derive_task_type(session, applied_tags: list[str]) -> str | None:
     4. SDLC branch without slug → generic SDLC, skip (not specific enough)
     5. None — do not force classification
 
-    A "rework-triggered" rule used to sit above all of these. It read
-    ``AgentSession.rework_triggered``, a field no production code ever wrote,
-    so it never fired; #3177 removed the field and the rule with it. Rework is
-    now derived from ``ImprovementEvidence`` rows classified "architectural".
+    A "rework-triggered" rule used to sit above all of these. It read a session
+    field that no production code ever wrote, so it never fired; #3177 removed
+    the field and the rule together. Rework is now derived from
+    ``ImprovementEvidence`` rows classified "architectural", which have a real
+    writer.
 
     No LLM calls — purely pattern-based.
 

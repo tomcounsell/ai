@@ -16,9 +16,10 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   not per message.
 - **This is the row the loop counts.** The correction detector, the
   memory-inspiration adapter, and the expectation reconciler all write here.
-  Rework is derived from rows with ``classification="architectural"`` — that
-  replaces ``TaskTypeProfile.rework_rate``, which was structurally always zero
-  because its input field had no writer. A ``SessionEvent`` append is optional
+  Rework is derived from rows with ``classification="architectural"``. That
+  replaces the retired ``TaskTypeProfile`` aggregate, which was structurally
+  always zero because its input field had no writer, so it measured nothing.
+  This row's writers are real. A ``SessionEvent`` append is optional
   in-session provenance only: session events are embedded dicts inside a
   ``ListField`` and are not queryable, so nothing may gate on them.
 - **Classification is uncertain evidence, never a verdict.** ``unknown`` is the
