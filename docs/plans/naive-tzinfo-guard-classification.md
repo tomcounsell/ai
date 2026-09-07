@@ -63,13 +63,94 @@ No external research was needed, and none would have been authoritative. The one
 
 ## Data Flow
 
+The only flow that matters is how a datetime reaches a guard. There are exactly two shapes, and the verdict for every site follows from which one it is.
+
+**Shape A — popoto-only (guard is dead):**
+1. **Entry point**: application code assigns an aware `datetime` (or a float) to a `DatetimeField` on an `AgentSession`.
+2. **`AgentSession.__setattr__` (`models/agent_session.py:795-812`)**: a float becomes `datetime.fromtimestamp(value, tz=UTC)`; an ISO string is parsed and stamped UTC; a datetime passes through untouched. **This is the choke point that makes Shape A safe** — nothing naive gets past it unless the caller hands it a naive datetime object, and no caller does.
+3. **`DatetimeField.format_value_pre_save` → `encoding.py` encoder**: stored as `obj.isoformat()`, offset included.
+4. **`_decode_datetime` on read**: aware, for both the modern and the legacy stored shapes.
+5. **Output**: `record.updated_at` is aware. `if record.updated_at.tzinfo is None` can never be true.
+
+**Shape B — mixed input (guard is load-bearing):**
+1. **Entry point**: a timestamp arrives from outside popoto — an ISO string in a lock file or a flag file, a `gh` API response, a raw Redis string, a `TelegramMessage.date`, an epoch float, a CLI argument.
+2. **`datetime.fromisoformat` / `strptime`**: produces a **naive** datetime whenever the source string carried no offset. Nothing in this path stamps a zone.
+3. **Comparison against `datetime.now(UTC)`**: raises `TypeError` on naive-vs-aware, which in every one of these call sites is swallowed by a surrounding `except` and turns the feature into a silent no-op.
+4. **Output**: correct only because the guard is there.
+
 ## Architectural Impact
+
+- **New dependencies**: none.
+- **Interface changes**: none. Every deletion is inside a function body; no signature, return type, or contract moves.
+- **Coupling**: unchanged. The one structural improvement available (routing bare one-liners through a module's general-purpose coercer) does not apply — the two candidate modules, `agent/session_runner/liveness.py` and `tools/session_progress.py`, already *are* the general-purpose coercers, and `tools/session_progress.py` already delegates to `liveness._as_unix_ts` with a local fallback.
+- **Data ownership**: unchanged. No writes are added or removed; `reflections/audits/redis_quality_audit.py` is read-only by contract.
+- **Reversibility**: trivial. Every change is a deleted branch or a reworded comment; `git revert` restores it exactly.
 
 ## Appetite
 
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0 (the classification rule is already settled by #3173; nothing here needs a scope call)
+- Review rounds: 1
+
+The coding is an hour. The review is the expensive part, because a reviewer has to independently confirm the input source of each of the five deleted guards, and confirm that each new test actually reaches the line it claims to cover.
+
 ## Prerequisites
 
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| popoto >= 1.9.0 installed | `.venv/bin/python -c "import popoto,pathlib,re;p=pathlib.Path(popoto.__file__).parent/'models/encoding.py';assert '_LEGACY_DATETIME_RE' in p.read_text()"` | The aware-decode contract every deletion rests on |
+| `POPOTO_DATETIME_KEY_LEGACY` unset | `.venv/bin/python -c "from popoto.models.db_key import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | With the kill switch on, legacy rows decode naive and the deletions are unsafe |
+
 ## Solution
+
+### Key Elements
+
+- **The verdict table**: one row per site, with its input source and its disposition. It is the deliverable; the code change follows from it mechanically.
+- **Five deletions**: guards whose only inbound source is a popoto model field.
+- **Sixteen keeps**: guards with at least one non-popoto source, each given a one-line docstring reason.
+- **Five prose corrections**: comments and docstrings that assert popoto 1.8.0 behaviour as fact. Three sit on keep-sites and must be rewritten; two sit on delete-sites and go away with the guard.
+- **Five non-vacuous tests**: one per deletion, each constructed so that it fails if the deletion is wrong.
+
+### Flow
+
+Sweep → classify each site by inbound source → delete / keep+annotate → add a reaching test per deletion → re-run the sweep and the `getattr`-shaped variant → the survivors are exactly the sixteen keeps.
+
+### Technical Approach
+
+**The rule, restated.** A `tzinfo is None` coercion goes when a popoto model field is provably its only inbound source. It stays when the coercer also accepts floats, ISO strings, Telegram timestamps, or file mtimes.
+
+**Delete (5).**
+
+| Site | Function | Inbound source | Why the guard is dead |
+|---|---|---|---|
+| `models/agent_session.py:1092` | `_heal_future_updated_at` | `record.updated_at` from `cls.query.all()` | Pure popoto read. The `# Popoto strips tzinfo on load` comment above it goes too. |
+| `models/agent_session.py:2225` | `log_lifecycle_transition` | `self.started_at or self.created_at` | Both are `DatetimeField`. The sibling `isinstance(prev_time, int \| float)` branch is a *type* branch, not a tz guard — **it stays**. |
+| `reflections/pm_briefings/daily_log.py:382` | `_collect_sessions` | `s.completed_at` from `AgentSession.query.filter(status="completed")` | Pure popoto read. Its `# Popoto strips tzinfo on save` comment goes too. The surrounding `else` branch that coerces a float via `datetime.fromtimestamp` is a type branch and stays. |
+| `reflections/crash_recovery.py:186` | resumable-session filter | `s.updated_at` from the resumable query | Pure popoto read. The four-line comment block at `:176` asserting "tzinfo stripped on read" goes with it. |
+| `reflections/audits/redis_quality_audit.py:61` | dead-channel scan | `chat.updated_at` | **Dead code, not a stale guard.** `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`) and line 55 already compares it against the float `month_ago`. The `isinstance(_ua, datetime)` branch has never been reachable. Delete the whole branch, leaving `days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)`. |
+
+**Keep (16).** Grouped by why:
+
+- *ISO strings from files and raw Redis*: `agent/agent_session_queue.py:1364` (restart-flag file), `monitoring/bridge_watchdog.py:943` (recovery-lock JSON), `bridge/telegram_bridge.py:343` (last-connected file), `bridge/poll_registry.py:299`, `bridge/poll_reconcile.py:53`, `bridge/poll_reconcile.py:250`.
+- *ISO strings from an external API*: `reflections/pm_briefings/daily_log.py:352` (`_iso_in_window`, parsing `gh` output).
+- *General-purpose coercers accepting `datetime | int | float | str`*: `agent/session_runner/liveness.py:77` and `:87`, `monitoring/session_watchdog.py:65`, `tools/session_progress.py:214` and `:224`, `agent/agent_session_queue.py:2994`, `tools/valor_session.py:419`.
+- *Model ingress normalisation*: `models/agent_session.py:801` (`__setattr__`) and `:906` (`_normalize_kwargs`). These two are the reason the five deletions are safe and must be called out as such in their docstrings — deleting them would invalidate this entire plan.
+- *Already settled by #3173, untouched here*: `agent/session_health.py:403`, `:730`, `:6302`; `agent/session_pickup.py:52`, `:387`, `:600`.
+
+**Prose corrections on keep-sites (3).** Each currently states popoto 1.8.0 behaviour as present tense:
+- `agent/session_runner/liveness.py:66-72` — "naive datetimes are treated as UTC — Popoto strips tzinfo on save". Rewrite: popoto 1.9.0 decodes aware; the guard exists for the ISO-string and float inputs this coercer also accepts.
+- `tools/session_progress.py:200-203` — same claim, same correction, keeping the "one definition" delegation note.
+- `monitoring/session_watchdog.py:54-59` — "matching how Popoto SortedField stores them". Rewrite to name the real reason (#777): the float and naive-string inputs, on a non-UTC host.
+
+**Testing the deletions non-vacuously.** This is where #3173's review found the defect, so each test states its own falsifiability:
+- Build the fixture by *writing through popoto and reading back*, never by constructing the object in memory — an in-memory `AgentSession(...)` never exercises decode and would pass with or without the guard.
+- Assert on the aware value the function produces, and assert the function does not raise. A naive value reaching the deleted line would raise `TypeError` on the naive/aware comparison downstream, which is the signal the test is really watching for.
+- For `redis_quality_audit.py`, the test asserts `Chat.updated_at` is a float after a round-trip — that is the claim that makes the branch dead, and it is checkable without touching the audit at all.
+- Mutation-check each test: re-insert the guard's inverse (force a naive value into the fixture) and confirm the test goes red. A test that stays green under that mutation is vacuous and does not ship.
 
 ## Failure Path Test Strategy
 
