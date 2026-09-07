@@ -59,7 +59,35 @@ __all__ = ["run_disk_space_check", ...]
 
 ## YAML Registration
 
-Register the reflection in `config/reflections.yaml` (see [Registry Format](reflections.md#registry-format-configreflectionsyaml) and [Schedule Grammar](reflections.md#schedule-grammar) in `reflections.md` for the full field reference). A minimal `function`-type entry:
+**The vault file is the source of truth, and `config/reflections.yaml` is a copy of it.**
+`~/Desktop/Valor/reflections.yaml` is the registry the scheduler resolves and
+the only file a registration may write. `/update` clobbers
+`config/reflections.yaml` from the vault on every run (Step 1.66), so an entry
+written to the repo copy is erased by the very next `/update` — which is exactly
+how a reflection can appear registered, pass a local check, and never run again.
+
+Two ways to get an entry into the vault:
+
+**Tracked registration (preferred for anything shipped in this repo).** Add a
+thin wrapper to `scripts/update/reflection_register.py` and call it from
+`scripts/update/run.py`, **before** Step 1.66's vault→config copy so the entry
+propagates into this machine's config copy on the same cycle. `register_reflection`
+handles the guards: it writes the vault path, refuses when
+`_this_machine_owns_valor` is false (which is how a reflection pins to one
+machine), raises when `cadence` and `cron` are both or neither supplied, and is
+idempotent — a no-op once the entry exists. Existing wrappers to copy:
+`register_crash_recovery`, `register_sdlc_upvote_pickup`,
+`register_improvement_collect`. This is the path that survives `/update` and
+lands fleet-wide without anybody editing a file by hand.
+
+**Hand edit of the vault file.** Only Tom does this, and only for
+`execution_type: agent` entries — `register_reflection` emits
+`execution_type: function` entries only.
+
+The field reference below describes the entry shape either path produces (see
+[Registry Format](reflections.md#registry-format-configreflectionsyaml) and
+[Schedule Grammar](reflections.md#schedule-grammar) in `reflections.md`). A
+minimal `function`-type entry:
 
 ```yaml
 - name: your-reflection-name
@@ -144,7 +172,8 @@ When adding a new reflection:
 
 - [ ] Create `reflections/{group}/<name>.py` exposing `run()`, with the five-line module-docstring header (What it does / Cadence / Failure modes / Related reflections / See also)
 - [ ] Handle `redis.exceptions.ConnectionError` explicitly if the reflection touches Redis
-- [ ] Register it in `config/reflections.yaml` with `name`, `description`, `every:` (never the legacy `interval` key), `priority`, `execution_type: function`, `callable` pointing at the new per-file module, `enabled`
+- [ ] Register it through `scripts/update/reflection_register.py` (a thin wrapper called from `scripts/update/run.py` before Step 1.66) with `name`, `description`, `cadence` **or** `cron` but never both, `priority`, and the dotted `callable` path — the wrapper writes the vault file, which is what makes the entry survive `/update`'s vault→config copy
+- [ ] Add an idempotence case to `tests/unit/test_reflection_register.py` for the new wrapper
 - [ ] Add a smoke test to `tests/unit/test_reflections_package.py` (or a sibling `test_reflections_<topic>.py`) using `assert_valid_result`
 - [ ] Run `pytest tests/unit/test_reflections_package.py -x -q` to verify
 - [ ] Update `docs/features/reflections.md` if the new reflection changes the registered set (e.g. adds a group, or belongs in its Registered Reflections tables)

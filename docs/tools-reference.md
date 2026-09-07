@@ -342,6 +342,42 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
+### Improvement Controller (`valor-improve`) — planned, lane 3
+
+Not yet implemented. The entry point arrives with the improvement controller's
+lane-3 child issue; it is listed here so the surface is agreed before it is
+built rather than discovered afterwards. See
+[Improvement Controller](features/improvement-controller.md).
+
+```bash
+valor-improve case show --case ID     # the journal head, its revision, and the journal tail
+valor-improve case explain --case ID  # why this case exists, and on what evidence
+valor-improve propose                 # the only way a research session writes a proposed action
+valor-improve release compare         # a release against the incumbent it would replace
+valor-improve pause --case ID --reason TEXT   # break-glass. Never self-clearing
+valor-improve resume --case ID        # re-reads the head first; refuses a case with unreconciled intents
+valor-improve doctor                  # paused heads, stale intents, outstanding reservations
+valor-improve export / import         # move improvement records between machines
+valor-improve replay-projection       # rebuild a Popoto projection from the journal
+```
+
+Research sessions reach research state only through this CLI, which enforces
+journal authorization and never exposes a raw transition. `pause`, `resume`, and
+`doctor` are the break-glass path; the manual procedure lives in
+[Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
+
+**What is available today** is the evidence side, and it has no CLI: the
+`improvement-evidence-collect` reflection runs on a 900s tick and writes
+`ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
+Read it directly if you need to:
+
+```python
+from models.improvement_evidence import ImprovementEvidence
+
+rows = ImprovementEvidence.recent("valor", limit=50)
+corrections = [r for r in rows if r.kind == "correction"]
+```
+
 ### Agent Session Scheduler (`tools.agent_session_scheduler`)
 
 Agent-initiated queue operations. Schedule SDLC sessions, push arbitrary messages,

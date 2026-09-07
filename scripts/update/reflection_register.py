@@ -74,6 +74,9 @@ OWNING_PROJECT_KEY = "valor"
 CRASH_RECOVERY_NAME = "crash-recovery"
 CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 
+IMPROVEMENT_COLLECT_NAME = "improvement-evidence-collect"
+IMPROVEMENT_COLLECT_CALLABLE = "reflections.improvement_collect.run_improvement_collect"
+
 # Reflections whose callables have been deleted from the repo. Each name is
 # removed from the vault registry on /update (the reflection counterpart of
 # hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
@@ -568,6 +571,34 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
         callable_path=CRASH_RECOVERY_CALLABLE,
         description="Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)",
         cadence="300s",
+        priority="normal",
+    )
+
+
+def register_improvement_collect(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-evidence-collect`` reflection is registered (#3177).
+
+    Thin wrapper over :func:`register_reflection` — same guards, same target
+    resolution, same idempotence. This is the tick that makes the improvement
+    loop notice anything: without it the correction detector, the
+    memory-inspiration adapter, and the expectation-coverage adapter have no
+    caller and ``ImprovementEvidence`` stays empty forever.
+
+    Registered regardless of ``ImprovementSettings.enabled``. The controller
+    stays off until it is switched on; evidence accumulates either way, so the
+    first thing the controller reads is history rather than nothing.
+
+    Machine pinning is inherited, not re-implemented: ``register_reflection``
+    already returns ``skipped`` when ``_this_machine_owns_valor`` is false.
+    """
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_COLLECT_NAME,
+        callable_path=IMPROVEMENT_COLLECT_CALLABLE,
+        description=(
+            "Collect improvement evidence from completed sessions and Tom-sourced memories (#3177)"
+        ),
+        cadence="900s",
         priority="normal",
     )
 

@@ -1,11 +1,16 @@
 """Unit tests for models/session_lifecycle.py — session lifecycle management.
 
 Tests cover:
-- finalize_session() calls update_task_type_profile after auto_tag_session
-- finalize_session() skips profile update when skip_auto_tag=True
-- finalize_session() profile update failure never prevents session finalization
+- finalize_session() calls auto_tag_session and skips it when skip_auto_tag=True
+- finalize_session() session_archive export hook and its failure isolation
 - StatusConflictError behavior
 - finalize_session() validation (None session, non-terminal status)
+
+The TaskTypeProfile update hook these tests once covered was removed with the
+model in #3177: `rework_rate` was structurally always zero because
+`rework_triggered` had no production writer, so the aggregate measured nothing.
+Rework is now derived from `ImprovementEvidence` rows classified
+"architectural", which have a real writer.
 """
 
 import json
@@ -41,35 +46,27 @@ def _make_session(session_id="test-session-lc", status="running", project_key="t
     return session
 
 
-def _build_mock_modules():
-    """Build mock session_tags and task_type_profile modules for patching."""
-    mock_auto_tag_module = MagicMock()
-    mock_profile_module = MagicMock()
-    return mock_auto_tag_module, mock_profile_module
+def _mock_session_tags():
+    """Build a mock tools.session_tags module for patching."""
+    return MagicMock()
 
 
 # ===================================================================
-# finalize_session — TaskTypeProfile update hook
+# finalize_session — auto-tag hook
 # ===================================================================
 
 
-class TestFinalizeSessionProfileHook:
-    """Tests for the step 2.5 TaskTypeProfile update hook in finalize_session()."""
+class TestFinalizeSessionAutoTagHook:
+    """Tests for the auto-tag hook finalize_session() runs on a terminal transition."""
 
-    def test_profile_update_called_when_auto_tag_runs(self):
-        """update_task_type_profile is called when skip_auto_tag=False (default)."""
+    def test_auto_tag_called_when_not_skipped(self):
+        """auto_tag_session is called when skip_auto_tag=False (default)."""
         session = _make_session()
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "running"
@@ -77,16 +74,19 @@ class TestFinalizeSessionProfileHook:
 
             finalize_session(session, "completed")
 
-        # Both auto_tag and profile update should have been called
         mock_auto_tag_module.auto_tag_session.assert_called_once_with(session.session_id)
-        mock_profile_module.update_task_type_profile.assert_called_once_with(session.session_id)
 
-    def test_profile_update_call_order(self):
-        """update_task_type_profile is called AFTER auto_tag_session (and after status save)."""
+    def test_auto_tag_runs_before_the_status_save(self):
+        """auto_tag_session runs at step 2.5, ahead of step 5's status save.
+
+        Pinning the real order rather than a preferred one: auto-tagging reads
+        the session's own fields (classification, branch, slug), none of which
+        the terminal-status save changes, so it deliberately runs early and its
+        writes are folded into the same save.
+        """
         session = _make_session()
         call_order = []
 
-        # Track save() calls to verify profile update comes after
         def tracking_save():
             call_order.append("session_save")
 
@@ -95,20 +95,9 @@ class TestFinalizeSessionProfileHook:
         mock_auto_tag_module = MagicMock()
         mock_auto_tag_module.auto_tag_session = lambda sid: call_order.append("auto_tag")
 
-        mock_profile_module = MagicMock()
-        mock_profile_module.update_task_type_profile = lambda sid: call_order.append(
-            "update_profile"
-        )
-
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "running"
@@ -117,25 +106,17 @@ class TestFinalizeSessionProfileHook:
             finalize_session(session, "completed")
 
         assert "auto_tag" in call_order
-        assert "update_profile" in call_order
-        # auto_tag must precede update_profile, and profile update must come after session save
-        assert call_order.index("auto_tag") < call_order.index("update_profile")
-        assert call_order.index("session_save") < call_order.index("update_profile")
+        assert "session_save" in call_order
+        assert call_order.index("auto_tag") < call_order.index("session_save")
 
-    def test_profile_update_skipped_when_skip_auto_tag(self):
-        """update_task_type_profile is NOT called when skip_auto_tag=True."""
+    def test_auto_tag_skipped_when_skip_auto_tag(self):
+        """auto_tag_session is NOT called when skip_auto_tag=True."""
         session = _make_session()
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "running"
@@ -143,58 +124,36 @@ class TestFinalizeSessionProfileHook:
 
             finalize_session(session, "completed", skip_auto_tag=True)
 
-        # Profile update must NOT have been called
-        mock_profile_module.update_task_type_profile.assert_not_called()
-        # auto_tag must also NOT have been called
         mock_auto_tag_module.auto_tag_session.assert_not_called()
 
-    def test_profile_update_failure_does_not_prevent_finalization(self):
-        """Exception in update_task_type_profile must not block session status save."""
+    def test_auto_tag_failure_does_not_prevent_finalization(self):
+        """An exception in auto_tag_session must not block the status save."""
         session = _make_session()
         mock_auto_tag_module = MagicMock()
-        mock_profile_module = MagicMock()
-        mock_profile_module.update_task_type_profile.side_effect = Exception("Redis is down")
+        mock_auto_tag_module.auto_tag_session.side_effect = Exception("Redis is down")
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "running"
             mock_cas.return_value = mock_fresh
 
-            # Must not raise — finalization must complete
             finalize_session(session, "completed")
 
-        # Status must have been set to "completed"
         assert session.status == "completed"
-        # save() must have been called
         session.save.assert_called()
 
-    def test_finalization_sets_completed_status_despite_profile_error(self):
-        """Session status reaches 'completed' even when profile update throws."""
+    def test_finalization_completes_despite_auto_tag_error(self):
+        """Session status reaches 'completed' even when auto-tagging throws."""
         session = _make_session(status="running")
         mock_auto_tag_module = MagicMock()
-        mock_profile_module = MagicMock()
-        mock_profile_module.update_task_type_profile.side_effect = RuntimeError(
-            "intentional failure"
-        )
+        mock_auto_tag_module.auto_tag_session.side_effect = RuntimeError("intentional failure")
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "running"
@@ -218,17 +177,11 @@ class TestFinalizeSessionArchiveHook:
         """export_session is called with the session after finalize_session runs
         to a terminal status."""
         session = _make_session()
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
             patch("agent.session_archive.export_session") as mock_export,
         ):
             mock_fresh = MagicMock()
@@ -243,17 +196,11 @@ class TestFinalizeSessionArchiveHook:
         """A raising export_session must not prevent finalize_session from
         completing or propagate out of it."""
         session = _make_session()
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
             patch(
                 "agent.session_archive.export_session",
                 side_effect=RuntimeError("disk full"),
@@ -341,17 +288,11 @@ class TestFinalizeSessionRejectFromTerminal:
     def test_finalize_session_reject_from_terminal_opt_out_succeeds(self):
         """Passing reject_from_terminal=False permits terminal->terminal escalation."""
         session = _make_session(status="abandoned")
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
         ):
             mock_fresh = MagicMock()
             mock_fresh.status = "abandoned"
@@ -1829,16 +1770,10 @@ class TestFinalizeSessionLeaseRelease:
     best-effort and never break the terminal transition."""
 
     def _finalize(self, session, status="completed"):
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
             patch("agent.session_archive.export_session"),
             patch("models.session_lifecycle.release_issue_lock") as mock_release,
             patch("agent.supervised_run.clear_supervised_run_signal") as mock_clear,
@@ -1884,17 +1819,11 @@ class TestFinalizeSessionLeaseRelease:
         session = _make_session()
         session.issue_number = 2026
         session.active_run_id = "owner-run"
-        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        mock_auto_tag_module = _mock_session_tags()
 
         with (
             patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
-            patch.dict(
-                sys.modules,
-                {
-                    "tools.session_tags": mock_auto_tag_module,
-                    "models.task_type_profile": mock_profile_module,
-                },
-            ),
+            patch.dict(sys.modules, {"tools.session_tags": mock_auto_tag_module}),
             patch("agent.session_archive.export_session"),
             patch(
                 "models.session_lifecycle.release_issue_lock",

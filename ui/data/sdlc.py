@@ -24,6 +24,13 @@ from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
+# The single definition of "this pipeline is live". Read by
+# PipelineProgress.is_active and by the dashboard retention filter, which is
+# the point: they were two literals that disagreed on "in_progress", so a
+# session could be live on one path and inactive on the other. One name, one
+# membership test, one place to add a status.
+ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
+
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
 
@@ -466,7 +473,19 @@ class PipelineProgress(BaseModel):
 
     @property
     def is_active(self) -> bool:
-        return self.status in ("pending", "running", "active", "waiting_for_children")
+        """Whether this pipeline is live. Single definition, deliberately.
+
+        This property and the module-level retention filter used to carry two
+        different literals: the constant included ``in_progress`` and this
+        property did not, so a session in that status was live on one code path
+        and inactive on the other. They now read the same ACTIVE_STATUSES,
+        keeping the union, which means this property gained ``in_progress`` as
+        a deliberate and tested change rather than a silent one.
+
+        ``StageState.is_active`` is unrelated: it compares a *stage* status,
+        not a session status, and is left alone.
+        """
+        return self.status in ACTIVE_STATUSES
 
     @property
     def is_complete(self) -> bool:
@@ -1251,9 +1270,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
 
 # === Public query functions ===
-
-
-ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
 
 
 def best_timestamp(p: PipelineProgress) -> float:

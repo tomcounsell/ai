@@ -134,6 +134,55 @@ Every untyped-field read site goes through the canonical `_truthy()` helper
 round-trips as a real bool and needs no `_truthy()` wrapping at read sites. Only reach for
 `_truthy()` when reading an existing *untyped* boolean field you can't safely re-type.
 
+## The Schema Gate
+
+Every new model must record two decisions in its module docstring, and both are
+checkable: the **KeyField set** and the **index cardinality**.
+
+**The cardinality rule.** Never index a pid, a uuid, a timestamp, a digest, or a
+monotonic counter. `rebuild_indexes()` walks one Redis set per distinct value,
+so an index on an unbounded field turns a maintenance pass into a scan that
+grows without limit. An `IndexedField` earns its place only when its value space
+is small and named — `status` (active / at-rest), `verdict` (four values), a
+two-valued bool. A field you want to look records up by but whose values are
+unbounded stays a plain `Field`, and the lookup goes through a partitioned
+recency sort plus a filter in Python.
+
+**The TTL decision.** State in the docstring whether the model expires and why.
+`Meta.ttl` is declared at the Model level so popoto applies Redis EXPIRE on
+every save — never a runtime `r.expire()` call, which would violate the
+no-raw-Redis-on-Popoto-keys invariant. "Immortal" is a decision too, and lineage
+records (a verdict, an obligation, an authorization) generally are: a record
+that outlives nothing it is cited by makes the citation unresolvable.
+
+Worked examples of both, with the reasoning written out:
+`models/job.py`, `models/room.py`, and the eight `models/improvement_*.py`
+modules. `tests/unit/test_improvement_models.py` shows how to enforce the rule
+structurally rather than by trusting prose — every `IndexedField` must appear in
+a declared vocabulary, index defaults must fall inside their own vocabulary, and
+a field whose name marks it unbounded fails on sight.
+
+### The control-namespace exception
+
+The improvement controller (#3177) keeps its research state in a **non-Popoto**
+Redis namespace, `improve:{project_key}:{case_id}:*`, whose Lua transition
+script is the sole authority for state changes. Raw Redis there is correct and
+already precedented in this repo — `models/session_lifecycle.py` states the same
+exemption for its lock key and carries the working Lua CAS.
+
+Two rules make the exception safe rather than a loophole:
+
+- **The exemption is for keys popoto does not manage, and nothing else.** The
+  flat `Improvement*` Popoto records are ordinary models and every read and
+  write of them goes through the ORM.
+- **The raw-Redis guard is a text heuristic, not a namespace check.** It fires
+  when one command string contains both a Popoto-context substring and a block
+  pattern, so it will misfire on a plain `improve:*` key. The control journal
+  therefore binds its client under a private alias in its own module, never
+  `from popoto.redis_db import POPOTO_REDIS_DB as _R` in a file where an
+  operator would type a debug one-liner, and its compare-and-delete is exercised
+  through a pytest file rather than an inline `python -c`.
+
 ## Field Type Semantics: KeyField vs IndexedField
 
 Popoto field types have different implications for how records behave on mutation:

@@ -530,3 +530,169 @@ class TestClearDocsAuditLivenessKeys:
         fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
         assert fn is _migrate_clear_docs_audit_liveness_keys
         assert description
+
+
+class TestImprovementMigrationRegistration:
+    """#3177's two migrations must be registered, not merely defined.
+
+    A defined-but-unregistered migration never runs, and it is invisible in the
+    obvious check: a text grep for the name still finds the function
+    definition, its docstring, and the script filename it shells out to, so a
+    `grep -c ... > 1` row reports healthy while the migration is dead. This
+    reads the actual dict, which is the only thing `run_pending_migrations`
+    iterates.
+    """
+
+    def test_task_type_profile_retirement_is_registered(self):
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        assert "retire_task_type_profile" in MIGRATIONS, (
+            "TaskTypeProfile was deleted whole; without this entry its hashes and "
+            "its delegation_recommendation index sets are orphaned in Redis with no "
+            "surviving code able to reach them through the ORM"
+        )
+        fn, description = MIGRATIONS["retire_task_type_profile"]
+        assert fn is _migrate_retire_task_type_profile
+        assert description
+
+    def test_improvement_models_registration_marker_exists(self):
+        from scripts.update.migrations import _migrate_confirm_improvement_models_readable
+
+        assert "confirm_improvement_models_readable" in MIGRATIONS
+        fn, description = MIGRATIONS["confirm_improvement_models_readable"]
+        assert fn is _migrate_confirm_improvement_models_readable
+        assert description
+
+    def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
+        """The subprocess-shaped migrations name a script by filename.
+
+        A registered migration pointing at a missing script fails at /update
+        time on every machine, which is the worst place to discover it.
+        """
+        import inspect
+        from pathlib import Path
+
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        source = inspect.getsource(_migrate_retire_task_type_profile)
+        assert "migrate_retire_task_type_profile.py" in source
+        repo_root = Path(__file__).resolve().parents[2]
+        assert (repo_root / "scripts" / "migrate_retire_task_type_profile.py").exists()
+
+
+class TestTaskTypeProfileRetirementStub:
+    """The stub must de-index every key the retired model owned (#3177).
+
+    ``Model.delete()`` de-indexes by iterating ``_meta.fields`` and firing each
+    field's ``on_delete`` hook. A field the stub does not declare gets no hook,
+    so its key survives the delete with no class left that can ever reach it —
+    and Redis cannot expire a single sorted-set member, so the residue is
+    permanent. The retired model carried a ``SortedField`` (``last_updated``)
+    alongside its ``IndexedField``; both must be on the stub.
+
+    Real Popoto/Redis against the test db (autouse ``redis_test_db``). Rows are
+    seeded through the stub itself, which is the only surviving way to reach the
+    keyspace.
+    """
+
+    _PK = "test-3177-ttp"
+
+    @staticmethod
+    def _stub():
+        import scripts.migrate_retire_task_type_profile as mod
+
+        return mod
+
+    def _sorted_partition(self):
+        mod = self._stub()
+        return SortedField.get_sortedset_db_key(
+            mod.TaskTypeProfile, "last_updated", self._PK
+        ).redis_key
+
+    def _seed(self):
+        mod = self._stub()
+        return mod.TaskTypeProfile.create(
+            project_key=self._PK,
+            task_type="sdlc-build",
+            delegation_recommendation="structured",
+            last_updated=1700000000.0,
+        )
+
+    def teardown_method(self):
+        mod = self._stub()
+        for row in mod.TaskTypeProfile.query.filter(project_key=self._PK):
+            row.delete()
+
+    def test_the_stub_declares_the_sorted_field(self):
+        mod = self._stub()
+        names = set(mod.TaskTypeProfile._meta.fields)
+        assert "last_updated" in names, (
+            "without it, instance.delete() fires no ZREM and the sorted-set "
+            "members outlive every key that could ever purge them"
+        )
+        assert "delegation_recommendation" in names
+        # Type matters, not just the name: a plain ``Field`` stores the value in
+        # the row hash and registers no ZREM hook at all, so the sorted set is
+        # never written and never cleaned.
+        from popoto import IndexedField as _IndexedField
+        from popoto import SortedField as _SortedField
+
+        assert isinstance(mod.TaskTypeProfile._meta.fields["last_updated"], _SortedField)
+        assert isinstance(
+            mod.TaskTypeProfile._meta.fields["delegation_recommendation"], _IndexedField
+        )
+
+    def test_delete_empties_the_sorted_set(self):
+        mod = self._stub()
+        row = self._seed()
+        partition = self._sorted_partition()
+        assert POPOTO_REDIS_DB.zcard(partition) == 1, "seed did not reach the sorted set"
+
+        handled = mod.retire(apply=True)
+
+        assert handled == 1
+        assert POPOTO_REDIS_DB.zcard(partition) == 0, (
+            "the sorted-set member survived the delete — this is the orphaned "
+            "index state the migration exists to prevent"
+        )
+        assert not list(mod.TaskTypeProfile.query.filter(project_key=self._PK))
+        assert row is not None
+
+    def test_a_dry_run_deletes_nothing(self):
+        mod = self._stub()
+        self._seed()
+        partition = self._sorted_partition()
+
+        assert mod.retire(apply=False) == 1
+        assert POPOTO_REDIS_DB.zcard(partition) == 1
+
+    def test_an_empty_keyspace_is_a_clean_no_op(self):
+        mod = self._stub()
+        assert mod.retire(apply=True) == 0
+
+    def test_a_partial_pass_exits_non_zero_so_update_retries_it(self, monkeypatch):
+        """A run that deleted nothing must not be recorded permanently complete.
+
+        ``run_pending_migrations`` skips any name already in the completed set,
+        and the class this stub stands in for no longer exists — so a migration
+        marked done after a failed pass can never be corrected.
+        """
+        import sys
+
+        mod = self._stub()
+        self._seed()
+
+        def boom(self):
+            raise RuntimeError("wedged row")
+
+        monkeypatch.setattr(mod.TaskTypeProfile, "delete", boom, raising=False)
+        monkeypatch.setattr(sys, "argv", ["migrate_retire_task_type_profile.py", "--apply"])
+        assert mod.main() == 1
+
+    def test_a_complete_pass_exits_zero(self, monkeypatch):
+        import sys
+
+        mod = self._stub()
+        self._seed()
+        monkeypatch.setattr(sys, "argv", ["migrate_retire_task_type_profile.py", "--apply"])
+        assert mod.main() == 0

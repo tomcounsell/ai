@@ -660,3 +660,77 @@ class TestDashboardJobsView:
         assert job["is_stale"] is True
         assert "last_evidence_at" in job
         assert "unhealthy_reason" in job
+
+
+class TestImprovementPartials:
+    """The improvement-controller dashboard partials (#3177).
+
+    On merge day ``ImprovementEvidence`` is empty, because no correction may
+    have happened yet. That is the honest gate: these are render smoke tests
+    against an empty store plus one seeded row, not assertions that the loop
+    has found something.
+    """
+
+    def test_improvement_coverage_partial_renders_when_empty(self, client):
+        resp = client.get("/_partials/improvement/coverage/?project_key=test-3177-ui-empty")
+        assert resp.status_code == 200
+        assert "improvement-coverage" in resp.text
+
+    def test_empty_coverage_says_the_collector_is_silent(self, client):
+        """An empty panel must not read as a healthy zero."""
+        resp = client.get("/_partials/improvement/coverage/?project_key=test-3177-ui-empty")
+        assert "count of nothing" in resp.text
+
+    def test_improvement_burden_partial_renders_when_empty(self, client):
+        resp = client.get("/_partials/improvement/burden/?project_key=test-3177-ui-empty")
+        assert resp.status_code == 200
+        assert "improvement-burden" in resp.text
+
+    def test_empty_burden_says_nothing_observed_not_nothing_happened(self, client):
+        resp = client.get("/_partials/improvement/burden/?project_key=test-3177-ui-empty")
+        assert "nothing observed" in resp.text
+
+    def test_improvement_burden_renders_a_seeded_correction(self, client):
+        from models.improvement_evidence import ImprovementEvidence
+
+        pk = "test-3177-ui-seeded"
+        ImprovementEvidence.record_once(
+            pk,
+            "correction",
+            classification="architectural",
+            source_session_id="ui-seed-1",
+            text="that's the wrong approach for this journey",
+        )
+
+        resp = client.get(f"/_partials/improvement/burden/?project_key={pk}")
+        assert resp.status_code == 200
+        assert "architectural" in resp.text
+        assert "wrong approach" in resp.text
+
+    def test_improvement_coverage_counts_a_seeded_row(self, client):
+        from models.improvement_evidence import ImprovementEvidence
+
+        pk = "test-3177-ui-coverage"
+        ImprovementEvidence.record_once(pk, "inspiration", source_ref="memory:ui-1")
+
+        resp = client.get(f"/_partials/improvement/coverage/?project_key={pk}")
+        assert resp.status_code == 200
+        assert "inspiration" in resp.text
+        assert "count of nothing" not in resp.text
+
+    def test_dashboard_never_offers_experiment_or_patch_counts(self, client):
+        """Activity is not improvement, and the dashboard must not imply it is."""
+        import ui.data.improvement as improvement_data
+
+        exported = [n for n in dir(improvement_data) if n.startswith("get_")]
+        assert exported == [
+            "get_coverage",
+            "get_intervention_burden",
+            "get_provisional_assumptions",
+        ]
+
+    def test_index_page_links_both_improvement_partials(self, client):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "/_partials/improvement/coverage/" in resp.text
+        assert "/_partials/improvement/burden/" in resp.text

@@ -16,7 +16,8 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | `update.log` | Log from last remote update | Overwritten each update |
 | `update.txt` | Update status file | Overwritten each update |
 | `checkpoints/` | Session checkpoint data for resume | Pruned automatically by checkpoint manager |
-| `experiments/` | Autoexperiment results and iteration data | Retain for analysis; prune monthly |
+| `experiments/` | Legacy autoexperiment corpora, retained as evidence (#3177 removed the script). See `experiments/README.md` | Retain indefinitely; do not prune |
+| `improvement_content/` | Retention root for improvement-controller artifacts (experiment manifests, judge envelopes) written through `models/verifying_artifact_store.py`. Content-addressed; every load is re-hashed. Override with `POPOTO_IMPROVEMENT_CONTENT_PATH` | Retain while the evaluation citing an artifact is retained; deleting one invalidates that verdict's evidence |
 | `media/` | Downloaded media files from Telegram | Pruned after processing |
 | `pipeline/` | SDLC pipeline state files (one subdir per slug) | Cleaned up when PRs merge |
 | `process_state/` | Process-level state tracking | Ephemeral; auto-recreated |
@@ -28,7 +29,7 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 ## Cleanup Policy
 
 - **Weekly**: Delete stale session files (any `.session` files other than `valor_bridge.session`)
-- **Monthly**: Prune `experiments/` data older than 30 days, review `sessions/` size
+- **Monthly**: Review `sessions/` size
 - **Quarterly**: Archive or delete `sessions/` logs older than 90 days
 - **On demand**: Delete `doc_embeddings.json` to force regeneration (saves ~46MB)
 

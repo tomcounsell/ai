@@ -369,6 +369,35 @@ def create_app() -> FastAPI:
             {"jobs": jobs},
         )
 
+    @app.get("/_partials/improvement/coverage/", response_class=HTMLResponse)
+    def partial_improvement_coverage(request: Request, project_key: str = "valor"):
+        """HTMX partial: what the improvement loop is actually observing (#3177).
+
+        The denominator panel. Read it before the burden panel below — a count
+        of corrections means nothing without knowing how much was scanned.
+        """
+        from ui.data.improvement import get_coverage
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/coverage.html",
+            {"coverage": get_coverage(project_key=project_key)},
+        )
+
+    @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
+    def partial_improvement_burden(request: Request, project_key: str = "valor"):
+        """HTMX partial: how often a human had to step in, and of what kind (#3177)."""
+        from ui.data.improvement import get_intervention_burden, get_provisional_assumptions
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/intervention_burden.html",
+            {
+                "burden": get_intervention_burden(project_key=project_key),
+                "assumptions": get_provisional_assumptions(project_key=project_key),
+            },
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""

@@ -131,3 +131,82 @@ class TestRemoveObsoleteServices:
         removed = service.remove_obsolete_services()
         assert removed == [label]
         assert not plist.exists()
+
+
+class TestAutoexperimentRetirement:
+    """#3177 removed autoexperiment; `/update` must clean up its LaunchAgent.
+
+    The script, its installer, its plist template, and its feature doc are gone
+    from the repo, but a machine that ever ran the installer still has a nightly
+    job pointing at a deleted file. The suffix entry is what makes `/update`
+    reap it fleet-wide.
+    """
+
+    def test_autoexperiment_is_registered_as_obsolete(self):
+        assert "autoexperiment" in service.OBSOLETE_SERVICE_SUFFIXES
+
+    def test_boots_out_and_unlinks_autoexperiment(self, tmp_path, monkeypatch):
+        fake_home = _fake_home(tmp_path, monkeypatch)
+        label = f"{service.SERVICE_PREFIX}.autoexperiment"
+        plist = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
+        plist.write_text("<plist>dead</plist>\n")
+
+        calls: list[list[str]] = []
+
+        def fake_run_cmd(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:2] == ["launchctl", "list"]:
+                return MagicMock(returncode=0, stdout=f"-\t0\t{label}\n")
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr(service, "run_cmd", fake_run_cmd)
+
+        removed = service.remove_obsolete_services()
+
+        assert label in removed
+        assert any(
+            c == ["launchctl", "bootout", f"gui/{__import__('os').getuid()}/{label}"] for c in calls
+        )
+        assert not plist.exists()
+
+    def test_near_miss_label_is_never_booted_out(self, tmp_path, monkeypatch):
+        """A label that merely *contains* ours is a mismatch: log it, never act.
+
+        This is the mutation guard for the exact-match rule. Under the old
+        substring test (`label in launchctl_list`) this case booted out a job
+        the sweep does not own.
+        """
+        _fake_home(tmp_path, monkeypatch)
+        foreign = f"{service.SERVICE_PREFIX}.autoexperiment-v2"
+
+        calls: list[list[str]] = []
+
+        def fake_run_cmd(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:2] == ["launchctl", "list"]:
+                return MagicMock(returncode=0, stdout=f"4242\t0\t{foreign}\n")
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr(service, "run_cmd", fake_run_cmd)
+
+        removed = service.remove_obsolete_services()
+
+        assert removed == []
+        assert not any(c[:2] == ["launchctl", "bootout"] for c in calls)
+
+
+class TestLaunchctlLoadedLabels:
+    def test_parses_three_column_output(self):
+        out = "1234\t0\tcom.valor.worker\n-\t0\tcom.valor.autoexperiment\n"
+        assert service._launchctl_loaded_labels(out) == {
+            "com.valor.worker",
+            "com.valor.autoexperiment",
+        }
+
+    def test_blank_lines_contribute_nothing(self):
+        assert service._launchctl_loaded_labels("\n\n  \n") == set()
+
+    def test_match_is_by_whole_label_not_substring(self):
+        labels = service._launchctl_loaded_labels("1\t0\tcom.valor.autoexperiment-v2\n")
+        assert "com.valor.autoexperiment" not in labels
+        assert "com.valor.autoexperiment-v2" in labels

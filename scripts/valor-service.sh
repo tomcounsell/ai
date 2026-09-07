@@ -36,8 +36,8 @@ set +a
 # Sort to ensure deterministic selection if multiple distinct prefixes coexist
 # (pathological half-installed case); warn loudly if so.
 INSTALLED_PREFIXES=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null \
-    | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$' \
-    | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//' \
+    | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|bridge-watchdog)\.plist$' \
+    | sed -E 's/\.(bridge|worker|reflections|bridge-watchdog)\.plist$//' \
     | sort -u)
 INSTALLED_PREFIX_COUNT=$(printf '%s\n' "$INSTALLED_PREFIXES" | grep -c . || true)
 INSTALLED_PREFIX=$(printf '%s\n' "$INSTALLED_PREFIXES" | head -1)
