@@ -236,16 +236,160 @@ The one agent-visible surface in scope is indirect: `reflections/pm_briefings/da
 
 ## Documentation
 
+### Feature Documentation
+- [ ] Update `docs/features/utc-timestamps.md:87` — it currently names `monitoring/session_watchdog._to_timestamp`, `agent/session_health._ts`, and `ui/data/sdlc._safe_float` as "three older helpers ... intentionally left untouched". After this plan the inventory is larger and the reason is different: replace that clause with the settled verdict — which guards remain, and that they remain for non-popoto producers, not for popoto.
+- [ ] Add to the same doc a short subsection recording the two escape hatches that bound the aware-decode contract: `POPOTO_DATETIME_KEY_LEGACY` must stay unset, and a deliberately-naive write still round-trips naive. This is the durable artifact — without it the next lane re-derives the same popoto source reading.
+- [ ] No `docs/features/README.md` index entry is needed; `utc-timestamps.md` is already indexed.
+
+### External Documentation Site
+Not applicable — this repo has no Sphinx/MkDocs site.
+
+### Inline Documentation
+- [ ] Rewrite the four stale rationale blocks named in the Solution section (`utils/utc.py:41-49`, `agent/session_runner/liveness.py:66-72`, `tools/session_progress.py:200-203`, `monitoring/session_watchdog.py:54-59`).
+- [ ] Give every other keep-site a one-line reason naming its non-popoto input source, per the issue's closing condition.
+- [ ] Delete the two now-false comment blocks that accompany deletions (`models/agent_session.py:1088`, `reflections/pm_briefings/daily_log.py:381`) and the four-line block at `reflections/crash_recovery.py:176-179`.
+
 ## Success Criteria
+
+- [ ] The sweep, re-run in both shapes and across all directories including `utils/` and `ui/`, returns exactly the eighteen keep-sites plus the six #3173 survivors — and no delete-site.
+- [ ] Every surviving guard carries a one-line reason naming its non-popoto input source.
+- [ ] All five deletions have a test that reads the value back through popoto, and each test has been shown to go red when a naive value is forced into its fixture. The red output is pasted in the PR body.
+- [ ] The PR body records the verdict for every site, delete and keep alike.
+- [ ] `docs/features/utc-timestamps.md` no longer describes the inline guards as "intentionally left untouched" and does record the two escape hatches.
+- [ ] No behaviour change: `reflections/pm_briefings/daily_log.py` still collects a session with a real `completed_at`, `redis_quality_audit` still returns `status: "ok"`, `crash_recovery` still filters by `updated_at`.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
+The lane is small and the risk is concentrated in one place — proving the tests are not vacuous. The split is by file-ownership so two builders never write the same file.
+
+### Team Members
+
+- **Builder (models + agent)**
+  - Name: `models-builder`
+  - Role: the two `models/agent_session.py` deletions and their tests
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (reflections)**
+  - Name: `reflections-builder`
+  - Role: the three reflections deletions (`daily_log.py`, `crash_recovery.py`, `redis_quality_audit.py`) and their tests
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (keep-site annotation)**
+  - Name: `annotation-builder`
+  - Role: the eighteen keep-site reasons and the four stale-prose rewrites, across `utils/`, `agent/`, `bridge/`, `monitoring/`, `tools/`
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (mutation check)**
+  - Name: `mutation-validator`
+  - Role: for each of the five new tests, force a naive value into the fixture and confirm the test goes red; capture the output
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `utc-documentarian`
+  - Role: `docs/features/utc-timestamps.md`
+  - Agent Type: documentarian
+  - Resume: true
+
+File ownership is disjoint by construction: `models-builder` owns `models/agent_session.py`, `reflections-builder` owns `reflections/**`, `annotation-builder` owns everything else. `annotation-builder` must not edit the two files the other builders own, even for a keep-site comment — the two `models/agent_session.py` keeps (`:801`, `:906`) belong to `models-builder`.
+
 ## Step by Step Tasks
+
+### 1. Delete the two `models/agent_session.py` guards
+- **Task ID**: build-models
+- **Depends On**: none
+- **Validates**: `tests/integration/test_updated_at_heal.py`, `tests/unit/test_agent_session_updated_at_utc.py`, `tests/integration/test_lifecycle_transition.py`
+- **Assigned To**: models-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Delete the `updated_at_utc.tzinfo is None` branch in `_heal_future_updated_at` (`:1092`) and the now-false comment above it.
+- Replace the `prev_time if prev_time.tzinfo else prev_time.replace(tzinfo=UTC)` ternary in `log_lifecycle_transition` (`:2225`) with `prev_time`. Leave the sibling `isinstance(prev_time, int | float)` branch alone — it is a type branch.
+- Add a one-line reason to the two keep-sites in this file (`__setattr__` at `:801`, `_normalize_kwargs` at `:906`) naming ISO-string ingress as the non-popoto source, and noting these two are what make the deletions elsewhere safe.
+- Add a test per deletion that persists an `AgentSession` through popoto, re-reads it, and asserts the aware value flows through without raising. Do not construct the session in memory.
+
+### 2. Delete the three reflections guards
+- **Task ID**: build-reflections
+- **Depends On**: none
+- **Validates**: `tests/unit/reflections/test_daily_log_aggregator.py`, `tests/unit/test_crash_recovery_gates.py`, `tests/unit/test_reflection_pool_bulkhead.py`
+- **Assigned To**: reflections-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `daily_log.py:382`: collapse the ternary to `ts = ca`, delete the false comment on `:381`, keep the `else` float branch.
+- `crash_recovery.py:186`: delete the `getattr(updated, "tzinfo", None) is None` branch and the four-line comment block at `:176-179`. Keep the surrounding `except Exception` handler and its warning.
+- `redis_quality_audit.py:60-62`: delete the whole `isinstance(_ua, datetime)` block as dead code and simplify to `days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)`. Justify it in the diff as a dead-branch removal — `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`) and line 55 already compares it to a float. Drop the now-unused `datetime`/`UTC` imports if nothing else in the file needs them.
+- Add a reaching test per deletion. For `redis_quality_audit`, the test asserts `Chat.updated_at` is a `float` after a popoto round-trip — that is the claim the dead-branch verdict rests on.
+
+### 3. Annotate the keep-sites and correct the stale prose
+- **Task ID**: build-annotations
+- **Depends On**: none
+- **Validates**: `python -m ruff check .`
+- **Assigned To**: annotation-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Rewrite the four stale rationale blocks: `utils/utc.py:41-49`, `agent/session_runner/liveness.py:66-72`, `tools/session_progress.py:200-203`, `monitoring/session_watchdog.py:54-59`. Say what is true now (popoto 1.9.0 decodes aware; the guard exists for the ISO-string / float / non-popoto producers the coercer also accepts) rather than what is no longer true.
+- Add a one-line reason to each remaining keep-site naming its actual input source: the restart-flag file, the recovery-lock JSON, the last-connected file, the raw Redis strings, the `gh` API output, the CLI argument.
+- Do not edit `models/agent_session.py` or anything under `reflections/` — those belong to tasks 1 and 2.
+- Do not edit `agent/session_health.py`, `agent/session_pickup.py`, or `ui/data/sdlc.py` — already settled.
+
+### 4. Mutation-check the five new tests
+- **Task ID**: validate-mutation
+- **Depends On**: build-models, build-reflections
+- **Assigned To**: mutation-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- For each of the five new tests: force a naive datetime into its fixture (write the field with `datetime.now()` rather than `datetime.now(UTC)`), re-run the node, and confirm it fails.
+- Capture the failing output verbatim; it goes in the PR body as the non-vacuity proof.
+- Revert every mutation. Report any test that stayed green — that test does not ship as-is.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-models, build-reflections, build-annotations
+- **Assigned To**: utc-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/utc-timestamps.md:87` per the Documentation section.
+- Add the escape-hatch subsection (`POPOTO_DATETIME_KEY_LEGACY`; naive writes round-trip naive).
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: validate-mutation, document-feature
+- **Assigned To**: mutation-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row.
+- Confirm the PR body carries a verdict for all twenty-three sites and the mutation-check red output.
 
 ## Verification
 
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `./scripts/pytest-clean.sh tests/unit -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Heal guard gone | `grep -c "updated_at_utc.tzinfo is None" models/agent_session.py` | match count == 0 |
+| Lifecycle ternary gone | `grep -c "prev_time if prev_time.tzinfo else" models/agent_session.py` | match count == 0 |
+| daily_log ternary gone | `grep -c "ca if ca.tzinfo else" reflections/pm_briefings/daily_log.py` | match count == 0 |
+| crash_recovery guard gone | `grep -c 'getattr(updated, "tzinfo", None) is None' reflections/crash_recovery.py` | match count == 0 |
+| Dead datetime branch gone | `grep -c "_ua.timestamp() if _ua.tzinfo else" reflections/audits/redis_quality_audit.py` | match count == 0 |
+| No stale popoto-strips claim | `grep -rn "strips tzinfo" --include='*.py' agent/ models/ monitoring/ reflections/ bridge/ tools/ utils/ worker/` | match count == 0 |
+| No naive writer reintroduced | `grep -rnE "\.(updated_at\|started_at\|completed_at) = datetime\.now\(\)" --include='*.py' agent/ models/ bridge/ worker/ tools/ monitoring/ reflections/` | match count == 0 |
+| Legacy kill switch off | `.venv/bin/python -c "from popoto.models.db_key import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | exit code 0 |
+| Doc records the escape hatches | `grep -c "POPOTO_DATETIME_KEY_LEGACY" docs/features/utc-timestamps.md` | output > 0 |
+| No #3199 region touched | `git diff origin/main --unified=0 -- models/agent_session.py \| grep -c "repair_indexes\|_last_quarantined_identityless"` | match count == 0 |
+
 ## Critique Results
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| | | | | |
 
 ---
 
 ## Open Questions
+
+None. The classification rule was settled by #3173, every verdict in this plan was derived from a read of the actual input source rather than a judgement call, and the one premise that could have needed a human — whether popoto 1.9.0's aware-decode really holds for legacy rows — was answered by reading the installed package. The scope widening to `utils/utc.py` is the only discretionary call, and it is a four-line docstring correction on the coercer the rest of the repo defers to.
