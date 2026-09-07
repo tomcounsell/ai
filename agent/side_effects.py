@@ -105,6 +105,8 @@ def enqueue(
     session_id: str,
     project_key: str | None = None,
     payload: dict | None = None,
+    *,
+    merge_on_lost_race: bool = True,
 ) -> str:
     """Create one durable side-effect job and return its ``job_id``.
 
@@ -113,6 +115,18 @@ def enqueue(
 
     Raises on a Redis failure in the guard rather than creating a row that
     might be a duplicate.
+
+    ``merge_on_lost_race`` (default ``True``) governs what a LOST race does
+    to the row it binds to. A live per-turn caller has a real payload for
+    the same session and must win it (blocker 2: the newest turn's
+    ``response_text`` must survive). A backfill/migration caller -- run
+    once per fleet machine against a Redis every other machine shares, with
+    a synthetic placeholder payload it mints only to satisfy the handler's
+    signature -- has no real data to contribute and must NOT touch a row it
+    did not create. Passing ``merge_on_lost_race=False`` skips the merge
+    entirely on a lost race: the caller's payload is discarded and the
+    already-bound row is returned untouched (#3183 review round 2 blocker,
+    ``scripts/update/migrations.py``'s back-enqueue).
     """
     if not kind:
         raise ValueError("enqueue() requires a kind")
@@ -140,7 +154,8 @@ def enqueue(
                 session_id,
                 bound_id,
             )
-            _merge_payload_into_pending(bound_id, payload)
+            if merge_on_lost_race:
+                _merge_payload_into_pending(bound_id, payload)
             return bound_id
         # The key expired between the SET NX and the read. Take it under our
         # own id and create the row.

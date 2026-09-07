@@ -1293,11 +1293,19 @@ def _migrate_side_effect_job_model(project_dir: Path) -> str | None:
                 # unlike a payload-less enqueue -- it does not raise
                 # `TypeError` on every attempt, dead-letter, and re-enqueue
                 # itself forever through the replay reflection (#3183 review).
+                # merge_on_lost_race=False: this placeholder payload exists
+                # only to satisfy the handler's signature. On a lost race
+                # (a live per-turn job for this session_id is already
+                # pending -- exactly what "back-enqueue recent extractions"
+                # means on machines 2..N of a fleet update) it must not
+                # overwrite that row's real response_text with an empty one
+                # (#3183 review round 2 blocker).
                 enqueue(
                     "memory_extraction",
                     session_id,
                     getattr(session, "project_key", None),
                     {"response_text": ""},
+                    merge_on_lost_race=False,
                 )
                 enqueued += 1
             except Exception as e:  # noqa: BLE001 -- one session never stops the sweep
