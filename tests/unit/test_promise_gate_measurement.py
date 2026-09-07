@@ -268,6 +268,10 @@ class TestFindContradictionsNegationGuard:
             "delivered clean, no failures",
             "shipped with zero failures",
             "merged without failures",
+            # Keyword at index 3: the lookback window would start before
+            # the string, so this is the case that exercises the
+            # ``max(0, idx - _ABSENCE_PREFIX_LOOKBACK)`` clamp.
+            "no failures",
         ],
     )
     def test_delivered_leg_absence_prefix_is_not_a_contradiction(self, evidence):

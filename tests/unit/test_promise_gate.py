@@ -11,6 +11,7 @@ Plan: docs/plans/sdlc-1219.md (issue #1219).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from unittest.mock import MagicMock, patch
@@ -681,3 +682,66 @@ class TestRunAsyncSafelyNoLeak:
 
         asyncio.run(_drive())
         assert closed["seen"], "coroutine was not closed on the running-loop branch"
+
+
+# === LLM input cap ===
+
+
+class TestLlmInputCap:
+    """Texts longer than ``PROMISE_GATE_LLM_MAX_INPUT_CHARS`` never reach the
+    model: the helper runs the heuristic and reports the ``oversize`` suffix
+    so the skip is queryable by audit source."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_text_skips_llm_and_reports_oversize(self, monkeypatch):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "50")
+        called = False
+
+        async def _fake(text):
+            nonlocal called
+            called = True
+            return PromiseVerdict(action="allow", reason="llm")
+
+        text = "I'll follow up once the deploy finishes and report back. " * 3
+        assert len(text) > 50
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_fake):
+            (
+                verdict,
+                suffix,
+                elapsed_ms,
+                queue_wait_ms,
+            ) = await promise_gate._evaluate_promise_llm_or_heuristic(text)
+
+        assert called is False
+        assert suffix == "oversize"
+        assert queue_wait_ms is None
+        assert elapsed_ms >= 0
+        # The heuristic still decides: this text is a forward deferral.
+        assert verdict.action == "block"
+
+    @pytest.mark.asyncio
+    async def test_text_at_cap_still_reaches_llm(self, monkeypatch):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "50")
+        text = "x" * 50
+        with _patch_llm("allow", reason="llm-said-so"):
+            verdict, suffix, _, _ = await promise_gate._evaluate_promise_llm_or_heuristic(text)
+        assert suffix == "llm"
+        assert verdict.reason == "llm-said-so"
+
+    @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
+    def test_unusable_env_value_falls_back_to_default(self, monkeypatch, raw):
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", raw)
+        assert promise_gate._llm_max_input_chars() == 8000
+
+    @pytest.mark.asyncio
+    async def test_drafter_main_path_audits_oversize_source(self, monkeypatch):
+        """The drafter's ``use_llm=True`` path prefixes the suffix, so an
+        oversize skip lands as ``promise_gate_drafter_oversize``."""
+        from bridge.message_drafter import _evaluate_drafter_promise
+
+        monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "20")
+        text = "Everything is merged and deployed to production. " * 2
+        with _patch_llm("allow"):
+            await _evaluate_drafter_promise(text, medium="telegram", use_llm=True)
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert rows[-1]["source"] == "promise_gate_drafter_oversize"

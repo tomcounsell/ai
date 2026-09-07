@@ -78,25 +78,29 @@ caller passes); ``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs.
 Latency
 -------
 Budget for the LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling
-2026-09-03, set at roughly 1.5x the p50/p99 of 1619ms/2463ms that the
-ruling was computed against; provisional/tunable, re-derive from
-post-merge audit JSONL). The zero-LLM short path
-(<200 chars, non-SDLC, no artifacts) keeps its existing guarantee of
-p50 ~= 0ms and is unchanged by this budget. This latency budget is
-separate from the SDK-level per-call timeout: the semaphore acquire and
-the API call are each separately bounded at 3 seconds via the
-RTR-correct pattern: ``async with
-semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
-client:``. Stacking both 3-second bounds gives a structural worst case
-of ~6 seconds, above the documented p99 of 5000ms — this is a
-structural bound on the worst case, not the measured distribution
-(the current measurement over the LLM-path bucket, n=592, is p50
-~1637ms / p99 ~2482ms, comfortably inside the 5000ms budget).
-``max_retries=0`` is load-bearing for the stated bound: the SDK default
+2026-09-03; provisional/tunable, re-derive from post-merge audit JSONL
+with ``tools/promise_gate_measurement.py``). Measured 2026-09-07 on this
+code, one bucket: n=60 sequential calls over audit-log text previews
+(<= 200 chars, no semaphore contention, ``queue_wait_ms`` max 0.05):
+p50 1871ms / p95 2352ms / p99 2543ms / max 2705ms, 0 timeouts. The
+zero-LLM short path (<200 chars, non-SDLC, no artifacts) keeps its
+existing guarantee of p50 ~= 0ms and is unchanged by this budget.
+
+The budget is separate from the SDK-level timeout. The call follows the
+RTR-correct pattern ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT):
+async with anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT,
+max_retries=0) as client:``. That ``timeout=3.0`` becomes
+``httpx.Timeout(3.0)``, which bounds connect, read, write and pool
+acquire at 3 seconds **each**, not total wall time, so a single call can
+legitimately exceed 3 seconds without firing ``APITimeoutError``; the
+semaphore acquire is a further, separately bounded 3-second wait
+(``queue_wait_ms`` on the audit row). There is therefore no exact
+structural ceiling to quote; the p99 budget above is the enforced bound
+and the audit JSONL is the source of truth for whether it holds.
+``max_retries=0`` is load-bearing: the SDK default
 (``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts, which would
-silently turn the 3s worst case into ~3 attempts plus backoff (~10s) on
-this call's now-inline delivery path.
+silently multiply the per-phase bound into ~3 attempts plus backoff
+(~10s) on this call's now-inline delivery path.
 The other anthropic-client helper (the convenience one that
 constructs the client for you) is **not** used here — it does not
 accept a ``timeout`` argument and would silently violate the 3-second
@@ -515,6 +519,24 @@ _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.
 _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+# Longest text (characters) the LLM-primary path will send to the model.
+# ``draft_message``'s main path passes the full narration-stripped agent output,
+# which has no upper bound (outputs above FILE_ATTACH_THRESHOLD spill to a
+# file attachment but still reach this gate in full), so without a cap the
+# per-call token cost and latency are unbounded by construction. Over the cap
+# the gate skips the model and runs the regex heuristic, audited with the
+# ``_oversize`` source suffix so the skip is queryable. Provisional/tunable:
+# 8000 chars is roughly 2k tokens, about twice the Telegram message ceiling
+# and well above any reply the drafter would deliver as prose.
+def _llm_max_input_chars() -> int:
+    raw = os.environ.get("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "")
+    try:
+        value = int(raw) if raw.strip() else 8000
+    except ValueError:
+        value = 8000
+    return value if value > 0 else 8000
+
+
 def _write_promise_audit(
     text: str,
     verdict: PromiseVerdict,
@@ -728,7 +750,9 @@ async def _evaluate_promise_llm_or_heuristic(
     written once.
 
     Returns ``(verdict, source_suffix, elapsed_ms, queue_wait_ms)``.
-    ``source_suffix`` is one of ``"llm"``, ``"heuristic"``, ``"timeout"`` —
+    ``source_suffix`` is one of ``"llm"``, ``"heuristic"``, ``"timeout"``,
+    ``"oversize"`` (text longer than ``PROMISE_GATE_LLM_MAX_INPUT_CHARS``;
+    the model is never called and the regex heuristic decides) —
     callers prefix their own audit-source namespace (``"promise_gate_"`` for
     the CLI path, ``"promise_gate_drafter_"`` for the drafter path).
     ``queue_wait_ms`` is ``None`` whenever the semaphore-acquire line was
@@ -739,6 +763,9 @@ async def _evaluate_promise_llm_or_heuristic(
     """
     start = time.monotonic()
     _queue_wait_ms.set(None)
+    if len(text) > _llm_max_input_chars():
+        verdict = _evaluate_promise_heuristic(text)
+        return verdict, "oversize", (time.monotonic() - start) * 1000, None
     llm_verdict: PromiseVerdict | None = None
     timeout_hit = False
     try:

@@ -603,7 +603,7 @@ def validate_telegram_poll(question: str) -> list[Violation]:
     return violations
 
 
-def validate_poll_question(question: str) -> list[Violation]:
+def validate_poll_question(question: str, *, session_id: str | None = None) -> list[Violation]:
     """Validate a poll question against the ``telegram_poll`` medium. No composition.
 
     **The public seam the poll path uses, and the reason it exists.**
@@ -624,30 +624,61 @@ def validate_poll_question(question: str) -> list[Violation]:
     violation — surfaced the same non-blocking way ``send_poll`` already
     surfaces every other validation failure (a warning log; the poll still
     sends). Deliberately NOT the LLM-primary path: a poll question is a
-    low-volume, interactive affordance, and a ~1637ms round-trip (the
-    current p50 over the LLM-path bucket, n=592) here would be real latency cost
-    for no delivery-honesty gain since the two-state
-    outcome (ship or don't) is unchanged from before this plan — see No-Go 5.
+    low-volume, interactive affordance, and an inline model round-trip
+    (see the measured distribution in ``bridge.promise_gate``) would be real
+    latency cost for no delivery-honesty gain since the two-state outcome
+    (ship or don't) is unchanged from before this plan — see No-Go 5.
+
+    Every decision writes a ``classification_audit.jsonl`` row, so this
+    route is queryable like every other gated route: ``transport``
+    ``"telegram_poll"`` with ``source="promise_gate_poll"`` (the heuristic
+    verdict, block or allow) or ``source="promise_gate_poll_disabled"``
+    when the kill switch is off. ``session_id`` is the sending session when
+    the caller has one; it is recorded on the row and never consulted.
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch via
-    ``bridge.promise_gate._gate_enabled()``: when the switch is off, this
-    check is skipped entirely (no violation appended), matching the
-    process-wide "gate disabled" contract documented in
+    ``bridge.promise_gate._gate_enabled()``: when the switch is off, no
+    violation is appended and the disabled audit row is the only trace,
+    matching the process-wide "gate disabled" contract documented in
     ``docs/features/promise-gate.md``.
     """
     violations = _validate_for_medium(question, "telegram_poll")
 
-    from bridge.promise_gate import _evaluate_promise_heuristic, _gate_enabled
+    from bridge.promise_gate import (
+        PromiseVerdict,
+        _evaluate_promise_heuristic,
+        _gate_enabled,
+        _write_promise_audit,
+    )
 
-    if _gate_enabled():
-        verdict = _evaluate_promise_heuristic(question)
-        if verdict.action == "block":
-            violations.append(
-                Violation(
-                    rule="poll_question_promise",
-                    snippet=verdict.reason,
-                )
+    if not _gate_enabled():
+        _write_promise_audit(
+            question,
+            PromiseVerdict(action="allow", reason="gate_disabled"),
+            transport="telegram_poll",
+            session_id=session_id,
+            source="promise_gate_poll_disabled",
+        )
+        return violations
+
+    _start = time.monotonic()
+    verdict = _evaluate_promise_heuristic(question)
+    elapsed_ms = (time.monotonic() - _start) * 1000
+    if verdict.action == "block":
+        violations.append(
+            Violation(
+                rule="poll_question_promise",
+                snippet=verdict.reason,
             )
+        )
+    _write_promise_audit(
+        question,
+        verdict,
+        transport="telegram_poll",
+        session_id=session_id,
+        source="promise_gate_poll",
+        elapsed_ms=elapsed_ms,
+    )
     return violations
 
 

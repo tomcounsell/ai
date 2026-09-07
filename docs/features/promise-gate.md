@@ -50,7 +50,7 @@ the judgment layer used is a deliberate per-route choice, not an oversight:
 | Drafter main path (everything else) | `draft_message`'s main return → `_evaluate_drafter_promise(..., use_llm=True)` | LLM-primary (`_evaluate_promise_llm_or_heuristic`), regex fail-closed-only fallback | `promise_gate_drafter_llm` / `promise_gate_drafter_heuristic` / `promise_gate_drafter_timeout` | The composed, longer reply is where forward-deferral prose actually lives (the Incident A class); the real caller is `agent/output_handler.py`, defaulting `use_llm=True` |
 | Email outbound (`bridge/email_bridge.py::EmailOutputHandler.send`) | `draft_message(..., medium="email", use_llm=False)` | Heuristic only | `promise_gate_drafter` (same sources as the short path) | Email has no bounce path: a `block` verdict returns `needs_self_draft=True`, but the call site only reads `draft.text` and there is no `needs_self_draft`/`promise_advisory`/self-draft-steering wiring on this transport, so the verdict cannot alter delivery. Paying an LLM round-trip for an unusable verdict is cost without enforcement, so the call site is pinned `use_llm=False` pending the bounce wiring tracked in #3124 |
 | Stop hook (`agent/hooks/stop.py`) | Explicit `draft_message(..., use_llm=False)` | Heuristic only, forced regardless of message length | `promise_gate_drafter` (same sources as the short path) | Runs inline on the Stop hook's 10-second harness-wall critical path; an inline LLM round-trip there repeats the documented 126/131 SIGKILL incident (`docs/features/memory-hook-performance.md`) — the fix was "detach, don't bound," not "add a timeout around a Haiku call" |
-| Poll questions (`TelegramRelayOutputHandler.send_poll`) | `validate_poll_question` → `_evaluate_promise_heuristic` directly | Heuristic only | none (surfaced as a non-blocking `Violation(rule="poll_question_promise")`, not a full gate call) | Poll questions reach Telegram without ever calling `draft_message`, so they would otherwise ship with zero honesty checking; a poll question is a structured artifact, not a prose reply worth an LLM round-trip. Residual (no LLM backstop) tracked in #3094 |
+| Poll questions (`TelegramRelayOutputHandler.send_poll`) | `validate_poll_question` → `_evaluate_promise_heuristic` directly | Heuristic only | `promise_gate_poll` / `promise_gate_poll_disabled` (transport `telegram_poll`); a block is surfaced as a non-blocking `Violation(rule="poll_question_promise")` and the poll still sends | Poll questions reach Telegram without ever calling `draft_message`, so they would otherwise ship with zero honesty checking; a poll question is a structured artifact, not a prose reply worth an LLM round-trip. Residual (no LLM backstop) tracked in #3094 |
 | Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | `agent/session_health._gate_terminal_promise` | Heuristic only — **the one known-uncovered route**: it never reaches the LLM layer | `terminal_flush` | No live agent exists at flush time to consume an LLM-derived revise-or-override advisory; there is nobody left to self-draft a rewrite, so the heuristic backstop is what actually ships the substitution. Residual (no LLM backstop) tracked in #3094 |
 | CLI senders — `tools/send_message.py`, `tools/valor_telegram.py send`, `tools/valor_email.py cmd_send` | `cli_check_or_exit` → `evaluate_promise` (sync wrapper over `evaluate_promise_async`) | LLM-primary, regex fail-closed-only fallback | `promise_gate_llm` / `promise_gate_heuristic` / `promise_gate_timeout` / `promise_gate_disabled` / `promise_gate_cli_exception` | Same LLM-first contract as the drafter main path, reached through the sync CLI wrapper instead of an `await` |
 
@@ -321,6 +321,9 @@ The `source` discriminator takes one of:
 | `promise_gate_drafter_llm` | Drafter main path (`use_llm=True`): LLM Haiku call returned a parseable verdict |
 | `promise_gate_drafter_heuristic` | Drafter main path: LLM unavailable / parse failure → fell through to regex |
 | `promise_gate_drafter_timeout` | Drafter main path: LLM SDK 3-second timeout, or the bounded semaphore-acquire wait, fired |
+| `promise_gate_oversize` / `promise_gate_drafter_oversize` | CLI path / drafter main path: the text exceeded `PROMISE_GATE_LLM_MAX_INPUT_CHARS` (default 8000), so the model was never called and the regex heuristic decided |
+| `promise_gate_poll` | Poll-question route (`validate_poll_question`, transport `telegram_poll`): the heuristic verdict, written on allow and block alike |
+| `promise_gate_poll_disabled` | Poll-question route: kill switch was on — records `action="allow" / reason="gate_disabled"` |
 | `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`, heuristic-only); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
@@ -365,25 +368,31 @@ documented as a follow-up).
 
 ## Latency budget
 
-* LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling 2026-09-03, set
-  at roughly 1.5x the p50/p99 of 1619ms/2463ms that the ruling was
-  computed against, to leave headroom for Anthropic API variance
-  without hiding a genuine regression; provisional/tunable, re-derive
-  from post-merge audit JSONL). The current measurement over the
-  `promise_gate_drafter_llm` bucket (n=592 LLM-path rows, out of 1690
-  promise-gate rows total) is p50 ~1637ms / p99 ~2482ms, comfortably
-  inside this budget.
+* LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling 2026-09-03;
+  provisional/tunable, re-derive from post-merge audit JSONL with
+  `tools/promise_gate_measurement.py`). Measured 2026-09-07 on this code,
+  one bucket: n=60 sequential calls over audit-log text previews (<= 200
+  chars, no semaphore contention, `queue_wait_ms` max 0.05): p50 1871ms /
+  p95 2352ms / p99 2543ms / max 2705ms, 0 timeouts.
 * Zero-LLM short path (<200 chars, non-SDLC, no artifacts): p50 ~= 0ms,
   unchanged by the ruling above.
+* Input to the LLM path is capped at `PROMISE_GATE_LLM_MAX_INPUT_CHARS`
+  (default 8000, `# @optional` in `.env.example`). Longer text skips the
+  model and gets the heuristic, audited with the `_oversize` source
+  suffix, so per-call token cost and latency are bounded by construction.
 
-The SDK-level 3-second timeout is a separate per-call bound, not the
-latency budget itself, and is enforced via the RTR-correct
-pattern: `async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
+The SDK-level timeout is separate from the budget and is not a
+wall-clock ceiling. The call uses the RTR-correct pattern
+`async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
 anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as client:`.
-`max_retries=0` is load-bearing: the SDK default (`DEFAULT_MAX_RETRIES = 2`)
-retries client-side timeouts, which would silently turn the 3s worst
-case into ~3 attempts plus backoff (~10s) on this call's inline
-delivery path. The semaphore acquire itself is bounded by the same
+That `timeout=3.0` becomes `httpx.Timeout(3.0)`, which bounds connect,
+read, write and pool acquire at 3 seconds **each**, so a single call can
+exceed 3 seconds without firing `APITimeoutError`. The p99 budget above
+is the enforced bound; the audit JSONL is the source of truth for whether
+it holds. `max_retries=0` is load-bearing: the SDK default
+(`DEFAULT_MAX_RETRIES = 2`) retries client-side timeouts, which would
+silently multiply the per-phase bound into ~3 attempts plus backoff
+(~10s) on this call's inline delivery path. The semaphore acquire itself is bounded by the same
 timeout — a caller that cannot get a slot within `RTR_SDK_TIMEOUT` raises
 `TimeoutError` rather than queuing indefinitely, and that wait is measured
 as `queue_wait_ms` on the audit row, separately from the LLM call's own
@@ -445,7 +454,10 @@ under tests.
   zero LLM calls, that the Stop hook's `use_llm=False` call shape issues zero
   LLM calls, and the main path's LLM-exception/timeout fallthrough to the
   heuristic. `TestPollQuestionHeuristicGate` covers the poll-question honesty
-  check (`validate_poll_question` → heuristic, non-blocking `Violation`).
+  check (`validate_poll_question` → heuristic, non-blocking `Violation`) and
+  its `promise_gate_poll` / `promise_gate_poll_disabled` audit rows.
+  `TestLlmInputCap` in `test_promise_gate.py` covers the
+  `PROMISE_GATE_LLM_MAX_INPUT_CHARS` skip and its `_oversize` audit source.
 * [`tests/unit/test_promise_advisory.py`](../../tests/unit/test_promise_advisory.py) —
   `TestPromiseOverride` covers the Job-scoped `promise_recorded_override`
   path against both the heuristic and a real LLM call (Incident A text),

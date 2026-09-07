@@ -1558,7 +1558,9 @@ class TelegramRelayOutputHandler:
         try:
             from bridge.message_drafter import validate_poll_question
 
-            violations = validate_poll_question(question)
+            violations = validate_poll_question(
+                question, session_id=getattr(session, "session_id", None)
+            )
             if violations:
                 logger.warning(
                     "poll question failed %s validation: %s", "telegram_poll", violations

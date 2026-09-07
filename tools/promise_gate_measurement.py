@@ -171,10 +171,12 @@ def _any_negative_keyword_unnegated(evidence_lower: str) -> bool:
        bad outcome, the same shape as leg 1 reached from the other side of
        the keyword, so it applies to asserted-outcome keywords too.
 
-    Known blind spot: a double negation ("not without failures") cancels via
-    leg 2 and is not re-flagged. That shape is vanishingly rare in real
-    evidence text, and the alternative -- a general negation parser -- is far
-    more machinery than a human-reviewed sampling aid warrants.
+    Known blind spots: a double negation ("not without failures") cancels via
+    leg 2 and is not re-flagged, and the prefix test has no word boundary, so
+    a word that merely ends in an absence prefix ("domino failures") also
+    cancels. Both shapes are vanishingly rare in real evidence text, and the
+    alternative -- a general negation parser -- is far more machinery than a
+    human-reviewed sampling aid warrants.
 
     Symmetric to :func:`_any_positive_keyword_unnegated` in that both scope
     their check to a window around the match instead of the whole string.

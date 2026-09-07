@@ -1707,3 +1707,47 @@ class TestPollQuestionHeuristicGate:
         question = "I'll come back with the results — proceed to stage?"
         violations = validate_poll_question(question)
         assert not any(v.rule == "poll_question_promise" for v in violations)
+
+    @staticmethod
+    def _audit_rows(path):
+        import json
+
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_every_poll_decision_writes_an_audit_row(self, tmp_path, monkeypatch):
+        """The poll route is queryable like every other gated route: a
+        ``telegram_poll`` row with ``source="promise_gate_poll"`` on both
+        verdicts, carrying the sending session's id."""
+        from bridge import promise_gate
+        from bridge.message_drafter import validate_poll_question
+
+        log_path = tmp_path / "classification_audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        validate_poll_question(
+            "I'll come back with the results — proceed to stage?", session_id="sess-1"
+        )
+        validate_poll_question("Should we deploy to staging now or wait?", session_id="sess-1")
+
+        rows = self._audit_rows(log_path)
+        assert [r["action"] for r in rows] == ["block", "allow"]
+        assert {r["source"] for r in rows} == {"promise_gate_poll"}
+        assert {r["transport"] for r in rows} == {"telegram_poll"}
+        assert {r["session_id"] for r in rows} == {"sess-1"}
+        assert all("elapsed_ms" in r for r in rows)
+
+    def test_kill_switch_still_writes_a_disabled_audit_row(self, tmp_path, monkeypatch):
+        from bridge import promise_gate
+        from bridge.message_drafter import validate_poll_question
+
+        log_path = tmp_path / "classification_audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        validate_poll_question("I'll come back with the results — proceed to stage?")
+
+        (row,) = self._audit_rows(log_path)
+        assert row["source"] == "promise_gate_poll_disabled"
+        assert row["action"] == "allow"
+        assert row["reason"] == "gate_disabled"
+        assert row["transport"] == "telegram_poll"
