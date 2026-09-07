@@ -1082,11 +1082,201 @@ against it.
 
 ## Step by Step Tasks
 
-_placeholder_
+
+### 0. Capture the before-census (must run first, on unmodified `main`)
+- **Task ID**: capture-baseline
+- **Depends On**: none
+- **Validates**: n/a — this task *produces* the instrument every later check uses
+- **Informed By**: spike-6 (expected end state), spike-1 (baseline is 25/24)
+- **Assigned To**: census-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Confirm the tree is at `8e62c3a50` or later with `python tests/marker_map.py
+  --audit` printing `OK: 25 known, baselined violation(s); 0 new, 0 stale.`
+- Run `python tests/marker_map.py --report` and commit the output verbatim to
+  `tests/data/marker_census_before.tsv`, one `path<TAB>marker` line per tracked
+  file. This is the frozen "before" that acceptance criterion 3 is measured
+  against; it must be captured **before any resolver edit**.
+- Record the real collection counts for every feature marker
+  (`--collect-only -q -m <marker>` per marker) into the PR description.
+- Record `pytest -m reflections --collect-only` over the two reflections
+  packages: expected `34/396 tests collected (362 deselected)`.
+
+### 1. Resolution layer
+- **Task ID**: build-resolver
+- **Depends On**: capture-baseline
+- **Validates**: tests/unit/test_feature_map_markers.py (existing fixtures must
+  stay green), tests/unit/test_marker_resolution.py (create)
+- **Informed By**: spike-2 (directory rule re-measured), spike-4 (whole-token
+  costs 2 losses / 0 changes), spike-6 (final census)
+- **Assigned To**: resolver-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `DIRECTORY_MAP` with the nine entries from Technical Approach, exact-match,
+  with the order-free docstring. Leave `tests/unit/memory_extraction` out.
+- Switch `resolve_marker` from `pattern in stem` to
+  `_whole_token_match(pattern, stem)`. Keep its `(marker, key)` signature.
+- Add `"checkpointing": "validation"` to `FEATURE_MAP`, positioned anywhere, and
+  say in a comment *why* position no longer matters.
+- Add `resolve_markers(path) -> frozenset[str]`: walk ancestors outward, stop at
+  the first `KNOWN_ROOT_DIRS` name, union directory markers with the basename
+  marker. Never removes a basename marker.
+- Extend `--report` to emit the full marker set per line.
+- Make `run_audit()` raise `RuntimeError` on an empty `DIRECTORY_MAP`, matching
+  the existing empty-`FEATURE_MAP` raise.
+- Keep the module standard-library only: no `pytest` import, no file reads.
+
+### 2. Resolver validation
+- **Task ID**: validate-resolver
+- **Depends On**: build-resolver
+- **Assigned To**: census-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Diff `python tests/marker_map.py --report` against
+  `tests/data/marker_census_before.tsv`. Assert the loss set is exactly
+  `{tests/unit/reflections/test_pm_briefings_no_slots_configured.py: config}`
+  and the gain set is exactly the 48 files from spike-6.
+- Confirm the per-marker census: `reflections` 28→48, `sessions` 43→61,
+  `messaging` 61→67, `sdlc` 85→89, `config` 6→5, all others unchanged.
+- Confirm the five `_stem` fidelity fixtures from #3184 still pass untouched.
+
+### 3. Collection hook + the R1 replacement
+- **Task ID**: build-hook
+- **Depends On**: build-resolver
+- **Validates**: tests/unit/test_marker_collection.py (create)
+- **Informed By**: spike-5 (nodeid is rootdir-relative and carries directories),
+  Research finding 1 (`-m` only sees markers added before `deselect_by_mark`)
+- **Assigned To**: hook-builder
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Change `pytest_collection_modifyitems` to apply every marker in
+  `resolve_markers(item.nodeid.split("::")[0])`.
+- **Write the R1 replacement**: a test that runs a *real* pytest collection
+  (`pytest.main` with `--collect-only` in a tmp_path tree, or an inline
+  `pytester` fixture) over a synthetic package named after a `DIRECTORY_MAP` key
+  containing a file whose basename resolves to a *different* marker, and asserts
+  the collected item carries the directory marker. This is the test that must
+  fail when the directory branch is deleted.
+- Write a companion test asserting `-m <dirmarker>` actually *selects* that
+  synthetic item, so a hook-ordering inversion (Risk 5) fails here rather than
+  silently.
+- Assert `resolve_markers` returns an empty frozenset for `""`, `"test_.py"`,
+  a bare basename with no directory, and a file directly under `tests/unit/`.
+
+### 4. Guard rework
+- **Task ID**: build-guard
+- **Depends On**: build-hook, validate-resolver
+- **Validates**: tests/unit/test_feature_map_markers.py
+- **Informed By**: spike-6 (only `memory_extraction` remains under R2)
+- **Assigned To**: guard-builder
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Delete `check_r1`, `check_r3`, and their synthetic tests. Delete
+  `resolve_marker_whole_token` **only if** nothing else needs it — with
+  `resolve_marker` now whole-token, the two are the same function, so keep one
+  and update every caller rather than leaving a shim (no legacy bridges).
+- Narrow `check_r2` to packages absent from `DIRECTORY_MAP`. Keep the tie
+  branch, the order-independence test, and the same-named-package partition
+  tests unchanged.
+- Add `check_r4`: every non-root test package is in `DIRECTORY_MAP` or in
+  `UNMAPPED_PACKAGES` (path-keyed, prose reason, bracketed both ways). Seed it
+  with `tests/unit/memory_extraction` only. Its failure message must name the
+  package and the two remedies.
+- Add a test that every `DIRECTORY_MAP` and `FEATURE_MAP` value is a marker
+  registered in `pyproject.toml`, parsed with `tomllib`.
+- Add a test that `_partition_packages` and the R4 package walk enumerate the
+  same directory set from the same file list.
+- Set `KNOWN_MISTAGS = {}`, rewrite its docstring, keep both bracketing
+  assertions and `test_audit_reports_stale_exemption` working on synthetic data.
+- Add the acceptance-criterion-3 test: compare `resolve_markers` against
+  `tests/data/marker_census_before.tsv` over paths present in both, assert the
+  only regression is the one ratified path.
+
+### 5. Mutation proof (own worktree)
+- **Task ID**: validate-mutation
+- **Depends On**: build-guard
+- **Assigned To**: mutation-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- In a **separate worktree** (no builder may hold this checkout), run three
+  mutations and capture each failure verbatim:
+  1. delete the directory branch from `resolve_markers` → the task-3
+     real-collection test must fail;
+  2. revert `resolve_marker` to substring matching → the `checkpointing`
+     fixture must fail;
+  3. set `DIRECTORY_MAP = {}` → `run_audit()` must raise.
+- Additionally mutate R4: add a synthetic unmapped package → R4 fails; remove
+  the `memory_extraction` entry from `UNMAPPED_PACKAGES` → R4 fails; add an
+  entry for a package that does not exist → the stale-bracket assertion fails.
+- Revert every mutation. Paste all six failure outputs into the PR description.
+  A green suite alone does not close this task.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-guard, validate-mutation
+- **Assigned To**: guard-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Rewrite `docs/features/feature-map-marker-guard.md` per the Documentation
+  section, including the corrected +43/+47/1 figures replacing 39/6 and a
+  re-derived coverage boundary replacing "80 of 835 (9.6%)".
+- Regenerate `tests/README.md`'s per-marker counts from a real collection.
+- Fix the stale "#3184 has exactly one line to change" sentence in `_stem`.
+- Check `docs/features/README.md`'s index row.
+
+### 7. Final validation
+- **Task ID**: validate-all
+- **Depends On**: capture-baseline, build-resolver, validate-resolver,
+  build-hook, build-guard, validate-mutation, document-feature
+- **Assigned To**: final-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table at the final head, not at plan time.
+- Re-run the full `tests/unit/` suite through `scripts/pytest-clean.sh`.
+- Confirm every Success Criterion checkbox.
 
 ## Verification
 
-_placeholder_
+
+Every command runs from the repository root. Counts are the measured values from
+spike-6; a mismatch is a real failure, not a tolerance to widen.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Audit clean | `python tests/marker_map.py --audit` | exit code 0 |
+| Zero violations, not zero *new* | `python tests/marker_map.py --audit` | output contains `OK: 0 known` |
+| `KNOWN_MISTAGS` is empty | `python -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import KNOWN_MISTAGS; sys.exit(0 if KNOWN_MISTAGS == {} else 1)"` | exit code 0 |
+| reflections fully collected | `./scripts/pytest-clean.sh -m reflections --collect-only -q -p no:randomly tests/unit/reflections tests/integration/reflections 2>&1 \| grep -c '^tests/'` | output > 395 |
+| reflections: nothing deselected | `./scripts/pytest-clean.sh -m reflections --collect-only -q -p no:randomly tests/unit/reflections tests/integration/reflections 2>&1 \| grep -c 'deselected'` | match count == 0 |
+| Guard suite green | `./scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py tests/unit/test_marker_resolution.py tests/unit/test_marker_collection.py -q` | exit code 0 |
+| Census: exactly one marker lost | `python scripts/marker_census_diff.py tests/data/marker_census_before.tsv --expect-losses tests/unit/reflections/test_pm_briefings_no_slots_configured.py:config` | exit code 0 |
+| Census: 43 files gain a marker | `python scripts/marker_census_diff.py tests/data/marker_census_before.tsv --count-gained` | output contains `43` |
+| `DIRECTORY_MAP` is populated | `python -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import DIRECTORY_MAP; sys.exit(0 if len(DIRECTORY_MAP) >= 9 else 1)"` | exit code 0 |
+| Empty `DIRECTORY_MAP` fails loudly | `python -c "import sys; sys.path.insert(0,'.'); import tests.marker_map as m; m.DIRECTORY_MAP={}; ${'t'}ry: m.run_audit(); sys.exit(1)\nexcept RuntimeError: sys.exit(0)"` | exit code 0 |
+| R1 is retired, not renamed | `grep -c 'def check_r1' tests/marker_map.py` | match count == 0 |
+| R3 is retired, not renamed | `grep -c 'def check_r3' tests/marker_map.py` | match count == 0 |
+| R4 exists | `grep -c 'def check_r4' tests/marker_map.py` | output > 0 |
+| **Anti-criterion** — no `pytest` import in the bare-interpreter module | `grep -cE '^(import pytest\|from pytest)' tests/marker_map.py` | match count == 0 |
+| **Anti-criterion** — no file-content reading (that is #3223's territory, No-Go) | `grep -cE 'read_text\|open\(\|\bast\.' tests/marker_map.py` | match count == 0 |
+| Bare-interpreter execution still works | `/usr/bin/python3 tests/marker_map.py --count` | output > 800 |
+| Every marker value is registered | `./scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -k registered -q` | exit code 0 |
+| Full unit suite | `./scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Stale 39/6 figure removed from the feature doc | `grep -c 'Gains 39 markers' docs/features/feature-map-marker-guard.md` | match count == 0 |
+| Stale coverage boundary removed | `grep -c '80 of 835' docs/features/feature-map-marker-guard.md` | match count == 0 |
+| Stale `_stem` comment removed | `grep -c '#3184 has exactly one line to change' tests/marker_map.py` | match count == 0 |
+
+`scripts/marker_census_diff.py` is a small helper this plan creates: it reads the
+frozen `path<TAB>markers` snapshot, recomputes the current marker set for every
+path still tracked, and reports gains, losses, and the per-marker census. It is
+the mechanical form of acceptance criterion 3.
+
+**Red-state proof requirement.** The three anti-criterion rows and the two
+retirement rows must each be demonstrated FAILING against a deliberately
+violating input before the PR is opened, with the FAIL output pasted into the PR
+description. A grep-based anti-criterion that has never been seen to fire is
+indistinguishable from a typo'd pattern.
 
 ## Critique Results
 
@@ -1096,4 +1286,44 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+
+1. **Ratify the single marker removal.**
+   `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` currently
+   carries `config`, acquired because `config` is a literal substring of
+   `configured`. Under whole-token matching it loses `config` and gains
+   `reflections` from its package. This is the **only** file in the suite that
+   loses a marker (spike-4 and spike-6 both measured it), and it is the one
+   place where acceptance criterion 3 read verbatim — "no test file loses a
+   marker it currently has" — is not satisfied. The plan's position is that the
+   criterion's intent is to prevent silent coverage regression, and deliberately
+   removing one measured-wrong marker while adding the right one is the drain
+   working rather than a regression. `-m config` drops from 6 files to 5, and no
+   script, `addopts`, or CI path in the repo passes `-m config`. **Confirm, or
+   say the criterion is literal — in which case whole-token matching is dropped,
+   the two R3 entries stay in `KNOWN_MISTAGS` with policy reasons, and
+   acceptance criterion 1 is met by the escape hatch instead of by emptying.**
+
+2. **Are `hooks` → `sdlc` and `session_runner` → `sessions` the right
+   markers?** These two new `DIRECTORY_MAP` entries are what drain the R2
+   baseline, and they hand markers to 23 files at once. `sdlc` is registered as
+   "SDLC pipeline stages, observer, steering, **hooks**", which reads as
+   confirmation. `session_runner` is the headless turn runner, which sits
+   between `sessions` ("lifecycle, watchdog, stall detection, recovery") and
+   `sdlc`; two of its files already declare `pytest.mark.sdlc` explicitly, and
+   because the union is additive they keep it either way. Is `sessions` the
+   intended home, or should `session_runner` map to `sdlc`?
+
+3. **Is retiring R1 and R3 acceptable, given #3010 shipped one day earlier?**
+   The plan's argument is that both rules detect defect classes the new
+   resolution makes impossible, that #3184 set the precedent for closing a
+   mechanism rather than exempting it, and that R4 replaces the guard's
+   forward-looking value. It pays for the claim with six red-state mutation
+   proofs. If the preference is to keep R1 and R3 running as
+   permanently-tautological rules for reassurance, say so — the cost is two
+   rules that can never fail, which is its own kind of silent hole.
+
+4. **Should `tests/unit/memory_extraction/` get a marker?** It is the one
+   package left unmapped, because no `memory` marker exists and inventing one
+   touches `pyproject.toml` and the marker taxonomy. Five files stay unmarked.
+   Add a `memory` marker in this plan, map the package to `context`, or leave it
+   unmapped with a recorded reason (the plan's current choice)?
