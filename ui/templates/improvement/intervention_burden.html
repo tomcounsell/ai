@@ -1,0 +1,81 @@
+{# Improvement: intervention burden (#3177).
+
+   How often a human had to step in, split by kind. Raw counts sit beside every
+   share on purpose: a share alone cannot distinguish "fewer rescues because the
+   work got better" from "fewer rescues because less work ran" or "because the
+   collector stopped".
+
+   "unknown" is expected to be the largest bucket and that is not a defect. A
+   regex cannot tell a rescue from a preference most of the time, and the
+   detector is built to say so rather than to guess confidently.
+#}
+<div class="improvement-panel" id="improvement-burden">
+    {% if burden.no_evidence_yet %}
+    <p class="improvement-warning">
+        No corrections recorded in the last {{ burden.window_days }} days.
+        Read this as "nothing observed", not as "nothing happened" — check the
+        coverage panel above before drawing any conclusion from it.
+    </p>
+    {% else %}
+    <div class="stats-group-cards">
+        <div class="stat-card">
+            <span class="stat-card-label">Corrections</span>
+            <span class="stat-card-value">{{ burden.total_corrections }}</span>
+        </div>
+        <div class="stat-card">
+            <span class="stat-card-label">Architectural</span>
+            <span class="stat-card-value">{{ burden.architectural }}</span>
+        </div>
+        <div class="stat-card">
+            <span class="stat-card-label">Unclassified</span>
+            <span class="stat-card-value">{{ burden.unclassified }}</span>
+        </div>
+    </div>
+
+    <table class="improvement-table">
+        <thead>
+            <tr><th>Classification</th><th>Count</th><th>Share</th></tr>
+        </thead>
+        <tbody>
+        {% for entry in burden.breakdown %}
+            <tr>
+                <td>{{ entry.classification }}</td>
+                <td>{{ entry.count }}</td>
+                <td>{% if entry.share is not none %}{{ '%.0f%%' | format(entry.share * 100) }}{% else %}—{% endif %}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {% if burden.recent %}
+    <h4>Most recent</h4>
+    <ul class="improvement-list">
+        {% for item in burden.recent %}
+        <li>
+            <span class="improvement-tag">{{ item.classification }}</span>
+            {{ item.text }}
+            {% if item.session_id %}<code>{{ item.session_id }}</code>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% endif %}
+
+    {% if assumptions %}
+    <h4>Proceeding on assumption</h4>
+    <p class="improvement-meta">
+        The controller asks nobody anything. An uncertainty it could not resolve
+        from memory or the open web becomes a recorded assumption instead of a
+        question in someone's queue — which only works if you can see it.
+    </p>
+    <ul class="improvement-list">
+        {% for item in assumptions %}
+        <li>
+            <span class="improvement-tag">{{ item.kind }}</span>
+            {{ item.assumption }}
+            {% if item.uncertainty %}<em>({{ item.uncertainty }})</em>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</div>

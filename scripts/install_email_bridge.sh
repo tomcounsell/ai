@@ -219,10 +219,10 @@ PYEOF
 # -----------------------------------------------------------------------------
 # Validate and bootstrap.
 # No watchdog: KeepAlive=true gives launchd-level restart on crash, mirroring
-# install_autoexperiment.sh and install_nightly_tests.sh which also rely on
-# KeepAlive alone. The com.valor.bridge-watchdog launchd service is specific
-# to the Telegram bridge's Telethon session-lock failure mode and does not
-# apply to the email bridge.
+# install_nightly_tests.sh which also relies on KeepAlive alone. The
+# com.valor.bridge-watchdog launchd service is specific to the Telegram
+# bridge's Telethon session-lock failure mode and does not apply to the
+# email bridge.
 # -----------------------------------------------------------------------------
 if ! plutil -lint "$PLIST_DST" > /dev/null; then
     echo "ERROR: Generated plist is invalid"

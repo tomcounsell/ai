@@ -153,16 +153,20 @@ def _derive_task_type(session, applied_tags: list[str]) -> str | None:
     """Derive a task_type from session fields using pattern-based rules.
 
     Priority order:
-    1. rework_triggered=True → "rework-triggered"
-    2. classification_type=="bug" → "bug-fix"
-    3. SDLC stage markers in tags/transcript → "sdlc-{stage}"
+    1. classification_type=="bug" → "bug-fix"
+    2. SDLC stage markers in tags/transcript → "sdlc-{stage}"
        - "pr-created" in tags → "sdlc-build"
        - "tested" in tags and SDLC branch → "sdlc-test"
        - SDLC branch + slug but no PR yet → "sdlc-plan"
-    4. SDLC branch + slug + "pr-created" → "sdlc-build" (already covered above)
-    5. slug set + no PR created → "greenfield-feature"
-    6. SDLC branch without slug → generic SDLC, skip (not specific enough)
-    7. None — do not force classification
+    3. slug set + no SDLC branch markers → "greenfield-feature"
+    4. SDLC branch without slug → generic SDLC, skip (not specific enough)
+    5. None — do not force classification
+
+    A "rework-triggered" rule used to sit above all of these. It read a session
+    field that no production code ever wrote, so it never fired; #3177 removed
+    the field and the rule together. Rework is now derived from
+    ``ImprovementEvidence`` rows classified "architectural", which have a real
+    writer.
 
     No LLM calls — purely pattern-based.
 
@@ -178,7 +182,6 @@ def _derive_task_type(session, applied_tags: list[str]) -> str | None:
     classification = getattr(session, "classification_type", None) or ""
     branch = getattr(session, "branch_name", None) or ""
     slug = getattr(session, "slug", None)
-    rework = getattr(session, "rework_triggered", None)
 
     # Combine persisted tags with newly-applied ones for pattern matching
     persisted_tags = list(session.tags or [])
@@ -186,15 +189,11 @@ def _derive_task_type(session, applied_tags: list[str]) -> str | None:
 
     is_sdlc_branch = branch.startswith("session/")
 
-    # Priority 1: rework_triggered flag
-    if str(rework).lower() == "true":
-        return "rework-triggered"
-
-    # Priority 2: bug classification
+    # Priority 1: bug classification
     if classification == "bug":
         return "bug-fix"
 
-    # Priority 3: SDLC stage from transcript/tag markers
+    # Priority 2: SDLC stage from transcript/tag markers
     if is_sdlc_branch:
         if "pr-created" in all_tags:
             return "sdlc-build"
@@ -204,7 +203,7 @@ def _derive_task_type(session, applied_tags: list[str]) -> str | None:
             # Has a slug but no PR yet — likely in planning stage
             return "sdlc-plan"
 
-    # Priority 4: slug set + no SDLC branch markers → greenfield feature
+    # Priority 3: slug set + no SDLC branch markers → greenfield feature
     if slug and not is_sdlc_branch:
         return "greenfield-feature"
 

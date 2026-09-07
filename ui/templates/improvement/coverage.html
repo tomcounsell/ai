@@ -1,0 +1,44 @@
+{# Improvement: observation coverage (#3177).
+
+   The denominator panel. Every rate the improvement loop reports is only as
+   readable as the coverage behind it: a falling correction count with a
+   falling scan count is not an improvement, and this panel is what makes the
+   two distinguishable. It also says plainly when the collector has gone quiet,
+   because a silent collector produces the same comforting zeros as a system
+   with nothing to correct.
+#}
+<div class="improvement-panel" id="improvement-coverage">
+    {% if coverage.collector_silent %}
+    <p class="improvement-warning">
+        No evidence recorded in the last {{ coverage.window_days }} days.
+        Every count on this page is a count of nothing until the
+        <code>improvement-evidence-collect</code> reflection runs.
+    </p>
+    {% else %}
+    <p class="improvement-meta">
+        Last observation {{ coverage.last_collected_at.strftime('%Y-%m-%d %H:%M UTC') }},
+        over a {{ coverage.window_days }}-day window.
+    </p>
+    {% endif %}
+
+    <div class="stats-group-cards">
+        <div class="stat-card">
+            <span class="stat-card-label">Evidence rows</span>
+            <span class="stat-card-value">{{ coverage.total }}</span>
+        </div>
+        <div class="stat-card">
+            <span class="stat-card-label">Collection ticks</span>
+            <span class="stat-card-value">{{ coverage.ticks_observed }}</span>
+        </div>
+        {% for kind, count in coverage.by_kind | dictsort %}
+        <div class="stat-card">
+            <span class="stat-card-label">{{ kind | replace('_', ' ') }}</span>
+            <span class="stat-card-value">{{ count }}</span>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if coverage.latest_coverage_text %}
+    <p class="improvement-meta">{{ coverage.latest_coverage_text }}</p>
+    {% endif %}
+</div>

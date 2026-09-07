@@ -16,6 +16,14 @@ Provides fast, queryable Redis models for all persistent data:
 - DocumentChunk: per-chunk embeddings for fine-grained document search
 - PRReviewAudit: deduplication tracker for PR review audit findings
 - SideEffectJob: durable post-session side effects, retried by the drain reflection
+- ImprovementCharter: immutable versions of the improvement controller's charter
+- ImprovementEvidence: durable observations the improvement loop reasons from
+- ImprovementModelRevision: revisions of the system's model of itself
+- ImprovementCase: weaknesses the system has decided to pursue
+- ImprovementInvestigation: bounded acts of finding something out
+- ImprovementExperiment: candidate changes under frozen, preregistered contracts
+- ImprovementEvaluation: paired, blinded measurements of a candidate
+- ImprovementRelease: qualified candidates proposed for human review
 """
 
 # Install the popoto version-floor interlock BEFORE any model class is
@@ -34,6 +42,14 @@ from models.chat import Chat  # noqa: E402
 from models.dead_letter import DeadLetter  # noqa: E402
 from models.dedup import DedupRecord  # noqa: E402
 from models.document_chunk import DocumentChunk  # noqa: E402
+from models.improvement_case import ImprovementCase  # noqa: E402
+from models.improvement_charter import ImprovementCharter  # noqa: E402
+from models.improvement_evaluation import ImprovementEvaluation  # noqa: E402
+from models.improvement_evidence import ImprovementEvidence  # noqa: E402
+from models.improvement_experiment import ImprovementExperiment  # noqa: E402
+from models.improvement_investigation import ImprovementInvestigation  # noqa: E402
+from models.improvement_model_revision import ImprovementModelRevision  # noqa: E402
+from models.improvement_release import ImprovementRelease  # noqa: E402
 from models.job import Job  # noqa: E402
 from models.knowledge_document import KnowledgeDocument  # noqa: E402
 from models.link import Link  # noqa: E402
@@ -57,6 +73,14 @@ __all__ = [
     "BridgeEvent",
     "DocumentChunk",
     "KnowledgeDocument",
+    "ImprovementCase",
+    "ImprovementCharter",
+    "ImprovementEvaluation",
+    "ImprovementEvidence",
+    "ImprovementExperiment",
+    "ImprovementInvestigation",
+    "ImprovementModelRevision",
+    "ImprovementRelease",
     "Job",
     "PRReviewAudit",
     "Reflection",

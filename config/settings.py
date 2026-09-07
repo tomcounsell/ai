@@ -563,6 +563,92 @@ class HybridEvalSettings(BaseModel):
     )
 
 
+class ImprovementSettings(BaseModel):
+    """Bounds for the recursive self-improvement controller (#3177).
+
+    The controller finds its own weaknesses, gathers what it needs to know,
+    tests candidate changes, and proposes measured improvements. These are the
+    limits it runs inside. Immutable, human-approved scope on top of them lives
+    in ``ImprovementCharter`` records in Redis, not here — a setting is a
+    default, a charter is an authorization, and the controller can amend
+    neither.
+
+    There is deliberately **no** setting bounding how many questions the
+    controller may ask a human per day. The bound is zero and the capability
+    does not exist: the controller asks Tom nothing. It resolves uncertainty
+    from Tom-sourced memories and online research, and records what it cannot
+    resolve as a provisional assumption with its evidence, surfaced on the
+    dashboard as an assumption rather than a fact. An anti-criterion in
+    ``docs/plans/recursive-self-improvement.md`` fails the build if a question
+    path reappears anywhere in bridge/, tools/, config/, models/, or ui/.
+
+    Budget is two units, neither of them a per-experiment dollar ceiling for
+    Claude. Claude work runs on the subscription and is budgeted as SDLC lane
+    concurrency; external LLM calls run through the existing OpenRouter path
+    against a daily dollar pool, settled per call from reported usage, with the
+    controller and the evaluator drawing separate reservations from it.
+
+    Every default here is PROVISIONAL/TUNABLE. ``enabled`` defaults to False:
+    nothing in this system runs until it is deliberately turned on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the improvement controller. False means no "
+            "controller tick runs, no research session is dispatched, and no "
+            "evidence-collection adapter writes. The evidence-collection "
+            "reflection stays registered either way so turning this on needs "
+            "no re-registration. Env: IMPROVEMENT__ENABLED."
+        ),
+    )
+    max_concurrent_research_sessions: int = Field(
+        default=1,
+        ge=0,
+        le=4,
+        description=(
+            "How many research sessions may hold a lane slot at once. One is "
+            "the budgeted unit for Claude work: the subscription is the "
+            "constraint, so concurrency is the currency. Raising this competes "
+            "directly with ordinary SDLC lanes. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__MAX_CONCURRENT_RESEARCH_SESSIONS."
+        ),
+    )
+    daily_external_llm_usd: float = Field(
+        default=10.00,
+        ge=0.0,
+        description=(
+            "Daily dollar pool for non-Claude LLM calls through the OpenRouter "
+            "path, settled per call from the usage reported in each response "
+            "envelope. The controller and the evaluator draw separate "
+            "reservations from this one pool, so a runaway research loop "
+            "cannot starve the evaluator that would catch it. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__DAILY_EXTERNAL_LLM_USD."
+        ),
+    )
+    portfolio_allocation: str = Field(
+        default="architectural=0.5,stakeholder=0.25,quality=0.25",
+        description=(
+            "How research effort is split across the three charter objectives, "
+            "as comma-separated ``objective=weight`` pairs. Read as a "
+            "portfolio, not a target: an objective starved for several cycles "
+            "is a signal to look at, not a quota to fill. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__PORTFOLIO_ALLOCATION."
+        ),
+    )
+    controller_tick_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description=(
+            "Cadence of the controller and evidence-collection ticks, in "
+            "seconds. Matches the cadence the evidence-collection reflection "
+            "registers with. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__CONTROLLER_TICK_SECONDS."
+        ),
+    )
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings."""
 
@@ -1137,6 +1223,7 @@ class Settings(BaseSettings):
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     session_runner: SessionRunnerSettings = Field(default_factory=SessionRunnerSettings)
+    improvement: ImprovementSettings = Field(default_factory=ImprovementSettings)
 
     @field_validator("environment")
     @classmethod

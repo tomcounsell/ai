@@ -112,3 +112,121 @@ class TestLengthSafeFilenameSanitize:
 
         name = store._sanitize_filename(key)
         assert len(name.encode("utf-8")) <= 50
+
+
+# ===================================================================
+# VerifyingArtifactStore (#3177)
+# ===================================================================
+
+
+@pytest.fixture
+def verifying_store(tmp_path):
+    from models.verifying_artifact_store import VerifyingArtifactStore
+
+    return VerifyingArtifactStore(base_path=str(tmp_path / "artifacts"))
+
+
+@pytest.mark.unit
+class TestVerifyingArtifactStore:
+    """Every load path re-hashes, archive fallback included.
+
+    Popoto's FilesystemStore.load() verifies the live file and then, on a
+    mismatch or a missing live file, returns the archived bytes WITHOUT
+    re-hashing them. For a document chunk that is harmless. For evaluation
+    evidence it turns a corrupted file into a scored result, which is exactly
+    what docs/plans/recursive-self-improvement.md exists to prevent.
+    """
+
+    def test_round_trip(self, verifying_store):
+        ref = verifying_store.save(b"manifest bytes", key="exp-1", model_class_name="Exp")
+        assert verifying_store.load(ref) == b"manifest bytes"
+
+    def test_corrupted_live_file_with_no_archive_raises(self, verifying_store):
+        from models.verifying_artifact_store import ArtifactIntegrityError
+
+        ref = verifying_store.save(b"original", key="exp-2", model_class_name="Exp")
+        _, relative = verifying_store._parse_reference(ref)
+        live = os.path.join(verifying_store.base_path, relative)
+        with open(live, "wb") as f:
+            f.write(b"tampered")
+
+        with pytest.raises(ArtifactIntegrityError):
+            verifying_store.load(ref)
+
+    def test_corrupted_archive_raises_instead_of_returning_bytes(self, verifying_store):
+        """The behavior this subclass exists for.
+
+        Save twice so the first version lands in .versions/, then corrupt BOTH
+        the archived copy and the live file. The parent would fall through to
+        the archive and hand back the tampered bytes unverified; this store
+        refuses.
+        """
+        from models.verifying_artifact_store import ArtifactIntegrityError
+
+        first_ref = verifying_store.save(b"version one", key="exp-3", model_class_name="Exp")
+        verifying_store.save(b"version two", key="exp-3", model_class_name="Exp")
+
+        content_hash, relative = verifying_store._parse_reference(first_ref)
+        archive = verifying_store._version_path(content_hash)
+        assert os.path.exists(archive), "precondition: the first version was archived"
+
+        with open(archive, "wb") as f:
+            f.write(b"tampered archive")
+
+        with pytest.raises(ArtifactIntegrityError):
+            verifying_store.load(first_ref)
+
+    def test_parent_would_have_returned_the_tampered_archive(self, tmp_path):
+        """Mutation guard: prove the parent really is unsafe here.
+
+        Without this, the test above could pass against a parent that already
+        verified, and the subclass would be guarding nothing.
+        """
+        parent = FilesystemStore(base_path=str(tmp_path / "parent"))
+        first_ref = parent.save(b"version one", key="exp-4", model_class_name="Exp")
+        parent.save(b"version two", key="exp-4", model_class_name="Exp")
+
+        content_hash, _ = parent._parse_reference(first_ref)
+        archive = parent._version_path(content_hash)
+        with open(archive, "wb") as f:
+            f.write(b"tampered archive")
+
+        # The parent hands back bytes that do not hash to the reference.
+        assert parent.load(first_ref) == b"tampered archive"
+
+    def test_intact_archive_still_loads(self, verifying_store):
+        """Verification must not break the legitimate archive fallback."""
+        first_ref = verifying_store.save(b"version one", key="exp-5", model_class_name="Exp")
+        verifying_store.save(b"version two", key="exp-5", model_class_name="Exp")
+
+        assert verifying_store.load(first_ref) == b"version one"
+
+    def test_missing_artifact_is_not_found_not_an_integrity_error(self, verifying_store):
+        """Absence and corruption are different problems and read differently."""
+        ref = verifying_store.save(b"gone soon", key="exp-6", model_class_name="Exp")
+        _, relative = verifying_store._parse_reference(ref)
+        os.unlink(os.path.join(verifying_store.base_path, relative))
+
+        with pytest.raises(FileNotFoundError):
+            verifying_store.load(ref)
+
+    def test_exists_is_false_for_a_corrupted_artifact(self, verifying_store):
+        """exists() True must still imply load() succeeds."""
+        ref = verifying_store.save(b"original", key="exp-7", model_class_name="Exp")
+        assert verifying_store.exists(ref) is True
+
+        _, relative = verifying_store._parse_reference(ref)
+        with open(os.path.join(verifying_store.base_path, relative), "wb") as f:
+            f.write(b"tampered")
+
+        assert verifying_store.exists(ref) is False
+
+    def test_retention_root_is_separate_from_the_shared_content_path(self, monkeypatch, tmp_path):
+        from models.verifying_artifact_store import VerifyingArtifactStore, _default_base_path
+
+        monkeypatch.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", str(tmp_path / "custom"))
+        assert _default_base_path() == str(tmp_path / "custom")
+        assert VerifyingArtifactStore().base_path == str(tmp_path / "custom")
+
+        monkeypatch.delenv("POPOTO_IMPROVEMENT_CONTENT_PATH")
+        assert _default_base_path().endswith(os.path.join("data", "improvement_content"))

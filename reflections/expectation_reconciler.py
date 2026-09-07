@@ -240,6 +240,35 @@ def _owner_is_gone(owner: str) -> bool | None:
 # --- Shipped-work guard (Race 2's sole collision guard) ---------------------
 
 
+def _record_shipped_work_evidence(
+    project_key: str, job_id: str, eid: str, owner: str, evidence: str
+) -> None:
+    """Persist the shipped-work signal this run just computed (#3177).
+
+    ``_shipped_evidence`` does a fresh git/GitHub read and the reconciler acts
+    on it and then discards it, so the system has never been able to answer
+    "how often did a lane ship without discharging its expectation?" — the
+    exact shape of the intervention burden the improvement controller measures.
+    One durable row per ``(job, expectation)``, deduped so re-running the
+    reconciler does not inflate the count.
+
+    Fail-soft by construction: the reconciler's own decision must not depend on
+    an evidence write succeeding.
+    """
+    try:
+        from models.improvement_evidence import ImprovementEvidence
+
+        ImprovementEvidence.record_once(
+            project_key,
+            "shipped_work",
+            source_ref=f"shipped:{job_id}:{eid}",
+            text=f"lane {owner} shipped without discharging: {evidence}",
+            detail=evidence,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("expectation_reconciler: shipped-work evidence write failed: %s", exc)
+
+
 def _lane_slug(owner: str) -> str | None:
     """Best-effort branch slug for the recorded owner."""
     slug = owner[len("session/") :] if owner.startswith("session/") else owner
@@ -477,6 +506,7 @@ def _reconcile_project(project: dict) -> dict:
                 pm = _live_pm_session(project_key, str(entry.get("holder") or ""))
 
                 if evidence is not None:
+                    _record_shipped_work_evidence(project_key, job.job_id, eid, owner, evidence)
                     # Shipped work is never respawned: evidence goes to a PM
                     # for deliberate discharge.
                     message = (
