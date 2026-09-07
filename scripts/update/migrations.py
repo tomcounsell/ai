@@ -1283,7 +1283,22 @@ def _migrate_side_effect_job_model(project_dir: Path) -> str | None:
             if Memory.query.filter(agent_id=f"extraction-{session_id}").count():
                 continue
             try:
-                enqueue("memory_extraction", session_id, getattr(session, "project_key", None))
+                # `run_post_session_extraction` requires `response_text`
+                # positionally (agent/memory_extraction.py:1663-1669); the
+                # migration has no access to a completed session's actual
+                # response text, so it passes the minimum payload that
+                # satisfies the signature. An empty string short-circuits the
+                # observation-extraction step (the <50-char guard) but still
+                # runs outcome detection for any injected thoughts, and --
+                # unlike a payload-less enqueue -- it does not raise
+                # `TypeError` on every attempt, dead-letter, and re-enqueue
+                # itself forever through the replay reflection (#3183 review).
+                enqueue(
+                    "memory_extraction",
+                    session_id,
+                    getattr(session, "project_key", None),
+                    {"response_text": ""},
+                )
                 enqueued += 1
             except Exception as e:  # noqa: BLE001 -- one session never stops the sweep
                 logger.warning("side_effect_job_model: enqueue for %s failed: %s", session_id, e)

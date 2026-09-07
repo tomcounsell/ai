@@ -246,16 +246,46 @@ async def replay_dead_letters(client) -> int:
 
 
 async def _replay_side_effect(letter: DeadLetter) -> bool:
-    """Re-enqueue a side-effect job whose handler exhausted its attempts."""
-    import asyncio
+    """Re-enqueue a side-effect job whose handler exhausted its attempts.
 
-    from agent.side_effects import enqueue
+    Declines (returns ``False``) when the reconstructed payload cannot
+    satisfy the handler's signature. Re-enqueueing it anyway would recreate
+    the identical job, which fails identically, dead-letters identically, and
+    is offered for replay again -- a self-sustaining cycle with no exit,
+    because a successful re-enqueue always deletes the letter (see
+    ``replay_stage``) regardless of whether the new job can actually run.
+    The concrete case this closes: the ``/update`` back-enqueue minting a
+    ``memory_extraction`` job with no ``response_text`` in its payload, which
+    used to regenerate itself roughly every 12 minutes on every fleet
+    machine (#3183 review). Declining routes the row through `_fail_replay` /
+    `MAX_REPLAY_ATTEMPTS` instead, so it eventually stops being offered.
+    """
+    import asyncio
+    import inspect
+
+    from agent.side_effects import enqueue, resolve_handler
 
     payload = json.loads(letter.payload_json or "{}")
     kind = payload.pop("_kind", "memory_extraction")
     session_id = payload.pop("_session_id", None)
     if not session_id:
         return False
+
+    handler = resolve_handler(kind)
+    if handler is not None:
+        try:
+            inspect.signature(handler).bind(session_id, **(payload or {}))
+        except TypeError as e:
+            logger.warning(
+                "Dead-letter replay declined for %s/%s: payload cannot satisfy "
+                "the %s handler's signature (%s)",
+                kind,
+                session_id,
+                kind,
+                e,
+            )
+            return False
+
     await asyncio.to_thread(
         lambda: enqueue(kind, session_id, letter.project_key or "", payload or None)
     )

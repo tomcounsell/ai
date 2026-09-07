@@ -321,3 +321,78 @@ class TestReplayAttemptCap:
         assert dead_letters.is_replayable(letter) is False
         letter.replayable = "True"
         assert dead_letters.is_replayable(letter) is True
+
+
+class TestReplaySideEffectDeclinesAnUnbindablePayload:
+    """A payload that cannot satisfy the handler's signature must not be
+    re-enqueued (#3183 review blocker 3).
+
+    Re-enqueueing it anyway recreates the identical job, which fails
+    identically and dead-letters identically, and a successful re-enqueue
+    always deletes the letter (``replay_stage``) regardless of whether the
+    new job can run -- a self-sustaining cycle with no exit. The concrete
+    case: the ``/update`` back-enqueue used to mint a ``memory_extraction``
+    job with no ``response_text`` in its payload, and this replayed itself
+    roughly every 12 minutes on every fleet machine forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_declines_a_payload_that_cannot_bind_the_handler(self):
+        from bridge.dead_letters import _replay_side_effect
+
+        async def _needs_response_text(session_id, response_text, project_key=None):
+            raise AssertionError("must never be invoked by the replay path")
+
+        letter = MagicMock()
+        letter.payload_json = '{"_kind": "memory_extraction", "_session_id": "s1"}'
+        letter.project_key = "valor"
+
+        with (
+            patch("agent.side_effects.resolve_handler", lambda kind: _needs_response_text),
+            patch("agent.side_effects.enqueue") as mock_enqueue,
+        ):
+            result = await _replay_side_effect(letter)
+
+        assert result is False
+        mock_enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_replays_a_payload_that_does_satisfy_the_handler(self):
+        from bridge.dead_letters import _replay_side_effect
+
+        async def _needs_response_text(session_id, response_text, project_key=None):
+            return None
+
+        letter = MagicMock()
+        letter.payload_json = (
+            '{"_kind": "memory_extraction", "_session_id": "s1", "response_text": "hi"}'
+        )
+        letter.project_key = "valor"
+
+        with (
+            patch("agent.side_effects.resolve_handler", lambda kind: _needs_response_text),
+            patch("agent.side_effects.enqueue") as mock_enqueue,
+        ):
+            result = await _replay_side_effect(letter)
+
+        assert result is True
+        mock_enqueue.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_kind_is_not_declined_by_the_signature_check(self):
+        """No handler to check against -> fall through to the existing
+        no-session_id / enqueue behavior rather than false-declining."""
+        from bridge.dead_letters import _replay_side_effect
+
+        letter = MagicMock()
+        letter.payload_json = '{"_kind": "some_future_kind", "_session_id": "s1"}'
+        letter.project_key = "valor"
+
+        with (
+            patch("agent.side_effects.resolve_handler", lambda kind: None),
+            patch("agent.side_effects.enqueue") as mock_enqueue,
+        ):
+            result = await _replay_side_effect(letter)
+
+        assert result is True
+        mock_enqueue.assert_called_once()

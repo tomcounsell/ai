@@ -530,3 +530,88 @@ class TestClearDocsAuditLivenessKeys:
         fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
         assert fn is _migrate_clear_docs_audit_liveness_keys
         assert description
+
+
+class _FakeCountQuery:
+    """Stand-in for ``Memory.query.filter(...)``: only ``.count()`` is used."""
+
+    def count(self):
+        return 0
+
+
+class _FakeMemoryQuery:
+    @staticmethod
+    def filter(**kwargs):
+        return _FakeCountQuery()
+
+
+class _FakeMemory:
+    query = _FakeMemoryQuery()
+
+
+class _FakeSession:
+    def __init__(self, session_id: str, completed_at, project_key: str = "test-migration"):
+        self.session_id = session_id
+        self.completed_at = completed_at
+        self.project_key = project_key
+
+
+class _FakeSessionQuery:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def filter(self, **kwargs):
+        return self._rows
+
+
+class _FakeAgentSession:
+    def __init__(self, rows: list):
+        self.query = _FakeSessionQuery(rows)
+
+
+class TestSideEffectJobMigrationPayload:
+    """The back-enqueue must give the handler a payload it can bind (#3183 review blocker 3).
+
+    ``scripts/update/migrations.py:1286`` used to call ``enqueue()`` with no
+    payload at all. ``run_post_session_extraction`` requires ``response_text``
+    positionally (``agent/memory_extraction.py:1663-1669``), so every
+    back-enqueued job raised ``TypeError`` on all 4 attempts, became a
+    ``DeadLetter(stage="extraction", replayable=True)``, and the replay path
+    re-enqueued the identical payload-less job forever. Hermetic: the
+    ``AgentSession``/``Memory`` lookups and ``agent.side_effects.enqueue``
+    are all faked so this test exercises exactly the payload construction,
+    not the shared test Redis db's accumulated session history.
+    """
+
+    def test_back_enqueue_payload_satisfies_the_handler_signature(self, monkeypatch):
+        import inspect
+
+        from agent.memory_extraction import run_post_session_extraction
+        from scripts.update.migrations import _migrate_side_effect_job_model
+
+        session_id = f"test-mig-sideeffect-{uuid.uuid4().hex[:8]}"
+        fake_session = _FakeSession(session_id, datetime.now(UTC))
+
+        monkeypatch.setattr("models.agent_session.AgentSession", _FakeAgentSession([fake_session]))
+        monkeypatch.setattr("models.memory.Memory", _FakeMemory)
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.side_effects.enqueue",
+            lambda *a, **k: calls.append((a, k)) or "fake-job-id",
+        )
+
+        result = _migrate_side_effect_job_model(Path("."))
+
+        assert result is None
+        assert len(calls) == 1, "the migration must back-enqueue exactly one job"
+        args, kwargs = calls[0]
+        assert args[0] == "memory_extraction"
+        assert args[1] == session_id
+        payload = args[3] if len(args) > 3 else kwargs.get("payload")
+        assert payload == {"response_text": ""}
+
+        # The concrete defect: a payload-less call cannot bind
+        # run_post_session_extraction's signature and raises TypeError on
+        # every attempt. A payload of {"response_text": ""} must bind clean.
+        inspect.signature(run_post_session_extraction).bind(session_id, **payload)
