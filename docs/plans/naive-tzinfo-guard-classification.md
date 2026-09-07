@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3181
 last_comment_id: 5564069727
+revision_applied: true
+revision_applied_at: 2026-09-07T02:35:50Z
 ---
 
 # Classify the remaining naive-tzinfo guards by the #3173 rule
@@ -68,6 +70,7 @@ Every one of the 32 sites carries a settled verdict. Popoto-only guards are gone
 - **PR #787 / issue #777** — "Fix watchdog UTC duration: `_to_timestamp` treats naive datetimes as local time". Succeeded. It is *why* `monitoring/session_watchdog.py:65` exists: without the guard, a non-UTC host inflated every duration by its offset and fired false `LIFECYCLE_STALL` events. That guard stays; only its stale rationale changes.
 - **Issue #1653 / #1645** — "AgentSession.updated_at stamped 7h in the future: popoto `auto_now` uses naive local `datetime.now()`". Succeeded upstream (popoto #421). It is the origin of `_heal_future_updated_at`, one of this plan's deletion sites — the healer stays, only its naive-input guard goes.
 - **Issue #3199** — open, adjacent. Its recon independently confirmed that popoto 1.9.0 changed decode semantics on this exact code path, which corroborates the premise here.
+- **Issue #3207** — closed as a duplicate into #3199. Its first suggested next step is a consumer audit that #3199's scope does not reach; this plan discharges it, and its second (settle the archive datetime contract) is left with #3199, which owns `agent/session_archive.py`. Reading its failure output is what surfaced the archive-restore ingress leg documented in Data Flow.
 
 No prior attempt to classify *this* set exists. #3173 deliberately scoped away from it.
 
@@ -299,7 +302,7 @@ A second shape of false green is a run in which no test executed at all. `script
 
 ## Race Conditions
 
-No race conditions identified. Every change is the removal or rewording of a synchronous, pure-branch guard inside a single function body. No new shared state, no new concurrency, no ordering dependency between the sites, and no write path is touched — `reflections/audits/redis_quality_audit.py` is read-only by its own module contract, and the other four deletions sit on read paths whose surrounding write behaviour is unchanged.
+No race conditions identified. Every change is the removal or rewording of a synchronous, pure-branch guard inside a single function body. No new shared state, no new concurrency, no ordering dependency between the sites, and no write path is touched — `reflections/audits/redis_quality_audit.py` is read-only by its own module contract, and the other three deletions sit on read paths whose surrounding write behaviour is unchanged.
 
 ## No-Gos (Out of Scope)
 
@@ -506,4 +509,9 @@ Round 1 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency
 
 ## Open Questions
 
-None. The classification rule was settled by #3173, every verdict in this plan was derived from a read of the actual input source rather than a judgement call, and the one premise that could have needed a human — whether popoto 1.9.0's aware-decode really holds for legacy rows — was answered by reading the installed package. The scope widening to `utils/utc.py` is the only discretionary call, and it is a four-line docstring correction on the coercer the rest of the repo defers to.
+None. The classification rule was settled by #3173, every verdict in this plan was derived from a read of the actual input source rather than a judgement call, and the one premise that could have needed a human — whether popoto 1.9.0's aware-decode really holds for legacy rows — was answered by reading the installed package.
+
+Two discretionary calls are recorded here rather than left implicit, both resolved without needing a human:
+
+- **Widening the scope to `utils/utc.py` and `ui/data/sdlc.py`.** `utils/utc.py` holds the coercer the rest of the repo defers to and the docstring the other five stale claims echo, so leaving it out would have retired the repetitions while leaving the original. `ui/data/sdlc.py` contributes two keeps that need no change and are counted only so the arithmetic closes.
+- **Reversing the `:2225` verdict from delete to keep** after critique round 1 falsified its premise. The alternative — keeping the deletion on a longer derivation through the archive-restore leg — is defensible but buys nothing: it removes two lines from a field that has no ingress choke point, in exchange for a fifth test and a fifth mutation check on a Small-appetite lane. The conservative reading of the #3173 rule ("popoto must be *provably* the only inbound source") settles it.
