@@ -1,0 +1,468 @@
+"""scripts/pytest-clean.sh fails closed when a green run executed nothing (#3195).
+
+A run in which every selected test is *skipped* executes nothing and exits 0
+-- indistinguishable, by exit code alone, from a real pass. The realistic
+trigger is on this machine already: `tests/conftest.py`'s `scratch_test_db`
+fixture calls `pytest.skip()` when the 15-slot machine-global test-DB pool is
+exhausted, which happens routinely past ~5 concurrent agents. Any mutation
+check whose selected tests all depend on that fixture reports a confident
+green having run nothing.
+
+`tests/unit/test_worktree_venv_absent_guard.py`'s `--version` model cannot
+exercise this guard: `--version` runs no pytest session at all, so the
+plugin never loads and every case here would land on "file absent -> pass
+through". The harness below instead builds a real sandbox pytest rootdir
+(own `pyproject.toml`, `.git` as a directory, a symlink to the repo's real
+`.venv`, no `.python-version`, a copy of the plugin) and drives a genuine
+pytest session through the wrapper. See spike-5/spike-6 in
+docs/plans/pytest-clean-zero-tests-fail-closed.md.
+
+Two rules this file follows, both round-1 false-pass channels:
+  1. The negative control (TestNegativeControl) runs before any guard
+     assertion is trusted -- it proves the sandbox's OWN plugin copy is what
+     loads, not a decoy or the repo's.
+  2. Every subprocess env is built from a copy of `os.environ` with
+     `PYTHONPATH` and `PYTEST_CLEAN_COUNT_FILE` removed (`_base_env`), so an
+     ambient value inherited from the process running these tests (itself
+     ordinarily run under scripts/pytest-clean.sh) cannot pass a test for the
+     wrong reason.
+
+The script and plugin under test are resolved from env vars
+(`PYTEST_CLEAN_SCRIPT`, `PYTEST_EXECUTED_COUNT_SOURCE`), defaulting to the
+real repo files. This is the mutation seam: `/do-build`'s validator points
+these at mutated copies under a `mktemp -d` rather than editing the shared
+checkout, which peer lanes are running out of concurrently.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_UNDER_TEST = Path(
+    os.environ.get("PYTEST_CLEAN_SCRIPT", str(REPO_ROOT / "scripts" / "pytest-clean.sh"))
+)
+PLUGIN_SOURCE = Path(
+    os.environ.get("PYTEST_EXECUTED_COUNT_SOURCE", str(REPO_ROOT / "pytest_executed_count.py"))
+)
+
+ZERO_TESTS_HEADLINE = "ZERO TESTS EXECUTED (#3195)"
+
+# The three existing wrapper refusals this diagnostic must never be confused
+# with, verbatim from scripts/pytest-clean.sh.
+OTHER_GUARD_HEADLINES = (
+    "worktree has no usable .venv of its own",
+    "refusing to run against an off-pin interpreter",
+    "WEDGED",
+)
+
+FIXTURE_SKIP = """
+import pytest
+
+
+@pytest.fixture
+def pool_exhausted():
+    pytest.skip("pool exhausted")
+
+
+def test_one(pool_exhausted):
+    assert True
+
+
+def test_two(pool_exhausted):
+    assert True
+"""
+
+BODY_SKIP = """
+import pytest
+
+
+def test_one():
+    pytest.skip("gone")
+
+
+def test_two():
+    pytest.skip("gone")
+"""
+
+MARKER_SKIP = """
+import pytest
+
+
+@pytest.mark.skip
+def test_one():
+    assert True
+
+
+@pytest.mark.skip
+def test_two():
+    assert True
+"""
+
+PASSING = """
+def test_one():
+    assert True
+"""
+
+FAILING = """
+def test_one():
+    assert False
+"""
+
+# A deliberate syntax error -- pytest cannot even collect this file.
+COLLECTION_ERROR = "def test_bad(:\n    pass\n"
+
+
+def _base_env() -> dict:
+    """A copy of the ambient environment with PYTHONPATH and
+    PYTEST_CLEAN_COUNT_FILE removed. The process running this test file is
+    itself ordinarily launched under scripts/pytest-clean.sh, which exports
+    both -- an unstripped env would let a subprocess pass these tests for
+    inheriting the outer run's state rather than producing its own.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTEST_CLEAN_COUNT_FILE", None)
+    env.pop("PYTEST_ALLOW_ZERO_TESTS", None)
+    return env
+
+
+def _sandbox(tmp_path: Path) -> Path:
+    """A pytest rootdir shaped exactly as the guard's harness requires
+    (spike-5): own pyproject.toml, .git as a directory (not a worktree
+    gitdir-pointer file, which would trip the #3033 guard), a symlink to the
+    repo's real .venv (so PYTEST_BIN resolves to a real pytest -- a fake
+    `.venv/bin/pytest` cannot run a session at all), no .python-version (so
+    check-interpreter-pin.sh returns 0 at its "no pin file" early exit), and
+    a COPY of the plugin under test (never a shared reference -- the subject
+    under test must be the sandbox's own copy).
+    """
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    (root / ".git").mkdir()
+    (root / ".venv").symlink_to(REPO_ROOT / ".venv")
+    (root / "pyproject.toml").write_text('[tool.pytest.ini_options]\naddopts = ""\n')
+    (root / "pytest_executed_count.py").write_text(PLUGIN_SOURCE.read_text())
+    return root
+
+
+def _write(root: Path, name: str, body: str) -> None:
+    (root / name).write_text(body)
+
+
+def _run(
+    root: Path, args: list[str], env: dict | None = None, script: Path | None = None
+) -> subprocess.CompletedProcess:
+    cmd = [str(script or SCRIPT_UNDER_TEST), *args]
+    return subprocess.run(
+        cmd,
+        cwd=str(root),
+        env=env if env is not None else _base_env(),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+
+class TestNegativeControl:
+    """Must pass before any other test in this file is trusted. With a decoy
+    module of the same name on PYTHONPATH behind the sandbox, `-p` resolved
+    to the sandbox copy; with the sandbox absent from PYTHONPATH, it
+    resolved to the decoy (spike-5). Without this control, a test can pass
+    while exercising a different copy of the plugin than the one under
+    test, so mutating that copy would produce no observable change.
+    """
+
+    def test_sandbox_plugin_resolves_from_the_sandbox(self, tmp_path):
+        root = _sandbox(tmp_path)
+        venv_python = root / ".venv" / "bin" / "python"
+        result = subprocess.run(
+            [str(venv_python), "-c", "import pytest_executed_count as m; print(m.__file__)"],
+            cwd=str(root),
+            env=_base_env(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        resolved = Path(result.stdout.strip()).resolve()
+        assert resolved.is_relative_to(tmp_path.resolve()), (
+            f"pytest_executed_count resolved to {resolved}, expected under {tmp_path} "
+            "-- the sandbox's own copy did not load"
+        )
+
+
+class TestSkipShapesAreRefused:
+    """The three ways a test can execute nothing while still reporting
+    'skipped', each measured in spike-4. Named so `-k skip_shape` selects
+    exactly these three (Verification table)."""
+
+    def test_fixture_skip_shape_is_refused(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", FIXTURE_SKIP)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode != 0, result.stdout
+        assert ZERO_TESTS_HEADLINE in result.stderr
+
+    def test_body_skip_shape_is_refused(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", BODY_SKIP)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode != 0, result.stdout
+        assert ZERO_TESTS_HEADLINE in result.stderr
+
+    def test_marker_skip_shape_is_refused(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", MARKER_SKIP)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode != 0, result.stdout
+        assert ZERO_TESTS_HEADLINE in result.stderr
+
+
+class TestAlreadyRedRunsKeepTheirOwnStatus:
+    """The guard may only ever convert a green into a red (spike-8). Named so
+    `-k pytest_status_preserved` selects exactly these two."""
+
+    def test_collection_error_pytest_status_preserved(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", COLLECTION_ERROR)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode == 2, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_zero_collected_pytest_status_preserved(self, tmp_path):
+        root = _sandbox(tmp_path)
+        (root / "empty").mkdir()
+        result = _run(root, ["empty/", "-q"])
+        assert result.returncode == 5, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+
+class TestPassThroughPathsAreUnaffected:
+    def test_all_passing_exits_zero_no_diagnostic(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_failing_test_keeps_pytests_own_status(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", FAILING)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode != 0
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+        assert "1 failed" in result.stdout
+
+    def test_collect_only_exits_zero(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", FIXTURE_SKIP)
+        result = _run(root, ["test_x.py", "--collect-only", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_version_exits_zero(self, tmp_path):
+        root = _sandbox(tmp_path)
+        result = _run(root, ["--version"])
+        assert result.returncode == 0, result.stdout
+
+
+class TestEscapeHatchSuppressesExitNotMessage:
+    def test_allow_zero_tests_suppresses_exit_but_not_message(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", FIXTURE_SKIP)
+        env = _base_env()
+        env["PYTEST_ALLOW_ZERO_TESTS"] = "1"
+        result = _run(root, ["test_x.py", "-q"], env=env)
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE in result.stderr
+
+
+class TestCallerFlagsSurviveTheInjection:
+    """The `-p pytest_executed_count` injection uses `set --`, which
+    prepends rather than replaces, so a caller's own `-p` flag must still
+    take effect (Risk 2)."""
+
+    def test_default_run_creates_the_pytest_cache_dir(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode == 0
+        assert (root / ".pytest_cache").exists()
+
+    def test_callers_own_p_flag_still_applies(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "-p", "no:cacheprovider", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert not (root / ".pytest_cache").exists()
+
+
+class TestCountFileIsNeverInherited:
+    """Race 4: this plan's own tests run scripts/pytest-clean.sh under
+    scripts/pytest-clean.sh, so the inner wrapper inherits the outer run's
+    exported PYTEST_CLEAN_COUNT_FILE unless the mint is unconditional."""
+
+    def test_nested_invocation_leaves_the_outer_count_file_untouched(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        outer_file = tmp_path / "outer-count-file"
+        outer_file.write_text("count 7")
+        env = _base_env()
+        env["PYTEST_CLEAN_COUNT_FILE"] = str(outer_file)
+        result = _run(root, ["test_x.py", "-q"], env=env)
+        assert result.returncode == 0, result.stdout
+        assert outer_file.read_text() == "count 7"
+
+
+class TestPluginFailsOpenOnAnUnwritableCountFile:
+    """The plugin's write helper swallows OSError -- a deliberate fail-OPEN
+    on an unwritable temp dir, so a broken path degrades to today's
+    behavior instead of taking down an otherwise-passing run. Exercises the
+    plugin directly (not through the wrapper): the wrapper's own mint is
+    unconditional `mktemp`, so a test cannot steer where the wrapper itself
+    writes; the plugin's OSError handling is the thing under test here."""
+
+    def test_unwritable_count_file_path_does_not_break_the_run(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        unwritable_dir = tmp_path / "unwritable"
+        unwritable_dir.mkdir(mode=0o000)
+        try:
+            env = _base_env()
+            env["PYTEST_CLEAN_COUNT_FILE"] = str(unwritable_dir / "count-file")
+            venv_pytest = root / ".venv" / "bin" / "pytest"
+            result = subprocess.run(
+                [str(venv_pytest), "-p", "pytest_executed_count", "test_x.py", "-q"],
+                cwd=str(root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert result.returncode == 0, result.stderr
+            assert "1 passed" in result.stdout
+        finally:
+            unwritable_dir.chmod(0o755)
+
+
+class TestDiagnosticIsDistinctFromTheOtherGuards:
+    def test_diagnostic_headline_names_cause_remedy_and_hatch(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", FIXTURE_SKIP)
+        result = _run(root, ["test_x.py", "-q"])
+        assert ZERO_TESTS_HEADLINE in result.stderr
+        assert "test-DB pool" in result.stderr
+        assert "reap-xdist.sh --apply" in result.stderr
+        assert "PYTEST_ALLOW_ZERO_TESTS" in result.stderr
+        for headline in OTHER_GUARD_HEADLINES:
+            assert headline not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Shell-level check of the pass-through predicate. The count file is minted
+# by the wrapper and written only by the plugin, so no test can seed it with
+# garbage through the wrapper's public surface -- driving pytest to produce a
+# truncated file is not reproducible. This drives the wrapper's own
+# `verdict_passes_through` body, sliced out of the script under test at run
+# time, never a retyped copy of its `case` patterns: a loop that repeats the
+# patterns in this file would pass identically with the wrapper's own `case`
+# deleted (spike-9).
+# ---------------------------------------------------------------------------
+
+_PREDICATE_DRIVER = r"""
+set -u
+SCRIPT="$1"
+SLICE="$(mktemp)"
+sed -n '/^verdict_passes_through()/,/^}/p' "$SCRIPT" > "$SLICE"
+
+if [ ! -s "$SLICE" ]; then
+    echo "EMPTY_SLICE: verdict_passes_through not found in $SCRIPT" >&2
+    rm -f "$SLICE"
+    exit 3
+fi
+
+if grep -q '^exit ' "$SLICE"; then
+    echo "SLICE_OVERRUN: verdict_passes_through is not in the sliceable multi-line form" >&2
+    rm -f "$SLICE"
+    exit 4
+fi
+
+. "$SLICE"
+
+if ! declare -f verdict_passes_through >/dev/null 2>&1; then
+    echo "UNDEFINED: verdict_passes_through is not defined after sourcing" >&2
+    rm -f "$SLICE"
+    exit 5
+fi
+
+rm -f "$SLICE"
+
+check() {
+    local input="$1" expect="$2" got
+    if verdict_passes_through "$input"; then got=pass; else got=fail; fi
+    if [ "$got" != "$expect" ]; then
+        echo "MISMATCH: input=[$input] expected=$expect got=$got" >&2
+        exit 6
+    fi
+}
+
+check ""             pass
+check "collectonly"  pass
+check "count 0"      fail
+check "count 1"      pass
+check "count 10"     pass
+check "started"      fail
+check "coun"         fail
+check "  "           fail
+check "count -1"     fail
+
+echo "ALL_OK"
+"""
+
+
+def _run_predicate_driver(script_path: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", _PREDICATE_DRIVER, "predicate-driver", str(script_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+class TestPredicateSlice:
+    def test_predicate_allowlist_matches_the_wrapper_exactly(self):
+        result = _run_predicate_driver(SCRIPT_UNDER_TEST)
+        assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert "ALL_OK" in result.stdout
+
+    def test_slice_refuses_when_the_function_is_absent(self, tmp_path):
+        scratch = tmp_path / "no_predicate.sh"
+        scratch.write_text("#!/usr/bin/env bash\necho hi\n")
+        result = _run_predicate_driver(scratch)
+        assert result.returncode == 3
+        assert "EMPTY_SLICE" in result.stderr
+
+    def test_slice_refuses_on_a_collapsed_one_line_definition(self, tmp_path):
+        # Mirrors what task 2 forbids: `verdict_passes_through` collapsed to
+        # one line ending `esac; }` makes the sed range run to EOF and
+        # swallow whatever follows -- here a synthetic `exit 0`, in the real
+        # wrapper the script's own `exit "$PYTEST_EXIT"`.
+        scratch = tmp_path / "collapsed.sh"
+        scratch.write_text(
+            "#!/usr/bin/env bash\n"
+            'verdict_passes_through() { case "$1" in "") return 0 ;; *) return 1 ;; esac; }\n'
+            "exit 0\n"
+        )
+        result = _run_predicate_driver(scratch)
+        assert result.returncode == 4
+        assert "SLICE_OVERRUN" in result.stderr
+
+    def test_driver_does_not_use_the_vacuous_process_substitution_form(self):
+        # Anti-criterion (spike-9): under /bin/bash 3.2.57 on macOS,
+        # process-substitution sourcing returns 0 and defines nothing, so
+        # every verdict would report a vacuous pass. Pinned here as a
+        # negative assertion on the driver itself.
+        assert "<(" not in _PREDICATE_DRIVER
