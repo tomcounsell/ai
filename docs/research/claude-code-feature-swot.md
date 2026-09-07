@@ -410,7 +410,6 @@ Operational (ready)          Configured (needs_setup)
 | Bridge | `com.valor.bridge` | `scripts/start_bridge.sh` | Always on |
 | Watchdog | `com.valor.bridge-watchdog` | `monitoring/bridge_watchdog.py` | Every 60s |
 | Issue Poller | `com.valor.issue-poller` | Issue polling script | Every 5min |
-| AutoExperiment | `com.valor.autoexperiment` | `scripts/autoexperiment.py` | Nightly |
 
 Reflections run in their own supervised launchd subprocess (`python -m reflections`, `com.valor.reflection-worker`), separate from the worker (`python -m worker`). See [Reflection Scheduler Subprocess](../features/reflection-scheduler-subprocess.md) and [Reflections](../features/reflections.md) for details.
 

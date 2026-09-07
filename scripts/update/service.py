@@ -39,7 +39,31 @@ OBSOLETE_SERVICE_SUFFIXES: list[str] = [
     # firing every 300s and failing "No such file or directory" on every
     # already-provisioned machine.
     "issue-poller",
+    # scripts/autoexperiment.py, its installer, and com.valor.autoexperiment.plist
+    # were deleted in #3177. The script committed to whatever branch happened to be
+    # checked out and its installer defaulted to a target whose module was removed
+    # in #466, so a machine that ever ran the installer has a nightly LaunchAgent
+    # raising KeyError forever. Boot it out and remove the plist fleet-wide.
+    "autoexperiment",
 ]
+
+
+def _launchctl_loaded_labels(launchctl_list: str) -> set[str]:
+    """Parse ``launchctl list`` output into the exact set of loaded labels.
+
+    ``launchctl list`` prints three whitespace-separated columns: PID, Status,
+    Label. The label is always the last column, so an exact last-token match is
+    the only safe identity test — a substring search for
+    ``com.valor.autoexperiment`` also matches ``com.valor.autoexperiment-v2``
+    and would boot out a job this sweep does not own. A blank line contributes
+    nothing.
+    """
+    labels: set[str] = set()
+    for line in launchctl_list.splitlines():
+        parts = line.split()
+        if parts:
+            labels.add(parts[-1])
+    return labels
 
 
 def remove_obsolete_services() -> list[str]:
@@ -60,13 +84,15 @@ def remove_obsolete_services() -> list[str]:
     except Exception:
         launchctl_list = ""
 
+    loaded_labels = _launchctl_loaded_labels(launchctl_list)
+
     removed: list[str] = []
     for suffix in OBSOLETE_SERVICE_SUFFIXES:
         label = f"{SERVICE_PREFIX}.{suffix}"
         plist_path = launch_agents / f"{label}.plist"
         acted = False
 
-        if label in launchctl_list:
+        if label in loaded_labels:
             try:
                 run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
                 acted = True
