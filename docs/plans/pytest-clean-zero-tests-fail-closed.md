@@ -7,7 +7,7 @@ created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3195
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-07T02:48:33Z
+revision_applied_at: 2026-09-07T03:28:02Z
 ---
 
 # pytest-clean.sh fails closed when zero tests executed
@@ -279,7 +279,9 @@ than a question, and every task, risk and verification row below uses these name
 | Count-file path variable | `PYTEST_CLEAN_COUNT_FILE` | Private wrapper state, **never** caller-supplied — see the unconditional-mint rule below. |
 | Escape hatch | `PYTEST_ALLOW_ZERO_TESTS` | Unset means the guard is on. Reads as what it does at a call site. |
 | Plugin module | `pytest_executed_count.py` at the repo root, loaded as `-p pytest_executed_count` | A repo-root module has no package `__init__` to execute. `tools/__init__.py` arms the Redis flush guard on import (`tools/__init__.py:18-20`), so `-p tools.pytest_executed_count` would run that on every pytest invocation on the machine. A single top-level file is also the smallest thing a sandbox rootdir can reproduce, which the tests depend on. |
-| Script under test, in the tests | `PYTEST_CLEAN_SCRIPT`, defaulting to `REPO_ROOT/scripts/pytest-clean.sh` | The mutation check must not edit `scripts/pytest-clean.sh` in the shared checkout — six lanes run concurrently and an in-place mutation breaks all of them. Reading the script path from an env var lets the mutation run against a copy in `/tmp`. |
+| Script under test, in the tests | `PYTEST_CLEAN_SCRIPT`, defaulting to `REPO_ROOT/scripts/pytest-clean.sh` | The mutation check must not edit `scripts/pytest-clean.sh` in the shared checkout — six lanes run concurrently and an in-place mutation breaks all of them. Reading the script path from an env var lets the mutation run against a copy under a `mktemp -d`. **The copy is only valid in a sibling layout**: it must live at `<tmpdir>/scripts/pytest-clean.sh` with `check-interpreter-pin.sh` copied next to it. `SCRIPT_ROOT` is derived from `${BASH_SOURCE[0]}/..` (line 34) and line 195 runs `"$SCRIPT_ROOT/scripts/check-interpreter-pin.sh"`, so a bare copy at `<tmpdir>/pc-mutated.sh` resolves `SCRIPT_ROOT` to `<tmpdir>`'s parent and aborts before pytest starts. Measured both ways in spike-7. |
+| Plugin source, in the tests | `PYTEST_EXECUTED_COUNT_SOURCE`, defaulting to `REPO_ROOT/pytest_executed_count.py` | The counting rule is the site round 1 got wrong twice and the thing this plan most fears being "simplified" back into the bug, so it needs a mutation seam of its own. Copying the plugin into the sandbox from a hard-coded path would make mutating the rule require editing the shared checkout, which task 4 forbids. This mirrors `PYTEST_CLEAN_SCRIPT` exactly: same indirection, same reason. |
+| Pass-through predicate | `verdict_passes_through()`, defined inside the `BEGIN`/`END` seam | Naming the predicate as a function is what makes it testable. A test that retypes the `case` patterns exercises a copy of the predicate and passes unchanged with the wrapper's own `case` deleted; a test that slices `verdict_passes_through` out of the script under test at run time exercises the real body and goes red when the seam is gone. |
 | Mutation seam | `# BEGIN zero-executed guard (#3195)` / `# END zero-executed guard (#3195)` around the verdict block | Makes the mutation a deterministic one-line `sed` range delete rather than a hand edit, so the Verification row is reproducible by anyone. |
 
 ## Data Flow
