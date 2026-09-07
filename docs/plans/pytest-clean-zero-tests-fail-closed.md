@@ -875,7 +875,7 @@ that exit code. That is precisely why the fix belongs in the wrapper.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/pytest-clean-zero-test-guard.md` — what the guard detects, the
+- [x] Create `docs/features/pytest-clean-zero-test-guard.md` — what the guard detects, the
       pass-through allowlist and why it is expressed as an allowlist, the measured
       report-tuple table from spike-4 (the single most re-derivable thing in this change),
       why output parsing was rejected (#2574 stall watcher), what `PYTEST_ALLOW_ZERO_TESTS`
@@ -884,8 +884,8 @@ that exit code. That is precisely why the fix belongs in the wrapper.
       state that the guard **only converts a green into a red** — the `PYTEST_EXIT -eq 0`
       gate and the spike-8 table (all-skip 0, collection error 2, zero-collected 5) — so
       nobody later "fixes" the gate away and starts rewriting already-red runs.
-- [ ] Add a row to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/test-concurrency-coordination.md` — it is the standing home for
+- [x] Add a row to the `docs/features/README.md` index table.
+- [x] Update `docs/features/test-concurrency-coordination.md` — it is the standing home for
       the pool/claim story and must now say that a pool-exhausted run fails closed at the
       wrapper instead of reading green.
 
@@ -893,16 +893,16 @@ that exit code. That is precisely why the fix belongs in the wrapper.
 Not applicable — this repo publishes no external documentation site.
 
 ### Inline Documentation
-- [ ] Header comment in `pytest_executed_count.py`: why it exists, why the controller is
+- [x] Header comment in `pytest_executed_count.py`: why it exists, why the controller is
       the sole writer, the verdict values it can write, and the spike-4 report-tuple table
       with a plain instruction not to simplify the counting rule.
-- [ ] Block comment in `scripts/pytest-clean.sh` above the guard, matching the house style
+- [x] Block comment in `scripts/pytest-clean.sh` above the guard, matching the house style
       of the #3033 and #2574 guards: the failure it prevents, the measured evidence, and
       the issue number. It must say why `verdict_passes_through` is a named function rather
       than an inline `case` (the tests slice its body out of the script under test) and why
       the `BEGIN`/`END` markers exist (they are the mutation seam), so neither survives a
       later tidy-up as apparent noise.
-- [ ] `CLAUDE.md`'s "Non-obvious behavior" bullet on `scripts/pytest-clean.sh` gains the
+- [x] `CLAUDE.md`'s "Non-obvious behavior" bullet on `scripts/pytest-clean.sh` gains the
       zero-executed refusal alongside the existing off-pin and worktree-venv aborts.
 
 ## Success Criteria
@@ -946,7 +946,7 @@ Not applicable — this repo publishes no external documentation site.
 - [x] A nested wrapper invocation leaves the outer run's count file untouched.
 - [x] Verified on a real linked worktree, not only in a `tmp_path` sandbox.
 - [x] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

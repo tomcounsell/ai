@@ -39,7 +39,9 @@ channels ever returned 0, which is why the guard is narrow:
 
 The verdict block runs only when pytest itself exited **0**
 (`[ "$PYTEST_EXIT" -eq 0 ]`). That gate is load-bearing, not an optimization.
-A `count 0` verdict is produced by three channels with three different meanings:
+A `count 0` verdict is produced by three channels with three different meanings;
+the table below adds the wedge case as a fourth row for contrast, since it also
+must not read as a plain pass-through:
 
 | Channel | pytest exit | Count file | Ungated | Gated on `PYTEST_EXIT -eq 0` |
 |---|---|---|---|---|
@@ -167,9 +169,9 @@ writes a verdict to a file the wrapper names via `PYTEST_CLEAN_COUNT_FILE`:
 
 ```python
 if report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail")):
-    executed += 1
+    _executed += 1
 elif report.when in ("setup", "teardown") and report.failed:
-    executed += 1
+    _executed += 1
 ```
 
 **Do not simplify this.** Round 1 of the plan tried, in two different directions,
