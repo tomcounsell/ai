@@ -39,8 +39,15 @@ actually executed, so "0 executed, all skipped" and "1500 executed, all passed" 
 same signal to every caller.
 
 **Desired outcome:**
-The wrapper fails closed when a session ran and executed zero tests, with a distinct
-message naming the cause. Every other case keeps today's pass-through exactly.
+The wrapper exits non-zero when a session ran and reported zero passed and zero failed,
+with a distinct, unmistakable message naming the cause. Pass-through behavior for every
+other case is unchanged.
+
+The message is as load-bearing as the exit code. `scripts/pytest-clean.sh` is what every
+mutation check in this repo reads, so a false green here silently confirms every guard the
+repo has. Whoever reads a mutation-check transcript later — a reviewer, a merge gate, the
+next agent on the lane — must not be able to mistake a zero-execution run for a pass, which
+is why the diagnostic prints even when the escape hatch suppresses the exit.
 
 ## Freshness Check
 
@@ -572,6 +579,13 @@ where no slot was taken.
   `/do-pr-review`, or the verification runner.
 - **Making the plugin also fix the "node down" reporting.** Crashed workers already exit
   5. Improving how that is *displayed* is a different issue.
+- **"Simplifying" the counting rule.** It looks like four clauses where one would do, and
+  round 1 of this plan made exactly that mistake in two different directions. Every clause
+  has a measured rootdir behind it (spike-4). If it looks redundant, run the table before
+  touching it.
+- **Making the escape hatch quiet.** Suppressing the diagnostic along with the exit would
+  restore the original defect under a different name. The hatch changes the exit code and
+  nothing else.
 
 ## Risks
 
@@ -708,8 +722,10 @@ that exit code. That is precisely why the fix belongs in the wrapper.
 
 ### Feature Documentation
 - [ ] Create `docs/features/pytest-clean-zero-test-guard.md` — what the guard detects, the
-      three-state file protocol, why output parsing was rejected (#2574 stall watcher), the
-      escape-hatch env var, and the measured exit-code table from spike-1 so the next
+      pass-through allowlist and why it is expressed as an allowlist, the measured
+      report-tuple table from spike-4 (the single most re-derivable thing in this change),
+      why output parsing was rejected (#2574 stall watcher), what `PYTEST_ALLOW_ZERO_TESTS`
+      does and does not suppress, and the measured exit-code table from spike-1 so the next
       reader does not have to re-derive which channels already fail closed.
 - [ ] Add a row to the `docs/features/README.md` index table.
 - [ ] Update `docs/features/test-concurrency-coordination.md` — it is the standing home for
@@ -720,8 +736,9 @@ that exit code. That is precisely why the fix belongs in the wrapper.
 Not applicable — this repo publishes no external documentation site.
 
 ### Inline Documentation
-- [ ] Header comment in the new plugin module: why it exists, why the controller is the
-      sole writer, and the three file states with their meanings.
+- [ ] Header comment in `pytest_executed_count.py`: why it exists, why the controller is
+      the sole writer, the verdict values it can write, and the spike-4 report-tuple table
+      with a plain instruction not to simplify the counting rule.
 - [ ] Block comment in `scripts/pytest-clean.sh` above the guard, matching the house style
       of the #3033 and #2574 guards: the failure it prevents, the measured evidence, and
       the issue number.
