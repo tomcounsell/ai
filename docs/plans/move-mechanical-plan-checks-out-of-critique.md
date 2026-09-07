@@ -2,7 +2,7 @@
 status: Planning
 type: chore
 revision_applied: true
-revision_applied_at: 2026-09-06T16:53:08Z
+revision_applied_at: 2026-09-07T01:40:58Z
 tracking: https://github.com/tomcounsell/ai/issues/3178
 appetite: Small
 ---
@@ -73,11 +73,23 @@ The resolution removes the shell rather than patching the list:
 
 1. **Opt-in execution** — no command runs without `--execute`. The default path executes nothing.
 2. **`shell=False`, always** — `subprocess.run(shlex.split(cmd), shell=False)`. Any row whose text contains a shell metacharacter (`;`, `&&`, `||`, `|`, `$(`, backtick, `>`, `<`, `&`) is reported `skipped: requires shell, not auto-executable` and is **never executed**. This is a guarantee rather than a mitigation: with no shell there is no chaining, no substitution, and no redirection to defeat.
-3. **Denylist on the resolved argv[0]** — one list, covering write-side verbs (`rm`, `git push`, `git reset --hard`, `curl`, `ssh`, `pkill`) **and** read-side secret readers (`env`, `printenv`, `set`, `op`, `security`), plus any argument referencing `.env`, a dotfile, `Desktop/Valor`, `credentials`, `*.pem`, `id_rsa`, or a path outside the worktree. Stated once here and nowhere else, so the two descriptions cannot drift apart as they did in round 1. `op read op://…` is this repo's own sanctioned secret read and is named explicitly.
-4. **Process-group timeout kill** — 30s per command, started in its own process group, killing the group rather than the leader, because `scripts/pytest-clean.sh` spawns xdist workers. **Accepted residual limit:** a grandchild that self-detaches via `setsid` survives this. Control 2 removes the common route, since `nohup` and `disown` are shell constructs and a detaching row would have to invoke `setsid` as argv[0] — which the denylist catches. A survivor is detectable through `scripts/reap-xdist.sh`; this is recorded rather than claimed solved.
+3. **Allowlist on the resolved argv[0]** — round 3 proved a denylist unwinnable here: `sh -c 'rm -rf .'` and `python3 -c "__import__('os').system(...)"` contain none of the screened metacharacters, and any interpreter or wrapper script defeats an enumerate-the-dangerous approach by construction. Execution is therefore permitted only for an enumerated set of read-only binaries, and everything else is `skipped: not on the execution allowlist`:
+
+   | Permitted argv[0] | Restriction |
+   |---|---|
+   | `test`, `[` | none |
+   | `grep`, `rg` | none |
+   | `git` | subcommands `grep`, `log`, `show`, `diff`, `rev-parse`, `cat-file`, `status` only |
+   | `ls`, `wc`, `head`, `tail` | none |
+   | `sed` | `-n` only (read-only invocation) |
+   | `python`, `python3` | `-m` only — **`-c` is refused**, since it is an inline interpreter |
+   | `scripts/pytest-clean.sh` | none |
+
+   Every argument is additionally rejected if it references `.env`, a dotfile, `Desktop/Valor`, `credentials`, `*.pem`, `id_rsa`, or resolves outside the worktree. `sh`, `bash`, `zsh`, `env`, `printenv`, `op`, `security`, `setsid`, `nohup`, `curl`, `ssh`, `rm`, and `pkill` are absent from the allowlist and are therefore refused without needing to be enumerated anywhere — which is the point of inverting the list.
+4. **Process-group timeout kill** — 30s per command, started in its own process group, killing the group rather than the leader, because `scripts/pytest-clean.sh` spawns xdist workers. **Accepted residual limit:** a grandchild that self-detaches via `setsid` survives a process-group kill. Round 3 correctly found that the r2 text claimed `setsid` was "caught by the denylist" when `setsid` appeared in no list anywhere — a control asserted but never specified. Under the allowlist above the claim is now true by construction: `setsid` is not a permitted argv[0], and `nohup`/`disown` are shell constructs already excluded by control 2. The residual that genuinely remains is an allowlisted binary that itself detaches a child; `scripts/pytest-clean.sh` is the only such candidate and it is the reason the group kill exists. A survivor is detectable through `scripts/reap-xdist.sh`.
 5. **stdout cap and scrub** — cap captured output at 2 KB per row and scrub it against a secret-shaped pattern set before any of it reaches a findings block or committable artifact.
 
-**Stated cost.** Rows needing a shell are not executed, so coverage is partial by construction. That is the intended trade: a row that cannot be run safely is reported as unrun rather than run unsafely, and the reader sees which rows were skipped and why.
+**Stated cost, measured.** Rows needing a shell are not executed, so coverage is partial by construction. Measured once on 2026-09-07 across every `## Verification` row in `docs/plans/` and `docs/archive/plans-completed/` (5,454 rows): 1,149 (21.1%) contain a shell metacharacter; restricted to the live top-level corpus, 62 of 227 (27.3%). So roughly three rows in four remain executable, and the plan's own motivating defect class — `grep -c pattern file` — is plain argv, unaffected. This figure is a one-time measurement recorded with its date and corpus, not a claim to be re-verified as the corpus drifts. That is the intended trade: a row that cannot be run safely is reported as unrun rather than run unsafely, and the reader sees which rows were skipped and why.
 
 **Findings never edit the plan body.** The findings block is attached to the **critique input**, not written into the plan document. This is deliberate and load-bearing: #1760 documents that a revision pass which edits plan text busts `compute_plan_hash` and re-stales the just-recorded verdict, looping PLAN↔CRITIQUE indefinitely. Attaching to the critique input keeps plan-lint outside that mechanism entirely.
 
@@ -124,7 +136,7 @@ That is the gap this plan targets, and it is why the ordering matters: **the con
 5. **Report format** — a markdown findings block attached to the critique input. It must not write into the plan body (see Technical Approach, #1760).
 6. **Console script** — register `plan-lint` in `pyproject.toml [project.scripts]`.
 7. **Wire into `/do-plan-critique`** — invoke with `--execute` at the single call site, before critic dispatch, and attach the findings block to the critique input. **Fail-open is mandatory at this site:** wrap the invocation so that a non-zero exit, a timeout, or any exception from `plan-lint` is logged and discarded, and critic dispatch proceeds regardless. Plan-lint must never be able to block a critique round — that would violate the No-Go against skipping them.
-8. **Fixture + tests** — `tests/fixtures/plan_lint_sample.md` (a committed plan-shaped document that never migrates) and `tests/unit/test_plan_lint.py`.
+8. **Fixture + tests** — `tests/fixtures/plan_lint_sample.md`, a committed plan-shaped document that never migrates. It must carry, verbatim: the six `grep -c`-style rows from the original evidence, one row whose command contains a shell metacharacter (to exercise `skipped: requires shell`), one row whose argv[0] is off the allowlist such as `sh -c` (to exercise `skipped: not on the execution allowlist`), and one `file:line` citation that resolves but asserts something false. Plus `tests/unit/test_plan_lint.py` covering each.
 
 ## Failure Path Test Strategy
 
@@ -136,7 +148,7 @@ That is the gap this plan targets, and it is why the ordering matters: **the con
 
 ## Test Impact
 
-- [ ] `tests/unit/test_plan_lint.py` — NEW: parser, executor, denylist, citation resolver, disposition differ, and the fail-open path.
+- [ ] `tests/unit/test_plan_lint.py` — NEW: parser, executor, denylist, citation resolver, and the fail-open path.
 - [ ] No existing tests are affected. `tools/plan_lint.py` is a new module with no importers; wiring into `/do-plan-critique` edits a skill markdown body, which carries no test coverage today. Verified: `grep -rl "plan_lint" tests/` returns nothing.
 
 ## Rabbit Holes
@@ -189,7 +201,7 @@ Every command below was re-executed against `origin/main` at `cd5f0572e` (2026-0
 
 **Every row above is argv-safe: no `;`, no `$(`, no pipes, no redirection.** This is deliberate, and it is the plan holding itself to Decision D2 — a row containing a shell metacharacter would be reported `skipped: requires shell` by the very tool this plan builds, which would make the table unrunnable by its own linter.
 
-Round 2 removed two rows that violated this. Both used `test "$(…)"` subshells to work around the exit-status trap, and both would now be skipped rather than executed. Their replacements avoid the trap a second way — by asserting a boolean with `grep -q` instead of comparing a count:
+Round 2 removed two rows that violated this. Both used `test "$(…)"` subshells to work around the exit-status trap, and both would now be skipped rather than executed. The surviving row's replacement avoids the trap a second way — by asserting a boolean with `grep -q` instead of comparing a count:
 
 - The fixture row previously counted occurrences and recorded `printed 4`. The real count was `5` when written and `6` by round 2, drifting as the plan was edited. An absolute count of a string inside the document that contains the count is self-referential and cannot be kept true. `grep -q` asserts the property actually being checked — the fixture is referenced — and cannot drift.
 - The greenfield row (`git grep -l plan_lint -- tests/` expecting no match) was dropped entirely. It could only ever pass *before* the build; task 8 adds a test that references `plan_lint`, so the row was guaranteed to invert the moment the work landed. A Verification row that must fail after the work completes is not a verification.
@@ -199,7 +211,7 @@ The exit-status trap that motivated this plan is still real — `grep -c` prints
 ## Success Criteria
 
 - `plan-lint <plan.md>` executes every non-denylisted Verification row and prints claimed vs. actual exit code and stdout for each.
-- Run against the #2733 plan, it flags the six `grep -c`-style rows whose actual exit status is 1 while the row reads as a success condition.
+- Run against `tests/fixtures/plan_lint_sample.md`, it flags the six `grep -c`-style rows whose actual exit status is 1 while the row reads as a success condition. The fixture reproduces that pattern verbatim from the original evidence (preserved at `docs/archive/plans-completed/rtr-unconditional-2733.md:876,886-895`), so the criterion is backed by a Verification row and a task rather than by a document that has already migrated once.
 - It resolves `file:line` citations and surfaces the cited line text.
 - A denylisted command is reported skipped and demonstrably not executed.
 - Plan-lint raising an exception leaves critique dispatch unaffected.
@@ -240,6 +252,26 @@ Open Question 1 (executing plan-authored shell) was put to all three critics as 
 | CONCERN | Risk & Robustness | `os.killpg` reaches xdist workers but not a grandchild that self-detaches via `setsid`/`nohup`/`disown`, which survives the 30s timeout as an orphan outside even `scripts/reap-xdist.sh`'s recognition. | **Resolved** — r2. Documented as an accepted residual limit with its detection path, not silently carried. The no-shell decision removes the common route to `nohup`/`disown`, which are shell constructs. |
 | CONCERN | Scope & Value | Success Criterion "Plan-lint raising an exception leaves critique dispatch unaffected" and the Failure Path fail-open guarantee have no counterpart in Task 7, which says only "invoke and attach". A literal implementation could let a plan-lint crash block critic dispatch, violating the No-Go against skipping critique rounds. | **Resolved** — r2. Task 7 now states the fail-open requirement explicitly at the wiring site. |
 | NIT | History & Consistency | The Blocker-3 disposition cites `do-plan-critique/SKILL.md:132` for the Step 2c bullets; 132 is the `## Step 2` header and the quoted content is at 148-151. | **Resolved** — r2. Citation corrected to the range. |
+
+
+### Round 3 — 2026-09-07
+
+**Verdict:** NEEDS REVISION — 2 blockers, 2 concerns, 2 nits.
+**Critics:** Risk & Robustness, Scope & Value, History & Consistency (FULL depth). **Mode:** independent roster (3 critics), gate 3/3, none ungrounded.
+**Run under an explicit human override of the G2 critique cycle cap.**
+
+**Central measurement (Scope & Value).** Counted every `## Verification` command row across `docs/plans/` and `docs/archive/plans-completed/` — 5,454 rows, after unescaping markdown's `\|` cell escaping. 1,149 (21.1%) contain a shell metacharacter and would be skipped under D2; in the live top-level corpus, 62 of 227 (27.3%). The scope-collapse hypothesis is refuted: roughly three rows in four remain executable, and the plan's motivating defect class is plain argv. **Execution stays in scope.**
+
+| Severity | Critics | Finding | Addressed By |
+|---|---|---|---|
+| BLOCKER | Risk & Robustness | `shell=False` plus an argv[0] denylist is not the claimed guarantee. `sh -c 'rm -rf .'` and `python3 -c "__import__('os').system(...)"` contain none of the eight screened metacharacters, and neither `sh` nor `python3` appeared in the denylist. Any interpreter or uninspected wrapper as argv[0] re-introduces a shell one layer down. | **Resolved** — r3. The denylist is inverted into an **allowlist** of read-only binaries (`test`, `grep`/`rg`, `git` restricted to read subcommands, `ls`/`wc`/`head`/`tail`, `sed -n`, `python -m` with `-c` refused, `scripts/pytest-clean.sh`). Everything else is `skipped: not on the execution allowlist`. Enumerating the safe set is tractable; enumerating the dangerous set is not. |
+| BLOCKER | Risk & Robustness | The `setsid` residual-limit paragraph claimed the denylist catches `setsid` as argv[0], but `setsid` appeared in no list anywhere in the plan — a control asserted in prose and never specified. `setsid python3 task.py` was argv-safe, uncaught, and survives the 30s `os.killpg`. | **Resolved** — r3. Under the allowlist the claim is true by construction: `setsid` is not permitted, so no enumeration is needed. The paragraph now states the genuine residual — an allowlisted binary that detaches its own child, of which `scripts/pytest-clean.sh` is the only candidate and the reason the group kill exists. |
+| CONCERN | Scope & Value | `## Test Impact` still listed the "disposition differ" as covered by the new test file, though `## Solution` and the round-1 Blocker-3 resolution both drop that check from scope. Leftover from the r1/r2 narrowing. | **Resolved** — r3. Reference removed; Test Impact now names the citation-content check. |
+| CONCERN | Scope & Value | The Success Criterion "run against the #2733 plan, it flags the six `grep -c`-style rows" had no backing task or Verification row, and cited a document the plan's own Freshness Check forbids citing because it has already migrated to the archive. | **Resolved** — r3. The criterion now targets `tests/fixtures/plan_lint_sample.md`, and task 8 requires the fixture to carry those six rows verbatim plus a metacharacter row, an off-allowlist row, and a resolving-but-false citation. |
+| NIT | History & Consistency | "Their replacements avoid the trap a second way" is plural, but only one of the two removed rows was replaced; the other was dropped outright. | **Resolved** — r3. Singular. |
+| NIT | Scope & Value | The shell-coverage cost was stated only qualitatively while every other quantitative claim in the document was driver-verified. | **Resolved** — r3. The measured 21.1% / 27.3% figures are recorded with their date and corpus, and explicitly marked a one-time measurement rather than a claim to re-verify as the corpus drifts. |
+
+**Clean in this round:** History & Consistency re-ran all seven Verification rows from the worktree and every recorded Pre-build actual matched; all cited SHAs resolve; the `SKILL.md:132` / `:148-151` citation is correct; both round-2 blockers verified genuinely resolved rather than relabelled.
 
 ## Decisions
 
