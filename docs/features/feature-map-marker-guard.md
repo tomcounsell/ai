@@ -11,10 +11,10 @@ status: Shipped
 resolution function `tests/conftest.py::pytest_collection_modifyitems` calls
 at collection time to auto-tag every test with a pytest feature marker
 (`pytest -m sdlc`, `pytest -m "messaging or sessions"`, and so on).
-`resolve_marker()` takes a module basename, strips `test_` and `.py`
-(`basename.replace("test_", "").replace(".py", "")`, a global replace of
-every occurrence, copied verbatim from the shipped hook), and substring-matches
-the remainder against `FEATURE_MAP` in insertion order, first hit wins.
+`resolve_marker()` takes a module basename, strips a leading `test_` and a
+trailing `.py` (`basename.removeprefix("test_").removesuffix(".py")`, an
+anchored strip), and substring-matches the remainder against `FEATURE_MAP` in
+insertion order, first hit wins.
 
 Nothing checked that the marker a file landed on was the marker anyone
 intended. A file could be renamed, moved, or split and silently change
@@ -48,19 +48,23 @@ runs everywhere the suite already runs needs no second execution path.
    `config`. `checkpoint` is a prefix of `checkpointing`, so
    `test_long_task_checkpointing.py` tags `validation`. **Guard rule R3**
    catches this suite-wide.
-3. **Mangled stem.** The stem expression is a *global* `str.replace("test_",
-   "")`, not a prefix strip, so a basename containing `test_` a second time
-   has that occurrence eaten out of the middle: `tests/tools/test_test_judge.py`
-   yields the stem `judge`, missing the `test_judge` key written for it.
-   **No rule below can see this** — it surfaces as an unmarked file with no
-   directory or sibling signal to contradict it, the same shape a
-   presence-only rule cannot catch either (see "What was considered and
-   rejected"). Tracked separately as
-   [#3184](https://github.com/tomcounsell/ai/issues/3184) and deliberately
-   left unfixed here: correcting the strip would retag
-   `tests/tools/test_test_judge.py` and
-   `tests/unit/test_validate_test_impact.py`, which is a marker-assignment
-   change, not a regression-prevention one.
+3. **Mangled stem.** A stem taken with an unanchored strip loses `test_`
+   wherever it appears, not just at the front, so a basename carrying `test_`
+   twice has the second occurrence eaten out of the middle:
+   `tests/tools/test_test_judge.py` would stem to `judge` and miss the
+   `test_judge` key written for it, and `test_conftest_isolation_guards.py`
+   would stem to `confisolation_guards`, unreachable by any key naming
+   `conftest`. `_stem` anchors both ends
+   (`removeprefix("test_")` / `removesuffix(".py")`), which is what makes
+   `tests/tools/test_test_judge.py` carry `tools` and
+   `tests/unit/test_validate_test_impact.py` carry `validation`
+   ([#3184](https://github.com/tomcounsell/ai/issues/3184)). **No rule below
+   can see a mangled stem** — it surfaces as an unmarked file with no directory
+   or sibling signal to contradict it, the same shape a presence-only rule
+   cannot catch either (see "What was considered and rejected"). The anchoring
+   is instead held by direct stem-fidelity fixtures in
+   `tests/unit/test_feature_map_markers.py`, one for each of the five tracked
+   basenames of this shape.
 
 ## The three rules, and what each can and cannot see
 
