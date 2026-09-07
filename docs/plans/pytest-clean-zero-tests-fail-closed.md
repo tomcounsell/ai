@@ -431,12 +431,18 @@ new pytest plugin module, and a new test file, all inside the repo.
   the wrapper injects with `-p`. It counts executed test reports in the controller and
   records a verdict to the file the wrapper named. It changes no pytest behavior, prints
   nothing, and no-ops when the env var is unset.
-- **One pass-through predicate, not a state enumeration**: the wrapper passes through on an
-  *absent* file, a `collectonly` verdict, or a `count` of at least one. **Everything else
-  fails closed** — `count 0`, a surviving `started` sentinel, an empty file, a truncated
-  write, unparseable bytes. Inverting the test this way is what makes the guard total: a
-  state nobody anticipated lands on the safe side by construction rather than by having
-  been enumerated.
+- **The guard only ever converts a green into a red.** The verdict block runs only when
+  pytest itself exited **0** (`[ "$PYTEST_EXIT" -eq 0 ]`). A run that already failed keeps
+  its own exit code and its own headline. This is not a softening of the guard: the channel
+  it exists for — every test skipped — is precisely the one that exits 0 today. A collection
+  error exits 2 and a zero-collected run exits 5, and both were already loud (spike-8).
+- **One pass-through predicate, not a state enumeration**: `verdict_passes_through()` passes
+  through on an *absent* file, a `collectonly` verdict, or a `count` of at least one.
+  **Everything else fails closed** — `count 0`, a surviving `started` sentinel, an empty
+  file, a truncated write, unparseable bytes. Inverting the test this way is what makes the
+  guard total: a state nobody anticipated lands on the safe side by construction rather than
+  by having been enumerated. It is a named function, not an inline `case`, so a test can
+  drive the wrapper's own body instead of a retyped copy of it (spike-9).
 
 ### Flow
 
@@ -445,10 +451,12 @@ new pytest plugin module, and a new test file, all inside the repo.
 **plugin records the verdict** → wrapper reaps workers → **wrapper reads and deletes the
 file** → one of:
 
+- *pytest exited non-zero* → **exit with pytest's status**, verdict block skipped entirely
+  (the run is already red and already has its own headline)
 - *`count N`, N ≥ 1* → **exit with pytest's status** (today's behavior, the overwhelming majority)
 - *`collectonly`* → **exit with pytest's status**
 - *file absent* → **exit with pytest's status** (no session ran; `--version` and friends)
-- *anything else* → **stderr diagnostic, exit 1**
+- *anything else, on a run pytest called green* → **stderr diagnostic, exit 1**
 
 ### Technical Approach
 
@@ -515,24 +523,51 @@ file** → one of:
   fi
   ```
 
+  This `if` is the **only** shape the hatch takes anywhere in this plan. A one-line
+  `[ -z ... ] && exit 1` would be equivalent here only by accident — `scripts/pytest-clean.sh:29`
+  sets `set -u` and not `set -e`, and line 311 re-exits explicitly — and a reader would have
+  to reconstruct all three facts to know it was safe. Write the `if`.
+
   Measured on the prototype: with the hatch set, an all-skip run exits 0 **and** still
   prints `pytest-clean: ZERO TESTS EXECUTED (#3195) — this run proves nothing.` A reader of
   a mutation-check transcript can therefore never mistake a hatched run for a pass. The
   escape-hatch test asserts that message; asserting only the exit code is the assertion
   this whole issue proves worthless.
-- **The verdict block is a single `case` with a pass-through allowlist:**
+- **The verdict block is gated on pytest's own success, and its predicate is a named
+  function.** Both shapes are settled by measurement (spike-8, spike-9):
 
   ```bash
-  case "$COUNT_VERDICT" in
-      ""|collectonly)  : ;;          # no session ran, or a collect-only run
-      "count "[1-9]*)  : ;;          # at least one test executed
-      *)               <diagnostic>; [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ] && exit 1 ;;
-  esac
+  # BEGIN zero-executed guard (#3195)
+  verdict_passes_through() {
+      case "$1" in
+          ""|collectonly)  return 0 ;;   # no session ran, or a collect-only run
+          "count "[1-9]*)  return 0 ;;   # at least one test executed
+          *)               return 1 ;;   # count 0, started, truncated, garbage
+      esac
+  }
+
+  if [ "$PYTEST_EXIT" -eq 0 ] && ! verdict_passes_through "$COUNT_VERDICT"; then
+      <full diagnostic to stderr>
+      if [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ]; then
+          exit 1
+      fi
+  fi
+  # END zero-executed guard (#3195)
   ```
 
-  Verified against `""`, `collectonly`, `count 0`, `count 1`, `count 10`, `started`,
-  `coun` (truncated), whitespace, and `count -1`: only the first two and the positive
-  counts pass through.
+  The predicate was verified against `""`, `collectonly`, `count 0`, `count 1`, `count 10`,
+  `started`, `coun` (truncated), whitespace, and `count -1`: only the first two and the
+  positive counts pass through.
+
+  Two things about this shape are load-bearing:
+  - **`$PYTEST_EXIT -eq 0` is the gate, not an optimization.** Without it the guard rewrites
+    a collection error's exit 2 and a zero-collected run's exit 5 into 1 and prints a
+    pool-exhaustion headline over an unrelated failure; after a wedge it prints a second
+    headline contradicting the `WEDGED` banner. All three measured in spike-8. The gate is
+    what makes "pass-through behavior for every other case is unchanged" true as written.
+  - **`verdict_passes_through` is a function so the tests can slice it out of the script
+    under test.** An inline `case` can only be tested by retyping its patterns, which passes
+    unchanged when the wrapper's own `case` is deleted (spike-9).
 - **A file-absent run is a pass-through, deliberately.** `pytest --version` runs no session
   and writes nothing, and `scripts/pytest-clean.sh --version` is how the existing guard
   tests drive the wrapper. Measured: no file is created.
