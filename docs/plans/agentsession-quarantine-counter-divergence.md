@@ -437,6 +437,11 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
   and running them here would blur the two halves.
 - **Preserving the `× 3` number to avoid editing a test.** Multiplying the row count by the indexed
   field count would keep every assertion green while reporting a quantity that never happened.
+- **Widening `except ImportError` to `except Exception` because the degrade test will not fire.**
+  The naive test recipe cannot reach that branch for a structural reason (popoto imports the same
+  symbol inside the call we make — see task 2), and widening the handler makes the test pass by
+  changing production behaviour: every decode fault on a hot startup path would be swallowed into a
+  "the symbol moved" report. Fix the test with the stubbing recipe; leave the handler narrow.
 
 ## Risks
 
@@ -562,9 +567,11 @@ wrapper, no bridge import.
       (popoto's divergence pre-check plus the retained `on_save` shim) and state the counter's unit
       as de-duplicated identity-less rows per pass.
 - [ ] Update `docs/features/agentsession-index-drift-detection.md` — correct the description of what
-      the quarantine suffix counts.
-- [ ] Check `docs/features/popoto-index-hygiene.md` for the same stale claim and correct it if
-      present.
+      the quarantine suffix counts. It quotes the old literal verbatim at `:122`
+      ("quarantined 3 identity-less hash re-add(s)"), so it must move with the f-string.
+- [ ] Update `docs/features/popoto-index-hygiene.md` — it quotes the same literal verbatim at `:109`
+      and lists `tools/doctor.py` / `_recent_quarantine_suffix()` in its surface table at `:186`.
+      Correct the quoted example to the new row phrasing.
 - [ ] `docs/features/README.md` index — verify the three entries above still describe their pages
       accurately; add no new page (this is a correction, not a new feature).
 
@@ -572,13 +579,34 @@ wrapper, no bridge import.
 Not applicable — this repo has no external documentation site.
 
 ### Inline Documentation
+
+Both comment blocks below were located by symbol at `1ad6cbf97`, not carried over from an earlier
+draft. The round-3 nit is correct that the previously-cited `:68-78` range was wrong and that a
+second, more directly stale block was missing; both are now named.
+
 - [ ] Rewrite the "A1 rebuild guard" paragraph and the "Returns" note in the `repair_indexes()`
       docstring to name popoto 1.9.0's divergence pre-check as the primary quarantine seam.
-- [ ] Update the module-level comment at `models/agent_session.py:68-78` describing the counter and
-      its Redis key.
+- [ ] Update the module-level comment at `models/agent_session.py:66-74` describing the persisted
+      Redis key. (The block ends at `:74`; `:75-78` are the
+      `_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY` / `_TTL_SECONDS` constant definitions, not prose.)
+- [ ] Update the comment block at `models/agent_session.py:689-694`, directly above
+      `_last_quarantined_identityless: int = 0` at `:695`. This is the block that states the unit
+      most directly and is the most stale: it says the counter is what the rebuild "refused to
+      re-add to the **status index**" and that "This is a **per-pass event count**". Under
+      row-scoped counting across all three `IndexedField`s both clauses are wrong — reword to
+      de-duplicated identity-less **rows** quarantined this pass, across every indexed field, via
+      either seam. Keep the block's standing caveat that this is not a cumulative keyspace gauge.
+- [ ] Document the new `_decode_degrade_reported: bool = False` class attribute added beside
+      `_last_quarantined_identityless`: what it latches (the Sentry capture only), why
+      (`repair_indexes()` runs on worker startup, the hourly reflection, and session pickup, and the
+      condition it reports is permanent), and that `logger.error` is deliberately left unlatched.
 - [ ] Comment the `try/except ImportError` at the call site with why the degrade is correct (issue
       comment `5563793165`'s counting rule, just unfiltered) and why `config/popoto_floor.py` is
       deliberately not the place for this check (it fails open by policy).
+- [ ] Reword the `tools/doctor.py` suffix f-string at `:1599` to the row unit, and the two
+      docstrings that repeat the old unit around it — `_recent_quarantine_suffix` (`:1576-1586`,
+      "per-pass quarantine count" at `:1579`) and `_check_agentsession_index_drift`
+      (`:1613-1615`, "identity-less quarantine count").
 
 ## Success Criteria
 
@@ -596,9 +624,19 @@ Not applicable — this repo has no external documentation site.
       the `finally`.
 - [ ] A forced `ImportError` on `decode_popoto_model_hashmap` degrades the counter to the unfiltered
       `len(diverged_keys)` sum, keeps `repair_indexes()` returning its 2-tuple, and emits the loud
-      `logger.error` + Sentry report — asserted by a test, not only by inspection.
+      `logger.error` + Sentry report — asserted by a test, not only by inspection. The test stubs
+      `AgentSession.rebuild_indexes` before removing the symbol (the one-step version cannot reach
+      the branch) and resets `_decode_degrade_reported`, and the production handler stays
+      `except ImportError`, never widened to `except Exception`.
+- [ ] The Sentry capture on the degrade path fires at most once per process
+      (`_decode_degrade_reported`) while `logger.error` fires on every pass — asserted by that same
+      test, so the recurring-path flood Risk 5 names cannot regress in silently.
+- [ ] The doctor suffix reports the row unit: `tools/doctor.py:1599` no longer says "identity-less
+      hash re-add(s)", and `tools.doctor._recent_quarantine_suffix()` renders the new wording. No
+      test asserts on that literal today, so nothing else has to move with it.
 - [ ] `config/popoto_floor.py` and `tests/unit/test_popoto_floor.py` are untouched by this PR. The
-      files this PR may change are `models/agent_session.py`, the two named test files, and docs.
+      files this PR may change are `models/agent_session.py`, `tools/doctor.py`, the two named test
+      files, and docs.
 - [ ] `tests/unit/test_session_archive.py` and `agent/session_archive.py` are untouched by this PR.
 - [ ] PR body says `Refs #3199`.
 - [ ] Tests pass (`/do-test`, scoped)
@@ -679,12 +717,34 @@ single-quoted heredoc that feeds an interpreter. Verify through the scoped tests
   `quarantined_keys.update(<diverged keys>)` for the unfiltered sum, and emit the loud degradation
   report (`logger.error` naming the missing symbol and the installed popoto version, plus a
   `sentry_sdk.capture_message` at `error` level inside its own `try/except` so Sentry can never crash
-  the caller — the shape of `agent/index_drift.py::_report_loud`, `agent/index_drift.py:211-231`).
+  the caller — the shape of `agent/index_drift.py::_report_loud`, `agent/index_drift.py:211-231`,
+  with the Sentry block itself at `:221-231`).
   Do **not** touch `config/popoto_floor.py`: it fails open by policy and a symbol probe there would
   block index repair fleet-wide on a false positive.
+- **Latch the Sentry capture, not the log.** Add `_decode_degrade_reported: bool = False` as a class
+  attribute beside `_last_quarantined_identityless` (`models/agent_session.py:695`). Emit
+  `logger.error(...)` unconditionally on every degraded pass, then
+  `if not cls._decode_degrade_reported: cls._decode_degrade_reported = True` and only inside that
+  guard make the Sentry capture (still wrapped in its own `try/except Exception`). Rationale for the
+  comment at the call site: `repair_indexes()` runs on worker startup, on the hourly
+  agent-session-cleanup reflection (`agent/session_health.py:6101`), and opportunistically from
+  session pickup (`agent/session_pickup.py:469`), and a moved upstream symbol is permanent — an
+  unlatched capture is an unthrottled fleet-wide error stream, which buries the alert instead of
+  raising it.
+- **Reword the doctor suffix to the row unit** (`tools/doctor.py`). Replace "identity-less hash
+  re-add(s)" in the f-string at `:1599` with a row phrasing such as "identity-less row(s)", and move
+  the two docstrings carrying the same stale unit with it: `_recent_quarantine_suffix` (`:1576-1586`,
+  the "per-pass quarantine count" clause at `:1579`) and `_check_agentsession_index_drift`
+  (`:1613-1615`, "identity-less quarantine count"). This lands in task 1 rather than task 6 so that
+  task 5's pasted suffix shows the final wording. `grep -rn 'hash re-add' tests/` returns nothing, so
+  no test moves with it.
 - Publish `len(quarantined_keys)` to `cls._last_quarantined_identityless`, to the WARNING log (row
   phrasing, naming both seams), and to the Redis key. Leave the Redis `SET` non-fatal.
-- Rewrite the docstring's A1 paragraph, its "Returns" note, and the module comment at lines 68-78.
+- Rewrite the docstring's A1 paragraph, its "Returns" note, and **both** stale comment blocks named
+  in Inline Documentation: `models/agent_session.py:66-74` (the persisted-Redis-key block) and
+  `:689-694` (the block directly above `_last_quarantined_identityless` at `:695`, which still says
+  "refused to re-add to the status index" and "This is a per-pass event count" — both wrong under
+  row-scoped counting across all three indexed fields).
 
 ### 2. Test updates
 
@@ -704,10 +764,37 @@ single-quoted heredoc that feeds an interpreter. Verify through the scoped tests
   string containing the count.
 - Add `test_diverged_key_decode_failure_is_counted_not_raised`: monkeypatch the decode helper to
   raise, assert `repair_indexes()` returns its 2-tuple and the diverged keys still counted.
-- Add `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`: force the
-  `decode_popoto_model_hashmap` import to raise `ImportError`, seed diverged rows, and assert the
-  counter equals the unfiltered diverged-key count, that `repair_indexes()` still returns its
-  2-tuple, and that the degradation was reported at `error` level.
+- Add `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`. **The obvious
+  one-step recipe does not work and must not be attempted.** popoto's own `rebuild_indexes()` imports
+  the very same symbol from the very same module — `from .encoding import
+  decode_popoto_model_hashmap` at
+  `.venv/lib/python3.14/site-packages/popoto/models/base.py:3194`, inside the call `repair_indexes()`
+  makes at `models/agent_session.py:2518`. That call sits under a bare `try: … finally:` with **no**
+  `except` (`try:` at `models/agent_session.py:2506`, `finally:` at `:2519`), so any technique that makes the symbol unimportable
+  raises out of `cls.rebuild_indexes()` and escapes `repair_indexes()` entirely; the degrade branch is
+  never reached and the test measures nothing. Ordering does not save it either — if our own import
+  runs first the `ImportError` is caught, and then the real `rebuild_indexes()` raises the same error
+  from popoto's import a few lines later.
+
+  **Working recipe, in this order:**
+  1. Seed the identity-less rows and collect their Redis keys.
+  2. `monkeypatch.setattr(AgentSession, "_decode_degrade_reported", False)` — reset the Sentry latch
+     so the assertion does not depend on test order.
+  3. `monkeypatch.setattr(AgentSession, "rebuild_indexes", <callable returning
+     RebuildIndexesResult(0, [<seeded keys>])>)`, importing `RebuildIndexesResult` from
+     `popoto.models.base`. Its signature is `__new__(cls, count, diverged_keys=None)`, so the
+     positional two-argument form is correct. This is the same stubbing technique
+     `test_plain_int_rebuild_result_degrades_to_shim_only` already uses in this task.
+  4. **Only then** `monkeypatch.delattr(popoto.models.encoding, "decode_popoto_model_hashmap",
+     raising=False)`. With the real rebuild stubbed out, `base.py:3194` never runs, and the only
+     remaining import of that symbol is the one inside `repair_indexes()` — which is the branch under
+     test. `from X import Y` raises `ImportError` when `Y` is absent from module `X`, so the
+     production `except ImportError` catches it as designed.
+  5. Assert: the counter equals the unfiltered diverged-key count; `repair_indexes()` still returns
+     its 2-tuple; `logger.error` fired.
+
+  **Do not widen the production `except ImportError` to `except Exception` to make the naive version
+  pass.** That would swallow real decode faults on the hot path in exchange for a test shortcut.
 - Add `test_plain_int_rebuild_result_degrades_to_shim_only`: monkeypatch `rebuild_indexes` to return
   a bare `int`, assert no `AttributeError`.
 - Add `test_redis_persistence_failure_is_non_fatal`: monkeypatch the Redis `set` to raise, assert
@@ -785,7 +872,9 @@ single-quoted heredoc that feeds an interpreter. Verify through the scoped tests
 ## Verification
 
 Every row below was measured against unmodified `main` at `ed1820fcc` before the build starts, and
-re-confirmed at `8f0b04a70` — no commit between the two touched `models/agent_session.py`,
+re-confirmed at `8f0b04a70`; the two rows added by the round-3 concern embed ("Doctor suffix uses
+the row unit" and "Sentry capture is latched") were measured at `1ad6cbf97` and read 1 and 0
+respectively, both red against their expectations. No commit between the baselines touched `models/agent_session.py`,
 `tests/unit/test_agentsession_pending_index_leak.py`, or
 `tests/unit/test_agentsession_index_guard_generalized.py`, so the baseline still holds. A row
 that is already green on `main` proves nothing about this work, so each row records its pre-change
@@ -810,8 +899,10 @@ different `run_id`, substitute it in both rows and record the substitution in th
 | Floor interlock untouched (anti-regression) | `git diff --name-only origin/main...HEAD \| grep -c 'config/popoto_floor[.]py'` | match count == 0 | green (0) |
 | on_save shim retained (anti-regression) | `grep -c '_make_identityless_skip_shim' models/agent_session.py` | output > 1 | green (2) |
 | Archive half untouched (anti-regression) | `git diff --name-only origin/main...HEAD \| grep -cE 'test_session_archive\|session_archive[.]py'` | match count == 0 | green (0) |
-| Lint clean | `python -m ruff check models/agent_session.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
-| Format clean | `python -m ruff format --check models/agent_session.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
+| Lint clean | `python -m ruff check models/agent_session.py tools/doctor.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
+| Format clean | `python -m ruff format --check models/agent_session.py tools/doctor.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
+| Doctor suffix uses the row unit | `grep -c 'identity-less hash re-add' tools/doctor.py` | match count == 0 | RED (1) |
+| Sentry capture is latched | `grep -c '_decode_degrade_reported' models/agent_session.py` | output > 1 | RED (0) |
 | No stale xfails introduced | `grep -rn 'xfail' tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 1 | green |
 
 The second row reads the log the first row wrote, so the scoped suite runs once, not twice. The
