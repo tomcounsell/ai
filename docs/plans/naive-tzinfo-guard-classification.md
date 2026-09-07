@@ -103,7 +103,7 @@ The coding is an hour. The review is the expensive part, because a reviewer has 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | popoto >= 1.9.0 installed | `.venv/bin/python -c "import popoto,pathlib,re;p=pathlib.Path(popoto.__file__).parent/'models/encoding.py';assert '_LEGACY_DATETIME_RE' in p.read_text()"` | The aware-decode contract every deletion rests on |
-| `POPOTO_DATETIME_KEY_LEGACY` unset | `.venv/bin/python -c "from popoto.models.db_key import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | With the kill switch on, legacy rows decode naive and the deletions are unsafe |
+| `POPOTO_DATETIME_KEY_LEGACY` unset | `.venv/bin/python -c "from popoto.fields.constants import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | With the kill switch on, legacy rows decode naive and the deletions are unsafe |
 
 ## Solution
 
@@ -376,11 +376,11 @@ File ownership is disjoint by construction: `models-builder` owns `models/agent_
 | daily_log ternary gone | `grep -c "ca if ca.tzinfo else" reflections/pm_briefings/daily_log.py` | match count == 0 |
 | crash_recovery guard gone | `grep -c 'getattr(updated, "tzinfo", None) is None' reflections/crash_recovery.py` | match count == 0 |
 | Dead datetime branch gone | `grep -c "_ua.timestamp() if _ua.tzinfo else" reflections/audits/redis_quality_audit.py` | match count == 0 |
-| No stale popoto-strips claim | `grep -rn "strips tzinfo" --include='*.py' agent/ models/ monitoring/ reflections/ bridge/ tools/ utils/ worker/` | match count == 0 |
-| No naive writer reintroduced | `grep -rnE "\.(updated_at\|started_at\|completed_at) = datetime\.now\(\)" --include='*.py' agent/ models/ bridge/ worker/ tools/ monitoring/ reflections/` | match count == 0 |
-| Legacy kill switch off | `.venv/bin/python -c "from popoto.models.db_key import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | exit code 0 |
+| No stale popoto-strips claim | `grep -rn "strips tzinfo" --include='*.py' agent/ models/ monitoring/ reflections/ bridge/ tools/ utils/ worker/ \| wc -l` | match count == 0 |
+| No naive writer reintroduced | `grep -rnE "\.(updated_at\|started_at\|completed_at) = datetime\.now\(\)" --include='*.py' agent/ models/ bridge/ worker/ tools/ monitoring/ reflections/ \| wc -l` | match count == 0 |
+| Legacy kill switch off | `.venv/bin/python -c "from popoto.fields.constants import Defaults; assert not Defaults.DATETIME_KEY_LEGACY"` | exit code 0 |
 | Doc records the escape hatches | `grep -c "POPOTO_DATETIME_KEY_LEGACY" docs/features/utc-timestamps.md` | output > 0 |
-| No #3199 region touched | `git diff origin/main --unified=0 -- models/agent_session.py \| grep -c "repair_indexes\|_last_quarantined_identityless"` | match count == 0 |
+| No #3199 region touched | `git diff origin/main --unified=0 -- models/agent_session.py \| grep -cE "repair_indexes\|_last_quarantined_identityless"` | match count == 0 |
 
 ## Critique Results
 
