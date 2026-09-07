@@ -107,7 +107,7 @@ instead of inside a themed package, would resolve to `config`, pass R3
 (`config` is a whole token), and never reach R1 or R2 (its parent `unit` is a
 known root) — all three rules stay green on a genuine mistag. The rules are
 not widened to close this: doing so would need a declaration of intent that
-does not exist for those 755 files.
+does not exist for those 758 files.
 
 ## Exemptions: `KNOWN_MISTAGS`, keyed by path only
 
@@ -155,8 +155,11 @@ policy, never by deferring a fix to a future issue.
   neither bracketing assertion ever exercised — the exact silent-hole shape
   #3031 warns against, reintroduced inside the mechanism meant to close it.
 - **Making the package directory authoritative over the basename.** Re-measured
-  for #3175 it gains **17** markers and corrects **4** with zero losses (the
-  "39 and 6" figure recorded here when the guard shipped did not reproduce).
+  for #3175 against the pre-rename population it gained **17** markers and
+  corrected **4** with zero losses (the "39 and 6" figure recorded here when the
+  guard shipped did not reproduce). Against the post-rename population it gains
+  and corrects nothing at all, because every file in an R1 package now already
+  resolves to its own directory's marker.
   Still rejected, and #3175 reinforces why: it makes rule R1 tautological (the
   file's marker would be *defined* as the directory's marker, so "they match"
   proves nothing). #3175 took remedy 1 from the ladder below instead — rename
@@ -170,11 +173,19 @@ venv) or `pytest tests/unit/test_feature_map_markers.py` names every
 offending path with its resolved marker, expected marker, and the
 `FEATURE_MAP` key responsible. Three remediations, in order of preference:
 
-1. Rename the file so its basename resolves correctly.
+1. Rename the file so its basename resolves correctly. A rename also drops
+   whatever marker the *old* basename derived, which silently shrinks any
+   selector that relied on it. When the old marker was wanted, declare it
+   as a module-level `pytestmark` in the renamed file: the collection hook
+   calls `item.add_marker`, which is additive, so the file then carries
+   both. #3175 needed this for three of its 21 renames.
 2. Reorder or extend `FEATURE_MAP` (e.g. insert a more specific key ahead of
    the generic one currently winning).
-3. Add a `KNOWN_MISTAGS` entry with a prose reason, when 1 and 2 are out of
-   scope for the change at hand.
+3. Add a `KNOWN_MISTAGS` entry whose prose reason states a deliberate policy
+   choice and carries the literal token `POLICY`. Since #3175 this is not a
+   way to defer 1 and 2 to a later change:
+   `test_known_mistags_holds_only_policy_entries` fails any reason without that
+   token, so an exemption meaning "not right now" fails the suite.
 
 `python tests/marker_map.py --report` prints `path<TAB>marker` (`NONE` for
 unmarked) for every tracked test file; `--count` prints the population size.

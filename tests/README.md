@@ -512,7 +512,10 @@ enforces this in CI, not just in this note.
 ## Adding Tests for New Features
 
 1. **Pick the right level**: Unit for pure logic, integration for Redis/network, e2e for multi-component flows
-2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags
+2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags.
+   Inside a themed package whose own directory name resolves (`tests/unit/reflections/`,
+   `tests/unit/bridge/`, ...), guard rule R1 requires the basename to resolve to *that*
+   package's marker — leading with `test_{package}_` is the reliable way to get there.
 3. **Or add a new entry** to `FEATURE_MAP` if creating a new feature area
 4. **Add to this index** under the appropriate feature section
 5. **Run the audit** (`python tests/marker_map.py --audit`) before opening the PR — it fails
@@ -588,6 +591,11 @@ only the tagging moves. So when splitting a file:
 3. If the audit is clean but you still want to eyeball the count shift, compare
    `pytest -m <marker> --collect-only -q | tail -1` before and after for every marker the
    file touches.
+
+The same holds for a **rename**, with one extra step: the old basename's marker is
+simply gone, so any marker a selector still wants has to be declared as a module-level
+`pytestmark` in the renamed file (the collection hook's `add_marker` is additive, so the
+file then carries both). That is remedy 1 in the feature doc's remediation ladder.
 
 This is no longer a manual habit to remember: `tests/unit/test_feature_map_markers.py`
 runs the same audit as an ordinary test, so a mistagged basename fails the suite instead

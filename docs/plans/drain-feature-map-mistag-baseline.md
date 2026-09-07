@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 revision_applied: true
 revision_applied_at: 2026-09-07T10:00:15Z
@@ -1150,7 +1150,7 @@ The renames break prose, and prose failures are silent. This section is
 therefore weighted toward the sweep rather than toward new writing.
 
 ### Feature Documentation
-- [ ] Update `docs/features/feature-map-marker-guard.md`. This plan **does not**
+- [x] Update `docs/features/feature-map-marker-guard.md`. This plan **does not**
   change the guard's rules, so the document's structure survives; four factual
   passages move:
   - `## Exemptions: KNOWN_MISTAGS, keyed by path only` — the baseline is 2
@@ -1175,14 +1175,14 @@ therefore weighted toward the sweep rather than toward new writing.
   - Two of the renamed basenames are named in this file
     (`test_pm_briefings_no_slots_configured.py`, `test_sdlc_progress_check.py`)
     and must be updated to their new names.
-- [ ] Update `docs/features/docs-auditor.md:863` —
+- [x] Update `docs/features/docs-auditor.md:863` —
   `tests/unit/reflections/test_docs_auditor_git_surface.py` →
   `test_reflections_docs_auditor_git_surface.py`.
-- [ ] Update `docs/features/expectation-reconciler.md:92` —
+- [x] Update `docs/features/expectation-reconciler.md:92` —
   `test_expectation_reconciler.py` → `test_reflections_expectation_reconciler.py`.
-- [ ] Update `docs/features/plan-migration-invariant.md:199` —
+- [x] Update `docs/features/plan-migration-invariant.md:199` —
   `test_merged_branch_cleanup.py` → `test_reflections_merged_branch_cleanup.py`.
-- [ ] Update `tests/README.md`: the index row at line 299
+- [x] Update `tests/README.md`: the index row at line 299
   (`test_docs_auditor_git_surface.py`) and the prose at line 554 naming
   `test_pm_briefings_no_slots_configured.py` as the `configured` fragment-match
   example. That example is now *fixed*, so the sentence becomes a description of
@@ -1191,12 +1191,12 @@ therefore weighted toward the sweep rather than toward new writing.
   counts (`sdlc` 516, `messaging` 327, `sessions` 293) alone beyond a one-line
   note that they predate several splits — fixing them is not this change's job
   and pretending otherwise hides real drift behind a rename.
-- [ ] Sweep `docs/archive/plans-completed/` — 17 archived plans name 20 of the
+- [x] Sweep `docs/archive/plans-completed/` — 17 archived plans name 20 of the
   21 old basenames. Update each reference to the new path so a reader following
   a historical plan can still find the file, and add no commentary: an archived
   plan is a record, and the only edit it wants is one that keeps its pointers
   resolvable.
-- [ ] **Two ACTIVE plans owned by other lanes name renamed basenames inside
+- [x] **Two ACTIVE plans owned by other lanes name renamed basenames inside
   runnable commands.** These are not the archived case: an archived plan wants a
   resolvable pointer, an active plan wants its owner told. Update the paths *and*
   post a coordination note on each tracking issue from the PR description.
@@ -1213,23 +1213,23 @@ therefore weighted toward the sweep rather than toward new writing.
   reasoning does not apply. #3181 is `status: Ready` and may enter BUILD
   concurrently with this lane, which is why its owner gets told rather than
   discovering it from a failing command.
-- [ ] `docs/features/README.md` — check whether the guard's index row summary is
+- [x] `docs/features/README.md` — check whether the guard's index row summary is
   still accurate. It should be; the rule set is unchanged. Update only if the row
   quotes a baseline count.
 
 ### Inline Documentation
-- [ ] `KNOWN_MISTAGS`'s module docstring currently ends "Draining this baseline
+- [x] `KNOWN_MISTAGS`'s module docstring currently ends "Draining this baseline
   is #3175; it can only shrink, never grow". Rewrite: the drain happened, the
   two survivors are policy entries, and the shrink-only property still holds.
-- [ ] The new `"checkpointing": "validation"` key carries the comment explaining
+- [x] The new `"checkpointing": "validation"` key carries the comment explaining
   why its position is free — that both keys map to the same marker, so R3's
   marker-vs-marker comparison is order-independent. This is the sentence that
   stops a future reader from "tidying" it into a position that looks more
   deliberate.
-- [ ] The module docstring's opening paragraph describes the substring-match
+- [x] The module docstring's opening paragraph describes the substring-match
   coupling and says a test file "can be renamed, moved, or split and land under
   the wrong marker". Still true and still the point; leave it.
-- [ ] Comment-only references in `tests/unit/conftest.py:168`,
+- [x] Comment-only references in `tests/unit/conftest.py:168`,
   `tests/unit/test_plan_migration_invariant.py:155`,
   `tests/unit/test_reflections_package.py:528`, and
   `tests/integration/test_worker_liveness_ingestion.py:61`.

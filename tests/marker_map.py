@@ -156,8 +156,9 @@ FEATURE_MAP: dict[str, str] = {
 
 # Parent directory names that mean "not a themed package" -- a test file
 # directly under one of these carries no directory-level declaration of
-# intent, so it is covered by R3 alone (see docs/features/feature-map-marker-guard.md
-# for the 9.6%-of-the-suite coverage boundary this implies).
+# intent, so it is covered by R3 alone (see the coverage-boundary section of
+# docs/features/feature-map-marker-guard.md for what that implies; it carries the
+# measured share of the suite, with the date it was measured).
 KNOWN_ROOT_DIRS = ("tests", "unit", "integration", "e2e", "tools", "performance", "ai_judge")
 
 # Path-keyed exemptions, the only exemption mechanism (#2805: never key by
