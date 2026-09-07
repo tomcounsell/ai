@@ -430,7 +430,7 @@ Reflections are declared in `config/reflections.yaml` (a vault-symlinked registr
 
 | | Analysis |
 |---|---------|
-| **Strengths** | Watchdog ensures bridge resilience. Reflections automate maintenance. AutoExperiment enables self-improvement. Issue poller catches new work automatically. |
+| **Strengths** | Watchdog ensures bridge resilience. Reflections automate maintenance. Issue poller catches new work automatically. |
 | **Weaknesses** | No scheduled memory consolidation. No scheduled test suite runs. No scheduled dependency updates. Remote triggers underutilized. |
 | **Opportunities** | **Cron memory consolidation** — nightly dedup and merge similar memories. **Scheduled regression testing** — run full test suite nightly. **Dependency audit schedule** — weekly check for outdated packages. **Health check dashboards** — aggregate scheduled check results. |
 | **Threats** | Overlapping schedules consuming resources. Scheduled tasks failing silently. Launchd complexity for cross-machine deployment. |
