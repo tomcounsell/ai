@@ -184,7 +184,7 @@ def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
     The bootstrap script (``_BOOTSTRAP``) is what disarms the ambient shim:
     the child's ``argv[0]`` becomes the bootstrap itself, a path outside any
     checkout, so ``checkout_pin.checkout_root_of`` returns ``None`` and the
-    ambient ``pin()`` no-ops even though its ``.pth`` still runs.
+    ambient ``pin()`` would no-op even if its ``.pth`` ran.
     ``sys.argv = [target]`` must happen *before* ``site.addsitedir`` processes
     any ``.pth``, so the fake site dir's own pin (when present) sees the real
     target rather than the bootstrap's path. ``-S`` additionally skips the
