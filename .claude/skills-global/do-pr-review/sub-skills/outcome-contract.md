@@ -92,7 +92,7 @@ shape classifier for cost containment, and a single-writer verdict recorder),
 orchestrate it exactly as the context file specifies. The invariants that hold in
 every consensus configuration:
 
-- Each judge fork RETURNS its dict — it does not post a PR comment or record state itself.
+- Each judge subagent RETURNS its dict — it does not post a PR comment or record state itself.
 - The parent posts per-judge comments under a heading prefix distinct from the aggregate `## Review:` comment, then posts the aggregate comment **last**.
 - ONE verdict-record call writes the scalar verdict plus any consensus metadata (single-writer invariant).
 - A failed/skipped optional judge is treated as a skip, never a crash (unless the repo marks it fail-closed).

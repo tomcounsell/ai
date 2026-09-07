@@ -715,6 +715,48 @@ class TestTrivialDiffPathDoesNotReachQuorumGuard:
         assert "MUST NOT include these fields" in doc
 
 
+# ---------------------------------------------------------------------------
+# Judge-dispatch contract prose (issue #3198)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeDispatchContractProse:
+    """The judge roster is dispatched by an agent reading prose, so the prose
+    IS the mechanism -- the same shape as ``test_review_judge_env_docs`` and
+    the trivial-diff test above.
+
+    Every REVIEW run on 2026-09-04 was single-judge because ``do-pr-review``
+    declared ``context: fork``: the harness withholds the Agent tool at spawn
+    depth, so the declared roster collapsed to one reviewer while the posted
+    review kept the multi-judge format. Removing the frontmatter key stops the
+    collapse; these two clauses are what make a future collapse visible and
+    keep a named dispatch from reintroducing a refusal that reads like a
+    missing capability.
+    """
+
+    SKILL = ".claude/skills-global/do-pr-review/SKILL.md"
+
+    def test_skill_requires_sequential_lens_disclosure(self):
+        import pathlib
+
+        text = pathlib.Path(self.SKILL).read_text()
+        assert "sequential lenses (Agent tool unavailable:" in text, (
+            "do-pr-review must require the review to state "
+            "`sequential lenses (Agent tool unavailable: ...)` when the declared "
+            "judge roster could not be spawned (#3198)."
+        )
+
+    def test_skill_forbids_name_on_judge_dispatch(self):
+        import pathlib
+
+        text = pathlib.Path(self.SKILL).read_text()
+        assert "Do not pass `name` on judge dispatches" in text, (
+            "do-pr-review must forbid passing `name` on judge dispatches: a named "
+            "nested spawn is refused with a misleading 'Teammates cannot spawn "
+            "other teammates' error (#3198)."
+        )
+
+
 class TestRecordVerdictCLIShape:
     def test_cli_record_help_advertises_judges_json(self, capsys):
         """Smoke test: `python -m tools.sdlc_verdict record --help` lists the

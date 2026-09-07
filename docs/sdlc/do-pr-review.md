@@ -263,6 +263,11 @@ expect:
   meaningful once the rule has run over a full roster, and the rule never ran
   on a shortfall. The `notes` field names the degraded run in its first
   clause (e.g. "1 of 2 judges reported").
+- The aggregate `## Review:` comment states the run's `REVIEW_MODE`. With the
+  declared roster dispatched that is `independent roster (2 judges)`; where the
+  Agent tool is unavailable it is
+  `sequential lenses (Agent tool unavailable: {reason})`, and the run is
+  recorded as a quorum shortfall rather than read back as agreement (#3198).
 - Cost containment: trivial PRs force the legacy single-judge path. A PR is
   trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
   docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
@@ -276,11 +281,19 @@ Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-
 
 ### In-turn-await + artifact-presence gate (WS-D, issue #2124)
 
+REVIEW runs **inline** in the dispatching context: `do-pr-review` carries no
+`context: fork` frontmatter, so the judges are the stage runner's own subagents.
+A forked review sat at the harness spawn-depth limit, was withheld the Agent
+tool, and silently collapsed this two-judge roster into one sequential reviewer
+(#3198). Judge dispatches pass `run_in_background: false` and no `name` — a named
+nested spawn is refused with a misleading "Teammates cannot spawn other
+teammates" error.
+
 The judge subagents run in the **foreground and are awaited in-turn**: the parent
 blocks on every judge returning IN THE SAME TURN before it aggregates, posts the
-`## Review:` comment, and records the verdict. A fork that exits with judges still in
-flight kills those children and posts nothing (the #2112 miss) — so this is a hard
-contract, not a latency preference.
+`## Review:` comment, and records the verdict. A parent that returns with judges
+still in flight kills those children and posts nothing (the #2112 miss) — so this
+is a hard contract, not a latency preference.
 
 The mechanical backstop lives in `tools/sdlc_stage_marker.py`: the REVIEW `completed`
 marker now requires **both** (a) a readable substrate verdict (WS3c / #2062,
