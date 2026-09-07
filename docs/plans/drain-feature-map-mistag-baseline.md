@@ -972,8 +972,12 @@ surface:
 - [ ] `resolve_markers` documents the union semantics and, explicitly, that it
   never removes a marker the basename resolves to — the property acceptance
   criterion 3 rests on.
-- [ ] The `_stem` docstring currently says "#3184 has exactly one line to
-  change"; #3184 has landed and the sentence is stale. Correct it.
+- [ ] The `_stem` docstring names `resolve_marker_whole_token` as one of its two
+  callers. Task 4 collapses that function into `resolve_marker`, which would
+  leave the docstring pointing at something that no longer exists — update it in
+  the same change rather than after (**verified at plan time**: the older
+  "#3184 has exactly one line to change" sentence is already gone, rewritten by
+  #3184 itself, so there is nothing else stale in this docstring).
 
 ### External Documentation Site
 - Not applicable. This repo has no Sphinx/MkDocs/Read the Docs site; `docs/` is
@@ -1263,14 +1267,24 @@ spike-6; a mismatch is a real failure, not a tolerance to widen.
 | Full unit suite | `./scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Stale 39/6 figure removed from the feature doc | `grep -c 'Gains 39 markers' docs/features/feature-map-marker-guard.md` | match count == 0 |
+| Stale 39/6 figure removed from the feature doc | `grep -c 'Gains 39' docs/features/feature-map-marker-guard.md` | match count == 0 |
 | Stale coverage boundary removed | `grep -c '80 of 835' docs/features/feature-map-marker-guard.md` | match count == 0 |
-| Stale `_stem` comment removed | `grep -c '#3184 has exactly one line to change' tests/marker_map.py` | match count == 0 |
+| `_stem` docstring names no removed function | `grep -c 'resolve_marker_whole_token' tests/marker_map.py` | match count == 0 |
 
 `scripts/marker_census_diff.py` is a small helper this plan creates: it reads the
 frozen `path<TAB>markers` snapshot, recomputes the current marker set for every
 path still tracked, and reports gains, losses, and the per-marker census. It is
 the mechanical form of acceptance criterion 3.
+
+**Patterns pre-verified at plan time.** Every `grep`-based row above was run
+against `8e62c3a50` to confirm it matches what it claims to match:
+`Gains 39` → 1, `80 of 835` → 1, `def check_r1` → 1,
+`resolve_marker_whole_token` → present, `^(import pytest|from pytest)` → 0,
+`read_text|open\(|\bast\.` → 0, `/usr/bin/python3 tests/marker_map.py --count`
+→ 838. Two candidate rows were **discarded** during this check because their
+patterns matched nothing and would have passed vacuously: a `'Gains 39 markers'`
+row (the phrase wraps across two lines in the source) and a row asserting
+removal of a `_stem` sentence that #3184 had already deleted.
 
 **Red-state proof requirement.** The three anti-criterion rows and the two
 retirement rows must each be demonstrated FAILING against a deliberately
