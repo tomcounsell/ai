@@ -8,7 +8,7 @@ discriminator is whether the obligation behind a forward-looking statement is
 *durably recorded* (a Job inbound expectation, a `schedule_id`, or a PR URL),
 not how the sentence is phrased.
 
-Silence is the worse failure than over-claiming (it is the symptom this
+Silence is a worse failure than over-claiming (it is the symptom this
 section exists to prevent), so the honest core — say only what is already
 true, stated as present fact — must stay in the prompt verbatim.
 
@@ -18,13 +18,13 @@ Three things are locked here.
    guidance is text loaded into every headless PM turn, so a CI gate is the
    only thing that keeps an edit from silently deleting it.
 
-2. **No phrasing-workaround language survives.** The deleted phrasebook's
-   measured-verdict table and "two ways to stay on the allowed side" list
-   must not reappear under any name.
+2. **No phrasing-workaround language.** The prompt carries no
+   measured-verdict table and no "two ways to stay on the allowed side" list,
+   under any name.
 
 3. **Promise-gate fallback characterization**: illustrative phrasings that
-   mirror what the rewritten section teaches (present fact, no forward
-   clause) must still clear the *deterministic* heuristic branch
+   mirror what the section teaches (present fact, no forward clause) must
+   still clear the *deterministic* heuristic branch
    (``_evaluate_promise_heuristic``), which is what actually decides the
    verdict whenever the LLM is unavailable (no API key, SDK exception,
    timeout). Without this, someone tightening ``_FORWARD_DEFERRAL_PATTERNS``
@@ -54,11 +54,11 @@ WORK_PATTERNS_PATH = REPO_ROOT / "config" / "personas" / "segments" / "work-patt
 
 PM_SECTION_HEADER = "# Progress updates when the work overruns the ask"
 
-# Illustrative phrasings mirroring what the rewritten section teaches: present
-# fact, no forward-looking clause. These are not required to appear verbatim
-# in the prompt (the old phrasebook's literal-example table is gone by
-# design) — they characterize the *shape* of message the guidance produces,
-# and must keep clearing the deterministic fallback branch.
+# Illustrative phrasings mirroring what the section teaches: present fact, no
+# forward-looking clause. These are not required to appear verbatim in the
+# prompt (the prompt carries no literal-example table by design) — they
+# characterize the *shape* of message the guidance produces, and must keep
+# clearing the deterministic fallback branch.
 TAUGHT_ALLOWED = [
     # Present fact, no forward-looking clause, no artifact needed.
     "Scope check: what read as a one-line config change is 14 files across "
@@ -75,8 +75,8 @@ TAUGHT_ALLOWED = [
 # path regardless of how much evidence accompanies it.
 TAUGHT_BLOCKED = "dev opened PR #102. I'll report back when tests finish."
 
-# Strings that belonged to the deleted #2664 phrasebook. None of these may
-# reappear in the rewritten section under any name.
+# Phrasebook strings: gate-safe-phrasing scaffolding that must not appear in
+# the section under any name (#3027).
 PHRASING_WORKAROUND_STRINGS = [
     "two ways to stay on the allowed side",
     "measured against the live gate",
@@ -134,9 +134,9 @@ class TestPMRoleGuidance:
     def test_present_fact_norm_survives(self):
         text = _read_nonempty(PM_ROLE_PATH)
         assert "say only what is already true" in text, (
-            "The literal present-fact reporting norm must survive the phrasebook "
-            "deletion verbatim — it is the honest core of the deleted section, "
-            "and losing it trades over-claiming for silence, the worse failure."
+            "The literal present-fact reporting norm must stay in the prompt "
+            "verbatim — it is the honest core of the section, and losing it "
+            "trades over-claiming for silence, the worse failure."
         )
 
     def test_names_the_actual_discriminator(self):
@@ -229,7 +229,7 @@ class TestWorkPatternsScopeClarification:
 
 class TestPromiseGateFallbackAllowsTaughtPhrasings:
     """Characterization: the deterministic branch must not block the shape of
-    message the rewritten section teaches.
+    message the section teaches.
 
     This is the prompt-to-gate lock #3027 preserves: it stops a future
     ``_FORWARD_DEFERRAL_PATTERNS`` tightening from silently starting to block
