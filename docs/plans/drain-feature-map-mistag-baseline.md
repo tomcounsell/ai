@@ -638,15 +638,135 @@ single losing file from spike-6 — no other line moves.
 
 ## Failure Path Test Strategy
 
-_placeholder_
+
+### Exception Handling Coverage
+- [ ] `tests/marker_map.py` contains **no** `except Exception: pass` blocks
+  today, and this change adds none. The two existing failure paths both raise
+  loudly and both already have tests: `run_audit()` raises `RuntimeError` on an
+  empty `FEATURE_MAP` (`test_empty_feature_map_raises`) and `iter_test_files()`
+  raises on an empty enumeration (`test_empty_file_enumeration_raises`).
+- [ ] Add the same fail-loud treatment to the new table: `run_audit()` raises
+  `RuntimeError` if `DIRECTORY_MAP` is empty, with a test proving it. An empty
+  `DIRECTORY_MAP` would make R4 pass vacuously and silently revert every file to
+  basename-only resolution — the identical vacuous-pass failure the two existing
+  raises exist to prevent.
+- [ ] `tests/conftest.py`'s hook has no exception handling and must not gain
+  any. A `getattr(pytest.mark, <typo>)` on an unregistered marker currently
+  warns rather than raising (no `--strict-markers` in `addopts`), so a typo'd
+  `DIRECTORY_MAP` value would produce a marker nothing selects, silently. The
+  guard closes this instead: a test asserts every `DIRECTORY_MAP` and
+  `FEATURE_MAP` value is a marker registered in `pyproject.toml`, parsed from
+  the file with `tomllib`.
+
+### Empty/Invalid Input Handling
+- [ ] `resolve_markers("")`, `resolve_markers("test_.py")`, and
+  `resolve_markers("tests/test_.py")` each return an empty `frozenset`, not
+  `None` and not a set containing `None`. The existing `resolve_marker` fixtures
+  for `""` and `"test_.py"` stay and gain `resolve_markers` counterparts.
+- [ ] A path with fewer than two components (`"test_foo.py"` with no directory)
+  must not raise on the ancestor walk.
+- [ ] A path whose every ancestor is a `KNOWN_ROOT_DIRS` name
+  (`tests/unit/test_foo.py`) yields directory markers of `∅` — the 757-file
+  common case, and the one that must be provably unchanged.
+- [ ] `_partition_packages` and the R4 walk must agree about what counts as a
+  package; a test asserts they enumerate the same directory set from the same
+  file list, so R4 cannot pass on a set of packages R2 never sees.
+
+### Error State Rendering
+- [ ] The user-visible failure surface is the guard's `pytest.fail` message and
+  `python tests/marker_map.py --audit`'s stdout. Both must name the *rule* that
+  fired. R4's message must name the unmapped package directory and instruct the
+  reader to add a `DIRECTORY_MAP` entry or an `UNMAPPED_PACKAGES` reason —
+  tested by asserting on the message content of a synthetic R4 violation, not
+  just its truthiness.
+- [ ] `--audit` exit codes stay meaningful: 0 clean, 1 on any violation. A test
+  invokes `main(["--audit"])` under a patched, deliberately-violating file list
+  and asserts a `1`.
 
 ## Test Impact
 
-_placeholder_
+
+`tests/unit/test_feature_map_markers.py` is the file this plan reshapes; every
+disposition below is in it unless stated otherwise.
+
+- [ ] `test_no_violation_outside_known_mistags` — **UPDATE**: keep the
+  bracketing in both directions, but it now runs against an empty
+  `KNOWN_MISTAGS` and the R2/R4 rule set. It stays the guard's core assertion.
+- [ ] `test_known_mistags_are_all_tracked_paths` — **UPDATE**: still correct and
+  still cheap against an empty dict, but it becomes vacuous. Pair it with a
+  synthetic-population test so it is not silently reaching nothing.
+- [ ] `test_known_mistags_all_carry_a_prose_reason` — **UPDATE**: same. Both keep
+  guarding the mechanism for whoever next needs an exemption.
+- [ ] `test_audit_reports_a_synthetic_mistag_r1` — **DELETE**: R1 retires. Its
+  replacement is a real-collection mutation test (see Step by Step Tasks), which
+  is strictly stronger: the deleted test asserted on filenames, the replacement
+  asserts on markers pytest actually applied.
+- [ ] `test_audit_reports_a_synthetic_mistag_r3` — **DELETE**: R3 retires.
+- [ ] `test_r1_does_not_merge_same_named_packages` — **REPLACE**: the
+  same-named-packages invariant (`tests/unit/helpers/` vs
+  `tests/integration/helpers/`) is still load-bearing and must be re-asserted
+  against `resolve_markers` and R4 rather than against R1.
+- [ ] `test_audit_reports_a_synthetic_mistag_r2`,
+  `test_r2_single_file_package_passes_trivially`,
+  `test_r2_tie_reports_every_file_as_ambiguous`,
+  `test_r2_tie_is_order_independent`,
+  `test_same_named_packages_in_different_trees_stay_separate`,
+  `test_r2_does_not_merge_same_named_packages` — **KEEP unchanged**. R2 survives
+  and its tie/partition branches are still its only coverage.
+- [ ] `test_stem_fidelity_test_judge`, `test_stem_fidelity_validate_test_impact`,
+  the three `test_stem_unmangled_*` fixtures — **KEEP unchanged**. These are
+  #3184's tripwires and must survive this change untouched; they are also a
+  useful canary, since a whole-token regression would move `test_test_judge.py`.
+- [ ] `test_resolve_marker_empty_string`, `test_resolve_marker_test_dot_py`,
+  `test_resolve_marker_no_underscores`, `test_resolve_marker_exact_key_match`,
+  `test_youtube_transcription_retagged_to_tools` — **KEEP**, and add
+  `resolve_markers` counterparts. All five still pass under whole-token
+  matching (`sdlc`, `config`, `youtube` are whole tokens in their stems).
+- [ ] `test_whole_token_single_token_stem_matches`,
+  `test_whole_token_rejects_fragment_at_single_token` — **KEEP**. They stop
+  being R3 support and become tests of the resolution semantics themselves,
+  which raises rather than lowers their value.
+- [ ] `test_empty_feature_map_raises`, `test_empty_file_enumeration_raises` —
+  **KEEP**, and add the `DIRECTORY_MAP`-empty twin.
+- [ ] `test_audit_reports_stale_exemption` — **KEEP unchanged**. It is the
+  #3031 bracketing that makes the drain self-proving, and it must keep working
+  on a synthetic baseline now that the real one is empty.
+- [ ] `tests/conftest.py::pytest_collection_modifyitems` — **UPDATE**: applies a
+  marker set. No test currently covers this hook at all; that gap is what makes
+  the R1 retirement feel risky, and closing it is a task below.
+- [ ] **Suite-wide**: no test outside `tests/unit/test_feature_map_markers.py`
+  imports `tests/marker_map.py` (verified by `git grep -ln marker_map`), so no
+  other test file changes. The 43 files that gain a marker gain it at collection
+  time; their assertions are untouched.
 
 ## Rabbit Holes
 
-_placeholder_
+
+- **Teaching the guard to read explicit `pytest.mark.<feature>` declarations.**
+  Spike-3 found 47 files carrying them and a guard blind to all 47. It is a real
+  gap and it is *not* this plan: reading them means AST-parsing 838 files inside
+  a module that must stay import-light, and it would drag in `pytestmark`
+  aliasing, conditional marks, and `pytest.param(marks=...)`. Deferred with an
+  issue rather than absorbed.
+- **Adding a `memory` marker for `tests/unit/memory_extraction/`.** Touches
+  `pyproject.toml`, `tests/README.md`, and the marker taxonomy, and nobody has
+  asked for the selector. The package is left unmapped with a recorded reason.
+- **Auditing whether the 284 existing markers are semantically *right*.** This
+  plan drains a mechanical baseline. "Is `test_ui_sdlc_data.py` really a `webui`
+  test or an `sdlc` test?" is a taxonomy question with 838 instances and no
+  mechanical answer. Out of scope, and the additive design means it never has to
+  be answered to make progress.
+- **Replacing `FEATURE_MAP` with per-file explicit markers.** The end state
+  everyone eventually proposes. It is 554 files that need a decision, it deletes
+  the automatic-tagging property that makes new tests get markers for free, and
+  it is a different project.
+- **Making `KNOWN_ROOT_DIRS` smarter.** It is a hardcoded tuple of seven names
+  and it works. Deriving it (any directory containing a `conftest.py`? any
+  directory not in `DIRECTORY_MAP`?) invites exactly the kind of implicit rule
+  this plan is removing.
+- **Chasing why the filed measurement said 39/6.** It was measured at a
+  different commit with a method nobody wrote down. The re-measurement is the
+  answer; archaeology on the old number buys nothing.
 
 ## Risks
 
