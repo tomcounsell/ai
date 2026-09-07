@@ -192,8 +192,37 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 #### Lane 1: side-effect jobs
 
 - Add `models/side_effect_job.py`, export from `models/__init__.py` with the schema-gate docstring. Cover its `IndexedField` set in the new `tests/unit/test_side_effect_jobs.py`; leave `tests/unit/test_agentsession_index_guard_generalized.py` alone (it is AgentSession-scoped — see §Test Impact).
-- `agent/side_effects.py`: `HANDLERS = {"memory_extraction": run_post_session_extraction}`; `enqueue(kind, session_id, project_key)`; `run_due(limit)`.
-- `finalize_session` replaces the call to `_schedule_post_session_extraction` with `enqueue("memory_extraction", ...)`. Delete `_schedule_post_session_extraction`, `drain_pending_extractions`, and the worker shutdown drain call. Keep `run_post_session_extraction` unchanged.
+- `agent/side_effects.py`: `HANDLERS = {"memory_extraction": run_post_session_extraction}`; `enqueue(kind, session_id, project_key, payload: dict | None = None) -> str` (writes `payload_json = json.dumps(payload)`, guarded by `SET sideeffect:idem:{kind}:{session_id} {job_id} NX EX 604800` through `utils.redis_client.text_redis()`, returning the bound `job_id` on a lost race); `run_due(limit)` invoking `HANDLERS[kind](session_id, **json.loads(job.payload_json or "{}"))`.
+- **The extraction seam is at `agent/session_executor.py:2590`, inside `_execute_agent_session` (`:1117`) — NOT `finalize_session`.** `models/session_lifecycle.py` contains zero extraction references (`/usr/bin/grep -c extract models/session_lifecycle.py` returns 0 at current `main`); the round-2 critique caught the mis-location and this is the corrected site. Replace the four-argument call
+
+  ```python
+  _schedule_post_session_extraction(
+      session.session_id,
+      task._result or "",
+      turn_count=_ext_turn_count,
+      is_conversational=_ext_is_conversational,
+  )
+  ```
+
+  with
+
+  ```python
+  enqueue(
+      "memory_extraction",
+      session.session_id,
+      session.project_key,
+      {
+          "response_text": task._result or "",
+          "turn_count": _ext_turn_count,
+          "is_conversational": _ext_is_conversational,
+      },
+  )
+  ```
+
+  The four arguments round-trip as: `session_id` stays a column on the row and is passed positionally by `run_due`; the other three become `payload_json` keys and come back as keyword arguments through `**json.loads(...)`, landing on `run_post_session_extraction`'s existing `response_text` / `turn_count` / `is_conversational` parameters (`agent/memory_extraction.py:1663-1669`). `project_key` is a column too and stays available to the handler if a later kind needs it.
+- **Leave the `_ext_turn_count` / `_ext_is_conversational` captures at `:2588-2589` exactly where they are.** They exist because teardown clears the in-memory turn-count tracker (#1822 fix 2), so reading either value inside the drain minutes later would silently re-introduce the trivial-session bug the captures were added to fix. Snapshotting them into `payload_json` at capture time is the only form that preserves the gate. Rewrite the explanatory comment block at `:2575-2586` so it describes the durable job row rather than the fire-and-forget task.
+- Delete `_schedule_post_session_extraction` (`agent/session_executor.py:339-398`), `drain_pending_extractions` (`:400`), the `_pending_extraction_tasks` registry those two share, and the worker shutdown drain call with its import (`worker/__main__.py:1081-1085`). Keep `run_post_session_extraction` unchanged.
+- **Three prose references to the deleted pair survive the edits above** and must be reworded so the codebase carries no dangling symbol: `agent/session_executor.py:589` and `:609` (docstrings in `_schedule_calendar_heartbeat` / `drain_pending_calendar_heartbeats`, which compare themselves to the deleted pair) and `agent/messenger.py:238-248` (a `_run_work` docstring stating that extraction is scheduled by `_schedule_post_session_extraction`). All three are comment-only edits. Rewrite them to name the `SideEffectJob` enqueue instead. `agent/messenger.py` is declared for this lane for that single docstring and nothing else. The §Verification row is written so these three cannot make it fail, and so that leaving them cannot make it pass — the check keys on definitions and call syntax, not on prose.
 - `reflections/housekeeping/side_effect_drain.py` with the five-line header; register via a `register_side_effect_drain` in `scripts/update/reflection_register.py` called from `run.py` beside `register_crash_recovery`.
 - Migration `side_effect_job_model` in `scripts/update/migrations.py` (no-op marker plus one-time enqueue for sessions completed in the last 24h with no extraction record).
 - #3177 Gap E kill switch becomes a `skip` disposition on the handler, keyed by `settings.improvement.extraction_paused` when that settings block exists; until then a `FeatureSettings.side_effects_paused` bool.
@@ -402,7 +431,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 ## Success Criteria
 
 ### This build (lanes 1-5)
-- [ ] A session finalizing on `main` produces a `SideEffectJob` row and, after the drain, an extraction record; a handler that raises produces a `DeadLetter(stage="extraction")` after 4 attempts
+- [ ] A session whose **execution finishes** on `main` produces a `SideEffectJob` row whose `payload_json` carries `response_text`, `turn_count` and `is_conversational`, and after the drain an extraction record; a second `enqueue` for the same `(kind, session_id)` binds to the existing row instead of creating a second; a handler that raises produces a `DeadLetter(stage="extraction")` after 4 attempts
 - [ ] `DeadLetter` has a `stage` field and every terminal sink on the relay, session, and archive paths writes it; no silent discard remains in `process_outbox`
 - [ ] The `dead-letter-replay` and `side-effect-drain` reflections are registered through `reflection_register.py` and survive a simulated `/update`
 - [ ] Outbox, steering, and notify payloads are constructed and parsed through `bridge/wire_schemas.py`
@@ -466,15 +495,17 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ### File Ownership (contended files)
 
-Five builders run in parallel over one lane worktree. Three files are touched by more than one lane, so each gets exactly one owner; every other lane hands its change to that owner as a written spec rather than editing the file. A builder that finds itself about to edit a file it does not own stops and posts the diff it wants to the owner.
+Five builders run in parallel over one lane worktree. Five files are touched by more than one lane, so each gets exactly one owner; every other lane hands its change to that owner as a written spec rather than editing the file. A builder that finds itself about to edit a file it does not own stops and posts the diff it wants to the owner.
 
 | File | Sole owner | What the other lanes hand over |
 |---|---|---|
-| `models/session_lifecycle.py` | **dlq-builder** (lane 2) | lane 1 hands the one-line swap of `_schedule_post_session_extraction(...)` → `enqueue("memory_extraction", session_id, project_key)` inside `finalize_session`; lane 4 hands the `claim_pending_run` change at `:858-864` (add `record_lock_degradation("claim_pending_run", "closed")`, flip `return True` → `return False`, add the policy docstring line). Lane 2's own edits are the `session_recovery_cap` / `session_init_hang` dead-letter writes. |
+| `models/session_lifecycle.py` | **dlq-builder** (lane 2) | lane 4 hands the `claim_pending_run` change at `:858-864` (add `record_lock_degradation("claim_pending_run", "closed")`, flip `return True` → `return False`, add the policy docstring line). Lane 2's own edits are the `session_recovery_cap` / `session_init_hang` dead-letter writes. **Lane 1 hands nothing here** — the extraction seam is in `agent/session_executor.py`, not this file (round-2 blocker 1). |
+| `agent/session_executor.py` | **locks-builder** (lane 5a) | lane 1 hands the whole extraction seam: the `_schedule_post_session_extraction(...)` → `enqueue("memory_extraction", ...)` swap at `:2590`, the comment rewrite at `:2575-2586`, the deletion of `_schedule_post_session_extraction` (`:339-398`), `drain_pending_extractions` (`:400`) and the `_pending_extraction_tasks` registry, and the two docstring rewordings at `:589` / `:609`. Lane 5a's own edit is `VALOR_CORRELATION_ID` in `_harness_env` (`:2194`). |
+| `worker/__main__.py` | **locks-builder** (lane 5a) | lane 1 hands the removal of the shutdown drain call and its import (`:1081-1085`). Lane 5a's own edit is `StructuredJsonFormatter` in `_configure_logging` (`:425`). |
 | `agent/agent_session_queue.py` | **seam-builder** (lane 5b) | lane 2 hands the corrupted-pop reaper dead-letter write (`:2175-2272`); lane 3 hands the `_session_notify_listener` parse change (`:1053`). Lane 5b's own edits are `_push_agent_session` (`:204-231`, `:361`, `:369`) and the `enqueue_agent_session` call site (`:1712`). Seam-builder is the owner because the signature change is the one edit that must land coherently with its callers. |
 | `scripts/update/migrations.py`, `scripts/update/reflection_register.py`, `scripts/update/run.py` | **dlq-builder** (lane 2) | lane 1 hands `side_effect_job_model` (migration), `register_side_effect_drain` (register helper), and its `run.py` step. Lane 2 lands both migrations and both register helpers in one commit so `MIGRATIONS` and the `run.py` step order have a single author. |
 
-Uncontended files stay with their lane: lane 1 owns `models/side_effect_job.py`, `agent/side_effects.py`, `reflections/housekeeping/side_effect_drain.py`; lane 2 owns `models/dead_letter.py`, `bridge/dead_letters.py`, `bridge/telegram_relay.py`, the email relay, `agent/session_archive.py`, `reflections/housekeeping/dead_letter_replay.py`, `ui/data/dead_letters.py`; lane 3 owns `bridge/wire_schemas.py`, `agent/steering.py`, `agent/session_pickup.py`'s parse sites; lane 4 owns `agent/lock_policy.py`, `bridge/dedup.py`, `ui/data/locks.py`; lane 5a owns `agent/session_executor.py`, `agent/output_handler.py`, `worker/__main__.py`; lane 5b owns `agent/enqueue_idempotency.py`, `agent/reflection_scheduler.py`, `tools/valor_session.py`.
+Uncontended files stay with their lane: lane 1 owns `models/side_effect_job.py`, `agent/side_effects.py`, `reflections/housekeeping/side_effect_drain.py`, and `agent/messenger.py` (one docstring); lane 2 owns `models/dead_letter.py`, `bridge/dead_letters.py`, `bridge/telegram_relay.py`, the email relay, `agent/session_archive.py`, `reflections/housekeeping/dead_letter_replay.py`, `ui/data/dead_letters.py`; lane 3 owns `bridge/wire_schemas.py`, `agent/steering.py`, `agent/session_pickup.py`'s parse sites; lane 4 owns `agent/lock_policy.py`, `bridge/dedup.py`, `ui/data/locks.py`; lane 5a owns `agent/output_handler.py` (and, per the table above, `agent/session_executor.py` and `worker/__main__.py` as contended files); lane 5b owns `agent/enqueue_idempotency.py`, `agent/reflection_scheduler.py`, `tools/valor_session.py`.
 
 `agent/session_pickup.py` is touched by lane 3 (parse) and lane 4 (`_acquire_pop_lock` counter at `:131-134`). These are ~40 lines apart in different functions and are the one overlap left unsplit; **lane 4 owns the file**, and lane 3 hands over its parse change. `models/__init__.py` gains one export from lane 1 and none from lane 2 (`DeadLetter` is already exported) — no contention.
 
@@ -485,12 +516,12 @@ Commit early with explicit paths (`git add <path>`, never `git add -A`) so a pee
 ### 1. Side-effect jobs
 - **Task ID**: build-jobs
 - **Depends On**: none
-- **Validates**: `tests/unit/test_side_effect_jobs.py` (create), `tests/unit/test_session_executor_extraction_decoupling.py`, `tests/integration/test_session_finalization_decoupled.py`
+- **Validates**: `tests/unit/test_side_effect_jobs.py` (create — must cover the `payload_json` round-trip and the `(kind, session_id)` single-winner create), `tests/unit/test_session_executor_extraction_decoupling.py`, `tests/integration/test_session_finalization_decoupled.py`
 - **Informed By**: spike-4
 - **Assigned To**: jobs-builder
 - **Agent Type**: builder
-- **Parallel**: true (files split per §File Ownership; hand the `finalize_session` swap and all three `scripts/update/` changes to dlq-builder)
-- Lane 1 Technical Approach in full; delete `_schedule_post_session_extraction` and `drain_pending_extractions`
+- **Parallel**: true (files split per §File Ownership; hand the `agent/session_executor.py` seam swap plus deletions and the `worker/__main__.py` drain removal to locks-builder, and all three `scripts/update/` changes to dlq-builder)
+- Lane 1 Technical Approach in full. The seam moves at `agent/session_executor.py:2590`; `_schedule_post_session_extraction` and `drain_pending_extractions` are deleted; `payload_json` carries `response_text`, `turn_count` and `is_conversational` so the #1822 trivial-session gate survives the process boundary
 
 ### 2. Dead-letter model and replayer
 - **Task ID**: build-dlq
