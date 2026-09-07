@@ -7,7 +7,7 @@ created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3195
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-09-07T03:28:02Z
+revision_applied_at: 2026-09-07T04:09:58Z
 ---
 
 # pytest-clean.sh fails closed when zero tests executed
@@ -922,16 +922,23 @@ Not applicable — this repo publishes no external documentation site.
 - [ ] **Mutation check, guard 1 (wrapper verdict block)**: with the `BEGIN`/`END` range
       deleted from a sibling-layout copy, the new zero-executed tests go red; the unmutated
       run is green. Both summary lines pasted in the PR, and the check is a Verification row.
-- [ ] **Mutation-check control leg, guard 1**: the *same mutated copy* still runs an
-      all-passing selection to a real `N passed` summary at exit 0. Without this, red proves
-      only that the copy is broken.
+- [ ] **Mutation-check control leg, guard 1**: the *same mutated copy*, driven through
+      `PYTEST_CLEAN_SCRIPT` against
+      `tests/unit/test_pytest_clean_zero_tests.py -k "passing or version"`, still reaches a
+      real `N passed` summary at exit 0. The selection must be the new test file — it is the
+      only one that honors `PYTEST_CLEAN_SCRIPT`, so it is the only one that binds to the
+      mutant; `test_worktree_venv_absent_guard.py` ignores the env var and passes even
+      against a copy that does nothing but `exit 97`. Without this, red proves only that the
+      copy is broken.
 - [ ] **Mutation check, guard 2 (the counting rule)**: with `PYTEST_EXECUTED_COUNT_SOURCE`
       pointing at a plugin whose rule is the round-1 defect (`if report.outcome != "skipped"`),
       the three skip-shape cases go red; with the settled rule they are green. Its own control
       leg passes.
 - [ ] **The pass-through predicate check drives the wrapper's own body**: it refuses with a
-      distinct message when the sliced function is empty or undefined, and that refusal is
-      exercised under the guard-1 mutation.
+      distinct message when the sliced function is empty, when the slice overruns into the
+      script's final `exit` (the one-line `esac; }` form), or when the function is undefined
+      after sourcing; the empty-slice refusal is exercised under the guard-1 mutation and the
+      `SLICE_OVERRUN` refusal against a collapsed-predicate scratch copy.
 - [ ] **Negative control passes**: the sandbox's own `pytest_executed_count` is the module
       that loads, proven by its `__file__` resolving under `tmp_path`.
 - [ ] `PYTEST_ALLOW_ZERO_TESTS` suppresses the exit **and still prints the diagnostic**,
@@ -1005,10 +1012,29 @@ must be run by someone who did not write the guard.
   `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then set -- -p pytest_executed_count "$@"; fi`.
   `$REPO_ROOT`, never `$SCRIPT_ROOT`. `set --`, never a string.
 - After `wait "$PYTEST_PID"` and the existing reap, read the file and delete it.
-- Define the predicate as a **named function** inside the seam:
-  `verdict_passes_through() { case "$1" in ""|collectonly) return 0 ;; "count "[1-9]*) return 0 ;; *) return 1 ;; esac; }`.
+- Define the predicate as a **named function** inside the seam, in exactly this multi-line
+  shape (verbatim from Technical Approach): opening `verdict_passes_through() {` on its own
+  line, the `case` indented, and a bare `}` at column 0.
+
+  ```bash
+  verdict_passes_through() {
+      case "$1" in
+          ""|collectonly)  return 0 ;;   # no session ran, or a collect-only run
+          "count "[1-9]*)  return 0 ;;   # at least one test executed
+          *)               return 1 ;;   # count 0, started, truncated, garbage
+      esac
+  }
+  ```
+
   Not an inline `case` — the tests slice this function body out of the script under test, and
   a check that retypes the patterns passes with the wrapper's own `case` deleted (spike-9).
+  The multi-line shape is **load-bearing, not cosmetic**. Task 3's slice is
+  `sed -n '/^verdict_passes_through()/,/^}/p'`, and `scripts/pytest-clean.sh` has no line
+  starting with `}` anywhere after line 282. Written as a one-liner ending `esac; }` the slice
+  runs to EOF, swallows `exit "$PYTEST_EXIT"`, and sourcing it under `set -u` dies with
+  `PYTEST_EXIT: unbound variable` at rc 127 **before** `declare -f` runs — so neither of task
+  3's designated refusals fires and the predicate check reports an unrelated diagnostic
+  (measured, round 3).
 - **Gate the verdict on `[ "$PYTEST_EXIT" -eq 0 ]`.** The guard may only convert a green into
   a red. A collection error (exit 2), a zero-collected run (exit 5) and a wedge all produce a
   `count 0`-or-worse verdict while already carrying their own correct headline; firing there
@@ -1063,9 +1089,19 @@ must be run by someone who did not write the guard.
 - A shell-level check of the pass-through predicate that **slices the real function body out
   of `PYTEST_CLEAN_SCRIPT`** — `sed -n '/^verdict_passes_through()/,/^}/p'` into a `mktemp`
   file, sourced from that file (never `source <(…)`, which defines nothing under macOS bash
-  3.2 and would make every verdict a vacuous pass). Refuse with distinct messages on an empty
-  slice and on an undefined function *before* checking a single verdict, then assert the full
-  table `"" collectonly "count 0" "count 1" "count 10" started coun "  " "count -1"`.
+  3.2 and would make every verdict a vacuous pass). Refuse with three distinct messages, each
+  *before* checking a single verdict, in this order:
+  1. **Empty slice** — `[ -s "$SLICE" ]`.
+  2. **Slice overrun** — immediately after the `[ -s "$SLICE" ]` check and before `declare -f`:
+     `grep -q '^exit ' "$SLICE" && { echo "SLICE_OVERRUN: verdict_passes_through is not in the sliceable multi-line form" >&2; exit 4; }`.
+     Without it, a one-line `esac; }` definition (task 2 forbids it) makes the `sed` range run
+     to EOF and swallow the script's own `exit "$PYTEST_EXIT"`; sourcing that under `set -u`
+     dies at rc 127 before `declare -f` runs, so neither of the other two refusals fires.
+  3. **Undefined function** — `declare -f verdict_passes_through` after sourcing.
+
+  Then assert the full table `"" collectonly "count 0" "count 1" "count 10" started coun "  " "count -1"`.
+  Do **not** replace the `sed` with a brace-counting parser: the fixed multi-line shape from
+  task 2 plus the overrun refusal is the smaller change and keeps the slice reproducible by hand.
 - Pin the diagnostic's text and assert the other three refusal headlines are absent.
 
 ### 4. Validate the guard actually bites
@@ -1090,19 +1126,42 @@ must be run by someone who did not write the guard.
   goes red for a reason unrelated to the deleted block and the check confirms nothing
   (measured, spike-7).
 - **Control leg for mutation check 1 — mandatory, not optional.** With the *same* mutated
-  copy, run an all-passing selection and confirm it still exits 0 with a real `N passed`
-  summary. Red under a broken copy is not evidence that the guard bites; only red-under-a-
-  copy-that-otherwise-works is. Skipping this leg reproduces this issue's own failure mode
-  inside the check meant to prevent it.
+  copy, run
+  `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version"`
+  and confirm it still exits 0 with a real `N passed` summary. The selection **must** come
+  from the new test file, mirroring the mutation-2 control leg: it is the only file that
+  resolves its script through `PYTEST_CLEAN_SCRIPT`, so it is the only selection that binds
+  to the mutant. `tests/unit/test_worktree_venv_absent_guard.py` hard-codes
+  `SCRIPT = REPO_ROOT / "scripts" / "pytest-clean.sh"` at line 25 and never reads
+  `os.environ`, so pointing the env var at the mutated copy is inert — measured, with the
+  copy replaced by a two-line script printing `BROKEN COPY` and exiting 97, that run still
+  printed `10 passed in 99.29s` at exit 0, a control leg that cannot fail for the reason it
+  exists. Do not teach the two sibling guard files the env var to make them usable here;
+  ## Test Impact pins both as "UPDATE (verify only, expect no change)". Red under a broken
+  copy is not evidence that the guard bites; only red-under-a-copy-that-otherwise-works is.
+  Skipping this leg reproduces this issue's own failure mode inside the check meant to
+  prevent it.
 - **Mutation check 2 — the counting rule.** Copy `pytest_executed_count.py` to
   `"$M/pytest_executed_count_round1.py"`, replace the settled rule with the round-1 defect
-  (`if report.outcome != "skipped": executed += 1`), and run
+  (`if report.outcome != "skipped": executed += 1`), then prove the substitution landed
+  **by difference before running anything**:
+  `cmp -s pytest_executed_count.py "$M/pytest_executed_count_round1.py" && { echo "MUTATION-2 NO-OP: rule text drifted" >&2; exit 1; }`,
+  and equivalently assert the settled rule's distinguishing clause is absent from the mutant
+  (`grep -c 'hasattr(report, "wasxfail")'` must be `0`). A presence grep for
+  `report.outcome != "skipped"` is **not** a valid drift guard — that string is a substring of
+  the settled rule, so it prints `1` on an unsubstituted file too; measured, a deliberately
+  non-matching `sed` produced a file byte-identical to its input while the grep still printed 1.
+  The settled rule must also stay on **one physical line** or the `sed` matches nothing
+  (94 characters at four-space indent, 98 at eight, against `line-length = 100`). Then run
   `PYTEST_EXECUTED_COUNT_SOURCE="$M/pytest_executed_count_round1.py"` with the **unmutated**
   wrapper. Confirm the three `-k skip_shape` cases go **red**. Run its own all-passing
   control leg the same way. Then re-run with no overrides and confirm **green**.
 - Confirm the sliced-predicate check refuses under mutation 1: with the seam deleted the
   slice is empty and the check must fail with its own distinct message rather than reporting
-  passes over an empty source.
+  passes over an empty source. Drive the **slice-overrun** refusal once as well: against a
+  scratch copy whose `verdict_passes_through` is collapsed to a single line ending `esac; }`,
+  the check must exit 4 with `SLICE_OVERRUN` rather than dying at rc 127 on
+  `PYTEST_EXIT: unbound variable`.
 - Never edit `scripts/pytest-clean.sh` or `pytest_executed_count.py` in place — five peer
   lanes are running in this checkout. Capture every leg's output verbatim, reading the
   **passed count off the summary line**, not the exit code.
@@ -1157,8 +1216,8 @@ and the row's own expectation catches it.
 | Sibling wrapper guards actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 15 passed |
 | Marker guard actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` |
 | **Mutation 1: the wrapper's verdict block bites** | `M=$(mktemp -d) && mkdir -p "$M/scripts" && sed '/# BEGIN zero-executed guard (#3195)/,/# END zero-executed guard (#3195)/d' scripts/pytest-clean.sh > "$M/scripts/pytest-clean.sh" && cp scripts/check-interpreter-pin.sh "$M/scripts/" && chmod +x "$M/scripts/"*.sh && PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -3` | with the verdict block removed the output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is wired to nothing and the whole test file is decoration (Risk 4). The sibling `scripts/` layout is required: a flat copy aborts at line 195 before pytest starts and reddens everything for the wrong reason (spike-7). |
-| **Mutation 1 control leg** (mandatory) | with the same `$M` from the row above: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and **no** `refusing to run against an off-pin interpreter`. This proves the mutated copy is otherwise working, which is the only thing that makes the row above evidence. A failure here invalidates the mutation result rather than confirming it. |
-| **Mutation 2: the counting rule bites** | `sed 's/report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail"))/report.outcome != "skipped"/' pytest_executed_count.py > "$M/r1.py" && grep -c 'report.outcome != "skipped"' "$M/r1.py" && PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -3` | the `grep -c` prints ≥ 1 (the substitution landed — a `0` means the rule text drifted and the row proves nothing), and the summary matches `[1-9][0-9]* failed`: all three skip-shape cases go **red** under the round-1 rule. Measured reachable: the settled rule counts 0 on an all-skip rootdir at `-n 0` and `-n 2`; the round-1 rule counts non-zero on the same rootdir. Wrapper is **unmutated** for this row. |
+| **Mutation 1 control leg** (mandatory) | with the same `$M` from the row above: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`. The selection must be the **new** test file, mirroring the Mutation 2 control leg: it is the only file that resolves its script through `PYTEST_CLEAN_SCRIPT` (task 3 makes it do so), so it is the only selection that binds to the mutated copy. Do **not** substitute `tests/unit/test_worktree_venv_absent_guard.py` here — it hard-codes `SCRIPT = REPO_ROOT / "scripts" / "pytest-clean.sh"` at line 25 and never reads `os.environ`, so the env var is inert; measured, with `$M/scripts/pytest-clean.sh` replaced by a two-line script printing `BROKEN COPY` and `exit 97`, that command still printed `10 passed in 99.29s` at exit 0. Do not "fix" it by teaching the sibling guard files the env var either; ## Test Impact pins both as "verify only, expect no change". The `passing or version` cases are guard-independent, so they stay green with the verdict block deleted, which is the only thing that makes the row above evidence. A failure here invalidates the mutation result rather than confirming it. The unmutated venv-guard regression run is covered by the "Sibling wrapper guards actually ran and passed" row above; it cannot serve as this control. |
+| **Mutation 2: the counting rule bites** | `sed 's/report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail"))/report.outcome != "skipped"/' pytest_executed_count.py > "$M/r1.py" && ! cmp -s pytest_executed_count.py "$M/r1.py" && [ "$(grep -c 'hasattr(report, "wasxfail")' "$M/r1.py")" = 0 ] && PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -3` | assert the substitution **by difference**: `cmp -s` must report the files differ, and the settled rule's distinguishing clause `hasattr(report, "wasxfail")` must be **absent** from the mutant (count `0`). A presence grep for `report.outcome != "skipped"` cannot serve as the drift guard — that string is a substring of the settled rule, so it prints `1` on an unsubstituted file too (measured: a deliberately non-matching `sed` produced a byte-identical file while the grep still printed 1). Then the summary matches `[1-9][0-9]* failed`: all three skip-shape cases go **red** under the round-1 rule. Measured reachable: the settled rule counts 0 on an all-skip rootdir at `-n 0` and `-n 2`; the round-1 rule counts non-zero on the same rootdir. Wrapper is **unmutated** for this row. The settled rule must stay on **one physical line** or the `sed` matches nothing — measured 94 characters at four-space indent and 98 at eight against `line-length = 100`, so `ruff format` leaves it unwrapped today. |
 | **Mutation 2 control leg** (mandatory) | `PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` — the round-1 plugin still loads and runs, so the reds above are the rule and not a broken module. |
 | **Restore leg: both mutations reverted** (run last, after Mutation 1 and Mutation 2) | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, no `ZERO TESTS EXECUTED` |
 | Zero-executed run is refused, end to end | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` |
@@ -1183,7 +1242,7 @@ and the row's own expectation catches it.
 
 ## Critique Results
 
-Round 3 — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), **sequential lenses** (the Agent tool is absent in this stage-runner context, so no finding below was independently corroborated by a separate agent; where two lenses converged it is noted in the Critic column), at plan hash `sha256:6316dc2c…`. Verdict: **READY TO BUILD (with concerns)** (0 blockers, 3 concerns, 2 nits). This was the terminal authorized critique round; the three concerns below are **accepted on the record** and carried into build with their Implementation Notes, rather than answered by a further revision pass.
+Round 3 — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), **sequential lenses** (the Agent tool is absent in this stage-runner context, so no finding below was independently corroborated by a separate agent; where two lenses converged it is noted in the Critic column), at plan hash `sha256:6316dc2c…`. Verdict: **READY TO BUILD (with concerns)** (0 blockers, 3 concerns, 2 nits). This was the terminal authorized critique round; the three concerns below were **accepted on the record**, and this revision embedded each Implementation Note into the task bodies and Verification rows a builder actually executes, rather than leaving them as commentary. The two nits are accepted with no change. No further critique round follows; the next stage is BUILD.
 
 Every finding below was reached by direct measurement on `main` at `a39f10179`, not by reading. The three checks the round-2 revision introduced were each driven with a deliberately seeded fault to see whether they could fail; two could not, and both are recorded below.
 
@@ -1191,11 +1250,11 @@ Every finding below was reached by direct measurement on `main` at `a39f10179`, 
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness; History & Consistency | The **Mutation 1 control leg** — the leg the plan itself calls "mandatory, not optional" and "the only thing that makes the row above evidence" — does not bind to the mutated copy, so it cannot fail for the reason it exists. The Verification row runs `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py`, but that file hard-codes `SCRIPT = REPO_ROOT / "scripts" / "pytest-clean.sh"` at line 25 and never reads `os.environ` (grep for `environ` across both existing guard files returns zero hits), so the env var is inert. **Measured:** with `$M/scripts/pytest-clean.sh` replaced by a two-line script that prints `BROKEN COPY` and `exit 97`, and `check-interpreter-pin.sh` copied alongside, the row run verbatim still printed `10 passed in 99.29s` at exit 0. This is the round-2 blocker's own failure shape — a check that confirms regardless of what the builder wrote — relocated into its remedy. Task 4's *prose* is correct; only the Verification row instantiates it against a file that ignores the seam, and the Mutation 2 control leg one row below already shows the right shape. | pending | Replace the Mutation 1 control-leg command with the new test file's guard-independent subset, mirroring Mutation 2's leg exactly: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2`, expected `[1-9][0-9]* passed`. Only `tests/unit/test_pytest_clean_zero_tests.py` resolves its script through `PYTEST_CLEAN_SCRIPT` (task 3 makes it do so); `test_worktree_venv_absent_guard.py` and `test_interpreter_pin_guard.py` never will, because ## Test Impact pins both as "UPDATE (verify only, expect no change)" — do not "fix" this by teaching them the env var, which would invalidate that disposition. Keep the venv-guard run as a separate **unmutated** regression row if wanted; it cannot serve as the control. Update the matching Success Criterion ("**Mutation-check control leg, guard 1**") to name the same selection. |
-| CONCERN | Risk & Robustness | Task 2 and Technical Approach disagree on the shape of `verdict_passes_through`, and only one of the two shapes can be sliced. Technical Approach writes it multi-line; task 2 spells it as a one-liner ending `esac; }`. The plan's own slice is `sed -n '/^verdict_passes_through()/,/^}/p'`. **Measured:** `scripts/pytest-clean.sh` has no line starting with `}` anywhere after line 282, so under the one-line form the slice runs to EOF and swallows `exit "$PYTEST_EXIT"`; sourcing it under `set -u` dies with `PYTEST_EXIT: unbound variable` at rc 127 **before** `declare -f` runs. Neither of the two designated distinct refusals fires, and the predicate check reports an unrelated diagnostic. The multi-line form slices to exactly 7 lines and drives the real predicate correctly (`count 0` → fail-closed, measured). Fails closed and loudly, so this is not a false-green channel — but a builder following task 2 verbatim breaks one of the plan's own mutation-detectable checks. | pending | Make task 2 carry the multi-line block verbatim from Technical Approach: opening `verdict_passes_through() {` on its own line, the `case` indented, and a bare `}` at column 0. Then add a third refusal to the slice procedure, after the `[ -s "$SLICE" ]` check and before `declare -f`: `grep -q '^exit ' "$SLICE" && { echo "SLICE_OVERRUN: verdict_passes_through is not in the sliceable multi-line form" >&2; exit 4; }`. Do not switch the slice to a brace-counting parser — the fixed multi-line shape plus the overrun refusal is the smaller change and keeps the `sed` reproducible by hand. |
-| CONCERN | Scope & Value | The **Mutation 2** row's drift guard cannot fail. It runs `grep -c 'report.outcome != "skipped"' "$M/r1.py"` expecting ≥ 1 and describes a `0` as meaning "the rule text drifted and the row proves nothing" — but the *settled* rule contains `report.outcome != "skipped"` as a substring, so the grep prints 1 on an unsubstituted file too. **Measured:** running the same `sed` with a deliberately non-matching pattern produced a file byte-identical to its input (`diff -q` reported identical) while `grep -c` still printed 1. Contained rather than dangerous: the row's primary expectation (`[1-9][0-9]* failed`) still fails loudly if the substitution did not land, because an unsubstituted plugin makes the three skip-shape cases pass. It is a dead belt over live braces. | pending | Assert the substitution by difference, not by presence: `cmp -s pytest_executed_count.py "$M/r1.py" && { echo "MUTATION-2 NO-OP: rule text drifted" >&2; exit 1; }`. Equivalently, assert the settled rule's distinguishing clause is **absent** from the mutant: `grep -c 'hasattr(report, "wasxfail")' "$M/r1.py"` == 0. Also record that the rule must stay on one physical line for the `sed` to match at all — measured 94 characters at four-space indent and 98 at eight, against `line-length = 100`, so `ruff format` leaves it unwrapped today, but a future line-length reduction would re-break this row silently. |
-| NIT | Scope & Value | The injection gate `[ -f "$REPO_ROOT/pytest_executed_count.py" ]` is a second, quieter escape hatch than `PYTEST_ALLOW_ZERO_TESTS`: when it declines, the wrapper runs exactly as today with no guard and no message, so a transcript from a checkout predating the plugin is indistinguishable from a guarded one. The repo-level case is covered (the tests copy the plugin from `PYTEST_EXECUTED_COUNT_SOURCE` and error if it is missing), but a stale `.worktrees/` lane runs unguarded and silently. The back-compat behavior itself is right; only its invisibility is the nit. | pending | (NIT — no Implementation Note required.) |
-| NIT | History & Consistency | `mktemp -t pytest-clean-count` is the BSD form and is pinned verbatim by an anti-criterion Verification row. Verified working here (`/var/folders/…/T/pytest-clean-count.M6cFNLJh7T`); GNU coreutils treats `-t` differently and was not measured, so the portability of the pinned string is untested rather than known-good. The fleet is macOS-only today, so this is a note rather than a defect. | pending | (NIT — no Implementation Note required.) |
+| CONCERN | Risk & Robustness; History & Consistency | The **Mutation 1 control leg** — the leg the plan itself calls "mandatory, not optional" and "the only thing that makes the row above evidence" — does not bind to the mutated copy, so it cannot fail for the reason it exists. The Verification row runs `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py`, but that file hard-codes `SCRIPT = REPO_ROOT / "scripts" / "pytest-clean.sh"` at line 25 and never reads `os.environ` (grep for `environ` across both existing guard files returns zero hits), so the env var is inert. **Measured:** with `$M/scripts/pytest-clean.sh` replaced by a two-line script that prints `BROKEN COPY` and `exit 97`, and `check-interpreter-pin.sh` copied alongside, the row run verbatim still printed `10 passed in 99.29s` at exit 0. This is the round-2 blocker's own failure shape — a check that confirms regardless of what the builder wrote — relocated into its remedy. Task 4's *prose* is correct; only the Verification row instantiates it against a file that ignores the seam, and the Mutation 2 control leg one row below already shows the right shape. | **embedded** (round 3) — Verification "Mutation 1 control leg" row now runs `tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version"` against `$M` and records why the venv-guard file cannot serve; task 4's control-leg bullet and the "Mutation-check control leg, guard 1" Success Criterion name the same selection and forbid teaching the sibling guard files the env var. | Replace the Mutation 1 control-leg command with the new test file's guard-independent subset, mirroring Mutation 2's leg exactly: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2`, expected `[1-9][0-9]* passed`. Only `tests/unit/test_pytest_clean_zero_tests.py` resolves its script through `PYTEST_CLEAN_SCRIPT` (task 3 makes it do so); `test_worktree_venv_absent_guard.py` and `test_interpreter_pin_guard.py` never will, because ## Test Impact pins both as "UPDATE (verify only, expect no change)" — do not "fix" this by teaching them the env var, which would invalidate that disposition. Keep the venv-guard run as a separate **unmutated** regression row if wanted; it cannot serve as the control. Update the matching Success Criterion ("**Mutation-check control leg, guard 1**") to name the same selection. |
+| CONCERN | Risk & Robustness | Task 2 and Technical Approach disagree on the shape of `verdict_passes_through`, and only one of the two shapes can be sliced. Technical Approach writes it multi-line; task 2 spells it as a one-liner ending `esac; }`. The plan's own slice is `sed -n '/^verdict_passes_through()/,/^}/p'`. **Measured:** `scripts/pytest-clean.sh` has no line starting with `}` anywhere after line 282, so under the one-line form the slice runs to EOF and swallows `exit "$PYTEST_EXIT"`; sourcing it under `set -u` dies with `PYTEST_EXIT: unbound variable` at rc 127 **before** `declare -f` runs. Neither of the two designated distinct refusals fires, and the predicate check reports an unrelated diagnostic. The multi-line form slices to exactly 7 lines and drives the real predicate correctly (`count 0` → fail-closed, measured). Fails closed and loudly, so this is not a false-green channel — but a builder following task 2 verbatim breaks one of the plan's own mutation-detectable checks. | **embedded** (round 3) — task 2 now carries the multi-line `verdict_passes_through` block verbatim with the slice rationale; task 3's slice procedure gains the third `SLICE_OVERRUN` refusal (`grep -q '^exit ' "$SLICE"` → exit 4) between the empty-slice and undefined-function refusals; task 4 drives that refusal against a collapsed-predicate copy and the Success Criterion lists all three refusals. | Make task 2 carry the multi-line block verbatim from Technical Approach: opening `verdict_passes_through() {` on its own line, the `case` indented, and a bare `}` at column 0. Then add a third refusal to the slice procedure, after the `[ -s "$SLICE" ]` check and before `declare -f`: `grep -q '^exit ' "$SLICE" && { echo "SLICE_OVERRUN: verdict_passes_through is not in the sliceable multi-line form" >&2; exit 4; }`. Do not switch the slice to a brace-counting parser — the fixed multi-line shape plus the overrun refusal is the smaller change and keeps the `sed` reproducible by hand. |
+| CONCERN | Scope & Value | The **Mutation 2** row's drift guard cannot fail. It runs `grep -c 'report.outcome != "skipped"' "$M/r1.py"` expecting ≥ 1 and describes a `0` as meaning "the rule text drifted and the row proves nothing" — but the *settled* rule contains `report.outcome != "skipped"` as a substring, so the grep prints 1 on an unsubstituted file too. **Measured:** running the same `sed` with a deliberately non-matching pattern produced a file byte-identical to its input (`diff -q` reported identical) while `grep -c` still printed 1. Contained rather than dangerous: the row's primary expectation (`[1-9][0-9]* failed`) still fails loudly if the substitution did not land, because an unsubstituted plugin makes the three skip-shape cases pass. It is a dead belt over live braces. | **embedded** (round 3) — Verification "Mutation 2" row asserts by `cmp -s` difference plus absence of `hasattr(report, "wasxfail")` in the mutant, and states why the presence grep is invalid; task 4's mutation-check-2 bullet carries the same two assertions plus the one-physical-line pin on the settled rule. | Assert the substitution by difference, not by presence: `cmp -s pytest_executed_count.py "$M/r1.py" && { echo "MUTATION-2 NO-OP: rule text drifted" >&2; exit 1; }`. Equivalently, assert the settled rule's distinguishing clause is **absent** from the mutant: `grep -c 'hasattr(report, "wasxfail")' "$M/r1.py"` == 0. Also record that the rule must stay on one physical line for the `sed` to match at all — measured 94 characters at four-space indent and 98 at eight, against `line-length = 100`, so `ruff format` leaves it unwrapped today, but a future line-length reduction would re-break this row silently. |
+| NIT | Scope & Value | The injection gate `[ -f "$REPO_ROOT/pytest_executed_count.py" ]` is a second, quieter escape hatch than `PYTEST_ALLOW_ZERO_TESTS`: when it declines, the wrapper runs exactly as today with no guard and no message, so a transcript from a checkout predating the plugin is indistinguishable from a guarded one. The repo-level case is covered (the tests copy the plugin from `PYTEST_EXECUTED_COUNT_SOURCE` and error if it is missing), but a stale `.worktrees/` lane runs unguarded and silently. The back-compat behavior itself is right; only its invisibility is the nit. | **accepted, no change** — the back-compat behavior is right and its invisibility in a stale `.worktrees/` lane is acknowledged on the record; out of scope at `appetite: Small`. | (NIT — no Implementation Note required.) |
+| NIT | History & Consistency | `mktemp -t pytest-clean-count` is the BSD form and is pinned verbatim by an anti-criterion Verification row. Verified working here (`/var/folders/…/T/pytest-clean-count.M6cFNLJh7T`); GNU coreutils treats `-t` differently and was not measured, so the portability of the pinned string is untested rather than known-good. The fleet is macOS-only today, so this is a note rather than a defect. | **accepted, no change** — the fleet is macOS-only; GNU `mktemp -t` portability is untested rather than known-bad, and the pinned string is verified working here. | (NIT — no Implementation Note required.) |
 
 ## Settled Questions
 
