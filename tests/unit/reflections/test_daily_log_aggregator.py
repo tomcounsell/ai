@@ -13,6 +13,7 @@ inlined into ``reflections.pm_briefings.daily_log`` when the legacy
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -93,6 +94,40 @@ def test_collect_sessions_filters_to_target_date(yesterday_utc):
     finally:
         on_target.delete()
         off_target.delete()
+
+
+def test_collect_sessions_reaches_aware_completed_at(yesterday_utc):
+    """Reaching test for the deleted naive-tzinfo guard on `completed_at` (#3181).
+
+    Fixture is built by writing through popoto and reading back: an aware
+    `completed_at` is assigned via attribute and persisted with a plain
+    `save()` (save() never stamps `completed_at`, so no
+    `preserve_updated_at` flag is needed). Asserts the session is present in
+    `_collect_sessions`' returned items — the observable result the deleted
+    guard existed to protect.
+    """
+    from models.agent_session import AgentSession
+
+    yesterday_noon = datetime(
+        yesterday_utc.year, yesterday_utc.month, yesterday_utc.day, 12, 0, 0, tzinfo=UTC
+    )
+    uid = uuid.uuid4().hex[:8]
+    session = AgentSession.create(
+        session_type="eng",
+        project_key=f"daily-report-reach-{uid}",
+        status="completed",
+    )
+    session.completed_at = yesterday_noon
+    session.save()
+    try:
+        sessions, err = dr._collect_sessions(yesterday_utc)
+        assert err is None
+        ids = {s["session_id"] for s in sessions}
+        assert session.agent_session_id in ids, (
+            "a session with an aware completed_at must appear in the collected items"
+        )
+    finally:
+        session.delete()
 
 
 # --- TelegramMessage collector -----------------------------------------------

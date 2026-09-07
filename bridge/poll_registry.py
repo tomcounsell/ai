@@ -296,6 +296,8 @@ def poll_claim_age_s(poll_id: int | str) -> float | None:
         claimed = datetime.fromisoformat(raw)
     except (TypeError, ValueError):
         return None
+    # Keep: `claimed` comes from a raw Redis string, not popoto, and may
+    # carry no offset.
     if claimed.tzinfo is None:
         claimed = claimed.replace(tzinfo=UTC)
     return (datetime.now(UTC) - claimed).total_seconds()

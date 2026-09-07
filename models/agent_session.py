@@ -791,6 +791,16 @@ class AgentSession(Model):
         This guards against Popoto's is_valid() coercion failure when a
         DatetimeField holds a non-datetime value (e.g. a descriptor object
         for sessions loaded from Redis before the field existed).
+
+        Keep: the ISO-string and float branches below are what close the
+        naive-write ingress for every `_DATETIME_FIELDS` member — they are
+        the reason the deletions in `_heal_future_updated_at` and
+        `_collect_sessions` are safe. This coercion fires only for names in
+        `_DATETIME_FIELDS` (never for `created_at`), and it never fires for a
+        constructor kwarg — `Model.__init__` does
+        `self.__dict__.update(kwargs)`, bypassing `__setattr__` entirely; a
+        `datetime` value passed as a kwarg reaches `_normalize_kwargs`
+        instead.
         """
         if name in self._DATETIME_FIELDS:
             if isinstance(value, int | float):
@@ -840,6 +850,15 @@ class AgentSession(Model):
         against Popoto's ``is_valid()`` silently aborting ``save()`` when a
         session loaded from Redis holds a stale or corrupt value in this field
         (issue #929).
+
+        Keep: this is the *only* ingress coercion that runs for a constructor
+        kwarg (``Model.__init__`` does ``self.__dict__.update(kwargs)``, so
+        ``__setattr__`` never fires), and it converts only ``int | float`` for
+        most fields (the ISO-string branch below is ``response_delivered_at``-
+        specific). ``created_at`` gets its own ``int | float`` conversion a few
+        lines down but no ISO-string or datetime handling at all — a naive
+        ``datetime`` passed as a constructor kwarg for any of these fields
+        passes through untouched.
         """
         # Extract fields that map to initial_telegram_message
         itm_fields = {}
@@ -1086,11 +1105,11 @@ class AgentSession(Model):
                 if record.updated_at is None:
                     continue  # None is safe — save() will stamp on next write
 
-                # Popoto strips tzinfo on load — treat naive datetimes as UTC
-                # (consistent with utils/utc.py::to_unix_ts).
+                # popoto 1.9.0 decodes `updated_at` aware (it is in
+                # `_DATETIME_FIELDS`, so every `__setattr__` assignment
+                # coerces it); this is a pure popoto read, so no naive-tzinfo
+                # guard is needed here.
                 updated_at_utc = record.updated_at
-                if updated_at_utc.tzinfo is None:
-                    updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
 
                 if updated_at_utc <= now:
                     continue  # already sane, skip
@@ -2219,6 +2238,9 @@ class AgentSession(Model):
         now = datetime.now(tz=UTC)
 
         # Calculate duration from session start
+        # Keep: `created_at` (SortedField) sits outside `_DATETIME_FIELDS`, so
+        # `__setattr__` never coerces it, and a constructor kwarg or an
+        # archive-restore `fromisoformat()` value can land here naive.
         prev_time = self.started_at or self.created_at
         if prev_time is not None:
             if isinstance(prev_time, datetime):
@@ -2566,7 +2588,9 @@ class AgentSession(Model):
             if started is None:
                 continue
             # Handle both datetime and float timestamps (migration period).
-            # to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo).
+            # to_unix_ts treats a naive datetime as UTC; that guard is for a
+            # constructor kwarg or archive-restore value on created_at, which
+            # has no __setattr__ coercion, not for a popoto read.
             from utils.utc import to_unix_ts
 
             ts = to_unix_ts(started)
