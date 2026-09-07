@@ -171,9 +171,11 @@ async def _send_queued_reaction(
     """
     chat_id = message.get("chat_id")
     reply_to = message.get("reply_to")
+    # ``emoji`` is ``None`` for a clear-reaction payload (the teammate
+    # completion path); only a missing target makes the payload malformed.
     emoji = message.get("emoji")
 
-    if not chat_id or not reply_to or not emoji:
+    if not chat_id or not reply_to:
         logger.warning(f"Relay: skipping malformed reaction payload: {message}")
         return False
 
@@ -237,10 +239,9 @@ def _reaction_yields_slot(message: dict) -> bool:
 
     Telegram permits one reaction per sender per message, and seven writers
     across two processes target a session's originating message. Ordering is
-    undefined: `output_handler.react()` writes ``telegram:outbox:{chat_id}``
-    while ticks, budget, and completion reactions write
-    ``telegram:outbox:{session_id}``, and `process_outbox` iterates those keys
-    in unspecified order. There is no single queue whose FIFO order could be
+    undefined: every writer targets ``telegram:outbox:{session_id}`` (falling
+    back to ``{chat_id}`` for a chatless call), and `process_outbox` iterates
+    those keys in unspecified order. There is no single queue whose FIFO order could be
     relied on, so precedence is enforced here, at the one point all outbox
     traffic converges.
 

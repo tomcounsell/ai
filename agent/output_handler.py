@@ -1599,14 +1599,9 @@ class TelegramRelayOutputHandler:
         """Queue a 👀 reaction directly to ``telegram:outbox:{session_id}``.
 
         Built via :meth:`_build_reaction_payload` so the schema matches
-        :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here:
-        on the telegram path, ``react()`` derives ``session_id = chat_id``
-        (see ``session_id = chat_id`` in :meth:`react`), which would orphan
-        the reaction in a different queue when ``session.session_id !=
-        chat_id`` (the normal case). See Implementation Note F7. (``react()``
-        also resolves transport via ``_resolve_transport`` before reaching
-        that line — a system-transport session drops before any outbox write
-        at all.)
+        :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here
+        because it resolves transport via ``_resolve_transport`` first, and
+        the suppress branch already knows the target queue.
         """
         from agent.reaction_priority import PRIORITY_PICKUP
 
@@ -1711,11 +1706,9 @@ class TelegramRelayOutputHandler:
                 await self._file_handler.react(chat_id, msg_id, emoji, session)
             return
 
-        # Derive a session_id -- best effort, use chat_id as fallback.
-        # NOTE: when called with a session context, callers should prefer
-        # writing the reaction directly to ``telegram:outbox:{session.session_id}``
-        # via _build_reaction_payload (see RTR suppress branch in send()).
-        session_id = chat_id
+        # Queue on the session's own outbox so the payload carries a real
+        # session_id; chat_id is the fallback only for a chatless call.
+        session_id = getattr(session, "session_id", None) or chat_id
 
         payload = self._build_reaction_payload(chat_id, msg_id, emoji, session_id)
 

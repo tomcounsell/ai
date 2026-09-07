@@ -1443,6 +1443,24 @@ class TestZeroPeerGuard:
         mock_react.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_reaction_path_clears_on_none_emoji(self):
+        """``emoji: None`` is a clear, not a malformed payload; it reaches Telegram."""
+        message = {
+            "chat_id": "-1003900483201",
+            "reply_to": 42,
+            "emoji": None,
+            "session_id": "s",
+        }
+
+        mock_react = AsyncMock(return_value=True)
+        with patch("bridge.response.set_reaction", mock_react):
+            result = await _send_queued_reaction(MagicMock(), message)
+
+        assert result is True
+        mock_react.assert_called_once()
+        assert mock_react.call_args.args[3] is None
+
+    @pytest.mark.asyncio
     async def test_custom_emoji_path_still_sends_for_valid_peer(self):
         message = {"chat_id": "12345", "reply_to": None, "emoji": "🎉", "session_id": "s"}
         sent = MagicMock()

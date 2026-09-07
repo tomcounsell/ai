@@ -394,9 +394,9 @@ class TestTelegramRelayOutputHandler:
 
             asyncio.run(handler.react("chat-1", 42, "\U0001f44d", FakeSession()))
 
-            # Redis outbox key is still keyed by chat_id (Rabbit Holes: react()
-            # keeps session_id = chat_id on the telegram path).
-            assert mock_r.rpush.call_args[0][0] == "telegram:outbox:chat-1"
+            # Redis outbox key is the session's own queue when a session is
+            # supplied, so the payload carries a real session_id.
+            assert mock_r.rpush.call_args[0][0] == "telegram:outbox:session-xyz-789"
 
             # But the file dual-write prefers the session's own session_id.
             session_log = Path(tmp) / "session-xyz-789.log"

@@ -111,7 +111,7 @@ class TestReactTransportDerivation:
 
         mock_r.rpush.assert_called_once()
         key = mock_r.rpush.call_args[0][0]
-        assert key == "telegram:outbox:-100123"
+        assert key == "telegram:outbox:0_1234567890"
         payload = json.loads(mock_r.rpush.call_args[0][1])
         assert payload["chat_id"] == "-100123"
 
@@ -137,7 +137,7 @@ class TestReactTransportDerivation:
 
         mock_r.rpush.assert_called_once()
         key = mock_r.rpush.call_args[0][0]
-        assert key == "telegram:outbox:0"
+        assert key == "telegram:outbox:sess-polluted"
 
     # ── (e) file dual-write still occurs on the system path ────────────────
 
