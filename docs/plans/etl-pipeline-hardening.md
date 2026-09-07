@@ -230,7 +230,12 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 #### Lane 5b: idempotent enqueue seam and reflection key
 
-- Add `idempotency_key: str | None = None` and `status: str = "pending"` to `_push_agent_session` (`agent/agent_session_queue.py:204-231`); thread `status` into `async_create` at `:369`; change the return to `tuple[int, str]` (queue depth, bound `agent_session_id`) and update every caller (`enqueue_agent_session`, `retry_agent_session`, `tools/valor_session.py`, `agent/reflection_scheduler.py`, `tools/agent_session_scheduler.py`).
+- Add `idempotency_key: str | None = None` and `status: str = "pending"` to `_push_agent_session` (`agent/agent_session_queue.py:204-231`); thread `status` into `async_create` at `:369`; change the return to `tuple[int, str]` (queue depth, bound `agent_session_id`).
+- **There are exactly three production callers**, re-derived at `bf0a5d5` with `grep -rn "_push_agent_session" agent/ tools/ bridge/ worker/ models/ scripts/`:
+  1. `agent/agent_session_queue.py:1712` — `depth = await _push_agent_session(...)` inside `enqueue_agent_session`. This is the breaking pattern: once it unpacks a tuple, every test that patches the seam with a stub returning a bare `int` raises `TypeError: cannot unpack non-sequence int`.
+  2. `tools/valor_session.py:760`.
+  3. `agent/reflection_scheduler.py:754`.
+  `retry_agent_session` (`agent/agent_session_queue.py:731`) calls `AgentSession.create(**fields)` directly and never touches the seam; `tools/agent_session_scheduler.py` contains no reference at all. Both were named as callers in the pre-critique draft and are **not** — do not go looking for them.
 - With a key: `SET enqueue:idem:{key} {preallocated_id} NX EX 86400` via `utils.redis_client.text_redis()` in `agent/enqueue_idempotency.py`, placed after the stale-terminal reconcile at `:361` and before `async_create` at `:369`; on a lost race read the bound id back from the key and return it without creating a row. The preallocated id is minted with the same `AutoKeyField` generator Popoto uses so the created row carries it.
 - **Plumb the due value down; do not re-derive it inside the enqueue.** `_enqueue_agent_reflection(entry)` (`agent/reflection_scheduler.py:709`) sees only the registry entry, and so does `run_reflection(entry, state)` (`:597`). The due value is a local inside `is_reflection_due` (`:524`) and is thrown away. It **cannot** be recomputed at the `:635` dispatch site from `state.ran_at`, because `run_reflection` calls `state.mark_started()` at `:607` and `mark_started` does `self.ran_at = time.time(); self.save()` (`models/reflection.py:171-175`) — by `:635` the input has already been clobbered, so a crash-retry would compute a different key. The round-1 critique's "populate it at the `:635` dispatch site" note is corrected here for exactly that reason.
   1. Extract the `ran_at` recovery that `is_reflection_due` does at `:512-521` (the `isinstance` descriptor guard plus the blank-`every:` `_latest_run_timestamp` fallback) into `_effective_last_run(entry, state) -> float | None`, and call it from both `is_reflection_due` and the new helper.
@@ -281,8 +286,11 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - [ ] `tests/unit/output_handler/test_output_handler_handlers.py`, `tests/unit/test_tool_call_delivery.py` — UPDATE: payload carries `correlation_id`
 - [ ] `tests/integration/test_harness_env_pm_injection.py` — UPDATE: `VALOR_CORRELATION_ID` present
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: duplicate-tick case
-- [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py` — UPDATE: `_push_agent_session` returns a tuple; new `idempotency_key` and `status` kwargs; lost-race binding case
-- [ ] `tests/unit/test_agent_session_scheduler_kill.py`, `tests/integration/test_session_spawning.py` — UPDATE: callers of the seam unpack the tuple
+- [ ] **Seam blast radius (lane 5b): 23 test files reference `_push_agent_session`, not four.** Enumerate with `grep -rln "_push_agent_session" tests/` at build time and check every stub's return value. The list at `bf0a5d5`: `tests/integration/{test_agent_session_lifecycle,test_bridge_routing,test_connectivity_gaps,test_lifecycle_transition,test_notify_isolation,test_parent_child_round_trip,test_session_notify,test_silent_failures,test_worker_drain}.py` and `tests/unit/{test_agent_session_queue,test_agent_session_queue_async,test_child_session_gate,test_hub_alias_references,test_pm_session_auto_slug,test_pm_session_refuse_no_issue,test_reflection_scheduler,test_resume_notify,test_teammate_cold_start_finalize,test_valor_session_cli,test_valor_session_create_core,test_valor_session_project_key,test_valor_session_sdlc_metadata,test_valor_session_working_dir_resolution}.py`
+- [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py` — UPDATE: `_push_agent_session` returns a tuple; new `idempotency_key` and `status` kwargs; lost-race binding case; assert the created row's key equals the value bound into `enqueue:idem:{key}`
+- [ ] `tests/unit/test_valor_session_cli.py` — UPDATE: the `_fake_push` stubs at `:280` and `:379` return a literal `1` and must return `(1, "<id>")`. These are the only two confirmed int-returning seam stubs at `bf0a5d5`; re-run the enumeration above in case a peer adds another
+- [ ] `tests/integration/test_bridge_routing.py` — NO CHANGE. `TestWorkflowIdAbsent` (`:162-170`) asserts only that `workflow_id` is *absent* from `inspect.signature(_push_agent_session)`; adding `idempotency_key` and `status` does not touch it. The round-1 critique's note that this file "must be updated for the two new kwargs" was wrong on re-derivation and is recorded here so a builder does not chase it
+- [ ] `tests/unit/test_agent_session_scheduler_kill.py`, `tests/integration/test_session_spawning.py` — NO CHANGE. Both were named in the pre-critique draft; neither contains a single reference to `_push_agent_session`
 - [ ] `tests/integration/test_steering.py` — UPDATE (lane 3): entries built via `SteeringPayload`
 
 ## Rabbit Holes
@@ -311,7 +319,11 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 
 ### Risk 4: dead-letter volume from a misbehaving relay floods Redis
 **Impact:** unbounded rows.
-**Mitigation:** `Meta.ttl` 30 days, `replayable=False` after 3 replay attempts, per-stage cap of 10,000 rows enforced in `record()` with the oldest aged first.
+**Mitigation:** `Meta.ttl` 30 days, `replayable=False` after 3 replay attempts, and a per-stage cap of 10,000 rows that costs **O(1) on the write path**. `record()` is called from the relay's per-message failure branch, so it must never run a per-stage census or an ordering pass — under the flood the cap is written for, a census makes the mitigation the bottleneck.
+- On every `record()`: `HINCRBY {project}:dead_letters:count {stage} 1` and `ZADD {project}:dead_letters:{stage} <first_seen_epoch> <letter_id>`, both through `utils.redis_client.text_redis()`. Two O(log n) commands, no hydration, no scan.
+- Eviction runs in the `dead-letter-replay` reflection (300s cadence), never in `record()`: read the `HGET` count, and while it exceeds the cap take `ZRANGE {project}:dead_letters:{stage} 0 <overflow-1>` and, for each id, `DeadLetter.query.get(id).delete()` through the ORM, then `ZREM` the id and `HINCRBY` the counter down.
+- **Never a raw Redis delete on the Popoto row.** `.claude/hooks/validators/validate_no_raw_redis_delete.py` blocks it and the guard is machine-global. The sorted set is an eviction *index* over ids; the rows themselves are only ever removed via `instance.delete()`.
+- The counter is advisory. It drifts when TTL expiry removes a row without a `ZREM`, so the eviction pass reconciles it from `ZCARD` each time it runs rather than trusting the hash.
 
 ### Risk 5: seam contention with #3177 lane 3
 **Impact:** two PRs change `_push_agent_session`'s signature.
@@ -445,6 +457,22 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
   - Agent Type: documentarian
   - Resume: true
 
+### File Ownership (contended files)
+
+Five builders run in parallel over one lane worktree. Three files are touched by more than one lane, so each gets exactly one owner; every other lane hands its change to that owner as a written spec rather than editing the file. A builder that finds itself about to edit a file it does not own stops and posts the diff it wants to the owner.
+
+| File | Sole owner | What the other lanes hand over |
+|---|---|---|
+| `models/session_lifecycle.py` | **dlq-builder** (lane 2) | lane 1 hands the one-line swap of `_schedule_post_session_extraction(...)` → `enqueue("memory_extraction", session_id, project_key)` inside `finalize_session`; lane 4 hands the `claim_pending_run` change at `:858-864` (add `record_lock_degradation("claim_pending_run", "closed")`, flip `return True` → `return False`, add the policy docstring line). Lane 2's own edits are the `session_recovery_cap` / `session_init_hang` dead-letter writes. |
+| `agent/agent_session_queue.py` | **seam-builder** (lane 5b) | lane 2 hands the corrupted-pop reaper dead-letter write (`:2175-2272`); lane 3 hands the `_session_notify_listener` parse change (`:1053`). Lane 5b's own edits are `_push_agent_session` (`:204-231`, `:361`, `:369`) and the `enqueue_agent_session` call site (`:1712`). Seam-builder is the owner because the signature change is the one edit that must land coherently with its callers. |
+| `scripts/update/migrations.py`, `scripts/update/reflection_register.py`, `scripts/update/run.py` | **dlq-builder** (lane 2) | lane 1 hands `side_effect_job_model` (migration), `register_side_effect_drain` (register helper), and its `run.py` step. Lane 2 lands both migrations and both register helpers in one commit so `MIGRATIONS` and the `run.py` step order have a single author. |
+
+Uncontended files stay with their lane: lane 1 owns `models/side_effect_job.py`, `agent/side_effects.py`, `reflections/housekeeping/side_effect_drain.py`; lane 2 owns `models/dead_letter.py`, `bridge/dead_letters.py`, `bridge/telegram_relay.py`, the email relay, `agent/session_archive.py`, `reflections/housekeeping/dead_letter_replay.py`, `ui/data/dead_letters.py`; lane 3 owns `bridge/wire_schemas.py`, `agent/steering.py`, `agent/session_pickup.py`'s parse sites; lane 4 owns `agent/lock_policy.py`, `bridge/dedup.py`, `ui/data/locks.py`; lane 5a owns `agent/session_executor.py`, `agent/output_handler.py`, `worker/__main__.py`; lane 5b owns `agent/enqueue_idempotency.py`, `agent/reflection_scheduler.py`, `tools/valor_session.py`.
+
+`agent/session_pickup.py` is touched by lane 3 (parse) and lane 4 (`_acquire_pop_lock` counter at `:131-134`). These are ~40 lines apart in different functions and are the one overlap left unsplit; **lane 4 owns the file**, and lane 3 hands over its parse change. `models/__init__.py` gains one export from lane 1 and none from lane 2 (`DeadLetter` is already exported) — no contention.
+
+Commit early with explicit paths (`git add <path>`, never `git add -A`) so a peer sees the file move rather than colliding on it.
+
 ## Step by Step Tasks
 
 ### 1. Side-effect jobs
@@ -454,7 +482,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Informed By**: spike-4
 - **Assigned To**: jobs-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: true (files split per §File Ownership; hand the `finalize_session` swap and all three `scripts/update/` changes to dlq-builder)
 - Lane 1 Technical Approach in full; delete `_schedule_post_session_extraction` and `drain_pending_extractions`
 
 ### 2. Dead-letter model and replayer
@@ -464,7 +492,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Informed By**: spike-2
 - **Assigned To**: dlq-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: true (sole owner of `models/session_lifecycle.py` and all three `scripts/update/` files per §File Ownership; hand the reaper write to seam-builder)
 - Lane 2 Technical Approach in full. **The `_restore_quarantine` SQLite table is NOT deleted** — the archive change is one guarded, observability-only `DeadLetter` emission in the cap branch at `agent/session_archive.py:420`.
 
 ### 3. Wire schemas
@@ -474,7 +502,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Assigned To**: schema-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Lane 3 Technical Approach; parse failures call `dead_letters.record`
+- Lane 3 Technical Approach; parse failures call `dead_letters.record`. Hand the `_session_notify_listener` parse to seam-builder and the `session_pickup.py` parse to locks-builder per §File Ownership
 
 ### 4. Lock policy and lineage
 - **Task ID**: build-locks-lineage
@@ -482,7 +510,7 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Validates**: `tests/unit/test_lock_policy.py` (create), `tests/unit/test_dedup.py`, `tests/unit/test_agent_session_queue.py`, `tests/integration/test_harness_env_pm_injection.py`
 - **Assigned To**: locks-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: true (sole owner of `agent/session_pickup.py`; hand the `claim_pending_run` change to dlq-builder per §File Ownership)
 - Lanes 4 and 5a Technical Approach
 
 ### 5. Enqueue seam and reflection idempotency
@@ -492,8 +520,8 @@ Finalize → job row → drained by reflection → retried or dead-lettered. Sen
 - **Informed By**: spike-3; #3177 spike-2 and its structural critique finding on the `int` return
 - **Assigned To**: seam-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- Lane 5b Technical Approach in full; every caller of `_push_agent_session` updated for the tuple return; lost-race binding test
+- **Parallel**: true (sole owner of `agent/agent_session_queue.py` per §File Ownership; accepts the reaper write from dlq-builder and the notify parse from schema-builder)
+- Lane 5b Technical Approach in full; all three real callers of `_push_agent_session` updated for the tuple return; the 23-file test sweep from §Test Impact; lost-race binding test asserting the row key equals the bound value
 
 ### 6. Validate lanes 1-5
 - **Task ID**: validate-lanes
