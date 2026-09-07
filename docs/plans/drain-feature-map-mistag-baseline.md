@@ -24,35 +24,56 @@ wins. `tests/unit/reflections/test_pm_briefings_builder.py` contains no
 `FEATURE_MAP` key at all, so it gets no marker. Its neighbour
 `test_pm_briefings_no_slots_configured.py` gets `config`, because `config` is a
 literal substring of `configured`. `test_sdlc_progress_check.py` gets `sdlc`,
-because `sdlc` sits at insertion index 16 and `reflections` at 45. The
-directory these three files live in is named `reflections` and every one of them
-is a reflections test, and the resolver never looks at it.
+because `sdlc` sits at insertion index 16 and `reflections` at 45.
 
 [#3010](https://github.com/tomcounsell/ai/issues/3010) shipped
 `tests/unit/test_feature_map_markers.py`, a guard that detects this class of
-mistag, with a path-keyed `KNOWN_MISTAGS` baseline recording the 24 files
-already wrong on the day it landed. The guard was built so the baseline could
-only shrink. Nobody has shrunk it. This issue drains it.
+mistag, with a path-keyed `KNOWN_MISTAGS` baseline in `tests/marker_map.py`
+recording the 24 files already wrong on the day it landed. The guard was built
+so the baseline could only shrink. Nobody has shrunk it. This issue drains it.
 
 **Current behavior:**
 
-Measured at `8e62c3a50`, over 838 tracked test files:
+Measured at `6c865fb5f` (`tests/` identical to `8e62c3a50`), over 838 tracked
+test files:
 
 | | |
 |---|---|
-| `python tests/marker_map.py --audit` | 25 violations across 24 paths (21 R1, 2 R2, 2 R3) |
+| `python3 tests/marker_map.py --audit` | 25 violations across 24 paths (21 R1, 2 R2, 2 R3) |
 | `KNOWN_MISTAGS` entries | 24 |
 | files carrying a derived marker | 284 of 838 |
-| `tests/unit/reflections/` carrying `reflections` | 2 of 20 |
-| `tests/integration/reflections/` carrying `reflections` | 0 of 2 |
+| reflections packages carrying `reflections` | 2 of 22 |
 | `pytest -m reflections --collect-only` over both packages | 34 of 396 tests, 362 deselected |
 
 **Desired outcome:**
 
-The package directory a test lives in is a declaration of intent, and the
-resolver honors it. `tests/unit/reflections/` means `reflections`, for every
-file in it, forever, including files nobody has written yet. `KNOWN_MISTAGS`
-is empty. `pytest -m reflections` collects 396 of 396.
+Every file whose filename lies about what it tests gets renamed so its filename
+tells the truth. `tests/unit/reflections/test_pm_briefings_builder.py` becomes
+`test_reflections_pm_briefings_builder.py`, and the resolver that already works
+resolves it correctly. `pytest -m reflections` collects 396 of 396.
+`KNOWN_MISTAGS` drops from 24 entries to **2**, and each survivor carries a
+policy reason rather than an unaddressed defect — which is what the issue's
+acceptance criterion 1 asks for, verbatim:
+
+> `KNOWN_MISTAGS` ... is empty, **or every remaining entry has a reason that is
+> a deliberate policy choice rather than an unaddressed defect**.
+
+The two survivors are the R2 sibling-uniformity pair
+(`tests/unit/session_runner/test_schema_routing.py` and
+`tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`), which are not
+mistags at all: each file's own marker is *correct*, and R2 fires on its
+siblings' absence of one. That is a policy choice about how much a lone
+correctly-marked sibling should be punished for its neighbours, and it stays
+recorded as such.
+
+**What this is not.** Three files (`test_sdlc_progress_check.py`,
+`test_sdlc_upvote_lanes.py`, `test_docs_auditor_git_surface.py`) carry a
+*correct* second-order marker today — they genuinely are SDLC and validation
+tests, living in the reflections package. Renaming moves their derived marker to
+`reflections`, so each one gains an explicit `pytestmark` for the marker it
+would otherwise shed. Nothing loses coverage. The one marker this plan does
+remove is `config` from `test_pm_briefings_no_slots_configured.py`, which was
+never about configuration — `config` matched inside the word `configured`.
 
 ## Freshness Check
 
@@ -173,45 +194,55 @@ Two, neither of them blocking.
 - **[#3010 / PR #3190]**: *FEATURE_MAP marker-regression guard* — merged
   2026-09-06. Built `tests/marker_map.py` (the single resolution point shared by
   the collection hook and the guard), the three rules R1/R2/R3, and the
-  `KNOWN_MISTAGS` baseline. **Succeeded.** Its `## What was considered and
-  rejected` section names "making the package directory authoritative" as
-  deferred to this issue, explicitly because the guard had to exist first to
-  measure the before/after. That precondition is now met.
+  `KNOWN_MISTAGS` baseline. **Succeeded.** Its `## Responding to a red guard`
+  ladder lists three remediations in order of preference, and the first is
+  *"Rename the file so its basename resolves correctly."* This plan is that
+  first remedy, applied 21 times. The guard is not being reshaped to
+  accommodate the drain; it is being used the way it documents.
+- **[#3072]**: *Four sibling reflections still hardcode "Eng: Valor" in their
+  Telegram senders* — **the precedent rename, done the same way.** It moved test
+  files with `git mv` and checked the new basenames against the resolver rather
+  than adding resolver special-cases, and it updated the prose that named the old
+  paths in the same commit. That is the shape this plan follows: `git mv`, verify
+  against `resolve_marker`, sweep the doc references.
 - **[#3184]**: *FEATURE_MAP stem uses a global str.replace* — merged
-  2026-09-07 as `8e62c3a50`. Anchored the strip. **Succeeded**, and eliminated
-  mechanism 3 (mangled stem) structurally rather than by exemption. This plan
-  follows the same shape for mechanisms 1 and 2, and #3184 is the precedent for
-  the argument that retiring a rule whose defect class became impossible is
-  correct rather than a weakening.
+  2026-09-07 as `8e62c3a50`. Anchored the strip so `test_test_judge.py` stems to
+  `test_judge` rather than `judge`. **Succeeded.** Note carefully what it did
+  *not* do: **#3184 retired no rule.** R1, R2, and R3 all still exist and all
+  still fire at `6c865fb5f` (21 / 2 / 2). It is a precedent for fixing a
+  *mechanism* in place, and for the discipline of measuring that the fix moves
+  exactly the files you predicted — not a precedent for deleting a guard rule.
+  This plan deletes no rule.
 - **[#2879 / PRs #2941, #3005]**: *Split the largest test files into per-class
-  modules* — merged Aug 2026. Created the themed package directories. This is
-  the change that made a *directory* signal exist at all; before it, there were
-  no themed packages to be authoritative about. It is also the change that
-  introduced 21 of the 24 baseline violations, silently, with the suite green —
-  the exact scenario #3010 was later built to catch.
+  modules* — merged Aug 2026. Created the themed package directories and, in
+  doing so, introduced 21 of the 24 baseline violations silently with the suite
+  green. The split kept each file's old basename while moving it into a package
+  whose name now carried the real meaning; renaming is the completion of that
+  move rather than a new convention.
 - **[#2946]**: *Split test_output_handler.py and test_memory_extraction.py into
   theme-grouped packages* — merged. Created `tests/unit/output_handler/` and
-  `tests/unit/memory_extraction/`, two of the four packages whose directory name
-  does not resolve today.
+  `tests/unit/memory_extraction/`. Neither package appears in the baseline: both
+  are internally uniform, so R2 passes on them.
 - **[#2805]**: *line-keyed ALLOWLIST silently un-exempted call sites* —
   the reason `KNOWN_MISTAGS` is path-keyed. Constrains this plan: entries are
-  deleted, never re-keyed or re-indexed.
+  deleted, never re-keyed or re-indexed. A `git mv` changes the path, so each
+  renamed file's entry must be **deleted**, never edited to the new path.
 - **[#3031]**: *a stale exemption is a silent hole* — the reason the guard fails
   on a baseline entry with no matching violation. This is what makes the drain
   self-proving: a file cannot be fixed without its entry being deleted, and an
   entry cannot be deleted without the file being fixed.
 - **[#431]**: *Organize test suite: feature markers, e2e tests, index* — March
   2026, the original introduction of `FEATURE_MAP` and the substring-match
-  resolver. The root of every mechanism this plan closes.
+  resolver.
 
 No prior attempt to drain the baseline exists. This is the first.
 
 ## Research
 
 
-External research on pytest's marker machinery, because the correctness of the
-whole approach rests on *when* a dynamically-added marker becomes visible to
-`-m`.
+External research on pytest's marker machinery, because the plan's
+marker-preservation step rests on how an explicit `pytestmark` composes with the
+marker the collection hook derives.
 
 **Queries used:**
 - `pytest pytest_collection_modifyitems item.add_marker directory based markers best practice`
@@ -219,54 +250,51 @@ whole approach rests on *when* a dynamically-added marker becomes visible to
 
 **Key findings:**
 
-1. **`-m` sees only the markers present when pytest's own deselection runs.**
-   pytest performs `-m` deselection inside its *own* `pytest_collection_modifyitems`,
-   via `deselect_by_mark`, and `MarkMatcher.from_item` snapshots
-   `{mark.name for mark in item.iter_markers()}` at that moment. A marker added
-   later (in `pytest_collection_finish`, `pytest_runtest_setup`, or a fixture's
-   `request.node.add_marker`) still drives `skip`/`xfail` but is **invisible to
-   `-m`**. Ordering between a conftest hook and pytest's internal one is a pluggy
-   LIFO detail, not a guarantee.
-   ([_pytest.mark source](https://docs.pytest.org/en/stable/_modules/_pytest/mark.html))
-   **How it informs the plan:** the repo's hook already wins this race today —
-   `-m reflections` does select the 34 files whose marker is derived, proving the
-   ordering works. But it is a property of the current plugin stack, not a
-   contract. Therefore **every acceptance measurement in this plan is a real
-   `pytest --collect-only -m <marker>` run, never a unit test of the resolver.**
-   A resolver test would stay green through a hook-ordering regression that
-   silently drops every derived marker from `-m` — precisely the invisible
-   failure #3010 was built to prevent.
-
-2. **`add_marker` is additive over module-level `pytestmark`.** The docs'
+1. **`add_marker` is additive over module-level `pytestmark`.** The docs'
    canonical pattern is exactly this repo's: iterate `items`, call
    `item.add_marker(...)`. It composes with, rather than replaces, an explicit
    `pytestmark`.
    ([Working with custom markers](https://docs.pytest.org/en/stable/example/markers.html))
-   **How it informs the plan:** the effective marker set of a file is *already*
-   `explicit ∪ derived` in the shipped system — which is what makes the 47
-   explicit-marker files coexist quietly with derived ones. An **additive** union
-   of directory and basename markers is therefore consistent with the model
-   already in production; a *replacing* directory rule would be the novel
-   semantics, not the conservative one.
+   **How it informs the plan:** the effective marker set of a file is already
+   `explicit ∪ derived` in the shipped system. That is the mechanism the three
+   marker-preservation edits use, and it is **verified against this repo, not
+   just the docs**: `tests/unit/test_reflection_arm.py` derives `reflections`
+   from its basename and declares `pytest.mark.sdlc` explicitly;
+   `pytest --collect-only -m sdlc` and `-m reflections` each collect all 10 of
+   its tests. The mechanism is in production today across 99 files.
 
-3. **Directory-keyed marking is the documented idiom, and `item.path`
-   (a `pathlib.Path`) is preferred over the deprecated `item.fspath`;** guides
-   specifically warn to compare path *parts* rather than substring-match the
-   path string, to avoid accidental matches.
-   ([mark how-to](https://docs.pytest.org/en/stable/how-to/mark.html))
-   **How it informs the plan:** directory resolution matches on `Path(...).parts`
-   with an **exact** dict lookup, never a substring scan — which is also what
-   makes it order-free.
+2. **`-m` sees only the markers present when pytest's own deselection runs.**
+   pytest performs `-m` deselection inside its *own*
+   `pytest_collection_modifyitems`, via `deselect_by_mark`, and
+   `MarkMatcher.from_item` snapshots `{mark.name for mark in item.iter_markers()}`
+   at that moment. A marker added later is invisible to `-m`.
+   ([_pytest.mark source](https://docs.pytest.org/en/stable/_modules/_pytest/mark.html))
+   **How it informs the plan:** this plan does not touch
+   `tests/conftest.py::pytest_collection_modifyitems`, so it neither introduces
+   nor mitigates this hazard — the ordering is exactly as inherited. It does
+   mean every acceptance measurement must be a real
+   `pytest --collect-only -m <marker>` run rather than a unit test of
+   `resolve_marker`, because only the real run proves the marker reaches `-m`.
+   That is how the two close conditions in Success Criteria are written.
 
-4. **Unregistered markers warn (and error under `--strict-markers`).**
+3. **Unregistered markers warn (and error under `--strict-markers`).**
    `pyproject.toml` `addopts` is
    `--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread`,
    with no `--strict-markers`. **How it informs the plan:** every marker this
-   plan applies (`reflections`, `sessions`, `sdlc`, `messaging`, `git`,
-   `validation`) is already declared in `[tool.pytest.ini_options] markers`, so
-   no registration change is needed — and a verification row asserts that any
-   marker a `DIRECTORY_MAP` entry can produce is a registered one, so a future
-   entry naming a typo'd marker fails loudly instead of warning into the void.
+   plan writes explicitly (`sdlc`, `validation`) is already declared in
+   `[tool.pytest.ini_options] markers`, so no registration change is needed. A
+   typo would warn rather than raise, which is why the verification table asserts
+   on real collection *counts* rather than on the absence of an error.
+
+4. **`git mv` preserves history; renames are detected by content similarity.**
+   Git stores no rename records — `git log --follow` and `git blame` reconstruct
+   them from similarity at read time, and a pure rename with no content change is
+   detected at 100% similarity.
+   ([git-mv docs](https://git-scm.com/docs/git-mv))
+   **How it informs the plan:** rename commits stay pure. Content edits to a
+   renamed file (the three `pytestmark` additions) land in a **separate commit**
+   from the `git mv`, so `--find-renames` sees an unambiguous 100% match and
+   `git log --follow` keeps working on all 21 files.
 
 ## Spike Results
 
