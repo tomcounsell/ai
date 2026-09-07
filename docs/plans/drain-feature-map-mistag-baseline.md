@@ -770,23 +770,163 @@ disposition below is in it unless stated otherwise.
 
 ## Risks
 
-_placeholder_
+
+### Risk 1: Retiring R1 and R3 removes real protection rather than redundant protection
+**Impact:** The guard shipped one day before this plan. If the structural
+argument is wrong, this change trades a working detector for a claim, and the
+next mistag lands silently — the exact outcome #3010 exists to prevent.
+**Mitigation:** The retirement is not accepted on argument. Each retired rule
+must be paid for with a test that fails when the *mechanism* is removed, and
+that is proven red before it is proven green:
+1. Delete the directory branch from `resolve_markers` and confirm the
+   real-collection mutation test fails. Paste the failure into the PR.
+2. Revert `resolve_marker` to substring matching and confirm the
+   `checkpointing` fixture fails. Paste the failure into the PR.
+3. Empty `DIRECTORY_MAP` and confirm `run_audit()` raises.
+A retirement with no red-state proof for its replacement is a blocker, not a nit.
+
+### Risk 2: R4 becomes a rubber stamp
+**Impact:** R4 is the only thing keeping this a guard rather than a one-time
+cleanup. If `UNMAPPED_PACKAGES` grows without discipline it degrades into the
+whole-package exemption that #3010 explicitly rejected as "the exact silent-hole
+shape #3031 warns against".
+**Mitigation:** `UNMAPPED_PACKAGES` is bracketed in both directions like
+`KNOWN_MISTAGS` — an entry for a package that no longer exists, or that has since
+been mapped, fails the guard. It ships with exactly one entry
+(`tests/unit/memory_extraction`) and a prose reason, so both bracketing
+assertions are exercised on day one rather than sitting unexercised. That
+single-entry population is the specific defect #3010 called out in the mechanism
+it rejected, and it is why this one ships populated.
+
+### Risk 3: The one marker removal breaks a real selection
+**Impact:** `tests/unit/reflections/test_pm_briefings_no_slots_configured.py`
+loses `config`. If anyone or anything runs `pytest -m config` expecting that
+file, it stops appearing.
+**Mitigation:** `-m config` currently selects 6 files, of which this is one; it
+is a reflections test about briefing slots, and its `config` marker came from
+`config` matching inside `configured`. The file gains `reflections`, which is
+correct. No script, `addopts`, or CI path in the repo passes `-m config`
+(`git grep` over `scripts/`, `pyproject.toml`, `.github/`). Surfaced as the one
+Open Question so a human ratifies it rather than discovering it.
+
+### Risk 4: Marker inflation makes negated selections quietly broader
+**Impact:** 43 files gain a marker. Anyone running `pytest -m "not sessions"` to
+skip a slow area now skips 18 more files than before, silently.
+**Mitigation:** No repo-controlled invocation uses a negated feature marker
+(verified over `scripts/`, `pyproject.toml`, `.github/`), so the effect is
+confined to interactive use, where the widened set is the intended correction.
+The per-marker census before/after is committed in the PR so the change in every
+selector's size is visible, not inferred.
+
+### Risk 5: The hook-ordering assumption is inherited, not owned
+**Impact:** `-m` sees a dynamically-added marker only if the repo's
+`pytest_collection_modifyitems` runs ahead of pytest's internal
+`deselect_by_mark` (Research finding 1). That ordering is a pluggy LIFO detail
+across the whole plugin stack — `pytest-xdist`, `pytest-randomly`,
+`pytest-asyncio`, `pytest-timeout` are all loaded here. If it ever inverts,
+every derived marker disappears from `-m` and the resolver tests stay green.
+**Mitigation:** This plan does not introduce the risk, but it does make the
+suite depend on it far more heavily (327 files instead of 284). Every acceptance
+measurement is a real `pytest --collect-only -m <marker>` run, and the collect
+counts go into the verification table as literal numbers, so an ordering
+inversion fails a check instead of passing a mock.
+
+### Risk 6: A concurrent lane edits `tests/marker_map.py`
+**Impact:** #3184 shipped into this file hours before this plan was written.
+Another lane touching `FEATURE_MAP` produces a conflict on a file where a bad
+merge silently changes markers.
+**Mitigation:** Both known adjacent lanes are resolved: #3184 is merged, #3195
+touches `scripts/pytest-clean.sh` only. The build re-runs
+`python tests/marker_map.py --audit` immediately before opening the PR and again
+at the merge head, and the census diff is regenerated at the final head rather
+than quoted from plan time.
 
 ## Race Conditions
 
-_placeholder_
+
+No race conditions identified. Every code path this plan touches is synchronous
+and single-threaded: `resolve_markers` and the `FEATURE_MAP` / `DIRECTORY_MAP`
+lookups are pure functions over strings, `iter_test_files()` is one blocking
+`subprocess.run` of `git ls-files`, and `pytest_collection_modifyitems` runs
+once per session on the collection list before any test executes. No async, no
+shared mutable state, no cross-process data flow, no Redis.
+
+Two ordering hazards exist and neither is a race — both are deterministic
+sequencing properties, recorded here so they are not mistaken for one:
+
+- **Hook ordering vs. `deselect_by_mark`** (Risk 5) is a fixed plugin-load
+  order resolved once at startup, identical on every run.
+- **`FEATURE_MAP` insertion order** determines which key wins a first-hit scan.
+  This plan reduces that dependence to near zero (`DIRECTORY_MAP` is exact-match
+  and order-free; whole-token matching removes the two measured ordering
+  collisions) but does not eliminate the ordered scan itself.
+
+Under `-n auto --dist=loadfile`, each xdist worker collects independently and
+applies markers to its own items. Resolution is a pure function of the path, so
+all workers reach identical results with no shared state.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+
+- [SEPARATE-SLUG #3223] Teaching the guard to see the 47 files that declare an
+  explicit `pytest.mark.<feature>`. Filed with its own recon; sequenced after
+  this plan because this plan rewrites the rule set and empties `KNOWN_MISTAGS`,
+  and landing #3223 first would conflict for no gain.
+- [SEPARATE-SLUG #3223] Correcting the `KNOWN_MISTAGS`-style reason text that
+  implies a derived marker is a file's only marker. Same issue, same reason.
+
+Everything else the issue raises is **in scope and done in this plan**, not
+deferred: `KNOWN_MISTAGS` is drained to empty here, the R2 entries are drained
+here by mapping `hooks` and `session_runner`, the R3 entries are drained here by
+whole-token matching plus the `checkpointing` key, the stale 39/6 figure is
+corrected in `docs/features/feature-map-marker-guard.md` here, and
+`tests/README.md`'s per-marker counts are refreshed here.
+
+`tests/unit/memory_extraction/` staying out of `DIRECTORY_MAP` is **a decision
+made in this plan, not a deferral**: no `memory` marker exists, the package
+resolves uniformly to no marker so R2 stays green on it, and it ships as the
+single reasoned `UNMAPPED_PACKAGES` entry so R4's bracketing assertions are
+exercised from day one.
 
 ## Update System
 
-_placeholder_
+
+No update system changes required. The change is confined to `tests/`, the two
+documents describing it, and nothing that `/update` propagates:
+
+- No new dependency, so `scripts/update/deps.py` and the pin set are untouched.
+- No new config file, env key, or `.env.example` entry.
+- No service restart. `tests/conftest.py` and `tests/marker_map.py` are loaded
+  by `pytest` only; the bridge, worker, and reflection scheduler never import
+  them, so `./scripts/valor-service.sh restart` is not needed.
+- No migration. `data/migrations_completed.json` and
+  `scripts/update/migrations.py` are untouched — this plan changes no Popoto
+  model and writes nothing to Redis.
+- Existing installations need nothing. The next `git pull` gives every machine
+  the new resolution, and marker resolution is recomputed from scratch on every
+  collection with no persisted state to migrate.
 
 ## Agent Integration
 
-_placeholder_
+
+No agent integration required. This is test infrastructure with no runtime
+surface:
+
+- **No new CLI entry point.** `tests/marker_map.py` already has a
+  `python tests/marker_map.py --audit | --report | --count` interface, invoked
+  by path rather than through `pyproject.toml [project.scripts]`, deliberately
+  so it runs on a bare interpreter with no venv. `--report` changes its output
+  format (a marker *set* per line instead of a single marker) and gains no new
+  subcommand. No `valor-*` entrypoint is added or changed.
+- **The bridge does not import it.** `git grep -ln marker_map` returns three
+  code files, all under `tests/`. `bridge/telegram_bridge.py`, `worker/`, and
+  `agent/` have no path to this module.
+- **No MCP surface.** Nothing in `mcp_servers/` or `.mcp.json` changes.
+- **How the agent reaches it**: through the Bash tool, running
+  `python tests/marker_map.py --audit` or `pytest -m <marker>` — both of which
+  already work and neither of which changes shape. The `--audit` output text
+  changes (new rule names), so any prose telling the agent what a red audit
+  means is updated in `docs/features/feature-map-marker-guard.md`.
 
 ## Documentation
 
