@@ -7,7 +7,7 @@ created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3184
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-07T02:19:31Z
+revision_applied_at: 2026-09-07T02:25:56Z
 ---
 
 # FEATURE_MAP stem: anchored prefix/suffix strip
@@ -288,7 +288,7 @@ untagged).
   ```bash
   WORK=$(mktemp -d)                     # never a fixed /tmp/<name> — see below
   BASE=$(git merge-base HEAD origin/main)
-  git show "$BASE:tests/marker_map.py" > "$WORK/marker_map_base.py"
+  git show "${BASE}:tests/marker_map.py" > "$WORK/marker_map_base.py"   # braces required: see below
   python3 -c "import importlib.util as u; s=u.spec_from_file_location('mm','$WORK/marker_map_base.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('\n'.join(m._report_lines(m.iter_test_files())))" > "$WORK/before.txt"
   python3 tests/marker_map.py --report > "$WORK/after.txt"
   diff "$WORK/before.txt" "$WORK/after.txt"
@@ -310,12 +310,27 @@ untagged).
   match yields a passing check that proves nothing. Allocate `WORK=$(mktemp -d)`
   once and pass it forward explicitly.
 
+- **Brace `${BASE}` in the `git show` line.** This machine's shell is zsh, which
+  applies its `:t` (tail) history modifier to a bare `$VAR` *even inside double
+  quotes*. Written `"$BASE:tests/marker_map.py"`, the `:t` is eaten and git gets
+  the revision `…076cests/marker_map.py`, failing with "ambiguous argument".
+  The base module then lands empty and `diff` reports all 836 lines as added,
+  which reads like a catastrophic blast radius rather than a broken command.
+  `"${BASE}:tests/marker_map.py"` is correct. The bug is specific to the bare
+  `$VAR` form: the `$(git merge-base HEAD origin/main):tests/marker_map.py`
+  command-substitution form used in task 3 and the Verification rows is
+  unaffected, and was tested as such.
+
 - **Pin every `git diff` comparison to the merge-base, never `origin/main`.**
   `main` moves constantly here (it advanced twice during this plan's own
   authoring), and #3175 is OPEN against `KNOWN_MISTAGS` in this very file. A row
   written against `origin/main` fires against a PR that never touched the list
   once #3175 lands. `git merge-base HEAD origin/main` is stable for the life of
-  the branch and measures only what *this* branch changed.
+  the branch and measures only what *this* branch changed. **This requires a
+  current `origin/main` ref**: run `git fetch origin --quiet` once before the
+  verification block, or a stale ref resolves the merge-base further back and the
+  diff picks up changes the branch merely inherited, reintroducing the very false
+  positive this rule removes.
 
 - The three comment sites to repair, all of which currently forbid this change:
   1. `tests/marker_map.py:296-306` — `_stem`'s docstring and the "Do NOT clean
@@ -637,6 +652,8 @@ The lead agent orchestrates and does not build directly.
 - **Assigned To**: blast-radius-validator
 - **Agent Type**: validator
 - **Parallel**: false
+- Run `git fetch origin --quiet` FIRST — the merge-base anti-criteria are only
+  correct against a current `origin/main` ref
 - Run every row of the Verification table
 - Confirm all Success Criteria are met
 
@@ -650,7 +667,7 @@ The lead agent orchestrates and does not build directly.
 | All five mangled basenames now un-mangled | `python3 -c "import sys;sys.path.insert(0,'.');from tests.marker_map import _stem as s;assert s('test_test_judge.py')=='test_judge';assert s('test_validate_test_impact.py')=='validate_test_impact';assert s('test_conftest_isolation_guards.py')=='conftest_isolation_guards';assert s('test_conftest_autouse_monkeypatch_order.py')=='conftest_autouse_monkeypatch_order';assert s('test_test_redis_server_resolution.py')=='test_redis_server_resolution';print('OK')"` | exit code 0 |
 | Edge cases unchanged | `python3 -c "import sys;sys.path.insert(0,'.');from tests.marker_map import resolve_marker as r;assert r('')==(None,None);assert r('test_.py')==(None,None);assert r('test_sdlc.py')==('sdlc','sdlc');assert r('test_config.py')==('config','config');assert r('test_youtube_transcription.py')==('tools','youtube');print('OK')"` | exit code 0 |
 | No global `test_` replace remains in the stem | `grep -c 'replace("test_"' tests/marker_map.py` | match count == 0 |
-| Both stem-fidelity fixtures still exist | `grep -c 'def test_stem_fidelity_' tests/unit/test_feature_map_markers.py` | output contains `2` |
+| Both stem-fidelity fixtures still exist (inverted, not deleted) | `grep -cE 'def test_stem_fidelity_(test_judge\|validate_test_impact)\b' tests/unit/test_feature_map_markers.py` | output contains `2` |
 | Anti-criterion: `KNOWN_MISTAGS` untouched (#3175 stays out of scope) | `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -c '^[-+].*Drain tracked by #3175'` | match count == 0 |
 | Anti-criterion: `FEATURE_MAP` neither reordered nor extended | `git diff $(git merge-base HEAD origin/main) -- tests/marker_map.py \| grep -cE '^[-+] *"[a-z_]+": "'` | match count == 0 |
 | Anti-criterion: no comment still forbids the anchored strip | `grep -c 'clean this up' tests/marker_map.py` | match count == 0 |
@@ -702,11 +719,11 @@ Round 1 — FULL war room (Risk & Robustness, Scope & Value, History & Consisten
 | NIT | Scope & Value | Three named agents across seven tasks for a one-line change. Tasks 1-3 are one builder's linear sequence (capture baseline, edit, diff) split into three hand-offs, while Appetite says "Solo dev" with 0 PM check-ins. | Tasks 1-3 collapsed into a single `build-stem` task; graph renumbered to 5 tasks. | n/a (NIT) |
 | NIT | History & Consistency | The Rabbit Hole tells the builder to leave `docs/features/README.md` reading "24 pre-existing violations" while the audit prints 25, justified as "not made wrong by this change" — which reads as though the line is accurate when it is a pre-existing off-by-one between path count and violation count. | Rabbit Hole reworded: the off-by-one is named as pre-existing rather than implied correct. | n/a (NIT) |
 
-Round 2 — FULL war room, sequential lenses, at plan hash `sha256:18f013c1…`. Verdict: **NEEDS REVISION** (1 blocker, 2 concerns, 1 nit). Round 2 independently re-verified every round-1 fix and found all nine landed; the findings below are new, and the blocker is a defect introduced by the round-1 fix itself.
+Round 2 — FULL war room, sequential lenses, at plan hash `sha256:18f013c1…`. Verdict: **NEEDS REVISION** (1 blocker, 2 concerns, 1 nit). **Blocker and both concerns fixed; NOT re-critiqued — the router hit the G2 critique cycle cap (2/2) and escalated.** Round 2 independently re-verified every round-1 fix and found all nine landed; the findings below are new, and the blocker is a defect introduced by the round-1 fix itself.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The round-1 replacement recipe does not run. `git show "$BASE:tests/marker_map.py"` breaks under zsh (this machine's shell): zsh applies the `:t` history modifier to a bare `$VAR` even inside double quotes, so git receives `...076cests/marker_map.py` and fails. `before.txt` lands empty and `diff` then reports all 836 lines as added, which reads like a catastrophic blast radius rather than a broken command. | pending | Brace it: `git show "${BASE}:tests/marker_map.py"`. Verified both directions under /bin/zsh — unbraced fails `ambiguous argument`; braced returns 24860 bytes and the full recipe yields 836 baseline lines identical to the current report. Scoped to the bare `$VAR` form ONLY: the `$(git merge-base ...):tests/marker_map.py` command-substitution form in task 3 and the Verification rows was tested and is unaffected. |
-| CONCERN | Risk & Robustness | `git merge-base HEAD origin/main` is only as good as the local `origin/main` ref. In a lane that has not fetched, it resolves further back, so the diff includes changes the branch inherited rather than authored. If #3175 lands and the branch rebases onto it, both anti-criteria fire against a PR that touched neither list — reintroducing the false positive the merge-base fix removed. | pending | Add `git fetch origin --quiet` as the first step of task 5 and state the dependency in the Technical Approach merge-base rule. Do NOT fold `git fetch` into each Verification row — rows execute individually and repeated fetches serialize on the remote; one fetch before the block keeps each row a pure measurement. |
-| CONCERN | History & Consistency | Verification and Test Impact contradict each other and will fail a correct build. Test Impact says ADD three fixtures for the latent basenames, under the same "stem fidelity" header the plan tells the builder to rewrite; Verification asserts `grep -c 'def test_stem_fidelity_'` outputs exactly `2`. Naming the new fixtures in the obvious family yields 5 and fails the row. It was written against the pre-change count and never revisited when the ADD instruction appeared. | pending | Use `grep -cE 'def test_stem_fidelity_(test_judge\|validate_test_impact)\b' tests/unit/test_feature_map_markers.py` with `output contains 2`. That pins exactly the two fixtures that must be INVERTED rather than deleted — the property the row exists to protect — while leaving the builder free to add any number of new stem fixtures. |
-| NIT | History & Consistency | The round-1 revision inlined four general rules (never `git stash` in a shared checkout, never a fixed `/tmp/<name>` under concurrency, always pin `git diff` to the merge-base). All are repo-wide hazards of this repo's concurrent-worktree topology, not properties of the FEATURE_MAP stem; captured only here, the next lane rediscovers them the same expensive way. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The round-1 replacement recipe does not run. `git show "$BASE:tests/marker_map.py"` breaks under zsh (this machine's shell): zsh applies the `:t` history modifier to a bare `$VAR` even inside double quotes, so git receives `...076cests/marker_map.py` and fails. `before.txt` lands empty and `diff` then reports all 836 lines as added, which reads like a catastrophic blast radius rather than a broken command. | Applied: the recipe now reads `git show "${BASE}:tests/marker_map.py"`, and the Technical Approach carries a rule explaining the zsh `:t` modifier and scoping it to the bare `$VAR` form. | Brace it: `git show "${BASE}:tests/marker_map.py"`. Verified both directions under /bin/zsh — unbraced fails `ambiguous argument`; braced returns 24860 bytes and the full recipe yields 836 baseline lines identical to the current report. Scoped to the bare `$VAR` form ONLY: the `$(git merge-base ...):tests/marker_map.py` command-substitution form in task 3 and the Verification rows was tested and is unaffected. |
+| CONCERN | Risk & Robustness | `git merge-base HEAD origin/main` is only as good as the local `origin/main` ref. In a lane that has not fetched, it resolves further back, so the diff includes changes the branch inherited rather than authored. If #3175 lands and the branch rebases onto it, both anti-criteria fire against a PR that touched neither list — reintroducing the false positive the merge-base fix removed. | Applied: task 5 now runs `git fetch origin --quiet` first, and the merge-base rule states the currency requirement. | Add `git fetch origin --quiet` as the first step of task 5 and state the dependency in the Technical Approach merge-base rule. Do NOT fold `git fetch` into each Verification row — rows execute individually and repeated fetches serialize on the remote; one fetch before the block keeps each row a pure measurement. |
+| CONCERN | History & Consistency | Verification and Test Impact contradict each other and will fail a correct build. Test Impact says ADD three fixtures for the latent basenames, under the same "stem fidelity" header the plan tells the builder to rewrite; Verification asserts `grep -c 'def test_stem_fidelity_'` outputs exactly `2`. Naming the new fixtures in the obvious family yields 5 and fails the row. It was written against the pre-change count and never revisited when the ADD instruction appeared. | Applied: the row is now `grep -cE 'def test_stem_fidelity_(test_judge\|validate_test_impact)\b'`, pinning the two fixtures that must be inverted while allowing new ones. | Use `grep -cE 'def test_stem_fidelity_(test_judge\|validate_test_impact)\b' tests/unit/test_feature_map_markers.py` with `output contains 2`. That pins exactly the two fixtures that must be INVERTED rather than deleted — the property the row exists to protect — while leaving the builder free to add any number of new stem fixtures. |
+| NIT | History & Consistency | The round-1 revision inlined four general rules (never `git stash` in a shared checkout, never a fixed `/tmp/<name>` under concurrency, always pin `git diff` to the merge-base). All are repo-wide hazards of this repo's concurrent-worktree topology, not properties of the FEATURE_MAP stem; captured only here, the next lane rediscovers them the same expensive way. | Not applied — durable capture is outside this plan's scope; left for the operator to record. | n/a (NIT) |
