@@ -765,256 +765,307 @@ rather than the bare basename, which matches 30 unrelated files.
 ## Failure Path Test Strategy
 
 
+This plan changes data, not code paths. `tests/marker_map.py` gains one dict key
+and loses 22 dict entries; no function is added, removed, or edited. So the
+failure surface is unchanged, and the interesting failures are all failures of
+the *change itself* landing incompletely.
+
 ### Exception Handling Coverage
-- [ ] `tests/marker_map.py` contains **no** `except Exception: pass` blocks
-  today, and this change adds none. The two existing failure paths both raise
-  loudly and both already have tests: `run_audit()` raises `RuntimeError` on an
-  empty `FEATURE_MAP` (`test_empty_feature_map_raises`) and `iter_test_files()`
-  raises on an empty enumeration (`test_empty_file_enumeration_raises`).
-- [ ] Add the same fail-loud treatment to the new table: `run_audit()` raises
-  `RuntimeError` if `DIRECTORY_MAP` is empty, with a test proving it. An empty
-  `DIRECTORY_MAP` would make R4 pass vacuously and silently revert every file to
-  basename-only resolution — the identical vacuous-pass failure the two existing
-  raises exist to prevent.
-- [ ] `tests/conftest.py`'s hook has no exception handling and must not gain
-  any. A `getattr(pytest.mark, <typo>)` on an unregistered marker currently
-  warns rather than raising (no `--strict-markers` in `addopts`), so a typo'd
-  `DIRECTORY_MAP` value would produce a marker nothing selects, silently. The
-  guard closes this instead: a test asserts every `DIRECTORY_MAP` and
-  `FEATURE_MAP` value is a marker registered in `pyproject.toml`, parsed from
-  the file with `tomllib`.
+- [ ] No new `try`/`except` anywhere. `tests/marker_map.py` contains no
+  `except Exception: pass` blocks today and this change adds none. Its two
+  fail-loud paths — `run_audit()` raising `RuntimeError` on an empty
+  `FEATURE_MAP` (`test_empty_feature_map_raises`) and `iter_test_files()`
+  raising on an empty enumeration (`test_empty_file_enumeration_raises`) — are
+  untouched and stay green.
+- [ ] `iter_test_files()` reads `git ls-files`, so a rename that is on disk but
+  not staged is **invisible to the audit**: it would still see the old paths and
+  report `0 new, 0 stale` against the old baseline, a green result that proves
+  nothing. Every audit run in this plan is preceded by
+  `git status --porcelain tests/` returning empty, and the Verification table
+  makes that a row rather than an assumption.
 
 ### Empty/Invalid Input Handling
-- [ ] `resolve_markers("")`, `resolve_markers("test_.py")`, and
-  `resolve_markers("tests/test_.py")` each return an empty `frozenset`, not
-  `None` and not a set containing `None`. The existing `resolve_marker` fixtures
-  for `""` and `"test_.py"` stay and gain `resolve_markers` counterparts.
-- [ ] A path with fewer than two components (`"test_foo.py"` with no directory)
-  must not raise on the ancestor walk.
-- [ ] A path whose every ancestor is a `KNOWN_ROOT_DIRS` name
-  (`tests/unit/test_foo.py`) yields directory markers of `∅` — the 757-file
-  common case, and the one that must be provably unchanged.
-- [ ] `_partition_packages` and the R4 walk must agree about what counts as a
-  package; a test asserts they enumerate the same directory set from the same
-  file list, so R4 cannot pass on a set of packages R2 never sees.
+- [ ] No new input surface. `resolve_marker`'s existing fixtures for `""`,
+  `"test_.py"`, and a stem with no underscores stay unchanged and stay green;
+  they are also the canary that the `checkpointing` key changed nothing about
+  the resolver's edge behavior.
+- [ ] The 838-file enumeration must be identical before and after: 21 paths
+  change value, and the *count* must not move. A rename that accidentally
+  collides with an existing basename would silently reduce the tracked set. The
+  builder asserts `python3 tests/marker_map.py --count` returns 838 both before
+  and after, and that the set of post-rename basenames within each package has
+  no duplicates.
 
 ### Error State Rendering
-- [ ] The user-visible failure surface is the guard's `pytest.fail` message and
-  `python tests/marker_map.py --audit`'s stdout. Both must name the *rule* that
-  fired. R4's message must name the unmapped package directory and instruct the
-  reader to add a `DIRECTORY_MAP` entry or an `UNMAPPED_PACKAGES` reason —
-  tested by asserting on the message content of a synthetic R4 violation, not
-  just its truthiness.
-- [ ] `--audit` exit codes stay meaningful: 0 clean, 1 on any violation. A test
-  invokes `main(["--audit"])` under a patched, deliberately-violating file list
-  and asserts a `1`.
+- [ ] The user-visible failure surface is `python3 tests/marker_map.py --audit`
+  and the guard's `pytest.fail` message, both unchanged. After the drain, a
+  regression prints exactly what it printed before, naming the rule (`R1`), the
+  path, the resolved marker, the expected marker, and the responsible
+  `FEATURE_MAP` key.
+- [ ] The two retained `KNOWN_MISTAGS` reasons are themselves an error-rendering
+  surface: they are what a future reader sees when asking why those entries are
+  still there. They must read as a decision, not as a TODO. A test already
+  asserts every entry carries a prose reason
+  (`test_known_mistags_all_carry_a_prose_reason`); it keeps passing against the
+  2-entry baseline and is no longer at risk of going vacuous, which an empty
+  dict would have made it.
+- [ ] **Mid-flight partial state is the real hazard.** If the renames land but
+  the `KNOWN_MISTAGS` deletions do not, the audit reports 22 stale exemptions
+  and fails loudly — good. If the deletions land but a rename does not, the
+  audit reports a new mistag and fails loudly — also good. There is no ordering
+  of the two halves that produces a silent pass, which is the #3031 bracketing
+  working exactly as designed, and it is the reason this drain needs no bespoke
+  verification machinery.
 
 ## Test Impact
 
 
-`tests/unit/test_feature_map_markers.py` is the file this plan reshapes; every
-disposition below is in it unless stated otherwise.
+The guard's own test file is **not reshaped by this plan** — no rule is retired,
+so no rule's tests are deleted. What changes is the data those tests run against.
 
-- [ ] `test_no_violation_outside_known_mistags` — **UPDATE**: keep the
-  bracketing in both directions, but it now runs against an empty
-  `KNOWN_MISTAGS` and the R2/R4 rule set. It stays the guard's core assertion.
-- [ ] `test_known_mistags_are_all_tracked_paths` — **UPDATE**: still correct and
-  still cheap against an empty dict, but it becomes vacuous. Pair it with a
-  synthetic-population test so it is not silently reaching nothing.
-- [ ] `test_known_mistags_all_carry_a_prose_reason` — **UPDATE**: same. Both keep
-  guarding the mechanism for whoever next needs an exemption.
-- [ ] `test_audit_reports_a_synthetic_mistag_r1` — **DELETE**: R1 retires. Its
-  replacement is a real-collection mutation test (see Step by Step Tasks), which
-  is strictly stronger: the deleted test asserted on filenames, the replacement
-  asserts on markers pytest actually applied.
-- [ ] `test_audit_reports_a_synthetic_mistag_r3` — **DELETE**: R3 retires.
-- [ ] `test_r1_does_not_merge_same_named_packages` — **REPLACE**: the
-  same-named-packages invariant (`tests/unit/helpers/` vs
-  `tests/integration/helpers/`) is still load-bearing and must be re-asserted
-  against `resolve_markers` and R4 rather than against R1.
-- [ ] `test_audit_reports_a_synthetic_mistag_r2`,
-  `test_r2_single_file_package_passes_trivially`,
+- [ ] `tests/unit/test_feature_map_markers.py::test_no_violation_outside_known_mistags`
+  — **KEEP unchanged**. It is the assertion that proves the drain: it runs
+  against the 2-entry baseline and passes only if `check_r1` and `check_r3`
+  return nothing and `check_r2` returns exactly the two policy paths.
+- [ ] `test_known_mistags_are_all_tracked_paths` — **KEEP unchanged**. It gets
+  *stronger* here, not weaker: it is the assertion that catches a
+  `KNOWN_MISTAGS` entry edited to a renamed path instead of deleted (#2805), and
+  with 2 real entries it is still reaching something.
+- [ ] `test_known_mistags_all_carry_a_prose_reason` — **KEEP unchanged**, and it
+  now guards the two policy reasons, which is precisely its purpose. Draining to
+  an empty dict would have made this vacuous; draining to 2 does not.
+- [ ] `test_audit_reports_stale_exemption` — **KEEP unchanged**. Runs on
+  synthetic data and is the #3031 bracketing that makes the drain self-proving.
+- [ ] `test_audit_reports_a_synthetic_mistag_r1`,
+  `test_audit_reports_a_synthetic_mistag_r2`,
+  `test_audit_reports_a_synthetic_mistag_r3` — **KEEP unchanged**. All three
+  rules survive; all three synthetic detectors stay. These are the tests that
+  would have been deleted by the rejected directory-authoritative design.
+- [ ] `test_r1_does_not_merge_same_named_packages`,
+  `test_r2_does_not_merge_same_named_packages`,
+  `test_same_named_packages_in_different_trees_stay_separate` — **KEEP
+  unchanged**. The full-path keying of `_partition_packages` is untouched, so
+  the invariant they encode is untouched. Worth stating plainly because
+  `tests/unit/reflections/` and `tests/integration/reflections/` are a live
+  same-name pair and both are renamed in this change: after the renames they
+  still partition as two independent packages with two independent file lists.
+- [ ] `test_r2_single_file_package_passes_trivially`,
   `test_r2_tie_reports_every_file_as_ambiguous`,
-  `test_r2_tie_is_order_independent`,
-  `test_same_named_packages_in_different_trees_stay_separate`,
-  `test_r2_does_not_merge_same_named_packages` — **KEEP unchanged**. R2 survives
-  and its tie/partition branches are still its only coverage.
+  `test_r2_tie_is_order_independent` — **KEEP unchanged**. R2's branch coverage
+  is unaffected. Note `tests/unit/bridge/` becomes a single-file package that
+  now resolves under R1, so it stays out of R2's territory either way.
 - [ ] `test_stem_fidelity_test_judge`, `test_stem_fidelity_validate_test_impact`,
-  the three `test_stem_unmangled_*` fixtures — **KEEP unchanged**. These are
-  #3184's tripwires and must survive this change untouched; they are also a
-  useful canary, since a whole-token regression would move `test_test_judge.py`.
+  the three `test_stem_unmangled_*` fixtures — **KEEP unchanged**. #3184's
+  tripwires; none of the renamed basenames carries a second `test_` token, so
+  none of them interacts with the anchored strip.
 - [ ] `test_resolve_marker_empty_string`, `test_resolve_marker_test_dot_py`,
   `test_resolve_marker_no_underscores`, `test_resolve_marker_exact_key_match`,
-  `test_youtube_transcription_retagged_to_tools` — **KEEP**, and add
-  `resolve_markers` counterparts. All five still pass under whole-token
-  matching (`sdlc`, `config`, `youtube` are whole tokens in their stems).
+  `test_youtube_transcription_retagged_to_tools` — **KEEP unchanged**. The
+  `checkpointing` key changes none of them.
 - [ ] `test_whole_token_single_token_stem_matches`,
-  `test_whole_token_rejects_fragment_at_single_token` — **KEEP**. They stop
-  being R3 support and become tests of the resolution semantics themselves,
-  which raises rather than lowers their value.
+  `test_whole_token_rejects_fragment_at_single_token` — **KEEP unchanged**.
+  R3 survives, so `_whole_token_match` keeps its role as R3's detector.
 - [ ] `test_empty_feature_map_raises`, `test_empty_file_enumeration_raises` —
-  **KEEP**, and add the `DIRECTORY_MAP`-empty twin.
-- [ ] `test_audit_reports_stale_exemption` — **KEEP unchanged**. It is the
-  #3031 bracketing that makes the drain self-proving, and it must keep working
-  on a synthetic baseline now that the real one is empty.
-- [ ] `tests/conftest.py::pytest_collection_modifyitems` — **UPDATE**: applies a
-  marker set. No test currently covers this hook at all; that gap is what makes
-  the R1 retirement feel risky, and closing it is a task below.
-- [ ] **Suite-wide**: no test outside `tests/unit/test_feature_map_markers.py`
-  imports `tests/marker_map.py` (verified by `git grep -ln marker_map`), so no
-  other test file changes. The 43 files that gain a marker gain it at collection
-  time; their assertions are untouched.
+  **KEEP unchanged**.
+- [ ] `test_feature_map_is_a_non_empty_dict` (line 137) — **KEEP unchanged**.
+  Listed explicitly so this disposition list is exhaustive over the file; the
+  added key does not affect it.
+- [ ] **ADD** `test_checkpointing_key_position_is_free` — a new fixture asserting
+  that `resolve_marker("test_long_task_checkpointing.py")` and
+  `resolve_marker_whole_token(...)` both return `validation`, so R3 stays silent
+  regardless of where the key sits. This is the fixture that would go red if
+  someone later "tidied" the key away or moved `checkpoint` after it in a way
+  that changed the marker. It is the plan's one added test.
+- [ ] **ADD** `test_known_mistags_holds_only_policy_entries` — a fixture
+  asserting every remaining `KNOWN_MISTAGS` reason contains the token `POLICY`.
+  This is issue acceptance criterion 1 turned into an assertion: an entry added
+  later as an unaddressed defect fails it, so the baseline cannot quietly
+  refill with the class of entry this issue drained.
+- [ ] **UPDATE** `tests/unit/conftest.py:168`,
+  `tests/unit/test_plan_migration_invariant.py:155`,
+  `tests/unit/test_reflections_package.py:528`,
+  `tests/integration/test_worker_liveness_ingestion.py:61` — comment-only
+  references to renamed basenames. No assertion changes.
+- [ ] **Suite-wide**: none of the 21 renamed modules is imported by any other
+  test (`git grep "from tests\.unit\.reflections\|from tests\.integration\.reflections"`
+  returns nothing), and their contents are unchanged by the rename, so no test
+  logic anywhere changes. The three `pytestmark` edits add a marker and touch no
+  assertion.
 
 ## Rabbit Holes
 
 
+- **Renaming beyond the 21.** The baseline is 24 paths and the rename set is
+  exactly the 21 R1 files. It is tempting, while renaming, to "tidy" the other
+  basenames in the same packages. Do not: every one of them already resolves
+  correctly, a rename with no violation behind it is churn, and it inflates a
+  reviewable diff into an unreviewable one.
+- **Making the package directory authoritative.** The route this plan rejected.
+  It is a genuinely interesting design and it is out of scope here for a reason
+  recorded in Why Previous Fixes Failed: it hollows out R1. If someone wants to
+  revisit it, it needs its own issue and its own argument, not a paragraph
+  inside a drain.
 - **Teaching the guard to read explicit `pytest.mark.<feature>` declarations.**
-  Spike-3 found 47 files carrying them and a guard blind to all 47. It is a real
-  gap and it is *not* this plan: reading them means AST-parsing 838 files inside
-  a module that must stay import-light, and it would drag in `pytestmark`
-  aliasing, conditional marks, and `pytest.param(marks=...)`. Deferred with an
-  issue rather than absorbed.
-- **Adding a `memory` marker for `tests/unit/memory_extraction/`.** Touches
-  `pyproject.toml`, `tests/README.md`, and the marker taxonomy, and nobody has
-  asked for the selector. The package is left unmapped with a recorded reason.
+  47 files carry them and the guard sees none. This plan *adds three more*,
+  which slightly widens that blind spot — and that is the honest cost of the
+  marker-preservation step. It is filed as #3223, not absorbed here: reading
+  them means AST-parsing 838 files inside a module that must stay import-light.
 - **Auditing whether the 284 existing markers are semantically *right*.** This
   plan drains a mechanical baseline. "Is `test_ui_sdlc_data.py` really a `webui`
   test or an `sdlc` test?" is a taxonomy question with 838 instances and no
-  mechanical answer. Out of scope, and the additive design means it never has to
-  be answered to make progress.
-- **Replacing `FEATURE_MAP` with per-file explicit markers.** The end state
-  everyone eventually proposes. It is 554 files that need a decision, it deletes
-  the automatic-tagging property that makes new tests get markers for free, and
-  it is a different project.
-- **Making `KNOWN_ROOT_DIRS` smarter.** It is a hardcoded tuple of seven names
-  and it works. Deriving it (any directory containing a `conftest.py`? any
-  directory not in `DIRECTORY_MAP`?) invites exactly the kind of implicit rule
-  this plan is removing.
-- **Further archaeology on the 39/6 figure.** Three reconstructions of the
-  `f3594dd23` conditions were already tried during planning and none reproduces
-  it (Freshness Check). That is enough: the re-measurement is the answer, and a
-  fourth attempt to reverse-engineer a method nobody wrote down buys nothing.
-  Record the corrected number, do not hunt the old one.
+  mechanical answer.
+- **Adding a `memory` marker for `tests/unit/memory_extraction/`.** That package
+  is not in the baseline: it is internally uniform, so R2 passes on it and
+  nothing here is broken. Touching it means `pyproject.toml`, `tests/README.md`,
+  and the marker taxonomy for a selector nobody has asked for.
+- **Refreshing every stale count in `tests/README.md`.** Its headline numbers
+  (`sdlc` 516, `messaging` 327, `sessions` 293) are wrong today by a wide margin
+  — the real counts are 2859, 1271, and unmeasured — and none of that staleness
+  was caused by this change. Fix the two rows this change actually moves, note
+  the wider drift, and leave a full README census to whoever owns that document.
+- **Further archaeology on the 39/6 figure.** Three reconstructions were already
+  tried and none reproduces it. It sizes a rejected option in a feature doc.
+  Correct the number in one line; do not hunt the old method.
 
 ## Risks
 
 
-### Risk 1: Retiring R1 and R3 removes real protection rather than redundant protection
-**Impact:** The guard shipped one day before this plan. If the structural
-argument is wrong, this change trades a working detector for a claim, and the
-next mistag lands silently — the exact outcome #3010 exists to prevent.
-**Mitigation:** The retirement is not accepted on argument. Each retired rule
-must be paid for with a test that fails when the *mechanism* is removed, and
-that is proven red before it is proven green:
-1. Delete the directory branch from `resolve_markers` and confirm the
-   real-collection mutation test fails. Paste the failure into the PR.
-2. Revert `resolve_marker` to substring matching and confirm the
-   `checkpointing` fixture fails. Paste the failure into the PR.
-3. Empty `DIRECTORY_MAP` and confirm `run_audit()` raises.
-A retirement with no red-state proof for its replacement is a blocker, not a nit.
+### Risk 1: A rename breaks a reference that is not an import
+**Impact:** The 21 modules are referenced by name in 4 live test comments, 2
+`tests/README.md` rows, 3 feature docs, and 17 archived plans. None is an
+import, so **nothing fails** — the suite stays green while the documentation
+quietly points at files that no longer exist. This is the failure mode most
+likely to actually happen, and the least likely to be noticed.
+**Mitigation:** The doc sweep is a numbered task with its own verification row,
+not a bullet inside another task. After the renames, `git grep -n` for each of
+the 21 old basenames across the whole repo must return **only** hits inside
+`docs/plans/drain-feature-map-mistag-baseline.md` itself (which documents the
+rename and legitimately names both sides). `test_dispatch` is greped as the full
+path `tests/unit/bridge/test_dispatch.py`, because the bare basename matches 30
+unrelated files. The grep is re-run at the final head, not at plan time.
 
-### Risk 2: R4 becomes a rubber stamp
-**Impact:** R4 is the only thing keeping this a guard rather than a one-time
-cleanup. If `UNMAPPED_PACKAGES` grows without discipline it degrades into the
-whole-package exemption that #3010 explicitly rejected as "the exact silent-hole
-shape #3031 warns against".
-**Mitigation:** `UNMAPPED_PACKAGES` is bracketed in both directions like
-`KNOWN_MISTAGS` — an entry for a package that no longer exists, or that has since
-been mapped, fails the guard. It ships with exactly one entry
-(`tests/unit/memory_extraction`) and a prose reason, so both bracketing
-assertions are exercised on day one rather than sitting unexercised. That
-single-entry population is the specific defect #3010 called out in the mechanism
-it rejected, and it is why this one ships populated.
+### Risk 2: A renamed file silently loses coverage from a selector
+**Impact:** Renaming *replaces* the derived marker. Three files carry a correct
+second-order marker today; without the `pytestmark` step, 154 tests leave
+`-m sdlc` and 27 leave `-m validation` with no error anywhere.
+**Mitigation:** The three `pytestmark` additions, and — because a `pytestmark`
+line is easy to write and easy to get subtly wrong — a real
+`pytest --collect-only -m <marker>` count for each affected selector, before and
+after, in the PR description. Expected: `-m sdlc` 2859 → 2859, `-m validation`
+428 → 428, `-m messaging` 1271 → 1276, `-m reflections` 544 → 906, `-m config`
+127 → 123. A resolver unit test cannot catch a malformed `pytestmark`; a real
+collection can.
 
 ### Risk 3: The one marker removal breaks a real selection
-**Impact:** `tests/unit/reflections/test_pm_briefings_no_slots_configured.py`
-loses `config`. If anyone or anything runs `pytest -m config` expecting that
-file, it stops appearing.
-**Mitigation:** `-m config` currently selects 6 files, of which this is one; it
-is a reflections test about briefing slots, and its `config` marker came from
-`config` matching inside `configured`. The file gains `reflections`, which is
-correct. No script, `addopts`, or CI path in the repo passes `-m config`
-(`git grep` over `scripts/`, `pyproject.toml`, `.github/`). Surfaced as the one
-Open Question so a human ratifies it rather than discovering it.
+**Impact:** `test_reflections_pm_briefings_no_slots_configured.py` loses
+`config`. If anyone runs `pytest -m config` expecting that file, it stops
+appearing.
+**Mitigation:** `-m config` currently collects 127 tests across 6 files; this is
+4 tests in 1 of them. The file is a reflections test about briefing slots and its
+`config` marker came from `config` matching inside `configured`. No script,
+`addopts`, or CI path in the repo passes `-m config` (`git grep` over `scripts/`,
+`pyproject.toml`, `.github/`). Surfaced as the single Open Question so a human
+ratifies it rather than discovering it.
 
-### Risk 4: Marker inflation makes negated selections quietly broader
-**Impact:** 43 files gain a marker. Anyone running `pytest -m "not sessions"` to
-skip a slow area now skips 18 more files than before, silently.
-**Mitigation:** No repo-controlled invocation uses a negated feature marker
-(verified over `scripts/`, `pyproject.toml`, `.github/`), so the effect is
-confined to interactive use, where the widened set is the intended correction.
-The per-marker census before/after is committed in the PR so the change in every
-selector's size is visible, not inferred.
+### Risk 4: A `git mv` is recorded as a delete-plus-add
+**Impact:** `git log --follow` and `git blame` stop reaching a file's history,
+which for `test_sdlc_progress_check.py` (112 tests, heavily iterated) is a real
+loss of context.
+**Mitigation:** Git detects renames by content similarity at read time, so a
+rename commit that also edits content can fall below the similarity threshold.
+The renames land as **one commit containing only renames, no content changes**;
+the three `pytestmark` additions land in a **separate follow-up commit**. Verified
+with `git log --follow --oneline -- <new path>` reaching pre-rename history for
+all 21, and `git show --stat --find-renames` on the rename commit showing 21
+`R100` entries and zero adds or deletes.
 
-### Risk 5: The hook-ordering assumption is inherited, not owned
-**Impact:** `-m` sees a dynamically-added marker only if the repo's
-`pytest_collection_modifyitems` runs ahead of pytest's internal
-`deselect_by_mark` (Research finding 1). That ordering is a pluggy LIFO detail
-across the whole plugin stack — `pytest-xdist`, `pytest-randomly`,
-`pytest-asyncio`, `pytest-timeout` are all loaded here. If it ever inverts,
-every derived marker disappears from `-m` and the resolver tests stay green.
-**Mitigation:** This plan does not introduce the risk, but it does make the
-suite depend on it far more heavily (327 files instead of 284). Every acceptance
-measurement is a real `pytest --collect-only -m <marker>` run, and the collect
-counts go into the verification table as literal numbers, so an ordering
-inversion fails a check instead of passing a mock.
+### Risk 5: A measurement is taken against an unstaged rename
+**Impact:** `iter_test_files()` reads `git ls-files`, not the filesystem. A
+rename done with `mv` instead of `git mv`, or done but not staged, is invisible
+to the audit: it reports `0 new, 0 stale` against the *old* paths and the old
+baseline, a green result that proves the opposite of what it appears to.
+**Mitigation:** Every audit invocation in the Verification table is preceded by
+`git status --porcelain tests/` returning empty, and that check is its own row.
+The builder uses `git mv`, never `mv`.
 
-### Risk 6: A concurrent lane edits `tests/marker_map.py`
-**Impact:** #3184 shipped into this file hours before this plan was written.
-Another lane touching `FEATURE_MAP` produces a conflict on a file where a bad
-merge silently changes markers.
+### Risk 6: A pool-exhausted test run reports success while running nothing
+**Impact:** The test-DB pool is shared across concurrent lanes (#3195). A
+pool-exhausted run can print nothing and exit 0, so a verification step gated on
+an exit code would pass having executed no tests. Every count in this plan would
+then be unverified.
+**Mitigation:** No verification row in this plan gates on an exit code alone.
+Every row reads a **collected or passed count** and compares it to a literal
+number. A run that collects 0 fails the comparison, which is the intended
+behavior.
+
+### Risk 7: A concurrent lane touches `tests/marker_map.py` or a renamed file
+**Impact:** A merge conflict on a file where a bad resolution silently changes
+markers, or a new file added to `tests/unit/reflections/` while this work is in
+flight, which would arrive with a non-conforming name and fire R1.
 **Mitigation:** Both known adjacent lanes are resolved: #3184 is merged, #3195
-touches `scripts/pytest-clean.sh` only. The build re-runs
-`python tests/marker_map.py --audit` immediately before opening the PR and again
-at the merge head, and the census diff is regenerated at the final head rather
-than quoted from plan time.
+touches `scripts/pytest-clean.sh` only. The build re-runs the full audit and the
+doc-reference grep at the merge head rather than quoting plan-time numbers. A new
+non-conforming file arriving mid-flight surfaces as an R1 violation, which is the
+guard working; the remedy is to rename it too and say so in the PR.
 
 ## Race Conditions
 
 
-No race conditions identified. Every code path this plan touches is synchronous
-and single-threaded: `resolve_markers` and the `FEATURE_MAP` / `DIRECTORY_MAP`
-lookups are pure functions over strings, `iter_test_files()` is one blocking
-`subprocess.run` of `git ls-files`, and `pytest_collection_modifyitems` runs
-once per session on the collection list before any test executes. No async, no
-shared mutable state, no cross-process data flow, no Redis.
+No race conditions identified. This plan changes filenames and dict contents;
+it adds no code path at all. `resolve_marker` and the `FEATURE_MAP` lookup are
+pure functions over strings, `iter_test_files()` is one blocking
+`subprocess.run` of `git ls-files`, and `pytest_collection_modifyitems` — which
+this plan does not touch — runs once per session on the collection list before
+any test executes. No async, no shared mutable state, no cross-process data
+flow, no Redis.
 
-Two ordering hazards exist and neither is a race — both are deterministic
-sequencing properties, recorded here so they are not mistaken for one:
+Two ordering properties are worth recording so they are not mistaken for races:
 
-- **Hook ordering vs. `deselect_by_mark`** (Risk 5) is a fixed plugin-load
-  order resolved once at startup, identical on every run.
+- **Hook ordering vs. `deselect_by_mark`** is a fixed plugin-load order resolved
+  once at startup, identical on every run. This plan neither introduces nor
+  changes that dependency — the collection hook is untouched, and the number of
+  files depending on a derived marker moves only from 284 to 301.
 - **`FEATURE_MAP` insertion order** determines which key wins a first-hit scan.
-  This plan reduces that dependence to near zero (`DIRECTORY_MAP` is exact-match
-  and order-free; whole-token matching removes the two measured ordering
-  collisions) but does not eliminate the ordered scan itself.
+  This plan removes 21 files' dependence on that ordering by renaming them, and
+  the one key it adds is measurably position-free (spike-4). The ordered scan
+  itself remains.
 
 Under `-n auto --dist=loadfile`, each xdist worker collects independently and
-applies markers to its own items. Resolution is a pure function of the path, so
-all workers reach identical results with no shared state.
+applies markers to its own items. Resolution is a pure function of the basename,
+so all workers reach identical results with no shared state.
+
+**Commit ordering within the change is deterministic, not racy**, and is
+specified in Step by Step Tasks: renames first (pure `git mv`, so rename
+detection stays at 100%), then content edits. Reversing that order costs `git
+log --follow` on three files (Risk 4).
 
 ## No-Gos (Out of Scope)
 
 
 - [SEPARATE-SLUG #3223] Teaching the guard to see the 47 files that declare an
-  explicit `pytest.mark.<feature>`. Filed with its own recon; sequenced after
-  this plan because this plan rewrites the rule set and empties `KNOWN_MISTAGS`,
-  and landing #3223 first would conflict for no gain.
-- [SEPARATE-SLUG #3223] Correcting the `KNOWN_MISTAGS`-style reason text that
-  implies a derived marker is a file's only marker. Same issue, same reason.
+  explicit `pytest.mark.<feature>`. This plan adds three more such files, so it
+  widens that blind spot by three — stated plainly rather than glossed. Filed
+  with its own recon; sequenced after this plan.
+- [SEPARATE-ISSUE, to file] Making the package directory authoritative over the
+  basename. Evaluated in detail during this plan's first draft and **rejected**,
+  because it makes R1 tautological and requires retiring R1 and R3 one day after
+  #3010 shipped them. It remains a coherent design; it needs its own issue and
+  its own argument about what replaces R1's forward-looking value.
+- [OUT] Renaming any test file that is not one of the 21 R1 violations.
+- [OUT] Adding a `memory` marker for `tests/unit/memory_extraction/`. That
+  package is not in the baseline: it is internally uniform, R2 passes on it, and
+  nothing about it is broken.
+- [OUT] A full refresh of `tests/README.md`'s per-marker counts. They are
+  badly stale independently of this change; the two rows this change moves get
+  fixed and the wider drift gets a one-line note.
 
 Everything else the issue raises is **in scope and done in this plan**, not
-deferred: `KNOWN_MISTAGS` is drained to empty here, the R2 entries are drained
-here by mapping `hooks` and `session_runner`, the R3 entries are drained here by
-whole-token matching plus the `checkpointing` key, the stale 39/6 figure is
-corrected in `docs/features/feature-map-marker-guard.md` here, and
-`tests/README.md`'s per-marker counts are refreshed here.
-
-`tests/unit/memory_extraction/` staying out of `DIRECTORY_MAP` is **a decision
-made in this plan, not a deferral**: no `memory` marker exists, the package
-resolves uniformly to no marker so R2 stays green on it, and it ships as the
-single reasoned `UNMAPPED_PACKAGES` entry so R4's bracketing assertions are
-exercised from day one.
+deferred: the 21 R1 entries are drained by renaming, the 2 R3 entries are drained
+by renaming plus the `checkpointing` key, the 2 R2 entries are ratified as policy
+entries with rewritten reasons (issue acceptance criterion 1's second branch),
+the stale 39/6 figure is corrected in
+`docs/features/feature-map-marker-guard.md`, and every doc reference to a renamed
+file is updated.
 
 ## Update System
 
