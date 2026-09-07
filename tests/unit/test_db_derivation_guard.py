@@ -944,6 +944,13 @@ LEG3_ROWS = [
         "    redis.Redis(db=scratch_test_db)\n",
         1,
     ),
+    (
+        "L3LAMBDADEFAULT",
+        "def t(scratch_test_db):\n"
+        "    f = lambda x=(scratch_test_db := 99): x\n"
+        "    redis.Redis(db=scratch_test_db)\n",
+        1,
+    ),
 ]
 
 # Leg-3 over-refusal -- the sanctioned parameter is genuinely unshadowed;
@@ -1167,6 +1174,22 @@ class TestReboundNames:
         (#2764's accept-direction gap)."""
         fn = _parse_fn("def t(p):\n    def inner(x=(p := 7)):\n        return x\n")
         assert "p" in _rebound_names(fn)
+
+    def test_lambda_default_walrus_rebinds(self):
+        """A lambda's parameter default evaluates in the ENCLOSING scope at
+        definition time, exactly like a nested def's does (#3192)."""
+        fn = _parse_fn("def t(p):\n    f = lambda x=(p := 99): x\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_lambda_keyword_only_default_walrus_rebinds(self):
+        fn = _parse_fn("def t(p):\n    f = lambda *, x=(p := 99): x\n")
+        assert "p" in _rebound_names(fn)
+
+    def test_lambda_body_walrus_does_not_rebind(self):
+        """The body is the lambda's own scope, so a walrus there binds
+        locally and leaves the enclosing parameter intact."""
+        fn = _parse_fn("def t(p):\n    f = lambda y: (p := y)\n")
+        assert "p" not in _rebound_names(fn)
 
     def test_nested_def_decorator_walrus_rebinds(self):
         fn = _parse_fn("def t(p):\n    @deco(p := 7)\n    def inner():\n        pass\n")

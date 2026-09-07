@@ -100,18 +100,6 @@ boundary rather than an assumed guarantee:
    violation. That is a documented false positive, not a hole: the failure
    direction is loud, and an author who hits it can inline the call or write
    a disposition.
-7. A walrus written inside a nested ``Lambda``'s own parameter default
-   (``lambda x=(scratch_test_db := 99): x``) rebinds the enclosing
-   function's ``scratch_test_db`` the moment the lambda is defined --
-   exactly the same "default evaluates in the enclosing scope" rule that
-   makes ``def inner(x=(scratch_test_db := 7)): ...`` a genuine rebind (see
-   :func:`_rebound_names`) -- but :func:`_rebound_names` skips the whole
-   ``Lambda`` node on sight and never sweeps its ``args.defaults`` /
-   ``args.kw_defaults`` the way it does for a nested ``def``. Zero live
-   occurrences on this tree. Accept-direction only: this can cause a missed
-   violation, never a false positive, and it was graded accepted tech debt
-   during review rather than reopening #2764's diff; the correct fix mirrors
-   the ``FunctionDef`` leg almost exactly (tracked as #3192).
 
 ``REDIS_CONSTRUCTORS`` (below) is the residual permit list the opaque-splat
 leg scopes itself to, and it is exactly that: an enumeration, kept short
@@ -527,14 +515,14 @@ def _rebound_names(fn: ast.AST) -> set[str]:
     into ``body`` or the parameter names themselves, which stay the new
     scope's own.
 
-    A nested ``Lambda`` gets none of that recursion: the whole node is
-    skipped on sight, not just its (bodyless) body. A ``Lambda``'s parameter
+    A nested ``Lambda`` follows the same rule (#3192): its parameter
     defaults evaluate at DEFINITION time in the ENCLOSING scope exactly like
     a ``def``'s do, so ``lambda x=(scratch_test_db := 99): x`` rebinds the
     OUTER ``scratch_test_db`` the same way the ``def inner`` example above
-    does -- and this sweep does not see it. Accepted, disclosed residual gap
-    7 (#3192), not fixed here: zero live occurrences, and it is a missed
-    violation, never a false positive.
+    does. This sweep recurses into a ``Lambda``'s ``args.defaults`` and
+    ``args.kw_defaults`` (a lambda has no name and no ``decorator_list``),
+    never into its parameter names or its expression body, which stay the
+    lambda's own scope.
 
     Excludes only ``ast.comprehension.target`` nodes (never a whole
     comprehension subtree): a ``for``-target has had its own scope since
@@ -572,10 +560,15 @@ def _rebound_names(fn: ast.AST) -> set[str]:
                 if child.rest:
                     names.add(child.rest)
             elif isinstance(child, ast.Lambda):
-                # Whole node skipped, defaults included: a walrus in a
-                # lambda default rebinds the outer scope just like a def's
-                # default does, and this sweep misses it (gap 7, #3192).
-                continue
+                # A lambda has no name and no decorators, but its defaults
+                # evaluate in the ENCLOSING scope at definition time exactly
+                # like a def's do.
+                for default in (
+                    *child.args.defaults,
+                    *(d for d in child.args.kw_defaults if d is not None),
+                ):
+                    walk_own_scope(default)
+                continue  # body/args are a new scope; do not sweep them
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(child.name)  # the def's own name binds HERE
                 # Defaults and decorators evaluate in the ENCLOSING scope at
