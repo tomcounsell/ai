@@ -525,4 +525,4 @@ class TestSessionIntelligenceCallable:
 # reflections.daily_report was deleted in issue #1292; the daily-log slot
 # (reflections/pm_briefings/daily_log.py) is now the canonical home for
 # the aggregator/renderer/vault-writer helpers, and its end-to-end behavior
-# is exercised via tests/integration/reflections/test_pm_briefings_dispatch.py.
+# is exercised via tests/integration/reflections/test_reflections_pm_briefings_dispatch.py.

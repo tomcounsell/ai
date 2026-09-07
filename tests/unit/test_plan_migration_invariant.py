@@ -152,7 +152,7 @@ class TestStaticEnforcementAssertions:
         # source of truth, and a human disarm must stick -- see the one-shot
         # marker in scripts/update/reflection_arm.py). The durable code-level
         # arm is asserted separately via MIGRATION_APPLY_ENABLED in
-        # tests/unit/reflections/test_merged_branch_cleanup.py.
+        # tests/unit/reflections/test_reflections_merged_branch_cleanup.py.
         assert "enabled" in entry
 
     def test_reflection_source_calls_migrate_plan_to_completed(self):

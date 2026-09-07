@@ -76,6 +76,52 @@ def test_known_mistags_all_carry_a_prose_reason():
     assert not bad, f"KNOWN_MISTAGS entrie(s) missing a real prose reason: {bad}"
 
 
+def test_known_mistags_holds_only_policy_entries():
+    """#3175 acceptance criterion 1, asserted rather than asserted-in-prose.
+
+    The baseline was drained from 24 entries to 2. The issue allows a non-empty
+    baseline only when "every remaining entry has a reason that is a deliberate
+    policy choice rather than an unaddressed defect", so this pins the marker
+    that says so. An entry deferring its own fix -- the "Drain tracked by #N"
+    shape the drained entries carried -- fails here, which is the point: the
+    next person to add an exemption has to state a policy or not add it.
+    """
+    missing = sorted(path for path, reason in KNOWN_MISTAGS.items() if "POLICY" not in reason)
+    assert not missing, (
+        "KNOWN_MISTAGS entrie(s) whose reason is not marked POLICY: "
+        f"{missing}. An exemption is a stated policy choice, not a deferral."
+    )
+
+
+def test_checkpointing_key_position_is_free():
+    """`checkpointing` and `checkpoint` both map to `validation`, so order cannot matter.
+
+    R3 compares `resolve_marker` against `resolve_marker_whole_token`. Both keys
+    carry the same value, so whichever wins the first-hit scan the two resolvers
+    return the same marker and R3 stays silent. This is what makes the key safe
+    to add without re-introducing the ordering sensitivity #3010 exists to
+    catch -- it outranks nothing. Asserted by rebuilding FEATURE_MAP with the
+    key at each end and checking the resolution is identical both ways.
+    """
+    assert FEATURE_MAP["checkpointing"] == FEATURE_MAP["checkpoint"] == "validation"
+
+    basename = "test_long_task_checkpointing.py"
+    front = {
+        "checkpointing": "validation",
+        **{k: v for k, v in FEATURE_MAP.items() if k != "checkpointing"},
+    }
+    back = {
+        **{k: v for k, v in FEATURE_MAP.items() if k != "checkpointing"},
+        "checkpointing": "validation",
+    }
+
+    for label, ordering in (("front", front), ("back", back)):
+        with patch("tests.marker_map.FEATURE_MAP", ordering):
+            assert resolve_marker(basename)[0] == "validation", label
+            assert resolve_marker_whole_token(basename)[0] == "validation", label
+            assert check_r3([basename]) == [], label
+
+
 # ---------------------------------------------------------------------------
 # Stem fidelity: these pin the anchored strip shipped by #3184 -- `test_` comes
 # off the front only and `.py` off the end only, so a basename carrying
@@ -202,15 +248,17 @@ def test_audit_reports_a_synthetic_mistag_r2():
 
 def test_audit_reports_a_synthetic_mistag_r3():
     """R3: a fragment match with no package signal to contradict it."""
-    # "checkpoint" is a prefix of "checkpointing" -- a genuine fragment match,
-    # not a whole-token match.
-    synthetic_files = ["tests/unit/test_long_task_checkpointing_synthetic.py"]
+    # "config" is a prefix of "configured" -- a genuine fragment match, not a
+    # whole-token match. This synthetic used to ride on "checkpoint" inside
+    # "checkpointing"; #3175 cleared that one by adding a "checkpointing" key
+    # of equal value, so the fixture moved to a fragment that is still live.
+    synthetic_files = ["tests/unit/test_synthetic_slots_configured.py"]
     violations = check_r3(synthetic_files)
     assert len(violations) == 1
     (v,) = violations
     assert v["rule"] == "R3"
-    assert v["resolved"] == "validation"
-    assert v["key"] == "checkpoint"
+    assert v["resolved"] == "config"
+    assert v["key"] == "config"
 
 
 def test_audit_reports_stale_exemption():

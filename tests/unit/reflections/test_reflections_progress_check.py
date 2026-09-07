@@ -37,6 +37,12 @@ import reflections.utilities
 from reflections import sdlc_progress
 from tests.unit.session_lookup_mock import wire_session_lookup
 
+# The derived FEATURE_MAP marker for this file is now 'reflections' (the rename
+# in #3175 made the basename resolve to its package). This line preserves the
+# 'sdlc' marker the old basename derived; item.add_marker is additive on top of
+# pytestmark, so the file carries both.
+pytestmark = [pytest.mark.sdlc]
+
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
