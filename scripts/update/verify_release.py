@@ -22,6 +22,13 @@ the worker-heartbeat freshness poll at run.py's ``for _ in range(15)``) —
 the Race 1 mitigation. A beacon that never freshens past ``--since`` within
 the window means the worker failed to come up on new code → stale/fail.
 
+A process that is mid-boot when this runs (its beacon is missing or belongs to
+the previous image) is re-polled by
+``service.verify_running_release_settled`` until it resolves or the settle
+window elapses — a bridge restarting for ANY reason (this run's kickstart, the
+watchdog's recovery chain, a launchd relaunch) must not degrade the verdict to
+``unknown``.
+
 ``--skip-bridge`` is passed when a bridge restart is queued this cycle (the
 deliberately-about-to-restart bridge must not be escalated as stale).
 Independently of the flag, a fresh ``data/update-restart-in-progress``
@@ -117,7 +124,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.since > 0 and machine_check.get("projects"):
         forced_worker_stale = not _poll_worker_beacon(project_dir, args.since)
 
-    results = service.verify_running_release(project_dir, head_short, machine_check)
+    # Settle past any mid-boot process (a bridge/worker restarted by this run,
+    # the watchdog, or launchd) so a restart in flight cannot degrade the
+    # verdict to `unknown`. A skipped bridge is never waited on.
+    results = service.verify_running_release_settled(
+        project_dir,
+        head_short,
+        machine_check,
+        settle_skip=("bridge",) if skip_bridge else (),
+    )
     if skip_bridge:
         results.pop("bridge", None)
     if forced_worker_stale and "worker" in results:
