@@ -279,10 +279,11 @@ class TestEndToEnd:
         # The fourth field guards the bootstrap's line ordering (#3201 review):
         # `site.addsitedir` must run before `sys.path.insert(0, script_dir)` so
         # the pin's insert(0, worktree) lands *before* the script's own dir gets
-        # its insert(0, ...) -- matching real CPython, where the script directory
-        # is already on sys.path[0] before `site` runs and a `.pth`'s insert(0,
-        # ...) then lands ahead of it. Swap those two `_BOOTSTRAP` lines and this
-        # field flips to "False" (measured, #3201 review round 2).
+        # its insert(0, ...) -- matching real CPython, where `site` processing
+        # runs first and the script directory is inserted at sys.path[0] only
+        # AFTER `site` finishes, so a `.pth`'s insert(0, ...) during `site`
+        # processing ends up behind it. Swap those two `_BOOTSTRAP` lines and
+        # this field flips to "False" (measured, #3201 review round 2).
         assert _run_probe(tmp_path, site_dir, script, pinned=False) == (
             "which=primary early_probe_seen=primary "
             "worktree_in_syspath=False script_dir_precedes_pin_root=None"
