@@ -1,14 +1,16 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3176
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-07T02:48:16Z
 ---
 
-# Synthetic-slug worktrees are invisible to the busy guard
+# Synthetic-slug worktrees are invisible to both busy-guard predicates
 
 ## Problem
 
@@ -39,45 +41,98 @@ path outlived the lane it named. See spike-7 and spike-8.
 
 ## Freshness Check
 
+### Revision pass — re-verified on `d786c8ad2` (2026-09-07)
+
+Every code citation in this document was re-located **by symbol** during the revision pass, not by
+trusting a line number. `agent/worktree_manager.py` moved under #3162, #3167, and #2712/#3179 this
+weekend, so line numbers from the original plan pass are unreliable and have been removed from the
+prose; where a location is needed, the symbol name is given instead.
+
+**Re-confirmed on `d786c8ad2`:**
+- `_execute_agent_session` has exactly one top-level `try`, one top-level `finally`, and **no**
+  top-level `except`.
+- `_scan_worktree_sessions` still matches on `getattr(session, "working_dir", None)` and nothing
+  else; #3179 narrowed the query and added `_fetch_live_sessions` / `worktree_busy_probe_many` but
+  left the predicate alone.
+- `AgentSession.exec_cwd` exists, is stamped by `stamp_execution_spawn`, is called from
+  `runner.py::_on_turn_spawn` with `cwd=self._working_dir`, and is listed in
+  `_EXECUTION_FENCE_RESET_FIELDS`.
+- `validate_workspace` falls back to `allowed_root` on a nonexistent path; the executor passes
+  `Path.home() / "src"`.
+- `get_authoritative_session` applies no status filter.
+- `slug = KeyField(null=True)`; `working_dir = Field()`.
+- The synthetic cleanup's `_session_recorded_reap_failure` skip and the `blocked_by_session` key set
+  by `cleanup_after_merge` are both present and unchanged.
+
+### Original pass
+
 **Baseline commit:** `de229ee469fe7b2b176b371b6cd19646fce401a0`
 **Issue filed at:** 2026-09-05T12:54:14Z
 **Disposition:** Minor drift
 
-**File:line references re-verified:**
-- `agent/session_executor.py:1314` — synthesizes `dev-{aid[:8]}` into a local — **still holds, exact line.**
-- `agent/session_executor.py:1377-1378` — `get_or_create_worktree` + local `working_dir` rebind — **still holds, exact lines.**
-- `agent/session_runner/role_driver.py:198` — `self.working_dir = working_dir` — **still holds**; it is a driver constructor attribute, not a session row.
-- No production code writes `AgentSession.working_dir` after creation — **re-verified**: `grep -rn '\.working_dir *=' --include='*.py'` over non-test, non-venv code returns only `role_driver.py:198`.
-- `agent/worktree_manager.py:433` (`_scan_worktree_sessions`) — **drifted to `:503`.**
-- `agent/worktree_manager.py:483-513` (the `working_dir` match) — **drifted to `:579-614`.** The predicate is unchanged: it still compares only the stored `working_dir`.
-- `tools/disk_reclaim.py:407/:415` (process scan before the session probe) — **drifted to `:417`/`:429`**, and the single-slug `worktree_busy_probe` re-probe is now at `:467`. Both still sit behind `_worktree_has_live_process`.
+**File:line references re-verified at that time:**
+- The synthetic slug is synthesized into a local, and the worktree path is rebound into a local —
+  **both still hold.**
+- `agent/session_runner/role_driver.py` `self.working_dir = working_dir` — a driver constructor
+  attribute, not a session row.
+- No production code writes `AgentSession.working_dir` after creation — re-verified.
+- `_scan_worktree_sessions` and its `working_dir` match drifted under #3179; the predicate itself is
+  unchanged.
+- `tools/disk_reclaim.py`'s process scan and single-slug `worktree_busy_probe` re-probe drifted;
+  both still sit behind `_worktree_has_live_process`.
 
 **Cited sibling issues/PRs re-checked:**
-- **#2712** — closed 2026-09-05T17:52Z by **PR #3179** ("Busy-guard scan: narrow the query, unamplify the sweep"), which merged *after* this issue was filed. It replaced `query.all()` with `query.filter(status__in=NON_TERMINAL_STATUSES)`, added `_fetch_live_sessions()` and `worktree_busy_probe_many()`, and is the sole cause of the line drift above. It did not touch the match predicate, so this blind spot is unchanged — exactly as #3176 predicted.
-- **#2305** — closed 2026-07-27. `_worktree_has_live_process` (defect 3) is present and is still the only guard that sees a synthetic lane.
-- **#1272** — closed 2026-05-05. Introduced the synthetic slug; its cleanup hook at `agent/session_executor.py:2744-2795` is a direct dependency of this work.
+- **#2712** — closed 2026-09-05T17:52Z by **PR #3179** ("Busy-guard scan: narrow the query,
+  unamplify the sweep"), merged *after* this issue was filed. It replaced `query.all()` with
+  `query.filter(status__in=NON_TERMINAL_STATUSES)` and is the sole cause of the line drift. It did
+  not touch the match predicate, so this blind spot is unchanged — exactly as #3176 predicted.
+- **#2305** — closed 2026-07-27. `_worktree_has_live_process` is present and is still the only guard
+  that sees a synthetic lane.
+- **#1272** — closed 2026-05-05. Introduced the synthetic slug; its cleanup hook is a direct
+  dependency of this work.
 
-**Commits on main since issue was filed (touching referenced files):**
-- `9c75c2e08` Busy-guard scan: narrow the query, unamplify the sweep (#3179) — **line drift only; root cause unchanged.**
-- `2ec83a447` Auto-preserve refuses to commit a wipe (#3167) (#3188) — irrelevant to the match predicate.
+**Commits on main since the issue was filed (touching referenced files):**
+- `9c75c2e08` Busy-guard scan: narrow the query, unamplify the sweep (#3179) — line drift only.
+- `2ec83a447` Auto-preserve refuses to commit a wipe (#3167) (#3188) — irrelevant to the predicate.
 - `988fac09a` Make Read-the-Room unconditional; repair the SDLC bypass (#3174) — irrelevant.
 
-**Active plans in `docs/plans/` overlapping this area:** none. `grep -l 'worktree_busy\|_scan_worktree_sessions\|synthetic.slug' docs/plans/*.md` returns nothing.
+**Active plans in `docs/plans/` overlapping this area:** none.
 
-**Bug still reproducible:** yes, by code path. The synthesis at `:1310-1318` and the rebind at
-`:1377-1378` both assign to locals; the only production write site for `AgentSession.working_dir`
-remains "never".
+**Bug still reproducible:** yes, by code path, re-confirmed on `d786c8ad2`.
 
 ## Prior Art
 
-- **#1272 / `docs/plans/parallel-session-checkout-guard.md`**: introduced the synthetic slug as Alternative A to close the #887 main-checkout hole. It deliberately kept the synthesis local — the goal was to make the *guard* fire, not to change the stored row. This plan finishes that thought.
-- **#1357 / PR #1367** ("refuse-busy guard + cwd-vanished watchdog"): created `worktree_busy_check` and the `working_dir`-containment predicate. The predicate was correct for CLI-created slugged sessions, whose `working_dir` is set to the lane at enqueue time. It was never extended to sessions that resolve their lane at execution time.
-- **#2712 / PR #3179**: narrowed the query and batched the sweep. Explicitly left this blind spot alone as pre-existing and orthogonal.
-- **#2517 / PR #2681**: scheduled disk reclaim; the caller that most depends on the busy guard being real.
-- **#1085**: made `slug` a `KeyField` so worker pop can filter by it. That decision is what makes persisting `slug` unsafe here (see Spike 3).
-- **#1938**: session recovery deleted a worktree out from under a live subprocess. The `runner_reap_failed` skip in the synthetic cleanup block is its remedy, and the same block is where this plan's second change lands.
+- **#1272 / `docs/plans/parallel-session-checkout-guard.md`**: introduced the synthetic slug as
+  Alternative A to close the #887 main-checkout hole. It deliberately kept the synthesis local — the
+  goal was to make the *guard* fire, not to change the stored row. This plan finishes that thought,
+  without changing the stored row either.
+- **#1357 / PR #1367** ("refuse-busy guard + cwd-vanished watchdog"): created `worktree_busy_check`
+  and the `working_dir`-containment predicate. The predicate was correct for CLI-created slugged
+  sessions, whose `working_dir` is set to the lane at enqueue time. It was never extended to
+  sessions that resolve their lane at execution time — which is precisely the gap `exec_cwd` fills.
+- **#2494 / `exec_cwd` and the fenced execution record** (`docs/features/agent-session-fenced-execution-record.md`):
+  added `exec_cwd` alongside the pid fence to answer "where did this spawn run", explicitly
+  cwd-scoped and explicitly reset per continuation. That design decision is what makes this plan a
+  read-side change rather than a data-model change; the field this problem needs already shipped
+  eighteen months of sessions ago, unused by the guard that most needed it.
+- **#2563 / `_EXECUTION_FENCE_RESET_FIELDS`**: established which fields a continuation must not
+  inherit, and put `exec_cwd` on that list while leaving `working_dir` off it. That split is the
+  entire lifecycle argument in spike-8.
+- **#2712 / PR #3179**: narrowed the busy-scan query and batched the sweep. Explicitly left this
+  blind spot alone as pre-existing and orthogonal.
+- **#2517 / PR #2681**: scheduled disk reclaim; the caller that most depends on the busy guard being
+  real.
+- **#1085**: made `slug` a `KeyField` so worker pop can filter by it. That decision is what makes
+  persisting `slug` unsafe here (spike-3) — and what makes `bridge/session_transcript.py`'s
+  unguarded write a live bug (#3210).
+- **#1938**: session recovery deleted a worktree out from under a live subprocess. The
+  `runner_reap_failed` skip in the synthetic cleanup block is its remedy; this plan adds a
+  pre-finalize guard *above* that skip and never weakens it.
+- **#2007**: the unconditional completion-exit finalize guard. Its `defer_reaction` gate is what
+  leaves a raising or cancelled session `running` at cleanup time (#3209).
 
-No prior attempt to persist the synthesized identity exists, so there is no "Why Previous Fixes Failed" section.
+No prior attempt to make the busy scan see an execution-time lane exists, so there is no "Why
+Previous Fixes Failed" section.
 
 ## Research
 
@@ -352,11 +407,16 @@ Located by symbol on `d786c8ad2`; line numbers below are pointers, not the citat
 
 **Size:** Small
 
-**Team:** Solo dev, code reviewer
+Production diff is roughly forty lines across three files, each owned by a different builder. The
+critique pass grew the scope by one guard (the pre-finalize hoist) and roughly doubled the test
+surface, but it also removed the largest piece of the original design — the `working_dir` write and
+its two compensating edits — so the net shape is smaller and the invariants are fewer.
+
+**Team:** three builders on disjoint files, one test engineer, one validator, one documentarian
 
 **Interactions:**
 - PM check-ins: 0
-- Review rounds: 1
+- Review rounds: 2 (this plan has already been through one critique; the second is the PR review)
 
 ## Prerequisites
 
@@ -693,23 +753,33 @@ forbidden code-level outcome.
 
 No update system changes required — this feature is purely internal. It adds no dependency, no
 config file, no entry point, and no schema change, so `scripts/remote-update.sh` and the `/update`
-skill are unaffected. Existing installations need nothing beyond the ordinary code sync: the write
-is to an existing `Field()` on an existing model, and rows written before this change simply carry
-the old (main-checkout) value until their session next runs.
+skill are unaffected. Existing installations need nothing beyond the ordinary code sync: rows
+written before this change carry `exec_cwd=None` until their session next spawns, and the scan's
+`if not wd: continue` guard reads through that to the `working_dir` arm it already used.
+
+**Deploy note:** this lane changes `agent/`, so the merge needs `./scripts/valor-service.sh restart`
+on bridge and worker machines before the new predicate is live. Verify with
+`tail -5 logs/bridge.log` showing "Connected to Telegram". This must appear in the PR body.
 
 ## Popoto Schema Migration
 
-None required. `working_dir` is an existing `Field()` (`models/agent_session.py:186`) and `slug` is
-deliberately not written. No field is added, removed, renamed, or re-typed, so no entry in
-`scripts/update/migrations.py` is warranted. Every write in this plan goes through
-`instance.save(update_fields=[...])`; no raw Redis operation is introduced.
+None required. Every field this plan writes already exists: `exec_cwd` is
+`Field(null=True)` on `AgentSession`, declared and populated today by `stamp_execution_spawn`. No
+field is added, removed, renamed, or re-typed, so no entry in `scripts/update/migrations.py` is
+warranted. `slug` and `working_dir` are deliberately never written (Rabbit Holes). Every write goes
+through `instance.save(update_fields=[...])`; no raw Redis operation is introduced, and no test
+fixture in this plan touches a Popoto-managed key outside the ORM.
 
 ## Agent Integration
 
-No agent integration required — this is a bridge/worker-internal change. It adds no CLI entry
-point to `pyproject.toml [project.scripts]`, no MCP surface, and no new import for
+No agent integration required — this is a worker-internal change. It adds no CLI entry point to
+`pyproject.toml [project.scripts]`, no MCP surface, and no new import for
 `bridge/telegram_bridge.py`. The behavior is exercised by the worker's ordinary session-execution
-path, which the existing unit suite drives directly.
+path, which the unit suite drives directly through `_execute_agent_session`.
+
+The one operational requirement is the deploy note: because this changes `agent/`, the running
+worker and bridge carry the old code until `./scripts/valor-service.sh restart` runs. Until then the
+busy guard behaves exactly as it does today, which is a safe intermediate state.
 
 ## Documentation
 
@@ -774,36 +844,50 @@ path, which the existing unit suite drives directly.
 
 ## Team Orchestration
 
+Three builders own three disjoint files, declared here so a shared-worktree livelock cannot happen:
+`scan-builder` owns `agent/worktree_manager.py`, `executor-builder` owns
+`agent/session_executor.py`, `scheduler-builder` owns `tools/agent_session_scheduler.py`. No builder
+edits another's file. Commit early with explicit paths.
+
 ### Team Members
+
+- **Builder (scan)**
+  - Name: `scan-builder`
+  - Role: the two-field lane match and docstring in `agent/worktree_manager.py`
+  - Agent Type: builder
+  - Resume: true
 
 - **Builder (executor)**
   - Name: `executor-builder`
-  - Role: the lane write-back and the cleanup log upgrade in `agent/session_executor.py`
+  - Role: the `exec_cwd` pre-stamp, the `[lane-writeback]` log, the pre-finalize guard, and the
+    cleanup-blocked WARNING in `agent/session_executor.py`
   - Agent Type: builder
   - Domain: Redis/Popoto data
   - Resume: true
 
 - **Builder (scheduler)**
   - Name: `scheduler-builder`
-  - Role: the working_dir inheritance guard in `tools/agent_session_scheduler.py`
+  - Role: the `working_dir` inheritance guard in `tools/agent_session_scheduler.py`
   - Agent Type: builder
   - Resume: true
 
 - **Test engineer**
   - Name: `guard-tester`
-  - Role: tests pinning the busy-guard match, both cleanup branches, the failure log, and the inheritance guard
+  - Role: tests pinning the two-field match (both arms, plus the negatives), the pre-spawn stamp,
+    `live_fence()` staying `None`, all three cleanup branches, the failure log, and the inheritance
+    guard. Mutation-checks each guard and re-measures after every review round.
   - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
   - Name: `lane-validator`
-  - Role: runs the Verification table and confirms every success criterion
+  - Role: runs the Verification table and confirms every success criterion against observed output
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `lane-documentarian`
-  - Role: the three feature-doc updates
+  - Role: the four feature-doc updates and the deploy note in the PR body
   - Agent Type: documentarian
   - Resume: true
 
@@ -1001,41 +1085,29 @@ The working tree was restored byte-for-byte after each seeded mutation (`git dif
 
 ## Critique Results
 
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The persisted lane path outlives the lane. The synthetic cleanup deletes `.worktrees/dev-{aid8}` in `_execute_agent_session`'s `finally` (session_executor.py:2753-2790) but the row keeps pointing at it. `valor-session resume` (valor_session.py:1157-1162, `reject_from_terminal=False`), the nudge requeue (agent_session_queue.py:2906-2919) and `retry_agent_session` (`clone_agent_session_fields`, agent_session_queue.py:177-201 — `working_dir` is not in `_EXECUTION_FENCE_RESET_FIELDS`) all re-execute or copy that row. Next run, `Path(session.working_dir)` (session_executor.py:1278) names a deleted dir, `validate_workspace` fails invariant 1 and falls back to `allowed_root = Path.home()/"src"` (worktree_manager.py:812-817), which is not a git repo; `get_or_create_worktree(~/src, slug)` then runs `git worktree add` outside any repository, or the #887 guard at :1417-1428 refuses the session. Unreachable today. Architectural Impact's "a stale lane path in a terminal row is ignored by every reader" is false: the executor is a reader, and spike-6 missed it. | pending | Two edits. (1) In the synthetic cleanup block, when `cleanup_result.get("worktree_removed")` is truthy, re-hydrate via `get_authoritative_session(session.session_id, project_key=session.project_key)` and if the row still names the removed lane write `_auth.working_dir = str(resolve_main_repo_root(_wd))` + `_auth.save(update_fields=["working_dir", "updated_at"])`, inside the block's existing `try` so it stays non-fatal. (2) At session_executor.py:1278, when `WORKTREES_DIR in str(session.working_dir) and not Path(session.working_dir).exists()`, re-seed from `resolve_main_repo_root(...)` BEFORE `validate_workspace` so the `~/src` fallback can never become the base passed to `get_or_create_worktree`. Pin (2) with a test that a deleted `.worktrees/dev-*` path re-provisions under the repo root, not under `Path.home()/"src"`. |
-| BLOCKER | History & Consistency | The row already records the lane, in a field with the correct lifecycle. `AgentSession.exec_cwd` (models/agent_session.py:346) is stamped on every harness spawn by `stamp_execution_spawn(..., cwd=self._working_dir, ...)` (session_runner/runner.py:695-705), where `_working_dir` is the executor's resolved lane (runner.py:395), and it is persisted via `save(update_fields=[..., "exec_cwd", ...])` (agent_session.py:1287-1300). It is already excluded from continuations — `_EXECUTION_FENCE_RESET_FIELDS` lists `exec_cwd` as "Working dir that spawn ran in; resume is cwd-scoped" (agent_session_queue.py:131-143). The Rabbit Hole rejecting "a second field (`active_worktree_dir`)" misses that the second field exists, needs no model change, and is already populated. Matching the busy scan on `exec_cwd` closes the blind spot with none of the lifecycle hazard of making `working_dir` execution-scoped. | pending | In `_scan_worktree_sessions` (worktree_manager.py:579-614) replace `wd = getattr(session, "working_dir", None)` with a loop `for wd in (getattr(session, "exec_cwd", None), getattr(session, "working_dir", None)):` running the existing normalize + segment-prefix match over each and returning `("busy", ...)` on the first hit; the `if not wd: continue` guard already covers the `None` a never-spawned row carries. One real trade to measure rather than assume: `exec_cwd` lands at spawn (runner.py:699) whereas the plan's write lands at session_executor.py:1510, so an exec_cwd-only variant leaves the Race 1 window marginally wider. If that gap matters, keep both arms rather than persisting `working_dir`. |
-| CONCERN | Risk & Robustness | spike-5 reasons only about the completion exit, but the block it protects is not on that path. `_execute_agent_session` has one top-level `try:` (session_executor.py:1160), one top-level `finally:` (:2736), and no top-level `except`, so the synthetic cleanup at :2753 runs on exception and cancellation exits too. The completion-exit finalize guard it relies on sits at :2532 inside `if not chat_state.defer_reaction:` on the normal-return path, so on any raising or cancelled exit nothing has flipped the row terminal. After this change every such exit yields `blocked_by_session` and leaks the lane. Risk 2's mitigation ("the health checker finalizes stuck rows, after which the next cleanup pass clears") has no next cleanup pass: this cleanup only runs inside this `finally`, and `sweep_worktrees` requires `merged_via_tree`, which a `session/dev-*` branch never satisfies. The leak is permanent, not bounded. | pending | Ahead of `cleanup_after_merge`, add `_auth = get_authoritative_session(session.session_id)` and when `_auth is not None and _auth.status == "running"` call `finalize_session(_auth, _runner_final_status(task.error, agent_session), reason="synthetic-cleanup pre-finalize")` inside `except StatusConflictError: pass` — identical in shape to :2536-2547, hoisted out of the `if not chat_state.defer_reaction:` conditional. Do NOT use `remove_worktree(force=True)`: forcing is the deletion-under-a-live-subprocess failure #1938 produced, and the `_session_recorded_reap_failure` skip above must keep winning. |
-| CONCERN | Scope & Value | Swapping the linear scan for `get_authoritative_session` is scope creep with unmeasured blast radius. The `agent_session` that block produces also feeds `_session_type` (session_executor.py:1514), which drives the harness `SESSION_TYPE` env (:2216), the ENG/TEAMMATE permission branch (:2217-2222), and runner dispatch (:1649, :2176, :2255, :2308). Today `agent_session` stays `None` unless a `status="running"` row matches; `get_authoritative_session` applies no status filter (session_lifecycle.py:136-139), so `_session_type` becomes non-`None` on paths where it is `None` today. No task, success criterion, or test pins that. | pending | Write it as `_auth = get_authoritative_session(session.session_id, project_key=session.project_key)` then `agent_session = _auth if _auth is not None and _auth.status == "running" else None`, and perform the `working_dir` / `branch_name` / `task_list_id` save on `_auth`. Downstream `_session_type` reads stay byte-identical while the write still routes through the newest-wins resolver. Add one test asserting a session with a terminal duplicate and no running row still yields `_session_type is None`. |
-| CONCERN | Scope & Value | The write rule is deliberately broad ("any session whose resolved `working_dir` differs from the stored value, not only synthetic ones") but only the synthetic shape is demonstrated, spiked, or tested. The claim that "a real-slug session that was enqueued against the main checkout has the identical blind spot" carries no spike, no cited call site, and no verification row; every case in Task 3 uses `dev-abcd1234` or a `slug=None` row. The untested half of the rule is also the half whose lanes and rows live longest. | pending | If narrowing, gate on the flag already in scope: `if is_synthetic_slug and str(working_dir) != (agent_session.working_dir or ""):` — `is_synthetic_slug` is set at session_executor.py:1310-1318 and stays live through the save block. If keeping the broad rule, add a real-slug case to tests/unit/worktree_manager/test_worktree_manager_busy_guards.py (`working_dir=".worktrees/sdlc-1218"`, `slug="sdlc-1218"`) so both halves are pinned. |
-| CONCERN | History & Consistency | Test Impact says of tests/unit/test_session_isolation_bypass.py that its tests "mirror the synthesis logic rather than driving `_execute_agent_session`, so none break" — accurate: every test there is a static `_should_block` mirror (:65-140) or a source-text regex (:281-400). Task 3 then assigns that same file two assertions that require actually driving the executor (the row persists `working_dir` and leaves `slug` unset; a raising `save()` emits the `[lane-writeback]` WARNING via caplog). A builder following the plan literally will satisfy them with more source greps, which proves nothing about behavior and contradicts the plan's own "observable behavior, not `pass`" requirement. | pending | tests/unit/test_teammate_cold_start_finalize.py:122-175 is the working template: a real `AgentSession.create(...)` under the `redis_test_db` fixture, `_patch_runner()` to stub the harness, `await _execute_agent_session(session)`, then `AgentSession.get_by_id(...)` to assert persisted state. Use that shape for the write-back and `[lane-writeback]` cases (assert `reloaded.slug is None` alongside `reloaded.working_dir`); keep test_session_isolation_bypass.py for the "slug stays local" source assertion only. |
-| CONCERN | Risk & Robustness | Verification row 1 runs `.venv/bin/python -m pytest ...`. CLAUDE.md forbids bare pytest and requires `scripts/pytest-clean.sh`, which reaps xdist workers, bounds the run, and pins `PYTHONPATH` to the invoking checkout so a lane worktree exercises worktree code. Run from `.worktrees/{slug}` the plan's command validates the wrong tree — the same confusion this plan exists to fix. The row also passes a directory and accepts "exit code 0", which cannot distinguish "tests passed" from "0 tests collected". | pending | Replace with `scripts/pytest-clean.sh tests/unit/test_session_isolation_bypass.py tests/unit/worktree_manager/test_worktree_manager_busy_guards.py tests/unit/test_session_executor_reap_marker.py tests/unit/test_agent_session_scheduler_worktree_inheritance.py -q` and set Expected to "N passed with N > 0" read off the summary line, never "exit code 0". The wrapper supplies `--timeout=420 --timeout-method=thread`, so drop those flags. |
-| NIT | Scope & Value | Success Criterion 3 is repo-wide ("No production code assigns `.slug` on a hydrated `AgentSession` instance") but its anti-criterion greps only `agent/session_executor.py`. A future `.slug =` in the scheduler, the queue, or tools/valor_session.py would satisfy the table while violating the criterion. | pending | Widen the anti-criterion grep to the production tree so the probe is as wide as the claim. |
-| NIT | History & Consistency | No-Gos opens "Nothing deferred — every relevant item is in scope for this plan", while Rabbit Holes defers "Reworking the `defer_reaction`-gated finalize guard" and Open Question 3 asks whether that guard is "Worth its own issue?". Something is deferred, and a reader scanning only the No-Gos header will miss it. | pending | Move the deferred finalize-guard item into No-Gos with its follow-up disposition, or reword the opening sentence to point at Rabbit Holes. |
+**Revision pass complete.** Every finding below is dispositioned. The critique's central argument —
+that `exec_cwd` already carries the resolved lane with the right lifecycle — was verified and
+**adopted**, which restructured the plan: the `working_dir` write that was the earlier draft's
+central mechanism is now an anti-criterion.
 
-### Rulings on the plan's Open Questions
+| Severity | Critic | Finding (abridged; the full text is in the git history of this file at `98c5e8bd5`) | Addressed By | Disposition |
+|----------|--------|--------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | The persisted lane path outlives the lane. Synthetic cleanup deletes `.worktrees/dev-{aid8}` in the `finally` while the row keeps naming it; `valor-session resume`, the nudge requeue, and `retry_agent_session` via `clone_agent_session_fields` all re-execute or copy that row. Next run, `Path(session.working_dir)` names a deleted dir, `validate_workspace` falls back to `~/src`, and `git worktree add` runs outside any repository. Architectural Impact's "a stale lane path in a terminal row is ignored by every reader" is false. | spike-8; Rabbit Holes; Architectural Impact; Verification anti-criterion | **ACCEPTED — root cause removed, not patched.** Verified every leg on `d786c8ad2`: `valor-session resume` calls `transition_status(..., "pending", reject_from_terminal=False)` on the same row with no reset; `clone_agent_session_fields` copies `working_dir` and its docstring is explicit that anything omitted is destroyed; `_EXECUTION_FENCE_RESET_FIELDS` contains `exec_cwd` and not `working_dir`; `validate_workspace` returns `allowed_root` on a nonexistent path and the executor passes `Path.home() / "src"`. Rather than add the two compensating edits the critique proposed, **the plan no longer writes `working_dir` at all** — so there is no stale path to clean up, no re-seed guard to maintain, and one fewer invariant for a future reader to preserve. The reversibility claim the finding called false is deleted and replaced with the measured statement. |
+| BLOCKER | History & Consistency | `AgentSession.exec_cwd` already carries the resolved lane with the correct lifecycle — stamped on every spawn by `stamp_execution_spawn(..., cwd=self._working_dir, ...)` and already reset on continuation. Matching `_scan_worktree_sessions` on `exec_cwd` closes the blind spot without BLOCKER 1's hazard. The Rabbit Hole rejecting "a second field" misses that the field already exists and is already populated. | spike-7; Solution; Technical Approach; Rabbit Holes; Task 1 | **ACCEPTED AND ADOPTED.** Every claim re-verified by symbol on `d786c8ad2`: the field declaration, the `save(update_fields=[..., "exec_cwd", ...])` inside `stamp_execution_spawn`, the `cwd=self._working_dir` call in `runner.py::_on_turn_spawn`, `self._working_dir` being the executor's resolved lane, and `"exec_cwd"` in `_EXECUTION_FENCE_RESET_FIELDS`. Two things measured beyond the finding: (i) production readers of `exec_cwd` outside the model are **none**, and the sole in-model reader `live_fence()` is gated on `spawn_history` / `exec_pid`, so a pre-spawn stamp is invisible to it (Risk 5, with a pinning test); (ii) the finding's own acknowledged trade — that `exec_cwd` lands at spawn, widening Race 1 — is **closed** by having the executor pre-stamp `exec_cwd` in the session-phase save block, the exact seam the earlier draft was going to write `working_dir` at. So Race 1 is as narrow as the earlier draft claimed, with none of the lifecycle cost. The Rabbit Hole is rewritten to say the field exists. |
+| CONCERN | Risk & Robustness | spike-5 covers only the completion exit. `_execute_agent_session` has one top-level try/finally and no top-level except, so cleanup runs on exception and cancellation exits where the finalize guard (inside `if not chat_state.defer_reaction:`) never ran — the lane leaks permanently, since this cleanup is the only pass and `sweep_worktrees` requires `merged_via_tree`. | spike-5 (rewritten); spike-9; Solution; Race 2; Risk 2; Task 2 | **ACCEPTED.** Structure re-measured: `awk 'NR>=1160 && NR<=2740 && /^    (except\|finally\|else)/'` over `agent/session_executor.py` returns exactly one hit, the `finally`. The pre-finalize guard is in scope, written in the shape the finding specified, with `force=True` explicitly forbidden and the `_session_recorded_reap_failure` skip left winning. Two additions from spike-9: the `status == "running"` predicate is documented as the reason hoisting out of the `defer_reaction` conditional is safe (the nudge paths leave the row `pending`), and `task` is resolved via `locals().get("task")` because it is bound partway through the body and would raise `NameError` in the `finally` on an early-raising exit. |
+| CONCERN | Scope & Value | The `get_authoritative_session` swap changes `_session_type`, which drives harness `SESSION_TYPE` env, the ENG/TEAMMATE permission branch, and runner dispatch; the resolver applies no status filter. | Technical Approach; Rabbit Holes; Task 2; Verification anti-criterion | **ACCEPTED — the swap is dropped entirely, which is stronger than the guard the finding proposed.** Verified `get_authoritative_session` applies no status filter. Since the plan no longer writes `working_dir`, the only remaining write is `exec_cwd`, and the wrong-duplicate hazard the swap was meant to fix is **benign for this predicate**: `_scan_worktree_sessions` iterates every non-terminal row, so a stamp landing on any duplicate still makes the lane read busy. The session-phase hydration is left byte-identical, `_session_type` is provably unchanged, and an anti-criterion row asserts the literal is still present so the swap cannot be reintroduced silently. |
+| CONCERN | Scope & Value | The broad write rule ("any session whose resolved `working_dir` differs") is asserted, never spiked; every Task 3 case exercises only the synthetic shape. | Technical Approach; Task 4; Success Criteria | **ACCEPTED, and the rule dissolves.** `exec_cwd` is stamped unconditionally on every spawn today, so there is no new broad-vs-narrow rule to justify — the real-slug case is the same code path. Per Open Question ruling 1 (do not narrow on safety grounds), nothing is gated on `is_synthetic_slug`. The untested half the finding named is now a required test row: a real-slug session with `slug="sdlc-1218"` and `exec_cwd=".worktrees/sdlc-1218"` must read `busy`, and a separate row pins the `exec_cwd=None` fallback so the old arm cannot regress. |
+| CONCERN | History & Consistency | Task 3 assigns behavioral assertions to `tests/unit/test_session_isolation_bypass.py`, a pure logic-mirror/source-regex file. Route them to the `redis_test_db` + `_patch_runner()` pattern at `tests/unit/test_teammate_cold_start_finalize.py:122-175`. | Test Impact; Task 4 | **ACCEPTED.** Confirmed the file's shape (static `_should_block` mirrors and `read_text()` regexes) and the template's shape (real `AgentSession.create(...)` under `redis_test_db`, `_patch_runner()`, `await _execute_agent_session(session)`, re-read by stable `id`). Every behavioral assertion moves to a new `tests/unit/test_session_executor_lane_visibility.py` built on that template; `test_session_isolation_bypass.py` keeps only the "slug stays local" source assertion, and Test Impact states the rule explicitly so a builder cannot satisfy a behavioral criterion with another grep. |
+| CONCERN | Risk & Robustness | Verification row 1 uses bare `.venv/bin/python -m pytest` and accepts "exit code 0". The repo mandates `scripts/pytest-clean.sh`, and exit 0 cannot distinguish 0-collected from passing. | Verification; Step by Step Tasks preamble | **ACCEPTED.** The row now runs `scripts/pytest-clean.sh` with explicit test files (no directory argument), drops `--timeout` flags the wrapper supplies, and the Expected column reads "`N passed` with `N > 0` and zero failed/errored, read off the summary line — exit code alone is NOT sufficient". The same discipline is stated once in the task preamble so every builder inherits it. |
+| NIT | Scope & Value | Success Criterion 3 is repo-wide but its anti-criterion greps one file. | Success Criteria; Verification | **ACCEPTED, resolved by making probe and claim agree — and it surfaced a bug.** Widening the grep repo-wide first: `grep -rnE '^\s*[A-Za-z_][A-Za-z0-9_]*\.slug\s*=[^=]' agent bridge models tools worker` returns **2** on main, not 0 — `tools/lane_identity.py` (writes `PipelineLedger.slug`, a different model, not a violation) and `bridge/session_transcript.py` (writes `AgentSession.slug` on a hydrated row, **an unguarded instance of exactly the spike-3 hazard**). A repo-wide `== 0` criterion would therefore have been false on the day it was written. The criterion is restated as "no production code **in this plan's changed files**", the grep covers exactly those three files and both forbidden attributes, and the `bridge/` finding is filed as **#3210** and recorded in No-Gos rather than quietly widened into this lane. |
+| NIT | History & Consistency | No-Gos says "Nothing deferred" while Rabbit Holes and Open Question 3 defer the `defer_reaction` gate. | No-Gos | **ACCEPTED.** No-Gos now opens by naming three deferred items with their issue numbers — **#3209** (the `defer_reaction` gate, per Open Question ruling 3), **#3210** (the `session_transcript` KeyField write), and the `sweep_worktrees` synthetic-lane path (ruled out of scope by Open Question ruling 2, and no longer needed since the pre-finalize guard closes the permanent-leak case) — and then points at Rabbit Holes for the separable-but-not-deferred items. |
 
-1. **Scope of the write-back — narrow to `is_synthetic_slug`?** Narrowing does not buy safety here: the
-   synthetic lane is precisely the one deleted at end of session, so it is the *source* of the
-   BLOCKER-1 lifecycle hazard, not an exemption from it. Ruling: do not narrow on safety grounds. Either
-   keep the broad rule and pin the real-slug half with a test, or narrow and say plainly that the
-   real-slug blind spot is untested and deferred (Scope & Value concern above gives both forms).
+### Rulings on the plan's Open Questions — all three honored
 
-2. **The leak in Risk 2 — is an operator-facing log enough?** No, as written. The Risk & Robustness
-   concern above shows the leak is permanent rather than bounded on every exception and cancellation
-   exit, because this cleanup only runs inside `_execute_agent_session`'s `finally` and there is no
-   later pass. Ruling: the pre-finalize guard belongs in this plan; growing `sweep_worktrees` a
-   synthetic-lane path stays out of scope.
-
-3. **The `defer_reaction` finalize gate — worth its own issue?** Yes, file it, and keep it out of this
-   plan. The pre-finalize guard in ruling 2 makes the refusal survivable without touching the gate's
-   semantics, which is the right seam. Record the follow-up issue number in No-Gos rather than leaving
-   the deferral only in Rabbit Holes (NIT above).
-
----
-
-## Open Questions
-
-1. **Scope of the write-back.** This plan persists `working_dir` whenever the executor's resolved path differs from the stored one, not only for synthetic slugs. That is the more correct rule and it widens the blast radius to any lane resolved at execution time. Should it be narrowed to `is_synthetic_slug` for the first landing?
-2. **The leak in Risk 2.** A row stuck at `running` holds its `dev-*` lane indefinitely, and `sweep_worktrees` will not reclaim it because the synthetic branch is never merged. This plan makes that state loud rather than reclaimable. Is an operator-facing log enough, or should the sweep grow an explicit synthetic-lane path?
-3. **The `defer_reaction` finalize gate.** `agent/session_executor.py:2532` skips the completion-exit finalize guard when a reaction is deferred, which is the one ordinary way a session reaches its own cleanup while still `running`. This plan treats that as out of scope and only makes the resulting refusal visible. Worth its own issue?
+1. **Do not narrow the write-back to `is_synthetic_slug` on safety grounds.** Honored, and the
+   question is moot: `exec_cwd` is stamped on every spawn today, so there is no narrowing decision
+   left to make. The real-slug half is pinned by its own test row rather than left asserted.
+2. **An operator log is not enough; the pre-finalize guard belongs in this plan. A synthetic-lane
+   `sweep_worktrees` path does not.** Honored — the guard is Task 2, the sweep is in No-Gos.
+3. **File the `defer_reaction` gate as its own issue and record the number in No-Gos.** Honored —
+   **#3209**, recorded in No-Gos and cross-referenced from Rabbit Holes.
