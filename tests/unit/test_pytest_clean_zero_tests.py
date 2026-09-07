@@ -22,10 +22,10 @@ Two rules this file follows, both round-1 false-pass channels:
      assertion is trusted -- it proves the sandbox's OWN plugin copy is what
      loads, not a decoy or the repo's.
   2. Every subprocess env is built from a copy of `os.environ` with
-     `PYTHONPATH` and `PYTEST_CLEAN_COUNT_FILE` removed (`_base_env`), so an
-     ambient value inherited from the process running these tests (itself
-     ordinarily run under scripts/pytest-clean.sh) cannot pass a test for the
-     wrong reason.
+     `PYTHONPATH`, `PYTEST_CLEAN_COUNT_FILE`, and `PYTEST_ALLOW_ZERO_TESTS`
+     removed (`_base_env`), so an ambient value inherited from the process
+     running these tests (itself ordinarily run under
+     scripts/pytest-clean.sh) cannot pass a test for the wrong reason.
 
 The script and plugin under test are resolved from env vars
 (`PYTEST_CLEAN_SCRIPT`, `PYTEST_EXECUTED_COUNT_SOURCE`), defaulting to the
@@ -116,16 +116,28 @@ COLLECTION_ERROR = "def test_bad(:\n    pass\n"
 
 
 def _base_env() -> dict:
-    """A copy of the ambient environment with PYTHONPATH and
-    PYTEST_CLEAN_COUNT_FILE removed. The process running this test file is
-    itself ordinarily launched under scripts/pytest-clean.sh, which exports
-    both -- an unstripped env would let a subprocess pass these tests for
-    inheriting the outer run's state rather than producing its own.
+    """A copy of the ambient environment with PYTHONPATH,
+    PYTEST_CLEAN_COUNT_FILE, and PYTEST_ALLOW_ZERO_TESTS removed. The process
+    running this test file is itself ordinarily launched under
+    scripts/pytest-clean.sh, which exports the first two -- an unstripped env
+    would let a subprocess pass these tests for inheriting the outer run's
+    state rather than producing its own. PYTEST_ALLOW_ZERO_TESTS is popped
+    for the same reason: it is load-bearing for the skip-shape assertions and
+    an ambient value would silently suppress the exit they check for.
     """
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env.pop("PYTEST_CLEAN_COUNT_FILE", None)
     env.pop("PYTEST_ALLOW_ZERO_TESTS", None)
+    # #3222 review tech debt: the #2574 stall watcher's subshell leaves a
+    # `sleep 30` grandchild holding stdout/stderr pipe write-ends open past
+    # the pytest controller exiting, so subprocess.run(..., capture_output=
+    # True) blocks ~30s per invocation even for a trivial run like
+    # `--version`. Measured: 30.1s with the watcher on vs 0.6s with
+    # PYTEST_STALL_LIMIT_S=0. This file makes 15+ such calls; nothing here
+    # exercises the wedge detector itself, and the guard still fires
+    # correctly with the watcher disabled.
+    env["PYTEST_STALL_LIMIT_S"] = "0"
     return env
 
 
@@ -150,6 +162,29 @@ def _sandbox(tmp_path: Path) -> Path:
 
 def _write(root: Path, name: str, body: str) -> None:
     (root / name).write_text(body)
+
+
+def _append_marker(root: Path) -> None:
+    """Append a stderr marker to the sandbox's OWN plugin copy, fired at
+    import time regardless of how the module gets resolved (`python -c` or
+    `pytest -p`). Used only to prove which copy actually loaded -- the same
+    technique the #3222 review used to demonstrate that TestNegativeControl's
+    `python -c` check does not exercise `-p` resolution: `python -c` puts cwd
+    on `sys.path`, `pytest -p` does not, so a test can pass via the former
+    while the wrapper (which always uses `-p`) loads a different copy
+    entirely.
+    """
+    plugin = root / "pytest_executed_count.py"
+    with open(plugin, "a") as f:
+        f.write(
+            "\n"
+            "import sys as _marker_sys\n"
+            'print(f"SANDBOX_PLUGIN_LOADED:{__file__}", file=_marker_sys.stderr)\n'
+        )
+
+
+def _marker_lines(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith("SANDBOX_PLUGIN_LOADED:")]
 
 
 def _run(
@@ -191,6 +226,65 @@ class TestNegativeControl:
         assert resolved.is_relative_to(tmp_path.resolve()), (
             f"pytest_executed_count resolved to {resolved}, expected under {tmp_path} "
             "-- the sandbox's own copy did not load"
+        )
+
+    def test_sandbox_plugin_resolves_from_the_sandbox_via_dash_p(self, tmp_path):
+        """#3222 review: the check above drives `python -c`, which is not the
+        resolution path the wrapper (or any other test in this file) uses.
+        `pytest -p` does not put cwd on sys.path, so it needs PYTHONPATH set
+        explicitly -- exactly what the wrapper does at
+        scripts/pytest-clean.sh:173 and what Blocker 2's fix restores for
+        TestPluginFailsOpenOnAnUnwritableCountFile below. Proven with the
+        marker technique: the sandbox's own copy prints its __file__ to
+        stderr at import time.
+        """
+        root = _sandbox(tmp_path)
+        _append_marker(root)
+        _write(root, "test_x.py", PASSING)
+        venv_pytest = root / ".venv" / "bin" / "pytest"
+        env = _base_env()
+        env["PYTHONPATH"] = str(root)
+        result = subprocess.run(
+            [str(venv_pytest), "-p", "pytest_executed_count", "test_x.py", "-q"],
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        markers = _marker_lines(result.stderr)
+        assert len(markers) == 1, result.stderr
+        resolved = Path(markers[0].split(":", 1)[1]).resolve()
+        assert resolved.is_relative_to(tmp_path.resolve()), (
+            f"pytest_executed_count resolved to {resolved} via -p with PYTHONPATH set, "
+            f"expected under {tmp_path}"
+        )
+
+    def test_without_pythonpath_dash_p_does_not_provably_load_the_sandbox_copy(self, tmp_path):
+        """The negative control for the check above, and the exact defect
+        Blocker 2 named: without PYTHONPATH pointed at the sandbox, `-p`
+        resolution falls through to whatever copy of the module the venv's
+        own import machinery finds first (e.g. an editable-install `.pth`
+        entry for a different checkout), never the sandbox's marked copy --
+        so the marker must NOT appear.
+        """
+        root = _sandbox(tmp_path)
+        _append_marker(root)
+        _write(root, "test_x.py", PASSING)
+        venv_pytest = root / ".venv" / "bin" / "pytest"
+        env = _base_env()  # PYTHONPATH deliberately left unset
+        result = subprocess.run(
+            [str(venv_pytest), "-p", "pytest_executed_count", "test_x.py", "-q"],
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert not _marker_lines(result.stderr), (
+            "the sandbox's marked plugin copy loaded via -p without PYTHONPATH set -- "
+            "this control is supposed to prove that does NOT happen"
         )
 
 
@@ -263,6 +357,30 @@ class TestPassThroughPathsAreUnaffected:
         assert result.returncode == 0, result.stdout
         assert ZERO_TESTS_HEADLINE not in result.stderr
 
+    def test_setup_plan_exits_zero(self, tmp_path):
+        """#3222 review Blocker 1: --setup-plan runs a real session, produces
+        zero `call` reports, and exits 0 through bare pytest. Before the fix
+        this reverted to exit 1 with a false pool-exhaustion diagnostic."""
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "--setup-plan", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_setup_only_exits_zero(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "--setup-only", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_fixtures_exits_zero(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "--fixtures", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
     def test_version_exits_zero(self, tmp_path):
         root = _sandbox(tmp_path)
         result = _run(root, ["--version"])
@@ -327,11 +445,22 @@ class TestPluginFailsOpenOnAnUnwritableCountFile:
 
     def test_unwritable_count_file_path_does_not_break_the_run(self, tmp_path):
         root = _sandbox(tmp_path)
+        _append_marker(root)
         _write(root, "test_x.py", PASSING)
         unwritable_dir = tmp_path / "unwritable"
         unwritable_dir.mkdir(mode=0o000)
         try:
             env = _base_env()
+            # #3222 review Blocker 2: this is the one test in the file that
+            # calls pytest directly instead of through the wrapper, so it
+            # loses the wrapper's `export PYTHONPATH="$REPO_ROOT"`
+            # (scripts/pytest-clean.sh:173) and _base_env() strips it too.
+            # Without this, -p resolution falls through to whatever copy the
+            # venv's own import machinery finds first -- in a linked worktree
+            # that dies with ImportError, and where it happens to succeed it
+            # silently exercises the WRONG copy of the module under test.
+            # Set it exactly as the wrapper does for every other case.
+            env["PYTHONPATH"] = str(root)
             env["PYTEST_CLEAN_COUNT_FILE"] = str(unwritable_dir / "count-file")
             venv_pytest = root / ".venv" / "bin" / "pytest"
             result = subprocess.run(
@@ -344,6 +473,14 @@ class TestPluginFailsOpenOnAnUnwritableCountFile:
             )
             assert result.returncode == 0, result.stderr
             assert "1 passed" in result.stdout
+            # Prove the sandbox's own copy is what actually ran -- the fix
+            # above is inert if this doesn't hold (Blocker 2's whole point).
+            markers = _marker_lines(result.stderr)
+            assert len(markers) == 1, result.stderr
+            resolved = Path(markers[0].split(":", 1)[1]).resolve()
+            assert resolved.is_relative_to(tmp_path.resolve()), (
+                f"pytest_executed_count resolved to {resolved}, expected under {tmp_path}"
+            )
         finally:
             unwritable_dir.chmod(0o755)
 
@@ -359,6 +496,30 @@ class TestDiagnosticIsDistinctFromTheOtherGuards:
         assert "PYTEST_ALLOW_ZERO_TESTS" in result.stderr
         for headline in OTHER_GUARD_HEADLINES:
             assert headline not in result.stderr
+
+
+class TestInjectionGateFalseBranch:
+    """The injection gate `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]`
+    (scripts/pytest-clean.sh:198) had no automated cover for its false
+    branch: `_sandbox()` always copies the plugin in, so deleting the `if`
+    killed no existing test even though the branch is what protects six
+    concurrent lanes from an ImportError on every run if the module is ever
+    absent from a checkout (#3222 review nit)."""
+
+    def test_run_without_the_plugin_present_is_unaffected(self, tmp_path):
+        root = _sandbox(tmp_path)
+        (root / "pytest_executed_count.py").unlink()
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_help_passes_through_untouched(self, tmp_path):
+        """--help is named in the plan's Success Criteria but had no case
+        (#3222 review nit)."""
+        root = _sandbox(tmp_path)
+        result = _run(root, ["--help"])
+        assert result.returncode == 0, result.stdout
 
 
 # ---------------------------------------------------------------------------

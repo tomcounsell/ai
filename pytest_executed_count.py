@@ -19,8 +19,14 @@ The plugin no-ops entirely when PYTEST_CLEAN_COUNT_FILE is unset, so a bare
 `pytest` invocation (outside the wrapper) is untouched.
 
 Verdict values written to the file at pytest_sessionfinish:
-    "collectonly"   -- config.option.collectonly was set; no tests could run
+    "collectonly"   -- the session ran in an introspection-only mode
+                       (--collect-only, --setup-plan, --setup-only, or
+                       --fixtures); no tests could execute by design
     "count N"       -- N is the number of reports counted as "executed"
+    "started"       -- pytest_sessionstart ran but pytest_sessionfinish never
+                       did (e.g. the wrapper's #2574 wedge watcher killed the
+                       controller mid-run); the wrapper reads this as
+                       fail-closed
 
 DO NOT SIMPLIFY THE COUNTING RULE. Every clause below was measured against a
 real pytest session (see docs/features/pytest-clean-zero-test-guard.md for the
@@ -46,7 +52,12 @@ full table) and each one is load-bearing:
     guard never fires.
   - Checking for a `wasxfail` attribute on the report is required because an
     xfail reports call/skipped/wasxfail=True and an xpass reports
-    call/passed/wasxfail=True.
+    call/passed/wasxfail=True. (Deliberately paraphrased rather than quoted
+    as a literal expression here -- see commit 97333f8ac: the settled rule's
+    own clause, spelled out verbatim in prose, would survive a mutation
+    `sed` unchanged and make the Mutation-2 drift grep misreport a mutated
+    copy as still carrying the clause. Do not "clean this up" to match the
+    neighboring bullets' style.)
     Both genuinely executed; dropping this clause would undercount an
     xfail-heavy selection toward the fail-closed side.
   - The setup/teardown failure clause catches a fixture that raises, which
@@ -104,7 +115,27 @@ def pytest_runtest_logreport(report):
 def pytest_sessionfinish(session, exitstatus):
     if not _COUNT_FILE or _in_worker:
         return
-    if session.config.option.collectonly:
+    # #3222 review blocker: --collect-only is only one of four modes that
+    # legitimately run a session while executing nothing by design.
+    # --setup-plan, --setup-only and --fixtures all produce zero `call`
+    # reports and exit 0 through bare pytest, so without the other three
+    # attributes here the wrapper converts a healthy introspection command
+    # into a false "ZERO TESTS EXECUTED" / test-DB-pool-exhaustion failure.
+    # Verified directly against this venv's pytest: a normal run reports
+    # collectonly=False, setupplan=False, setuponly=False, showfixtures=False;
+    # --setup-plan sets setupplan=True and setuponly=True; --setup-only sets
+    # only setuponly=True; --fixtures sets only showfixtures=True. All three
+    # attributes exist on config.option at sessionfinish, but getattr with a
+    # default keeps this safe against a future pytest that renames or drops
+    # one of them.
+    option = session.config.option
+    introspection_only = (
+        option.collectonly
+        or getattr(option, "setupplan", False)
+        or getattr(option, "setuponly", False)
+        or getattr(option, "showfixtures", False)
+    )
+    if introspection_only:
         _write("collectonly")
     else:
         _write(f"count {_executed}")

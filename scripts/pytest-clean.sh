@@ -98,12 +98,18 @@ reap_workers() {
 #
 # Real isolation belongs in key namespacing, not in serializing the machine.
 
+# #3195 count-file hygiene tracker. The trap below is armed here, well
+# before the mint further down (after the .venv and interpreter-pin guards).
+# cleanup must only ever remove the file THIS invocation minted, never an
+# inherited PYTEST_CLEAN_COUNT_FILE from an enclosing wrapper -- otherwise an
+# early preflight abort (e.g. the no-usable-.venv guard) deletes a PARENT
+# wrapper's count file out from under it. Tracked separately from the env var
+# itself, which starts empty and is assigned only at the mint site.
+COUNT_FILE_MINTED=""
+
 cleanup() {
     reap_workers
-    # Interrupted-run hygiene for the #3195 count file: minted further down,
-    # but `set -u` requires the guarded expansion since cleanup can run
-    # before the mint (e.g. an early preflight abort).
-    [ -n "${PYTEST_CLEAN_COUNT_FILE-}" ] && rm -f "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null
+    [ -n "${COUNT_FILE_MINTED-}" ] && rm -f "$COUNT_FILE_MINTED" 2>/dev/null
     return 0
 }
 
@@ -187,6 +193,7 @@ export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 # nested run would overwrite its parent's verdict.
 PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"
 export PYTEST_CLEAN_COUNT_FILE
+COUNT_FILE_MINTED="$PYTEST_CLEAN_COUNT_FILE"
 
 # The plugin injection is gated on the module existing in the INVOKING
 # checkout ($REPO_ROOT, never $SCRIPT_ROOT -- pointing at $SCRIPT_ROOT would
@@ -342,17 +349,23 @@ reap_workers
 
 # Read and remove the #3195 count file. Tolerate a missing/unreadable file
 # without a bash error under `set -u`; no test can seed it with garbage
-# through the wrapper's public surface (only the plugin writes it), so an
-# absent read here just means no session ran (e.g. --version, --help).
+# through the wrapper's public surface (only the plugin writes it). The file
+# is minted with `mktemp` above before pytest starts, so this read is never
+# truly "file absent" on a real run -- an EMPTY read here is what "no session
+# ran" (e.g. --version, --help) or "the plugin wasn't injected" looks like on
+# disk.
 COUNT_VERDICT="$(cat "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null || true)"
 rm -f "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null
 
 # BEGIN zero-executed guard (#3195)
 # One pass-through predicate, not a state enumeration: passes through on an
-# absent file (no session ran), a collectonly verdict, or a count of at
-# least one. Everything else fails closed -- count 0, a surviving "started"
-# sentinel (the plugin's sessionfinish never ran, e.g. the wedge watcher
-# killed the controller), an empty file, a truncated write, unparseable
+# absent OR EMPTY read (no session ran, or the plugin was never injected --
+# the file is minted with `mktemp` above before pytest starts, so "absent"
+# and "empty" collapse to the same read here; there is no real run where
+# this predicate ever sees a truly absent file), a collectonly verdict, or a
+# count of at least one. Everything else fails closed -- count 0, a
+# surviving "started" sentinel (the plugin's sessionfinish never ran, e.g.
+# the wedge watcher killed the controller), a truncated write, unparseable
 # bytes. Inverting the test this way is what makes the guard total: a state
 # nobody anticipated lands on the safe side by construction rather than by
 # having been enumerated.

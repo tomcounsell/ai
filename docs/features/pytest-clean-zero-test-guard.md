@@ -67,9 +67,13 @@ verdict_passes_through() {
 ```
 
 Inverting the test this way is what makes the guard total. A state nobody
-anticipated (`count 0`, a surviving `started` sentinel, an empty file, a
-truncated write, unparseable bytes) lands on the safe side by construction
-rather than by having been enumerated. Verified under `/bin/bash` 3.2.57 against
+anticipated (`count 0`, a surviving `started` sentinel, a truncated write,
+unparseable bytes) lands on the safe side by construction rather than by
+having been enumerated. An absent or empty read passes through
+deliberately: the wrapper mints the count file with `mktemp` before pytest
+starts, so "empty" is what "no session ran" or "the plugin wasn't injected"
+looks like on disk -- there is no real run where this predicate ever sees a
+truly absent file. Verified under `/bin/bash` 3.2.57 against
 `""`, `collectonly`, `count 0`, `count 1`, `count 10`, `started`, `coun`,
 whitespace and `count -1`: only the first two and the positive counts pass.
 
