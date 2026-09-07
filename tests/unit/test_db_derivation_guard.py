@@ -633,6 +633,17 @@ class TestSplatHandling:
         )
         assert result.candidates == []
 
+    def test_a_starred_arg_before_the_index_is_blind(self):
+        """#3193, gap 5(b): a starred unpack BEFORE the db index shifts every
+        later argument, so `node.args` is `[Starred, Constant(7)]` -- length 2
+        -- and the fixed-index length guard short-circuits before the leg reads
+        anything. A db literal in plain sight yields no candidate at all, by a
+        different mechanism than the Starred suppression above: that branch is
+        never reached here. Pins the disclosed behavior so a change to the
+        length guard cannot silently move it."""
+        result = scan_source("import redis\ndef t(hp):\n    redis.Redis(*hp, 7)\n", "t.py")
+        assert result.candidates == []
+
 
 # ---------------------------------------------------------------------------
 # #2764: positional `db` and keyword `from_url(url=...)` produced no

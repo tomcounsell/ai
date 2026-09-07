@@ -68,12 +68,30 @@ boundary rather than an assumed guarantee:
    across kinds. Bounded by the db-0-only invariant and by
    :func:`apply_dispositions`'s refusal to let ``ALLOWLIST`` cover any
    candidate with a ``pool_db``.
-5. A ``db`` arriving inside a starred unpack at the positional index
-   (``redis.Redis("h", 6379, *rest)``) yields no candidate (#2764). The
-   positional leg suppresses ``ast.Starred`` deliberately rather than
-   reporting ``*rest`` as a derived db, so the contents of ``rest`` are
-   unexamined. Direct cost of fix 1's Starred suppression, and the positional
-   mirror of gap 1's opaque ``**`` splat.
+5. An ``ast.Starred`` at or before :data:`REDIS_DB_POSITIONAL_INDEX` in a
+   ``Redis``/``StrictRedis`` positional list. Two distinct blind shapes, both
+   yielding no candidate at all (#2764, #3193):
+
+   a. *At* the index (``redis.Redis("h", 6379, *rest)``): the positional leg
+      suppresses ``ast.Starred`` deliberately rather than reporting ``*rest``
+      as a derived db, so the contents of ``rest`` are unexamined. Direct cost
+      of fix 1's Starred suppression, and the positional mirror of gap 1's
+      opaque ``**`` splat.
+   b. *Before* the index (``redis.Redis(*hp, 7)``): the unpack shifts every
+      later argument, so a db literal in plain sight sits at syntactic index 1
+      and the fixed-index length guard short-circuits on a two-element
+      ``node.args`` before the leg reads anything. Nothing to do with the
+      Starred suppression in (a): the leg never runs. Pinned at zero
+      candidates by ``test_db_derivation_guard.py``'s
+      ``TestSplatHandling::test_a_starred_arg_before_the_index_is_blind``.
+
+   A starred unpack before the index that still leaves three or more syntactic
+   arguments (``redis.Redis("h", *hp, 6379, 7)``) is not blind but
+   misaddressed: the leg judges whatever sits at syntactic index 2 (``6379``
+   here), which need not be the runtime db slot. That direction is loud, so it
+   is a legibility cost rather than a missed violation. Zero ``ast.Starred``
+   arguments appear in any ``Redis``/``StrictRedis`` positional list on this
+   tree, so all three shapes are hypothetical today.
 6. Route 2 carries **no one-hop alias leg** (#2764). Route 1 resolves
    ``d = claim_test_db(); redis.Redis(db=d)`` through :func:`_resolve_one_hop`
    and accepts it; route 2's only accept legs are a direct call to a
