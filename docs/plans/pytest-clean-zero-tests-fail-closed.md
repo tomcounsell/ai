@@ -576,66 +576,97 @@ where no slot was taken.
 ### Risk 1: The guard fires on a legitimate all-skipped run
 **Impact:** A developer running a platform-gated or otherwise entirely-skipped selection
 gets a refusal instead of a green, and reads it as a broken wrapper.
-**Mitigation:** The diagnostic names the escape-hatch env var on the same screen, matching
-`PYTEST_STALL_LIMIT_S=0`'s precedent. The message also names the pool-exhaustion cause
+**Mitigation:** The diagnostic names `PYTEST_ALLOW_ZERO_TESTS` on the same screen. The hatch
+suppresses only the exit — the message prints either way — so a hatched run can never be
+mistaken for a real pass in a transcript. The message also names the pool-exhaustion cause
 first, since that is the overwhelmingly likely one. Accepting this false-positive class is
-the deliberate trade: a run that executed nothing genuinely proved nothing, and the
-whole point is that callers stop reading it as proof.
+the deliberate trade: a run that executed nothing proved nothing, and the whole point is
+that callers stop reading it as proof.
 
 ### Risk 2: The `-p` injection collides with a caller's own `-p` argument
 **Impact:** A caller passing `-p no:something` could be reordered or shadowed, changing
 plugin loading in a way that is hard to attribute.
 **Mitigation:** pytest accepts repeated `-p` flags and applies them in order, so prepending
-the plugin ahead of `"$@"` leaves every caller-supplied `-p` in force. Pin this with a test
-that passes `-p no:cacheprovider` through the wrapper and asserts both the guard and the
-caller's flag took effect.
+via `set -- -p pytest_executed_count "$@"` leaves every caller-supplied `-p` in force. Pin
+this with a test that passes `-p no:cacheprovider` through the wrapper and asserts both the
+guard and the caller's flag took effect.
 
 ### Risk 3: The plugin is not importable from the invoking checkout
-**Impact:** pytest exits 4 (usage error) on every run — a total outage of the test wrapper
-across every worktree on the machine.
-**Mitigation:** `PYTHONPATH` is already pinned to `REPO_ROOT` at
-`scripts/pytest-clean.sh:168`, before the run, and the plugin ships in the repo so every
-checkout has it. Pin it with a test that runs the wrapper from a linked-worktree-shaped
-sandbox and asserts the plugin loaded. Verify on a real worktree before merge.
+**Impact:** pytest aborts before any test runs, on every invocation, in every checkout —
+a total outage of the test wrapper across the machine. Measured: it exits **1** with
+`ImportError: Error importing plugin` (round 1 stated exit 4; that is wrong, and the
+correction matters because exit 1 is indistinguishable from the three existing refusals).
+Six lanes share this machine, so a bad injection on `main` takes all of them down at once.
+**Mitigation, in the wrapper rather than after the fact:** the injection is gated on
+`[ -f "$REPO_ROOT/pytest_executed_count.py" ]`, so a checkout without the module simply runs
+as it does today instead of aborting. The gate uses `$REPO_ROOT`, never `$SCRIPT_ROOT`, so
+the primary checkout's plugin can never serve a worktree run (#3033). `PYTHONPATH` is
+already pinned to `REPO_ROOT` at line 168, before the run. Verified on a real linked
+worktree in task 4 as a second, independent check — no longer the only one.
 
 ### Risk 4: The guard is written but never actually bites
 **Impact:** The worst outcome available — a guard against false greens that is itself a
 false green, exactly the failure this issue reports.
-**Mitigation:** Mutation-check the guard specifically: revert the wrapper's post-run check
-to a bare `exit "$PYTEST_EXIT"`, confirm the new tests go **red**, restore it, confirm they
-go green. Paste both outputs into the PR. Do not accept a green test run as evidence that
-the guard works.
+**Mitigation:** Mutation-check the guard specifically: delete the wrapper's verdict block,
+confirm the new tests go **red**, restore it, confirm they go green. Already demonstrated on
+the prototype (spike-6): with the block deleted an all-fixture-skip run exits **0**; with it
+present the same run exits **1**. This is a Verification row, not only PR prose. Do not
+accept a green test run as evidence that the guard works.
+
+### Risk 5: The tests pass while exercising the repo's plugin instead of the sandbox's
+**Impact:** The tests go green against `main`'s plugin no matter what the builder writes,
+so the whole test file is decoration. This is the #3033 failure reproduced inside the tests
+written to prevent a #3033-shaped bug.
+**Mitigation:** The negative control in the Failure Path Test Strategy runs before any guard
+assertion and asserts the resolved `pytest_executed_count.__file__` is under `tmp_path`,
+and every subprocess env is built from a copy of `os.environ` with `PYTHONPATH` and
+`PYTEST_CLEAN_COUNT_FILE` removed. Measured that resolution flips with `PYTHONPATH`, so
+this control has been shown to be able to fail.
 
 ## Race Conditions
 
 ### Race 1: Two concurrent wrapper invocations sharing a count file
-**Location:** `scripts/pytest-clean.sh`, the new temp-file mint and read.
+**Location:** `scripts/pytest-clean.sh`, the new mint and read.
 **Trigger:** Several agents run the wrapper simultaneously — the normal state of this
 machine, and the exact condition that causes the pool exhaustion in the first place.
 **Data prerequisite:** Each invocation's count file must be written only by its own pytest
 controller.
 **State prerequisite:** No fixed path may be shared between invocations.
-**Mitigation:** Mint the path with `mktemp` per invocation and pass it through the
-environment, never a constant under `/tmp` or the repo. Remove it in the existing `cleanup`
-trap.
+**Mitigation:** `mktemp` per invocation, passed through the environment, never a constant
+under `/tmp` or the repo. Removed in the verdict block and in the existing `cleanup` trap.
 
 ### Race 2: The wrapper reads the file before the controller finished writing
 **Location:** `scripts/pytest-clean.sh`, between `wait "$PYTEST_PID"` and the guard.
 **Trigger:** The read racing the plugin's `sessionfinish` write.
-**Data prerequisite:** The final count must be on disk before the wrapper reads it.
+**Data prerequisite:** The final verdict must be on disk before the wrapper reads it.
 **State prerequisite:** pytest must have fully exited.
 **Mitigation:** The read happens after `wait "$PYTEST_PID"` returns, which is after the
-controller process has exited and therefore after its `sessionfinish` completed. No
-polling or sleep is needed, and none should be added.
+controller process exited and therefore after its `sessionfinish` completed. No polling or
+sleep is needed, and none should be added.
 
 ### Race 3: The stall watcher kills the controller mid-write
 **Location:** `scripts/pytest-clean.sh:257-279`.
 **Trigger:** A wedged run is `SIGKILL`ed while the plugin is writing.
 **Data prerequisite:** A truncated or absent file must not be read as a valid verdict.
 **State prerequisite:** none.
-**Mitigation:** This is exactly the sentinel state — a `started` file with no verdict — and
-the three-state protocol already fails closed on it. A truncated/garbage file is covered
-by the unparseable-contents case in the failure-path strategy, which also fails closed.
+**Mitigation:** Covered by construction rather than by a dedicated branch: the pass-through
+allowlist admits only an empty read, `collectonly`, and `count [1-9]*`. A surviving
+`started` sentinel and a truncated `coun` both fall to the fail-closed default, verified in
+the shell-level predicate check.
+
+### Race 4: A nested wrapper invocation overwrites its parent's verdict
+**Location:** `scripts/pytest-clean.sh`, the count-file mint.
+**Trigger:** **Guaranteed by this plan's own test design.** `tests/unit/test_pytest_clean_zero_tests.py`
+runs *under* `scripts/pytest-clean.sh` and drives `scripts/pytest-clean.sh` by
+`subprocess.run`, so the inner wrapper inherits the outer run's exported
+`PYTEST_CLEAN_COUNT_FILE`.
+**Data prerequisite:** The outer run's verdict file must reflect the outer run only.
+**State prerequisite:** The wrapper must never honor an inherited count-file path.
+**Mitigation:** The mint is unconditional — `PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"`
+with no `:-` default — and the plugin no-ops when the variable is unset, so a bare `pytest`
+writes nothing anywhere. Verified on the prototype: an outer file pre-seeded with `count 7`
+still read `count 7` after a nested wrapper run completed. Pinned by a test asserting
+exactly that.
 
 ## No-Gos (Out of Scope)
 
@@ -697,49 +728,48 @@ Not applicable — this repo publishes no external documentation site.
 
 ## Success Criteria
 
-- [ ] A fully-skipped run through the wrapper exits **non-zero** with a named diagnostic on
-      stderr.
-- [ ] A zero-collection run through the wrapper exits non-zero (regression pin — this is
-      already true at exit 5 and must stay true).
+- [ ] A run in which every test skips exits **non-zero** with the named diagnostic on
+      stderr, for all three skip shapes: fixture-level (the `scratch_test_db` shape),
+      body-level `pytest.skip()`, and `@pytest.mark.skip`.
+- [ ] A zero-collection run exits non-zero (regression pin — already true at exit 5).
 - [ ] A run with at least one executed test exits with pytest's own status, unchanged —
-      pass stays 0, failure stays non-zero.
+      an all-passing run stays 0, a run with a failure stays non-zero.
 - [ ] `--version`, `--help`, and `--collect-only` through the wrapper are unaffected.
 - [ ] `tests/unit/test_worktree_venv_absent_guard.py` and
       `tests/unit/test_interpreter_pin_guard.py` pass unmodified.
-- [ ] **Mutation check, per guard**: reverting the wrapper's post-run check to a bare
-      `exit "$PYTEST_EXIT"` turns the new zero-executed tests red; restoring it turns them
-      green. Both outputs pasted in the PR.
-- [ ] The guard's escape-hatch env var disables it, verified by a test.
+- [ ] **Mutation check, per guard**: deleting the wrapper's verdict block turns the new
+      zero-executed tests red; restoring it turns them green. Both outputs pasted in the PR,
+      and the check is also a Verification row.
+- [ ] **Negative control passes**: the sandbox's own `pytest_executed_count` is the module
+      that loads, proven by its `__file__` resolving under `tmp_path`.
+- [ ] `PYTEST_ALLOW_ZERO_TESTS` suppresses the exit **and still prints the diagnostic**,
+      verified by asserting the message text.
+- [ ] A nested wrapper invocation leaves the outer run's count file untouched.
 - [ ] Verified on a real linked worktree, not only in a `tmp_path` sandbox.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
+One agent, one serial chain. Round 1 declared four named agents for an `appetite: Small`
+change whose every task is `Parallel: false` and depends on the one before it — a roster
+that bought no concurrency and added three handoffs across one bash hunk, one small module,
+and one test file. The one split worth keeping is the validator, because the mutation check
+must be run by someone who did not write the guard.
+
 ### Team Members
 
-- **Builder (wrapper + plugin)**
-  - Name: `wrapper-builder`
-  - Role: The plugin module and the wrapper's guard — the entire behavior change.
+- **Builder**
+  - Name: `guard-builder`
+  - Role: the plugin module, the wrapper hunk, the test file, and the documentation.
   - Agent Type: builder
-  - Resume: true
-
-- **Builder (tests)**
-  - Name: `guard-test-builder`
-  - Role: `tests/unit/test_pytest_clean_zero_tests.py` and the mutation-check evidence.
-  - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
   - Name: `guard-validator`
-  - Role: Verifies the guard bites, on a real worktree as well as in a sandbox.
+  - Role: the mutation check and the real-worktree verification. Runs against the builder's
+    output without having written it.
   - Agent Type: validator
-  - Resume: true
-
-- **Documentarian**
-  - Name: `guard-documentarian`
-  - Role: The Documentation section's tasks.
-  - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
@@ -748,44 +778,71 @@ Not applicable — this repo publishes no external documentation site.
 - **Task ID**: build-plugin
 - **Depends On**: none
 - **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create)
-- **Informed By**: spike-2 (the three-state file protocol), spike-3 (controller is the sole writer)
-- **Assigned To**: wrapper-builder
+- **Informed By**: spike-2 (the file protocol), spike-3 and spike-4 (controller is the sole writer, aggregate under xdist), spike-4 (the counting rule)
+- **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add a repo-local pytest plugin module that reads its output path from an env var and does nothing when that var is unset.
-- `pytest_sessionstart`: write the `started` sentinel. Return early in workers (`hasattr(config, "workerinput")`).
-- `pytest_runtest_logreport`: count reports representing an executed outcome. Passed, failed, xfailed, xpassed and setup/teardown errors count; skipped and deselected do not.
-- `pytest_sessionfinish`: write `collectonly` when `config.option.collectonly` is set, otherwise the final count. Controller only.
-- Wrap the writes in a narrow `OSError` handler so an unwritable path degrades to today's behavior instead of failing the run.
-- Header comment per the Inline Documentation task.
+- Create `pytest_executed_count.py` at the **repo root** (not under `tools/` — see Settled Decisions).
+- Read the output path from `PYTEST_CLEAN_COUNT_FILE`; when it is unset, every hook returns
+  immediately so a bare `pytest` is untouched.
+- Return early in workers on `hasattr(config, "workerinput")` in every hook.
+- `pytest_sessionstart`: write the `started` sentinel.
+- `pytest_runtest_logreport`: count with the exact measured rule —
+  `report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail"))`,
+  or `report.when in ("setup", "teardown") and report.failed`. Do **not** simplify this to
+  `when == "call"` alone (counts body-skips) or to `outcome != "skipped"` (the round-1 defect).
+- `pytest_sessionfinish`: write `collectonly` when `config.option.collectonly` is set,
+  otherwise `count N`.
+- Wrap the writes in a narrow `OSError` handler so an unwritable path degrades to today's
+  behavior instead of failing the run.
+- Header comment per the Inline Documentation task, including the measured report-tuple
+  table from spike-4 so the rule is not "simplified" back into the bug.
 
 ### 2. Wrapper guard
 - **Task ID**: build-wrapper
 - **Depends On**: build-plugin
 - **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create), tests/unit/test_worktree_venv_absent_guard.py, tests/unit/test_interpreter_pin_guard.py
-- **Informed By**: spike-1 (only the all-skipped channel returns 0), spike-2 (no output capture)
-- **Assigned To**: wrapper-builder
+- **Informed By**: spike-1 (only the all-skipped channel returns 0), spike-2 (no output capture), spike-6 (the prototype)
+- **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Mint the count-file path with `mktemp`, export it, and remove it in the existing `cleanup` trap.
-- Prepend `-p <plugin>` ahead of `"$@"` so caller-supplied `-p` flags still apply.
-- After `wait "$PYTEST_PID"` and the existing reap, read the file and apply the three-state protocol: absent → pass through; `collectonly` → pass through; positive count → pass through; `count 0` → fail closed; sentinel-only, empty, or unparseable → fail closed.
-- Emit a stderr diagnostic distinguishable from the three existing refusals, naming the pool-exhaustion cause, `scripts/reap-xdist.sh --apply`, and the escape-hatch env var.
-- Honor the escape-hatch env var, defaulting to on, in the style of `PYTEST_STALL_LIMIT_S=0`.
-- Preserve the existing exit code on every pass-through path. Do not reorder or alter the preflight guards, the stall watcher, or the reaping.
+- After `export PYTHONPATH` (line 168) and before `"$PYTEST_BIN" "$@" &` (line 287):
+  mint `PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"` **unconditionally**,
+  export it, and add its removal to the existing `cleanup` trap.
+- Gate the injection on the module existing in the invoking checkout:
+  `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then set -- -p pytest_executed_count "$@"; fi`.
+  `$REPO_ROOT`, never `$SCRIPT_ROOT`. `set --`, never a string.
+- After `wait "$PYTEST_PID"` and the existing reap, read the file, delete it, and apply the
+  pass-through allowlist `case`: `""|collectonly` and `"count "[1-9]*` pass through;
+  everything else prints the diagnostic and exits 1 unless `PYTEST_ALLOW_ZERO_TESTS` is set.
+- The diagnostic goes to stderr, leads with `ZERO TESTS EXECUTED (#3195)`, and is printed
+  **whether or not** the hatch is set.
+- Preserve the existing exit code on every pass-through path. Do not reorder or alter the
+  preflight guards, the stall watcher, or the reaping.
 
 ### 3. Guard tests
 - **Task ID**: build-tests
 - **Depends On**: build-wrapper
 - **Validates**: tests/unit/test_pytest_clean_zero_tests.py (create)
-- **Informed By**: spike-1 (the measured exit-code table is the oracle)
-- **Assigned To**: guard-test-builder
-- **Agent Type**: test-engineer
+- **Informed By**: spike-5 (the harness), spike-6 (the expected behavior matrix)
+- **Assigned To**: guard-builder
+- **Agent Type**: builder
 - **Parallel**: false
-- Build sandbox rootdirs under `tmp_path` (a `pyproject.toml` with `[tool.pytest.ini_options]`, a `tests/` dir, a `.venv/bin/pytest`), following `tests/unit/test_worktree_venv_absent_guard.py`. Never point the wrapper at the repo's own `tests/` tree, and never claim a test-DB slot.
-- Cases: all-skipped → non-zero with the diagnostic; zero-collected → non-zero; at least one passing test → 0; a failing test → pytest's own non-zero; `--collect-only` → 0; `--version` → 0; escape hatch set → all-skipped returns 0; a caller's own `-p no:cacheprovider` still applies.
-- Failure-path cases from the Failure Path Test Strategy: unwritable count-file path, empty file, garbage file.
-- Pin the diagnostic's text, not only the exit code.
+- Build the sandbox rootdir exactly as the Failure Path Test Strategy specifies: own
+  `pyproject.toml`, `.git` as a **directory**, a **symlink** to the repo `.venv`, no
+  `.python-version`, and a **copy** of `pytest_executed_count.py`.
+- Run the **negative control first**: assert the resolved `pytest_executed_count.__file__`
+  is under `tmp_path`. Build every subprocess env from a copy of `os.environ` with
+  `PYTHONPATH` and `PYTEST_CLEAN_COUNT_FILE` removed.
+- Cases, with the spike-6 expectations: fixture-skip / body-skip / marker-skip → non-zero
+  with the diagnostic; zero-collected → non-zero; all passing → 0 with no diagnostic; a
+  failing test → pytest's own non-zero; `--collect-only` → 0; `--version` → 0; hatch set →
+  0 **and the message still printed**; a caller's `-p no:cacheprovider` still applies;
+  nested invocation leaves a pre-seeded outer file untouched; an unwritable count-file path
+  still completes and returns pytest's status.
+- A shell-level check of the pass-through allowlist over
+  `"" collectonly "count 0" "count 1" "count 10" started coun "  "`.
+- Pin the diagnostic's text and assert the other three refusal headlines are absent.
 
 ### 4. Validate the guard actually bites
 - **Task ID**: validate-guard
@@ -793,17 +850,26 @@ Not applicable — this repo publishes no external documentation site.
 - **Assigned To**: guard-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Mutation check: revert the wrapper's post-run check to a bare `exit "$PYTEST_EXIT"`, run the new tests, confirm **red**. Restore, confirm **green**. Capture both outputs verbatim for the PR.
-- Re-run `tests/unit/test_worktree_venv_absent_guard.py` and `tests/unit/test_interpreter_pin_guard.py` unmodified and confirm they pass.
-- Run `tests/unit/test_feature_map_markers.py` and confirm the new test file's marker resolution needs no `FEATURE_MAP` or `KNOWN_MISTAGS` entry.
-- Provision a real linked worktree with its own `.venv` and confirm the plugin loads and the guard fires there — the `tmp_path` sandbox does not prove `PYTHONPATH` resolution in a real worktree (Risk 3).
-- Run a normal targeted suite through the wrapper and confirm the exit code and terminal output are unchanged from today.
+- Mutation check: delete the wrapper's verdict block, run the new tests, confirm **red**.
+  Restore, confirm **green**. Capture both outputs verbatim, reading the **passed count off
+  the summary line**, not the exit code.
+- Re-run `tests/unit/test_worktree_venv_absent_guard.py` and
+  `tests/unit/test_interpreter_pin_guard.py` unmodified and confirm they pass.
+- Run `tests/unit/test_feature_map_markers.py` and confirm the new file needs no
+  `FEATURE_MAP` or `KNOWN_MISTAGS` entry.
+- Provision a real linked worktree with its own `uv sync --extra dev` venv and confirm the
+  plugin loads and the guard fires there — the sandbox does not prove `PYTHONPATH`
+  resolution in a real worktree (Risk 3).
+- Confirm the injection gate degrades safely: temporarily rename the plugin in a scratch
+  checkout and confirm the wrapper runs as it does today rather than aborting.
+- Run a normal targeted suite through the wrapper and confirm the exit code and terminal
+  output are unchanged from today.
 
 ### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-guard
-- **Assigned To**: guard-documentarian
-- **Agent Type**: documentarian
+- **Assigned To**: guard-builder
+- **Agent Type**: builder
 - **Parallel**: false
 - Execute every task in the Documentation section.
 
@@ -813,26 +879,37 @@ Not applicable — this repo publishes no external documentation site.
 - **Assigned To**: guard-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the Verification table.
+- Run the Verification table and record the **observed output** for every row, not the exit
+  code.
 - Confirm every Success Criteria checkbox, including the pasted mutation-check evidence.
 
 ## Verification
 
+Every row that could be satisfied by a run in which nothing executed asserts on **observed
+output** instead of exit status. That is not stylistic: this table is executed *by the
+wrapper under change*, so an exit-code-only table cannot detect its own bootstrap failure,
+and on this machine past ~5 concurrent agents a whole file legitimately skips. `TC` numbers
+below refer to the case names in `tests/unit/test_pytest_clean_zero_tests.py`.
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Guard tests pass | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q` | exit code 0 |
-| Wrapper refuses an all-skipped run | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k all_skipped` | exit code 0 |
-| Wrapper still passes a run that executed tests | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k executed` | exit code 0 |
-| Escape hatch disables the guard | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k escape_hatch` | exit code 0 |
-| Sibling wrapper guards still pass | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q` | exit code 0 |
-| Marker guard still passes | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q` | exit code 0 |
-| Wrapper unaffected by --version | `scripts/pytest-clean.sh --version` | exit code 0 |
-| Guard is wired into the wrapper | `grep -c PYTEST_EXECUTED scripts/pytest-clean.sh` | output > 2 |
+| Guard tests actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, and no `ZERO TESTS EXECUTED` |
+| Sibling wrapper guards actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 15 passed |
+| Marker guard actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` |
+| **Mutation check: the guard bites** | `cp scripts/pytest-clean.sh /tmp/pc.bak && python3 - <<'E'`<br>`import re,io;p='scripts/pytest-clean.sh';s=open(p).read();open(p,'w').write(s.replace(open('/tmp/verdict_block.txt').read(),''))`<br>`E`<br>`scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -3; cp /tmp/pc.bak scripts/pytest-clean.sh` | with the verdict block removed, output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is not wired to anything and the whole file is decoration. |
+| Zero-executed run is refused, end to end | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` |
+| Wrapper unaffected by `--version` | `scripts/pytest-clean.sh --version` | exit code 0 (the pass-through path *is* the assertion here — no session, so there is no summary line to read) |
+| Guard is wired, not merely mentioned | `grep -c 'PYTEST_CLEAN_COUNT_FILE' scripts/pytest-clean.sh` | output ≥ 3 |
+| Injection uses the arg-preserving form | `grep -c 'set -- -p pytest_executed_count' scripts/pytest-clean.sh` | output == 1 |
+| Injection is gated on the invoking checkout | `grep -c 'REPO_ROOT/pytest_executed_count.py' scripts/pytest-clean.sh` | output == 1 |
+| Injection gate does **not** use SCRIPT_ROOT (anti-criterion, #3033) | `grep -c 'SCRIPT_ROOT/pytest_executed_count' scripts/pytest-clean.sh` | match count == 0 |
+| Count file is never inherited (anti-criterion, Race 4) | `grep -cE 'PYTEST_CLEAN_COUNT_FILE:-' scripts/pytest-clean.sh` | match count == 0 |
+| Count file is not a fixed path (anti-criterion, Race 1) | `grep -cE 'PYTEST_CLEAN_COUNT_FILE=["'"'"']?/tmp/' scripts/pytest-clean.sh` | match count == 0 |
+| Output parsing was not introduced (anti-criterion, spike-2) | `grep -cE "tee " scripts/pytest-clean.sh` | match count == 0 (verified 0 on `main` today, so the pin is real rather than vacuous) |
+| Hatch suppresses the exit, not the message (anti-criterion, critique row 5) | `grep -c 'ZERO TESTS EXECUTED' scripts/pytest-clean.sh` | output ≥ 1, and it appears **before** the `PYTEST_ALLOW_ZERO_TESTS` test in the file: `awk '/ZERO TESTS EXECUTED/{z=NR} /PYTEST_ALLOW_ZERO_TESTS/{a=NR} END{print (z && a && z<a)}'` prints `1` |
+| conftest's `scratch_test_db` skip untouched (anti-criterion, No-Gos) | `git diff --quiet origin/main -- tests/conftest.py` | exit code 0 |
 | Feature doc exists | `test -f docs/features/pytest-clean-zero-test-guard.md` | exit code 0 |
 | Feature doc is indexed | `grep -c pytest-clean-zero-test-guard docs/features/README.md` | output > 0 |
-| Output parsing was not introduced (anti-criterion, spike-2) | `grep -cE "tee " scripts/pytest-clean.sh` | match count == 0 |
-| Count file is minted per run, not a fixed path (anti-criterion, Race 1) | `grep -c "COUNT_FILE=/tmp/" scripts/pytest-clean.sh` | match count == 0 |
-| conftest's scratch_test_db skip untouched (anti-criterion, No-Gos) | `git diff --quiet origin/main -- tests/conftest.py` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
