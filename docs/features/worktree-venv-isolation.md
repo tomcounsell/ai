@@ -237,7 +237,15 @@ line appended to `config/personas/engineer.md` in the worktree only:
 "STALE (32730 -> 32786)" after it; the same command on the primary checkout's
 own script stayed "current". `tests/unit/test_checkout_pin.py` pins the
 decision table and runs the two-checkout scenario in a real subprocess with
-the `.pth` present and absent.
+the `.pth` present and absent. The venv running that suite ships
+`_valor_checkout_pin.pth` itself (installed by the fleet-wide install path
+above), so the probe subprocess runs through an explicit bootstrap script
+under `-S -P` rather than a bare `[sys.executable, script]` invocation: the
+bootstrap's `argv[0]` sits outside any checkout, and that is what disarms
+the ambient pin during the child's `site` processing so the "without the
+pin" run stays a real negative control; `-S -P` are hermeticity against a
+future ambient shim that does not read `argv[0]`, not the mechanism that
+fixes this (#3201).
 
 ### Guard relaxation (#2050 coordination)
 
