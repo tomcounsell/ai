@@ -1044,7 +1044,10 @@ this weekend. Locate every symbol named below by name, never by the line numbers
 
 Run every row from the lane worktree. Greps use `/usr/bin/grep` explicitly: an interactive shell on
 this machine resolves `grep` to `ugrep`, which honors `.gitignore` and can disagree with the runner
-about what it searched.
+about what it searched. File lists are spelled out in full rather than held
+in a shell variable: the login shell here is zsh, which does not word-split an unquoted expansion,
+so `$FILES` arrives at grep as one nonexistent filename and the check exits 2 having searched
+nothing.
 
 | Check | Command | Expected |
 |-------|---------|----------|
@@ -1057,7 +1060,8 @@ about what it searched.
 | Pre-finalize guard present | `/usr/bin/grep -c 'synthetic-cleanup pre-finalize' agent/session_executor.py` | `> 0` |
 | Cleanup block is loud | `/usr/bin/grep -c 'cleanup blocked' agent/session_executor.py` | `> 0` |
 | Scheduler guard present | `/usr/bin/grep -c 'WORKTREES_DIR' tools/agent_session_scheduler.py` | `> 0` |
-| **Anti:** neither `slug` nor `working_dir` is assigned on a hydrated row in this plan's changed files | `/usr/bin/grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.(slug\|working_dir)[[:space:]]*=[^=]' agent/session_executor.py agent/worktree_manager.py tools/agent_session_scheduler.py \| wc -l` | `0` |
+| **Anti:** `slug` is never assigned on a hydrated row in this plan's changed files | `/usr/bin/grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.slug[[:space:]]*=[^=]' agent/session_executor.py agent/worktree_manager.py tools/agent_session_scheduler.py` | no output, exit code 1 |
+| **Anti:** `working_dir` is never assigned on a hydrated row in this plan's changed files | `/usr/bin/grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.working_dir[[:space:]]*=[^=]' agent/session_executor.py agent/worktree_manager.py tools/agent_session_scheduler.py` | no output, exit code 1 |
 | **Anti:** no `slug` arm in the busy scan | `/usr/bin/grep -cE 'getattr\(session, .slug.' agent/worktree_manager.py` | `0` |
 | **Anti:** no new lane field on the model | `/usr/bin/grep -c 'active_worktree_dir' models/agent_session.py` | `0` |
 | **Anti:** the session-phase hydration is unchanged (the resolver swap stayed out) | `/usr/bin/grep -c 'AgentSession.query.filter(project_key=session.project_key, status="running")' agent/session_executor.py` | `1` |
@@ -1075,7 +1079,8 @@ seeded violation; every structural row was confirmed at its expected value.
 | `synthetic-cleanup pre-finalize` | 0 | FAIL (expected `> 0`) |
 | `cleanup blocked` | 0 | FAIL (expected `> 0`) |
 | `WORKTREES_DIR` in scheduler | 0 | FAIL (expected `> 0`) |
-| anti: `.slug` / `.working_dir` assignment in changed files | 0 on main; **1** against a seeded `agent_session.working_dir = str(working_dir)`; **1** against a seeded `agent_session.slug = slug` | pattern bites in both directions |
+| anti: `.slug` assignment in changed files | no output / exit 1 on main; **matches `session_executor.py:2798`** against a seeded `agent_session.slug = slug` (exit 0) | pattern bites |
+| anti: `.working_dir` assignment in changed files | no output / exit 1 on main; **matches `session_executor.py:2799`** against a seeded `agent_session.working_dir = str(working_dir)` (exit 0) | pattern bites |
 | anti: `getattr(session, .slug.` | 0 on main; **1** against a seeded slug arm | pattern bites |
 | anti: `active_worktree_dir` | 0 on main; **1** against a seeded field declaration | pattern bites |
 | anti: session-phase hydration literal | **1** on main | already at its expected value; this row fails if the resolver swap is reintroduced |
