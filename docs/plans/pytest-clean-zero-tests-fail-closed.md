@@ -880,7 +880,10 @@ that exit code. That is precisely why the fix belongs in the wrapper.
       report-tuple table from spike-4 (the single most re-derivable thing in this change),
       why output parsing was rejected (#2574 stall watcher), what `PYTEST_ALLOW_ZERO_TESTS`
       does and does not suppress, and the measured exit-code table from spike-1 so the next
-      reader does not have to re-derive which channels already fail closed.
+      reader does not have to re-derive which channels already fail closed. It must also
+      state that the guard **only converts a green into a red** — the `PYTEST_EXIT -eq 0`
+      gate and the spike-8 table (all-skip 0, collection error 2, zero-collected 5) — so
+      nobody later "fixes" the gate away and starts rewriting already-red runs.
 - [ ] Add a row to the `docs/features/README.md` index table.
 - [ ] Update `docs/features/test-concurrency-coordination.md` — it is the standing home for
       the pool/claim story and must now say that a pool-exhausted run fails closed at the
@@ -895,7 +898,10 @@ Not applicable — this repo publishes no external documentation site.
       with a plain instruction not to simplify the counting rule.
 - [ ] Block comment in `scripts/pytest-clean.sh` above the guard, matching the house style
       of the #3033 and #2574 guards: the failure it prevents, the measured evidence, and
-      the issue number.
+      the issue number. It must say why `verdict_passes_through` is a named function rather
+      than an inline `case` (the tests slice its body out of the script under test) and why
+      the `BEGIN`/`END` markers exist (they are the mutation seam), so neither survives a
+      later tidy-up as apparent noise.
 - [ ] `CLAUDE.md`'s "Non-obvious behavior" bullet on `scripts/pytest-clean.sh` gains the
       zero-executed refusal alongside the existing off-pin and worktree-venv aborts.
 
