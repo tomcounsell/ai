@@ -256,7 +256,7 @@ with a symlinked repo `.venv`, claiming no test-DB slot.
   | all marker-skip | **1** | `2 skipped`, then the diagnostic |
   | all passing | **0** | `2 passed`, no diagnostic |
   | mixed with a real failure | **1** | `1 failed, 1 passed, ...` — pytest's own status, unchanged |
-  | zero collected | **1** | `no tests ran` (pytest's own 5 → the guard also fires; both non-zero) |
+  | zero collected | **5** | `no tests ran` — pytest's own status, **unchanged**. The round-2 `PYTEST_EXIT` gate keeps this channel's own exit code instead of rewriting it to 1 (see spike-8). |
   | `--collect-only` | **0** | verdict file reads `collectonly` |
   | `--version` | **0** | no verdict file at all |
   | escape hatch set, all fixture-skip | **0** | diagnostic **still printed** |
@@ -266,6 +266,80 @@ with a symlinked repo `.venv`, claiming no test-DB slot.
 - **Confidence**: high — every row was run.
 - **Impact on plan**: turns the Verification table from exit-code assertions into observed-output
   assertions with known-good expectations, and supplies the mutation-check row.
+
+### Revision measurements (critique round 2)
+
+Round 2 found one blocker and three concerns, all of them about whether the *checks* in
+this plan can fail. These three runs close them. Every row below was executed on
+2026-09-07 against `main` at `afc867bd4`'s parent, in sandbox rootdirs under
+`/private/tmp` with a symlinked repo `.venv`, claiming no test-DB slot.
+
+#### spike-7: Where must the mutated wrapper copy live for the mutation check to mean anything?
+
+- **Assumption**: "`PYTEST_CLEAN_SCRIPT=/tmp/pc-mutated.sh` runs the same session the real wrapper runs"
+- **Method**: prototype — an **unmutated** copy of `scripts/pytest-clean.sh` at two layouts, driven against an all-fixture-skip sandbox
+- **Finding**: **The flat copy never reaches pytest; the sibling layout does.**
+
+  | Copy location | Resolved `SCRIPT_ROOT` | Observed |
+  |---|---|---|
+  | `<tmpdir>/pc-mutated.sh` (flat) | `<tmpdir>`'s parent | `line 195: /private/tmp/scripts/check-interpreter-pin.sh: No such file or directory` then `pytest-clean: refusing to run against an off-pin interpreter.` — **pytest never started** |
+  | `<tmpdir>/scripts/pytest-clean.sh` with `check-interpreter-pin.sh` copied alongside | `<tmpdir>` | a genuine `2 skipped in 0.00s` — a real session |
+
+  The flat copy is the round-1 shape the Verification table carried. Under it every test in
+  the new file goes red because the wrapper aborted at line 195, not because the deleted
+  verdict block changed anything: the mutation check would report "the guard bites" no
+  matter what the builder wrote. That is the same false-confirmation this whole issue is about,
+  reproduced inside the check meant to prevent it.
+
+- **Confidence**: high — both layouts were run and their output read back.
+- **Impact on plan**: pins the mutation harness to the sibling layout in Settled Decisions,
+  task 4 and the Verification table, and makes the **all-passing control leg** mandatory —
+  a copy that is broken in any other way also produces red, so red alone is not evidence.
+
+#### spike-8: Does the guard fire on runs that already failed for an unrelated reason?
+
+- **Assumption**: "a `count 0` verdict always means the run proved nothing"
+- **Method**: prototype — three sandbox rootdirs driven through the real wrapper, exit codes read directly
+- **Finding**: **`count 0` is produced by three channels with three different meanings.**
+
+  | Channel | pytest exit today | What the count file would say | Ungated guard | Gated on `PYTEST_EXIT -eq 0` |
+  |---|---|---|---|---|
+  | all fixture-skip (the production trigger) | **0** | `count 0` | fires → 1 | **fires → 1** ✅ the target |
+  | collection error (`1 error during collection`) | **2** | `count 0` | rewrites 2 → 1 and prints a pool-exhaustion headline over a syntax error | **passes through → 2** ✅ |
+  | zero collected (`no tests ran`) | **5** | `count 0` | rewrites 5 → 1 | **passes through → 5** ✅ pin preserved |
+  | wedge (`watch_for_stall` kills the controller, `scripts/pytest-clean.sh:277-279` returns) | non-zero | `started` or truncated | prints a second, contradictory headline under the `WEDGED` banner | **passes through** ✅ one headline |
+
+- **Confidence**: high — the three exit codes were measured directly (0, 2, 5).
+- **Impact on plan**: the verdict block is gated on `[ "$PYTEST_EXIT" -eq 0 ]`. This is what
+  makes the Problem section's "pass-through behavior for every other case is unchanged"
+  literally true, keeps the Success Criteria zero-collection pin at its measured 5, and
+  leaves a wedged or collection-errored run with exactly one diagnostic. Nothing is lost:
+  the channel the guard exists for is the one that exits **0**.
+
+#### spike-9: Can a test exercise the wrapper's real pass-through predicate?
+
+- **Assumption**: "a bash loop over the verdict strings tests the wrapper's `case`"
+- **Method**: prototype — a script carrying `verdict_passes_through()` inside the seam, sliced out and driven; then the same script with the seam deleted
+- **Finding**: **A retyped `case` proves nothing, the function slice works, and the critique's
+  own suggested `source <(...)` form is itself a false pass on this machine.**
+  - A loop that retypes the patterns in the test file passes identically whether the wrapper's
+    `case` is present or deleted. It tests the test.
+  - Slicing the function body out of the script under test and sourcing it drives the real
+    predicate. Measured verdicts: `""` and `collectonly` and `count 1` and `count 10` pass
+    through; `count 0`, `started`, `coun`, `"  "` and `count -1` fail closed. Exactly the
+    allowlist.
+  - **`source <(sed -n ... "$SCRIPT")` silently defines nothing under `/bin/bash` 3.2.57 on
+    macOS.** `source` returns 0, and `verdict_passes_through` is then `command not found`.
+    Written that way the check would pass vacuously on every input — the same defect class in
+    a new place. The working form writes the slice to a `mktemp` file, sources **that**, and
+    asserts both that the slice is non-empty and that `declare -f verdict_passes_through`
+    succeeds before running a single verdict.
+  - With the seam deleted the slice comes back empty and the check exits 3 (`SEAM_ABSENT`)
+    rather than reporting nine passes over an empty source.
+- **Confidence**: high — all three shapes were run, including the failing one.
+- **Impact on plan**: names the predicate as a function inside the seam, replaces the
+  "source it, or a bash loop" bullet with the measured slice-and-guard procedure, and adds
+  the empty-slice refusal so the predicate check is itself mutation-detectable.
 
 
 ## Settled Decisions
