@@ -122,13 +122,15 @@ The loop is nonetheless closed for the deletions this plan makes: the archived s
 
 **Size:** Small
 
-**Team:** Solo dev, code reviewer
+**Team:** One builder, one mutation validator. Critique round 1 was right that five named roles is a Medium-appetite roster on a Small-appetite change, and that a three-way builder split existed only to enforce a file-ownership rule that a single builder makes moot. Collapsed to two.
+
+The one split that stays is builder / validator, and it is not organisational: a builder mutation-checking its own tests is precisely the #3173 failure this plan exists to avoid. The validator also needs sole ownership of its checkout while it mutates, so it runs after the builder's work is committed, never concurrently with author edits.
 
 **Interactions:**
 - PM check-ins: 0 (the classification rule is already settled by #3173; nothing here needs a scope call)
 - Review rounds: 1
 
-The coding is an hour. The review is the expensive part, because a reviewer has to independently confirm the input source of each of the five deleted guards, and confirm that each new test actually reaches the line it claims to cover.
+The coding is an hour. The review is the expensive part, because a reviewer has to independently confirm the input source of each of the four deleted guards, and confirm that each new test actually reaches the line it claims to cover.
 
 ## Prerequisites
 
@@ -229,7 +231,8 @@ The build re-runs these three as Verification rows so the audit is a checked cla
 ### Exception Handling Coverage
 - [ ] `reflections/crash_recovery.py:191-198` wraps the guard in `except Exception` and logs a warning naming the bad `updated_at`. Removing the guard must not remove that handler; add an assertion that a genuinely bad value still produces the warning and the session is skipped rather than crashing the reflection.
 - [ ] `reflections/audits/redis_quality_audit.py` runs entirely inside one `try` whose `except` appends the error as a finding and keeps `status: "ok"`. The dead-branch removal must keep that shape; assert the audit still returns `status == "ok"` with the branch gone.
-- [ ] `models/agent_session.py::log_lifecycle_transition` has no handler around the deleted line; a naive value would propagate a `TypeError` to the caller. That is exactly the signal the new test watches for.
+- [ ] `models/agent_session.py:1085-1108` (`_heal_future_updated_at`) wraps its **per-record** body in `except Exception` and continues to the next record. The failure mode of a wrong deletion here is therefore a silent skip of exactly the corrupted rows the healer exists to repair — the #1645 failure class. The new test must assert the **returned heal count**, never "did not raise".
+- [ ] `models/agent_session.py::log_lifecycle_transition` is no longer a delete site; its guard stays and needs no new failure-path coverage.
 - [ ] `bridge/poll_reconcile.py:249-255` and `bridge/telegram_bridge.py:351-353` keep their broad handlers unchanged — they are keep-sites, untouched.
 
 ### Empty/Invalid Input Handling
@@ -244,32 +247,42 @@ The build re-runs these three as Verification rows so the audit is a checked cla
 
 ## Test Impact
 
-- [ ] `tests/integration/test_updated_at_heal.py` — UPDATE: it is the closest existing coverage of `_heal_future_updated_at`. Confirm it round-trips through popoto rather than constructing in memory; if it constructs in memory, that is the vacuous shape and it gets rewritten, not extended.
+- [ ] `tests/integration/test_updated_at_heal.py` — UPDATE: it is the closest existing coverage of `_heal_future_updated_at`. Confirm it round-trips through popoto rather than constructing in memory; if it constructs in memory, that is the vacuous shape and it gets rewritten, not extended. Its assertions must key on the returned heal count.
 - [ ] `tests/unit/test_agent_session_updated_at_utc.py` — UPDATE: re-anchor its assertions on the aware-decode contract, and drop any assertion that depends on the deleted naive branch.
 - [ ] `tests/unit/test_session_health_trusted_clock.py` — UPDATE: it references `_heal_future_updated_at`; verify it is unaffected and, if it asserts naive handling, re-anchor it.
 - [ ] `tests/unit/reflections/test_daily_log_aggregator.py` — UPDATE: add the reaching test for `_collect_sessions` here rather than in a new file; it already owns this collector.
 - [ ] `tests/unit/test_crash_recovery_gates.py` — UPDATE: add the reaching test for the resumable-session filter here.
 - [ ] `tests/unit/test_reflection_pool_bulkhead.py` — UPDATE: it is the only test naming `redis_quality_audit`; add the `Chat.updated_at` float round-trip assertion alongside it, or in a new `tests/unit/reflections/test_redis_quality_audit.py` if the bulkhead test's fixtures do not fit.
-- [ ] `tests/integration/test_lifecycle_transition.py` — UPDATE: add the reaching test for `log_lifecycle_transition`'s duration math here; it already exercises the transition path end to end.
-- [ ] The nineteen other files that merely call `log_lifecycle_transition` incidentally need no change — the deletion is behaviour-preserving for every aware input, which is all of them.
+- [ ] `tests/integration/test_lifecycle_transition.py` — NO CHANGE: `models/agent_session.py:2225` is now a keep, so `log_lifecycle_transition`'s duration math is untouched and needs no new test.
+- [ ] `tests/unit/test_session_archive.py::test_restore_preserves_a_real_datetime_byte_identically` — NO CHANGE HERE, flagged only: this is the #3207 node, and it is owned by the #3199 lane. This plan does not touch `agent/session_archive.py` or its tests; it reads the restore path as evidence and records the finding.
+- [ ] The other files that merely call `log_lifecycle_transition` incidentally need no change — nothing in that function moves.
 
 ## Rabbit Holes
 
-- **Rewriting the sweep regex into something rigorous.** It already under-counts by one shape and skips two directories; the temptation is to build a proper AST-based finder. Do not. Run both shapes as two grep lines and move on — a one-off classification does not earn a tool.
-- **Migrating the sixteen keeps onto `utils.utc.to_unix_ts`.** The issue's instruction to "route the bare one-liners through the general-purpose coercer" reads like it applies here. It mostly does not: `to_unix_ts` returns a `float`, while ten of the keeps need an aware `datetime` for subtraction, and `docs/features/utc-timestamps.md:87` records a deliberate decision to leave three older inline helpers alone. Consolidation is a real idea and a separate one.
+- **Rewriting the sweep regex into something rigorous.** It already under-counts by one shape and skips two directories; the temptation is to build a proper AST-based finder. Do not. Run both shapes as two `/usr/bin/grep` lines and move on — a one-off classification does not earn a tool.
+- **Migrating the keeps onto `utils.utc.to_unix_ts`.** See No-Gos for the argument; it is rejected there, not deferred here.
 - **Backfilling a naive-write regression test into popoto.** The "post-#521 naive write round-trips naive" hazard is real, but it is a property of the library, and `~/src/popoto` is a different repo with its own pipeline. Record it as a risk, do not chase it.
-- **Auditing every remaining `datetime` comparison in the repo.** The scope is the guard shape the sweep matches, not tz-correctness in general.
+- **Settling the archive-restore datetime contract.** The `_deserialize_payload` → `__dict__.update` ingress this plan documents is real and is #3207's second suggested next step. It belongs to whoever owns `agent/session_archive.py`, which is the #3199 lane. Record the finding in the PR body; do not change the archive here.
+- **Auditing every remaining `datetime` comparison in the repo.** The scope is the guard shape the two sweeps match, plus the named #3207 consumer classes — not tz-correctness in general.
 - **Touching `agent/session_health.py` or `agent/session_pickup.py`.** #3173 settled those six sites. Re-litigating them burns review time and produces no diff.
 
 ## Risks
 
 ### Risk 1: A deletion is wrong because some writer stores a naive datetime
-**Impact:** The naive value survives the round-trip (popoto only re-attaches UTC for the pre-#521 stored shape, never for a post-#521 naive `isoformat()`), reaches a comparison against `datetime.now(UTC)`, and raises `TypeError`. In four of the five sites that exception is swallowed by a surrounding handler, so the visible symptom is a reflection or healer that silently does nothing — the exact failure class that made #1653 take months to notice.
-**Mitigation:** The writer audit is a prerequisite, not a review item. All fifteen assignment sites for `updated_at` / `started_at` / `completed_at` were enumerated and every one is aware or a float that `AgentSession.__setattr__` converts. The build re-runs that enumeration as a Verification row so the claim is checked mechanically, not remembered.
+**Impact:** The naive value survives the round-trip (popoto only re-attaches UTC for the pre-#521 stored shape, never for a post-#521 naive `isoformat()`), reaches a comparison against `datetime.now(UTC)`, and raises `TypeError`. In three of the four deletion sites that exception is swallowed by a surrounding handler, so the visible symptom is a reflection or healer that silently does nothing — the exact failure class that made #1653 take months to notice.
+**Mitigation:** The writer audit is a prerequisite, not a review item, and critique round 1 established that it must cover **three** ingress shapes, not just one:
+
+1. *Attribute assignment* (`session.updated_at = X`) — covered by `__setattr__` for every field in `_DATETIME_FIELDS`; **not** covered for `created_at`.
+2. *Constructor kwargs* — popoto's `Model.__init__` does `self.__dict__.update(kwargs)`, so `__setattr__` never fires. `_normalize_kwargs` is the whole coercion and it converts only `int | float`. Measured at `4b5a13184`: five `AgentSession(...)` / `async_create(...)` construction sites outside tests (`agent/agent_session_queue.py:374`, `models/agent_session.py:1833`, `:1922`, `:1972`, plus `agent/session_archive.py:449`), and every one that names `created_at` passes `datetime.now(tz=UTC)`. Zero `.created_at =` assignments exist anywhere in the nine directories plus `scripts/`.
+3. *The archive-restore leg* — `agent/session_archive.py:441-449` passes `datetime.fromisoformat(...)` output as constructor kwargs with no offset stamping, and `save(preserve_updated_at=isinstance(ts, datetime))` writes it verbatim. It can only preserve naiveness, never manufacture it, because the archived string is `.isoformat()` of a value that was itself aware. The loop is closed only as long as legs 1 and 2 hold.
+
+The build re-runs the leg-1 and leg-2 enumerations as Verification rows so the claim is checked mechanically, not remembered. `models/agent_session.py:2225` is a keep precisely because leg 1 does not cover `created_at`.
 
 ### Risk 2: The new tests are vacuous
-**Impact:** The deletions ship unverified and the plan's central deliverable — evidence, not just a diff — is not delivered. This is not hypothetical: #3173's review caught exactly this.
-**Mitigation:** Every test builds its fixture by writing through popoto and reading back, and every test is mutation-checked by forcing a naive value into the fixture and confirming it goes red. The red output goes in the PR body.
+**Impact:** The deletions ship unverified and the plan's central deliverable — evidence, not just a diff — is not delivered. This is not hypothetical: #3173's review caught exactly this. On a deletion-heavy change the specific shape is a test that no longer *reaches* the deleted code and passes for that reason.
+**Mitigation:** Every test builds its fixture by writing through popoto and reading back, asserts on an observable result rather than absence of a raise, and is mutation-checked **individually**, re-measuring after each mutation. The red output for each of the four goes in the PR body, one block per test.
+
+A second shape of false green is a run in which no test executed at all. `scripts/pytest-clean.sh` currently exits 0 when zero tests ran (#3195), so every test run in this lane reads the **passed count off the pytest summary line**. "0 passed" is a failed verification, not a pass.
 
 ### Risk 3: `POPOTO_DATETIME_KEY_LEGACY` gets set on some machine later
 **Impact:** Legacy rows start decoding naive again and every deleted guard becomes load-bearing at once, on whichever machine set it.
@@ -277,7 +290,11 @@ The build re-runs these three as Verification rows so the audit is a checked cla
 
 ### Risk 4: File-level collision with the open #3199 lane
 **Impact:** Both lanes write `models/agent_session.py`; the second to land hits a rebase.
-**Mitigation:** The regions are disjoint (`:1092` / `:2225` here, `~:2476-2528` there). Whoever lands second rebases; no coordination beyond that is warranted.
+**Mitigation:** The regions are disjoint (`:1089-1093`, `:2225`, `:2569` here; `~:2476-2528` there). Whoever lands second rebases; no coordination beyond that is warranted.
+
+### Risk 5: A parallel lane's test run is mistaken for this lane's
+**Impact:** Six lanes run here at once sharing a 15-slot Redis test-DB pool. A full-suite run from this lane starves the others and produces failures nobody can attribute.
+**Mitigation:** **Scoped node ids only, never the full suite.** Run only the node ids covering the touched sites, through `scripts/pytest-clean.sh` (never bare `pytest`), in small batches. Every Verification row in this plan names node ids rather than a directory.
 
 ## Race Conditions
 
