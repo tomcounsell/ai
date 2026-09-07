@@ -20,8 +20,9 @@ The plugin no-ops entirely when PYTEST_CLEAN_COUNT_FILE is unset, so a bare
 
 Verdict values written to the file at pytest_sessionfinish:
     "collectonly"   -- the session ran in an introspection-only mode
-                       (--collect-only, --setup-plan, --setup-only, or
-                       --fixtures); no tests could execute by design
+                       (--collect-only, --setup-plan, --setup-only,
+                       --fixtures, --fixtures-per-test, or --cache-show);
+                       no tests could execute by design
     "count N"       -- N is the number of reports counted as "executed"
     "started"       -- pytest_sessionstart ran but pytest_sessionfinish never
                        did (e.g. the wrapper's #2574 wedge watcher killed the
@@ -115,25 +116,41 @@ def pytest_runtest_logreport(report):
 def pytest_sessionfinish(session, exitstatus):
     if not _COUNT_FILE or _in_worker:
         return
-    # #3222 review blocker: --collect-only is only one of four modes that
-    # legitimately run a session while executing nothing by design.
-    # --setup-plan, --setup-only and --fixtures all produce zero `call`
-    # reports and exit 0 through bare pytest, so without the other three
-    # attributes here the wrapper converts a healthy introspection command
-    # into a false "ZERO TESTS EXECUTED" / test-DB-pool-exhaustion failure.
-    # Verified directly against this venv's pytest: a normal run reports
-    # collectonly=False, setupplan=False, setuponly=False, showfixtures=False;
-    # --setup-plan sets setupplan=True and setuponly=True; --setup-only sets
-    # only setuponly=True; --fixtures sets only showfixtures=True. All three
-    # attributes exist on config.option at sessionfinish, but getattr with a
-    # default keeps this safe against a future pytest that renames or drops
-    # one of them.
+    # --collect-only is only one of six modes that legitimately run a
+    # session while executing nothing by design. Derivation (re-run this
+    # whenever pytest is bumped): the complete set is exactly the flags
+    # whose pytest_cmdline_main hands off to _pytest.main.wrap_session --
+    # four call sites on pytest 9.0.3 (`_pytest/main.py` -> `_main`,
+    # `_pytest/fixtures.py` -> `_showfixtures_main` and
+    # `_show_fixtures_per_test`, `_pytest/cacheprovider.py` -> `cacheshow`),
+    # covering six flags/dests: --collect-only (collectonly), --setup-plan
+    # (setupplan, which also flips setuponly), --setup-only (setuponly,
+    # which also flips setupshow -- see the note below), --fixtures
+    # (showfixtures), --fixtures-per-test (show_fixtures_per_test), and
+    # --cache-show (cacheshow). --setup-show (setupshow) is deliberately
+    # NOT in this set: it runs the call phase like a normal session, so
+    # excluding it is correct, not an omission.
+    #
+    # Without all six attributes here the wrapper converts a healthy
+    # introspection command into a false "ZERO TESTS EXECUTED" /
+    # test-DB-pool-exhaustion failure -- measured directly against this
+    # venv's pytest for each flag (see docs/features/pytest-clean-zero-test-
+    # guard.md for the full table). All six attributes exist on
+    # config.option at sessionfinish, but getattr with a default keeps this
+    # safe against a future pytest that renames or drops one of them.
+    # (Deliberately not spelling out each dest=False pairing as a literal
+    # list here -- the wasxfail note above explains why: this comment would
+    # survive a mutation that deletes the introspection_only expression, and
+    # a drift grep for those names would misreport the mutant as still
+    # carrying the clause.)
     option = session.config.option
     introspection_only = (
         option.collectonly
         or getattr(option, "setupplan", False)
         or getattr(option, "setuponly", False)
         or getattr(option, "showfixtures", False)
+        or getattr(option, "show_fixtures_per_test", False)
+        or getattr(option, "cacheshow", False)
     )
     if introspection_only:
         _write("collectonly")

@@ -114,6 +114,28 @@ def test_one():
 # A deliberate syntax error -- pytest cannot even collect this file.
 COLLECTION_ERROR = "def test_bad(:\n    pass\n"
 
+# Two genuine xfails (both fail as expected: call/skipped/wasxfail=True,
+# spike-4). Deliberately NOT mixed with an xpass: an xpass reports
+# call/passed/wasxfail=True, and "passed" already satisfies the counting
+# rule's `outcome != "skipped"` branch on its own -- a mixed rootdir would
+# still count the xpass with the wasxfail clause deleted and the mutation
+# would not bite. Only an all-xfail (no xpass) rootdir isolates the clause:
+# every report is call/skipped, so counting depends entirely on `wasxfail`
+# being checked.
+ALL_XFAIL = """
+import pytest
+
+
+@pytest.mark.xfail(reason="known failure")
+def test_expected_fail_one():
+    assert False
+
+
+@pytest.mark.xfail(reason="known failure")
+def test_expected_fail_two():
+    assert False
+"""
+
 
 def _base_env() -> dict:
     """A copy of the ambient environment with PYTHONPATH,
@@ -268,6 +290,16 @@ class TestNegativeControl:
         own import machinery finds first (e.g. an editable-install `.pth`
         entry for a different checkout), never the sandbox's marked copy --
         so the marker must NOT appear.
+
+        #3222 review nit: this control used to assert only "no marker",
+        which passes identically whether -p resolved to a *different* copy
+        (what it documents -- exit 0, 1 passed, silently the wrong module)
+        or died with ImportError (round 1's linked-worktree symptom, a
+        completely different failure). Measured directly on this machine:
+        the real repo-root pytest_executed_count.py is what an editable
+        install's `.pth` entry surfaces here, so the run succeeds with
+        `1 passed` -- pinning returncode == 0 is what makes this test able
+        to tell the two states apart.
         """
         root = _sandbox(tmp_path)
         _append_marker(root)
@@ -282,6 +314,8 @@ class TestNegativeControl:
             text=True,
             timeout=30,
         )
+        assert result.returncode == 0, result.stderr
+        assert "1 passed" in result.stdout, result.stdout
         assert not _marker_lines(result.stderr), (
             "the sandbox's marked plugin copy loaded via -p without PYTHONPATH set -- "
             "this control is supposed to prove that does NOT happen"
@@ -381,10 +415,55 @@ class TestPassThroughPathsAreUnaffected:
         assert result.returncode == 0, result.stdout
         assert ZERO_TESTS_HEADLINE not in result.stderr
 
+    def test_fixtures_per_test_exits_zero(self, tmp_path):
+        """#3222 review round 2 blocker: --fixtures-per-test (dest
+        show_fixtures_per_test) is a fourth call site (_pytest/fixtures.py's
+        _show_fixtures_per_test) that wrap_session runs while executing zero
+        `call` reports, same shape as --fixtures. Before this fix it reverted
+        to exit 1 with a false pool-exhaustion diagnostic."""
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "--fixtures-per-test", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
+    def test_cache_show_exits_zero(self, tmp_path):
+        """#3222 review round 2 blocker: --cache-show (dest cacheshow) is the
+        fourth wrap_session call site (_pytest/cacheprovider.py's cacheshow),
+        distinct from the test-execution flags entirely -- it just prints
+        cache contents. Before this fix it reverted to exit 1 with a false
+        pool-exhaustion diagnostic."""
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", PASSING)
+        result = _run(root, ["test_x.py", "--cache-show", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+
     def test_version_exits_zero(self, tmp_path):
         root = _sandbox(tmp_path)
         result = _run(root, ["--version"])
         assert result.returncode == 0, result.stdout
+
+
+class TestXfailCountsAsExecuted:
+    """#3222 review tech debt: pytest_executed_count.py:110's `wasxfail`
+    clause shipped with zero behavioral cover -- no rootdir in this file
+    produced an xfail report, so deleting the clause left the full file
+    green (mutation-measured: `27 passed`). An xfail reports
+    call/skipped/wasxfail=True (spike-4): `outcome != "skipped"` is False,
+    so without the `wasxfail` check every xfail is miscounted as
+    not-executed. An all-xfail selection (this rootdir) would undercount to
+    `count 0` and trip a false ZERO TESTS EXECUTED on a run that was
+    actually informative.
+    """
+
+    def test_all_xfail_exits_zero_no_diagnostic(self, tmp_path):
+        root = _sandbox(tmp_path)
+        _write(root, "test_x.py", ALL_XFAIL)
+        result = _run(root, ["test_x.py", "-q"])
+        assert result.returncode == 0, result.stdout
+        assert ZERO_TESTS_HEADLINE not in result.stderr
+        assert "2 xfailed" in result.stdout
 
 
 class TestEscapeHatchSuppressesExitNotMessage:
@@ -432,6 +511,31 @@ class TestCountFileIsNeverInherited:
         env["PYTEST_CLEAN_COUNT_FILE"] = str(outer_file)
         result = _run(root, ["test_x.py", "-q"], env=env)
         assert result.returncode == 0, result.stdout
+        assert outer_file.read_text() == "count 7"
+
+    def test_early_abort_before_the_mint_leaves_an_inherited_count_file_untouched(self, tmp_path):
+        """#3222 review tech debt: scripts/pytest-clean.sh:112's
+        COUNT_FILE_MINTED tracker shipped with zero cover for the path it was
+        added to fix. The count file is minted well AFTER the #3033
+        worktree-venv guard, so a linked worktree with no usable `.venv`
+        aborts before COUNT_FILE_MINTED is ever assigned -- if cleanup()
+        reverted to `rm -f "$PYTEST_CLEAN_COUNT_FILE"` it would delete
+        whatever an ENCLOSING wrapper invocation already exported there,
+        since that env var is inherited from the caller's environment before
+        the mint site runs. Same shape as the nested-invocation case above,
+        but for the abort-before-mint path rather than the success path.
+        """
+        root = tmp_path / "no_venv_worktree"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = ''\n")
+        (root / ".git").write_text("gitdir: /somewhere/.git/worktrees/x\n")
+        outer_file = tmp_path / "outer-count-file"
+        outer_file.write_text("count 7")
+        env = _base_env()
+        env["PYTEST_CLEAN_COUNT_FILE"] = str(outer_file)
+        result = _run(root, ["--version"], env=env)
+        assert result.returncode != 0, result.stdout
+        assert "worktree has no usable .venv of its own" in result.stderr
         assert outer_file.read_text() == "count 7"
 
 
@@ -487,6 +591,16 @@ class TestPluginFailsOpenOnAnUnwritableCountFile:
 
 class TestDiagnosticIsDistinctFromTheOtherGuards:
     def test_diagnostic_headline_names_cause_remedy_and_hatch(self, tmp_path):
+        # #3222 review nit, deliberately not fixed: `_base_env()` sets
+        # PYTEST_STALL_LIMIT_S=0 for every subprocess in this file, so the
+        # #2574 wedge watcher subshell never starts and "WEDGED" is
+        # unreachable in the assertion loop below by construction, not
+        # because this diagnostic is distinct from it. Restoring the
+        # watcher's production default here would reintroduce the ~30s
+        # per-call tax _base_env() exists to remove, for a headline this
+        # file's other assertions already prove is unique text. Left as-is;
+        # the WEDGED headline itself has no dedicated regression test
+        # anywhere in this suite.
         root = _sandbox(tmp_path)
         _write(root, "test_x.py", FIXTURE_SKIP)
         result = _run(root, ["test_x.py", "-q"])

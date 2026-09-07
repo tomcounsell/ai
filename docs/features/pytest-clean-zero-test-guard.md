@@ -59,7 +59,7 @@ states:
 ```bash
 verdict_passes_through() {
     case "$1" in
-        ""|collectonly)  return 0 ;;   # no session ran, or a collect-only run
+        ""|collectonly)  return 0 ;;   # no session ran, or an introspection-only run
         "count "[1-9]*)  return 0 ;;   # at least one test executed
         *)               return 1 ;;   # count 0, started, truncated, garbage
     esac
@@ -88,6 +88,51 @@ Two shapes here are deliberate and both are pinned by tests:
   slice run to EOF, swallow `exit "$PYTEST_EXIT"`, and die under `set -u` on
   `PYTEST_EXIT: unbound variable` before the test's own refusals can fire. The
   test refuses with `SLICE_OVERRUN` if that ever happens.
+
+## The introspection-only family
+
+`--collect-only` is only one of six pytest modes that run a real session,
+execute zero `call` reports by design, and exit 0 through bare pytest. Without
+special-casing all six, the wrapper converts a healthy introspection command
+into a false `ZERO TESTS EXECUTED (#3195)` / test-DB-pool-exhaustion failure —
+exactly what happened to `--fixtures-per-test` and `--cache-show` in round 2
+of #3222's review, the residue of round 1's fix that named only four.
+
+**Derivation, re-run whenever pytest is bumped:** the complete set is exactly
+the flags whose `pytest_cmdline_main` hands off to `_pytest.main.wrap_session`
+instead of the normal test-collection-and-run path. On pytest 9.0.3 that is
+four call sites, covering six flags:
+
+| Call site | Flag(s) | `config.option` dest(s) |
+|---|---|---|
+| `_pytest/main.py:365` (`pytest_cmdline_main` → `_main`) | `--collect-only`, `--setup-plan`, `--setup-only` | `collectonly`, `setupplan` (also flips `setuponly`), `setuponly` (also flips `setupshow`) |
+| `_pytest/fixtures.py:1985` (`showfixtures` → `_showfixtures_main`) | `--fixtures` | `showfixtures` |
+| `_pytest/fixtures.py:1914` (`show_fixtures_per_test` → `_show_fixtures_per_test`) | `--fixtures-per-test` | `show_fixtures_per_test` |
+| `_pytest/cacheprovider.py:547` (`cacheshow`) | `--cache-show` | `cacheshow` |
+
+`--setup-show` (dest `setupshow`) is deliberately **excluded**: `--setup-only`
+and `--setup-plan` both flip it as a side effect, but flying solo it runs the
+call phase like a normal session (`runner.py`: the call phase is skipped only
+`if not item.config.getoption("setuponly")`) — measured through the wrapper as
+`1 passed`, exit 0, no diagnostic, same as any other passing run. Including it
+in the allowlist would let a real all-skip `--setup-show` run pass through.
+
+The wrapper checks all six with `getattr(option, <dest>, False)` rather than a
+bare attribute access, so a future pytest that renames or drops one degrades
+to "not introspection-only" (fail-closed-safe) instead of raising `AttributeError`.
+
+Measured directly against this venv's pytest for every flag in the table,
+through the real wrapper:
+
+| Command | Bare pytest | Through the wrapper |
+|---|---|---|
+| `--collect-only` | `1 test collected`, exit 0 | exit 0, no diagnostic |
+| `--setup-plan` | `no tests ran`, exit 0 | exit 0, no diagnostic |
+| `--setup-only` | `no tests ran`, exit 0 | exit 0, no diagnostic |
+| `--fixtures` | `no tests ran`, exit 0 | exit 0, no diagnostic |
+| `--fixtures-per-test` | `no tests ran`, exit 0 | exit 0, no diagnostic |
+| `--cache-show` | `no tests ran`, exit 0 | exit 0, no diagnostic |
+| `--setup-show` | `1 passed`, exit 0 | exit 0, no diagnostic (correctly executes) |
 
 ## Why a plugin, not output parsing
 

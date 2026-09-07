@@ -382,7 +382,7 @@ rm -f "$PYTEST_CLEAN_COUNT_FILE" 2>/dev/null
 # `PYTEST_EXIT: unbound variable` before the test's own refusals could fire.
 verdict_passes_through() {
     case "$1" in
-        ""|collectonly)  return 0 ;;   # no session ran, or a collect-only run
+        ""|collectonly)  return 0 ;;   # no session ran, or an introspection-only run
         "count "[1-9]*)  return 0 ;;   # at least one test executed
         *)               return 1 ;;   # count 0, started, truncated, garbage
     esac
