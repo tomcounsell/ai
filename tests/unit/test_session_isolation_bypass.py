@@ -524,3 +524,38 @@ class TestSyntheticSlugLogMarker:
             "log marker in agent/session_executor.py — synthesis log + "
             "cleanup log"
         )
+
+
+class TestSyntheticSlugStaysLocal:
+    """Issue #3176: ``slug`` is never written back onto a hydrated
+    ``AgentSession`` row. ``models/agent_session.py`` declares
+    ``slug = KeyField(null=True)``, so assigning it on a saved instance
+    writes a new row at a new Redis primary key and orphans the original —
+    the lane-visibility fix uses ``exec_cwd`` (a plain field) instead.
+    """
+
+    def test_no_slug_assignment_on_hydrated_row(self):
+        """Source-level anti-criterion: no line in the three files this
+        plan changes assigns ``<name>.slug = ...`` on a hydrated instance."""
+        pattern = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\.slug\s*=[^=]")
+        for rel_path in (
+            "agent/session_executor.py",
+            "agent/worktree_manager.py",
+            "tools/agent_session_scheduler.py",
+        ):
+            src_path = Path(__file__).parent.parent.parent / rel_path
+            for line in src_path.read_text().splitlines():
+                assert not pattern.match(line), (
+                    f"{rel_path} assigns .slug on a hydrated row: {line!r} — "
+                    "slug is a KeyField; a mid-flight write forks the Redis row"
+                )
+
+    def test_synthesis_site_documents_the_keyfield_hazard(self):
+        """The comment at the synthesis site must explain why slug stays
+        local, so a future reader does not "finish the job" (spike-3)."""
+        src_path = Path(__file__).parent.parent.parent / "agent" / "session_executor.py"
+        src = src_path.read_text()
+        assert "KeyField" in src, (
+            "expected a comment near the synthetic-slug synthesis site "
+            "explaining the KeyField hazard (spike-3)"
+        )
