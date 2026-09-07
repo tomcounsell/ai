@@ -25,6 +25,7 @@ class TestReplayDeadLetters:
         from bridge.dead_letters import replay_dead_letters
 
         mock_letter = MagicMock()
+        mock_letter.stage = "telegram_send"
         mock_letter.chat_id = "-1003900483201"
         mock_letter.text = "important group message"
         mock_letter.reply_to = None
@@ -59,6 +60,7 @@ class TestReplayDeadLetters:
         from bridge.dead_letters import replay_dead_letters
 
         mock_letter = MagicMock()
+        mock_letter.stage = "telegram_send"
         mock_letter.chat_id = "0"
         mock_letter.text = "orphaned invalid record"
         mock_letter.reply_to = None
@@ -100,6 +102,7 @@ class TestReplayDeadLetters:
         from bridge.dead_letters import replay_dead_letters
 
         mock_letter = MagicMock()
+        mock_letter.stage = "telegram_send"
         mock_letter.chat_id = "12345"
         mock_letter.text = "will fail"
         mock_letter.reply_to = None
@@ -142,6 +145,7 @@ class TestReplayPeerParseAgreesWithSendPaths:
         )
 
         mock_letter = MagicMock()
+        mock_letter.stage = "telegram_send"
         mock_letter.chat_id = odd_chat_id
         mock_letter.text = "legacy record with an odd peer"
         mock_letter.reply_to = None
@@ -172,6 +176,7 @@ class TestReplayPeerParseAgreesWithSendPaths:
         assert deliverable_telegram_peer(good_chat_id)
 
         mock_letter = MagicMock()
+        mock_letter.stage = "telegram_send"
         mock_letter.chat_id = good_chat_id
         mock_letter.text = "ordinary record"
         mock_letter.reply_to = None
@@ -188,3 +193,131 @@ class TestReplayPeerParseAgreesWithSendPaths:
 
         mock_client.send_message.assert_called_once_with(expected, "ordinary record", reply_to=None)
         assert replayed == 1
+
+
+class TestRecordStages:
+    """`record` is the one entry point every terminal sink writes through."""
+
+    def test_unknown_stage_is_refused(self):
+        """A mislabelled row is invisible to the tile and the replayer."""
+        from bridge import dead_letters
+
+        with pytest.raises(ValueError, match="unknown stage"):
+            dead_letters.record("not-a-stage", {"a": 1}, "why")
+
+    def test_empty_stage_is_refused(self):
+        from bridge import dead_letters
+
+        with pytest.raises(ValueError, match="requires a stage"):
+            dead_letters.record("", {"a": 1}, "why")
+
+    def test_a_string_payload_is_stored_verbatim(self, monkeypatch):
+        """An unparseable wire payload IS the string that failed to parse.
+
+        Re-encoding it would lose exactly the bytes a human needs.
+        """
+        from bridge import dead_letters
+
+        created = {}
+
+        class _Row:
+            letter_id = "abc"
+
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+        monkeypatch.setattr(
+            dead_letters.DeadLetter, "create", staticmethod(lambda **kw: _Row(**kw))
+        )
+        monkeypatch.setattr(dead_letters, "_bump_indexes", lambda *a, **k: None)
+
+        dead_letters.record("outbox_parse", '{"broken', "bad json")
+        assert created["payload_json"] == '{"broken'
+        assert created["replayable"] is True
+
+    def test_a_dict_payload_is_json_encoded(self, monkeypatch):
+        import json
+
+        from bridge import dead_letters
+
+        created = {}
+
+        class _Row:
+            letter_id = "abc"
+
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+        monkeypatch.setattr(
+            dead_letters.DeadLetter, "create", staticmethod(lambda **kw: _Row(**kw))
+        )
+        monkeypatch.setattr(dead_letters, "_bump_indexes", lambda *a, **k: None)
+
+        dead_letters.record("extraction", {"session_id": "s1"}, "boom", replayable=False)
+        assert json.loads(created["payload_json"]) == {"session_id": "s1"}
+        assert created["replayable"] is False
+
+
+class TestReplayAttemptCap:
+    """A handler that keeps failing retires the row rather than looping forever."""
+
+    @pytest.mark.asyncio
+    async def test_replayable_flips_false_at_the_cap(self):
+        from bridge import dead_letters
+
+        letter = MagicMock()
+        letter.stage = "extraction"
+        letter.replayable = True
+        letter.attempts = dead_letters.MAX_REPLAY_ATTEMPTS - 1
+        letter.payload_json = '{"_session_id": "s1"}'
+        letter.project_key = "valor"
+        letter.async_save = AsyncMock()
+        letter.async_delete = AsyncMock()
+
+        async def _boom(_letter):
+            raise RuntimeError("handler down")
+
+        with (
+            patch.object(dead_letters, "HANDLERS", {"extraction": _boom}),
+            patch("bridge.dead_letters.DeadLetter") as cls,
+        ):
+            cls.query.async_all = AsyncMock(return_value=[letter])
+            replayed = await dead_letters.replay_stage("extraction")
+
+        assert replayed == 0
+        assert letter.attempts == dead_letters.MAX_REPLAY_ATTEMPTS
+        assert letter.replayable is False
+        letter.async_save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_non_replayable_row_is_skipped(self):
+        from bridge import dead_letters
+
+        letter = MagicMock()
+        letter.stage = "extraction"
+        letter.replayable = False
+        letter.async_save = AsyncMock()
+
+        called = []
+
+        async def _handler(_letter):
+            called.append(_letter)
+            return True
+
+        with (
+            patch.object(dead_letters, "HANDLERS", {"extraction": _handler}),
+            patch("bridge.dead_letters.DeadLetter") as cls,
+        ):
+            cls.query.async_all = AsyncMock(return_value=[letter])
+            assert await dead_letters.replay_stage("extraction") == 0
+        assert not called
+
+    def test_popoto_string_false_reads_as_false(self):
+        """Popoto round-trips an untyped bool as the string 'False', which is truthy."""
+        from bridge import dead_letters
+
+        letter = MagicMock()
+        letter.replayable = "False"
+        assert dead_letters.is_replayable(letter) is False
+        letter.replayable = "True"
+        assert dead_letters.is_replayable(letter) is True

@@ -277,7 +277,10 @@ class TestCreateChildSessionGate:
 
         async def _fake_push(**kwargs):
             push_calls.append(kwargs)
-            return 1
+            # (queue depth, agent_session_id) — a bare int here raises
+            # "cannot unpack non-sequence int" at the enqueue_agent_session
+            # call site (#3183 lane 5b).
+            return 1, "0" * 32
 
         monkeypatch.setattr(queue_mod, "_push_agent_session", _fake_push)
 
@@ -376,7 +379,10 @@ class TestCreateTelegramMessageIdFlag:
 
         async def _fake_push(**kwargs):
             push_calls.append(kwargs)
-            return 1
+            # (queue depth, agent_session_id) — a bare int here raises
+            # "cannot unpack non-sequence int" at the enqueue_agent_session
+            # call site (#3183 lane 5b).
+            return 1, "0" * 32
 
         import agent.agent_session_queue as queue_mod
 

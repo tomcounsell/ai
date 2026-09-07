@@ -216,9 +216,10 @@ async def run_due(limit: int = 25) -> dict:
         handler = resolve_handler(fresh.kind)
         if handler is None:
             fresh.attempts = (fresh.attempts or 0) + 1
-            _dead_letter(fresh, f"no handler registered for kind {fresh.kind!r}")
-            release_idempotency(fresh.kind, fresh.session_id)
+            kind, session_id = fresh.kind, fresh.session_id
+            _dead_letter(fresh, f"no handler registered for kind {kind!r}")
             fresh.delete()
+            release_idempotency(kind, session_id)
             summary["dead_lettered"] += 1
             continue
 
@@ -234,27 +235,31 @@ async def run_due(limit: int = 25) -> dict:
                 await result
         except Exception as e:  # noqa: BLE001 -- one job never stops the batch
             fresh.attempts = (fresh.attempts or 0) + 1
-            if fresh.attempts >= MAX_JOB_ATTEMPTS:
+            # Read every field the log needs BEFORE the row can be deleted.
+            job_id, kind, session_id, attempts = (
+                fresh.job_id,
+                fresh.kind,
+                fresh.session_id,
+                fresh.attempts,
+            )
+            logger.warning(
+                "SideEffectJob %s (%s) failed on attempt %s: %s", job_id, kind, attempts, e
+            )
+            if attempts >= MAX_JOB_ATTEMPTS:
                 _dead_letter(fresh, str(e))
-                release_idempotency(fresh.kind, fresh.session_id)
+                release_idempotency(kind, session_id)
                 fresh.delete()
                 summary["dead_lettered"] += 1
             else:
                 fresh.status = "pending"
-                fresh.next_attempt_at = now + timedelta(seconds=_backoff_seconds(fresh.attempts))
+                fresh.next_attempt_at = now + timedelta(seconds=_backoff_seconds(attempts))
                 fresh.save()
                 summary["failed"] += 1
-            logger.warning(
-                "SideEffectJob %s (%s) failed on attempt %s: %s",
-                fresh.job_id,
-                fresh.kind,
-                fresh.attempts,
-                e,
-            )
             continue
 
-        release_idempotency(fresh.kind, fresh.session_id)
+        kind, session_id = fresh.kind, fresh.session_id
         fresh.delete()
+        release_idempotency(kind, session_id)
         summary["ran"] += 1
 
     return summary
