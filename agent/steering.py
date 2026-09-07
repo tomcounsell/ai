@@ -107,6 +107,38 @@ def _is_expired(msg: dict, max_age_seconds: float | None, now: float) -> float |
     return age if age > max_age_seconds else None
 
 
+def _parse_entry(raw, key: str, *, destructive: bool) -> dict | None:
+    """Validate one steering entry against ``SteeringPayload``.
+
+    Returns the entry as a dict, or ``None`` when it did not validate.
+
+    A destructive read has already LPOPped the entry, so an unparseable one is
+    gone: it becomes a ``steering_parse`` dead letter carrying the raw string.
+    A peek leaves the entry on the list for the next drain to handle, so it
+    only logs — dead-lettering there would write one row per peek for the same
+    entry.
+    """
+    from bridge.wire_schemas import SteeringPayload
+
+    try:
+        return SteeringPayload.model_validate_json(raw).model_dump(exclude_none=True)
+    except Exception as e:  # noqa: BLE001 -- pydantic ValidationError or bad bytes
+        logger.warning(f"[steering] Invalid entry in queue {key}: {raw!r} ({e})")
+        if destructive:
+            try:
+                from bridge import dead_letters
+
+                dead_letters.record(
+                    "steering_parse",
+                    raw if isinstance(raw, str) else repr(raw),
+                    f"steering payload failed validation in {key}: {e}",
+                    replayable=False,
+                )
+            except Exception as dl_exc:  # noqa: BLE001 -- never break a drain
+                logger.debug("[steering] dead-letter write failed (non-fatal): %s", dl_exc)
+        return None
+
+
 def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
     """Destructively drain one steering list via sequential LPOPs (FIFO).
 
@@ -127,10 +159,8 @@ def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
         raw = r.lpop(key)
         if raw is None:
             break
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning(f"[steering] Invalid JSON in queue {key}: {raw!r}")
+        msg = _parse_entry(raw, key, destructive=True)
+        if msg is None:
             continue
         age = _is_expired(msg, max_age_seconds, now)
         if age is not None:
@@ -162,10 +192,8 @@ def _peek_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
     now = time.time()
     messages: list[dict] = []
     for raw in r.lrange(key, 0, -1):
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning(f"[steering] Invalid JSON in queue {key}: {raw!r}")
+        msg = _parse_entry(raw, key, destructive=False)
+        if msg is None:
             continue
         if _is_expired(msg, max_age_seconds, now) is not None:
             continue
@@ -239,7 +267,9 @@ def push_steering_message(
     if target_agent is not None:
         msg_dict["target_agent"] = target_agent
 
-    payload = json.dumps(msg_dict)
+    from bridge.wire_schemas import SteeringPayload, dump
+
+    payload = dump(SteeringPayload(**msg_dict))
     if front:
         r.lpush(key, payload)
     else:

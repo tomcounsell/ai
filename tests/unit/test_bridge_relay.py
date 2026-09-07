@@ -15,7 +15,6 @@ from telethon.errors import FloodWaitError
 
 from bridge.telegram_relay import (
     DELIVERED_NO_ID,
-    KNOWN_MESSAGE_TYPES,
     MAX_RELAY_RETRIES,
     OUTBOX_KEY_PATTERN,
     RELAY_BATCH_SIZE,
@@ -48,12 +47,25 @@ class TestRelayConstants:
         assert MAX_RELAY_RETRIES == 3
 
     def test_known_message_types(self):
-        assert KNOWN_MESSAGE_TYPES == {None, "reaction", "custom_emoji_message", "poll"}
+        """The accepted set now lives on the wire schema's `type` Literal.
+
+        `None` must stay a member: an ordinary text message carries no `type`
+        key, and it is the highest-volume path in the system.
+        """
+        from typing import get_args
+
+        from bridge.wire_schemas import OutboxPayload
+
+        accepted = set(get_args(get_args(OutboxPayload.model_fields["type"].annotation)[0]))
+        assert accepted == {"reaction", "custom_emoji_message", "poll"}
+        assert OutboxPayload.model_validate_json('{"text": "hi"}').type is None
 
     def test_poll_is_a_known_type(self):
-        """#2701: an unknown type is discarded with no retry, which for a poll
-        would be a stuck agent."""
-        assert "poll" in KNOWN_MESSAGE_TYPES
+        """#2701: an unknown type is dead-lettered with no retry, which for a
+        poll would be a stuck agent."""
+        from bridge.wire_schemas import OutboxPayload
+
+        assert OutboxPayload(type="poll").type == "poll"
 
 
 class TestSendQueuedMessage:

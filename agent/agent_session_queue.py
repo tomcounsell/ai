@@ -25,7 +25,6 @@ tests/unit/test_no_reexport_hub.py fails if any come back.
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -35,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from popoto.exceptions import ModelException
+from pydantic import ValidationError
 
 # Shared mutable session-tracking state. Imported as a module, not as names, so
 # the mutation sites below write through to the owning module rather than to a
@@ -76,6 +76,7 @@ from agent.session_state import (
     _send_callbacks,
     _starting_workers,
 )
+from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
@@ -443,13 +444,13 @@ async def _push_agent_session(
             _wk = slug
         else:
             _wk = project_key
-        payload = json.dumps(
-            {
-                "chat_id": chat_id,
-                "session_id": session_id,
-                "worker_key": _wk,
-                "is_project_keyed": _wk == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=chat_id,
+                session_id=session_id,
+                worker_key=_wk,
+                is_project_keyed=_wk == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         await asyncio.to_thread(POPOTO_REDIS_DB.publish, channel, payload)
@@ -922,13 +923,13 @@ def publish_session_notify(session) -> None:
 
         worker_key = session.worker_key
         project_key = getattr(session, "project_key", None)
-        payload = json.dumps(
-            {
-                "chat_id": getattr(session, "chat_id", None),
-                "session_id": getattr(session, "session_id", None),
-                "worker_key": worker_key,
-                "is_project_keyed": worker_key == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=getattr(session, "chat_id", None),
+                session_id=getattr(session, "session_id", None),
+                worker_key=worker_key,
+                is_project_keyed=worker_key == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         POPOTO_REDIS_DB.publish(channel, payload)
@@ -1178,19 +1179,33 @@ async def _session_notify_listener() -> None:
                     if message["type"] != "message":
                         continue
                     try:
-                        data = json.loads(message["data"])
-                        wk = data.get("worker_key") or data.get("chat_id")
-                        is_pk = data.get("is_project_keyed", False)
-                        session_id = data.get("session_id")
+                        data = wire_schemas.NotifyPayload.model_validate_json(message["data"])
+                        wk = data.worker_key or data.chat_id
                         if wk is not None:
                             logger.info(
                                 "Received session notify: worker_key=%s session_id=%s",
                                 wk,
-                                session_id,
+                                data.session_id,
                             )
-                            loop.call_soon_threadsafe(notify_queue.put_nowait, (wk, is_pk))
-                    except json.JSONDecodeError as e:
-                        logger.warning("Session notify: bad JSON payload: %s", e)
+                            loop.call_soon_threadsafe(
+                                notify_queue.put_nowait, (wk, data.is_project_keyed)
+                            )
+                    except ValidationError as e:
+                        # A wake this thread cannot parse is a lost wake: the
+                        # session waits for the 5-minute health sweep instead.
+                        # Keep the raw message so that is diagnosable (#3183).
+                        logger.warning("Session notify: payload failed validation: %s", e)
+                        try:
+                            from bridge import dead_letters
+
+                            dead_letters.record(
+                                "notify_parse",
+                                str(message.get("data")),
+                                f"session-notify payload failed validation: {e}",
+                                replayable=False,
+                            )
+                        except Exception as dl_exc:  # noqa: BLE001
+                            logger.debug("notify dead-letter write failed: %s", dl_exc)
                     except Exception as e:
                         logger.warning("Session notify: error processing message: %s", e)
             except Exception as e:
