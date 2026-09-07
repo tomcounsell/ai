@@ -6,10 +6,12 @@ entry in :data:`HANDLERS`, not a framework.
     enqueue("memory_extraction", session_id, project_key, {...})
 
 writes a ``SideEffectJob`` row, and the ``side-effect-drain`` reflection
-calls :func:`run_due` every 60s. A handler that raises is retried on
-``min(30 * 2**attempts, 900)`` seconds of backoff up to
-:data:`MAX_JOB_ATTEMPTS`, after which the job becomes a
-``DeadLetter(stage="extraction")`` and the row is deleted.
+calls :func:`run_due` every 60s. A handler that raises -- or a claim that
+never gets to run at all, including an ``asyncio.CancelledError`` from a
+worker shutdown mid-drain -- is retried on ``min(30 * 2**attempts, 900)``
+seconds of backoff up to :data:`MAX_JOB_ATTEMPTS`, after which the job
+becomes a ``DeadLetter(stage="extraction")`` and the row is deleted. A
+cancellation releases the claim without charging an attempt.
 
 **Create is single-winner per ``(kind, session_id)``.** Two enqueues for one
 pair — ``_execute_agent_session`` running twice for a session, the archive
@@ -131,13 +133,15 @@ def enqueue(
     if not client.set(key, job_id, nx=True, ex=_IDEMPOTENCY_TTL_SECONDS):
         bound = client.get(key)
         if bound:
+            bound_id = str(bound)
             logger.info(
                 "SideEffectJob enqueue lost the race for %s/%s; binding to %s",
                 kind,
                 session_id,
-                bound,
+                bound_id,
             )
-            return str(bound)
+            _merge_payload_into_pending(bound_id, payload)
+            return bound_id
         # The key expired between the SET NX and the read. Take it under our
         # own id and create the row.
         client.set(key, job_id, ex=_IDEMPOTENCY_TTL_SECONDS)
@@ -156,6 +160,40 @@ def enqueue(
     return job_id
 
 
+def _merge_payload_into_pending(job_id: str, payload: dict | None) -> None:
+    """Fold a lost-race caller's payload into the row it bound to.
+
+    The single-winner guard keeps one row per ``(kind, session_id)``, but a
+    ``session_id`` is shared across every turn of a conversation
+    (``models/agent_session.py:1248``). Without this, a second turn's own
+    ``enqueue`` call binds to the first turn's row and silently discards its
+    ``response_text`` -- the drain then runs the FIRST turn's stale content,
+    or nothing at all, instead of the most recent one. Overwriting the
+    payload here means the drain always sees the latest turn's data, closing
+    the gap between the guard's lifetime (60s drain cadence plus up to ~7min
+    of retry backoff) and the seconds-long window the in-memory dedup this
+    guard replaced actually covered.
+
+    Only a still-``pending`` row is touched. A ``running`` row's handler has
+    already read its ``kwargs`` before this function could possibly run, so
+    updating it here cannot change what that invocation does, and the row is
+    deleted on completion moments later regardless. That narrow window --
+    the handler's own execution time, not the full drain cadence -- is the
+    residual loss this fix cannot close without reworking the row's
+    lifecycle beyond what this blocker asks for.
+    """
+    if payload is None:
+        return
+    try:
+        existing = SideEffectJob.query.get(job_id=job_id)
+        if existing is None or existing.status != "pending":
+            return
+        existing.payload_json = json.dumps(payload)
+        existing.save()
+    except Exception as e:  # noqa: BLE001 -- best-effort refresh, never blocks the caller
+        logger.debug("SideEffectJob payload merge failed for %s: %s", job_id, e)
+
+
 def release_idempotency(kind: str, session_id: str) -> None:
     """Drop the create guard so the same work can be enqueued again."""
     try:
@@ -166,8 +204,14 @@ def release_idempotency(kind: str, session_id: str) -> None:
         logger.debug("SideEffectJob guard release failed for %s/%s: %s", kind, session_id, e)
 
 
-def _dead_letter(job: SideEffectJob, error: str) -> None:
-    """Convert an exhausted job into a terminal dead letter."""
+def _dead_letter(job: SideEffectJob, error: str) -> bool:
+    """Convert an exhausted job into a terminal dead letter.
+
+    Returns ``True`` on success. A dead-letter write can itself fail (Redis
+    unreachable), and the caller must not delete the row or release the
+    idempotency guard on that failure -- doing so would strand the job with
+    no record anywhere. The caller falls back to a pending retry instead.
+    """
     from bridge import dead_letters
 
     try:
@@ -176,13 +220,25 @@ def _dead_letter(job: SideEffectJob, error: str) -> None:
         payload = {}
     payload["_kind"] = job.kind
     payload["_session_id"] = job.session_id
-    dead_letters.record(
-        "extraction",
-        payload,
-        f"side-effect handler failed {job.attempts} time(s): {error}",
-        replayable=True,
-        project_key=job.project_key,
-    )
+    try:
+        dead_letters.record(
+            "extraction",
+            payload,
+            f"side-effect handler failed {job.attempts} time(s): {error}",
+            replayable=True,
+            project_key=job.project_key,
+        )
+    except Exception as e:  # noqa: BLE001 -- a failed dead-letter write must not strand the row
+        logger.warning("SideEffectJob %s dead-letter write failed: %s", job.job_id, e)
+        return False
+    return True
+
+
+def _requeue(job: SideEffectJob, now, attempts: int) -> None:
+    """Release a claimed row back to ``pending`` with backoff applied."""
+    job.status = "pending"
+    job.next_attempt_at = now + timedelta(seconds=_backoff_seconds(attempts))
+    job.save()
 
 
 async def run_due(limit: int = 25) -> dict:
@@ -213,47 +269,78 @@ async def run_due(limit: int = 25) -> dict:
         fresh.status = "running"
         fresh.save()
 
-        handler = resolve_handler(fresh.kind)
-        if handler is None:
-            fresh.attempts = (fresh.attempts or 0) + 1
-            kind, session_id = fresh.kind, fresh.session_id
-            _dead_letter(fresh, f"no handler registered for kind {kind!r}")
-            fresh.delete()
-            release_idempotency(kind, session_id)
-            summary["dead_lettered"] += 1
-            continue
-
+        # Everything from here to the successful-completion block below runs
+        # inside one `try`/`except BaseException`. Before this fix, the claim
+        # above committed and then `resolve_handler()`, the payload decode,
+        # and the handler call all ran OUTSIDE any protection that could
+        # release it: a worker-shutdown `asyncio.CancelledError` (a
+        # `BaseException`, not caught by `except Exception`), an import
+        # failure inside `resolve_handler()`, or any other unforeseen raise
+        # left the row claimed forever -- nothing anywhere else in the repo
+        # ever moves a row out of "running". That stranded the row past every
+        # future drain, aged it out silently under the 7-day TTL with no
+        # DeadLetter, and kept its idempotency guard bound to a dead job_id
+        # for those same 7 days. See `_requeue()` / the `BaseException`
+        # branch below for the recovery path.
         try:
-            kwargs = json.loads(fresh.payload_json or "{}")
-        except (TypeError, ValueError) as e:
-            logger.warning("SideEffectJob %s has unreadable payload_json: %s", fresh.job_id, e)
-            kwargs = {}
+            handler = resolve_handler(fresh.kind)
+            if handler is None:
+                fresh.attempts = (fresh.attempts or 0) + 1
+                kind, session_id = fresh.kind, fresh.session_id
+                if _dead_letter(fresh, f"no handler registered for kind {kind!r}"):
+                    fresh.delete()
+                    release_idempotency(kind, session_id)
+                    summary["dead_lettered"] += 1
+                else:
+                    _requeue(fresh, now, fresh.attempts)
+                    summary["failed"] += 1
+                continue
 
-        try:
+            try:
+                kwargs = json.loads(fresh.payload_json or "{}")
+            except (TypeError, ValueError) as e:
+                logger.warning("SideEffectJob %s has unreadable payload_json: %s", fresh.job_id, e)
+                kwargs = {}
+
             result = handler(fresh.session_id, **kwargs)
             if hasattr(result, "__await__"):
                 await result
-        except Exception as e:  # noqa: BLE001 -- one job never stops the batch
+        except BaseException as e:  # noqa: BLE001 -- see comment above; must release the claim
+            job_id, kind, session_id = fresh.job_id, fresh.kind, fresh.session_id
+            if not isinstance(e, Exception):
+                # Not an ordinary handler failure: `asyncio.CancelledError`
+                # from a worker shutdown, or a `KeyboardInterrupt` /
+                # `SystemExit`. None of these are the job's fault -- release
+                # the claim without charging an attempt so the next tick
+                # retries it, then let the interrupt keep propagating.
+                # Swallowing it here (the way `except Exception` used to
+                # make impossible, but a bare `except BaseException` alone
+                # would not) would turn a shutdown signal into a caught,
+                # logged, and discarded event.
+                logger.warning(
+                    "SideEffectJob %s (%s) interrupted mid-run (%s); releasing claim",
+                    job_id,
+                    kind,
+                    type(e).__name__,
+                )
+                fresh.status = "pending"
+                fresh.save()
+                raise
             fresh.attempts = (fresh.attempts or 0) + 1
-            # Read every field the log needs BEFORE the row can be deleted.
-            job_id, kind, session_id, attempts = (
-                fresh.job_id,
-                fresh.kind,
-                fresh.session_id,
-                fresh.attempts,
-            )
+            attempts = fresh.attempts
             logger.warning(
                 "SideEffectJob %s (%s) failed on attempt %s: %s", job_id, kind, attempts, e
             )
             if attempts >= MAX_JOB_ATTEMPTS:
-                _dead_letter(fresh, str(e))
-                release_idempotency(kind, session_id)
-                fresh.delete()
-                summary["dead_lettered"] += 1
+                if _dead_letter(fresh, str(e)):
+                    release_idempotency(kind, session_id)
+                    fresh.delete()
+                    summary["dead_lettered"] += 1
+                else:
+                    _requeue(fresh, now, attempts)
+                    summary["failed"] += 1
             else:
-                fresh.status = "pending"
-                fresh.next_attempt_at = now + timedelta(seconds=_backoff_seconds(attempts))
-                fresh.save()
+                _requeue(fresh, now, attempts)
                 summary["failed"] += 1
             continue
 

@@ -8,8 +8,12 @@ Cadence: 60s (post-session memory extraction should land within a minute or two
 Failure modes:
     - A handler raises -> caught per job, attempts incremented, backoff applied;
       at MAX_JOB_ATTEMPTS the job becomes DeadLetter(stage="extraction")
-    - Redis unreachable mid-drain -> the job stays pending with unchanged
-      attempts, so nothing is double-counted
+    - The tick is cancelled (worker shutdown) mid-handler -> the claim is
+      released back to "pending" with the attempt count unchanged, so the
+      next tick picks it straight back up
+    - The dead-letter write itself fails at MAX_JOB_ATTEMPTS -> the job is
+      requeued pending with backoff instead of being deleted, so a failing
+      handler is never silently discarded for want of a place to record it
 Related reflections:
     - dead_letter_replay: replays what this drain gave up on
 See also: config/reflections.yaml (declaration), docs/features/side-effect-jobs.md

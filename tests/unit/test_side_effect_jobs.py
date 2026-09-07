@@ -13,6 +13,7 @@ them. These tests hold the three properties that makes true:
   servable at all.
 """
 
+import asyncio
 import json
 from datetime import timedelta
 
@@ -183,6 +184,42 @@ class TestIdempotentCreate:
         side_effects.enqueue("memory_extraction", "s1", "valor")
         assert "sideeffect:idem:memory_extraction:s1" in jobs.redis.store
 
+    def test_a_lost_race_still_updates_the_pending_rows_payload(self, jobs):
+        """A second turn's payload must not be silently discarded (#3183 review blocker).
+
+        Consecutive turns of one conversation share a `session_id`
+        (`models/agent_session.py:1248`), and the guard's lifetime (60s
+        drain cadence plus up to ~7min of retry backoff) is far longer than
+        one handler invocation. Race 4/5 and the plan's success criterion
+        ("a second enqueue for the same (kind, session_id) binds to the
+        existing row") still hold -- one row, one job_id -- but the row must
+        carry the LATEST turn's data while it is still pending, not the
+        first turn's stale payload.
+        """
+        first = side_effects.enqueue(
+            "memory_extraction", "s1", "valor", {"response_text": "turn 1"}
+        )
+        second = side_effects.enqueue(
+            "memory_extraction", "s1", "valor", {"response_text": "turn 2"}
+        )
+        assert first == second
+        assert len(jobs.rows) == 1
+        (row,) = jobs.rows.values()
+        assert json.loads(row["payload_json"]) == {"response_text": "turn 2"}
+
+    def test_a_lost_race_does_not_touch_an_already_running_row(self, jobs):
+        """A running job's handler already read its kwargs; updating the row
+        after that point cannot change what that invocation does, and the
+        row is deleted on completion moments later regardless."""
+        job_id = side_effects.enqueue(
+            "memory_extraction", "s1", "valor", {"response_text": "turn 1"}
+        )
+        jobs.rows[job_id]["status"] = "running"
+
+        side_effects.enqueue("memory_extraction", "s1", "valor", {"response_text": "turn 2"})
+
+        assert json.loads(jobs.rows[job_id]["payload_json"]) == {"response_text": "turn 1"}
+
     def test_an_unreachable_guard_raises_rather_than_creating_a_row(self, jobs, monkeypatch):
         """A possibly-duplicate row is worse than a visible failure.
 
@@ -294,6 +331,79 @@ class TestFailureHandling:
         assert ran == ["good"]
         assert summary["ran"] == 1
         assert summary["dead_lettered"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_releases_the_claim_without_charging_an_attempt(
+        self, jobs, monkeypatch
+    ):
+        """A worker-shutdown CancelledError must not strand the row at
+        "running" forever (#3183 review blocker 1).
+
+        `asyncio.CancelledError` is a `BaseException`, not an `Exception`, so
+        the ordinary handler-failure branch cannot catch it. Before this fix
+        nothing anywhere moved a row out of "running": it aged out silently
+        under the 7-day TTL with no DeadLetter, and its idempotency guard
+        stayed bound to the dead job_id for those same 7 days.
+        """
+
+        async def _cancelled(session_id, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(side_effects, "resolve_handler", lambda kind: _cancelled)
+        job_id = side_effects.enqueue("memory_extraction", "s1", "valor")
+
+        with pytest.raises(asyncio.CancelledError):
+            await side_effects.run_due()
+
+        assert jobs.rows[job_id]["status"] == "pending"
+        assert jobs.rows[job_id]["attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_handler_raising_backs_off_instead_of_stranding_the_row(
+        self, jobs, monkeypatch
+    ):
+        """An import failure inside resolve_handler() sat outside the old
+        try/except entirely and left the row claimed forever. It must behave
+        like any other handler failure: attempts incremented, backed off,
+        released back to pending."""
+
+        def _boom(kind):
+            raise ImportError("agent.memory_extraction pulled before uv sync")
+
+        monkeypatch.setattr(side_effects, "resolve_handler", _boom)
+        job_id = side_effects.enqueue("memory_extraction", "s1", "valor")
+
+        summary = await side_effects.run_due()
+
+        assert summary["failed"] == 1
+        assert jobs.rows[job_id]["status"] == "pending"
+        assert jobs.rows[job_id]["attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_dead_letter_write_requeues_instead_of_stranding_the_row(
+        self, jobs, monkeypatch
+    ):
+        """The row must survive a Redis failure during the dead-letter write
+        at the attempt cap. Deleting it there would strand the failure with
+        no record anywhere -- neither a live row nor a DeadLetter."""
+
+        async def _boom(session_id, **kwargs):
+            raise RuntimeError("still broken")
+
+        def _record_boom(*args, **kwargs):
+            raise ConnectionError("redis down")
+
+        monkeypatch.setattr(side_effects, "resolve_handler", lambda kind: _boom)
+        monkeypatch.setattr("bridge.dead_letters.record", _record_boom)
+        job_id = side_effects.enqueue("memory_extraction", "s1", "valor", {"response_text": "x"})
+        jobs.rows[job_id]["attempts"] = side_effects.MAX_JOB_ATTEMPTS - 1
+
+        summary = await side_effects.run_due()
+
+        assert summary["dead_lettered"] == 0
+        assert summary["failed"] == 1
+        assert job_id in jobs.rows
+        assert jobs.rows[job_id]["status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_paused_drain_runs_nothing(self, jobs, monkeypatch):
