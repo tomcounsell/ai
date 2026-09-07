@@ -530,3 +530,51 @@ class TestClearDocsAuditLivenessKeys:
         fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
         assert fn is _migrate_clear_docs_audit_liveness_keys
         assert description
+
+
+class TestImprovementMigrationRegistration:
+    """#3177's two migrations must be registered, not merely defined.
+
+    A defined-but-unregistered migration never runs, and it is invisible in the
+    obvious check: a text grep for the name still finds the function
+    definition, its docstring, and the script filename it shells out to, so a
+    `grep -c ... > 1` row reports healthy while the migration is dead. This
+    reads the actual dict, which is the only thing `run_pending_migrations`
+    iterates.
+    """
+
+    def test_task_type_profile_retirement_is_registered(self):
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        assert "retire_task_type_profile" in MIGRATIONS, (
+            "TaskTypeProfile was deleted whole; without this entry its hashes and "
+            "its delegation_recommendation index sets are orphaned in Redis with no "
+            "surviving code able to reach them through the ORM"
+        )
+        fn, description = MIGRATIONS["retire_task_type_profile"]
+        assert fn is _migrate_retire_task_type_profile
+        assert description
+
+    def test_improvement_models_registration_marker_exists(self):
+        from scripts.update.migrations import _migrate_confirm_improvement_models_readable
+
+        assert "confirm_improvement_models_readable" in MIGRATIONS
+        fn, description = MIGRATIONS["confirm_improvement_models_readable"]
+        assert fn is _migrate_confirm_improvement_models_readable
+        assert description
+
+    def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
+        """The subprocess-shaped migrations name a script by filename.
+
+        A registered migration pointing at a missing script fails at /update
+        time on every machine, which is the worst place to discover it.
+        """
+        import inspect
+        from pathlib import Path
+
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        source = inspect.getsource(_migrate_retire_task_type_profile)
+        assert "migrate_retire_task_type_profile.py" in source
+        repo_root = Path(__file__).resolve().parents[2]
+        assert (repo_root / "scripts" / "migrate_retire_task_type_profile.py").exists()
