@@ -44,8 +44,9 @@ full table) and each one is load-bearing:
     Setup and teardown of a skipped test both report "passed", so an
     only-skipped rootdir counts those passed setup/teardown reports and the
     guard never fires.
-  - `hasattr(report, "wasxfail")` is required because an xfail reports
-    call/skipped/wasxfail=True and an xpass reports call/passed/wasxfail=True.
+  - Checking for a `wasxfail` attribute on the report is required because an
+    xfail reports call/skipped/wasxfail=True and an xpass reports
+    call/passed/wasxfail=True.
     Both genuinely executed; dropping this clause would undercount an
     xfail-heavy selection toward the fail-closed side.
   - The setup/teardown failure clause catches a fixture that raises, which
