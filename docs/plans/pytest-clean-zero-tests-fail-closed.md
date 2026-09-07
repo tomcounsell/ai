@@ -271,6 +271,8 @@ than a question, and every task, risk and verification row below uses these name
 | Count-file path variable | `PYTEST_CLEAN_COUNT_FILE` | Private wrapper state, **never** caller-supplied — see the unconditional-mint rule below. |
 | Escape hatch | `PYTEST_ALLOW_ZERO_TESTS` | Unset means the guard is on. Reads as what it does at a call site. |
 | Plugin module | `pytest_executed_count.py` at the repo root, loaded as `-p pytest_executed_count` | A repo-root module has no package `__init__` to execute. `tools/__init__.py` arms the Redis flush guard on import (`tools/__init__.py:18-20`), so `-p tools.pytest_executed_count` would run that on every pytest invocation on the machine. A single top-level file is also the smallest thing a sandbox rootdir can reproduce, which the tests depend on. |
+| Script under test, in the tests | `PYTEST_CLEAN_SCRIPT`, defaulting to `REPO_ROOT/scripts/pytest-clean.sh` | The mutation check must not edit `scripts/pytest-clean.sh` in the shared checkout — six lanes run concurrently and an in-place mutation breaks all of them. Reading the script path from an env var lets the mutation run against a copy in `/tmp`. |
+| Mutation seam | `# BEGIN zero-executed guard (#3195)` / `# END zero-executed guard (#3195)` around the verdict block | Makes the mutation a deterministic one-line `sed` range delete rather than a hand edit, so the Verification row is reproducible by anyone. |
 
 ## Data Flow
 
@@ -817,6 +819,9 @@ must be run by someone who did not write the guard.
   everything else prints the diagnostic and exits 1 unless `PYTEST_ALLOW_ZERO_TESTS` is set.
 - The diagnostic goes to stderr, leads with `ZERO TESTS EXECUTED (#3195)`, and is printed
   **whether or not** the hatch is set.
+- Bracket the verdict block with `# BEGIN zero-executed guard (#3195)` and
+  `# END zero-executed guard (#3195)` so the mutation check is a deterministic `sed` range
+  delete against a copy, never a hand edit of the shared checkout.
 - Preserve the existing exit code on every pass-through path. Do not reorder or alter the
   preflight guards, the stall watcher, or the reaping.
 
@@ -828,6 +833,9 @@ must be run by someone who did not write the guard.
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- Resolve the script under test as `os.environ.get("PYTEST_CLEAN_SCRIPT", REPO_ROOT / "scripts" / "pytest-clean.sh")`
+  so the mutation check can point the same tests at a mutated copy in `/tmp` instead of
+  editing the shared checkout out from under five peer lanes.
 - Build the sandbox rootdir exactly as the Failure Path Test Strategy specifies: own
   `pyproject.toml`, `.git` as a **directory**, a **symlink** to the repo `.venv`, no
   `.python-version`, and a **copy** of `pytest_executed_count.py`.
@@ -850,8 +858,10 @@ must be run by someone who did not write the guard.
 - **Assigned To**: guard-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Mutation check: delete the wrapper's verdict block, run the new tests, confirm **red**.
-  Restore, confirm **green**. Capture both outputs verbatim, reading the **passed count off
+- Mutation check, **against a copy**: `sed` the `BEGIN`/`END` guard range out of
+  `scripts/pytest-clean.sh` into `/tmp/pc-mutated.sh`, run the new tests with
+  `PYTEST_CLEAN_SCRIPT=/tmp/pc-mutated.sh`, confirm **red**. Re-run without the override,
+  confirm **green**. Never edit `scripts/pytest-clean.sh` in place — peer lanes are running. Capture both outputs verbatim, reading the **passed count off
   the summary line**, not the exit code.
 - Re-run `tests/unit/test_worktree_venv_absent_guard.py` and
   `tests/unit/test_interpreter_pin_guard.py` unmodified and confirm they pass.
@@ -896,7 +906,7 @@ below refer to the case names in `tests/unit/test_pytest_clean_zero_tests.py`.
 | Guard tests actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, and no `ZERO TESTS EXECUTED` |
 | Sibling wrapper guards actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 15 passed |
 | Marker guard actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` |
-| **Mutation check: the guard bites** | `cp scripts/pytest-clean.sh /tmp/pc.bak && python3 - <<'E'`<br>`import re,io;p='scripts/pytest-clean.sh';s=open(p).read();open(p,'w').write(s.replace(open('/tmp/verdict_block.txt').read(),''))`<br>`E`<br>`scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -3; cp /tmp/pc.bak scripts/pytest-clean.sh` | with the verdict block removed, output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is not wired to anything and the whole file is decoration. |
+| **Mutation check: the guard bites** | `sed '/# BEGIN zero-executed guard (#3195)/,/# END zero-executed guard (#3195)/d' scripts/pytest-clean.sh > /tmp/pc-mutated.sh && chmod +x /tmp/pc-mutated.sh && PYTEST_CLEAN_SCRIPT=/tmp/pc-mutated.sh scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 | tail -3` | with the verdict block removed the output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is wired to nothing and the whole test file is decoration (Risk 4). Demonstrated on the prototype in spike-6. |
 | Zero-executed run is refused, end to end | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` |
 | Wrapper unaffected by `--version` | `scripts/pytest-clean.sh --version` | exit code 0 (the pass-through path *is* the assertion here — no session, so there is no summary line to read) |
 | Guard is wired, not merely mentioned | `grep -c 'PYTEST_CLEAN_COUNT_FILE' scripts/pytest-clean.sh` | output ≥ 3 |
@@ -904,7 +914,7 @@ below refer to the case names in `tests/unit/test_pytest_clean_zero_tests.py`.
 | Injection is gated on the invoking checkout | `grep -c 'REPO_ROOT/pytest_executed_count.py' scripts/pytest-clean.sh` | output == 1 |
 | Injection gate does **not** use SCRIPT_ROOT (anti-criterion, #3033) | `grep -c 'SCRIPT_ROOT/pytest_executed_count' scripts/pytest-clean.sh` | match count == 0 |
 | Count file is never inherited (anti-criterion, Race 4) | `grep -cE 'PYTEST_CLEAN_COUNT_FILE:-' scripts/pytest-clean.sh` | match count == 0 |
-| Count file is not a fixed path (anti-criterion, Race 1) | `grep -cE 'PYTEST_CLEAN_COUNT_FILE=["'"'"']?/tmp/' scripts/pytest-clean.sh` | match count == 0 |
+| Count file is not a fixed path (anti-criterion, Race 1) | `grep -c 'mktemp -t pytest-clean-count' scripts/pytest-clean.sh` | output == 1 |
 | Output parsing was not introduced (anti-criterion, spike-2) | `grep -cE "tee " scripts/pytest-clean.sh` | match count == 0 (verified 0 on `main` today, so the pin is real rather than vacuous) |
 | Hatch suppresses the exit, not the message (anti-criterion, critique row 5) | `grep -c 'ZERO TESTS EXECUTED' scripts/pytest-clean.sh` | output ≥ 1, and it appears **before** the `PYTEST_ALLOW_ZERO_TESTS` test in the file: `awk '/ZERO TESTS EXECUTED/{z=NR} /PYTEST_ALLOW_ZERO_TESTS/{a=NR} END{print (z && a && z<a)}'` prints `1` |
 | conftest's `scratch_test_db` skip untouched (anti-criterion, No-Gos) | `git diff --quiet origin/main -- tests/conftest.py` | exit code 0 |
