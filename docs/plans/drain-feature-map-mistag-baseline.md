@@ -457,15 +457,184 @@ whole-token basename match that cannot fragment.
 
 ## Appetite
 
-_placeholder_
+
+**Size:** Medium
+
+**Team:** Solo dev, PM, code reviewer
+
+**Interactions:**
+- PM check-ins: 1-2 (one is mandatory: the single-marker-removal policy call in
+  Open Questions, which is the only decision a human has to make)
+- Review rounds: 2+ (the change edits the guard that is meant to prevent this
+  class of change from being wrong, so the review has to establish that the
+  replacement rules bite — see the mutation requirements in Verification)
+
+Small in code — the resolver change is on the order of 40 lines — but Medium in
+alignment. The work retires two of the three rules of a guard that shipped
+yesterday, and "we deleted the rule" needs an argument a reviewer accepts, not
+just a green suite.
 
 ## Prerequisites
 
-_placeholder_
+
+No external prerequisites. Both blocking issues are merged.
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| #3010's guard on `main` | `test -f tests/marker_map.py && test -f tests/unit/test_feature_map_markers.py` | The baseline to drain, and the before/after measurement instrument |
+| #3184's anchored stem on `main` | `python -c "from tests.marker_map import _stem; assert _stem('test_test_judge.py') == 'test_judge'"` | The stem this plan builds on; an unanchored stem changes every measurement |
+| Clean baseline before any edit | `python tests/marker_map.py --audit` | Must print `OK: 25 known, baselined violation(s); 0 new, 0 stale.` before work starts |
 
 ## Solution
 
-_placeholder_
+
+### Key Elements
+
+- **`DIRECTORY_MAP`** — a second table in `tests/marker_map.py` mapping an
+  **exact** test-package directory name to a marker. Exact-match, so it is
+  order-free: adding an entry can never shadow or be shadowed by another. This
+  is the answer to the issue's objection that "more ordering-sensitive
+  hand-placement is the defect, not the remedy" — these entries carry no
+  ordering at all.
+- **Whole-token basename matching** — `resolve_marker` stops matching bare
+  substrings and requires the winning `FEATURE_MAP` key to appear as a
+  contiguous run of `_`-delimited tokens. The machinery already exists as
+  `_whole_token_match`, written for rule R3; this promotes it from detector to
+  semantics.
+- **`resolve_markers(path) -> frozenset[str]`** — the new single point of truth,
+  returning the **union** of every marker declared by the file's ancestor
+  package directories and the marker its basename resolves to. Additive, never
+  replacing.
+- **A reworked guard** — R1 and R3 retire because their defect classes become
+  structurally impossible; R2 survives, narrowed; a new R4 guards the one thing
+  the new mechanism can silently get wrong.
+- **An empty `KNOWN_MISTAGS`** — all 24 entries deleted, which the guard's own
+  stale-exemption assertion (#3031) forces to happen only if the violations are
+  genuinely gone.
+
+### Flow
+
+`pytest -m reflections` → collection hook reads
+`tests/unit/reflections/test_pm_briefings_builder.py` → **directory
+`reflections` → marker `reflections`** ∪ basename → ∅ → `item.add_marker(reflections)`
+→ pytest's `deselect_by_mark` sees it → **test runs**.
+
+Today the same journey stops at "basename → ∅ → no marker → deselected".
+
+### Technical Approach
+
+**1. `DIRECTORY_MAP`, exact-match, order-free.**
+
+```python
+DIRECTORY_MAP: dict[str, str] = {
+    "reflections": "reflections",
+    "bridge": "messaging",
+    "sdlc_router_decision": "sdlc",
+    "sdlc_session_ensure": "sdlc",
+    "valor_telegram": "messaging",
+    "worktree_manager": "git",
+    "hooks": "sdlc",
+    "session_runner": "sessions",
+    "output_handler": "messaging",
+}
+```
+
+The first six reproduce exactly what the directory names resolve to under
+today's substring scan, so seeding them changes nothing. The last three are
+new, and they are what drains the two R2 entries: once `hooks` and
+`session_runner` declare an intent, their lone-drifting siblings are no longer
+drift, they are files that carry both the package marker and their own. All
+three markers are already registered in `pyproject.toml`.
+
+`tests/unit/memory_extraction/` is deliberately **left out**: no `memory`
+marker exists, and inventing one is a `pyproject.toml` + docs change belonging
+to whoever wants that selector. Its five files resolve uniformly to no marker,
+so R2 stays green on it and R4 (below) records the omission with a reason.
+
+**2. Whole-token basename matching.**
+
+`resolve_marker` switches from `if pattern in stem` to
+`if _whole_token_match(pattern, stem)`. Measured cost (spike-4): two files lose
+a marker, zero change marker. One of the two,
+`tests/unit/test_long_task_checkpointing.py`, is restored deliberately by adding
+`"checkpointing": "validation"` to `FEATURE_MAP` — placeable **anywhere** in the
+dict, because with whole-token matching `checkpoint` no longer competes for it.
+That single key is the demonstration that the new semantics make targeted keys
+safe, where the issue correctly judged them unsafe under substring-first-hit.
+
+**3. `resolve_markers(path)`, the union.**
+
+Walk the path's parent components from the file outward, stopping at the first
+`KNOWN_ROOT_DIRS` name; collect each component's `DIRECTORY_MAP` marker; union
+with the basename marker. Returns a `frozenset[str]`, possibly empty. Walking
+outward rather than reading only the immediate parent costs nothing today (every
+themed package is exactly one level deep) and means a future
+`tests/unit/reflections/briefings/` inherits `reflections` instead of silently
+falling back to basename-only resolution.
+
+`resolve_marker(basename)` is **kept unchanged in signature** — the guard's rules
+and roughly a dozen existing fixtures call it, and Path A/Path B share it.
+
+**4. `tests/conftest.py::pytest_collection_modifyitems`.**
+
+```python
+def pytest_collection_modifyitems(items):
+    for item in items:
+        for marker_name in resolve_markers(item.nodeid.split("::")[0]):
+            item.add_marker(getattr(pytest.mark, marker_name))
+```
+
+`item.nodeid` is rootdir-relative and carries the full directory path regardless
+of the invocation arguments (spike-5). Using it rather than `item.path` keeps
+Path A's input byte-identical to the `git ls-files` strings Path B audits, which
+is the property that makes the guard's verdict mean anything.
+
+**5. The guard rework — and the honest argument for it.**
+
+The objection this plan must answer is the one recorded in
+`docs/features/feature-map-marker-guard.md`: making the directory authoritative
+"makes rule R1 tautological (the file's marker would be *defined* as the
+directory's marker, so 'they match' proves nothing)."
+
+That is correct, and it is the point. **R1 is a detector for a defect that
+directory-authoritative assignment makes impossible.** The distinguishing
+question is not "does R1 still prove something?" but "can a file still land in
+`tests/unit/reflections/` without the `reflections` marker?" Today the answer is
+yes, unless someone adds a `KNOWN_MISTAGS` entry. After this change the answer
+is no, by construction. A structural guarantee is strictly stronger than a test
+that detects violations of it, and #3184 is the precedent: it deleted mechanism
+3 rather than exempting it.
+
+Hollowing out would be deleting R1 while the defect remained reachable. So the
+plan draws the line explicitly, and pays for it with proof:
+
+| Rule | Disposition | Why |
+|---|---|---|
+| **R1** directory intent | **Retire** | Defect class eliminated. Replaced by a *real-collection* proof: a mutation test that plants a file with a colliding basename inside a resolving package, runs actual pytest collection, and asserts the directory marker is applied. That test fails if the mechanism is removed; R1 never tested the mechanism, only the filenames. |
+| **R2** sibling uniformity | **Keep, narrowed** | Still meaningful for packages absent from `DIRECTORY_MAP`, where no intent is declared. Its scope shrinks from 4 packages to 1 (`memory_extraction`). |
+| **R3** whole-token match | **Retire** | Defect class eliminated: the resolver *is* whole-token, so `resolve_marker` and `resolve_marker_whole_token` are the same function. Replaced by direct `_whole_token_match` unit fixtures (already present) plus a fixture pinning `test_long_task_checkpointing.py` to `validation` via the `checkpointing` key, which is the file the semantics change would otherwise have moved. |
+| **R4** package declaration *(new)* | **Add** | Guards what the new mechanism *can* silently get wrong: a new themed package directory added with no `DIRECTORY_MAP` entry falls back to basename-only resolution and quietly reproduces the whole original defect. R4 asserts every non-root test package is either in `DIRECTORY_MAP` or in a small reasoned `UNMAPPED_PACKAGES` dict. It is bracketed in both directions exactly as `KNOWN_MISTAGS` is (#3031): an entry for a package that no longer exists, or now maps, fails. |
+
+R4 is what keeps this a guard rather than a one-time cleanup. Without it the
+drain is permanent for today's files and worthless for tomorrow's.
+
+**6. Drain `KNOWN_MISTAGS` to `{}`.**
+
+The dict stays in the module — empty, with its docstring rewritten to say it is
+the exemption mechanism of last resort and that it is currently unused. Deleting
+the mechanism entirely would remove the #2805 path-keying lesson and the #3031
+bracketing along with it, and the next person needing an exemption would invent
+a worse one.
+
+**7. The before/after census, committed as evidence.**
+
+Acceptance criterion 3 ("no test file loses a marker it currently has") is a
+claim about all 838 files, so it is checked mechanically, not by inspection.
+`python tests/marker_map.py --report` already prints `path<TAB>marker` for every
+tracked file. It is extended to print the full marker *set*
+(`path<TAB>marker1,marker2`) and the PR carries the `diff` of before-report
+against after-report. The expected diff is exactly the 48 gaining files and the
+single losing file from spike-6 — no other line moves.
 
 ## Failure Path Test Strategy
 
