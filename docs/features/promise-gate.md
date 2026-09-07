@@ -308,13 +308,18 @@ via the `_write_promise_audit` helper. The entry shape:
 are required) — a real Haiku call can return `action="block"` with
 `class_=None`. Never assert on `class_` in a test; assert on `action` (and,
 where relevant, on `reason`'s text). `elapsed_ms` is present on every row
-that ran a judgment, including the zero-LLM `promise_gate_drafter` and
-`promise_gate_poll` rows; it is omitted only on the kill-switch and
-classifier-delegation short-circuits, which have nothing to time.
-`queue_wait_ms` is present only when the LLM attempt reached the semaphore
-acquire (the `llm` and `timeout` suffixes, and a `heuristic` fallthrough
-after acquiring); it is omitted on every `oversize` row, on the no-API-key
-heuristic fallthrough, and on every zero-LLM row.
+written by `bridge/promise_gate.py` and `bridge/message_drafter.py` that ran
+a judgment, including the zero-LLM `promise_gate_drafter` and
+`promise_gate_poll` rows; it is omitted on the kill-switch and
+classifier-delegation short-circuits, which have nothing to time, and on
+every `terminal_flush` row, whose writer in `agent/session_health.py` passes
+no timing fields (so the measurement tool reports that source with no
+`elapsed_ms` samples by design). `queue_wait_ms` is present only after the
+semaphore acquire succeeded (the `llm` suffix, an SDK-timeout `timeout` row,
+and a `heuristic` fallthrough after acquiring); it is omitted on a
+semaphore-acquire timeout (also a `timeout` row, since `semaphore_slot`
+raises before the wait is recorded), on every `oversize` row, on the
+no-API-key heuristic fallthrough, and on every zero-LLM row.
 
 The `source` discriminator takes one of:
 
@@ -333,7 +338,7 @@ The `source` discriminator takes one of:
 | `promise_gate_oversize` / `promise_gate_drafter_oversize` | CLI path / drafter main path: the text exceeded `PROMISE_GATE_LLM_MAX_INPUT_CHARS` (default 8000), so the model was never called and the regex heuristic decided |
 | `promise_gate_poll` | Poll-question route (`validate_poll_question`, transport `telegram_poll`): the heuristic verdict, written on allow and block alike |
 | `promise_gate_poll_disabled` | Poll-question route: kill switch was on — records `action="allow" / reason="gate_disabled"` |
-| `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`, heuristic-only); a block means the honest fallback was substituted |
+| `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`, heuristic-only); a block means the honest fallback was substituted. This route writes its kill-switch row under the same source with `reason="gate_disabled"` rather than a `_disabled` suffix, so filter on `reason` to separate its disabled rows |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
 Rows written before this instrumentation existed carry no `kind` field
@@ -583,7 +588,7 @@ every LLM-gated route: the CLI send paths (`evaluate_promise` /
 `evaluate_promise_async`) and the drafter main path
 (`_evaluate_drafter_promise(..., use_llm=True)`, which calls the same
 `_evaluate_promise_llm_or_heuristic`) all send it. Only the heuristic-only
-routes (short path, Stop hook, `EmailOutputHandler.send`, poll questions) are
-unaffected by it. If telemetry shows a class of false-positives the LLM cannot
+routes (short path, Stop hook, `EmailOutputHandler.send`, poll questions, and
+the terminal flush) are unaffected by it. If telemetry shows a class of false-positives the LLM cannot
 catch from text alone, this prompt is the knob to turn, and it changes the
 verdict on every composed relay-handler delivery as well as on CLI sends.
