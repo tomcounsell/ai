@@ -411,15 +411,31 @@ path, which the existing unit suite drives directly.
 | Targeted tests pass | `.venv/bin/python -m pytest tests/unit/test_session_isolation_bypass.py tests/unit/worktree_manager/ tests/unit/test_session_executor_reap_marker.py tests/unit/test_agent_session_scheduler_worktree_inheritance.py -q --timeout=420 --timeout-method=thread` | exit code 0 |
 | Lint clean | `.venv/bin/python -m ruff check agent/session_executor.py tools/agent_session_scheduler.py` | exit code 0 |
 | Format clean | `.venv/bin/python -m ruff format --check agent/session_executor.py tools/agent_session_scheduler.py` | exit code 0 |
-| working_dir is persisted | `grep -c "working_dir" agent/session_executor.py` | output > 8 |
+| working_dir is persisted | `grep -c "agent_session.working_dir = " agent/session_executor.py` | output > 0 |
 | Write-back marker present | `grep -c "\[lane-writeback\]" agent/session_executor.py` | output > 0 |
-| Authoritative resolver used for the write | `grep -c "get_authoritative_session" agent/session_executor.py` | output > 2 |
+| Anti-criterion: the duplicate-prone linear scan is gone | `grep -c 'AgentSession.query.filter(project_key=session.project_key, status="running")' agent/session_executor.py` | match count == 0 |
 | Cleanup block is loud | `grep -c "cleanup blocked" agent/session_executor.py` | output > 0 |
 | Scheduler guard present | `grep -c "WORKTREES_DIR" tools/agent_session_scheduler.py` | output > 0 |
-| Anti-criterion: slug is never written back | `grep -cE "(session\|agent_session\|_auth)\.slug *=[^=]" agent/session_executor.py` | match count == 0 |
+| Anti-criterion: slug is never written back | `grep -cE "\.slug *= *[^=]" agent/session_executor.py` | match count == 0 |
 | Anti-criterion: no slug arm in the busy scan | `grep -cE "getattr\(session, .slug." agent/worktree_manager.py` | match count == 0 |
 | Anti-criterion: no second lane field added | `grep -c "active_worktree_dir" models/agent_session.py` | match count == 0 |
-| Anti-criterion: no raw Redis write | `grep -cE "\.(delete\|srem\|sadd\|zrem)\(" tools/agent_session_scheduler.py` | match count == 0 |
+| Scheduler guard predicate present | `grep -c "WORKTREES_DIR not in" tools/agent_session_scheduler.py` | output > 0 |
+
+**Red-state proof (measured on `de229ee46`, before any implementation).** Every positive row
+above was run against main and returned a failing value, and every anti-criterion pattern was
+proved to bite against a seeded violation:
+
+| Row | Value on main | Verdict |
+|---|---|---|
+| `agent_session.working_dir = ` | 0 | FAIL (expected `> 0`) |
+| `[lane-writeback]` | 0 | FAIL (expected `> 0`) |
+| `cleanup blocked` | 0 | FAIL (expected `> 0`) |
+| `WORKTREES_DIR` in scheduler | 0 | FAIL (expected `> 0`) |
+| `WORKTREES_DIR not in` in scheduler | 0 | FAIL (expected `> 0`) |
+| linear-scan anti-criterion | 1 | FAIL (expected `match count == 0`) |
+| `.slug *= *[^=]` | 0 on main; **1** against seeded `agent_session.slug = "x"` | pattern bites |
+| `getattr\(session, .slug.` | 0 on main; **1** against a seeded slug arm | pattern bites |
+| `active_worktree_dir` | 0 on main; **1** against a seeded field declaration | pattern bites |
 
 ## Critique Results
 
