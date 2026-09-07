@@ -18,6 +18,7 @@ production Redis is ever touched. All seeded records use a test-scoped
 from __future__ import annotations
 
 import threading
+from unittest.mock import patch
 
 import msgpack
 import pytest
@@ -84,11 +85,15 @@ def test_task_type_index_does_not_reinflate_from_identityless_hashes():
 # removed with it — there is no pid index left to re-inflate.
 
 
-def test_quarantine_count_sums_across_all_indexed_fields():
-    """_last_quarantined_identityless accumulates shim invocations across every
-    IndexedField's shim, not just status's -- so it should be >= a per-field
-    count times the number of IndexedFields touched during one rebuild pass
-    (popoto's on_save loop runs every field for every hash)."""
+def test_quarantine_counts_each_identityless_row_once_across_all_indexed_fields():
+    """_last_quarantined_identityless is a de-duplicated ROW count, not a
+    per-field invocation count (#3199). Under popoto's row-scoped counting,
+    n_ghosts identity-less rows produce a count of n_ghosts regardless of how
+    many IndexedFields would have touched each row through popoto's on_save
+    loop -- a row seen through both the divergence pre-check and the on_save
+    shim, or through multiple fields, still counts once. This also asserts
+    the #2207 generalization more directly than counter arithmetic ever
+    could: all three $IndexF sets stay clean, not just one."""
     from models.agent_session import AgentSession
 
     pk = "test-2207-sum"
@@ -97,11 +102,179 @@ def test_quarantine_count_sums_across_all_indexed_fields():
         _seed_identityless_hash(pk, f"ghostsum{j:026d}")
 
     AgentSession.repair_indexes()
-    # 3 IndexedFields (status, task_type, claude_session_uuid) x n_ghosts
-    # identity-less hashes, at minimum (popoto may additionally write back
-    # artifact hashes during scan_iter). Durability plan #2494 deleted the
-    # former 4th IndexedField, claude_pid.
-    assert AgentSession._last_quarantined_identityless >= n_ghosts * 3
+    assert AgentSession._last_quarantined_identityless == n_ghosts
+
+    r = _redis()
+    for field_key in (
+        "$IndexF:AgentSession:status:pending",
+        "$IndexF:AgentSession:task_type:None",
+        "$IndexF:AgentSession:claude_session_uuid:None",
+    ):
+        assert r.scard(field_key) == 0, f"{field_key} was re-inflated from identity-less rows"
+
+
+def test_quarantine_count_persisted_to_redis_key_for_doctor():
+    """The Redis-persisted quarantine count and the doctor suffix are the
+    counter's only durable, cross-process surface -- assert both directly
+    rather than only by inspection."""
+    from models.agent_session import _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY, AgentSession
+    from tools.doctor import _recent_quarantine_suffix
+
+    pk = "test-3199-doctor-suffix"
+    n_ghosts = 3
+    for j in range(n_ghosts):
+        _seed_identityless_hash(pk, f"ghostdoc{j:025d}")
+
+    AgentSession.repair_indexes()
+
+    raw = _redis().get(_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY)
+    assert raw is not None
+    assert int(raw) == n_ghosts
+
+    suffix = _recent_quarantine_suffix()
+    assert suffix != ""
+    assert str(n_ghosts) in suffix
+
+
+def test_diverged_key_decode_failure_is_counted_not_raised(monkeypatch):
+    """A decode that raises for a diverged key must not fail repair_indexes()
+    -- a row that cannot even be decoded is certainly not a hydrated session,
+    so it is counted as identity-less rather than propagating the
+    exception."""
+    import popoto.models.encoding as encoding_module
+
+    from models.agent_session import AgentSession
+
+    pk = "test-3199-decode-raises"
+    n_ghosts = 3
+    for j in range(n_ghosts):
+        _seed_identityless_hash(pk, f"ghostdecode{j:024d}")
+
+    def _boom(*args, **kwargs):
+        raise ValueError("simulated decode failure")
+
+    monkeypatch.setattr(encoding_module, "decode_popoto_model_hashmap", _boom)
+
+    result = AgentSession.repair_indexes()
+    assert isinstance(result, tuple) and len(result) == 2
+    assert AgentSession._last_quarantined_identityless == n_ghosts
+
+
+def test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud(monkeypatch):
+    """The obvious one-step recipe (just make decode_popoto_model_hashmap
+    unimportable) cannot reach the ImportError degrade branch: popoto's own
+    rebuild_indexes() imports the very same symbol from the very same module
+    inside the call repair_indexes() makes, which sits under a bare
+    try/finally with no except -- any technique that makes the symbol
+    unimportable raises out of cls.rebuild_indexes() and escapes
+    repair_indexes() entirely before the degrade branch is ever reached.
+
+    Working recipe: stub rebuild_indexes() to return a canned
+    RebuildIndexesResult so popoto's own internal import of the symbol never
+    runs, and ONLY THEN remove the symbol -- with the real rebuild stubbed
+    out, the only remaining import of it is the one inside repair_indexes(),
+    which is the branch under test.
+
+    Also asserts the Sentry latch: two degraded passes in the same process
+    must log ERROR each time but capture to Sentry only once."""
+    import popoto.models.encoding as encoding_module
+    from popoto.models.base import RebuildIndexesResult
+
+    from models.agent_session import AgentSession
+
+    pk = "test-3199-import-degrade"
+    seeded_keys = [_seed_identityless_hash(pk, f"ghostimp{j:024d}") for j in range(4)]
+
+    # Reset the Sentry latch so this assertion does not depend on test order.
+    monkeypatch.setattr(AgentSession, "_decode_degrade_reported", False)
+
+    # Stub rebuild_indexes so popoto's own internal import of
+    # decode_popoto_model_hashmap (inside base.py's rebuild_indexes()) never
+    # runs -- this is the technique test_plain_int_rebuild_result_degrades_to_
+    # shim_only also uses.
+    monkeypatch.setattr(
+        AgentSession,
+        "rebuild_indexes",
+        classmethod(lambda cls: RebuildIndexesResult(0, seeded_keys)),
+    )
+
+    # Only now remove the symbol. With the real rebuild stubbed out, this
+    # cannot break anything but the call-site import inside repair_indexes(),
+    # which is the branch under test.
+    monkeypatch.delattr(encoding_module, "decode_popoto_model_hashmap", raising=False)
+
+    with (
+        patch("models.agent_session.logger") as mock_logger,
+        patch("sentry_sdk.capture_message") as mock_sentry,
+    ):
+        result_1 = AgentSession.repair_indexes()
+        result_2 = AgentSession.repair_indexes()
+
+    for result in (result_1, result_2):
+        assert isinstance(result, tuple) and len(result) == 2
+
+    # Do NOT widen the production `except ImportError` to `except Exception`
+    # to make a naive version of this test pass -- that would swallow real
+    # decode faults on the hot startup path in exchange for a test shortcut.
+    assert AgentSession._last_quarantined_identityless == len(seeded_keys)
+    # logger.error is the unconditional per-pass signal of record: it fires
+    # on EVERY degraded pass.
+    assert mock_logger.error.call_count == 2
+    # The Sentry capture is latched to once per process: a moved upstream
+    # symbol is a permanent condition, and repair_indexes() runs on worker
+    # startup, an hourly reflection, and session pickup, so an unlatched
+    # capture would be an unthrottled fleet-wide error stream.
+    mock_sentry.assert_called_once()
+
+
+def test_plain_int_rebuild_result_degrades_to_shim_only(monkeypatch):
+    """A future popoto that returns a bare int (not RebuildIndexesResult)
+    must not crash the getattr(result, "diverged_keys", ()) guard -- it
+    should degrade to counting only what the retained on_save shim caught,
+    with no AttributeError."""
+    from models.agent_session import AgentSession
+
+    real_rebuild = AgentSession.rebuild_indexes.__func__
+
+    def _plain_int_rebuild(cls):
+        return int(real_rebuild(cls))
+
+    monkeypatch.setattr(AgentSession, "rebuild_indexes", classmethod(_plain_int_rebuild))
+
+    pk = "test-3199-plain-int"
+    for j in range(2):
+        _seed_identityless_hash(pk, f"ghostplain{j:025d}")
+
+    result = AgentSession.repair_indexes()
+    assert isinstance(result, tuple) and len(result) == 2
+    # The seeded ghosts are diverged rows under real popoto 1.9.0 and never
+    # reach on_save, so with diverged_keys unavailable (plain int result)
+    # nothing catches them this pass -- documenting the degrade rather than
+    # newly breaking anything, since the shim remains the fallback seam.
+    assert AgentSession._last_quarantined_identityless == 0
+
+
+def test_redis_persistence_failure_is_non_fatal(monkeypatch):
+    """The Redis SET that persists the count for the doctor's cross-process
+    read must never fail the repair itself, and the in-memory counter must
+    still be populated even when persistence raises."""
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    from models.agent_session import AgentSession
+
+    pk = "test-3199-persist-fail"
+    n_ghosts = 2
+    for j in range(n_ghosts):
+        _seed_identityless_hash(pk, f"ghostpf{j:025d}")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated Redis SET failure")
+
+    monkeypatch.setattr(POPOTO_REDIS_DB, "set", _boom)
+
+    result = AgentSession.repair_indexes()
+    assert isinstance(result, tuple) and len(result) == 2
+    assert AgentSession._last_quarantined_identityless == n_ghosts
 
 
 def test_shims_restored_after_repair_no_leak():

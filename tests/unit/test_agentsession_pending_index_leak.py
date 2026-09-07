@@ -90,8 +90,9 @@ def test_repair_does_not_reinflate_from_identityless_hashes():
     # At least the m seeded identity-less hashes are quarantined. popoto's
     # rebuild also writes back its own identity-less artifact hash(es) during
     # the scan (Risk 4 — the raw hash keyspace is NOT cleaned by A1, only the
-    # index is), so the count is a lower-bounded per-pass event count, not an
-    # exact seed count.
+    # index is), so the count is a lower-bounded per-pass ROW count (rows
+    # quarantined, de-duplicated across both seams and all IndexedFields),
+    # not an exact seed count.
     assert AgentSession._last_quarantined_identityless >= m_identityless
 
     # Second pass: the index STAYS at n_healthy — no re-inflation across
