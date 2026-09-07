@@ -22,18 +22,29 @@ looks right. These tests pin every half of that contract:
   raise or guess a wrong PID, so callers land in their existing "not running"
   branch.
 
-Two live tests at the bottom exercise the real host process table. Both skip
-cleanly when the bridge is absent or when the test process is not one of its
-descendants, so they never fail on a machine that simply is not running the
+Two live tests exercise the real host process table against the bridge. Both
+skip cleanly when the bridge is absent or when the test process is not one of
+its descendants, so they never fail on a machine that simply is not running the
 service.
+
+The final section covers the one-shot migration guards in
+``scripts/migrate_session_type_pm_to_eng.py`` and
+``scripts/merge_dev_chat_into_eng.py`` (#3187), whose ``pgrep`` probes failed in
+the dangerous direction: a live worker read as stopped and the migration
+proceeded. Their worker precondition is exercised against a decoy subprocess
+this module spawns itself, so it runs on every machine.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import logging
 import os
 import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -741,3 +752,106 @@ def test_get_bridge_pid_resolves_the_live_bridge():
         pytest.skip("bridge is not running on this host")
 
     assert update_service.get_bridge_pid() == pids[0]
+
+
+# ---------------------------------------------------------------------------
+# Caller contract in the one-shot migration guards (#3187)
+# ---------------------------------------------------------------------------
+
+# Both scripts carry the same pair of preconditions, converted together.
+MIGRATION_GUARD_MODULES = (
+    "scripts.migrate_session_type_pm_to_eng",
+    "scripts.merge_dev_chat_into_eng",
+)
+
+
+@contextlib.contextmanager
+def _decoy_worker_process(tmp_path):
+    """Spawn a real ``python <tmp>/worker/__main__.py`` and yield its PID.
+
+    A genuine subprocess in the host process table, not a stubbed ``ps``: the
+    guard has to resolve it through ``ps`` the way it will on a real migration
+    run. The script-path launch shape is used deliberately — spawning the
+    ``python -m worker`` shape would start the actual worker.
+    """
+    script = tmp_path / "worker" / "__main__.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("import time\n\ntime.sleep(120)\n")
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if proc.pid in process_lookup.find_python_service_pids(script_suffix=WORKER_SUFFIX):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"decoy worker pid {proc.pid} never appeared in the process table")
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("module_name", MIGRATION_GUARD_MODULES)
+def test_migration_worker_guard_sees_a_live_worker_in_the_process_table(
+    module_name, monkeypatch, tmp_path, caplog
+):
+    """The guard must refuse to migrate while a worker-shaped process is live.
+
+    This is the #3187 failure direction: the old ``pgrep -f "python -m worker"``
+    excluded the caller's own ancestors, so a migration launched from inside a
+    worker-hosted agent session read the live worker as absent and mutated
+    session rows underneath it. Exercised against a real subprocess so the
+    lookup goes through ``ps``, and asserted on the decoy's own PID — a machine
+    that happens to be running the real worker would otherwise make any
+    ``SystemExit`` look like a pass.
+    """
+    guard_module = importlib.import_module(module_name)
+    # Neutralise the heartbeat-file signal (a fresh heartbeat exits first), so
+    # the process-table signal is the only thing that can trip the guard.
+    monkeypatch.setattr(guard_module, "WORKER_HEARTBEAT_THRESHOLD", 0)
+
+    with _decoy_worker_process(tmp_path) as decoy_pid:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as exit_info:
+                guard_module._check_worker_not_running()
+
+    assert exit_info.value.code == 1
+    assert str(decoy_pid) in caplog.text, (
+        f"the guard exited, but pid {decoy_pid} is absent from its message — it did "
+        "not exit because it saw the decoy worker"
+    )
+
+
+@pytest.mark.parametrize("module_name", MIGRATION_GUARD_MODULES)
+def test_migration_worker_guard_treats_a_reaped_pid_as_stopped(module_name, monkeypatch, tmp_path):
+    """The ``os.kill(pid, 0)`` re-check survives the conversion.
+
+    A PID the lookup reported but that has since exited must not block the
+    migration.
+    """
+    guard_module = importlib.import_module(module_name)
+    monkeypatch.setattr(guard_module, "WORKER_HEARTBEAT_THRESHOLD", 0)
+
+    reaped = subprocess.Popen([sys.executable, "-c", "pass"])
+    reaped.wait(timeout=30)
+    monkeypatch.setattr(guard_module, "find_python_service_pids", lambda **kwargs: [reaped.pid])
+
+    guard_module._check_worker_not_running()  # must not raise SystemExit
+
+
+@pytest.mark.parametrize("module_name", MIGRATION_GUARD_MODULES)
+def test_migration_email_guard_exits_on_a_live_email_bridge_pid(module_name, monkeypatch):
+    """The email-bridge precondition trips on a live PID from the lookup.
+
+    ``os.getpid()`` is used as the "live" PID because the guard re-checks
+    liveness with ``os.kill(pid, 0)``; the exit happens before the Redis
+    ``email:last_poll_ts`` freshness check, so no Redis is touched.
+    """
+    guard_module = importlib.import_module(module_name)
+    monkeypatch.setattr(guard_module, "find_python_service_pids", lambda **kwargs: [os.getpid()])
+
+    with pytest.raises(SystemExit) as exit_info:
+        guard_module._check_email_bridge_not_running()
+
+    assert exit_info.value.code == 1
