@@ -287,9 +287,10 @@ def build_telegram_outbox_payload(
     The shape is declared once, as ``bridge.wire_schemas.OutboxPayload``, and
     that model is what the relay validates the entry against on the way out:
     ``v``, ``chat_id``, ``reply_to``, ``text``, ``session_id``, ``timestamp``,
-    and — only when supplied — ``file_paths`` and ``correlation_id``.  Keys
-    left unset are OMITTED entirely rather than written as nulls, preserving
-    the conditional-key behaviour of the inline dict this helper replaced.
+    and — only when supplied — ``file_paths`` and ``correlation_id``.  Those
+    two are the only keys omitted when unset; every other key is always
+    written, ``reply_to`` as an explicit null when the message replies to
+    nothing.  That is the shape of the inline dict this helper replaced.
 
     Args:
         chat_id: Target Telegram chat identifier.
@@ -315,11 +316,17 @@ def build_telegram_outbox_payload(
         file_paths=file_paths or None,
         correlation_id=correlation_id,
     )
-    # `exclude_none` preserves the conditional-key behaviour the hand-built
-    # dict had: `file_paths` and `correlation_id` are omitted entirely rather
-    # than written as nulls, so a relay that predates the typed wire sees the
-    # exact shape it saw before.
-    return payload.model_dump(exclude_none=True)
+    # Only `file_paths` and `correlation_id` are conditional. The hand-built
+    # dict this replaced always wrote `reply_to`, including as an explicit
+    # null on the highest-volume path (an ordinary message replying to
+    # nothing), so a blanket `exclude_none=True` would silently drop it — and
+    # would drop `text`, `chat_id` or `session_id` too the moment any of them
+    # were ever None. Omit the two optional keys by name instead.
+    dumped = payload.model_dump()
+    for optional_key in ("file_paths", "correlation_id"):
+        if dumped.get(optional_key) is None:
+            del dumped[optional_key]
+    return dumped
 
 
 def build_telegram_poll_outbox_payload(

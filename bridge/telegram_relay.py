@@ -1361,8 +1361,12 @@ async def process_outbox(telegram_client) -> int:
                     continue
 
                 # Downstream handlers read a plain dict (and mutate it: the
-                # retry counter, the re-queue). `exclude_none` keeps the shape
-                # identical to what the writer put on the wire.
+                # retry counter, the re-queue). `exclude_none` drops the keys
+                # this payload never carried rather than materialising a null
+                # for every optional field the model declares. It also drops
+                # an explicit null the writer DID send (`reply_to` on a
+                # message replying to nothing); every handler reads these
+                # with `.get`, so the two are indistinguishable downstream.
                 message = payload.model_dump(exclude_none=True)
                 msg_type = payload.type
 

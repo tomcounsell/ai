@@ -20,7 +20,7 @@ delivery. Steering is deliberately correlation-free (see #3177).
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -89,15 +89,9 @@ def dump(payload: _Wire) -> str:
     return payload.model_dump_json(exclude_none=True)
 
 
-def outbox_from_dict(data: dict[str, Any]) -> str:
-    """Validate a hand-built outbox dict and return its JSON wire form."""
-    return dump(OutboxPayload(**data))
-
-
 __all__ = [
     "NotifyPayload",
     "OutboxPayload",
     "SteeringPayload",
     "dump",
-    "outbox_from_dict",
 ]
