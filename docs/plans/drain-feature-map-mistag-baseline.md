@@ -930,15 +930,155 @@ surface:
 
 ## Documentation
 
-_placeholder_
+
+### Feature Documentation
+- [ ] Rewrite `docs/features/feature-map-marker-guard.md`. It is the guard's
+  reference and this plan invalidates four of its sections:
+  - `## Three mistag mechanisms` — mechanisms 1 and 2 join mechanism 3 as
+    structurally closed. Rewrite as "what used to go wrong and what closed it",
+    with the closing change named for each (#3184, this plan).
+  - `## The three rules, and what each can and cannot see` — becomes R2 and R4.
+    The retirement of R1 and R3 is stated with its argument, not glossed.
+  - **`## The coverage boundary, stated plainly`** — the "80 of 835 tracked test
+    files (9.6%)" figure is superseded. Re-derive and restate it: directory
+    intent now reaches 81 files across 9 mapped packages, and the 757 files
+    under a root directory are covered by resolution semantics rather than by a
+    rule. Say plainly what is still uncovered.
+  - **`## What was considered and rejected`** — the entry "Making the package
+    directory authoritative … Gains 39 markers and corrects 6" is now both
+    *adopted* and *numerically wrong*. Replace it with the measured +43 files /
+    +47 applications / 1 loss, and move it out of the rejected list.
+  - `## Exemptions` and `## Responding to a red guard` — `KNOWN_MISTAGS` is
+    empty, `UNMAPPED_PACKAGES` is new, and the remediation ladder changes (add a
+    `DIRECTORY_MAP` entry is now the first move, renaming the file is no longer
+    the first).
+- [ ] Update `tests/README.md`: the auto-tagging description at line 116 says
+  markers come from the filename, which is no longer the whole truth, and the
+  per-marker counts it publishes (`sdlc` 516, `messaging` 327, `sessions` 293)
+  all move. Regenerate the counts from a real collection rather than editing
+  them by hand.
+- [ ] `docs/features/README.md` — check whether the guard's index row summary
+  still describes it accurately after the rule set changes; update if not.
+
+### Inline Documentation
+- [ ] `DIRECTORY_MAP` gets a docstring explaining that it is exact-match and
+  therefore order-free, and that this is the specific property `FEATURE_MAP`
+  lacks.
+- [ ] `KNOWN_MISTAGS` keeps its docstring, rewritten: still the only exemption
+  mechanism, still path-keyed (#2805), still bracketed both ways (#3031),
+  currently empty and expected to stay that way.
+- [ ] `UNMAPPED_PACKAGES` documents why a package is deliberately unmapped and
+  that it is bracketed in both directions.
+- [ ] `resolve_markers` documents the union semantics and, explicitly, that it
+  never removes a marker the basename resolves to — the property acceptance
+  criterion 3 rests on.
+- [ ] The `_stem` docstring currently says "#3184 has exactly one line to
+  change"; #3184 has landed and the sentence is stale. Correct it.
+
+### External Documentation Site
+- Not applicable. This repo has no Sphinx/MkDocs/Read the Docs site; `docs/` is
+  read directly from the repository.
 
 ## Success Criteria
 
-_placeholder_
+
+- [ ] `python tests/marker_map.py --audit` exits 0 with zero violations, not
+      zero *new* violations — the report line reads `0 known, baselined
+      violation(s); 0 new, 0 stale`.
+- [ ] `KNOWN_MISTAGS == {}`. **Acceptance criterion 1 from the issue**, met by
+      emptying rather than by reasoning about residual entries.
+- [ ] `pytest -m reflections --collect-only` over `tests/unit/reflections/` and
+      `tests/integration/reflections/` collects **396 of 396** tests with zero
+      deselected, up from 34 of 396. **Acceptance criterion 2.**
+- [ ] The before/after marker census over all 838 tracked files shows exactly
+      one file losing exactly one marker
+      (`tests/unit/reflections/test_pm_briefings_no_slots_configured.py` losing
+      `config`), and that loss is ratified in Open Questions. **Acceptance
+      criterion 3**, checked mechanically against a committed snapshot rather
+      than by inspection.
+- [ ] 43 files gain a marker; per-marker census matches spike-6
+      (`reflections` 28→48, `sessions` 43→61, `messaging` 61→67, `sdlc` 85→89,
+      `config` 6→5, all others unchanged).
+- [ ] Every retired rule has a replacement proven red before green, with the
+      failure output pasted into the PR: remove the directory branch → the
+      real-collection mutation test fails; revert to substring matching → the
+      `checkpointing` fixture fails; empty `DIRECTORY_MAP` → `run_audit()`
+      raises.
+- [ ] `tests/conftest.py::pytest_collection_modifyitems` has direct test
+      coverage for the first time, against a real pytest collection rather than
+      a resolver call.
+- [ ] Every value in `DIRECTORY_MAP` and `FEATURE_MAP` is a marker registered in
+      `pyproject.toml`, asserted by a test that parses the file.
+- [ ] `tests/marker_map.py` still runs on a bare interpreter: standard library
+      only, no `pytest` import, no file-content reading.
+- [ ] Full `tests/unit/` suite green via `scripts/pytest-clean.sh`.
+- [ ] `python -m ruff check` and `python -m ruff format --check` clean.
+- [ ] Documentation updated (`docs/features/feature-map-marker-guard.md`,
+      `tests/README.md`), including the corrected 39/6 figure and the
+      re-derived coverage boundary.
+- [ ] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
+      tests/` returns nothing related to marker resolution (verified at plan
+      time: the suite carries no xfail for this defect).
 
 ## Team Orchestration
 
-_placeholder_
+
+The lead orchestrates and does not build. Three builder/validator pairs plus a
+documentarian, sequenced so the resolver is proven before the guard is rewritten
+against it.
+
+### Team Members
+
+- **Builder (resolver)**
+  - Name: `resolver-builder`
+  - Role: `tests/marker_map.py` resolution layer — `DIRECTORY_MAP`,
+    whole-token matching, `resolve_markers`, `--report` set output. Owns no
+    guard rules.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (collection hook)**
+  - Name: `hook-builder`
+  - Role: `tests/conftest.py::pytest_collection_modifyitems` and its first-ever
+    real-collection tests, including the R1-replacement mutation test.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Builder (guard)**
+  - Name: `guard-builder`
+  - Role: `tests/unit/test_feature_map_markers.py` — retire R1/R3, narrow R2,
+    add R4, empty `KNOWN_MISTAGS`, add `UNMAPPED_PACKAGES` bracketing.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator (census)**
+  - Name: `census-validator`
+  - Role: read-only. Produces the before/after marker census over all 838 files,
+    confirms the loss set is exactly one path, confirms the per-marker census
+    matches spike-6, and runs the real `--collect-only -m` counts.
+  - Agent Type: validator
+  - Resume: true
+
+- **Validator (mutation)**
+  - Name: `mutation-validator`
+  - Role: read-only on the source, but runs the three red-state mutations in its
+    **own worktree** and captures the failure output. Must not share a checkout
+    with any builder.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `guard-documentarian`
+  - Role: `docs/features/feature-map-marker-guard.md`, `tests/README.md`,
+    `docs/features/README.md`, and the stale `_stem` docstring.
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Lead validator**
+  - Name: `final-validator`
+  - Role: runs the whole Verification table at the final head.
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
