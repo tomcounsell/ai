@@ -382,8 +382,10 @@ than a question, and every task, risk and verification row below uses these name
    `-n 2`: identical count).
 7. **Wrapper post-run**: `wait` yields `PYTEST_EXIT`; the stall watcher is killed; workers
    are reaped. The wrapper reads the file, deletes it, and decides.
-8. **Output**: today's exit code, unless the verdict says a session ran and executed
-   nothing — in which case a named diagnostic goes to stderr and the wrapper exits 1.
+8. **Output**: today's exit code. The one exception is a run pytest itself called green
+   (`PYTEST_EXIT` is 0) whose verdict fails `verdict_passes_through` — a named diagnostic
+   goes to stderr and the wrapper exits 1. A run that pytest already called red is never
+   touched, so it keeps both its status and its own headline.
 
 The count file is the only new piece of state. It is minted, written and deleted inside a
 single wrapper invocation, has exactly one writer, and is never inherited.
@@ -815,10 +817,12 @@ sleep is needed, and none should be added.
 **Trigger:** A wedged run is `SIGKILL`ed while the plugin is writing.
 **Data prerequisite:** A truncated or absent file must not be read as a valid verdict.
 **State prerequisite:** none.
-**Mitigation:** Covered by construction rather than by a dedicated branch: the pass-through
-allowlist admits only an empty read, `collectonly`, and `count [1-9]*`. A surviving
-`started` sentinel and a truncated `coun` both fall to the fail-closed default, verified in
-the shell-level predicate check.
+**Mitigation, two layers.** A wedged run exits non-zero, so the `[ "$PYTEST_EXIT" -eq 0 ]`
+gate skips the verdict block entirely and the `WEDGED` banner stays the only headline — which
+is the point of the gate (spike-8). Should the gate ever be widened, the allowlist is still
+total by construction: it admits only an empty read, `collectonly`, and `count [1-9]*`, so a
+surviving `started` sentinel and a truncated `coun` both fall to the fail-closed default,
+verified in the sliced-predicate check.
 
 ### Race 4: A nested wrapper invocation overwrites its parent's verdict
 **Location:** `scripts/pytest-clean.sh`, the count-file mint.
@@ -1150,7 +1154,7 @@ and the row's own expectation catches it.
 | **Mutation 1 control leg** (mandatory) | with the same `$M` from the row above: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and **no** `refusing to run against an off-pin interpreter`. This proves the mutated copy is otherwise working, which is the only thing that makes the row above evidence. A failure here invalidates the mutation result rather than confirming it. |
 | **Mutation 2: the counting rule bites** | `sed 's/report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail"))/report.outcome != "skipped"/' pytest_executed_count.py > "$M/r1.py" && grep -c 'report.outcome != "skipped"' "$M/r1.py" && PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -3` | the `grep -c` prints ≥ 1 (the substitution landed — a `0` means the rule text drifted and the row proves nothing), and the summary matches `[1-9][0-9]* failed`: all three skip-shape cases go **red** under the round-1 rule. Measured reachable: the settled rule counts 0 on an all-skip rootdir at `-n 0` and `-n 2`; the round-1 rule counts non-zero on the same rootdir. Wrapper is **unmutated** for this row. |
 | **Mutation 2 control leg** (mandatory) | `PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` — the round-1 plugin still loads and runs, so the reds above are the rule and not a broken module. |
-| Unmutated baseline, both seams cleared | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, no `ZERO TESTS EXECUTED` |
+| **Restore leg: both mutations reverted** (run last, after Mutation 1 and Mutation 2) | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, no `ZERO TESTS EXECUTED` |
 | Zero-executed run is refused, end to end | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` |
 | Already-red runs keep their own status and headline | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k pytest_status_preserved 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` — the collection-error case observes exit 2 and the zero-collected case observes exit 5, each with **no** `ZERO TESTS EXECUTED` line (spike-8) |
 | Verdict is gated on pytest's own exit (anti-criterion, round-2 concern) | `grep -cE 'PYTEST_EXIT"? -eq 0' scripts/pytest-clean.sh` | output ≥ 1 |
