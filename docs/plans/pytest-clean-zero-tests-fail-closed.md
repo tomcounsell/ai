@@ -1,11 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3195
-last_comment_id:
+last_comment_id: none
 ---
 
 # pytest-clean.sh fails closed when zero tests executed
@@ -652,6 +652,9 @@ Not applicable — this repo publishes no external documentation site.
 ---
 
 ## Open Questions
+
+None of these block the build — each has a stated default the builder can carry, and
+each is a good target for the critique round.
 
 1. **Escape-hatch naming.** The plan assumes an env var in the `PYTEST_*` family matching
    `PYTEST_STALL_LIMIT_S`'s precedent. Any objection to that family, or a preferred name?
