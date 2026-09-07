@@ -318,9 +318,14 @@ by symbol, never by trusting a line number from the previous draft.
   ...)`, and its fallback path creates a fresh `pending` row from
   `continuation_agent_session_fields`. So on the deferred path the authoritative row is `pending`,
   not `running`, by the time the `finally` runs — and a guard predicated on `status == "running"`
-  no-ops there without needing the `defer_reaction` condition at all. In the fallback-path case
-  where the original row was left `running`, `get_authoritative_session`'s tie-break prefers the
-  `running` record, and finalizing that dead row is the correct outcome.
+  no-ops there without needing the `defer_reaction` condition at all. **On the fallback path the
+  same conclusion holds for a different reason** (corrected in the with-concerns pass; the earlier
+  text claimed `get_authoritative_session`'s tie-break "prefers the `running` record", which the
+  code contradicts): the fallback is entered *because* the re-read returned `None`, so there is no
+  authoritative `running` row for the guard to find. `_auth` comes back `None`, the
+  `_auth is not None` leg is false, and the guard no-ops. The fresh `pending` row the fallback
+  creates comes from `continuation_agent_session_fields`, which resets `exec_cwd`, so that lane is
+  removed exactly as it is today — correct, and unchanged by this plan.
 - **Confidence**: high
 - **Impact on plan**: the pre-finalize guard is written **unconditionally** in the `finally`,
   predicated on `status == "running"`, and the `defer_reaction` gate on the completion-exit guard is
@@ -403,9 +408,23 @@ Located by symbol on `d786c8ad2`; line numbers below are pointers, not the citat
   the executor itself to seed the next run, by `checkpoint_branch_state` / `restore_branch_state`
   (`git -C <working_dir>`), by `session_pickup`'s git summary, and by the crash-snapshot writer;
   a lane path written there outlives the lane and re-seeds a deleted directory (spike-8).
-- **Reversibility**: high. Reverting the scan loop restores today's behavior exactly. Nothing is
-  persisted that a later reader cannot cope with: a stale `exec_cwd` in a terminal row is skipped
-  by the scan's status filter, and a continuation resets the field to its declared default.
+- **Reversibility**: high. Reverting the scan loop restores today's behavior exactly. A stale
+  `exec_cwd` in a terminal row is skipped by the scan's status filter, and a continuation —
+  including a retry, which goes through `continuation_agent_session_fields` — resets the field to
+  its declared default.
+  **One path is exempt, deliberately (C3).** `valor-session resume` calls
+  `transition_status(session, "pending", ..., reject_from_terminal=False)` (`tools/valor_session.py`)
+  on the **same row**, un-terminalizing it without going through
+  `continuation_agent_session_fields`. `_EXECUTION_FENCE_RESET_FIELDS` is consumed *only* by that
+  function (`agent/agent_session_queue.py`) and never by `transition_status`, so a resumed row
+  re-enters the scan non-terminal still carrying the previous run's `exec_cwd`. If the synthetic
+  cleanup already deleted that lane, the scan reports `busy` for a directory that no longer exists —
+  the scan matches on the stored string and never stats the path. **Chosen outcome: accept it.** It
+  is fail-safe in the direction that matters (a spurious `busy` refuses a removal; it never permits
+  one), the resumed session is about to re-provision that same lane under the same synthetic slug
+  anyway, and the runner's spawn stamp overwrites `exec_cwd` on the resumed run's first turn. Pinned
+  by a dedicated `_scan_worktree_sessions` unit row in Task 4 so a future reader sees it as a
+  decision rather than an oversight.
 
 ## Appetite
 
@@ -500,12 +519,34 @@ re-enter it (spike-10).
   `_auth is not None and _auth.status == "running"`, call
   `finalize_session(_auth, <status>, reason="synthetic-cleanup pre-finalize")` wrapped in
   `except StatusConflictError: pass` — the same shape as the completion-exit guard, hoisted out of
-  the `if not chat_state.defer_reaction:` conditional. `<status>` is
-  `_runner_final_status(_task.error, _agent_session)` where `_task = locals().get("task")` and
-  `_agent_session = locals().get("agent_session")`, degrading to `"failed"` when `task` never came
-  into being (spike-9: `task` is bound partway through the body and is not guaranteed to exist in
-  the `finally`). The `status == "running"` predicate is what makes the hoist safe on the nudge
-  path, where the row is already `pending`.
+  the `if not chat_state.defer_reaction:` conditional. The `status == "running"` predicate is what
+  makes the hoist safe on the nudge path, where the row is already `pending`.
+- **`<status>` — write this expression exactly.** `task` is bound partway through the body and is
+  not guaranteed to exist in the `finally` (spike-9), so it is resolved defensively and the
+  unbound case is short-circuited *before* `_runner_final_status` is consulted:
+
+  ```python
+  _task = locals().get("task")
+  _agent_session = locals().get("agent_session")
+  _guard_status = (
+      _runner_final_status(_task.error, _agent_session) if _task is not None else "failed"
+  )
+  ```
+
+  Two wrong shapes, both of which a builder will reach for and neither of which is acceptable:
+  - `_runner_final_status(_task.error, _agent_session)` on its own raises
+    `AttributeError: 'NoneType' object has no attribute 'error'` on exactly the early-raise path
+    this guard exists to cover.
+  - `_runner_final_status(getattr(_task, "error", None), _agent_session)` is the naive repair and
+    is **worse than the crash**: with `task` unbound it evaluates
+    `_runner_final_status(None, None)`, and that returns `"completed"` — `task_error` is falsy and
+    `_is_non_clean_runner_exit(None)` reads `getattr(None, "exit_reason", None) is None` and
+    returns `False` (`agent/session_executor.py::_runner_final_status` /
+    `_is_non_clean_runner_exit`). A session that crashed before it ever started a runner would be
+    finalized as a success — the exact inversion of the intended degradation.
+
+  `"failed"` is the honest terminal status for a session that raised before a runner existed, and
+  Task 4 asserts that status by value, not merely the absence of an exception.
   **Do NOT use `remove_worktree(force=True)`.** Forcing is the deletion-under-a-live-subprocess
   failure #1938 produced, and the `_session_recorded_reap_failure` skip above this block must keep
   winning.
@@ -697,6 +738,17 @@ window open through harness startup (spike-7's measured trade). `_worktree_has_l
 the remaining interval, and a bare `git worktree add` with no process in it is genuinely idle and
 safe to reap. This is a strict improvement on today, where the window is the entire session.
 
+**Accepted degradation on a lookup miss (C2).** The pre-stamp lives inside the `if agent_session:`
+branch of the session-phase hydration, and that lookup
+(`AgentSession.query.filter(project_key=..., status="running")`) can legitimately return nothing —
+the file documents the race on its `else:` arm (issue #917). When it misses, the runner is
+constructed with `agent_session=None` and skips its own spawn stamp as well, so `exec_cwd` is
+`None` for the entire session and this Race-1 window widens back out to the full session length.
+For that session the OS-process scan is again the only guard. This is accepted rather than fixed:
+it is exactly today's behavior for *every* session, the miss is rare, and the only available
+alternative — stamping the outer `session` object in an `else:` branch — writes a second hydrated
+copy of the row, which is the duplicate-row hazard the dropped resolver swap was about.
+
 ### Race 2: Cleanup versus a not-yet-finalized row
 **Location:** the completion-exit finalize guard and the synthetic cleanup in
 `agent/session_executor.py`'s `finally`.
@@ -832,14 +884,30 @@ busy guard behaves exactly as it does today, which is a safe intermediate state.
       row whose `exec_cwd` names the lane and whose `working_dir` names the main checkout
 - [ ] `_scan_worktree_sessions` still returns `busy` for the pre-existing `working_dir`-only shape
       (real slug, lane in `working_dir`, `exec_cwd` unset) — the fallback arm does not regress
-- [ ] A slugless eng session's row carries `exec_cwd=.worktrees/dev-{aid8}` before the harness
-      launches, not only after the first spawn
+- [ ] **When the session-phase row lookup resolves** — the `if agent_session:` branch — a slugless
+      eng session's row carries `exec_cwd=.worktrees/dev-{aid8}` before the harness launches, not
+      only after the first spawn. **Accepted residual (C2):** that lookup is
+      `AgentSession.query.filter(project_key=..., status="running")` and the file itself documents
+      it as racy (see the `# See issue #917` comment on the `else:` arm). On a miss there is no
+      pre-stamp, and `SessionRunner` is constructed with `agent_session=None`, so its own
+      `if self._agent_session is not None:` guard skips the spawn stamp too — `exec_cwd` stays
+      `None` for the whole session and the lane falls back to `_worktree_has_live_process`. That is
+      today's behavior exactly, so it is a narrowed gap rather than a regression: previously the
+      lane was invisible for every session, now only for one whose row lookup races. **Do not** add
+      an else-branch stamp on the outer `session` object — that is a second hydrated copy, and
+      stamping it is precisely the duplicate-row write the dropped resolver-swap argument rejected
 - [ ] The row's `working_dir` and `slug` are unchanged by execution — no production code in this
       plan's changed files assigns either on a hydrated `AgentSession`
 - [ ] A pre-spawn `exec_cwd` stamp leaves `AgentSession.live_fence` returning `None`
 - [ ] A raising or cancelled session is finalized before the synthetic cleanup runs, so the lane is
       removed rather than permanently blocked
-- [ ] An auto-continue exit leaves the continuation's `pending` row untouched and preserves the lane
+- [ ] An auto-continue exit **on `_enqueue_nudge`'s main path** — the one that re-reads the row and
+      calls `transition_status(session, "pending", ...)` — leaves the continuation's `pending` row
+      untouched and preserves the lane. **Scoped deliberately (C4):** on the fallback path
+      (`reread_session is None`) the fresh row is built from `continuation_agent_session_fields`,
+      which resets `exec_cwd` and copies the main-checkout `working_dir`, so the lane is removed as
+      it is today. No code change follows — the guard as specified
+      (`_auth is not None and _auth.status == "running"`) is already correct on both paths
 - [ ] The end-of-session synthetic cleanup logs a named `[synthetic-slug] ... cleanup blocked`
       WARNING when removal is refused
 - [ ] A failed `exec_cwd` stamp is logged at WARNING under `[lane-writeback]` and does not fail the
@@ -949,12 +1017,14 @@ this weekend. Locate every symbol named below by name, never by the line numbers
   is a `KeyField` in the Redis primary key.
 - In the `finally`, immediately before `cleanup_after_merge` and inside the block's existing `try`,
   add the pre-finalize guard: `_auth = get_authoritative_session(session.session_id)`; when
-  `_auth is not None and _auth.status == "running"`, call `finalize_session(_auth, <status>,
+  `_auth is not None and _auth.status == "running"`, call `finalize_session(_auth, _guard_status,
   reason="synthetic-cleanup pre-finalize")` wrapped in `except StatusConflictError: pass`.
-  `<status>` is `_runner_final_status(_task.error, _agent_session)` with
-  `_task = locals().get("task")` and `_agent_session = locals().get("agent_session")`, degrading to
-  `"failed"` when `task` never came into being (spike-9 — `task` is bound partway through the body
-  and is not guaranteed to exist in the `finally`).
+- Compute `_guard_status` with the **exact** expression the Technical Approach spells out:
+  `_runner_final_status(_task.error, _agent_session) if _task is not None else "failed"`, over
+  `_task = locals().get("task")` and `_agent_session = locals().get("agent_session")`. Do **not**
+  write `_runner_final_status(getattr(_task, "error", None), _agent_session)` — with `task` unbound
+  that resolves to `_runner_final_status(None, None)`, which returns `"completed"` and finalizes a
+  crashed session as a success. The `if _task is not None` short-circuit is load-bearing.
 - Do NOT pass `force=True` to `remove_worktree`, and do not weaken the
   `_session_recorded_reap_failure` skip above the cleanup.
 - When `cleanup_result` carries `blocked_by_session`, emit a WARNING containing the literal
@@ -999,6 +1069,11 @@ this weekend. Locate every symbol named below by name, never by the line numbers
   - negative: `exec_cwd=".worktrees/dev-abcd1234-other"` → `clear` (the segment-prefix guard,
     Risk 5 of #2712).
   - terminal row with a matching `exec_cwd` → `clear`.
+  - **resumed row, deleted lane** (C3): `status="pending"`, `exec_cwd=".worktrees/dev-abcd1234"`,
+    `working_dir=<main checkout>`, and **no such directory on disk** → `busy`. The scan never stats
+    the path, so a `valor-session resume`-revived row carrying a previous run's lane path reads
+    busy for a lane that no longer exists. This row pins that as the accepted, deliberate behavior
+    rather than an accident — see Architectural Impact / Reversibility.
   - Mutation-check each: revert the loop to the `working_dir`-only read and confirm the synthetic
     and real-slug cases fail; restore and re-measure.
 - **Executor tests** — create `tests/unit/test_session_executor_lane_visibility.py` using the
@@ -1011,10 +1086,19 @@ this weekend. Locate every symbol named below by name, never by the line numbers
   - a raising `save()` in the session-phase block produces the `[lane-writeback]` WARNING via
     `caplog` and the session still proceeds.
   - terminal-row cleanup branch: the worktree is removed.
-  - raising-exit branch: the pre-finalize guard finalizes the row, so the worktree is removed rather
-    than blocked, and no `NameError` escapes when `task` was never bound.
-  - deferred/auto-continue exit: the continuation's `pending` row is untouched, the cleanup is
-    refused, and the `[synthetic-slug] ... cleanup blocked` WARNING is emitted.
+  - raising-exit branch, **`task` never bound**: force the raise ahead of `task = BackgroundTask(...)`
+    so `locals().get("task")` is `None` in the `finally`. Assert the reloaded row's
+    `status == "failed"` **by value** — not merely that no `AttributeError`/`NameError` escaped.
+    A test that only asserts "no exception" passes against the
+    `getattr(_task, "error", None)` mis-repair, which finalizes `"completed"`. Then assert the
+    worktree is removed rather than blocked.
+  - deferred/auto-continue exit, **main nudge path only**: drive the path where
+    `_enqueue_nudge` re-reads the row and calls `transition_status(session, "pending", ...)`.
+    Assert `reloaded.status == "pending"` and that `.worktrees/dev-{aid8}` **still exists**, and
+    that the `[synthetic-slug] ... cleanup blocked` WARNING was emitted. Do **not** write the same
+    assertions against a forced-fallback variant (`reread_session is None`): there the fresh row
+    comes from `continuation_agent_session_fields`, `exec_cwd` is reset, and the lane is removed
+    exactly as it is today — which is correct, not a bug (C4).
 - **Source-level test** — in `tests/unit/test_session_isolation_bypass.py`, add only the "slug stays
   local" source assertion. Do not add behavioral assertions to this file; every test in it is a
   logic mirror or a source regex.
