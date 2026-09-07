@@ -309,28 +309,21 @@ CLI entry point or MCP surface changes.
 
 ## Success Criteria
 
-- [ ] `tests/unit/test_checkout_pin.py` is fully green on a checkout whose venv carries `_valor_checkout_pin.pth` (i.e. any machine that has run `/update` since #3141)
-- [ ] The negative control asserts, and would fail on, an ambient pin firing — proven by deleting `-S` and pasting the red output into the PR
+- [ ] `tests/unit/test_checkout_pin.py` is green on a checkout whose venv carries `_valor_checkout_pin.pth` (i.e. any machine that has run `/update` since #3141), with the summary line reading **`19 passed`** — the count, not the exit code, is the proof (#3195)
+- [ ] **Mutation M1 is measured red and pasted into the PR**: reverting `_run_probe` to `[sys.executable, str(script)]` plus the `sitecustomize` hop makes the negative control fail with `assert 'worktree worktree True' == 'primary primary False'`, and restoring it returns the summary line to `19 passed`. This, not the removal of `-S`, is the proof that the isolation is load-bearing
+- [ ] **Mutation M2 is measured red and pasted into the PR**: deleting `sys.argv = [target]` from the bootstrap makes the *positive* assertion fail (`primary primary False` where `worktree worktree True` is expected)
 - [ ] `tools/checkout_pin.py` and `scripts/update/redis_flush_guard_pth.py` are byte-identical to `main`
-- [ ] Tests pass (`/do-test`)
+- [ ] Verified on **this** machine — the one that has run `/update` and carries the production `_valor_checkout_pin.pth` in `.venv/lib/python3.14/site-packages/`. A green run in an environment without that file proves nothing and does not satisfy any row above
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No xfail markers exist for this bug — none were found; nothing to convert
 
 ## Team Orchestration
 
-### Team Members
-
-- **Builder (test isolation)**
-  - Name: `pin-probe-builder`
-  - Role: rewrite `_run_probe` and the two end-to-end tests
-  - Agent Type: test-engineer
-  - Resume: true
-
-- **Validator (isolation proof)**
-  - Name: `pin-probe-validator`
-  - Role: run the mutation check and confirm the guard bites
-  - Agent Type: validator
-  - Resume: true
+Not applicable at this appetite. This is a Small, single-file test fix whose four
+tasks form a strict chain — nothing here is independently schedulable, so a
+named multi-agent roster would be ceremony rather than parallelism. One builder
+carries all four tasks; the mutation checks are steps in that chain, not a
+separate role.
 
 ## Step by Step Tasks
 
@@ -338,53 +331,61 @@ CLI entry point or MCP surface changes.
 - **Task ID**: build-probe-isolation
 - **Depends On**: none
 - **Validates**: tests/unit/test_checkout_pin.py
-- **Informed By**: spike-2 (bootstrap ordering: `sys.argv` before `addsitedir`), spike-3 (script-dir insert reproduces CPython), spike-4 (guard needs `resolve()`)
-- **Assigned To**: pin-probe-builder
-- **Agent Type**: test-engineer
+- **Informed By**: spike-2 / spike-2b (the bootstrap's `argv[0]` is what disarms the ambient pin; `sys.argv = [target]` must precede `addsitedir`), spike-2c (`-P`), spike-3 (script-dir insert reproduces CPython), spike-4 (guard needs `resolve()`), spike-5 (whole-`sys.path` comparison)
 - **Parallel**: false
 - Write the bootstrap generator into `tmp_path`, outside `site_dir`
-- Change `_run_probe` to launch `[sys.executable, "-S", boot, script, site_dir]` with every `PYTHON*` var scrubbed and `PYTHONNOUSERSITE=1`
+- Change `_run_probe` to launch `[sys.executable, "-S", "-P", boot, script, site_dir]` with every `PYTHON*` var scrubbed and `PYTHONNOUSERSITE=1`
 - Drop the `sitecustomize` scaffolding from both end-to-end tests
 - Add the third probe field and the ambient-pin assertions, comparing `worktree.resolve()`
-- Add the `-S` rationale comment and refresh the module docstring
+- Change the primary probe to print the whole `sys.path`
+- Add the rationale comment (bootstrap first, then what `-S` and `-P` each buy) and refresh the module docstring
 
-### 2. Prove the guard bites
+### 2. Prove the isolation is load-bearing (both mutations)
 - **Task ID**: validate-probe-isolation
 - **Depends On**: build-probe-isolation
-- **Assigned To**: pin-probe-validator
-- **Agent Type**: validator
 - **Parallel**: false
-- Run `./scripts/pytest-clean.sh tests/unit/test_checkout_pin.py -n 0`
-- Mutate: remove `-S` from the invocation, re-run, confirm the failure names the ambient-pin field; restore
-- Confirm `git diff main -- tools/ scripts/` is empty
-- Report pass/fail with both outputs
+- Confirm the ambient pin is present first: `ls .venv/lib/python*/site-packages/_valor_checkout_pin.pth` must exit 0. If it is absent, **stop** — every measurement below is meaningless on that machine
+- Baseline: `./scripts/pytest-clean.sh tests/unit/test_checkout_pin.py -n 0 -q`, read the summary line, require **`19 passed`**
+- **Mutation M1**: revert `_run_probe` to `[sys.executable, str(script)]`, restore `env["PYTHONPATH"] = str(site_dir / "customize")` and the `customize/sitecustomize.py` write in the worktree test, re-run the single node id, require a **failure** whose diff is `assert 'worktree worktree True' == 'primary primary False'`. Restore; re-run; require `19 passed`
+- **Mutation M2**: delete `sys.argv = [target]` from the bootstrap, re-run the single node id, require a **failure** on the *pinned* assertion (`primary primary False` where `worktree worktree True` is expected). Restore; re-run; require `19 passed`
+- Do **not** run "delete `-S`" as a mutation and do not report it as evidence — it is measured green in both directions (spike-2b)
+- Confirm `git diff --name-only main -- tools/ scripts/` is empty
+- Record every summary line and both red diffs verbatim for the PR body
 
 ### 3. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-probe-isolation
-- **Assigned To**: pin-probe-builder
-- **Agent Type**: documentarian
 - **Parallel**: false
 - Update the `#3141` section of `docs/features/worktree-venv-isolation.md` per the Documentation section
 
 ### 4. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
-- **Assigned To**: pin-probe-validator
-- **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row
+- Run every Verification row and read the passed count off each summary line
 - Confirm all Success Criteria
 
 ## Verification
 
+Every pytest row states the **passed count** rather than resting on the exit
+code. `scripts/pytest-clean.sh:311` is a bare `exit "$PYTEST_EXIT"` pass-through
+(#3195, open), so a run that collected nothing exits 0; a plan whose deliverable
+*is* a verification mechanism cannot accept that as proof. Read the count off
+pytest's summary line and record it. `tests/unit/test_checkout_pin.py` collects
+19 tests, 2 of them in `TestEndToEnd` (verified by `--collect-only` at
+`78447df87`); neither class uses `scratch_test_db`, so the test-DB pool-exhaustion
+skip channel is not reachable here and a mistyped node id exits 5.
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Contamination source is present (makes the test meaningful) | `ls .venv/lib/python*/site-packages/_valor_checkout_pin.pth` | exit code 0 |
-| Checkout-pin tests pass | `./scripts/pytest-clean.sh tests/unit/test_checkout_pin.py -n 0 -q` | exit code 0 |
-| End-to-end pair passes under the ambient pin | `./scripts/pytest-clean.sh "tests/unit/test_checkout_pin.py::TestEndToEnd" -n 0 -q` | exit code 0 |
-| Production pin untouched | `git diff --name-only main -- tools/checkout_pin.py scripts/update/redis_flush_guard_pth.py \| wc -l` | output contains 0 |
-| No env kill-switch added to the pin | `grep -c 'environ\|getenv' tools/checkout_pin.py` | match count == 0 |
+| Contamination source is present (makes every row below meaningful) | `ls .venv/lib/python*/site-packages/_valor_checkout_pin.pth` | exit code 0. **If this fails, stop** — a green suite on a machine without the ambient pin is not evidence |
+| Checkout-pin tests pass | `./scripts/pytest-clean.sh tests/unit/test_checkout_pin.py -n 0 -q` | summary line reads `19 passed` |
+| End-to-end pair passes under the ambient pin | `./scripts/pytest-clean.sh "tests/unit/test_checkout_pin.py::TestEndToEnd" -n 0 -q` | summary line reads `2 passed` |
+| Mutation M1 (negative control bites) | Apply M1 per Failure Path Test Strategy, then `./scripts/pytest-clean.sh "tests/unit/test_checkout_pin.py::TestEndToEnd::test_worktree_script_imports_worktree_package_only_with_the_pin" -n 0` | summary line reads `1 failed`, diff is `assert 'worktree worktree True' == 'primary primary False'` |
+| Mutation M2 (positive assertion bites) | Apply M2 per Failure Path Test Strategy, then re-run the same node id | summary line reads `1 failed`, pinned probe printed `primary primary False` |
+| Restored after each mutation | `./scripts/pytest-clean.sh tests/unit/test_checkout_pin.py -n 0 -q` | summary line reads `19 passed` |
+| Production pin untouched | `git diff --name-only main -- tools/checkout_pin.py scripts/update/redis_flush_guard_pth.py` | no output |
+| No env kill-switch added to the pin | `! grep -q 'environ\|getenv' tools/checkout_pin.py` | exit code 0 (`grep -c` would print `0` and exit **1**, which a uniform exit-code reader records as a failure) |
 | Lint clean | `python -m ruff check tests/unit/test_checkout_pin.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tests/unit/test_checkout_pin.py` | exit code 0 |
 
