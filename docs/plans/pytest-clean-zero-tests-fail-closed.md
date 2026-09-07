@@ -1037,6 +1037,9 @@ must be run by someone who did not write the guard.
 - Name the three skip-shape cases so that `-k skip_shape` selects exactly them — e.g.
   `test_fixture_skip_shape_is_refused`, `test_body_skip_shape_is_refused`,
   `test_marker_skip_shape_is_refused`. The Verification table selects on that substring.
+  Name the two already-red cases so `-k pytest_status_preserved` selects exactly them —
+  `test_collection_error_pytest_status_preserved` and
+  `test_zero_collected_pytest_status_preserved`.
 - Run the **negative control first**: assert the resolved `pytest_executed_count.__file__`
   is under `tmp_path`. Build every subprocess env from a copy of `os.environ` with
   `PYTHONPATH` and `PYTEST_CLEAN_COUNT_FILE` removed.
@@ -1132,16 +1135,27 @@ must be run by someone who did not write the guard.
 Every row that could be satisfied by a run in which nothing executed asserts on **observed
 output** instead of exit status. That is not stylistic: this table is executed *by the
 wrapper under change*, so an exit-code-only table cannot detect its own bootstrap failure,
-and on this machine past ~5 concurrent agents a whole file legitimately skips. `TC` numbers
-below refer to the case names in `tests/unit/test_pytest_clean_zero_tests.py`.
+and on this machine past ~5 concurrent agents a whole file legitimately skips.
+
+Two rows select case subsets by name substring (`-k skip_shape`, `-k pytest_status_preserved`);
+task 3 pins those names, so a rename that breaks a selection turns the row into `no tests ran`
+and the row's own expectation catches it.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Guard tests actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, and no `ZERO TESTS EXECUTED` |
 | Sibling wrapper guards actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py tests/unit/test_interpreter_pin_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 15 passed |
 | Marker guard actually ran and passed | `scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` |
-| **Mutation check: the guard bites** | `sed '/# BEGIN zero-executed guard (#3195)/,/# END zero-executed guard (#3195)/d' scripts/pytest-clean.sh > /tmp/pc-mutated.sh && chmod +x /tmp/pc-mutated.sh && PYTEST_CLEAN_SCRIPT=/tmp/pc-mutated.sh scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 | tail -3` | with the verdict block removed the output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is wired to nothing and the whole test file is decoration (Risk 4). Demonstrated on the prototype in spike-6. |
+| **Mutation 1: the wrapper's verdict block bites** | `M=$(mktemp -d) && mkdir -p "$M/scripts" && sed '/# BEGIN zero-executed guard (#3195)/,/# END zero-executed guard (#3195)/d' scripts/pytest-clean.sh > "$M/scripts/pytest-clean.sh" && cp scripts/check-interpreter-pin.sh "$M/scripts/" && chmod +x "$M/scripts/"*.sh && PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -3` | with the verdict block removed the output matches `[1-9][0-9]* failed` — the tests go **red**. A `passed`-only summary here means the guard is wired to nothing and the whole test file is decoration (Risk 4). The sibling `scripts/` layout is required: a flat copy aborts at line 195 before pytest starts and reddens everything for the wrong reason (spike-7). |
+| **Mutation 1 control leg** (mandatory) | with the same `$M` from the row above: `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh" scripts/pytest-clean.sh tests/unit/test_worktree_venv_absent_guard.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and **no** `refusing to run against an off-pin interpreter`. This proves the mutated copy is otherwise working, which is the only thing that makes the row above evidence. A failure here invalidates the mutation result rather than confirming it. |
+| **Mutation 2: the counting rule bites** | `sed 's/report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail"))/report.outcome != "skipped"/' pytest_executed_count.py > "$M/r1.py" && grep -c 'report.outcome != "skipped"' "$M/r1.py" && PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -3` | the `grep -c` prints ≥ 1 (the substitution landed — a `0` means the rule text drifted and the row proves nothing), and the summary matches `[1-9][0-9]* failed`: all three skip-shape cases go **red** under the round-1 rule. Measured reachable: the settled rule counts 0 on an all-skip rootdir at `-n 0` and `-n 2`; the round-1 rule counts non-zero on the same rootdir. Wrapper is **unmutated** for this row. |
+| **Mutation 2 control leg** (mandatory) | `PYTEST_EXECUTED_COUNT_SOURCE="$M/r1.py" scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k "passing or version" 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` — the round-1 plugin still loads and runs, so the reds above are the rule and not a broken module. |
+| Unmutated baseline, both seams cleared | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q 2>&1 \| tail -2` | matches `[1-9][0-9]* passed`, at least 12 passed, no `ZERO TESTS EXECUTED` |
 | Zero-executed run is refused, end to end | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k skip_shape 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` |
+| Already-red runs keep their own status and headline | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py -q -k pytest_status_preserved 2>&1 \| tail -2` | matches `[1-9][0-9]* passed` and no `no tests ran` — the collection-error case observes exit 2 and the zero-collected case observes exit 5, each with **no** `ZERO TESTS EXECUTED` line (spike-8) |
+| Verdict is gated on pytest's own exit (anti-criterion, round-2 concern) | `grep -cE 'PYTEST_EXIT"? -eq 0' scripts/pytest-clean.sh` | output ≥ 1 |
+| Predicate is a named function, not an inline `case` (anti-criterion, round-2 concern) | `grep -c 'verdict_passes_through' scripts/pytest-clean.sh` | output ≥ 2 (the definition and at least one call site) |
+| Predicate check does not use the vacuous `source <(…)` form (anti-criterion, spike-9) | `grep -cE 'source <\(|\. <\(' tests/unit/test_pytest_clean_zero_tests.py` | match count == 0 |
 | Wrapper unaffected by `--version` | `scripts/pytest-clean.sh --version` | exit code 0 (the pass-through path *is* the assertion here — no session, so there is no summary line to read) |
 | Guard is wired, not merely mentioned | `grep -c 'PYTEST_CLEAN_COUNT_FILE' scripts/pytest-clean.sh` | output ≥ 3 |
 | Injection uses the arg-preserving form | `grep -c 'set -- -p pytest_executed_count' scripts/pytest-clean.sh` | output == 1 |
