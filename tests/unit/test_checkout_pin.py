@@ -169,7 +169,7 @@ _BOOTSTRAP = textwrap.dedent(
 )
 
 
-def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
+def _run_probe(tmp_path: Path, site_dir: Path, script: Path, *, pinned: bool) -> str:
     """Run ``script`` through a bootstrap interpreter isolated from the venv
     that runs this test suite.
 
@@ -194,6 +194,11 @@ def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
     today's bug. ``-P`` keeps the bootstrap's own directory off the child's
     ``sys.path`` so the probe's search path matches what real CPython startup
     produces (spikes 2b/2c/3 in the #3201 plan).
+
+    Neither flag is test-defended: dropping ``-S`` alone or ``-P`` alone
+    leaves every test in this file passing (measured, #3201 review). Both
+    stay for the hermeticity/ordering reasons above; only ``str(boot)`` in
+    the argv below is what a red test would actually catch going missing.
     """
     pth = site_dir / _PIN_PTH_FILENAME
     if pinned:
@@ -201,11 +206,15 @@ def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
     elif pth.exists():
         pth.unlink()
 
-    boot = site_dir.parent / "_boot.py"
+    # tmp_path, not site_dir.parent -- site_dir need not be tmp_path's direct
+    # child, and site_dir itself is scanned for .pth files so the bootstrap
+    # can't live there.
+    boot = tmp_path / "_boot.py"
     boot.write_text(_BOOTSTRAP)
 
+    # PYTHONNOUSERSITE is not set here: -S skips all site-packages processing
+    # outright, so there is no user-site step left for it to disable.
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
-    env["PYTHONNOUSERSITE"] = "1"
     proc = subprocess.run(
         [sys.executable, "-S", "-P", str(boot), str(script), str(site_dir)],
         capture_output=True,
@@ -215,6 +224,11 @@ def _run_probe(site_dir: Path, script: Path, *, pinned: bool) -> str:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
+    if proc.stderr:
+        # site.addpackage swallows a raising .pth at exit 0 -- surface the
+        # traceback so a broken fixture reads as "child printed a traceback"
+        # rather than a bare, confusing stdout-vs-expected diff.
+        print(proc.stderr, end="", file=sys.stderr)
     return proc.stdout.strip()
 
 
@@ -237,10 +251,19 @@ class TestEndToEnd:
                 f"""
                 import sys
                 import agentx
+                _worktree = {str(worktree.resolve())!r}
+                _script_dir = {str(script.parent.resolve())!r}
+                _worktree_pinned = _worktree in sys.path
+                _order = (
+                    sys.path.index(_script_dir) < sys.path.index(_worktree)
+                    if _worktree_pinned
+                    else None
+                )
                 print(
-                    agentx.WHICH,
-                    sys.modules["_early_probe"].SEEN,
-                    str({str(worktree.resolve())!r} in sys.path),
+                    "which=" + agentx.WHICH,
+                    "early_probe_seen=" + sys.modules["_early_probe"].SEEN,
+                    "worktree_in_syspath=" + str(_worktree_pinned),
+                    "script_dir_precedes_pin_root=" + str(_order),
                 )
                 """
             )
@@ -253,8 +276,21 @@ class TestEndToEnd:
         (site_dir / "_early_probe.py").write_text("import agentx\nSEEN = agentx.WHICH\n")
         (site_dir / "zzz_early_probe.pth").write_text("import _early_probe\n")
 
-        assert _run_probe(site_dir, script, pinned=False) == "primary primary False"
-        assert _run_probe(site_dir, script, pinned=True) == "worktree worktree True"
+        # The fourth field guards the bootstrap's line ordering (#3201 review):
+        # `site.addsitedir` must run before `sys.path.insert(0, script_dir)` so
+        # the pin's insert(0, worktree) lands *before* the script's own dir gets
+        # its insert(0, ...) -- matching real CPython, where the script directory
+        # is already on sys.path[0] before `site` runs and a `.pth`'s insert(0,
+        # ...) then lands ahead of it. Swap those two `_BOOTSTRAP` lines and this
+        # field flips to "False" (measured, #3201 review round 2).
+        assert _run_probe(tmp_path, site_dir, script, pinned=False) == (
+            "which=primary early_probe_seen=primary "
+            "worktree_in_syspath=False script_dir_precedes_pin_root=None"
+        )
+        assert _run_probe(tmp_path, site_dir, script, pinned=True) == (
+            "which=worktree early_probe_seen=worktree "
+            "worktree_in_syspath=True script_dir_precedes_pin_root=True"
+        )
 
     def test_primary_script_is_unaffected_by_the_pin(self, tmp_path):
         primary = _checkout(tmp_path / "primary")
@@ -268,6 +304,6 @@ class TestEndToEnd:
         (site_dir / _PIN_SHIM_FILENAME).write_text(_PIN_SOURCE_PATH.read_text())
         (site_dir / "_editable_impl_fake.pth").write_text(f"{primary}\n")
 
-        assert _run_probe(site_dir, script, pinned=False) == _run_probe(
-            site_dir, script, pinned=True
+        assert _run_probe(tmp_path, site_dir, script, pinned=False) == _run_probe(
+            tmp_path, site_dir, script, pinned=True
         )

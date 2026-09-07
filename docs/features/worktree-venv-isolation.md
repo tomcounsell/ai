@@ -243,10 +243,14 @@ above), so the probe subprocess runs through an explicit bootstrap script
 under `-S -P` rather than a bare `[sys.executable, script]` invocation: the
 bootstrap's `argv[0]` sits outside any checkout, and that is what would disarm
 the ambient pin during the child's `site` processing were it to run; under the
-shipped `-S -P` invocation there is no `site` processing to disarm, so the
-"without the pin" run stays a real negative control. `-S -P` are hermeticity
-against a future ambient shim that does not read `argv[0]`, not the mechanism
-that fixes this (#3201).
+shipped `-S -P` invocation there is no *ambient* `site` processing to disarm
+(the bootstrap still calls `site.addsitedir` on the fake site dir itself), so
+the "without the pin" run stays a real negative control. `-S` is hermeticity
+against a future ambient shim that does not read `argv[0]`; `-P` is not that —
+it keeps the bootstrap's own directory off the child's `sys.path` so the probe
+reproduces real CPython startup ordering, which the sibling test's
+whole-`sys.path` comparison depends on. Neither flag is the mechanism that
+fixes this (#3201).
 
 ### Guard relaxation (#2050 coordination)
 
