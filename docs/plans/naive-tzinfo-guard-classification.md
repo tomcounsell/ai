@@ -12,7 +12,7 @@ last_comment_id:
 
 ## Problem
 
-Twenty-one `tzinfo is None` coercion guards are scattered across twelve files. Every one of them was written against popoto 1.8.0, which round-tripped `DatetimeField` values as naive datetimes. popoto 1.9.0 decodes stored datetimes as aware UTC, so some of those guards now defend against a state that cannot occur, and several carry comments that assert the old behaviour as fact.
+Twenty-three `tzinfo is None` coercion guards are scattered across thirteen files. Every one of them was written against popoto 1.8.0, which round-tripped `DatetimeField` values as naive datetimes. popoto 1.9.0 decodes stored datetimes as aware UTC, so some of those guards now defend against a state that cannot occur, and several carry comments that assert the old behaviour as fact.
 
 **Current behavior:**
 Nothing is broken. The cost is that every lane touching one of these files has to re-derive, from scratch, whether the guard in front of it is load-bearing. Worse, five of the guards carry prose that is now actively wrong ("Popoto strips tzinfo on load", "matching how Popoto SortedField stores them"), so a reader who trusts the comment reaches the wrong conclusion. One site (`reflections/audits/redis_quality_audit.py:61`) guards a field that has never been a datetime at all.
@@ -111,13 +111,13 @@ The coding is an hour. The review is the expensive part, because a reviewer has 
 
 - **The verdict table**: one row per site, with its input source and its disposition. It is the deliverable; the code change follows from it mechanically.
 - **Five deletions**: guards whose only inbound source is a popoto model field.
-- **Sixteen keeps**: guards with at least one non-popoto source, each given a one-line docstring reason.
+- **Eighteen keeps**: guards with at least one non-popoto source, each given a one-line docstring reason.
 - **Five prose corrections**: comments and docstrings that assert popoto 1.8.0 behaviour as fact. Three sit on keep-sites and must be rewritten; two sit on delete-sites and go away with the guard.
 - **Five non-vacuous tests**: one per deletion, each constructed so that it fails if the deletion is wrong.
 
 ### Flow
 
-Sweep → classify each site by inbound source → delete / keep+annotate → add a reaching test per deletion → re-run the sweep and the `getattr`-shaped variant → the survivors are exactly the sixteen keeps.
+Sweep → classify each site by inbound source → delete / keep+annotate → add a reaching test per deletion → re-run the sweep and the `getattr`-shaped variant → the survivors are exactly the eighteen keeps.
 
 ### Technical Approach
 
@@ -133,18 +133,21 @@ Sweep → classify each site by inbound source → delete / keep+annotate → ad
 | `reflections/crash_recovery.py:186` | resumable-session filter | `s.updated_at` from the resumable query | Pure popoto read. The four-line comment block at `:176` asserting "tzinfo stripped on read" goes with it. |
 | `reflections/audits/redis_quality_audit.py:61` | dead-channel scan | `chat.updated_at` | **Dead code, not a stale guard.** `Chat.updated_at` is `SortedField(type=float)` (`models/chat.py:23`) and line 55 already compares it against the float `month_ago`. The `isinstance(_ua, datetime)` branch has never been reachable. Delete the whole branch, leaving `days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)`. |
 
-**Keep (16).** Grouped by why:
+**Keep (18).** Grouped by why:
 
 - *ISO strings from files and raw Redis*: `agent/agent_session_queue.py:1364` (restart-flag file), `monitoring/bridge_watchdog.py:943` (recovery-lock JSON), `bridge/telegram_bridge.py:343` (last-connected file), `bridge/poll_registry.py:299`, `bridge/poll_reconcile.py:53`, `bridge/poll_reconcile.py:250`.
 - *ISO strings from an external API*: `reflections/pm_briefings/daily_log.py:352` (`_iso_in_window`, parsing `gh` output).
 - *General-purpose coercers accepting `datetime | int | float | str`*: `agent/session_runner/liveness.py:77` and `:87`, `monitoring/session_watchdog.py:65`, `tools/session_progress.py:214` and `:224`, `agent/agent_session_queue.py:2994`, `tools/valor_session.py:419`.
+- *The repo's canonical coercer*: `utils/utc.py:54` and `:64` (`to_unix_ts`). **Outside the issue's declared directory set** — the sweep never looked at `utils/` — but it is the single source of truth `docs/features/utc-timestamps.md:87` points every read-path caller at, and its docstring still says "Popoto strips tzinfo on save". Guards stay; docstring is corrected.
 - *Model ingress normalisation*: `models/agent_session.py:801` (`__setattr__`) and `:906` (`_normalize_kwargs`). These two are the reason the five deletions are safe and must be called out as such in their docstrings — deleting them would invalidate this entire plan.
+- *Already settled, untouched here*: `ui/data/sdlc.py:823` and `:838` (`_safe_float`) — also outside the declared directory set, but PR #3180 already annotated it with the correct mixed-input reason. Verified, no change.
 - *Already settled by #3173, untouched here*: `agent/session_health.py:403`, `:730`, `:6302`; `agent/session_pickup.py:52`, `:387`, `:600`.
 
-**Prose corrections on keep-sites (3).** Each currently states popoto 1.8.0 behaviour as present tense:
+**Prose corrections on keep-sites (4).** Each currently states popoto 1.8.0 behaviour as present tense:
 - `agent/session_runner/liveness.py:66-72` — "naive datetimes are treated as UTC — Popoto strips tzinfo on save". Rewrite: popoto 1.9.0 decodes aware; the guard exists for the ISO-string and float inputs this coercer also accepts.
 - `tools/session_progress.py:200-203` — same claim, same correction, keeping the "one definition" delegation note.
 - `monitoring/session_watchdog.py:54-59` — "matching how Popoto SortedField stores them". Rewrite to name the real reason (#777): the float and naive-string inputs, on a non-UTC host.
+- `utils/utc.py:41-49` (`to_unix_ts`) — "Naive datetimes are treated as UTC (Popoto strips tzinfo on save)". This is the docstring the other three defer to, so correcting it is what actually retires the claim; the others merely stop repeating it.
 
 **Testing the deletions non-vacuously.** This is where #3173's review found the defect, so each test states its own falsifiability:
 - Build the fixture by *writing through popoto and reading back*, never by constructing the object in memory — an in-memory `AgentSession(...)` never exercises decode and would pass with or without the guard.
@@ -154,19 +157,82 @@ Sweep → classify each site by inbound source → delete / keep+annotate → ad
 
 ## Failure Path Test Strategy
 
+### Exception Handling Coverage
+- [ ] `reflections/crash_recovery.py:191-198` wraps the guard in `except Exception` and logs a warning naming the bad `updated_at`. Removing the guard must not remove that handler; add an assertion that a genuinely bad value still produces the warning and the session is skipped rather than crashing the reflection.
+- [ ] `reflections/audits/redis_quality_audit.py` runs entirely inside one `try` whose `except` appends the error as a finding and keeps `status: "ok"`. The dead-branch removal must keep that shape; assert the audit still returns `status == "ok"` with the branch gone.
+- [ ] `models/agent_session.py::log_lifecycle_transition` has no handler around the deleted line; a naive value would propagate a `TypeError` to the caller. That is exactly the signal the new test watches for.
+- [ ] `bridge/poll_reconcile.py:249-255` and `bridge/telegram_bridge.py:351-353` keep their broad handlers unchanged — they are keep-sites, untouched.
+
+### Empty/Invalid Input Handling
+- [ ] `_heal_future_updated_at` already `continue`s on `record.updated_at is None`; that branch is untouched and must stay covered.
+- [ ] `_collect_sessions` already `continue`s on `ca is None` and on an unparseable float; both branches stay.
+- [ ] `redis_quality_audit` uses `(_ua or 0)` for the missing case; after the deletion that becomes `(chat.updated_at or 0)` and must still yield a finite `days_inactive`.
+- [ ] No agent-output processing is in scope, so the empty-output silent-loop class does not apply.
+
+### Error State Rendering
+- [ ] `reflections/pm_briefings/daily_log.py` renders to a Markdown briefing. Assert a session with a real `completed_at` still lands in the rendered day window after the deletion — a silently-empty briefing is the failure mode this section exists to catch.
+- [ ] No other site in scope has user-visible output.
+
 ## Test Impact
+
+- [ ] `tests/integration/test_updated_at_heal.py` — UPDATE: it is the closest existing coverage of `_heal_future_updated_at`. Confirm it round-trips through popoto rather than constructing in memory; if it constructs in memory, that is the vacuous shape and it gets rewritten, not extended.
+- [ ] `tests/unit/test_agent_session_updated_at_utc.py` — UPDATE: re-anchor its assertions on the aware-decode contract, and drop any assertion that depends on the deleted naive branch.
+- [ ] `tests/unit/test_session_health_trusted_clock.py` — UPDATE: it references `_heal_future_updated_at`; verify it is unaffected and, if it asserts naive handling, re-anchor it.
+- [ ] `tests/unit/reflections/test_daily_log_aggregator.py` — UPDATE: add the reaching test for `_collect_sessions` here rather than in a new file; it already owns this collector.
+- [ ] `tests/unit/test_crash_recovery_gates.py` — UPDATE: add the reaching test for the resumable-session filter here.
+- [ ] `tests/unit/test_reflection_pool_bulkhead.py` — UPDATE: it is the only test naming `redis_quality_audit`; add the `Chat.updated_at` float round-trip assertion alongside it, or in a new `tests/unit/reflections/test_redis_quality_audit.py` if the bulkhead test's fixtures do not fit.
+- [ ] `tests/integration/test_lifecycle_transition.py` — UPDATE: add the reaching test for `log_lifecycle_transition`'s duration math here; it already exercises the transition path end to end.
+- [ ] The nineteen other files that merely call `log_lifecycle_transition` incidentally need no change — the deletion is behaviour-preserving for every aware input, which is all of them.
 
 ## Rabbit Holes
 
+- **Rewriting the sweep regex into something rigorous.** It already under-counts by one shape and skips two directories; the temptation is to build a proper AST-based finder. Do not. Run both shapes as two grep lines and move on — a one-off classification does not earn a tool.
+- **Migrating the sixteen keeps onto `utils.utc.to_unix_ts`.** The issue's instruction to "route the bare one-liners through the general-purpose coercer" reads like it applies here. It mostly does not: `to_unix_ts` returns a `float`, while ten of the keeps need an aware `datetime` for subtraction, and `docs/features/utc-timestamps.md:87` records a deliberate decision to leave three older inline helpers alone. Consolidation is a real idea and a separate one.
+- **Backfilling a naive-write regression test into popoto.** The "post-#521 naive write round-trips naive" hazard is real, but it is a property of the library, and `~/src/popoto` is a different repo with its own pipeline. Record it as a risk, do not chase it.
+- **Auditing every remaining `datetime` comparison in the repo.** The scope is the guard shape the sweep matches, not tz-correctness in general.
+- **Touching `agent/session_health.py` or `agent/session_pickup.py`.** #3173 settled those six sites. Re-litigating them burns review time and produces no diff.
+
 ## Risks
+
+### Risk 1: A deletion is wrong because some writer stores a naive datetime
+**Impact:** The naive value survives the round-trip (popoto only re-attaches UTC for the pre-#521 stored shape, never for a post-#521 naive `isoformat()`), reaches a comparison against `datetime.now(UTC)`, and raises `TypeError`. In four of the five sites that exception is swallowed by a surrounding handler, so the visible symptom is a reflection or healer that silently does nothing — the exact failure class that made #1653 take months to notice.
+**Mitigation:** The writer audit is a prerequisite, not a review item. All fifteen assignment sites for `updated_at` / `started_at` / `completed_at` were enumerated and every one is aware or a float that `AgentSession.__setattr__` converts. The build re-runs that enumeration as a Verification row so the claim is checked mechanically, not remembered.
+
+### Risk 2: The new tests are vacuous
+**Impact:** The deletions ship unverified and the plan's central deliverable — evidence, not just a diff — is not delivered. This is not hypothetical: #3173's review caught exactly this.
+**Mitigation:** Every test builds its fixture by writing through popoto and reading back, and every test is mutation-checked by forcing a naive value into the fixture and confirming it goes red. The red output goes in the PR body.
+
+### Risk 3: `POPOTO_DATETIME_KEY_LEGACY` gets set on some machine later
+**Impact:** Legacy rows start decoding naive again and every deleted guard becomes load-bearing at once, on whichever machine set it.
+**Mitigation:** The switch is absent from the repo and from `.env.example` today. The plan records the dependency explicitly in `docs/features/utc-timestamps.md` so the next person to consider that switch finds out what it costs. A Prerequisites check asserts it is off at build time.
+
+### Risk 4: File-level collision with the open #3199 lane
+**Impact:** Both lanes write `models/agent_session.py`; the second to land hits a rebase.
+**Mitigation:** The regions are disjoint (`:1092` / `:2225` here, `~:2476-2528` there). Whoever lands second rebases; no coordination beyond that is warranted.
 
 ## Race Conditions
 
+No race conditions identified. Every change is the removal or rewording of a synchronous, pure-branch guard inside a single function body. No new shared state, no new concurrency, no ordering dependency between the sites, and no write path is touched — `reflections/audits/redis_quality_audit.py` is read-only by its own module contract, and the other four deletions sit on read paths whose surrounding write behaviour is unchanged.
+
 ## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #3199] `models/agent_session.py` index-repair and identityless-quarantine work. That lane owns `~:2476-2528`; this plan does not touch it.
+- [SEPARATE-SLUG #3199] The `test_session_archive` naive-round-trip node and the quarantine-counter trio. Same lane, same file, different failure.
+- Consolidating the eighteen keep-sites onto `utils.utc.to_unix_ts`. **Not deferred to a ticket — deliberately rejected**: `to_unix_ts` returns a float and ten of the keeps need an aware `datetime`, so the consolidation is not available for most of them, and `docs/features/utc-timestamps.md:87` records the standing decision to leave the remaining inline helpers alone.
+- `utils/utc.py:28` (`to_local`). **Not deferred — out of shape**: it *raises* on a naive input as a validation contract rather than coercing one. It is not the guard this classification is about.
+- `tools/memory_search/cli.py:389,396`. **Not deferred — out of shape**: it unconditionally stamps UTC on `strptime` output of a CLI argument. There is no conditional guard to classify.
 
 ## Update System
 
+No update system changes required. This plan adds no dependency, no config file, no migration, and no new file that `/update` would need to propagate. The popoto floor it relies on (`>=1.9.0`) is already pinned in `pyproject.toml:21` and already asserted by `config/popoto_floor.py`, both landed by the `8c1a36ad1` bump.
+
+One machine-state assumption is worth naming even though it needs no script change: `POPOTO_DATETIME_KEY_LEGACY` must stay unset fleet-wide. It is absent from `.env.example`, so no machine acquires it through the normal update path.
+
 ## Agent Integration
+
+No agent integration required. Every change is internal to functions the bridge and the reflections runner already call; no new CLI entry point in `pyproject.toml [project.scripts]`, no new import for `bridge/telegram_bridge.py`, no MCP surface.
+
+The one agent-visible surface in scope is indirect: `reflections/pm_briefings/daily_log.py` renders the PM briefing the agent posts, and `reflections/crash_recovery.py` feeds the crash-recovery reflection. Both are already wired; this plan only changes a guard inside them, and the Failure Path tests assert their output is unchanged.
 
 ## Documentation
 
