@@ -594,7 +594,7 @@ The harness that **was built and run** (spike-5, spike-6) is a sandbox rootdir u
 | `.git` as a **directory** | a `.git` *file* means linked worktree, which trips the #3033 guard (line 143) before pytest starts |
 | a **symlink** to the repo's real `.venv` | makes `PYTEST_BIN` a real pytest (line 178). The fake-pytest model cannot run a session at all |
 | **no** `.python-version` | `check-interpreter-pin.sh` returns 0 at its "no pin file" early exit (line 33), so the pin guard stays silent on a sandbox that has no pin of its own |
-| a **copy** of `pytest_executed_count.py` written into the sandbox root | the subject under test must be the sandbox's copy, not the repo's |
+| a **copy** of the plugin written into the sandbox root, read from `PYTEST_EXECUTED_COUNT_SOURCE` (default `REPO_ROOT/pytest_executed_count.py`) | the subject under test must be the sandbox's copy, not the repo's. Reading the source path from an env var is also the counting rule's mutation seam — without it, mutating the rule would mean editing the shared checkout, which task 4 forbids |
 
 Measured end to end: an all-skip sandbox driven through `scripts/pytest-clean.sh` produced a
 genuine `2 skipped in 0.01s` and the injected plugin wrote its verdict file.
@@ -632,8 +632,23 @@ A real linked worktree with its own `uv sync --extra dev` venv remains in task 4
 - [ ] The pass-through allowlist is a **shell-level** unit check, not a pytest-driven one.
       The count file is minted by the wrapper and written only by the plugin, so no test can
       seed it with garbage through the wrapper's public surface; driving pytest to produce a
-      truncated file is not reproducible. Assert the `case` predicate directly by sourcing
-      it, or by a small bash loop over `"" collectonly "count 0" "count 1" "count 10" started coun "  "`.
+      truncated file is not reproducible. **It must drive the wrapper's own predicate body,
+      not a retyped copy of it** — a loop that repeats the `case` patterns in the test file
+      passes identically with the wrapper's `case` deleted, which is the stated-not-tested
+      failure round 2 caught. The measured procedure (spike-9), against
+      `PYTEST_CLEAN_SCRIPT`:
+
+      1. `sed -n '/^verdict_passes_through()/,/^}/p' "$SCRIPT" > "$SLICE"` where `$SLICE` is
+         a `mktemp` file. **Not** `source <(sed …)`: under `/bin/bash` 3.2.57 on macOS that
+         returns 0 and defines nothing, so every subsequent verdict would report a vacuous
+         pass. Measured.
+      2. Refuse on `[ ! -s "$SLICE" ]` and again on `! declare -f verdict_passes_through`,
+         each with its own distinct message. These two refusals are what make the check
+         mutation-detectable: with the `BEGIN`/`END` seam deleted the slice is empty and the
+         check exits 3 instead of reporting nine passes over nothing.
+      3. Only then loop over `"" collectonly "count 0" "count 1" "count 10" started coun "  " "count -1"`
+         and assert exactly the first two plus the positive counts pass through.
+
       This is what makes "fail closed on everything not allowlisted" a tested claim rather
       than a stated one.
 - [ ] `scripts/pytest-clean.sh` with no arguments at all: pytest runs the sandbox's
@@ -650,6 +665,12 @@ A real linked worktree with its own `uv sync --extra dev` venv remains in task 4
       guard fired. Pin this by asserting the other three headlines are absent.
 - [ ] With `PYTEST_ALLOW_ZERO_TESTS` set, the message is **still printed** while the exit is
       0. Assert the message; the exit code alone is not an assertion here.
+- [ ] **On a run pytest already called red, the guard prints nothing at all.** A rootdir with
+      a collection error must show `1 error during collection`, exit **2**, and carry no
+      `ZERO TESTS EXECUTED` line; a zero-collected rootdir must show `no tests ran`, exit
+      **5**, and likewise carry none. Assert both the exit code and the *absence* of the
+      diagnostic — a second, contradictory headline on an already-failing run is a
+      misattribution, not a guard (spike-8).
 
 ## Test Impact
 
