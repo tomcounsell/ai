@@ -5,9 +5,9 @@ appetite: Small
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3199
-last_comment_id: 5563793165
+last_comment_id: 5564168421
 revision_applied: true
-revision_applied_at: 2026-09-07T02:20:00Z
+revision_applied_at: 2026-09-07T02:31:18Z
 ---
 
 # AgentSession quarantine counter goes blind under popoto 1.9.0's divergence guard
@@ -105,6 +105,15 @@ carry popoto 1.9.0 and **did** run on 2026-09-06 at `25e4df925` (the 09-05 gap w
 not a stale install), and the repo-wide audit of naive `updated_at` comparisons belongs to #3181,
 not here.
 
+Comment `5564168421` (2026-09-07, the CRITIQUE escalation notice) adds no new technical premise. It
+restates round 2's blocker and names the subtractive resolution this revision applies — drop
+`config/popoto_floor.py`, wrap the import in `try/except ImportError`, degrade to the unfiltered sum,
+report loudly via the `agent/index_drift.py::_report_loud` pattern, `rm -f` the shared log before the
+row that writes it, and close the gaps the floor module opened. It also independently confirms the
+`test_quarantine_count_sums_across_all_indexed_fields` rewrite this plan already scheduled. Its one
+piece of process news is that reaching BUILD needs a cycle-cap override or a fresh run id, which is
+the supervisor's call, not the plan's.
+
 **Notes:** The bug reproduces at the current HEAD, so the premise is live. The issue body's stated
 hypothesis (popoto 1.9.0's "single hydration per `list()`") is wrong and is corrected in the issue's
 Recon Summary — `rebuild_indexes()` never calls `list()`.
@@ -198,6 +207,14 @@ to the rows*. The fix re-bases it on the row outcome, which both seams can repor
 
 **Size:** Small
 
+**Scope containment:** the diff is one method body in `models/agent_session.py`, two test files, and
+four doc pages. `config/popoto_floor.py` was pulled in by the round-1 revision and has been struck
+back out: the `try/except ImportError` degrade costs three lines at the call site and removes that
+module — an incident-response interlock with its own failure policy, its own test file, and its own
+popoto-coupling register — from the diff, from the Verification table, and from the Test Impact and
+Documentation obligations it would have opened. That is what keeps this plan inside a Small appetite
+that also funds five new tests, one rewritten test, and three mutation checks.
+
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
@@ -230,6 +247,12 @@ to the rows*. The fix re-bases it on the row outcome, which both seams can repor
   datetime-key-diverged healthy row needs `migrate_datetime_keys()` instead, so an unfiltered count
   would route an operator to the wrong remedy from the day #3181's aware-datetime work lands. That
   is why this goes past the letter of the directed fix in issue comment `5563793165`.
+- **A fail-open import with a loud report** — the identity filter needs `decode_popoto_model_hashmap`,
+  a popoto internal. The import lives at the call site under `try/except ImportError`; if it ever
+  fails, the counter degrades to the unfiltered `len(diverged_keys)` sum (the exact rule issue comment
+  `5563793165` directs) and the degradation is announced with `logger.error` plus a Sentry capture.
+  `config/popoto_floor.py` is not touched — this plan changes no file outside
+  `models/agent_session.py`, its two test files, and the docs.
 - **The retained shim** — `_make_identityless_skip_shim` stays installed on every `IndexedField`.
   It is the second half of a two-path defence: a hypothetical identity-less row whose derived key
   *does* match its stored key would sail past popoto's pre-check and still needs skipping.
@@ -254,13 +277,21 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
   so the returned 2-tuple stays exactly as it is today.
 - Read `getattr(result, "diverged_keys", ()) or ()` — a `getattr` guard, not an `isinstance` check,
   so a future popoto that returns a plain `int` degrades to the shim-only path instead of raising.
-- **Pin the one internal import loudly.** `decode_popoto_model_hashmap` is not exported from
-  `popoto/__init__.py`; it lives at `popoto/models/encoding.py:390`. Binding the fix to a popoto
-  internal is the same wager that produced this bug, so add the import to
-  `config/popoto_floor.py::assert_popoto_floor()`. An upstream move then fails at worker startup with
-  a named error instead of silently at the first reflection tick. One failure mode, checked where the
-  floor is already checked — chosen over a `try/except ImportError` degrade path, which would add a
-  second, quieter failure mode.
+- **Degrade the one internal import, loudly.** `decode_popoto_model_hashmap` is not exported from
+  `popoto/__init__.py`; it lives at `popoto/models/encoding.py:390`, so an upstream move breaks the
+  identity filter. Import it at the call site inside `repair_indexes()`, wrapped in
+  `try/except ImportError`, and on failure degrade to the unfiltered `len(diverged_keys)` sum — which
+  is exactly the counting rule issue comment `5563793165` directs, so the degraded number is correct,
+  just coarser. Report the degradation the way `config/popoto_floor.py` reports its own unresolvable
+  branch: `logger.error` plus a `sentry_sdk.capture_message` at `error` level, mirroring
+  `agent/index_drift.py::_report_loud` (`agent/index_drift.py:211-231`), with the Sentry call itself
+  wrapped so it can never crash the caller. `config/popoto_floor.py::assert_popoto_floor()` is
+  deliberately NOT extended with a symbol probe: it raises only on an unambiguous `violated` verdict
+  and fails open on `unresolvable`, because `repair_indexes()` runs on worker startup and an hourly
+  reflection and a false positive there would block index repair fleet-wide. A missing internal symbol
+  is neither `violated` nor `unresolvable`, and making it raise would import a hard-fail policy into a
+  module whose entire failure policy refuses one. This fix keeps that module's asymmetry rather than
+  breaking it: **runtime fails open, observability fails loud.**
 - For each diverged key: read the raw hash, `decode_popoto_model_hashmap(cls, h,
   source_redis_key=key)`, then `_filter_hydrated_sessions([instance])`. An empty hash means the row
   is **gone**, not identity-less — `continue` without counting, matching the rule
@@ -291,6 +322,11 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
 - [ ] The existing `try: … except Exception:` around the Redis `SET` (agent_session.py:2543-2550)
       stays non-fatal and stays covered — add a test that a raising `POPOTO_REDIS_DB.set` does not
       fail `repair_indexes()` and that `_last_quarantined_identityless` is still populated in memory.
+- [ ] The `decode_popoto_model_hashmap` import must not be able to fail the repair. Wrap it in
+      `try/except ImportError` at the call site and add a test that forces the `ImportError` and
+      asserts `repair_indexes()` still returns its 2-tuple, that the counter equals the unfiltered
+      `len(diverged_keys)`, and that `logger.error` fired — a silently-degraded filter must never
+      look healthy.
 - [ ] The new diverged-key re-decode loop must not be able to fail the repair. Wrap the per-key
       decode in its own `try`, count the key as identity-less on failure, and add a test that
       monkeypatches `decode_popoto_model_hashmap` to raise and asserts `repair_indexes()` still
@@ -342,6 +378,13 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
 - [ ] New: `tests/unit/test_agentsession_index_guard_generalized.py` gains coverage for the Redis
       persistence and the doctor suffix, for a decode failure in the diverged-key loop, and for a
       `rebuild_indexes()` that returns a plain `int`.
+- [ ] New: `tests/unit/test_agentsession_index_guard_generalized.py` gains
+      `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`, covering the
+      `ImportError` degrade path and its loud report.
+- [ ] `tests/unit/test_popoto_floor.py` — NOT TOUCHED, and neither is `config/popoto_floor.py`. The
+      degrade path lives entirely at the call site in `models/agent_session.py`, so the floor
+      interlock, its failure policy, its test file, and its "POPOTO COUPLING POINT" register are all
+      outside this diff.
 - [ ] `tests/unit/test_session_archive.py` — NOT TOUCHED. See No-Gos.
 
 ## Rabbit Holes
@@ -392,6 +435,17 @@ correction.
 **Impact:** An `AttributeError` on a hot startup path.
 **Mitigation:** `getattr(result, "diverged_keys", ()) or ()`. The floor assertion
 (`assert_popoto_floor()`) already guards the lower bound; the `getattr` guards the upper.
+
+### Risk 5: The degraded import path reports a coarser number without anyone noticing
+**Impact:** If `decode_popoto_model_hashmap` moves upstream, the identity filter stops running and
+the doctor's count silently starts including diverged-but-healthy rows — the exact wrong-remedy
+routing Risk 1 exists to prevent, arriving quietly instead of loudly.
+**Mitigation:** The degradation is not silent. It emits `logger.error` plus a Sentry capture at
+`error` level on every pass it occurs, mirroring `agent/index_drift.py::_report_loud` and matching
+the "observability fails loud" half of `config/popoto_floor.py`'s stated policy. The degraded number
+is still the counting rule issue comment `5563793165` directs, so the runtime behaviour remains
+correct while the alert names what was lost. Covered by
+`test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`.
 
 ## Race Conditions
 
@@ -470,6 +524,9 @@ Not applicable — this repo has no external documentation site.
       docstring to name popoto 1.9.0's divergence pre-check as the primary quarantine seam.
 - [ ] Update the module-level comment at `models/agent_session.py:68-78` describing the counter and
       its Redis key.
+- [ ] Comment the `try/except ImportError` at the call site with why the degrade is correct (issue
+      comment `5563793165`'s counting rule, just unfiltered) and why `config/popoto_floor.py` is
+      deliberately not the place for this check (it fails open by policy).
 
 ## Success Criteria
 
@@ -485,6 +542,11 @@ Not applicable — this repo has no external documentation site.
       returns a non-empty string — asserted by a new test, not only by hand.
 - [ ] `_make_identityless_skip_shim` is still installed on every `IndexedField` and still restored in
       the `finally`.
+- [ ] A forced `ImportError` on `decode_popoto_model_hashmap` degrades the counter to the unfiltered
+      `len(diverged_keys)` sum, keeps `repair_indexes()` returning its 2-tuple, and emits the loud
+      `logger.error` + Sentry report — asserted by a test, not only by inspection.
+- [ ] `config/popoto_floor.py` and `tests/unit/test_popoto_floor.py` are untouched by this PR. The
+      files this PR may change are `models/agent_session.py`, the two named test files, and docs.
 - [ ] `tests/unit/test_session_archive.py` and `agent/session_archive.py` are untouched by this PR.
 - [ ] PR body says `Refs #3199`.
 - [ ] Tests pass (`/do-test`, scoped)
@@ -523,8 +585,18 @@ exceptions, and this plan adds the third deliberately:
 Add no fourth. `validate_no_raw_redis_delete.py` fires only on **Bash** commands in an executable
 context, so writing exception 3 into `models/agent_session.py` via Edit/Write is not blocked — but a
 `.venv/bin/python -c` or heredoc probe containing `POPOTO_REDIS_DB.hgetall(` is, including a
-single-quoted heredoc that feeds an interpreter. Verify through the scoped tests instead. Scoped test
-runs go through `scripts/pytest-clean.sh`, never bare `pytest`, and never the full suite.
+single-quoted heredoc that feeds an interpreter. Verify through the scoped tests instead.
+
+### Testing discipline for the builder and the validator
+
+- Every test run goes through `./scripts/pytest-clean.sh` with **scoped node ids or the two named
+  test files only**. Never bare `pytest`, and never the full suite: six lanes share a 15-slot Redis
+  test-DB pool on this machine, and a full run starves the others for the ~20 minutes it takes.
+- **Read the passed count off the pytest summary line.** The wrapper currently exits 0 when zero
+  tests ran, so exit code 0 on its own proves nothing, and a `0 passed` summary is a FAILED
+  verification, not a pass. Record the exact summary line as evidence.
+- The two files in scope are `tests/unit/test_agentsession_pending_index_leak.py` and
+  `tests/unit/test_agentsession_index_guard_generalized.py`.
 
 ## Step by Step Tasks
 
@@ -550,8 +622,14 @@ runs go through `scripts/pytest-clean.sh`, never bare `pytest`, and never the fu
   rule). Otherwise decode via `decode_popoto_model_hashmap(cls, h, source_redis_key=key)` and add the
   key to `quarantined_keys` when `_filter_hydrated_sessions([instance])` is empty, when the decode
   returns `None`, or when the decode raises. One read per key, no pipeline batching — see Risk 2.
-- Add `decode_popoto_model_hashmap` to `config/popoto_floor.py::assert_popoto_floor()` so an upstream
-  move of that internal fails at worker startup rather than at the first reflection tick.
+- Import `decode_popoto_model_hashmap` at the call site inside `repair_indexes()` under
+  `try/except ImportError`. On `ImportError`, skip the per-key read/decode/filter loop entirely,
+  `quarantined_keys.update(<diverged keys>)` for the unfiltered sum, and emit the loud degradation
+  report (`logger.error` naming the missing symbol and the installed popoto version, plus a
+  `sentry_sdk.capture_message` at `error` level inside its own `try/except` so Sentry can never crash
+  the caller — the shape of `agent/index_drift.py::_report_loud`, `agent/index_drift.py:211-231`).
+  Do **not** touch `config/popoto_floor.py`: it fails open by policy and a symbol probe there would
+  block index repair fleet-wide on a false positive.
 - Publish `len(quarantined_keys)` to `cls._last_quarantined_identityless`, to the WARNING log (row
   phrasing, naming both seams), and to the Redis key. Leave the Redis `SET` non-fatal.
 - Rewrite the docstring's A1 paragraph, its "Returns" note, and the module comment at lines 68-78.
@@ -574,6 +652,10 @@ runs go through `scripts/pytest-clean.sh`, never bare `pytest`, and never the fu
   string containing the count.
 - Add `test_diverged_key_decode_failure_is_counted_not_raised`: monkeypatch the decode helper to
   raise, assert `repair_indexes()` returns its 2-tuple and the diverged keys still counted.
+- Add `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`: force the
+  `decode_popoto_model_hashmap` import to raise `ImportError`, seed diverged rows, and assert the
+  counter equals the unfiltered diverged-key count, that `repair_indexes()` still returns its
+  2-tuple, and that the degradation was reported at `error` level.
 - Add `test_plain_int_rebuild_result_degrades_to_shim_only`: monkeypatch `rebuild_indexes` to return
   a bare `int`, assert no `AttributeError`.
 - Add `test_redis_persistence_failure_is_non_fatal`: monkeypatch the Redis `set` to raise, assert
@@ -650,30 +732,51 @@ runs go through `scripts/pytest-clean.sh`, never bare `pytest`, and never the fu
 
 ## Verification
 
-Every row below was measured against unmodified `main` at `ed1820fcc` before the build starts. A row
+Every row below was measured against unmodified `main` at `ed1820fcc` before the build starts, and
+re-confirmed at `8f0b04a70` — no commit between the two touched `models/agent_session.py`,
+`tests/unit/test_agentsession_pending_index_leak.py`, or
+`tests/unit/test_agentsession_index_guard_generalized.py`, so the baseline still holds. A row
 that is already green on `main` proves nothing about this work, so each row records its pre-change
-result; the two rows that are deliberately green on `main` are labelled anti-regression, because what
-they assert is that something existing was **not removed**.
+result; the three rows that are deliberately green on `main` are labelled anti-regression, because
+what they assert is that something existing was **not removed** — the `on_save` shim, the archive
+half, and the `config/popoto_floor.py` interlock.
+
+**The scoped-suite log is named per RUN, not per issue.** `/tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log` embeds this lane's
+`run_id` (the one `sdlc-tool session-ensure` issued for #3199), so a concurrent lane on this machine
+cannot write a file the rows below then read as their own evidence. If the build executes under a
+different `run_id`, substitute it in both rows and record the substitution in the PR body.
 
 | Check | Command | Expected | On `main` |
 |-------|---------|----------|-----------|
-| Scoped suite green, non-empty | `./scripts/pytest-clean.sh tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py -n0 -q 2>&1 \| tee /tmp/quarantine-3199.log \| grep -oE '[0-9]+ passed' \| grep -oE '^[0-9]+'` | output > 12 | RED (10) |
-| No failing nodes | `grep -cE '^FAILED\|[0-9]+ failed' /tmp/quarantine-3199.log` | match count == 0 | RED (4) |
+| Scoped suite green, non-empty | `rm -f /tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log && ./scripts/pytest-clean.sh tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py -n0 -q 2>&1 \| tee /tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log \| grep -oE '[0-9]+ passed' \| grep -oE '^[0-9]+'` | output > 12 | RED (10) |
+| No failing nodes | `grep -cE '^FAILED\|[0-9]+ failed' /tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log` | match count == 0 | RED (4) |
 | Divergence seam wired in | `grep -c 'diverged_keys' models/agent_session.py` | output > 0 | RED (0) |
 | Old bare-int accumulator gone | `grep -c 'quarantined = \[0\]' models/agent_session.py` | match count == 0 | RED (1) |
 | Identity filter is inside the new loop | `.venv/bin/python -c "import inspect, models.agent_session as m; s=inspect.getsource(m.AgentSession.repair_indexes); print('_filter_hydrated_sessions' in s.split('diverged',1)[1] if 'diverged' in s else False)"` | output contains True | RED (False) |
-| Internal import pinned to the floor | `grep -c 'decode_popoto_model_hashmap' config/popoto_floor.py` | output > 0 | RED (0) |
+| Import degrade path present | `grep -c 'ImportError' models/agent_session.py` | output > 0 | RED (0) |
+| Degradation reported loudly | `grep -c 'capture_message' models/agent_session.py` | output > 0 | RED (0) |
+| Floor interlock untouched (anti-regression) | `git diff --name-only origin/main...HEAD \| grep -c 'config/popoto_floor[.]py'` | match count == 0 | green (0) |
 | on_save shim retained (anti-regression) | `grep -c '_make_identityless_skip_shim' models/agent_session.py` | output > 1 | green (2) |
 | Archive half untouched (anti-regression) | `git diff --name-only origin/main...HEAD \| grep -cE 'test_session_archive\|session_archive[.]py'` | match count == 0 | green (0) |
-| Lint clean | `python -m ruff check models/agent_session.py config/popoto_floor.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
-| Format clean | `python -m ruff format --check models/agent_session.py config/popoto_floor.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
+| Lint clean | `python -m ruff check models/agent_session.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
+| Format clean | `python -m ruff format --check models/agent_session.py tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 0 | green |
 | No stale xfails introduced | `grep -rn 'xfail' tests/unit/test_agentsession_pending_index_leak.py tests/unit/test_agentsession_index_guard_generalized.py` | exit code 1 | green |
 
-The second row reads the log the first row wrote, so the scoped suite runs once, not twice.
+The second row reads the log the first row wrote, so the scoped suite runs once, not twice. The
+`rm -f` in the first row is what makes that safe: without it a log left by an earlier run satisfies
+row 2 even if the suite crashed before writing a byte. With the truncation in place an absent log
+**fails closed** — `grep -c` on a missing file exits 2 and prints nothing, and the `match count == 0`
+expectation requires non-empty stdout, so "no log" is a failed row rather than a passing one. That
+depends on the empty-stdout gate, so it is stated here rather than left implicit.
+
+Both `/tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log` reads assume the scoped run in row 1 actually
+executed. `scripts/pytest-clean.sh` currently exits 0 when zero tests ran, so **exit code 0 alone
+proves nothing** — the passed count on the pytest summary line is the evidence, and a `0 passed`
+summary is a FAILED verification.
 
 ## Critique Results
 
-**Depth:** FULL (3 critics) · **Mode:** sequential lenses (Agent tool unavailable: not in tool list) · **Round 1 verdict:** NEEDS REVISION (2 blockers, all rows addressed) · **Round 2 verdict:** NEEDS REVISION (1 blocker)
+**Depth:** FULL (3 critics) · **Mode:** sequential lenses (Agent tool unavailable: not in tool list) · **Round 1 verdict:** NEEDS REVISION (2 blockers, all rows addressed) · **Round 2 verdict:** NEEDS REVISION (1 blocker, 3 concerns, 1 nit — all rows addressed) · **Round 2 revision applied:** 2026-09-07. Every row in this table is now closed. This was the final authorized revision round (owner ruling: exactly one round past the G2 cap), and the resolution was subtractive — `config/popoto_floor.py` left the plan rather than gaining a probe.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
@@ -683,15 +786,15 @@ The second row reads the log the first row wrote, so the scoped suite runs once,
 | CONCERN | Risk & Robustness | Counting a diverged key whose raw hash read comes back empty as identity-less contradicts the boundary `:217` exists to assert — that a gone-hash orphan is NOT quarantine. With `AgentSession`'s `Meta.ttl` keepalive, a row expiring mid-repair is ordinary churn, so this silently inflates the doctor's drift number. | An empty hash read is now skipped, not counted, matching `:217` | A vanished row cannot be re-inflated into an index, so it is not quarantine by the counter's own definition. Skip an empty hash with a `logger.debug` and `continue` before decoding, rather than counting it. Keep counting decode-returns-None and decode-raises, which are genuine "could not establish identity" outcomes. |
 | CONCERN | Scope & Value | Task 1 mandates a pipelined 5000-chunk batch path for the diverged-key loop, which the plan's own Risk 2 and Solution both say is empty on a healthy keyspace. That is optimization for an already-broken deploy, funded out of a Small appetite that also has to pay for six new tests and three mutation checks. | Pipelining mandate dropped from task 1; Risk 2 records the WARNING as the trigger to revisit | The `$IndexF` scan needs its `batch_size = 5000` pipeline because it walks every member of every index key on every worker startup. The diverged-key loop has no comparable exposure — its input is 0 on a healthy keyspace and is itself a loud WARNING when it is not. Drop the pipelining mandate, issue one hash read per diverged key, and leave Risk 2 as a documented follow-up trigger. |
 | CONCERN | Scope & Value | The identity filter goes beyond the directed fix in issue comment 5563793165 ("sum `len(diverged_keys)` into `quarantined[0]`") and carries most of the plan's new surface, while the condition it guards cannot occur until the archive half — an explicit No-Go here — lands. | Solution's fourth bullet now carries the wrong-remedy justification for building the filter now | Add the justification to the Solution's fourth bullet: the counter's only consumer is `tools/doctor.py::_recent_quarantine_suffix`, whose remediation text sends an operator to `valor-session inspect` and `repair_indexes()` for phantom hashes, whereas a datetime-key-diverged healthy row needs `migrate_datetime_keys()`. An unfiltered count routes an operator to the wrong remedy the day #3181's work lands. Without that sentence the filter reads as gold-plating against the issue's own instruction. |
-| CONCERN | History & Consistency | `decode_popoto_model_hashmap` is not public — it lives at `popoto/models/encoding.py:390` and is absent from the package `__init__.py`. Binding the fix to a third-party internal repeats the exact wager that caused this bug, which the plan's own "Why Previous Fixes Failed" table names. | `decode_popoto_model_hashmap` pinned in `assert_popoto_floor()`; shape (a) chosen and the reason stated | Two workable shapes. (a) Add the import to `config/popoto_floor.py`'s `assert_popoto_floor()` so an upstream move fails at worker startup with a named error instead of at the first reflection tick. (b) Wrap the diverged-key filter in `try/except ImportError` and degrade to the unfiltered `len(diverged_keys)` sum, logging the degradation at WARNING. (a) is preferable — one failure mode instead of two. The plan must say which. |
+| CONCERN | History & Consistency | `decode_popoto_model_hashmap` is not public — it lives at `popoto/models/encoding.py:390` and is absent from the package `__init__.py`. Binding the fix to a third-party internal repeats the exact wager that caused this bug, which the plan's own "Why Previous Fixes Failed" table names. | Shape (b): the import is wrapped in `try/except ImportError` at the call site and degrades to the unfiltered sum. Round 1 chose shape (a); round 2's blocker showed (a) is incompatible with `assert_popoto_floor()`'s fail-open policy, so (b) is the settled answer and the degradation is reported at `error` with a Sentry capture rather than at WARNING. | Two workable shapes. (a) Add the import to `config/popoto_floor.py`'s `assert_popoto_floor()` so an upstream move fails at worker startup with a named error instead of at the first reflection tick. (b) Wrap the diverged-key filter in `try/except ImportError` and degrade to the unfiltered `len(diverged_keys)` sum, logging the degradation at WARNING. (a) is preferable — one failure mode instead of two. The plan must say which. |
 | CONCERN | History & Consistency | The Update System section asserts no migration is needed without the reason, while `docs/sdlc/do-plan.md` requires any plan touching a Popoto model to address `scripts/update/migrations.py` explicitly. | Update System now states the schema-change rule and why `MIGRATIONS` stays untouched | The migration rule keys on schema change — a field added, removed, renamed, or re-typed, which is what makes stored hashes stale. This plan changes only the body of `repair_indexes()` and the unit of the `_last_quarantined_identityless` class attribute; no `Field` on `AgentSession` is touched, so no stored hash changes shape and `MIGRATIONS` stays untouched. One sentence naming that closes it. |
 | NIT | Scope & Value | The Verification rows "Scoped suite green" and "Run was not empty" execute the same pytest invocation, running the suite twice to answer one question. | Folded into one run: row 2 reads the log row 1 writes | — |
 | NIT | History & Consistency | Three code references resolve to nothing from the repo root: `popoto/models/base.py` (written elsewhere in the plan with its full `.venv/lib/python3.14/site-packages/` prefix) and the bare basenames `test_conftest_isolation_guards.py` and `test_job_model.py`. | All three references corrected to their full paths | — |
-| BLOCKER | History & Consistency | Round 2. The revision directs "Add `decode_popoto_model_hashmap` to `config/popoto_floor.py::assert_popoto_floor()`. An upstream move then fails at worker startup with a named error". That function raises ONLY on an unambiguous `violated` verdict and deliberately fails open on `unresolvable`, because — per its module docstring — `repair_indexes()` runs on worker startup and an hourly reflection, so a false positive there would block index repair fleet-wide, a worse incident than the one being prevented. A missing internal symbol is neither `violated` nor `unresolvable`; making it raise imports a hard-fail policy into a module that refuses one. | pending | Do not extend `assert_popoto_floor()`. At the call site in `repair_indexes()`, wrap the import in `try/except ImportError` and degrade to the unfiltered `len(diverged_keys)` sum — which is exactly what issue comment 5563793165 directs, so the degraded path is correct, just coarser. Report the degradation on the surface that module already uses for its own unresolvable branch (`logger.error` plus a Sentry capture, mirroring `agent/index_drift.py::_report_loud`, which `config/popoto_floor.py` names as its model), so a silently-degraded filter never looks healthy. This keeps the module's own asymmetry: runtime fails open, observability fails loud. |
-| CONCERN | History & Consistency | Round 2. The revision pulled `config/popoto_floor.py` into scope (Solution, task 1, two Verification rows) without updating the three sections that govern completeness: `tests/unit/test_popoto_floor.py` exists and is absent from Test Impact, the Documentation section names no floor page, and no Success Criterion covers the import-hardening decision. | pending | If the blocker resolves as recommended, `config/popoto_floor.py` leaves the diff entirely and all three gaps close by deletion — also strike it from the Lint and Format rows' file lists. If any change to that module survives, give `tests/unit/test_popoto_floor.py` an explicit disposition in Test Impact and add the new symbol to that module's "POPOTO COUPLING POINT -- re-verify on any popoto upgrade" note, which is the repo's standing register of popoto internals it depends on. |
-| CONCERN | Scope & Value | Round 2. The round-1 revision answered a CONCERN about one internal import by adding work in a second module to a Small-appetite plan. `config/popoto_floor.py` is an incident-response interlock with its own failure policy, test file, and coupling register; editing it is not a one-line hardening step, and it guards a symbol the fix can degrade without. | pending | The degrade path costs three lines at the call site and removes `config/popoto_floor.py` from the diff, from two Verification rows, and from the Test Impact and Documentation gaps it opened. That keeps the plan inside its Small appetite and leaves the fleet-wide interlock untouched — the conservative choice for a module whose docstring opens by describing the incident it exists to prevent. |
-| CONCERN | Risk & Robustness | Round 2. Verification row "No failing nodes" reads `/tmp/quarantine-3199.log`, which the row above writes, and nothing truncates it first. A log left by any earlier run on this machine satisfies the row even if the suite crashed before writing a byte. `/tmp` is shared across lanes, so the stale file is not hypothetical — the revision traded a duplicated suite run for a check that can pass on stale evidence. | pending | Prefix the first row's command with `rm -f /tmp/quarantine-3199.log &&`. `grep -c` on a missing file exits 2 with empty stdout and the `match count == 0` expectation requires non-empty stdout, so an absent log fails closed once the truncation is in place — say that in the row, because it depends on the parser's empty-stdout gate and is not obvious. Better still, name the log per run rather than per issue so two lanes cannot read each other's evidence. |
-| NIT | Risk & Robustness | Round 2. All ten round-1 findings verify as genuinely closed on spot-check: the Verification table carries an `On main` column with six rows measured red, the Domain framing names the raw hash read as sanctioned exception 3 with the Bash-only validator mechanics, Mutation C is a source edit with no escape hatch, the empty-hash case skips rather than counts, the pipelining mandate is gone, the wrong-remedy justification is in the Solution, the Update System states the schema-change rule, and the three path references are corrected. | pending | — |
+| BLOCKER | History & Consistency | Round 2. The revision directs "Add `decode_popoto_model_hashmap` to `config/popoto_floor.py::assert_popoto_floor()`. An upstream move then fails at worker startup with a named error". That function raises ONLY on an unambiguous `violated` verdict and deliberately fails open on `unresolvable`, because — per its module docstring — `repair_indexes()` runs on worker startup and an hourly reflection, so a false positive there would block index repair fleet-wide, a worse incident than the one being prevented. A missing internal symbol is neither `violated` nor `unresolvable`; making it raise imports a hard-fail policy into a module that refuses one. | Resolved as recommended. `config/popoto_floor.py` is no longer extended and leaves the diff entirely. The Solution's "Degrade the one internal import, loudly" bullet and task 1 now import `decode_popoto_model_hashmap` at the call site under `try/except ImportError`, degrading to the unfiltered `len(diverged_keys)` sum on failure and reporting it with `logger.error` plus a Sentry capture mirroring `agent/index_drift.py::_report_loud` (`:211-231`). New Key Element "A fail-open import with a loud report", new Risk 5, new failure-path row, new test `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud` (task 2), and a new Success Criterion. Verified independently: `assert_popoto_floor()` (`config/popoto_floor.py:248-259`) raises only on `VIOLATED`, and the module docstring states the runtime-fails-open / observability-fails-loud asymmetry the critic cites — the finding is correct as written. | Do not extend `assert_popoto_floor()`. At the call site in `repair_indexes()`, wrap the import in `try/except ImportError` and degrade to the unfiltered `len(diverged_keys)` sum — which is exactly what issue comment 5563793165 directs, so the degraded path is correct, just coarser. Report the degradation on the surface that module already uses for its own unresolvable branch (`logger.error` plus a Sentry capture, mirroring `agent/index_drift.py::_report_loud`, which `config/popoto_floor.py` names as its model), so a silently-degraded filter never looks healthy. This keeps the module's own asymmetry: runtime fails open, observability fails loud. |
+| CONCERN | History & Consistency | Round 2. The revision pulled `config/popoto_floor.py` into scope (Solution, task 1, two Verification rows) without updating the three sections that govern completeness: `tests/unit/test_popoto_floor.py` exists and is absent from Test Impact, the Documentation section names no floor page, and no Success Criterion covers the import-hardening decision. | Closed by deletion, per the recommendation's first branch. `config/popoto_floor.py` is struck from the Solution, from task 1, from the Verification table (the "Internal import pinned to the floor" row is gone), and from the Lint and Format rows' file lists. Test Impact now carries an explicit `tests/unit/test_popoto_floor.py` — NOT TOUCHED disposition naming the interlock, its failure policy, its test file, and its POPOTO COUPLING POINT register as outside this diff, and a Success Criterion asserts both files are untouched. A new anti-regression Verification row proves it from the diff. | If the blocker resolves as recommended, `config/popoto_floor.py` leaves the diff entirely and all three gaps close by deletion — also strike it from the Lint and Format rows' file lists. If any change to that module survives, give `tests/unit/test_popoto_floor.py` an explicit disposition in Test Impact and add the new symbol to that module's "POPOTO COUPLING POINT -- re-verify on any popoto upgrade" note, which is the repo's standing register of popoto internals it depends on. |
+| CONCERN | Scope & Value | Round 2. The round-1 revision answered a CONCERN about one internal import by adding work in a second module to a Small-appetite plan. `config/popoto_floor.py` is an incident-response interlock with its own failure policy, test file, and coupling register; editing it is not a one-line hardening step, and it guards a symbol the fix can degrade without. | Accepted. The Appetite section gains a "Scope containment" paragraph stating exactly this: the degrade costs three lines at the call site, removes the interlock from the diff, the Verification table, and the Test Impact / Documentation obligations it opened, and that is what keeps the plan inside its Small appetite. The diff is now one method body in `models/agent_session.py`, two test files, and four doc pages. | The degrade path costs three lines at the call site and removes `config/popoto_floor.py` from the diff, from two Verification rows, and from the Test Impact and Documentation gaps it opened. That keeps the plan inside its Small appetite and leaves the fleet-wide interlock untouched — the conservative choice for a module whose docstring opens by describing the incident it exists to prevent. |
+| CONCERN | Risk & Robustness | Round 2. Verification row "No failing nodes" reads `/tmp/quarantine-3199.log`, which the row above writes, and nothing truncates it first. A log left by any earlier run on this machine satisfies the row even if the suite crashed before writing a byte. `/tmp` is shared across lanes, so the stale file is not hypothetical — the revision traded a duplicated suite run for a check that can pass on stale evidence. | Both remedies applied, the stronger one first. The log is now named per RUN — `/tmp/quarantine-3199-d8a7e64660f541e2be5d9baa9657759c.log`, embedding this lane's `run_id` — so two lanes cannot read each other's evidence, with a note on substituting a different `run_id`. The writing row is prefixed `rm -f <log> &&`, and the prose under the table states that an absent log then fails closed because `grep -c` on a missing file exits 2 with empty stdout while the `match count == 0` expectation requires non-empty stdout. | Prefix the first row's command with `rm -f /tmp/quarantine-3199.log &&`. `grep -c` on a missing file exits 2 with empty stdout and the `match count == 0` expectation requires non-empty stdout, so an absent log fails closed once the truncation is in place — say that in the row, because it depends on the parser's empty-stdout gate and is not obvious. Better still, name the log per run rather than per issue so two lanes cannot read each other's evidence. |
+| NIT | Risk & Robustness | Round 2. All ten round-1 findings verify as genuinely closed on spot-check: the Verification table carries an `On main` column with six rows measured red, the Domain framing names the raw hash read as sanctioned exception 3 with the Bash-only validator mechanics, Mutation C is a source edit with no escape hatch, the empty-hash case skips rather than counts, the pipelining mandate is gone, the wrong-remedy justification is in the Solution, the Update System states the schema-change rule, and the three path references are corrected. | Acknowledged, no action needed. The spot-check confirms all ten round-1 findings stayed closed through this round; nothing in round 3's revision reopens any of them — the retained shim, the empty-hash skip, Mutation C's source edit, the single scoped run, and the `On main` column all survive the `config/popoto_floor.py` removal untouched. | — |
 
 ---
 
