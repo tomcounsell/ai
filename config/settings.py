@@ -842,6 +842,18 @@ class FeatureSettings(BaseModel):
             "FEATURES__MAX_CRITIQUE_CYCLES."
         ),
     )
+    side_effects_paused: bool = Field(
+        default=False,
+        description=(
+            "Administrative pause for the side-effect drain "
+            "(agent/side_effects.py::run_due). While true the drain reports a "
+            "skip and runs no handler; jobs stay pending and drain when the "
+            "pause lifts, so pausing loses no work. Exists so post-session "
+            "memory extraction can be held off during an incident or a trial "
+            "arm without the enqueue path changing. Env: "
+            "FEATURES__SIDE_EFFECTS_PAUSED."
+        ),
+    )
 
 
 class SessionRunnerSettings(BaseModel):

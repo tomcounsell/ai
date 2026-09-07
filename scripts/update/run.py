@@ -165,6 +165,8 @@ class UpdateResult:
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
+    side_effect_drain_register_result: reflection_register.RegisterResult | None = None
+    dead_letter_replay_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
@@ -1241,6 +1243,36 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not upr.success:
             log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
             _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
+
+        # Step 1.658b: Ensure the two ETL-pipeline reflections are registered
+        # (#3183) via the same generalized register path. Same ordering
+        # rationale as Steps 1.655-1.658: both run BEFORE Step 1.66's
+        # vault->config copy so the entries propagate into the per-machine
+        # config/reflections.yaml on this same cycle.
+        for _label, _register, _attr in (
+            (
+                "side-effect-drain",
+                reflection_register.register_side_effect_drain,
+                "side_effect_drain_register_result",
+            ),
+            (
+                "dead-letter-replay",
+                reflection_register.register_dead_letter_replay,
+                "dead_letter_replay_register_result",
+            ),
+        ):
+            log(f"Ensuring {_label} reflection is registered...", v)
+            _res = _register(project_dir)
+            setattr(result, _attr, _res)
+            if _res.action == "registered":
+                log(f"{_label} reflection registered in vault reflections.yaml", v, always=True)
+            elif _res.action == "noop":
+                log(f"{_label} reflection already registered", v)
+            elif _res.action == "skipped":
+                log(f"{_label} registration skipped: {_res.detail}", v)
+            if not _res.success:
+                log(f"WARN: {_label} registration: {_res.detail}", v, always=True)
+                _append_warning(result, f"{_label} registration: {_res.detail}")
 
         # Step 1.659: Repoint reflection callables onto the modules that own them.
         # Two migration families share one table: the `agent.sustainability.*` shim

@@ -1238,7 +1238,114 @@ def _migrate_clear_docs_audit_liveness_keys(project_dir: Path) -> str | None:
         return None
 
 
+def _migrate_side_effect_job_model(project_dir: Path) -> str | None:
+    """Land the ``SideEffectJob`` model and back-enqueue recent extractions (#3183).
+
+    Post-session memory extraction became a durable job row in this release.
+    A session whose execution finished shortly before the deploy scheduled its
+    extraction as an in-process task that the restart cancelled, so this
+    migration re-enqueues extraction for sessions completed in the last 24
+    hours that have no extraction record.
+
+    The back-enqueue goes through ``agent.side_effects.enqueue`` so it inherits
+    the ``sideeffect:idem:{kind}:{session_id}`` single-winner guard. That is
+    load-bearing, not incidental: ``data/migrations_completed.json`` is a
+    per-machine marker, so every bridge machine on the fleet runs this once
+    against the SAME shared Redis. Without the guard the fleet would create one
+    duplicate job per machine.
+
+    Returns None unconditionally; a best-effort back-enqueue must never fail
+    ``/update``.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from datetime import timedelta
+
+        from agent.side_effects import enqueue
+        from models.agent_session import AgentSession
+        from models.memory import Memory
+
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        enqueued = 0
+        for session in AgentSession.query.filter(status="completed"):
+            completed_at = getattr(session, "completed_at", None)
+            if not isinstance(completed_at, datetime):
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=UTC)
+            if completed_at < cutoff:
+                continue
+            session_id = getattr(session, "session_id", None)
+            if not session_id:
+                continue
+            if Memory.query.filter(agent_id=f"extraction-{session_id}").count():
+                continue
+            try:
+                enqueue("memory_extraction", session_id, getattr(session, "project_key", None))
+                enqueued += 1
+            except Exception as e:  # noqa: BLE001 -- one session never stops the sweep
+                logger.warning("side_effect_job_model: enqueue for %s failed: %s", session_id, e)
+        logger.info("[migration:side_effect_job_model] back-enqueued %d extraction(s)", enqueued)
+        return None
+    except Exception as e:
+        logger.warning("side_effect_job_model: %s", e)
+        return None
+
+
+def _migrate_dead_letter_stage_backfill(project_dir: Path) -> str | None:
+    """Stamp ``stage`` on pre-#3183 dead letters and re-save every row.
+
+    Rows written before this release carry only the Telegram send shape, so
+    they are ``stage="telegram_send"``, replayable, with ``attempts`` seeded at
+    the relay's retry cap.
+
+    EVERY row is re-saved, not only the ones missing ``stage``: ``DeadLetter``
+    had no ``class Meta`` block before this release, so existing rows carry no
+    TTL and acquire the new 30-day one only when they are written again.
+
+    Returns None unconditionally; a bookkeeping backfill must never fail
+    ``/update``.
+    """
+    try:
+        import sys
+        import time
+
+        sys.path.insert(0, str(project_dir))
+        from bridge.telegram_relay import MAX_RELAY_RETRIES
+        from models.dead_letter import DeadLetter
+
+        stamped = 0
+        for letter in DeadLetter.query.all():
+            if not getattr(letter, "stage", None):
+                letter.stage = "telegram_send"
+                letter.replayable = True
+                letter.attempts = letter.attempts or MAX_RELAY_RETRIES
+                stamped += 1
+            if getattr(letter, "created_at", None) is None:
+                letter.created_at = time.time()
+            # Unconditional save: this is what applies Meta.ttl to legacy rows.
+            letter.save()
+        logger.info(
+            "[migration:dead_letter_stage_backfill] stamped %d row(s); re-saved all for TTL",
+            stamped,
+        )
+        return None
+    except Exception as e:
+        logger.warning("dead_letter_stage_backfill: %s", e)
+        return None
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
+    "side_effect_job_model": (
+        _migrate_side_effect_job_model,
+        "Land SideEffectJob and back-enqueue extraction for recently completed sessions",
+    ),
+    "dead_letter_stage_backfill": (
+        _migrate_dead_letter_stage_backfill,
+        "Stamp DeadLetter.stage on legacy rows and re-save every row so Meta.ttl applies",
+    ),
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
         "Rename AgentSession job_id/parent_job_id KeyFields in Redis",
