@@ -166,7 +166,8 @@ rootdir, so no repo test-DB slot was claimed and no peer run was disturbed.
 
 - **Confidence**: high — every row above was executed and the file read back.
 - **Impact on plan**: Fixes the mechanism (plugin, not output parsing) and supplies the
-  three-state file protocol the implementation needs.
+  file protocol the implementation needs (superseded in this revision by the
+  pass-through allowlist — same file, fewer branches).
 
 ### spike-3: Under xdist, does the controller see the workers' test reports?
 - **Assumption**: "the controller can count executed tests, so no per-worker file merging is needed"
@@ -242,8 +243,8 @@ with a symlinked repo `.venv`, claiming no test-DB slot.
 
 #### spike-6: End-to-end prototype of the whole guard
 
-- **Assumption**: "the three-state protocol plus the settled rule actually produces the intended
-  behavior across every channel"
+- **Assumption**: "the pass-through allowlist plus the settled counting rule actually produce
+  the intended behavior across every channel"
 - **Method**: prototype — a throwaway copy of `scripts/pytest-clean.sh` carrying the injection
   and the verdict block, driven against sandbox rootdirs
 - **Finding**: **Confirmed, including the mutation check.**
@@ -319,8 +320,8 @@ single wrapper invocation, has exactly one writer, and is never inherited.
   the same exit code; only the set of conditions producing a non-zero exit grows.
 - **Coupling**: adds one edge — the wrapper now injects a repo-local pytest plugin, so it
   depends on that module being importable. `PYTHONPATH` is already pinned to `REPO_ROOT`
-  (`scripts/pytest-clean.sh:168`), which is what makes this safe; the plugin must live
-  under the repo root and be resolvable from it.
+  (`scripts/pytest-clean.sh:168`), and the injection is gated on the module existing in the
+  invoking checkout, so a checkout without it runs exactly as today rather than aborting.
 - **Data ownership**: unchanged. The plugin observes reports and owns nothing.
 - **Reversibility**: high. Deleting the `-p` injection and the post-run check restores
   today's behavior exactly; nothing persists between runs.
