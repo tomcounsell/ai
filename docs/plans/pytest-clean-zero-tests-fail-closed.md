@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3195
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-09-07T02:48:33Z
 ---
 
 # pytest-clean.sh fails closed when zero tests executed
@@ -170,6 +172,93 @@ rootdir, so no repo test-DB slot was claimed and no peer run was disturbed.
 - **Confidence**: high
 - **Impact on plan**: One file, one writer. No merging, no locking, no per-worker
   temp-file cleanup.
+
+### Revision measurements (critique round 1)
+
+Round 1 found that spike-1..3 validated the *mechanism* but not the *rule* or the
+*harness*. These runs close both, in an isolated sandbox rootdir under `/private/tmp`
+with a symlinked repo `.venv`, claiming no test-DB slot.
+
+#### spike-4: What exactly does `pytest_runtest_logreport` report, per outcome shape?
+
+- **Assumption**: "a report that is not `skipped` means a test executed" (the plan's original rule)
+- **Method**: prototype — a probe plugin dumping `(when, outcome, wasxfail, failed)` for every report
+- **Finding**: **The original rule is unusable, and the critique's suggested repair is also
+  incomplete.** Measured tuples:
+
+  | Test shape | setup | call | teardown |
+  |---|---|---|---|
+  | passing | passed | **passed** | passed |
+  | failing | passed | **failed** | passed |
+  | `pytest.skip()` in the body | passed | skipped | passed |
+  | fixture-level skip (the `scratch_test_db` shape) | skipped | *(no call report)* | passed |
+  | `@pytest.mark.skip` | skipped | *(no call report)* | passed |
+  | `@pytest.mark.xfail` that fails | passed | **skipped, `wasxfail=True`** | passed |
+  | `@pytest.mark.xfail` that passes | passed | **passed, `wasxfail=True`** | passed |
+  | fixture raising in setup | **failed** | *(no call report)* | passed |
+
+  Three candidate rules run against the same rootdirs:
+
+  | Rule | all fixture-skip | all body-skip | all marker-skip | mixed (1 pass, 1 fail, 1 xfail, 1 xpass, 1 error, 3 skip) |
+  |---|---|---|---|---|
+  | Plan round 1: `outcome != "skipped"` | 2 | 4 | 2 | 17 |
+  | Critique note: `when == "call"` or failed setup/teardown | 0 | **2** | 0 | 6 |
+  | **Settled rule** (below) | **0** | **0** | **0** | **5** |
+
+- **Confidence**: high — every cell was executed and read back.
+- **Impact on plan**: settles the counting rule as measured text, and shows the body-skip
+  channel the critique's own note would still have missed.
+
+#### spike-5: Can a `tmp_path` sandbox run a *real* pytest session through the wrapper?
+
+- **Assumption**: "`tests/unit/test_worktree_venv_absent_guard.py`'s `--version` model can drive the new guard"
+- **Method**: prototype
+- **Finding**: **The `--version` model cannot, and a viable alternative was built and run.**
+  A sandbox rootdir that (a) carries its own `pyproject.toml` with `[tool.pytest.ini_options]`
+  so the wrapper resolves `REPO_ROOT` to the sandbox, (b) has `.git` as a **directory** so the
+  #3033 worktree guard stays silent, (c) **symlinks** the repo's real `.venv` in so `PYTEST_BIN`
+  is a real pytest, and (d) carries **no `.python-version`** so `check-interpreter-pin.sh`
+  returns 0 at its "no pin file" early exit — runs a genuine pytest session end to end through
+  `scripts/pytest-clean.sh`. Measured: an all-skip sandbox produced a real `2 skipped in 0.01s`
+  and the injected plugin wrote its verdict file.
+
+  Plugin resolution was measured directly rather than assumed. With a decoy module of the same
+  name on `PYTHONPATH` behind the sandbox, `-p` resolved to the **sandbox** copy
+  (`sbx/pytest_executed_count.py`); with the sandbox absent from `PYTHONPATH`, it resolved to the
+  decoy. The wrapper's own `export PYTHONPATH="$REPO_ROOT:..."` (`scripts/pytest-clean.sh:168`)
+  is what makes the first case true, and the second is exactly the false-pass the negative
+  control has to rule out.
+
+- **Confidence**: high
+- **Impact on plan**: replaces the unusable structural model with a measured one, and supplies
+  the negative control the tests must run first.
+
+#### spike-6: End-to-end prototype of the whole guard
+
+- **Assumption**: "the three-state protocol plus the settled rule actually produces the intended
+  behavior across every channel"
+- **Method**: prototype — a throwaway copy of `scripts/pytest-clean.sh` carrying the injection
+  and the verdict block, driven against sandbox rootdirs
+- **Finding**: **Confirmed, including the mutation check.**
+
+  | Channel | Wrapper exit | Observed |
+  |---|---|---|
+  | all fixture-skip (the production trigger) | **1** | `2 skipped`, then the ZERO TESTS diagnostic |
+  | all body-skip | **1** | `2 skipped`, then the diagnostic |
+  | all marker-skip | **1** | `2 skipped`, then the diagnostic |
+  | all passing | **0** | `2 passed`, no diagnostic |
+  | mixed with a real failure | **1** | `1 failed, 1 passed, ...` — pytest's own status, unchanged |
+  | zero collected | **1** | `no tests ran` (pytest's own 5 → the guard also fires; both non-zero) |
+  | `--collect-only` | **0** | verdict file reads `collectonly` |
+  | `--version` | **0** | no verdict file at all |
+  | escape hatch set, all fixture-skip | **0** | diagnostic **still printed** |
+  | nested: outer verdict file pre-seeded `count 7` | — | outer file still `count 7` after the inner run |
+  | **mutation**: verdict block deleted, all fixture-skip | **0** | the bug, reproduced |
+
+- **Confidence**: high — every row was run.
+- **Impact on plan**: turns the Verification table from exit-code assertions into observed-output
+  assertions with known-good expectations, and supplies the mutation-check row.
+
 
 ## Data Flow
 
