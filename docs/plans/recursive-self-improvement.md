@@ -18,7 +18,21 @@ last_comment_id: 5560574590
 
 Valor improves only when a human notices a weakness and files work. The system records what it did and keeps no durable evidence of whether the work served its purpose, which corrections were architectural rescues rather than preference tweaks, or which past experiments were tried and rejected. The one prior attempt at autonomous self-optimization, `scripts/autoexperiment.py`, is unsafe and dead.
 
-**The north star is `docs/improvement-charter.md`**, written by Tom on 2026-09-07 from a structured interview and amended only by him. It states who Valor is becoming (the CEO a retired founder hired and expects to be worthy of the role), why Valor exists (a 2027 system on parallel subagents where stopping for a human is the costliest decision), four objectives, the rule for when they conflict (independence wins, quality is the floor), the standard of conduct, the two asking regimes, the order for resolving uncertainty without asking, the line on acquiring capability and accounts, budgets, non-negotiables, and claim levels. Everything below implements that document; where this plan and the charter disagree, the charter wins and this plan is wrong.
+**The north star is [the RSI charter](../improvement-charter.md), version 2, dated 2026-09-07.** It governs compounding capacity to learn, execute, and acquire abilities. The plan remains in Planning until the reconciliation below is carried through its technical design, tasks, and verification. Where the plan and charter disagree, the charter governs; older critique verdicts do not establish readiness against version 2.
+
+### Charter version 2 reconciliation required
+
+- Replace fixed independence-first weighting, the 60/25/15 allocation, and the mandatory journey-preservation first experiment with evidence-based ranking that initially favors inference capacity, token efficiency, skills, specialized personas, and cloud execution.
+- Add the first-month expectation of mostly cloud-sandbox, round-the-clock RSI operation, including infrastructure acquisition, unattended execution, storage, recovery, and measurable progress. A single-machine/one-lane first increment must retain explicit follow-through to that outcome.
+- Implement separate metering and admission for $10/day paid inference and $50/week infrastructure, including recurring charges and credit expiry. Subscription capacity is separate; one lane is not a permanent charter cap.
+- Permit any provider for open-source work; preserve Claude/Codex subscription execution for regular client work and prevent client-context leakage into provider experiments.
+- Replace blanket no-question wording and its anti-criterion with no routine RSI research questions plus an explicit, usable charter-amendment permission path. Ordinary client/project discernment remains separate.
+- Reflect authority to acquire accounts and resources through Valor's available browser, Workspace identities, card, vault, and Cloudflare access; verify access rather than asserting it exists. No autonomous revenue activity.
+- Permit evidence-backed core SDLC merges after representative comparison, no material quality regression, normal review, and applicable repository gates, without an extra Tom approval. Distinguish merge authority from deployment mechanics; retain technical isolation protections.
+- Make evaluation and research methods revisable in service of the charter. Carry the creative-skill acquisition scenario through evidence intake, vetting, library integration, comparative evaluation, and later reuse.
+- Treat Telegram links and videos as inspiration by default; explicit `do-issue` direction denotes requested work. Remove fulfilled-promises measures and apply the strict no-promises rule.
+- Reconcile all older sections below, child-issue requirements, and issue #3177's stale question-delivery acceptance criterion before claiming plan readiness. This block records the required changes; it does not claim the detailed redesign is complete.
+
 
 Tom supplied four success criteria for the system as it matures:
 
