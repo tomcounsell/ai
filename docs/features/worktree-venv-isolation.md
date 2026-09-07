@@ -247,10 +247,10 @@ shipped `-S -P` invocation there is no *ambient* `site` processing to disarm
 (the bootstrap still calls `site.addsitedir` on the fake site dir itself), so
 the "without the pin" run stays a real negative control. `-S` is hermeticity
 against a future ambient shim that does not read `argv[0]`; `-P` is not that —
-it keeps the bootstrap's own directory off the child's `sys.path` so the probe
-reproduces real CPython startup ordering, which the sibling test's
-whole-`sys.path` comparison depends on. Neither flag is the mechanism that
-fixes this (#3201).
+it keeps the bootstrap's own directory off the child's `sys.path` so the
+probe's search path matches real CPython startup, which is what makes the
+sibling test's whole-`sys.path` comparison meaningful. Neither flag is the
+mechanism that fixes this (#3201).
 
 ### Guard relaxation (#2050 coordination)
 
