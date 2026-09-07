@@ -170,9 +170,11 @@ No relevant external findings beyond the dependency source — proceeding with c
    shim's hits into one de-duplicated row set.
 7. **Publication**: `cls._last_quarantined_identityless = <count>`, a WARNING log, and a `SET` on
    `agentsession:repair_indexes:last_quarantined_identityless` with a 7-day TTL.
-8. **Output**: `python -m tools.doctor` reads that Redis key in a fresh process and appends
-   "(most recent repair_indexes() quarantined N identity-less hash re-add(s))" to the
-   `agentsession-index-drift` check message.
+8. **Output**: `python -m tools.doctor` reads that Redis key in a fresh process and appends a
+   parenthetical to the `agentsession-index-drift` check message. Today that literal
+   (`tools/doctor.py:1599`) reads "(most recent repair_indexes() quarantined N identity-less hash
+   re-add(s))" — the old event unit. This plan rewords it to the row unit alongside the counter
+   change, so the number and its label move together.
 
 ## Why Previous Fixes Failed
 
@@ -207,8 +209,13 @@ to the rows*. The fix re-bases it on the row outcome, which both seams can repor
 
 **Size:** Small
 
-**Scope containment:** the diff is one method body in `models/agent_session.py`, two test files, and
-four doc pages. `config/popoto_floor.py` was pulled in by the round-1 revision and has been struck
+**Scope containment:** the diff is one method body in `models/agent_session.py`, one f-string and
+two docstrings in `tools/doctor.py`, two test files, and four doc pages. `tools/doctor.py` is in
+scope deliberately: it renders the counter's only user-visible surface, and the counter's unit
+changes under this fix, so leaving its wording behind would ship a row count labelled with the old
+event unit — the exact misreading Risk 3 exists to prevent. It is a wording change to one f-string
+and the two docstrings around it, with no test asserting on that text, so it costs the appetite
+almost nothing. `config/popoto_floor.py` was pulled in by the round-1 revision and has been struck
 back out: the `try/except ImportError` degrade costs three lines at the call site and removes that
 module — an incident-response interlock with its own failure policy, its own test file, and its own
 popoto-coupling register — from the diff, from the Verification table, and from the Test Impact and
@@ -251,6 +258,10 @@ that also funds five new tests, one rewritten test, and three mutation checks.
   a popoto internal. The import lives at the call site under `try/except ImportError`; if it ever
   fails, the counter degrades to the unfiltered `len(diverged_keys)` sum (the exact rule issue comment
   `5563793165` directs) and the degradation is announced with `logger.error` plus a Sentry capture.
+  **The Sentry capture is latched to once per process** — a moved upstream symbol is a permanent
+  condition on a method that runs on every worker startup, the hourly reflection, and session
+  pickup, so an unlatched capture would be an unthrottled fleet-wide error stream. `logger.error`
+  stays unconditional; the latch guards only the Sentry call.
   `config/popoto_floor.py` is not touched — this plan changes no file outside
   `models/agent_session.py`, its two test files, and the docs.
 - **The retained shim** — `_make_identityless_skip_shim` stays installed on every `IndexedField`.
@@ -285,7 +296,18 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
   just coarser. Report the degradation the way `config/popoto_floor.py` reports its own unresolvable
   branch: `logger.error` plus a `sentry_sdk.capture_message` at `error` level, mirroring
   `agent/index_drift.py::_report_loud` (`agent/index_drift.py:211-231`), with the Sentry call itself
-  wrapped so it can never crash the caller. `config/popoto_floor.py::assert_popoto_floor()` is
+  wrapped in its own `try/except Exception` so it can never crash the caller (the shape at
+  `agent/index_drift.py:221-231`).
+  **Latch the Sentry capture on a class flag.** `repair_indexes()` is called from worker startup,
+  from the hourly agent-session-cleanup reflection (`agent/session_health.py:6101`), and
+  opportunistically from session pickup (`agent/session_pickup.py:469`). A moved upstream symbol is
+  permanent, not transient, so an unlatched capture emits at `error` level on every one of those
+  passes for as long as the condition lasts — an unthrottled fleet-wide Sentry stream. Add
+  `_decode_degrade_reported: bool = False` as a class attribute beside
+  `_last_quarantined_identityless` (`models/agent_session.py:695`) and gate **only** the Sentry call
+  on it: `logger.error(...)` fires unconditionally every pass, then
+  `if not cls._decode_degrade_reported: cls._decode_degrade_reported = True; <capture>`. The
+  `logger.error` line, not the capture, is the per-pass signal of record. `config/popoto_floor.py::assert_popoto_floor()` is
   deliberately NOT extended with a symbol probe: it raises only on an unambiguous `violated` verdict
   and fails open on `unresolvable`, because `repair_indexes()` runs on worker startup and an hourly
   reflection and a false positive there would block index repair fleet-wide. A missing internal symbol
@@ -326,7 +348,11 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
       `try/except ImportError` at the call site and add a test that forces the `ImportError` and
       asserts `repair_indexes()` still returns its 2-tuple, that the counter equals the unfiltered
       `len(diverged_keys)`, and that `logger.error` fired — a silently-degraded filter must never
-      look healthy.
+      look healthy. **Forcing that `ImportError` requires stubbing `rebuild_indexes` first** — see
+      the recipe in task 2; the obvious one-step version cannot reach the degrade branch.
+- [ ] The Sentry half of that report is latched (`_decode_degrade_reported`), so the same test must
+      reset the latch before acting or it passes or fails on test order. The `logger.error` half is
+      unlatched and is what the per-pass assertion reads.
 - [ ] The new diverged-key re-decode loop must not be able to fail the repair. Wrap the per-key
       decode in its own `try`, count the key as identity-less on failure, and add a test that
       monkeypatches `decode_popoto_model_hashmap` to raise and asserts `repair_indexes()` still
@@ -380,7 +406,15 @@ restore shims → `_last_quarantined_identityless = len(quarantine set)` → WAR
       `rebuild_indexes()` that returns a plain `int`.
 - [ ] New: `tests/unit/test_agentsession_index_guard_generalized.py` gains
       `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`, covering the
-      `ImportError` degrade path and its loud report.
+      `ImportError` degrade path, its unconditional `logger.error`, and its once-per-process Sentry
+      latch. The test must reset `AgentSession._decode_degrade_reported` to `False` (via
+      `monkeypatch.setattr`) so it does not pass or fail on test order, and it must stub
+      `AgentSession.rebuild_indexes` before removing the symbol — see task 2 for why.
+- [ ] `tests/unit/test_doctor*.py` — NOT TOUCHED. Verified by `grep -rn 'hash re-add' tests/`:
+      **no test in the suite asserts on the doctor suffix text**, so rewording the f-string at
+      `tools/doctor.py:1599` breaks nothing. The new
+      `test_quarantine_count_persisted_to_redis_key_for_doctor` (task 2) asserts the suffix is
+      non-empty and contains the count, not its exact wording.
 - [ ] `tests/unit/test_popoto_floor.py` — NOT TOUCHED, and neither is `config/popoto_floor.py`. The
       degrade path lives entirely at the call site in `models/agent_session.py`, so the floor
       interlock, its failure policy, its test file, and its "POPOTO COUPLING POINT" register are all
@@ -428,8 +462,17 @@ pipelined treatment, and this line is the record of that decision.
 **Impact:** Someone reads `_last_quarantined_identityless == 5` and, remembering the old docs,
 divides by three.
 **Mitigation:** The docstring, the WARNING message, the doctor suffix wording, and the renamed test
-all state "rows" explicitly. `docs/features/agentsession-pending-index-leak.md` gets the same
-correction.
+all state "rows" explicitly, and `tools/doctor.py` is in the allowed-file list so that promise is
+executable rather than aspirational. Concretely: the f-string at `tools/doctor.py:1599` becomes a
+row phrasing (e.g. "identity-less row(s)" in place of "identity-less hash re-add(s)"), and the two
+docstrings on the same surface that carry the same stale unit move with it — the
+`_recent_quarantine_suffix` docstring at `tools/doctor.py:1576-1586` ("per-pass quarantine count",
+`:1579`) and the `_check_agentsession_index_drift` docstring at `tools/doctor.py:1613-1615`
+("identity-less quarantine count"). Line numbers re-derived by locating the symbols at
+`1ad6cbf97`; the round-3 critique's `:1580-1581` / `:1607-1611` citations were off by a line or
+two and are superseded by these. `docs/features/agentsession-pending-index-leak.md` gets the same
+correction, as do the two feature pages that quote the literal string verbatim
+(`docs/features/popoto-index-hygiene.md:109`, `docs/features/agentsession-index-drift-detection.md:122`).
 
 ### Risk 4: A future popoto drops or renames `.diverged_keys`
 **Impact:** An `AttributeError` on a hot startup path.
@@ -440,12 +483,21 @@ correction.
 **Impact:** If `decode_popoto_model_hashmap` moves upstream, the identity filter stops running and
 the doctor's count silently starts including diverged-but-healthy rows — the exact wrong-remedy
 routing Risk 1 exists to prevent, arriving quietly instead of loudly.
-**Mitigation:** The degradation is not silent. It emits `logger.error` plus a Sentry capture at
-`error` level on every pass it occurs, mirroring `agent/index_drift.py::_report_loud` and matching
-the "observability fails loud" half of `config/popoto_floor.py`'s stated policy. The degraded number
-is still the counting rule issue comment `5563793165` directs, so the runtime behaviour remains
-correct while the alert names what was lost. Covered by
-`test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`.
+**Mitigation:** The degradation is not silent. It emits `logger.error` on **every** pass it occurs,
+plus a Sentry capture at `error` level **latched to the first pass in the process**, mirroring
+`agent/index_drift.py::_report_loud` and matching the "observability fails loud" half of
+`config/popoto_floor.py`'s stated policy. The degraded number is still the counting rule issue
+comment `5563793165` directs, so the runtime behaviour remains correct while the alert names what
+was lost. Covered by `test_decode_import_failure_degrades_to_unfiltered_count_and_reports_loud`.
+
+**Why the Sentry half is latched and the log half is not.** The condition this reports is permanent
+(an upstream symbol moved), and `repair_indexes()` runs on every worker startup, on the hourly
+agent-session-cleanup reflection (`agent/session_health.py:6101`), and opportunistically from
+session pickup (`agent/session_pickup.py:469`). An unlatched capture would therefore produce an
+unthrottled error-level Sentry stream across the fleet for as long as the condition lasts, which
+buries the signal it exists to raise. `_decode_degrade_reported` (a class attribute beside
+`_last_quarantined_identityless`) makes the capture fire once per process; the unconditional
+`logger.error` keeps the per-pass evidence in the logs where volume costs nothing.
 
 ## Race Conditions
 
