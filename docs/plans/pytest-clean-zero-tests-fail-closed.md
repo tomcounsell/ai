@@ -994,11 +994,21 @@ must be run by someone who did not write the guard.
 - Gate the injection on the module existing in the invoking checkout:
   `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then set -- -p pytest_executed_count "$@"; fi`.
   `$REPO_ROOT`, never `$SCRIPT_ROOT`. `set --`, never a string.
-- After `wait "$PYTEST_PID"` and the existing reap, read the file, delete it, and apply the
-  pass-through allowlist `case`: `""|collectonly` and `"count "[1-9]*` pass through;
-  everything else prints the diagnostic and exits 1 unless `PYTEST_ALLOW_ZERO_TESTS` is set.
+- After `wait "$PYTEST_PID"` and the existing reap, read the file and delete it.
+- Define the predicate as a **named function** inside the seam:
+  `verdict_passes_through() { case "$1" in ""|collectonly) return 0 ;; "count "[1-9]*) return 0 ;; *) return 1 ;; esac; }`.
+  Not an inline `case` — the tests slice this function body out of the script under test, and
+  a check that retypes the patterns passes with the wrapper's own `case` deleted (spike-9).
+- **Gate the verdict on `[ "$PYTEST_EXIT" -eq 0 ]`.** The guard may only convert a green into
+  a red. A collection error (exit 2), a zero-collected run (exit 5) and a wedge all produce a
+  `count 0`-or-worse verdict while already carrying their own correct headline; firing there
+  rewrites their exit code and prints a pool-exhaustion diagnostic over an unrelated failure
+  (spike-8). The all-skip channel this guard exists for exits **0**, so nothing is lost.
+- On a green run whose verdict fails the predicate: print the diagnostic and exit 1 unless
+  `PYTEST_ALLOW_ZERO_TESTS` is set.
 - The diagnostic goes to stderr, leads with `ZERO TESTS EXECUTED (#3195)`, and is printed
-  **whether or not** the hatch is set.
+  **whether or not** the hatch is set. Use the `if [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ]`
+  block form, never the one-line `&&` variant.
 - Bracket the verdict block with `# BEGIN zero-executed guard (#3195)` and
   `# END zero-executed guard (#3195)` so the mutation check is a deterministic `sed` range
   delete against a copy, never a hand edit of the shared checkout.
@@ -1018,18 +1028,31 @@ must be run by someone who did not write the guard.
   editing the shared checkout out from under five peer lanes.
 - Build the sandbox rootdir exactly as the Failure Path Test Strategy specifies: own
   `pyproject.toml`, `.git` as a **directory**, a **symlink** to the repo `.venv`, no
-  `.python-version`, and a **copy** of `pytest_executed_count.py`.
+  `.python-version`, and a **copy** of the plugin.
+- Resolve the plugin source as
+  `os.environ.get("PYTEST_EXECUTED_COUNT_SOURCE", REPO_ROOT / "pytest_executed_count.py")`
+  before copying it into the sandbox root, mirroring `PYTEST_CLEAN_SCRIPT`. This is the
+  counting rule's mutation seam; without it the rule can only be mutated by editing the
+  shared checkout, which task 4 forbids.
+- Name the three skip-shape cases so that `-k skip_shape` selects exactly them — e.g.
+  `test_fixture_skip_shape_is_refused`, `test_body_skip_shape_is_refused`,
+  `test_marker_skip_shape_is_refused`. The Verification table selects on that substring.
 - Run the **negative control first**: assert the resolved `pytest_executed_count.__file__`
   is under `tmp_path`. Build every subprocess env from a copy of `os.environ` with
   `PYTHONPATH` and `PYTEST_CLEAN_COUNT_FILE` removed.
-- Cases, with the spike-6 expectations: fixture-skip / body-skip / marker-skip → non-zero
-  with the diagnostic; zero-collected → non-zero; all passing → 0 with no diagnostic; a
-  failing test → pytest's own non-zero; `--collect-only` → 0; `--version` → 0; hatch set →
-  0 **and the message still printed**; a caller's `-p no:cacheprovider` still applies;
-  nested invocation leaves a pre-seeded outer file untouched; an unwritable count-file path
-  still completes and returns pytest's status.
-- A shell-level check of the pass-through allowlist over
-  `"" collectonly "count 0" "count 1" "count 10" started coun "  "`.
+- Cases, with the spike-6 and spike-8 expectations: fixture-skip / body-skip / marker-skip →
+  non-zero with the diagnostic; zero-collected → **exit 5 with no diagnostic**; a collection
+  error → **exit 2 with no diagnostic**; all passing → 0 with no diagnostic; a failing test →
+  pytest's own non-zero; `--collect-only` → 0; `--version` → 0; hatch set → 0 **and the
+  message still printed**; a caller's `-p no:cacheprovider` still applies; nested invocation
+  leaves a pre-seeded outer file untouched; an unwritable count-file path still completes and
+  returns pytest's status.
+- A shell-level check of the pass-through predicate that **slices the real function body out
+  of `PYTEST_CLEAN_SCRIPT`** — `sed -n '/^verdict_passes_through()/,/^}/p'` into a `mktemp`
+  file, sourced from that file (never `source <(…)`, which defines nothing under macOS bash
+  3.2 and would make every verdict a vacuous pass). Refuse with distinct messages on an empty
+  slice and on an undefined function *before* checking a single verdict, then assert the full
+  table `"" collectonly "count 0" "count 1" "count 10" started coun "  " "count -1"`.
 - Pin the diagnostic's text and assert the other three refusal headlines are absent.
 
 ### 4. Validate the guard actually bites
@@ -1038,18 +1061,49 @@ must be run by someone who did not write the guard.
 - **Assigned To**: guard-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Mutation check, **against a copy**: `sed` the `BEGIN`/`END` guard range out of
-  `scripts/pytest-clean.sh` into `/tmp/pc-mutated.sh`, run the new tests with
-  `PYTEST_CLEAN_SCRIPT=/tmp/pc-mutated.sh`, confirm **red**. Re-run without the override,
-  confirm **green**. Never edit `scripts/pytest-clean.sh` in place — peer lanes are running. Capture both outputs verbatim, reading the **passed count off
-  the summary line**, not the exit code.
+- **Mutation check 1 — the wrapper's verdict block.** Build a *sibling-layout* copy, never a
+  flat one:
+  ```bash
+  M="$(mktemp -d)"; mkdir -p "$M/scripts"
+  sed '/# BEGIN zero-executed guard (#3195)/,/# END zero-executed guard (#3195)/d' \
+      scripts/pytest-clean.sh > "$M/scripts/pytest-clean.sh"
+  cp scripts/check-interpreter-pin.sh "$M/scripts/"
+  chmod +x "$M/scripts/"*.sh
+  ```
+  Then run the new tests with `PYTEST_CLEAN_SCRIPT="$M/scripts/pytest-clean.sh"` and confirm
+  **red**. A copy placed anywhere but `<tmpdir>/scripts/` resolves `SCRIPT_ROOT` to the
+  copy's parent directory and aborts at line 195 with
+  `check-interpreter-pin.sh: No such file or directory` before pytest starts, so every test
+  goes red for a reason unrelated to the deleted block and the check confirms nothing
+  (measured, spike-7).
+- **Control leg for mutation check 1 — mandatory, not optional.** With the *same* mutated
+  copy, run an all-passing selection and confirm it still exits 0 with a real `N passed`
+  summary. Red under a broken copy is not evidence that the guard bites; only red-under-a-
+  copy-that-otherwise-works is. Skipping this leg reproduces this issue's own failure mode
+  inside the check meant to prevent it.
+- **Mutation check 2 — the counting rule.** Copy `pytest_executed_count.py` to
+  `"$M/pytest_executed_count_round1.py"`, replace the settled rule with the round-1 defect
+  (`if report.outcome != "skipped": executed += 1`), and run
+  `PYTEST_EXECUTED_COUNT_SOURCE="$M/pytest_executed_count_round1.py"` with the **unmutated**
+  wrapper. Confirm the three `-k skip_shape` cases go **red**. Run its own all-passing
+  control leg the same way. Then re-run with no overrides and confirm **green**.
+- Confirm the sliced-predicate check refuses under mutation 1: with the seam deleted the
+  slice is empty and the check must fail with its own distinct message rather than reporting
+  passes over an empty source.
+- Never edit `scripts/pytest-clean.sh` or `pytest_executed_count.py` in place — five peer
+  lanes are running in this checkout. Capture every leg's output verbatim, reading the
+  **passed count off the summary line**, not the exit code.
 - Re-run `tests/unit/test_worktree_venv_absent_guard.py` and
   `tests/unit/test_interpreter_pin_guard.py` unmodified and confirm they pass.
 - Run `tests/unit/test_feature_map_markers.py` and confirm the new file needs no
   `FEATURE_MAP` or `KNOWN_MISTAGS` entry.
-- Provision a real linked worktree with its own `uv sync --extra dev` venv and confirm the
-  plugin loads and the guard fires there — the sandbox does not prove `PYTHONPATH`
-  resolution in a real worktree (Risk 3).
+- Confirm the plugin loads and the guard fires in a real linked worktree — the sandbox does
+  not prove `PYTHONPATH` resolution in one (Risk 3). This is a **one-shot confirmation**, not
+  a standing harness: **reuse an existing lane worktree under `.worktrees/`** if one is
+  available rather than provisioning a fresh `uv sync --extra dev`, which is the single most
+  expensive step in an `appetite: Small` change. Risk 3's in-wrapper `[ -f ... ]` gate already
+  contains the failure this leg checks for, so this is a second, independent look rather than
+  the only defense.
 - Confirm the injection gate degrades safely: temporarily rename the plugin in a scratch
   checkout and confirm the wrapper runs as it does today rather than aborting.
 - Run a normal targeted suite through the wrapper and confirm the exit code and terminal
