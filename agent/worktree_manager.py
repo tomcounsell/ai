@@ -505,9 +505,23 @@ def _scan_worktree_sessions(
 ) -> tuple[str, str, str]:
     """Check whether any non-terminal AgentSession references this worktree.
 
-    Matches rows whose ``working_dir`` lives inside ``.worktrees/{slug}/``
-    (or is exactly that directory) and whose ``status`` is not in
-    ``TERMINAL_STATUSES``. The first match wins.
+    Matches rows whose ``exec_cwd`` or ``working_dir`` lives inside
+    ``.worktrees/{slug}/`` (or is exactly that directory) and whose
+    ``status`` is not in ``TERMINAL_STATUSES``. Both fields are read, in
+    that order, per row: ``exec_cwd`` (execution-scoped -- stamped by the
+    executor before harness launch and again by ``stamp_execution_spawn``,
+    reset to its declared default on every continuation via
+    ``_EXECUTION_FENCE_RESET_FIELDS``) is checked first, and
+    ``working_dir`` (enqueue-scoped -- set once when the row is created and
+    never reset) is the existing fallback. This closes the blind spot where
+    a slugless eng session synthesizes its lane at execution time: its
+    stored ``working_dir`` still names the main checkout, so only
+    ``exec_cwd`` records where it actually ran. ``slug`` is deliberately
+    not read as a third arm: a MERGE-stage session for slug X runs on the
+    main checkout and calls ``cleanup_after_merge(X)`` -> ``remove_worktree``
+    -> this scan; a ``slug ==`` match would make that session block its own
+    lane's removal on every merge. The first match, over either field,
+    wins.
 
     When ``sessions`` is ``None`` (the default, used by every single-slug
     caller), this fetches the candidate rows itself via
@@ -578,36 +592,41 @@ def _scan_worktree_sessions(
 
     for session in sessions:
         try:
-            wd = getattr(session, "working_dir", None)
-            if not wd:
-                continue
             status = getattr(session, "status", None)
             if not status or status in TERMINAL_STATUSES:
                 continue
 
-            # Normalize without resolving symlinks (Risk 5: realpath could
-            # amplify the match into unrelated directories).
-            try:
-                # Try resolving an absolute path; fall back to normpath for
-                # relative working_dir values like ".worktrees/sdlc-1218".
-                if os.path.isabs(wd):
-                    session_norm = os.path.normpath(wd)
-                else:
-                    session_norm = os.path.normpath(str((repo_root / wd).resolve()))
-            except Exception:
-                session_norm = os.path.normpath(str(wd))
-
-            session_parts = Path(session_norm).parts
-            # Segment-aware containment: the worktree's parts must be a prefix
-            # of the session's parts. This rejects ".worktrees/sdlc-1218-other"
-            # while accepting ".worktrees/sdlc-1218/subdir".
-            if (
-                len(session_parts) >= len(worktree_parts)
-                and session_parts[: len(worktree_parts)] == worktree_parts
+            for wd in (
+                getattr(session, "exec_cwd", None),
+                getattr(session, "working_dir", None),
             ):
-                session_id = getattr(session, "session_id", "") or ""
-                agent_session_id = getattr(session, "agent_session_id", "") or ""
-                return ("busy", session_id, agent_session_id)
+                if not wd:
+                    continue
+
+                # Normalize without resolving symlinks (Risk 5: realpath
+                # could amplify the match into unrelated directories).
+                try:
+                    # Try resolving an absolute path; fall back to normpath
+                    # for relative values like ".worktrees/sdlc-1218".
+                    if os.path.isabs(wd):
+                        session_norm = os.path.normpath(wd)
+                    else:
+                        session_norm = os.path.normpath(str((repo_root / wd).resolve()))
+                except Exception:
+                    session_norm = os.path.normpath(str(wd))
+
+                session_parts = Path(session_norm).parts
+                # Segment-aware containment: the worktree's parts must be a
+                # prefix of the session's parts. This rejects
+                # ".worktrees/sdlc-1218-other" while accepting
+                # ".worktrees/sdlc-1218/subdir".
+                if (
+                    len(session_parts) >= len(worktree_parts)
+                    and session_parts[: len(worktree_parts)] == worktree_parts
+                ):
+                    session_id = getattr(session, "session_id", "") or ""
+                    agent_session_id = getattr(session, "agent_session_id", "") or ""
+                    return ("busy", session_id, agent_session_id)
         except Exception as e:
             logger.debug("_scan_worktree_sessions: skipping session row (%s)", e)
             continue
