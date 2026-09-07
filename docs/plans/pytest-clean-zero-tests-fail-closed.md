@@ -260,30 +260,47 @@ with a symlinked repo `.venv`, claiming no test-DB slot.
   assertions with known-good expectations, and supplies the mutation-check row.
 
 
+## Settled Decisions
+
+Round 1 left three identifiers open while the Verification table already pinned one of
+them by grep. They are decided here as plan text so the builder carries a decision rather
+than a question, and every task, risk and verification row below uses these names.
+
+| Thing | Settled name | Why |
+|---|---|---|
+| Count-file path variable | `PYTEST_CLEAN_COUNT_FILE` | Private wrapper state, **never** caller-supplied — see the unconditional-mint rule below. |
+| Escape hatch | `PYTEST_ALLOW_ZERO_TESTS` | Unset means the guard is on. Reads as what it does at a call site. |
+| Plugin module | `pytest_executed_count.py` at the repo root, loaded as `-p pytest_executed_count` | A repo-root module has no package `__init__` to execute. `tools/__init__.py` arms the Redis flush guard on import (`tools/__init__.py:18-20`), so `-p tools.pytest_executed_count` would run that on every pytest invocation on the machine. A single top-level file is also the smallest thing a sandbox rootdir can reproduce, which the tests depend on. |
+
 ## Data Flow
 
 1. **Entry point**: an agent or human runs `scripts/pytest-clean.sh <args>` — a mutation
    check in `/do-build`, a verification row, a reviewer's re-run.
 2. **Wrapper preflight**: reaps orphan xdist workers, refuses a worktree with no usable
    `.venv` (#3033), refuses an off-pin interpreter (#2617), pins `PYTHONPATH` to the
-   invoking checkout.
-3. **Wrapper → pytest**: `"$PYTEST_BIN" "$@" &`, backgrounded so `$!` is the controller
-   PID for the stall watcher. **New:** the wrapper first exports a temp-file path and
-   prepends `-p <plugin>` to the args.
-4. **Plugin, controller process**: `pytest_sessionstart` writes a `started` sentinel;
-   every `pytest_runtest_logreport` that represents an executed (non-skipped) outcome
-   increments a counter; `pytest_sessionfinish` overwrites the file with the final count,
-   or with `collectonly` when `--collect-only` was requested.
-5. **Plugin, worker processes**: no writes at all — workers return early on
-   `hasattr(config, "workerinput")`. xdist forwards their reports to the controller, so
-   the controller's count is already the aggregate (spike-3).
-6. **Wrapper post-run**: `wait` yields `PYTEST_EXIT`; the stall watcher is killed; workers
-   are reaped. **New:** the wrapper reads the temp file and decides.
-7. **Output**: today's exit code, unless the file says a session ran and executed nothing
-   — in which case a named diagnostic goes to stderr and the wrapper exits non-zero.
+   invoking checkout (`scripts/pytest-clean.sh:168`).
+3. **Wrapper mints and injects.** It **unconditionally** mints
+   `PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"` and exports it — no `:-`
+   default, so an inherited value from an enclosing wrapper is discarded rather than
+   honored. It then injects the plugin **only if the module exists in the invoking
+   checkout**: `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then set -- -p pytest_executed_count "$@"; fi`.
+4. **Wrapper → pytest**: `"$PYTEST_BIN" "$@" &`, backgrounded so `$!` is the controller
+   PID for the stall watcher.
+5. **Plugin, controller process**: no-ops entirely when `PYTEST_CLEAN_COUNT_FILE` is unset,
+   so a bare `pytest` is untouched. Otherwise `pytest_sessionstart` writes a `started`
+   sentinel; every `pytest_runtest_logreport` matching the executed-report rule increments
+   a counter; `pytest_sessionfinish` overwrites the file with `collectonly` or `count N`.
+6. **Plugin, worker processes**: no writes at all — every hook returns early on
+   `hasattr(config, "workerinput")`. xdist forwards worker reports to the controller, so
+   the controller's tally is already the aggregate (spike-3, re-measured in spike-4 under
+   `-n 2`: identical count).
+7. **Wrapper post-run**: `wait` yields `PYTEST_EXIT`; the stall watcher is killed; workers
+   are reaped. The wrapper reads the file, deletes it, and decides.
+8. **Output**: today's exit code, unless the verdict says a session ran and executed
+   nothing — in which case a named diagnostic goes to stderr and the wrapper exits 1.
 
-The temp file is the only new piece of state, it is created and deleted inside a single
-wrapper invocation, and it has exactly one writer.
+The count file is the only new piece of state. It is minted, written and deleted inside a
+single wrapper invocation, has exactly one writer, and is never inherited.
 
 ## Architectural Impact
 
@@ -324,54 +341,117 @@ new pytest plugin module, and a new test file, all inside the repo.
 - **A zero-execution guard in the wrapper**: after `wait`, before `exit`, the wrapper
   decides whether the run it just supervised actually executed anything, and refuses to
   hand back a success it cannot justify.
-- **An executed-count reporter plugin**: a small repo-local pytest plugin the wrapper
-  injects with `-p`. It observes test reports in the controller and records the outcome
-  to a file the wrapper names. It changes no pytest behavior and prints nothing.
-- **A three-state protocol between them**: *absent*, *sentinel*, *verdict*. Absent means
-  no session ever started (`--version`, `--help`, an argparse rejection) and the wrapper
-  passes through untouched. The sentinel written at `sessionstart` and left unreplaced
-  means a session began and never finished, which fails closed. A verdict of zero executed
-  fails closed; a positive count or `collectonly` passes through.
+- **An executed-count reporter plugin**: `pytest_executed_count.py` at the repo root, which
+  the wrapper injects with `-p`. It counts executed test reports in the controller and
+  records a verdict to the file the wrapper named. It changes no pytest behavior, prints
+  nothing, and no-ops when the env var is unset.
+- **One pass-through predicate, not a state enumeration**: the wrapper passes through on an
+  *absent* file, a `collectonly` verdict, or a `count` of at least one. **Everything else
+  fails closed** — `count 0`, a surviving `started` sentinel, an empty file, a truncated
+  write, unparseable bytes. Inverting the test this way is what makes the guard total: a
+  state nobody anticipated lands on the safe side by construction rather than by having
+  been enumerated.
 
 ### Flow
 
 `scripts/pytest-clean.sh tests/unit/test_guard.py` → existing preflight guards →
-**wrapper mints a temp file and injects `-p`** → pytest runs → **plugin records the
-outcome** → wrapper reaps workers → **wrapper reads the file** → one of:
+**wrapper mints the count file and injects `-p` if the plugin exists here** → pytest runs →
+**plugin records the verdict** → wrapper reaps workers → **wrapper reads and deletes the
+file** → one of:
 
-- *positive count* → **exit with pytest's status** (today's behavior, the overwhelming majority)
-- *count 0* → **stderr diagnostic naming the pool-exhaustion cause, exit non-zero**
-- *sentinel only* → **stderr diagnostic: the session died before finishing, exit non-zero**
+- *`count N`, N ≥ 1* → **exit with pytest's status** (today's behavior, the overwhelming majority)
+- *`collectonly`* → **exit with pytest's status**
 - *file absent* → **exit with pytest's status** (no session ran; `--version` and friends)
+- *anything else* → **stderr diagnostic, exit 1**
 
 ### Technical Approach
+
+- **The counting rule, as measured (spike-4).** A report counts as an executed test when:
+
+  ```python
+  if report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail")):
+      executed += 1
+  elif report.when in ("setup", "teardown") and report.failed:
+      executed += 1
+  ```
+
+  Every clause is load-bearing and every one was measured:
+  - `when == "call"` alone is **not** enough. A body-level `pytest.skip()` produces a
+    *call* report with `outcome == "skipped"`, so a rootdir of body-skips counted **2**
+    under that rule while pytest printed `2 skipped`.
+  - `outcome != "skipped"` alone is **not** enough — the round-1 defect. Setup and teardown
+    of a skipped test both report `passed`, so an only-skipped rootdir counted 2, 4, or 2
+    depending on the skip shape and the guard never fired.
+  - `hasattr(report, "wasxfail")` is required because an **xfail** reports
+    `call/skipped/wasxfail=True` and an **xpass** reports `call/passed/wasxfail=True`.
+    Both genuinely executed; dropping the clause would undercount an xfail-heavy selection
+    toward the fail-closed side.
+  - The `setup`/`teardown` failure clause catches a fixture that raises, which produces a
+    *failed setup* report and **no call report at all**. Without it a rootdir whose every
+    test errors in setup would count zero and be reported as "nothing executed" when the
+    truth is "everything errored" — a misattributed diagnostic on an already-red run.
+
+  Against the mixed rootdir (1 pass, 1 fail, 1 xfail, 1 xpass, 1 setup error, 3 skips) the
+  rule counts **5**, matching pytest's own summary, identically at `-n 0` and `-n 2`.
 
 - **Detection is a plugin, not output parsing.** Settled by spike-2: the wrapper cannot
   capture pytest's stdout without breaking the #2574 stall watcher and taking pytest off
   a TTY. The plugin route touches neither.
-- **The controller is the sole writer.** Settled by spike-3: xdist forwards worker
-  reports, so the controller's tally is the aggregate. The plugin returns early when
+- **The controller is the sole writer.** Every hook returns early on
   `hasattr(config, "workerinput")`.
-- **"Executed" means a test ran to a real outcome.** Passed, failed, xfailed, and xpassed
-  all count as executed; skipped and deselected do not. Setup/teardown errors count —
-  they are a genuine result and already exit non-zero, so counting them only keeps the
-  guard from double-reporting.
-- **Fail closed on an unfinished session.** A `sessionstart` sentinel that survives to the
-  end is the case where the controller died between starting and summarizing. Today that
-  can only arrive alongside a non-zero pytest exit, so the branch is defensive; writing it
-  is what keeps the guard from silently degrading if that ever changes.
-- **A file-absent run is a pass-through, deliberately.** `pytest --version` runs no
-  session and writes nothing, and `scripts/pytest-clean.sh --version` is how the existing
-  guard tests drive the wrapper (`tests/unit/test_worktree_venv_absent_guard.py`,
-  `tests/unit/test_interpreter_pin_guard.py`). Failing closed on an absent file would
-  break both.
-- **`--collect-only` is a legitimate zero-execution run** and is recorded as such by the
-  plugin from `config.option.collectonly` rather than inferred by the wrapper from args.
-- **The escape hatch matches the house pattern.** `PYTEST_STALL_LIMIT_S=0` disables the
-  wedge detector; an analogous env var disables this guard for the rare deliberate
-  all-skip run. It defaults to on.
-- **Temp-file hygiene**: created with `mktemp`, removed in the existing `cleanup` trap so
-  an interrupted run leaves nothing behind.
+- **The count file is minted unconditionally and never inherited.**
+  `PYTEST_CLEAN_COUNT_FILE="$(mktemp -t pytest-clean-count)"; export PYTEST_CLEAN_COUNT_FILE`
+  — no `"${PYTEST_CLEAN_COUNT_FILE:-$(mktemp)}"`. This differs deliberately from
+  `PYTEST_STALL_LIMIT_S`, which is a caller-tunable knob; the count file is private wrapper
+  state, and honoring an inherited path would let a nested wrapper invocation overwrite its
+  parent's verdict. The tests nest the wrapper inside the wrapper, so this is not
+  hypothetical (Race 4).
+- **The injection is gated on the plugin existing in the invoking checkout.** An
+  unimportable `-p` module aborts pytest before a single test runs; measured, it exits
+  **1** with `ImportError: Error importing plugin`, indistinguishable by exit code from the
+  three existing refusals. Six lanes share this machine, so a bad injection on `main` takes
+  all of them down at once. The gate is
+  `if [ -f "$REPO_ROOT/pytest_executed_count.py" ]; then set -- -p pytest_executed_count "$@"; fi`,
+  placed after `export PYTHONPATH` (line 168) and before `"$PYTEST_BIN" "$@" &` (line 287).
+  `set --` is the only rewrite that preserves `"$@"` quoting; do not build a string.
+  The existence test uses **`$REPO_ROOT`, never `$SCRIPT_ROOT`** — pointing it at
+  `$SCRIPT_ROOT` would let the primary checkout's plugin serve a worktree run, the exact
+  #3033 bleed the wrapper exists to prevent.
+- **The escape hatch suppresses the exit, never the message.** `PYTEST_ALLOW_ZERO_TESTS`
+  cannot be allowed to restore the defect this plan removes: a silent green on a run that
+  executed nothing is indistinguishable in a transcript from a real pass, which is the
+  whole issue. So the diagnostic prints either way, and only the `exit 1` is conditional:
+
+  ```bash
+  <full diagnostic to stderr>
+  if [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ]; then
+      exit 1
+  fi
+  ```
+
+  Measured on the prototype: with the hatch set, an all-skip run exits 0 **and** still
+  prints `pytest-clean: ZERO TESTS EXECUTED (#3195) — this run proves nothing.` A reader of
+  a mutation-check transcript can therefore never mistake a hatched run for a pass. The
+  escape-hatch test asserts that message; asserting only the exit code is the assertion
+  this whole issue proves worthless.
+- **The verdict block is a single `case` with a pass-through allowlist:**
+
+  ```bash
+  case "$COUNT_VERDICT" in
+      ""|collectonly)  : ;;          # no session ran, or a collect-only run
+      "count "[1-9]*)  : ;;          # at least one test executed
+      *)               <diagnostic>; [ -z "${PYTEST_ALLOW_ZERO_TESTS:-}" ] && exit 1 ;;
+  esac
+  ```
+
+  Verified against `""`, `collectonly`, `count 0`, `count 1`, `count 10`, `started`,
+  `coun` (truncated), whitespace, and `count -1`: only the first two and the positive
+  counts pass through.
+- **A file-absent run is a pass-through, deliberately.** `pytest --version` runs no session
+  and writes nothing, and `scripts/pytest-clean.sh --version` is how the existing guard
+  tests drive the wrapper. Measured: no file is created.
+- **Temp-file hygiene**: `mktemp` per invocation, removed both in the verdict block and in
+  the existing `cleanup` trap so an interrupted run leaves nothing behind.
 
 ## Failure Path Test Strategy
 
