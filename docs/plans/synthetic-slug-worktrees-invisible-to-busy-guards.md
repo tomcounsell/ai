@@ -1208,15 +1208,21 @@ in the Verification table reproduced exactly as recorded.
 | NIT | History & Consistency | Spike-8's third leg names `clone_agent_session_fields` as the function `retry_agent_session` copies through. It actually calls `continuation_agent_session_fields` (`agent/agent_session_queue.py:765`). The conclusion survives (that function starts from clone and resets only the fence fields, so `working_dir` is still carried forward) and the correction strengthens the plan, because `exec_cwd` IS reset on retry. | **APPLIED** — spike-8 leg 3 | Name the correct function and note the split it demonstrates: retry resets `exec_cwd`, carries `working_dir` forward. |
 | NIT | Scope & Value | Race 4 states "`exec_cwd` is additionally on `_UPDATED_AT_OMISSION_OK_FIELDS`, so a partial save carrying it produces no `updated_at`-omission warning noise." The downgrade applies only when every field in the save is on that allowlist (`models/agent_session.py:1008`), and this save carries `updated_at` itself, so the omission check never engages. | **APPLIED** — Race 4 | Drop the sentence or replace it with the reason that holds: the save includes `updated_at`. |
 
-### Accepted Residual Concerns — the concern-recritique bound is spent
+### Accepted Residual Concerns — accepted rather than re-critiqued
 
 Round 2 returned **READY TO BUILD (WITH CONCERNS)** with zero blockers, and the critic stated
 explicitly that none of the four concerns or three nits would produce broken or unshippable code:
 each is a scoping or citation correction. The pass above embedded all seven into the tasks,
 criteria, races, and spikes they belong to. **These residuals were accepted and the plan goes to
-build; they were not sent through a third critique round.** The recritique budget for
-concern-severity findings is spent, and a further round would re-litigate settled design rather
-than surface new risk.
+build; they were deliberately not sent through a third critique round**, because a further round
+would re-litigate settled design rather than surface new risk.
+
+To be precise about the pipeline state rather than the intent: this is a supervisor decision, not
+an exhausted budget. The substrate records `concern_round_count: 1` against
+`MAX_CONCERN_RECRITIQUE_ROUNDS: 3`, so the concern-recritique bound has **two rounds of headroom
+remaining** and the router's row 2b will offer another `/do-plan-critique` on the strength of this
+revision's `revision_applied_at`. Skipping it is a choice being made here on the merits above, and
+it is written down so a later reader does not mistake it for a bound that ran out on its own.
 
 Two of the seven are residuals in the true sense — a known, bounded behavior the plan chooses to
 live with rather than a change it makes:
