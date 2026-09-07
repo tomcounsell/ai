@@ -2,7 +2,7 @@
 status: Ready
 type: chore
 revision_applied: true
-revision_applied_at: 2026-09-07T09:13:21Z
+revision_applied_at: 2026-09-07T10:00:15Z
 appetite: Medium
 owner: Valor Engels
 created: 2026-09-07
@@ -1608,7 +1608,15 @@ vacuously after it, so each one was confirmed to fire first.
 ## Critique Results
 
 
-**Round 4 (final)** — **Depth**: FULL (3 lenses) — **Mode**: independent roster
+**Round 5 — concern-embed revision. Verdict stands at READY TO BUILD; the next
+stage is BUILD.** Round 4's three concerns are embedded, all three marked
+ADDRESSED in the table below, with the residuals recorded in
+**Accepted Residual Concerns**. No redesign, no re-scope: the rename-first
+remedy, the `DIRECTORY_MAP` rejection, whole-token matching staying out of
+scope, and the retention of rules R1/R3 are all settled and were not reopened.
+There is no round 6.
+
+**Round 4** — **Depth**: FULL (3 lenses) — **Mode**: independent roster
 (3 critics) — **Findings**: 3 (0 blockers, 3 concerns, 0 nits).
 
 All three critics converged independently on the same three findings, and every
@@ -1630,18 +1638,63 @@ section's history, and the round-2 "43 vs 48" contradiction is gone.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Every hardcoded pytest collection literal in the plan is already stale at the current head, and the plan bars treating that as tolerable. Measured at `09bd4f48f`, three commits past the plan's `6c865fb5f` baseline: tracked files 838 → **840**, suite total 17001 → **17078**, `-m reflections` 544 → **546**, `-m sdlc` 2859 → **2876**, `-m messaging` 1271 → **1281**, scoped reflections packages `34/396 (362 deselected)` → **`36/399 (363 deselected)`**. `-m validation` (428) and `-m config` (127) still hold. The drift is organic suite growth from unrelated lanes, but Verification says "a mismatch is a real failure, not a tolerance to widen", so Task 0's very first measurement disagrees with the plan before any rename lands. | pending | Only the two lane close conditions are literal gates; they are drift-proof by construction (the audit is a diff, and the collection check asserts 0 deselected). Restate every other selector row as **Task-0 live capture ± the plan's stated delta**, not spike-6's absolute: `-m reflections` = capture + (the then-current deselected count in the two packages), `-m messaging` = capture + 5, `-m config` = capture − 4, `-m sdlc` and `-m validation` = capture unchanged. The `-m sdlc` row's malformed-`pytestmark` tripwire is the *unchanged* count, so its parenthetical "2705 means one is malformed" must be re-derived as `capture − 154` (currently 2722), never left at 2705. The structural rows (`check_r1`/`check_r2`/`check_r3`, `--count`, `KNOWN_MISTAGS` size, `R100` rename detection) are drift-proof and stay literal. | 
-| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Two **active** plans owned by other lanes reference renamed basenames inside **executable** commands, and neither appears in the plan's enumeration, its Freshness Check active-plans list, or Risk 7. `docs/plans/expectation_blocked_state.md` (#2862, status Planning) names `tests/unit/reflections/test_expectation_reconciler.py` at lines 130, 195, 252, 280 — including a `scripts/pytest-clean.sh` Verification command and a `**Validates**:` field. `docs/plans/naive-tzinfo-guard-classification.md` (#3181, status **Ready**) names `tests/unit/reflections/test_daily_log_aggregator.py` at lines 273, 430, 537, likewise in a runnable `pytest-clean.sh` command. This contradicts Risk 1's blanket claim that "None is an import, so **nothing fails**": a shell command naming a moved path exits non-zero. Risk 7's survey ("Both known adjacent lanes are resolved") is incomplete. | pending | Task 4's grep excludes only this plan's own file, so it **will** surface both — the gap is guidance, not detection. Add both to Task 4's enumerated table and update `expectation_blocked_state.md:130,195,252,280` → `test_reflections_expectation_reconciler.py` and `naive-tzinfo-guard-classification.md:273,430,537` → `test_reflections_daily_log_aggregator.py`. Because #3181 is `status: Ready` and may build concurrently, post a coordination note on #2862 and #3181 in the PR description rather than editing another lane's live plan silently. Do **not** treat these as the archived-plan case: an archived plan wants a resolvable pointer, an active plan wants its owner told. | 
-| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Task 4 (`sweep-docs`) declares `Depends On: do-renames` only, while its own verification asserts the grep loop "Must print nothing." `tests/marker_map.py` carries all 21 old basenames as literal `KNOWN_MISTAGS` dict keys until Task 2 (`content-edits`) deletes them, and the loop excludes only `docs/plans/drain-feature-map-mistag-baseline.md`. The dependency graph therefore permits Task 4 to run before Task 2 and fail its own gate on the plan's own unfinished work — a false failure in a file the documentarian has no mandate to edit. Task 3 already depends on `content-edits`; Task 4 does not. Race Conditions says "No race conditions identified" and does not cover this ordering hazard. | pending | Change Task 4's header from `Depends On: do-renames` to `Depends On: do-renames, content-edits`, encoding the plan's own prose ("the doc sweep must run against the final set of paths") as an enforced dependency. Do **not** instead exclude `tests/marker_map.py` from the grep: that path would let a genuinely missed reference in the resolver's comments survive the sweep. After Task 2 lands, the two retained `KNOWN_MISTAGS` survivors (`session_runner/test_schema_routing.py`, `hooks/test_pre_tool_use_foreground_subagents.py`) are not in the sweep list, so the loop goes clean. | 
+| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Every hardcoded pytest collection literal in the plan is already stale at the current head, and the plan bars treating that as tolerable. Measured at `09bd4f48f`, three commits past the plan's `6c865fb5f` baseline: tracked files 838 → **840**, suite total 17001 → **17078**, `-m reflections` 544 → **546**, `-m sdlc` 2859 → **2876**, `-m messaging` 1271 → **1281**, scoped reflections packages `34/396 (362 deselected)` → **`36/399 (363 deselected)`**. `-m validation` (428) and `-m config` (127) still hold. The drift is organic suite growth from unrelated lanes, but Verification says "a mismatch is a real failure, not a tolerance to widen", so Task 0's very first measurement disagrees with the plan before any rename lands. | **ADDRESSED** (round 5) — Verification section preamble rewritten to `capture ± delta`; the five `-m` rows, the two-package row, `--count`, and the bare-interpreter row all restated against task-0 captures; task 0 turned from assert-literals into capture-and-record-six-values; task 3's checks re-expressed as deltas; Risk 2's mitigation converted from absolutes to deltas. The `-m sdlc` tripwire is now `sdlc_capture − 154`, with the stale `2705` explicitly called out as not-to-be-used. | Only the two lane close conditions are literal gates; they are drift-proof by construction (the audit is a diff, and the collection check asserts 0 deselected). Restate every other selector row as **Task-0 live capture ± the plan's stated delta**, not spike-6's absolute: `-m reflections` = capture + (the then-current deselected count in the two packages), `-m messaging` = capture + 5, `-m config` = capture − 4, `-m sdlc` and `-m validation` = capture unchanged. The `-m sdlc` row's malformed-`pytestmark` tripwire is the *unchanged* count, so its parenthetical "2705 means one is malformed" must be re-derived as `capture − 154` (currently 2722), never left at 2705. The structural rows (`check_r1`/`check_r2`/`check_r3`, `--count`, `KNOWN_MISTAGS` size, `R100` rename detection) are drift-proof and stay literal. | 
+| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Two **active** plans owned by other lanes reference renamed basenames inside **executable** commands, and neither appears in the plan's enumeration, its Freshness Check active-plans list, or Risk 7. `docs/plans/expectation_blocked_state.md` (#2862, status Planning) names `tests/unit/reflections/test_expectation_reconciler.py` at lines 130, 195, 252, 280 — including a `scripts/pytest-clean.sh` Verification command and a `**Validates**:` field. `docs/plans/naive-tzinfo-guard-classification.md` (#3181, status **Ready**) names `tests/unit/reflections/test_daily_log_aggregator.py` at lines 273, 430, 537, likewise in a runnable `pytest-clean.sh` command. This contradicts Risk 1's blanket claim that "None is an import, so **nothing fails**": a shell command naming a moved path exits non-zero. Risk 7's survey ("Both known adjacent lanes are resolved") is incomplete. | **ADDRESSED** (round 5) — both plans added to the Documentation section's sweep as an explicit table with issue, status, exact lines, and old→new basename; both line sets re-verified at the revision head before embedding. Risk 1 rewritten: the "None is an import, so nothing fails" claim is now scoped to the prose references, with the 2 active plans called out as the loud-failure exception. Risk 7's survey corrected from two adjacent lanes to four. Coordination notes on #2862 and #3181 go in the PR description; neither lane's live plan is edited silently. | Task 4's grep excludes only this plan's own file, so it **will** surface both — the gap is guidance, not detection. Add both to Task 4's enumerated table and update `expectation_blocked_state.md:130,195,252,280` → `test_reflections_expectation_reconciler.py` and `naive-tzinfo-guard-classification.md:273,430,537` → `test_reflections_daily_log_aggregator.py`. Because #3181 is `status: Ready` and may build concurrently, post a coordination note on #2862 and #3181 in the PR description rather than editing another lane's live plan silently. Do **not** treat these as the archived-plan case: an archived plan wants a resolvable pointer, an active plan wants its owner told. | 
+| CONCERN | Risk & Robustness; Scope & Value; History & Consistency (all three, independently) | Task 4 (`sweep-docs`) declares `Depends On: do-renames` only, while its own verification asserts the grep loop "Must print nothing." `tests/marker_map.py` carries all 21 old basenames as literal `KNOWN_MISTAGS` dict keys until Task 2 (`content-edits`) deletes them, and the loop excludes only `docs/plans/drain-feature-map-mistag-baseline.md`. The dependency graph therefore permits Task 4 to run before Task 2 and fail its own gate on the plan's own unfinished work — a false failure in a file the documentarian has no mandate to edit. Task 3 already depends on `content-edits`; Task 4 does not. Race Conditions says "No race conditions identified" and does not cover this ordering hazard. | **ADDRESSED** (round 5) — Task 4 now declares `Depends On: do-renames, content-edits`, with the reason stated in the task body and the "do not exclude `tests/marker_map.py` from the grep instead" trap named. Race Conditions gained a closing paragraph recording the hazard as a task-ordering edge rather than leaving the section's "no race conditions identified" to imply the ordering was examined and cleared. | Change Task 4's header from `Depends On: do-renames` to `Depends On: do-renames, content-edits`, encoding the plan's own prose ("the doc sweep must run against the final set of paths") as an enforced dependency. Do **not** instead exclude `tests/marker_map.py` from the grep: that path would let a genuinely missed reference in the resolver's comments survive the sweep. After Task 2 lands, the two retained `KNOWN_MISTAGS` survivors (`session_runner/test_schema_routing.py`, `hooks/test_pre_tool_use_foreground_subagents.py`) are not in the sweep list, so the loop goes clean. | 
+
+
+### Accepted Residual Concerns
+
+Round 4's three concerns are addressed above. Three residuals are **accepted**
+rather than closed, and are recorded here so BUILD is not surprised by them.
+
+1. **Suite drift keeps moving while this lane runs.** Restating the rows as
+   `capture ± delta` removes the false-failure mode, and it does not stop the
+   suite from growing. The build must take its task-0 capture and its final
+   measurements from the same lane — a capture taken days before the final run
+   is worth as little as a hardcoded literal. The illustrative absolutes kept in
+   task 0 (`6c865fb5f` and round-4 values, both shown) are orientation only; a
+   capture matching neither is normal.
+
+2. **The two-package total `P` is no longer gated on its own value.** The close
+   condition is `zero deselected`, which is what the issue actually asks for.
+   A peer lane adding a reflections test between capture and verification changes
+   `P` and leaves the gate intact — the deliberate trade. What this gives up: a
+   reflections file arriving mid-flight with a non-conforming name would be
+   collected in `P` yet caught by R1 instead, which is the guard working
+   (Risk 7), not a hole in the close condition.
+
+3. **#3181 may build concurrently.** It is `status: Ready`, so it can enter BUILD
+   while this lane is in flight, and its plan doc could regain a stale
+   `test_daily_log_aggregator.py` reference after this sweep passes. The
+   mitigation is a coordination note on the issue, not a lock. If task 4's grep
+   comes back dirty on `naive-tzinfo-guard-classification.md` at the final head,
+   that is this scenario and not a missed sweep — re-apply the one-line path fix
+   and note it in the PR.
+
+**Also recorded, from the supervisor rather than from a critic:** the `-m config`
+selector dropping by 4 is **accepted and ratified**. The four tests only ever
+matched `config` as a fragment inside `configured`, the issue body names that
+fragment match as the defect being fixed, and acceptance criterion 3 is satisfied
+in the sense that matters — **0** files end up carrying no marker at all. This
+closes the Open Question below.
 
 ---
 
 ## Open Questions
 
 
-**One question, and it is the only decision a human has to make.**
+**All questions are resolved. Nothing here blocks BUILD.**
 
-1. **Ratify the single marker removal.**
+1. **Ratify the single marker removal.** — **RATIFIED** (supervisor,
+   2026-09-07). The removal is accepted as the drain working. The four tests
+   matched `config` only as a fragment inside `configured`, and the issue body
+   names that fragment match as the defect. Acceptance criterion 3 is satisfied
+   in the sense that matters: **0** files end up with no marker at all. Build the
+   plan as written — do **not** add a compensating fourth
+   `pytest.mark.config`. Recorded in Accepted Residual Concerns above.
+
+   The question as originally posed, kept for the record:
    `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` carries
    `config` today, acquired because `config` is a literal substring of
    `configured`. After the rename it resolves to `reflections` and sheds
