@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-07
 tracking: https://github.com/tomcounsell/ai/issues/3175
-last_comment_id:
+last_comment_id: 5557939734
 ---
 
 # Drain the FEATURE_MAP mistag baseline
@@ -70,9 +70,17 @@ material fact was absent from the write-up. The premise holds in full.
   `test_pm_briefings_no_slots_configured.py` trips R1 *and* R3. The issue body
   counts it once; `docs/features/feature-map-marker-guard.md` describes it as
   "21 from R1, 2 from R2, 1 further from R3", which is the same 24 paths.
-- "`config` sits at insertion index 45 and `reflection` at 52" — **holds**.
-  Verified by enumerating `FEATURE_MAP` keys; no rename of a
-  `test_*_configured.py` file inside `reflections/` escapes `config`.
+- "`config` sits at insertion index 45 and `reflection` at 52" — **FALSE, and
+  the issue body's rename argument fails with it.** Re-derived at `8e62c3a50`:
+  `sdlc` 16, `reflections` **45**, `reflection` **46**, `config` **47**.
+  `reflections` sits *ahead* of `config`, so
+  `test_reflections_pm_briefings_no_slots_configured.py` resolves to
+  `reflections`, not `config`. Issue comment 5557939734 caught this against
+  `f3594dd23` (indices 44/45 there) and this plan confirms it still holds after
+  #3010 and #3184. **Renaming is a working remedy for 19 of the 21 R1 files**,
+  not the dead end the issue body describes; the two survivors are
+  `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py`, blocked by
+  `sdlc` at index 16. Corrected in Why Previous Fixes Failed below.
 - "`pytest -m reflections` skips almost the whole `tests/unit/reflections/`
   package" — **holds and is now quantified**: 34 of 396 collected.
 - `tests/unit/session_runner/test_schema_routing.py` "alone among 18 siblings"
@@ -85,16 +93,33 @@ material fact was absent from the write-up. The premise holds in full.
 **Drift 1 — the headline measurement does not reproduce.** The issue and
 `docs/features/feature-map-marker-guard.md` both state that making the package
 directory authoritative "gains 39 markers and corrects 6 with zero losses",
-measured at `f3594dd23`. Replayed at `8e62c3a50` the same change gains **17
-files newly marked / 21 marker applications** and corrects **4**. The plan uses
-the re-measured numbers throughout and treats 39/6 as stale; correcting the
-feature doc is a documentation task below.
+measured at `f3594dd23`, and issue comment 5557939734 re-asserts that it
+"reproduces unchanged". Replayed at `8e62c3a50` the same change gains **17 files
+newly marked / 21 marker applications** and corrects **4**.
+
+Three reconstructions of the `f3594dd23` conditions were tried and **none**
+produces 39/6: (a) counting parents without the `KNOWN_ROOT_DIRS` exclusion
+(17/4), (b) the pre-#3010 `FEATURE_MAP` with the `reflections` and `youtube`
+keys removed, under the pre-#3184 global-`replace` stem (17/4), and (c) that
+same map under the anchored stem (17/4). The figure does not reproduce under any
+of them, so it is treated as wrong rather than as measuring something this plan
+has failed to reproduce. The plan uses the re-measured numbers throughout;
+correcting `docs/features/feature-map-marker-guard.md` is a documentation task
+below.
 
 **Drift 2 — a material fact absent from the write-up.** 47 tracked test files
 carry an explicit `pytest.mark.<feature>`, which the guard cannot see. This is
 not a drift in the code, it is a gap in the issue's survey, and it changes the
 right answer (see Solution). `tests/integration/reflections/test_pm_briefings_e2e.py`
 sits in `KNOWN_MISTAGS` while declaring `pytest.mark.reflections` itself.
+
+**Issue comments incorporated:** one, `5557939734` (2026-09-06, scope
+reconciliation from #3010's critique round 2). Both of its substantive findings
+are adopted: the scope is **24 paths**, not the 21 the title states (21 R1 + 2 R2
++ 1 R3), and the issue body's `reflection`-at-index-52 claim is wrong. Its third
+assertion — that the 39/6 measurement reproduces — is the one point this plan
+contradicts, with the three failed reconstructions recorded above. `#3184`, which
+the comment asks to be "sequenced together" with this work, has since merged.
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -403,8 +428,13 @@ read the issue will reach for them first.
 
 | Candidate | What it would do | Why it fails |
 |-----------|------------------|--------------|
-| Rename the files | `test_pm_briefings_no_slots_configured.py` → `test_reflections_pm_briefings_no_slots_configured.py` | First-hit-wins ordering is unchanged. `config` (index 45) still beats `reflection` (index 52), so the renamed file still resolves to `config`. **The ordering trap that motivated the guard also blocks the obvious fix.** Verified at `8e62c3a50`. |
+| Rename the files | Prefix each violating basename with its package name: `test_pm_briefings_no_slots_configured.py` → `test_reflections_pm_briefings_no_slots_configured.py` | **Works, for 19 of 21 — and is still the wrong trade.** The issue body claims it cannot work because `config` beats `reflection`; that is false (`reflections` 45, `reflection` 46, `config` 47, so the renamed file resolves to `reflections`). It genuinely fails only for `test_sdlc_progress_check.py` and `test_sdlc_upvote_lanes.py`, where `sdlc` at index 16 wins. The real objections are the ones renaming cannot answer: it touches 19 files to encode the directory name a second time, it fixes neither R2 nor R3, and it must be repeated by hand for **every file anyone ever adds** to a themed package, enforced by nothing but a guard entry after the fact. It converts a structural defect into a naming convention. |
 | Add ~9 narrow `FEATURE_MAP` keys | One key per offending basename | Three of the nine must be hand-placed *ahead of* `config`, `sdlc`, and `validation` to win. That is more ordering-sensitive hand-placement — the defect restated as the remedy. It also scales with file count forever: every new file in `reflections/` needs another key. |
+
+The correction matters beyond bookkeeping: a reviewer who checks the issue's
+index claim will find it wrong and may conclude the whole "renaming is blocked"
+premise was invented. It was not — it is right for 2 files and wrong for 19, and
+the case against renaming rests on maintenance cost rather than impossibility.
 
 **Root cause pattern:** every one of the three mistag mechanisms is a symptom of
 deriving a semantic property (what feature is this test about?) from an
