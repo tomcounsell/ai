@@ -82,6 +82,7 @@ an expected string.
 - **#3206**: "Nightly regression: `tests/unit/test_checkout_pin.py::TestEndToEnd::...`" — closed as a duplicate of #3201. Its triage independently identified the ambient `.pth` and proposed three fixes. This plan adopts a corrected form of its first proposal and rejects its second.
 - **#2603 / #2605 / PR #2606**: "Repair two shared-state leaks that make the suite's failure set unreproducible" — same failure family (a test measuring the host rather than the code), different mechanism (in-process shared state, not interpreter startup). No shared code.
 - **#2748 / PR #2882**: "Doctor console-script check: verify the winning script's interpreter" — prior art for the general lesson that on this machine the interpreter a command resolves to is not the interpreter you assumed. No shared code.
+- **#3195** (open): "`pytest-clean.sh` exits 0 when zero tests ran (pool exhausted, node down): mutation checks read false green" — `scripts/pytest-clean.sh:311` is a bare `exit "$PYTEST_EXIT"` pass-through, so a run that collected nothing still exits 0. This plan's Verification rows therefore state an expected passed count rather than resting on the exit code; the wrapper does not yet fail closed.
 
 No prior attempt to fix *this* test exists; it has been red since the pin was installed and has never been patched.
 
@@ -94,7 +95,9 @@ No prior attempt to fix *this* test exists; it has been red since the pin was in
 - `sys._base_executable` is private and undocumented, and CPython has declined to promote it. It can be **absent**, can **equal `sys.executable`** inside a venv (reported on 3.10/Linux), can point at an **invalid path** for venvs built with `--copies` ([python/cpython#99204](https://github.com/python/cpython/issues/99204)), and can point at a **non-Python host binary** under embedded interpreters. The defensive pattern in the wild is `getattr(sys, "_base_executable", None) or sys.executable` *plus* an existence check ([python/cpython#114476](https://github.com/python/cpython/issues/114476), [pypa/pipx#1074](https://github.com/pypa/pipx/issues/1074)).
 - The documented way to reason about a venv is the prefix pair: `sys.prefix != sys.base_prefix` ([venv docs](https://docs.python.org/3.12/library/venv.html)).
 
-**How this informs the approach:** it demotes the "just run the probe under the base interpreter" strategy from primary to rejected alternative. That strategy measured correctly here (spike-1), but its correctness rests on a private attribute with four known failure modes — on a machine where it degrades to `sys.executable`, the test silently returns to measuring the host. The `-S` strategy depends only on documented CPython behavior and on `site.addsitedir`, which the test already uses.
+**How this informs the approach:** it demotes the "just run the probe under the base interpreter" strategy from primary to rejected alternative. That strategy measured correctly here (spike-1), but its correctness rests on a private attribute with four known failure modes — on a machine where it degrades to `sys.executable`, the test silently returns to measuring the host. The bootstrap strategy this plan adopts depends only on documented CPython behavior (`-S`, `-P`, `runpy`) and on `site.addsitedir`, which the test already uses.
+
+Exactly one isolation mechanism ships: **an explicit bootstrap script run under `-S -P`**. `sys._base_executable` is not added alongside it, and no environment kill-switch is added to `pin()`; both live in Rabbit Holes.
 
 ## Spike Results
 
@@ -105,19 +108,43 @@ No prior attempt to fix *this* test exists; it has been red since the pin was in
 - **Confidence**: high
 - **Impact on plan**: confirms the diagnosis and fixes the shape of the repair — isolate the interpreter, do not touch `pin()`.
 
-### spike-2: `-S` plus an explicit bootstrap is hermetic
+### spike-2: the bootstrap, not `-S`, is what defeats the ambient pin
 - **Assumption**: "#3206's `-S` proposal works as written."
 - **Method**: prototype
-- **Finding**: it does not work as written — `-S` is precisely what stops `site.py` from importing `sitecustomize`, so the test's current `sitecustomize` bootstrap never runs. A bootstrap **script** passed as `argv[1]` does work: `python -S boot.py <script> <site_dir>` where `boot.py` sets `sys.argv = [script]`, calls `site.addsitedir(site_dir)`, and then runs the script. Restoring `sys.argv` before `addsitedir` is load-bearing: leave it and `pin()` sees the bootstrap's path, which is outside any checkout, and no-ops — the positive assertion would fail instead of the negative one.
+- **Finding**: it does not work as written — `-S` is precisely what stops `site.py` from importing `sitecustomize`, so the test's current `sitecustomize` bootstrap never runs. A bootstrap **script** passed as `argv[1]` does work: `python -S boot.py <script> <site_dir>` where `boot.py` sets `sys.argv = [script]`, calls `site.addsitedir(site_dir)`, and then runs the script. Restoring `sys.argv` before `addsitedir` is load-bearing: leave that line out and `pin()` sees the bootstrap's path, which is outside any checkout, and no-ops — the *positive* assertion fails instead of the negative one.
 - **Confidence**: high
 - **Impact on plan**: this becomes the chosen mechanism, with the exact ordering pinned in Technical Approach.
 
-### spike-3: the bootstrap can reproduce CPython's own `sys.path[0]`
+### spike-2b: which part of the invocation carries the isolation (re-measured for the critique)
+- **Assumption**: "`-S` is what defeats the ambient `_valor_checkout_pin.pth`, so deleting `-S` is a mutation that turns the negative control red."
+- **Method**: prototype, on **this** machine (`.venv` carries `_valor_checkout_pin.pth`, CPython 3.14.6), same fixtures as the test
+- **Finding**: **false.** Measured unpinned / pinned output per invocation:
+
+  | Invocation | unpinned | pinned |
+  |---|---|---|
+  | `[python, -S, -P, boot, script, site_dir]` (proposed) | `primary primary False` | `worktree worktree True` |
+  | drop `-S` (`[python, -P, boot, ...]`) | `primary primary False` | `worktree worktree True` |
+  | drop `-S` and `-P` (`[python, boot, ...]`) | `primary primary False` | `worktree worktree True` |
+  | drop `sys.argv = [target]` from the bootstrap | `primary primary False` | **`primary primary False`** |
+  | revert to `[python, script]` + `sitecustomize` on `PYTHONPATH` | **`worktree worktree True`** | `worktree worktree True` |
+
+  The ambient `.pth` runs during `site` processing, at which point `sys.argv[0]` is `boot.py` — a path outside any `valor-bridge` checkout — so `checkout_root_of()` returns `None` and `pin()` no-ops. The bootstrap defeats the ambient pin by *existing as the argv[0] the child starts with*; `-S` never gets the chance to matter for this particular shim.
+- **Confidence**: high (directly measured, both directions, five invocations)
+- **Impact on plan**: `-S`'s rationale is restated as hermeticity against the whole ambient `site-packages` (any future shim that does not read `argv[0]` — an unconditional `sys.path` append, a `sitecustomize` in the venv — would still leak without it). The mutation check becomes the full revert, the one row measured red. A second, complementary mutation is available and also measured red: deleting `sys.argv = [target]` flips the *positive* assertion.
+
+### spike-2c: `-P` removes the bootstrap's own directory from the child's path
+- **Assumption**: "The bootstrap's directory on `sys.path` is harmless."
+- **Method**: prototype, this machine
+- **Finding**: without `-P`, `tmp_path` (which also holds the fixture dirs `primary/` and `site/`) sits on the child's `sys.path`, and the sibling test's `sys.path[1]` becomes that bootstrap directory — a value real CPython startup never produces. With `-P` added, `tmp_path` is gone from `sys.path` entirely; the worktree pair still prints `primary primary False` / `worktree worktree True`, and the sibling test's `sys.path[1]` becomes `<uv python>/lib/python314.zip`, which is what real startup places there. `-P` requires 3.11+; `.python-version` pins 3.14.6.
+- **Confidence**: high
+- **Impact on plan**: `-P` is passed as a flag on the same invocation (it is the same switch as `PYTHONSAFEPATH`, but a flag cannot be lost by a later env-scrub refactor). This is hardening of the one mechanism, not a second mechanism.
+
+### spike-3: the bootstrap reproduces CPython's own `sys.path[0]`
 - **Assumption**: "Dropping real interpreter startup costs the sibling test its meaning."
 - **Method**: prototype
-- **Finding**: real CPython inserts the script's directory *after* `site` processing — measured directly, the ambient pin's root lands at `sys.path[1]`, behind the script dir. A bootstrap that inserts `dirname(script)` at index 0 between `addsitedir` and the run reproduces that order exactly. Under it, `test_primary_script_is_unaffected_by_the_pin` still compares equal pinned vs. unpinned on `sys.path[1]`, and the end-to-end test prints `primary primary` / `worktree worktree`.
+- **Finding**: real CPython inserts the script's directory *after* `site` processing — measured directly, the ambient pin's root lands at `sys.path[1]`, behind the script dir. A bootstrap that inserts `dirname(script)` at index 0 between `addsitedir` and the run reproduces that order. Under `-S -P` (spike-2c) the ordering matches real startup for **both** end-to-end tests: the worktree probe prints `primary primary False` / `worktree worktree True`, and the primary probe's `sys.path[1]` is the stdlib zip rather than the bootstrap's directory.
 - **Confidence**: high
-- **Impact on plan**: no fidelity is lost, so nothing has to be split off or weakened.
+- **Impact on plan**: with `-P` adopted the "reproduces that order" claim holds for both tests. Without `-P` it holds only for the worktree probe, which is why `-P` is not optional here.
 
 ### spike-4: the ambient-pin guard needs resolved paths
 - **Assumption**: "The negative control can assert 'no ambient pin fired' by testing `str(worktree) in sys.path`."
@@ -126,7 +153,12 @@ No prior attempt to fix *this* test exists; it has been red since the pin was in
 - **Confidence**: high
 - **Impact on plan**: the guard assertion is specified against resolved paths, so it cannot pass vacuously.
 
-## Data Flow
+### spike-5: the sibling test can compare the whole path, not one constant slot
+- **Assumption**: "`test_primary_script_is_unaffected_by_the_pin` can only assert on `sys.path[1]`."
+- **Method**: prototype, this machine
+- **Finding**: with the probe changed from `print(agentx.WHICH, sys.path[1])` to `print(agentx.WHICH, sys.path)`, the two runs (fake pin `.pth` present vs. absent) produce byte-identical six-element lists. The comparison is deterministic across runs: same interpreter, same fixtures, sequential subprocesses. Under `-S -P` the list is `[<script dir>, <stdlib zip>, <stdlib>, <lib-dynload>, <fake site dir>, <primary checkout>]`.
+- **Confidence**: high
+- **Impact on plan**: the sibling test stops asserting that one constant equals itself and starts asserting the thing it is named for — the pin shim ran and added nothing. One changed expression; no new mechanism.
 
 1. **Entry point**: `_run_probe(site_dir, script, pinned=...)` decides whether the fake pin `.pth` exists in the fake site dir, then launches a subprocess.
 2. **Interpreter startup**: today `sys.executable` runs `site.py`, which processes the venv's real `site-packages` (`_valor_checkout_pin.pth` → `pin()` → worktree root onto `sys.path`) and then imports `sitecustomize` from `PYTHONPATH`, which calls `site.addsitedir(fake_site_dir)` and processes the test's `.pth` files.
