@@ -953,17 +953,18 @@ second-order marker today; without the `pytestmark` step, 154 tests leave
 **Mitigation:** The three `pytestmark` additions, and — because a `pytestmark`
 line is easy to write and easy to get subtly wrong — a real
 `pytest --collect-only -m <marker>` count for each affected selector, before and
-after, in the PR description. Expected: `-m sdlc` 2859 → 2859, `-m validation`
-428 → 428, `-m messaging` 1271 → 1276, `-m reflections` 544 → 906, `-m config`
-127 → 123. A resolver unit test cannot catch a malformed `pytestmark`; a real
-collection can.
+after, in the PR description. Expected **as deltas against the task-0 capture**,
+because the absolutes drift under peer lanes: `-m sdlc` unchanged,
+`-m validation` unchanged, `-m messaging` `+5`, `-m reflections` `+D` (task-0's
+scoped `deselected` count), `-m config` `−4`. A resolver unit test cannot catch a
+malformed `pytestmark`; a real collection can.
 
 ### Risk 3: The one marker removal breaks a real selection
 **Impact:** `test_reflections_pm_briefings_no_slots_configured.py` loses
 `config`. If anyone runs `pytest -m config` expecting that file, it stops
 appearing.
-**Mitigation:** `-m config` currently collects 127 tests across 6 files; this is
-4 tests in 1 of them. The file is a reflections test about briefing slots and its
+**Mitigation:** `-m config` collects across 6 files (127 tests at both
+`6c865fb5f` and the round-4 head); this is 4 tests in 1 of them. The file is a reflections test about briefing slots and its
 `config` marker came from `config` matching inside `configured`. No script,
 `addopts`, or CI path in the repo passes `-m config` (`git grep` over `scripts/`,
 `pyproject.toml`, `.github/`). Surfaced as the single Open Question so a human
@@ -1329,13 +1330,23 @@ buys nothing on a change this shape, and a builder and a documentarian editing
   regeneration lifecycle, which is the shape this issue exists to remove. The
   before-state is recoverable at any time from git (`git show <base>:` plus a
   `--report` run in a scratch worktree), so freezing it buys nothing.
-- Record real collection counts to compare against later, reading the
-  **collected count**, never the exit code (#3195):
+- **Capture** the real collection counts. These are the reference points the
+  Verification table's deltas are measured against; this task **records** them
+  and asserts nothing about their absolute value. Read the **collected count**,
+  never the exit code (#3195):
   `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m <m> tests/`
-  for `reflections` (expect 544), `sdlc` (2859), `validation` (428),
-  `messaging` (1271), `config` (127); and
-  `-m reflections tests/unit/reflections tests/integration/reflections`
-  (expect `34/396 tests collected (362 deselected)`).
+  for `reflections`, `sdlc`, `validation`, `messaging`, `config` — naming them
+  `reflections_capture`, `sdlc_capture`, and so on; and
+  `-m reflections tests/unit/reflections tests/integration/reflections`, from
+  which record both the package total `P` and the `deselected` count `D`.
+- **Write all six captures verbatim into the PR description before any rename
+  lands.** Every later row reads them; a delta with no recorded baseline is not
+  a check. For orientation only, and explicitly **not** as an assertion: at
+  `6c865fb5f` these were 544 / 2859 / 428 / 1271 / 127 and `34/396 (362
+  deselected)`; three commits later at the round-4 critique head they were
+  546 / 2876 / 428 / 1281 / 127 and `36/399 (363 deselected)`. If your capture
+  matches neither, that is organic suite growth from a peer lane and is fine.
+  Proceed on your own numbers.
 
 ### 1. The renames, as one pure-rename commit
 - **Task ID**: do-renames
@@ -1391,18 +1402,27 @@ buys nothing on a change this shape, and a builder and a documentarian editing
 - **Assigned To**: census-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run `--report` and diff against the task-0 scratch capture. Assert: 838
-  files both times; 17 files gain a derived marker; **0** files lose one
-  entirely; exactly 4 change value, and they are the four named in spike-6.
-- Assert the derived census: `reflections` 28 → 48, `sdlc` 85 → 83, `messaging`
-  61 → 62, `config` 6 → 5, `validation` 9 → 8, all others unchanged.
-- Re-run all five real `--collect-only -m` counts. Expect `-m sdlc` 2859
-  (**unchanged** — this is the check that proves the `pytestmark` additions took;
-  2705 means one is malformed), `-m validation` 428, `-m messaging` 1276,
-  `-m reflections` 906, `-m config` 123.
+- Re-run `--report` and diff against the task-0 scratch capture. Assert: the
+  **same** tracked-file count both times (task-0's capture, not a literal); 17
+  files gain a derived marker; **0** files lose one entirely; exactly 4 change
+  value, and they are the four named in spike-6.
+- Assert the derived census by **file counts**, which the renames move and peer
+  lanes rarely do: `reflections` 28 → 48, `sdlc` 85 → 83, `messaging` 61 → 62,
+  `config` 6 → 5, `validation` 9 → 8, all others unchanged. If a peer lane added
+  a test file to one of these packages mid-flight, the endpoint shifts by that
+  file — reconcile against `git log` on `tests/` since task 0 rather than
+  declaring a failure.
+- Re-run all five `--collect-only -m` counts and check them **against the task-0
+  captures**, per the Verification table: `-m sdlc` = `sdlc_capture` (this is the
+  check that proves the `pytestmark` additions took — **`sdlc_capture − 154`**
+  means one is malformed; derive that number, do not use the stale literal
+  `2705`), `-m validation` = `validation_capture`, `-m messaging` =
+  `messaging_capture + 5`, `-m reflections` = `reflections_capture + D`,
+  `-m config` = `config_capture − 4`.
 - Run the lane close condition:
   `pytest --collect-only -q -m reflections tests/unit/reflections/` collects the
-  package, and over both packages 396 of 396 with zero deselected.
+  package, and over both packages `P` of `P` with **zero deselected** — `P` being
+  task-0's package total. The gate is the zero, not `P`.
 - Confirm `git show --stat --find-renames` on the task-1 commit lists 21 `R100`
   entries with zero adds or deletes, and `git log --follow --oneline` reaches
   pre-rename history for all 21 new paths.
@@ -1461,30 +1481,51 @@ buys nothing on a change this shape, and a builder and a documentarian editing
 ## Verification
 
 
-Every command runs from the repository root. Counts are the measured values from
-spike-6, re-derived at `6c865fb5f`; a mismatch is a real failure, not a
-tolerance to widen. **No row gates on an exit code where a count is available**
-(#3195: a pool-exhausted run can print nothing and exit 0).
+Every command runs from the repository root. **No row gates on an exit code
+where a count is available** (#3195: a pool-exhausted run can print nothing and
+exit 0).
+
+**Absolute pytest-collection counts are expressed as `capture ± delta`, never as
+literals.** The suite grows under other lanes continuously, so any absolute
+number written here is stale by the time the build reads it. Measured drift
+between the plan's `6c865fb5f` baseline and the round-4 critique head, three
+commits later and with no work from this lane in between: tracked files
+838 → 840, suite total 17001 → 17078, `-m reflections` 544 → 546, `-m sdlc`
+2859 → 2876, `-m messaging` 1271 → 1281, and the scoped reflections packages
+`34/396` → `36/399`. (`-m validation` at 428 and `-m config` at 127 happened to
+hold, which proves nothing about the next lane to land.)
+
+So each such row names its **task-0 capture** as the reference point and states
+the delta this change is expected to produce. A mismatch **against the delta** is
+a real failure and not a tolerance to widen — the plan's original standard, moved
+onto the quantity that is actually invariant. A drifting absolute would instead
+manufacture a false failure out of a peer lane's merge, which is the one outcome
+this table must not produce.
+
+Rows that read repository *structure* rather than pytest collection —
+`check_r1`/`check_r2`/`check_r3`, `KNOWN_MISTAGS` size, `R100` rename detection,
+the `grep -c` rows, the anti-criterion rows — are drift-proof by construction and
+stay literal.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | No unstaged rename hiding the true state | `git status --porcelain tests/` | empty output |
 | **Close condition 1** — audit clean on the shrunken baseline | `python3 tests/marker_map.py --audit` | `OK: 2 known, baselined violation(s); 0 new, 0 stale.`, exit 0 |
 | **Close condition 2** — reflections package collects | `pytest --collect-only -q -m reflections tests/unit/reflections/` | collects the package, 0 deselected |
-| reflections, both packages | `./scripts/pytest-clean.sh -m reflections --collect-only -q -p no:randomly tests/unit/reflections tests/integration/reflections 2>&1 \| tail -1` | `396/396 tests collected` with no `deselected` |
+| reflections, both packages | `./scripts/pytest-clean.sh -m reflections --collect-only -q -p no:randomly tests/unit/reflections tests/integration/reflections 2>&1 \| tail -1` | `P/P tests collected` with **no `deselected`**, where `P` is task-0's package total (`399` at the round-4 head, was `396` at `6c865fb5f`). The gate is the absent `deselected`, not `P`. |
 | R1 drained | `python3 -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import *; print(len(check_r1(iter_test_files())))"` | `0` |
 | R3 drained | `python3 -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import *; print(len(check_r3(iter_test_files())))"` | `0` |
 | R2 is the 2 policy entries | `python3 -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import *; print(sorted(v['path'] for v in check_r2(iter_test_files())))"` | the two `KNOWN_MISTAGS` paths |
 | `KNOWN_MISTAGS` is 2 policy entries | `python3 -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import KNOWN_MISTAGS as K; print(len(K), all('POLICY' in r for r in K.values()))"` | `2 True` |
 | No entry was re-keyed instead of deleted | `python3 -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import KNOWN_MISTAGS as K; print(any('test_reflections_' in p for p in K))"` | `False` |
-| Population unchanged | `python3 tests/marker_map.py --count` | `838` |
+| Population unchanged | `python3 tests/marker_map.py --count` | **task-0 capture, unchanged** (`840` at the round-4 head). A rename must not move the tracked-file count; a peer lane adding a test legitimately does. |
 | Rules all still exist (none retired) | `grep -c 'def check_r1\|def check_r2\|def check_r3' tests/marker_map.py` | `3` |
 | The one added key | `grep -c '"checkpointing": "validation"' tests/marker_map.py` | `1` |
-| `-m sdlc` unchanged — proves the `pytestmark` additions took | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m sdlc tests/ 2>&1 \| tail -1` | `2859/17001 tests collected` |
-| `-m validation` unchanged | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m validation tests/ 2>&1 \| tail -1` | `428/17001 tests collected` |
-| `-m messaging` gains the bridge file | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m messaging tests/ 2>&1 \| tail -1` | `1276/17001 tests collected` |
-| `-m reflections` suite-wide | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m reflections tests/ 2>&1 \| tail -1` | `906/17001 tests collected` |
-| `-m config` sheds exactly the ratified 4 | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m config tests/ 2>&1 \| tail -1` | `123/17001 tests collected` |
+| `-m sdlc` unchanged — proves the `pytestmark` additions took | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m sdlc tests/ 2>&1 \| tail -1` | **`= sdlc_capture`** (`2876` at the round-4 head). The tripwire for a malformed `pytestmark` is **`sdlc_capture − 154`** — derive it from task 0, never write the literal `2705`, which was `6c865fb5f`'s value and is already wrong. |
+| `-m validation` unchanged | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m validation tests/ 2>&1 \| tail -1` | **`= validation_capture`**. A malformed third `pytestmark` shows as `validation_capture − 27`. |
+| `-m messaging` gains the bridge file | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m messaging tests/ 2>&1 \| tail -1` | **`= messaging_capture + 5`** |
+| `-m reflections` suite-wide | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m reflections tests/ 2>&1 \| tail -1` | **`= reflections_capture + D`**, where `D` is the `deselected` count from task 0's scoped two-package run (`363` at the round-4 head). Those are exactly the tests the renames pull into the marker. |
+| `-m config` sheds exactly the ratified 4 | `./scripts/pytest-clean.sh --collect-only -q -p no:randomly -m config tests/ 2>&1 \| tail -1` | **`= config_capture − 4`** (the Open Question's ratified removal) |
 | Renames are pure | `git show --stat --find-renames <rename-sha> \| grep -c '=> '` | `21`, and no `create mode` / `delete mode` lines |
 | History follows | `for f in <21 new paths>; do git log --follow --oneline -- "$f" \| wc -l; done` | every count > 1 |
 | Old basenames gone from the repo | the loop in task 4 | empty output |
@@ -1495,7 +1536,7 @@ tolerance to widen. **No row gates on an exit code where a count is available**
 | Format clean | `python -m ruff format --check .` | exit 0 |
 | **Anti-criterion** — no `pytest` import in the bare-interpreter module | `grep -cE '^(import pytest\|from pytest)' tests/marker_map.py` | `0` |
 | **Anti-criterion** — the module still reads no file contents | `grep -cE 'read_text\|open\(\|\bast\.' tests/marker_map.py` | `0` |
-| Bare-interpreter execution still works | `/usr/bin/python3 tests/marker_map.py --count` | `838` |
+| Bare-interpreter execution still works | `/usr/bin/python3 tests/marker_map.py --count` | the same task-0 capture the repo-venv run prints |
 | Stale 39/6 figure corrected | `grep -c 'Gains 39' docs/features/feature-map-marker-guard.md` | `0` |
 | Stale coverage boundary corrected | `grep -c '80 of 835' docs/features/feature-map-marker-guard.md` | `0` |
 | No frozen census fixture was created | `test ! -e tests/data/marker_census_before.tsv` | exit 0 |
