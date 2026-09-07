@@ -421,20 +421,22 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 | Kill switch on | Audit + skip | Audit JSONL written first; ALLOW returned; `promise_gate.disabled` session_event on real-session |
 | Audit log write fails | Silent log warning | Gate continues; gate's verdict not affected |
 | `cli_check_or_exit` swallows unexpected raise | Fail-open (infrastructure branch) | Logs warning; writes audit `source="promise_gate_cli_exception"`; CLI proceeds to outbox write |
-| LLM path reached while an event loop is already running | Heuristic fallthrough | `_run_async_safely` cannot use `asyncio.run` inside a running loop; it **closes** the coroutine and returns `None` (heuristic takes over). Only reachable under a test harness / async caller — production reaches the sync API from a CLI context with no running loop. |
+| Sync `evaluate_promise` called while an event loop is already running | Heuristic fallthrough | `_run_async_safely` cannot use `asyncio.run` inside a running loop; it **closes** the coroutine and returns `None`, and `evaluate_promise` runs the regex heuristic for step 4 instead, audited `source="promise_gate_heuristic"`. The sync API always returns a `PromiseVerdict`. Production CLI senders have no running loop; async callers use `evaluate_promise_async`. |
 
 ### The `_run_async_safely` running-loop guard
 
-`evaluate_promise` is a sync API; on the CLI Haiku path it runs
-`_run_async_safely(_evaluate_promise_async(text))`. `_run_async_safely` calls
-`asyncio.run(coro)`, which raises `RuntimeError` if an event loop is already running —
-**before** it ever touches the coroutine. Because the `_evaluate_promise_async(text)`
-argument was eagerly created, it would be neither awaited nor closed, leaking
-`coroutine '_evaluate_promise_async' was never awaited` at GC/teardown. The
-running-loop branch therefore calls `coro.close()` before returning `None`.
-Behavior is unchanged: in production there is no running loop so
-`asyncio.run` really awaits the coroutine; the close-branch is only exercised
-under tests.
+`evaluate_promise` is a sync API. Steps 1-3 (empty input, kill switch,
+classifier delegation) run in `_promise_preflight`, shared with
+`evaluate_promise_async`; for step 4 it runs
+`_run_async_safely(_evaluate_promise_llm_or_heuristic(text))`. `_run_async_safely`
+calls `asyncio.run(coro)`, which raises `RuntimeError` if an event loop is already
+running, **before** it ever touches the coroutine. Because the coroutine argument
+was eagerly created, it would be neither awaited nor closed, leaking
+`coroutine ... was never awaited` at GC/teardown, so the running-loop branch calls
+`coro.close()` and returns `None`. `evaluate_promise` treats that `None` as "LLM
+unavailable" and evaluates step 4 with the regex heuristic, so the CLI guard's
+`verdict.action` read always has a verdict to read. In production there is no
+running loop and `asyncio.run` really awaits the coroutine.
 
 ## Tests
 
@@ -508,8 +510,8 @@ samples `logs/classification_audit.jsonl` and an optional file of sampled
   outcome), or a `delivered` entry with empty evidence that should have been
   invalidated upstream by `_normalize_ask_coverage` but wasn't.
 
-It tolerates the ~40 legacy audit rows written before the `kind` field
-existed (treated as `kind="promise_gate"` for grouping purposes) and rows
+It tolerates audit rows with no `kind` field (treated as `kind="promise_gate"`
+for grouping when their `source` is a promise-gate source) and rows
 missing `elapsed_ms`/`queue_wait_ms` (each field excluded from its own
 percentile math independently, never treated as zero).
 

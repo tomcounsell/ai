@@ -21,21 +21,6 @@ from config.enums import SessionType
 from models.agent_session import SDLC_STAGES
 
 
-@pytest.fixture(autouse=True)
-def _isolate_audit(tmp_path, monkeypatch):
-    """Redirect the promise-gate audit log to a per-test file.
-
-    Every gated route the drafter exposes (short path, main path, poll)
-    writes a row through ``bridge.promise_gate._write_promise_audit``, whose
-    default target is the repo's live ``logs/classification_audit.jsonl``,
-    the file ``tools/promise_gate_measurement.py`` samples for the latency
-    budget. Without this redirect, unit-test fixtures land in that sample.
-    """
-    from bridge import promise_gate
-
-    monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", tmp_path / "classification_audit.jsonl")
-
-
 def _mock_session_with_stages(stage_dict, links=None):
     """Create a MagicMock session with proper stage_states for PipelineStateMachine."""
     session = MagicMock()

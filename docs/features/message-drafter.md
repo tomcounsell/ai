@@ -50,7 +50,7 @@ The sole public entry point. Everything else is an implementation detail.
 | `session` | `AgentSession \| None` | `None` | Enriches the draft with SDLC stage progress, persona/mode context, and linkifies PR/issue numbers. |
 | `medium` | `str` | `"telegram"` | Discriminator for per-medium validator rules. `"telegram"` or `"email"`. |
 | `persona` | `str \| None` | `None` | Optional tone hint. Orthogonal to medium. Not used today. |
-| `use_llm` | `bool` | `True` | Whether the main (composed) path's promise gate may use its LLM-primary judgment layer (issue #3027). The short-output early return NEVER uses the LLM regardless of this flag — it always evaluates via the zero-cost heuristic. `agent/hooks/stop.py` is the one production caller that passes `use_llm=False`: it runs inline on the Stop hook's 10-second harness-wall critical path, and this repo has already had a SIGKILL incident (`docs/features/memory-hook-performance.md`) from adding an inline LLM round-trip to that exact path. |
+| `use_llm` | `bool` | `True` | Whether the main (composed) path's promise gate may use its LLM-primary judgment layer (issue #3027). The short-output early return NEVER uses the LLM regardless of this flag — it always evaluates via the zero-cost heuristic. Two production callers pass `use_llm=False`: `agent/hooks/stop.py`, which runs inline on the Stop hook's 10-second harness-wall critical path where this repo has already had a SIGKILL incident (`docs/features/memory-hook-performance.md`) from an inline LLM round-trip, and `bridge/email_bridge.py`, where the transport has no bounce path to act on a block verdict (#3124). |
 
 **Returns `MessageDraft`:**
 
@@ -78,7 +78,7 @@ Note: `was_drafted` has been removed. The drafter never rewrites the agent's tex
 2. Apply deterministic structural composition (`_compose_structured_draft`) — emoji prefix, SDLC stage line, bullet/question parsing, link footer.
 3. Run `_validate_for_medium` on the composed text.
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
-5. If `_evaluate_drafter_promise` fires (agent made a promise without substance — "will do", "I'll follow up" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. **Both** promotions happen on **both** return points — the short-output early return (see below) and this main-path return — so neither a wire-format violation (issue #1955) nor an empty promise (issue #2421) ever ships silently regardless of message length. Every gate decision writes an audit entry to `logs/classification_audit.jsonl` — `source="promise_gate_drafter"` on the heuristic-only judgment (short path, and the Stop hook's forced `use_llm=False`), or `source="promise_gate_drafter_llm"` / `"...drafter_heuristic"` / `"...drafter_timeout"` on the LLM-primary main path, depending on which layer produced the verdict. All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
+5. If `_evaluate_drafter_promise` fires (agent made a promise without substance — "will do", "I'll follow up" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. **Both** promotions happen on **both** return points — the short-output early return (see below) and this main-path return — so neither a wire-format violation (issue #1955) nor an empty promise (issue #2421) ever ships silently regardless of message length. Every gate decision writes an audit entry to `logs/classification_audit.jsonl` — `source="promise_gate_drafter"` on the heuristic-only judgment (short path, and the Stop hook's forced `use_llm=False`), or `source="promise_gate_drafter_llm"` / `"...drafter_heuristic"` / `"...drafter_timeout"` / `"...drafter_oversize"` on the LLM-primary main path, depending on which layer produced the verdict. All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
 7. Populate `open_questions` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
 8. Return `MessageDraft(text=<composed>, context_summary=..., open_questions=..., violations=[...])`.
@@ -152,17 +152,17 @@ layer:
 * `use_llm=False` — regex-only `bridge.promise_gate._evaluate_promise_heuristic`,
   **zero LLM calls**. Used by the short-output early return (< `SHORT_OUTPUT_THRESHOLD`
   chars) regardless of the caller's `use_llm`, and by any caller that
-  explicitly passes `use_llm=False` on the main path (`agent/hooks/stop.py`
-  is the one production caller that does this — see below). Audited as
-  `source="promise_gate_drafter"`.
+  explicitly passes `use_llm=False` on the main path: `agent/hooks/stop.py`
+  (see below) and `bridge/email_bridge.py` (no bounce path on that transport,
+  #3124). Audited as `source="promise_gate_drafter"`.
 * `use_llm=True` — the LLM-primary path via
   `bridge.promise_gate._evaluate_promise_llm_or_heuristic` (same SDK-timeout
   / bounded-semaphore / heuristic-fallthrough contract as the CLI's
-  `evaluate_promise_async`). Used by the main (composed) path for the real
-  delivery callers (`agent/output_handler.py`, `bridge/email_bridge.py`) —
-  this is `draft_message`'s default. Audited as `source="promise_gate_drafter_llm"`,
-  `"...drafter_heuristic"`, or `"...drafter_timeout"` depending on which
-  layer produced the verdict.
+  `evaluate_promise_async`). Used by the main (composed) path for the
+  Telegram delivery caller (`agent/output_handler.py`) — this is
+  `draft_message`'s default. Audited as `source="promise_gate_drafter_llm"`,
+  `"...drafter_heuristic"`, `"...drafter_timeout"`, or `"...drafter_oversize"`
+  depending on which layer produced the verdict.
 
 **Zero-LLM guarantee on the short path is test-enforced**, not just
 documented: `tests/unit/test_message_drafter.py::TestMainPathLLMWiring::test_short_path_issues_zero_llm_calls`

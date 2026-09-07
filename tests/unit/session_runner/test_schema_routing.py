@@ -360,8 +360,8 @@ async def test_file_paths_reach_outbox_fallback_on_delivery_failure(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# SCHEMA_ROUTING_FALLBACK_METRIC — assert at the emission call site (spike-1
-# gap 3: never asserted before this plan).
+# SCHEMA_ROUTING_FALLBACK_METRIC — pin the emission call site, not just the
+# constant's value.
 # ---------------------------------------------------------------------------
 
 

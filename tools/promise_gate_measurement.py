@@ -22,9 +22,9 @@ array — see ``agent/session_runner/router.py::PM_TURN_JSON_SCHEMA`` and
   ``_normalize_ask_coverage``, but the tool double-checks rather than
   trusting the upstream invariant blindly).
 
-Tolerant of the ~40 legacy audit rows written before the ``kind`` field
-existed. Rows missing ``elapsed_ms``/``queue_wait_ms`` are excluded from
-the respective percentile math, never treated as zero.
+Tolerant of audit rows with no ``kind`` field. Rows missing
+``elapsed_ms``/``queue_wait_ms`` are excluded from the respective percentile
+math, never treated as zero.
 
 This tool's report is the **recorded entry criterion** for the deferred
 phase-4 decision tracked in issue #3035 (embargoed until 2026-09-10). See
@@ -50,9 +50,8 @@ from typing import Any
 DEFAULT_AUDIT_LOG = Path(__file__).parent.parent / "logs" / "classification_audit.jsonl"
 
 # Recognizes both the CLI-path and drafter-path source namespaces plus the
-# terminal-flush route. A legacy row with no "kind" field is still counted
-# as a promise-gate row as long as its "source" matches one of these
-# prefixes/values -- this is the tolerance the ~40 no-kind legacy rows need.
+# terminal-flush route. A row with no "kind" field is still counted as a
+# promise-gate row as long as its "source" matches one of these prefixes/values.
 _PROMISE_GATE_SOURCE_PREFIXES = ("promise_gate_",)
 _PROMISE_GATE_EXACT_SOURCES = ("terminal_flush",)
 

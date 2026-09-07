@@ -626,8 +626,8 @@ def validate_poll_question(question: str, *, session_id: str | None = None) -> l
     sends). Deliberately NOT the LLM-primary path: a poll question is a
     low-volume, interactive affordance, and an inline model round-trip
     (see the measured distribution in ``bridge.promise_gate``) would be real
-    latency cost for no delivery-honesty gain since the two-state outcome
-    (ship or don't) is unchanged from before this plan — see No-Go 5.
+    latency cost for no delivery-honesty gain: the outcome is two-state
+    (ship or don't) either way — see No-Go 5.
 
     Every decision writes a ``classification_audit.jsonl`` row, so this
     route is queryable like every other gated route: ``transport``

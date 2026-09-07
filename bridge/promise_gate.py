@@ -525,9 +525,10 @@ _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 # file attachment but still reach this gate in full), so without a cap the
 # per-call token cost and latency are unbounded by construction. Over the cap
 # the gate skips the model and runs the regex heuristic, audited with the
-# ``_oversize`` source suffix so the skip is queryable. Provisional/tunable:
-# 8000 chars is roughly 2k tokens, about twice the Telegram message ceiling
-# and well above any reply the drafter would deliver as prose.
+# ``_oversize`` source suffix so the skip is queryable. The default is
+# provisional/tunable (``PROMISE_GATE_LLM_MAX_INPUT_CHARS``): about twice the
+# Telegram message ceiling and well above any reply the drafter would deliver
+# as prose.
 _LLM_MAX_INPUT_CHARS_DEFAULT = 8000
 
 
@@ -709,11 +710,8 @@ async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
                     messages=[{"role": "user", "content": text}],
                 )
     except (TimeoutError, anthropic.APITimeoutError):
-        # Timeout is its own discriminator — caller maps to
-        # source="promise_gate_timeout". Re-raised, not swallowed: an
-        # earlier version of this function caught the timeout and returned
-        # None here, so the caller's timeout-discriminating except clause
-        # was unreachable dead code — every fallthrough audited generically.
+        # Timeout is its own discriminator: it propagates so the caller can
+        # audit source="promise_gate_timeout" instead of a generic fallthrough.
         raise
     except Exception as e:
         logger.warning(f"promise_gate LLM call failed: {e!r}")
@@ -800,13 +798,10 @@ async def evaluate_promise_async(
 ) -> PromiseVerdict:
     """Evaluate a draft for empty-promise / forward-deferral content (async core).
 
-    Public async API — extracted so async callers (the drafter's main path,
-    Task 5) can ``await`` it directly instead of going through
-    ``evaluate_promise``'s ``_run_async_safely``/``asyncio.run`` wrapper,
-    which raises inside an already-running event loop. ``evaluate_promise``
-    (sync) is a thin wrapper over this function; its signature and behavior
-    are frozen (Risk 5) — every step below is verbatim what it did before
-    the extraction.
+    Public async API for callers that already run on an event loop.
+    ``evaluate_promise`` (sync) runs the same steps from a plain sync
+    context; steps 1-3 are shared through ``_promise_preflight`` and the
+    step-4 audit/session-event tail through ``_record_promise_outcome``.
 
     Call ordering (cycle-3 C-CYCLE3-2 — observable from telemetry):
 
@@ -841,6 +836,28 @@ async def evaluate_promise_async(
 
     Returns:
         ``PromiseVerdict``. Two-state action: ``"allow"`` or ``"block"``.
+    """
+    early = _promise_preflight(
+        text, transport=transport, session_id=session_id, classifier_verdict=classifier_verdict
+    )
+    if early is not None:
+        return early
+    outcome = await _evaluate_promise_llm_or_heuristic(text)
+    return _record_promise_outcome(text, outcome, transport=transport, session_id=session_id)
+
+
+def _promise_preflight(
+    text: str | None,
+    *,
+    transport: str,
+    session_id: str | None,
+    classifier_verdict: Any,
+) -> PromiseVerdict | None:
+    """Steps 1-3 of ``evaluate_promise_async``, shared with the sync wrapper.
+
+    Returns the verdict when one of the pre-LLM steps decides (empty input,
+    kill switch, classifier delegation), else ``None`` so the caller runs
+    step 4.
     """
     # Step 1: empty-input check (no audit).
     if text is None or not str(text).strip():
@@ -892,9 +909,18 @@ async def evaluate_promise_async(
                 ),
             )
         return verdict
+    return None
 
-    # Step 4: CLI Haiku path with heuristic fallthrough.
-    verdict, suffix, elapsed_ms, queue_wait_ms = await _evaluate_promise_llm_or_heuristic(text)
+
+def _record_promise_outcome(
+    text: str,
+    outcome: tuple[PromiseVerdict, str, float, float | None],
+    *,
+    transport: str,
+    session_id: str | None,
+) -> PromiseVerdict:
+    """Step 4 tail: audit the LLM-or-heuristic outcome and emit session events."""
+    verdict, suffix, elapsed_ms, queue_wait_ms = outcome
     source = f"promise_gate_{suffix}"
     _write_promise_audit(
         text,
@@ -941,31 +967,38 @@ def evaluate_promise(
 ) -> PromiseVerdict:
     """Evaluate a draft for empty-promise / forward-deferral content.
 
-    Public sync API — thin wrapper over ``evaluate_promise_async`` via
-    ``_run_async_safely`` (``asyncio.run`` under the hood). Signature and
-    behavior are frozen (Risk 5): every non-async CLI consumer
-    (``tools/send_message.py``, ``tools/valor_telegram.py``,
-    ``tools/valor_email.py``, ``agent/session_health.py``) is unaffected by
-    the async extraction.
-
-    See ``evaluate_promise_async`` for the full step-by-step contract.
+    Public sync API for the CLI senders (``tools/send_message.py``,
+    ``tools/valor_telegram.py``, ``tools/valor_email.py``). Runs the same
+    steps as ``evaluate_promise_async``; step 4's LLM call goes through
+    ``_run_async_safely`` (``asyncio.run``). When an event loop is already
+    running on the calling thread, ``asyncio.run`` cannot be used, so step 4
+    is the regex heuristic instead, audited as ``source="promise_gate_heuristic"``.
+    Always returns a ``PromiseVerdict``; it never returns ``None``.
     """
-    return _run_async_safely(
-        evaluate_promise_async(
-            text,
-            transport=transport,
-            session_id=session_id,
-            classifier_verdict=classifier_verdict,
-        )
+    early = _promise_preflight(
+        text, transport=transport, session_id=session_id, classifier_verdict=classifier_verdict
     )
+    if early is not None:
+        return early
+    start = time.monotonic()
+    outcome = _run_async_safely(_evaluate_promise_llm_or_heuristic(text))
+    if outcome is None:
+        outcome = (
+            _evaluate_promise_heuristic(text),
+            "heuristic",
+            (time.monotonic() - start) * 1000,
+            None,
+        )
+    return _record_promise_outcome(text, outcome, transport=transport, session_id=session_id)
 
 
 def _run_async_safely(coro):
     """Run an async coroutine from a sync context without blowing up if a
     loop is already running.
 
-    On a running event loop (e.g. test harness), raises a controlled
-    ``RuntimeError`` that ``evaluate_promise`` treats as "LLM unavailable".
+    On a running event loop (a test harness or an async caller reaching the
+    sync API), closes ``coro`` and returns ``None``; ``evaluate_promise``
+    treats ``None`` as "LLM unavailable" and runs the heuristic.
     """
     try:
         return asyncio.run(coro)
@@ -1094,8 +1127,8 @@ def cli_check_or_exit(
 
     Exception-swallow semantics (cycle-3 C-CYCLE3-3): wraps the
     ``evaluate_promise`` call in ``try/except Exception``. On unexpected
-    exception (asyncio nested-loop, ImportError from a circular import,
-    AttributeError from a Popoto schema migration), logs a warning,
+    exception (ImportError from a circular import, AttributeError from a
+    Popoto schema migration), logs a warning,
     writes a fail-open audit JSONL entry with
     ``source="promise_gate_cli_exception"``, and **returns silently**
     (does NOT block delivery on infrastructure failure). Heuristic-

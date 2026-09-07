@@ -685,6 +685,50 @@ class TestRunAsyncSafelyNoLeak:
 # === LLM input cap ===
 
 
+class TestSyncWrapperUnderRunningLoop:
+    """``evaluate_promise`` keeps its ``PromiseVerdict`` contract when an event
+    loop is already running on the calling thread.
+
+    ``_run_async_safely`` returns ``None`` there (it cannot ``asyncio.run``),
+    so the sync wrapper must evaluate step 4 with the heuristic and still
+    audit the row; ``cli_check_or_exit`` reads ``verdict.action`` outside its
+    fail-open guard and would crash on ``None``.
+    """
+
+    def test_returns_heuristic_verdict_and_audits(self):
+        import asyncio
+
+        from bridge import promise_gate
+
+        async def _drive():
+            return promise_gate.evaluate_promise(
+                "I'll come back with the results later.", transport="telegram", session_id="cli-x"
+            )
+
+        verdict = asyncio.run(_drive())
+        assert isinstance(verdict, promise_gate.PromiseVerdict)
+        assert verdict.action == "block"
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert [r["source"] for r in rows] == ["promise_gate_heuristic"]
+        assert rows[0]["transport"] == "telegram"
+        assert rows[0]["elapsed_ms"] is not None
+
+    def test_cli_guard_does_not_crash(self):
+        import asyncio
+
+        from bridge import promise_gate
+
+        async def _drive():
+            promise_gate.cli_check_or_exit(
+                "Deployed the fix; tests pass.", transport="telegram", session_id=None
+            )
+
+        asyncio.run(_drive())
+        rows = [json.loads(line) for line in promise_gate._AUDIT_LOG_PATH.read_text().splitlines()]
+        assert [r["source"] for r in rows] == ["promise_gate_heuristic"]
+        assert rows[0]["action"] == "allow"
+
+
 class TestLlmInputCap:
     """Texts longer than ``PROMISE_GATE_LLM_MAX_INPUT_CHARS`` never reach the
     model: the helper runs the heuristic and reports the ``oversize`` suffix
