@@ -58,7 +58,7 @@ async def _ingest(worker_fresh: bool):
         patch("popoto.redis_db.POPOTO_REDIS_DB", redis),
         patch("bridge.response.set_reaction", new=_fake_set_reaction),
         patch("agent.worker_down_reactions.record_worker_down_reaction"),
-        # Dispatch leaf side-effects (mirrors tests/unit/bridge/test_dispatch.py).
+        # Dispatch leaf side-effects (mirrors tests/unit/bridge/test_bridge_dispatch.py).
         patch("bridge.dispatch.claim_message", new=AsyncMock(return_value=True)),
         patch(
             "bridge.dispatch.enqueue_agent_session", new=AsyncMock(return_value=1)

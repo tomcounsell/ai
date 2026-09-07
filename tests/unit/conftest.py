@@ -194,7 +194,7 @@ def _no_live_embedding_provider():
     ``safe_save()`` into a ``None`` return), failing any test that saves a
     Memory — the classic "passes with -n0, fails under xdist" flake
     (test_memory_model, test_memory_timeline, test_memory_ingestion,
-    test_daily_log_aggregator).
+    test_reflections_daily_log_aggregator).
 
     Unit tests must not depend on a live Ollama. With the provider set to
     ``None``, ``EmbeddingField.on_save`` skips embedding cleanly (and stops

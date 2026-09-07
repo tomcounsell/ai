@@ -196,7 +196,7 @@ re-arms over it. Delete the marker to let the next `/update` re-arm.
   CLI's evidence gate: open or unknown issue state → `skipped-open`, never a
   migration (a multi-PR issue keeps its plan in root until the issue truly
   closes; a `gh` outage defers).
-- `tests/unit/reflections/test_merged_branch_cleanup.py` — the extended
+- `tests/unit/reflections/test_reflections_merged_branch_cleanup.py` — the extended
   reflection branch: both evidence-gate fixes (the `is_complete` short-circuit
   no longer hides closed-issue plans; a `gh` `"unknown"` never migrates), the
   per-run cap, and apply-off/report-only behavior.

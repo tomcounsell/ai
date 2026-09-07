@@ -867,8 +867,8 @@ beyond one debug line naming the dead renewer pid.
 - [ ] `tests/unit/test_session_lifecycle.py` `TestLockOwnerIsLive` rows at `:576`, `:586`, `:598`, `:610`, `:629`, `:650` — KEEP UNCHANGED: no `renewer_pid` in any payload, so all must stay green byte-for-byte. Running them unmodified IS the backward-compatibility proof.
 - [ ] `tests/unit/test_sdlc_session_ensure.py::TestKillOrphans` (`:1211`) — VERIFY UNCHANGED: the existing rows must stay green byte-for-byte. (The "if present" hedge in the first draft was stale; the class exists and `_iter_orphan_sessions` is at `tools/sdlc_session_ensure.py:1059`.)
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — ADD two rows to `TestKillOrphans`: an `sdlc-local-{N}` row with `last_heartbeat_at = None` whose payload carries a fresh stamp and a LIVE `renewer_pid` must NOT be yielded; the same row with a dead `renewer_pid` past the grace MUST be yielded. This is SC7 at the consumer layer, not the predicate layer.
-- [ ] `tests/unit/reflections/test_utilities_lock_says_live.py` — NEW module (BLOCKER 1). Patch `reflections.utilities._get_redis` to return each payload shape and assert `_lock_says_live(N)`: dead-renewer-past-grace → `False`; live-renewer → `True`; inside-grace → `True`; no-renewer-identity → `True`; cross-machine → `True`. The existing `tests/unit/reflections/test_sdlc_upvote_lanes.py` stubs `_lock_says_live` wholesale, so it exercises the gate but never the payload→verdict path; this module covers the half that matters here.
-- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` (`:697`, `:704`) — KEEP UNCHANGED: the "imported not forked" guards must stay green, since this plan's whole posture is one predicate for all three consumers.
+- [ ] `tests/unit/reflections/test_utilities_lock_says_live.py` — NEW module (BLOCKER 1). Patch `reflections.utilities._get_redis` to return each payload shape and assert `_lock_says_live(N)`: dead-renewer-past-grace → `False`; live-renewer → `True`; inside-grace → `True`; no-renewer-identity → `True`; cross-machine → `True`. The existing `tests/unit/reflections/test_reflections_upvote_lanes.py` stubs `_lock_says_live` wholesale, so it exercises the gate but never the payload→verdict path; this module covers the half that matters here.
+- [ ] `tests/unit/reflections/test_reflections_upvote_lanes.py` (`:697`, `:704`) — KEEP UNCHANGED: the "imported not forked" guards must stay green, since this plan's whole posture is one predicate for all three consumers.
 - [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD: the two non-releasing deadline exits perform the `renewer_*` clear (shape (a)); a clear that raises does not block the exit; and a clear that loses its CAS is retried once (Race 6 mode 1). Locate the existing exit-path tests (around `:185-226`) and extend them rather than adding a parallel class.
 - [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD the `-m` invocation regression test (SC5b): drive the heartbeat via `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or a subprocess and assert the renewal still stamps `renewer_pid`. A plain `import` cannot detect the round-3 BLOCKER.
 - [ ] `tests/unit/test_session_lifecycle.py::TestRenewerIdentityLiveness` — ADD (Task 1): the demonstrated-red class. Cases enumerated in Task 1; the (a) dead-renewer-past-grace case is the one that must be RED on `main`. The Verification row greps this exact class name.
@@ -1558,7 +1558,7 @@ most one TTL window".
   `reflections.utilities._get_redis` to return each payload shape and assert
   `_lock_says_live(N)` is `False` only for dead-renewer-past-grace, and `True`
   for live-renewer, inside-grace, no-identity, and cross-machine. This exercises
-  the real predicate; the existing `test_sdlc_upvote_lanes.py` stubs
+  the real predicate; the existing `test_reflections_upvote_lanes.py` stubs
   `_lock_says_live` wholesale and so proves nothing about the payload→verdict
   path.
 - Run the full pre-existing lock-liveness set unmodified
@@ -1571,7 +1571,7 @@ most one TTL window".
 
 ### 8. Final Validation
 
-- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/sdlc_session_ensure/ tests/unit/test_sdlc_lease_heartbeat.py tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q`
+- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/sdlc_session_ensure/ tests/unit/test_sdlc_lease_heartbeat.py tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_reflections_upvote_lanes.py -q`
 - `python -m ruff check .` and `python -m ruff format --check .`
 - Run every row in **## Verification**.
 - Paste the full demonstrated-red PAIR into the PR body: half (a) red on `main`
@@ -1619,7 +1619,7 @@ belongs in this plan and the PR body, neither of which the row greps.
 | Lock-liveness tests pass | `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py -q` | exit code 0 |
 | Orphan-reaper tests pass | `scripts/pytest-clean.sh tests/unit/sdlc_session_ensure/ -q` | exit code 0 |
 | Heartbeat tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_lease_heartbeat.py -q` | exit code 0 |
-| Reflection-layer tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
+| Reflection-layer tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_reflections_upvote_lanes.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check models/ tools/ agent/ tests/ reflections/` | exit code 0 |
 | Format clean | `python -m ruff format --check models/ tools/ agent/ tests/ reflections/` | exit code 0 |
 | Grace constant is named and env-overridable | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS = int(os.environ.get("ISSUE_LOCK_RENEWER_GRACE_SECONDS"' models/session_lifecycle.py` | output contains 1 |

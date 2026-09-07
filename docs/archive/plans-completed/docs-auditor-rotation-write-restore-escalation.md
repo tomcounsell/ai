@@ -120,7 +120,7 @@ One module, two private signature widenings, one new escalation, and a focused t
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. The tests use the existing `repo` fixture in `tests/unit/reflections/test_docs_auditor_git_surface.py` (a real `git init` checkout with a real bare local `origin`) and the existing `fake_redis` fixture; both `git` and `gh` are already intercepted or real in that file.
+No prerequisites — this work has no external dependencies. The tests use the existing `repo` fixture in `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` (a real `git init` checkout with a real bare local `origin`) and the existing `fake_redis` fixture; both `git` and `gh` are already intercepted or real in that file.
 
 ## Solution
 
@@ -180,7 +180,7 @@ Locate every edit site by symbol, never by remembered line number — `8934583dc
    def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:
    ```
 
-   `starting_ref` is a parameter, not a closure read: it is a `run_docs_auditor` local, so a module-level body that referenced it bare would raise `NameError` on its first call — in the one element this plan designates as its anti-drift mechanism. Do **not** resolve that by nesting the helper inside `run_docs_auditor` to capture the local; **Test Impact** and the mutation check both assume a module-level symbol the failure-path tests can import and monkeypatch, and a nested closure is unreachable from `tests/unit/reflections/test_docs_auditor_git_surface.py`.
+   `starting_ref` is a parameter, not a closure read: it is a `run_docs_auditor` local, so a module-level body that referenced it bare would raise `NameError` on its first call — in the one element this plan designates as its anti-drift mechanism. Do **not** resolve that by nesting the helper inside `run_docs_auditor` to capture the local; **Test Impact** and the mutation check both assume a module-level symbol the failure-path tests can import and monkeypatch, and a nested closure is unreachable from `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`.
 
 **Why the ref-read guard does not stamp the rotation hash.** The step-4b cap and open-PR guards stamp `_update_rotation_hash` because their condition is doc-specific: without a stamp, `_select_primary_doc` re-picks the same doc forever while the guard fires. A failed `_current_ref` read is doc-independent — it blocks every doc equally, so it cannot pin the rotation on one doc, and stamping would advance the rotation past a doc that was never audited. This guard deliberately does not stamp, and the code carries a comment saying so with that reason.
 
@@ -190,7 +190,7 @@ Locate every edit site by symbol, never by remembered line number — `8934583dc
 
 This is a failure-path bug, so the failure path is the deliverable. **The test must inject an exception into the window — substrate write done, push not yet called — and assert the checkout is restored and an escalation is filed.** A test that only asserts the happy path proves nothing about this fix.
 
-All new tests go in `tests/unit/reflections/test_docs_auditor_git_surface.py`, in a new class `TestWriteWindowRestore`. That file already provides the `repo` fixture (a real `git init` checkout with a real bare local `origin`, so `git checkout` / `add` / `commit` / `push` run for real and only `gh` is intercepted), the `gh` dispatcher fixture, `fake_redis`, and the `_porcelain` / `_git` helpers. Reuse them; do not build a parallel harness.
+All new tests go in `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`, in a new class `TestWriteWindowRestore`. That file already provides the `repo` fixture (a real `git init` checkout with a real bare local `origin`, so `git checkout` / `add` / `commit` / `push` run for real and only `gh` is intercepted), the `gh` dispatcher fixture, `fake_redis`, and the `_porcelain` / `_git` helpers. Reuse them; do not build a parallel harness.
 
 ### The six injection points
 
@@ -251,11 +251,11 @@ One test — `test_bare_name_withhold_propagates_to_pr_body_and_telegram` — ap
 
 ### Direct `_push_branch_and_pr` callers — UPDATE: add `starting_ref`
 
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::TestEarlyReturnRestore::test_gh_pr_create_failure_restores_head_and_deletes_branch` — UPDATE: pass `starting_ref="main"`. (There is no `class TestPushBranchAndPr` anywhere under `tests/`; this test lives in `TestEarlyReturnRestore`.)
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_git_add_missing_path_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_push_to_unreachable_remote_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_unrelated_modified_file_is_untouched_by_the_restore` — UPDATE: pass `starting_ref="main"`. This test is the guarantee that foreign dirt survives a restore; it must keep passing unchanged in substance.
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py::test_restore_checkout_failure_is_reported_and_run_returns_error` — UPDATE: pass `starting_ref="main"` to the direct call. Its `run_docs_auditor` half also stubs `audit` and `_push_branch_and_pr`; verify the stub `lambda *a, **kw: None` still absorbs the new keyword (it does) and that the test still exercises the `pr_url is None` R5-1 branch rather than being captured by the new handler.
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::TestEarlyReturnRestore::test_gh_pr_create_failure_restores_head_and_deletes_branch` — UPDATE: pass `starting_ref="main"`. (There is no `class TestPushBranchAndPr` anywhere under `tests/`; this test lives in `TestEarlyReturnRestore`.)
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::test_git_add_missing_path_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::test_push_to_unreachable_remote_restores_cleanly` — UPDATE: pass `starting_ref="main"`.
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::test_unrelated_modified_file_is_untouched_by_the_restore` — UPDATE: pass `starting_ref="main"`. This test is the guarantee that foreign dirt survives a restore; it must keep passing unchanged in substance.
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::test_restore_checkout_failure_is_reported_and_run_returns_error` — UPDATE: pass `starting_ref="main"` to the direct call. Its `run_docs_auditor` half also stubs `audit` and `_push_branch_and_pr`; verify the stub `lambda *a, **kw: None` still absorbs the new keyword (it does) and that the test still exercises the `pr_url is None` R5-1 branch rather than being captured by the new handler.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_pr_body_carries_marker_when_fixes_withheld` — UPDATE: pass `starting_ref="main"`.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestWithheldBlocksStaleClose::test_bare_name_withhold_propagates_to_pr_body_and_telegram` — UPDATE: pass `starting_ref="main"` **on the direct call**. This test also has a second, `run_docs_auditor` phase, so it needs the `_current_ref` patch as well — it is the one test that appears in both lists here. Its two dispositions are complementary, not competing: the direct-call phase needs the argument, the rotation phase needs the patch. Apply both.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::test_empty_files_touched_creates_no_branch_and_no_commit` — UPDATE: pass `starting_ref="main"`. Asserts the empty-`files_touched` early return, which now sits above the ref handling entirely.
@@ -286,13 +286,13 @@ One test — `test_bare_name_withhold_propagates_to_pr_body_and_telegram` — ap
 - **Do NOT relax the guard** so a `None` starting ref falls through to `audit`. The **Empty/Invalid Input Handling** row above requires `starting_ref is None` to produce `skipped` *before* `audit` is called, and asserts `audit` was never invoked. Weakening the guard to make these twelve pass deletes a planned assertion and removes the only thing standing between a `None` ref and a restore that cannot return anywhere.
 - **Do NOT add `git init` to the shared `repo` fixture.** **121** test functions in that file take `repo` (counted by AST at HEAD, not remembered). `git_repo`'s own docstring records why the split exists: the bare-name existence oracle (#2759) resolves a filename with no `/` against a `git ls-files --cached --others --exclude-standard` basename index, and that index "only exists inside a git checkout". Initialising `repo` therefore silently flips withhold and existence behaviour across the entire file — a change of blast radius far beyond this plan, landing as green tests that are testing something else.
 
-`tests/unit/reflections/test_docs_auditor_git_surface.py` is **unaffected** by cause 2: its fixture is a real `git init` checkout, so the pre-write ref read resolves. Measured: 15 passed under both control and treatment.
+`tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` is **unaffected** by cause 2: its fixture is a real `git init` checkout, so the pre-write ref read resolves. Measured: 15 passed under both control and treatment.
 
 ### Tests that stub rather than call — VERIFY only
 
 Tests that stub rather than call, and need only re-verification (no edit expected):
 
-- [ ] `tests/unit/reflections/test_docs_auditor_git_surface.py` — the **six** `monkeypatch.setattr(docs_auditor, "audit", ...)` / `"_push_branch_and_pr"` stubs (four `audit`, two `_push_branch_and_pr`). VERIFY: each stub's signature still absorbs the new keyword, and each `audit_result` dict still carries `status` so the new `status == "error"` check reads a real value rather than a missing key.
+- [ ] `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` — the **six** `monkeypatch.setattr(docs_auditor, "audit", ...)` / `"_push_branch_and_pr"` stubs (four `audit`, two `_push_branch_and_pr`). VERIFY: each stub's signature still absorbs the new keyword, and each `audit_result` dict still carries `status` so the new `status == "error"` check reads a real value rather than a missing key.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestDoDocsContract::test_pr_mode_does_not_create_branch` and `::test_hook_fires_and_nothing_is_committed_under_pr_mode` — VERIFY: the `audit()` guard must not change `scope_mode="pr-changed-files"` behavior. `/do-docs` still gets a dirty tree and no branch.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard::test_dirty_tree_skips_rotation` — VERIFY: unchanged. The step-3 guard keeps filing nothing; this plan deliberately does not touch it.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestZeroDiffGate::test_zero_diff_skips_pr_creation` — VERIFY: the zero-diff `return` now happens inside the new `try`. Assert it still returns `skipped` and that the new handler does not fire on it.
@@ -429,7 +429,7 @@ Not applicable — this repo publishes no Sphinx/MkDocs site for internal featur
 - [ ] No whole-tree restore primitive (`checkout -f`, `reset --hard`, `git clean`) appears anywhere in `reflections/docs_auditor.py`.
 - [ ] The step-3 dirty-tree guard still files nothing.
 - [ ] The mutation check in the Failure Path Test Strategy has been run and each reverted guard produced the predicted failure.
-- [ ] Scoped tests pass via `scripts/pytest-clean.sh` (`tests/unit/reflections/test_docs_auditor_git_surface.py` and `tests/unit/test_docs_auditor_substrate.py`), **with all twenty-one Test Impact UPDATEs landed** — the ten `starting_ref="main"` arguments from task 1 and the twelve `_current_ref` patches from task 4. **Score this on zero failures in both files, not on a passed/skipped pair.** Real-checkout measurement at HEAD via `scripts/pytest-clean.sh`: the substrate file collects **212**, the git-surface file **15**, and the two together run **227 passed, 0 skipped**. So **`212 passed` in `tests/unit/test_docs_auditor_substrate.py` is this criterion met**, not missed. Do not chase the `211 passed, 1 skipped` figure quoted in Test Impact — that is a shadow-rig reading and will not reproduce in a checkout. Read the counts; exit 0 alone is not the check. Without the twelve patches the substrate file carries twelve failures, and neither the guard nor the `repo` fixture may be changed to reach green.
+- [ ] Scoped tests pass via `scripts/pytest-clean.sh` (`tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` and `tests/unit/test_docs_auditor_substrate.py`), **with all twenty-one Test Impact UPDATEs landed** — the ten `starting_ref="main"` arguments from task 1 and the twelve `_current_ref` patches from task 4. **Score this on zero failures in both files, not on a passed/skipped pair.** Real-checkout measurement at HEAD via `scripts/pytest-clean.sh`: the substrate file collects **212**, the git-surface file **15**, and the two together run **227 passed, 0 skipped**. So **`212 passed` in `tests/unit/test_docs_auditor_substrate.py` is this criterion met**, not missed. Do not chase the `211 passed, 1 skipped` figure quoted in Test Impact — that is a shadow-rig reading and will not reproduce in a checkout. Read the counts; exit 0 alone is not the check. Without the twelve patches the substrate file carries twelve failures, and neither the guard nor the `repo` fixture may be changed to reach green.
 - [ ] Documentation updated (`/do-docs`), including `docs/features/docs-auditor.md`.
 - [ ] No xfail conversions needed — the recon confirmed none exist for this bug.
 
@@ -468,7 +468,7 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
 ### 1. Widen the two private signatures
 - **Task ID**: build-signatures
 - **Depends On**: none
-- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`, `tests/unit/test_docs_auditor_substrate.py`
+- **Validates**: `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`, `tests/unit/test_docs_auditor_substrate.py`
 - **Assigned To**: `auditor-restore-builder`
 - **Agent Type**: builder
 - **Parallel**: false
@@ -492,7 +492,7 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
 ### 3. Install the restore owner and the escalation in `run_docs_auditor`
 - **Task ID**: build-restore-owner
 - **Depends On**: build-audit-ledger
-- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py`
+- **Validates**: `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`
 - **Assigned To**: `auditor-restore-builder`
 - **Agent Type**: builder
 - **Parallel**: false
@@ -516,11 +516,11 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
 ### 4. Write the failure-path tests
 - **Task ID**: build-failure-tests
 - **Depends On**: build-restore-owner
-- **Validates**: `tests/unit/reflections/test_docs_auditor_git_surface.py::TestWriteWindowRestore`
+- **Validates**: `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py::TestWriteWindowRestore`
 - **Assigned To**: `auditor-restore-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add class `TestWriteWindowRestore` to `tests/unit/reflections/test_docs_auditor_git_surface.py`, reusing the existing `repo`, `gh`, and `fake_redis` fixtures and the `_git` / `_porcelain` helpers.
+- Add class `TestWriteWindowRestore` to `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`, reusing the existing `repo`, `gh`, and `fake_redis` fixtures and the `_git` / `_porcelain` helpers.
 - Implement all six injection points from **Failure Path Test Strategy**, plus the four empty/invalid-input cases and the pre-write-failure-files-no-escalation case. Injection point 6 is the only assertion that catches a `try` closed one block too wide — do not drop it as redundant, and do **not** simplify it to a benign `pr_url is None` run. It must monkeypatch `_file_issue_if_new` to raise on the R5-1 title; without that raise nothing in the R5-1 block can propagate, the new handler never fires under either boundary, and both the test and mutation row 8 come back green on a broken boundary.
 - The `branch=None` empty/invalid-input case must record `subprocess.run` argv and assert the `rev-parse refs/heads/None` call is absent, not merely that `git branch -D` is. Mutation row 4 is untestable otherwise.
 - The `audit` stub must perform a **real** write into the fixture repo, not just return a path list — a stub that writes nothing cannot prove a restore happened.
@@ -529,7 +529,7 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
   - **(b) The twelve rotations in `tests/unit/test_docs_auditor_substrate.py` are yours.** Task 3's pre-write ref capture is what turns them red: that file's `repo` fixture is a bare `tmp_path` with no `git init`, so the ref read returns `None` and the guard returns `skipped` before `audit`. Each gains `patch("reflections.docs_auditor._current_ref", return_value="main")` in its `with` block — except `TestHoistedPRGuards::test_no_guard_lets_the_substrate_run`, which has no `with` block of its own and takes the patch in the class's shared `_run` staticmethod instead (see Test Impact).
   - **Net-new for task 4 = the twelve patches, one of which is the overlap test's second edit.** `test_bare_name_withhold_propagates_to_pr_body_and_telegram` is in both groups: task 1 gave it the `starting_ref="main"` argument, and you give it the `_current_ref` patch. The Success Criterion "Scoped tests pass" is not met until all twenty-two edits exist across tasks 1 and 4.
 - Do **not** repair group (b) by relaxing the `starting_ref is None` guard, and do **not** add `git init` to the shared `repo` fixture. Both are rejected in Test Impact with reasons: the first deletes the planned Empty/Invalid Input assertion, the second changes bare-name-resolution behaviour for all **121** tests taking that fixture.
-- Run scoped: `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q`. Expect **zero** failures in both files, and **read the passed/failed counts** rather than trusting exit 0 alone (#3195). Real-checkout baselines, measured at HEAD on this machine: `tests/unit/test_docs_auditor_substrate.py` is **212 passed, 0 skipped**; `tests/unit/reflections/test_docs_auditor_git_surface.py` is **15 passed** and is unaffected by cause (b); the two together are **227 passed, 0 skipped**. `212 passed` in the substrate file is the target met. The `211 passed, 1 skipped` figure in Test Impact is a shadow-rig reading kept only as evidence for the twelve-red count — it will not reproduce here, so do not chase it.
+- Run scoped: `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q`. Expect **zero** failures in both files, and **read the passed/failed counts** rather than trusting exit 0 alone (#3195). Real-checkout baselines, measured at HEAD on this machine: `tests/unit/test_docs_auditor_substrate.py` is **212 passed, 0 skipped**; `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` is **15 passed** and is unaffected by cause (b); the two together are **227 passed, 0 skipped**. `212 passed` in the substrate file is the target met. The `211 passed, 1 skipped` figure in Test Impact is a shadow-rig reading kept only as evidence for the twelve-red count — it will not reproduce here, so do not chase it.
 
 ### 5. Mutation check
 - **Task ID**: validate-mutation
@@ -564,12 +564,12 @@ Stage files by explicit path — peers share this checkout, so `git add -A` is f
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Scoped auditor tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
-| Format clean | `python -m ruff format --check reflections/docs_auditor.py tests/unit/reflections/test_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| Scoped auditor tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check reflections/docs_auditor.py tests/unit/reflections/test_reflections_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
+| Format clean | `python -m ruff format --check reflections/docs_auditor.py tests/unit/reflections/test_reflections_docs_auditor_git_surface.py tests/unit/test_docs_auditor_substrate.py` | exit code 0 |
 | New escalation exists and is distinctly titled | `grep -c "rotation aborted after writing" reflections/docs_auditor.py` | output > 0 |
 | R5-1 escalation still present | `grep -c "rotation failed to produce a PR" reflections/docs_auditor.py` | output > 0 |
-| Write-window restore test class exists | `grep -c "class TestWriteWindowRestore" tests/unit/reflections/test_docs_auditor_git_surface.py` | output > 0 |
+| Write-window restore test class exists | `grep -c "class TestWriteWindowRestore" tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` | output > 0 |
 | Caller owns the starting ref | `grep -c "starting_ref=starting_ref" reflections/docs_auditor.py` | output > 0 |
 | Docs record the new behavior | `grep -c "rotation aborted after writing" docs/features/docs-auditor.md` | output > 0 |
 | Anti-criterion: no whole-tree restore primitive | `grep -cE '"(reset\|clean)"\|"--hard"\|"checkout", "-f"' reflections/docs_auditor.py` | match count == 0 |

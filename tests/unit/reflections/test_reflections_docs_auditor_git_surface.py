@@ -6,7 +6,7 @@ path, or the sweeper's close path — every ``git`` command in those paths must
 actually run against a real repository on disk.
 
 The sanctioned pattern (no in-repo precedent existed for a synchronous
-dispatcher — ``tests/unit/reflections/test_merged_branch_cleanup.py`` patches
+dispatcher — ``tests/unit/reflections/test_reflections_merged_branch_cleanup.py`` patches
 ``asyncio.create_subprocess_exec`` because its module is async, so it is not
 reusable here): ``monkeypatch.setattr(docs_auditor.subprocess, "run",
 dispatcher)``, module-scoped, where ``dispatcher`` intercepts only
@@ -26,6 +26,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from reflections import docs_auditor
+
+# The derived FEATURE_MAP marker for this file is now 'reflections' (the rename
+# in #3175 made the basename resolve to its package). This line preserves the
+# 'validation' marker the old basename derived; item.add_marker is additive on top of
+# pytestmark, so the file carries both.
+pytestmark = [pytest.mark.validation]
 
 # ---------------------------------------------------------------------------
 # Fixtures

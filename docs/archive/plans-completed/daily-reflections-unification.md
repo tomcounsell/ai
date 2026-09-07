@@ -248,10 +248,10 @@ parent `Reflection("pm-briefings").mark_completed(duration, error=None, projects
 - [ ] `tests/unit/reflections/test_daily_report_audio_guard.py` — UPDATE: import path moves to `reflections.pm_audio_briefing.daily_log` (or shared guards module). Test logic unchanged.
 - [ ] `tests/unit/test_reflections_auditing.py` (`run_log_review` tests) — REPLACE: old tests target `reflections.auditing.run_log_review`; new tests target `reflections.pm_audio_briefing.log_audit.build()` (or whatever the per-slot builder is named). Assertions about findings count, file-size detection, regression markers preserved.
 - [ ] Existing `pm_audio_briefing` tests (if any) — UPDATE: morning brief content path moves from `__init__.py` into `morning.py`; tests follow imports. Functional behavior unchanged.
-- [ ] **NEW** `tests/integration/reflections/test_pm_briefings_dispatch.py` — CREATE: end-to-end with three configured projects (one disabled, one owned-by-other-machine, one enabled-and-owned with two slots). Asserts: zero deliveries from disabled / foreign-machine projects; exactly two deliveries from the owned project (one per matching slot); per-(project × slot) Reflection records exist; aggregate `mark_completed(projects=[...])` payload populated correctly.
-- [ ] **NEW** `tests/unit/reflections/test_pm_briefings_slot_match.py` — CREATE: slot-match helper unit tests (HH:MM matching within 5-min window, TZ awareness, edge of day boundary).
-- [ ] **NEW** `tests/unit/reflections/test_pm_briefings_skip_when_empty.py` — CREATE: empty-collector slot returns `"skipped"`, releases lock, enqueues nothing.
-- [ ] **NEW** `tests/unit/reflections/test_pm_briefings_machine_gate.py` — CREATE: machine-ownership filter unit tests (this machine, foreign machine, empty `_resolve_machine()` result).
+- [ ] **NEW** `tests/integration/reflections/test_reflections_pm_briefings_dispatch.py` — CREATE: end-to-end with three configured projects (one disabled, one owned-by-other-machine, one enabled-and-owned with two slots). Asserts: zero deliveries from disabled / foreign-machine projects; exactly two deliveries from the owned project (one per matching slot); per-(project × slot) Reflection records exist; aggregate `mark_completed(projects=[...])` payload populated correctly.
+- [ ] **NEW** `tests/unit/reflections/test_reflections_pm_briefings_slot_match.py` — CREATE: slot-match helper unit tests (HH:MM matching within 5-min window, TZ awareness, edge of day boundary).
+- [ ] **NEW** `tests/unit/reflections/test_reflections_pm_briefings_skip_when_empty.py` — CREATE: empty-collector slot returns `"skipped"`, releases lock, enqueues nothing.
+- [ ] **NEW** `tests/unit/reflections/test_reflections_pm_briefings_machine_gate.py` — CREATE: machine-ownership filter unit tests (this machine, foreign machine, empty `_resolve_machine()` result).
 - [ ] **NEW** `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py` — CREATE: assert that an existing `pm_briefing.angles + pm_briefing.schedule` config (single morning slot) is interpreted as a one-element slot list without requiring `projects.json` edits.
 
 ## Rabbit Holes
@@ -415,7 +415,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 ### 2. Build the slot-driven dispatch skeleton
 - **Task ID**: build-dispatch
 - **Depends On**: build-morning-baseline
-- **Validates**: `tests/unit/reflections/test_pm_briefings_slot_match.py`, `tests/unit/reflections/test_pm_briefings_machine_gate.py`, `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py`
+- **Validates**: `tests/unit/reflections/test_reflections_pm_briefings_slot_match.py`, `tests/unit/reflections/test_reflections_pm_briefings_machine_gate.py`, `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py`
 - **Informed By**: spike-2 (`mark_completed(projects=)` shipped via #1251), spike-4 (`run_per_project_audit` pattern)
 - **Assigned To**: pm-briefings-dispatch-builder
 - **Agent Type**: builder
@@ -468,7 +468,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 - **Assigned To**: pm-briefings-test-eng
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Create new tests per Test Impact: `test_pm_briefings_dispatch.py`, `test_pm_briefings_slot_match.py`, `test_pm_briefings_skip_when_empty.py`, `test_pm_briefings_machine_gate.py`, `test_pm_briefings_legacy_config_migration.py`.
+- Create new tests per Test Impact: `test_reflections_pm_briefings_dispatch.py`, `test_reflections_pm_briefings_slot_match.py`, `test_reflections_pm_briefings_skip_when_empty.py`, `test_reflections_pm_briefings_machine_gate.py`, `test_pm_briefings_legacy_config_migration.py`.
 - Update existing tests per Test Impact (path moves only, no logic changes for guards/renderers).
 - Delete the 24 orphan `logs/reflections/report_2026-*.md` stubs.
 - Verify `logs/reflections/` is no longer written (`grep -rn "logs/reflections" --include='*.py' .`); remove gitignore entry if safe.

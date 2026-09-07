@@ -282,7 +282,7 @@ tick → owner gone → git/GitHub check → (shipped? steer PM with PR link for
 ### Exception Handling Coverage
 - [ ] Every `except Exception` in the reconciler (scan, per-expectation, gh/git subprocess,
       steer/create rungs) has a test asserting a `logger.warning` and loop continuation —
-      mirror `tests/unit/reflections/test_sdlc_progress_check.py` patterns.
+      mirror `tests/unit/reflections/test_reflections_progress_check.py` patterns.
 - [ ] `_write_goal_data` derivation failure cannot lose the goal write (derive before save;
       test with malformed entries).
 - [ ] Migration per-row failure costs only that row (logged), never aborts the sweep.
@@ -582,7 +582,7 @@ read absorbs it.
 ### 4. Expectation reconciler reflection
 - **Task ID**: build-reconciler
 - **Depends On**: build-job-model
-- **Validates**: tests/unit/reflections/test_expectation_reconciler.py (create),
+- **Validates**: tests/unit/reflections/test_reflections_expectation_reconciler.py (create),
   integration test with fake gh/git
 - **Assigned To**: reconciler-builder
 - **Agent Type**: builder

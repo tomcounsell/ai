@@ -1,6 +1,6 @@
 """Direct unit tests for reflections/utilities.py::resolve_eng_group.
 
-Every call site in tests/unit/reflections/test_sdlc_upvote_lanes.py
+Every call site in tests/unit/reflections/test_reflections_upvote_lanes.py
 monkeypatches `resolve_eng_group` away, so its real body has no direct
 coverage. These tests exercise it in isolation.
 """

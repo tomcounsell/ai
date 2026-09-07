@@ -16,6 +16,8 @@ pytest tests/unit/ -n0
 pytest tests/integration/ -n0
 
 # By feature (works across all levels)
+# The counts below predate several file splits and are low; run the selector
+# for the current number rather than quoting them.
 pytest -m sdlc                   # All SDLC pipeline tests (516)
 pytest -m messaging              # All messaging tests (327)
 pytest -m sessions               # All session tests (293)
@@ -296,7 +298,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_docs_auditor_substrate.py` | 196 | Documentation reference validation |
-| unit | `test_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
+| unit | `test_reflections_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
 | unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
 | unit | `test_validate_no_gos_justification.py` | 77 | No-Gos section justification validation |
 | unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |
@@ -325,6 +327,21 @@ tests/
 | unit | `test_reflections_scheduling.py` | 19 | Launchd infrastructure |
 | unit | `test_reflection_model.py` | 12 | Reflection model: mark_completed(), run_history append |
 | integration | `test_reflections_redis.py` | 20 | Reflection persistence |
+
+The 23 files in `tests/unit/reflections/` and `tests/integration/reflections/` all
+resolve to this marker. #3175 renamed 20 of them to lead with `test_reflections_`,
+because a basename is the only thing `FEATURE_MAP` looks at, and
+`pytest -m reflections` was collecting 36 of the packages' 399 tests. Two already
+led with that prefix; the remaining file, `test_stall_advisory_reflection.py`,
+resolves through the singular `reflection` key instead. Rule R1 asks only that a
+file's derived marker equal its package's, so a new file here must resolve to
+`reflections` — leading with `test_reflections_` is the reliable way to get
+there.
+
+| Level | Package | Files | Description |
+|-------|---------|------:|-------------|
+| unit | `tests/unit/reflections/` | 21 | Daily log, PM briefings, docs auditor, expectation reconciler, SDLC progress/upvote lanes |
+| integration | `tests/integration/reflections/` | 2 | PM briefings dispatch and end-to-end |
 
 ### `tools` — Individual tool tests
 
@@ -495,7 +512,10 @@ enforces this in CI, not just in this note.
 ## Adding Tests for New Features
 
 1. **Pick the right level**: Unit for pure logic, integration for Redis/network, e2e for multi-component flows
-2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags
+2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags.
+   Inside a themed package whose own directory name resolves (`tests/unit/reflections/`,
+   `tests/unit/bridge/`, ...), guard rule R1 requires the basename to resolve to *that*
+   package's marker — leading with `test_{package}_` is the reliable way to get there.
 3. **Or add a new entry** to `FEATURE_MAP` if creating a new feature area
 4. **Add to this index** under the appropriate feature section
 5. **Run the audit** (`python tests/marker_map.py --audit`) before opening the PR — it fails
@@ -551,9 +571,12 @@ for what each rule can and cannot see):
   wrong (see the feature doc's coverage-boundary section).
 
 - **A fragment match.** The winning key does not have to be a whole word: `config` is a
-  literal substring of `configured`, so `test_pm_briefings_no_slots_configured.py` tags
-  `config` even though nothing named "config" was intended. Guard rule R3 catches this
-  one suite-wide, with no package-directory signal required.
+  literal substring of `configured`. `test_pm_briefings_no_slots_configured.py` used to
+  tag `config` on exactly that fragment, even though nothing named "config" was
+  intended. #3175 renamed it to `test_reflections_pm_briefings_no_slots_configured.py`,
+  so its stem now hits `reflections` first and the accidental `config` tag is gone.
+  Guard rule R3 catches this class suite-wide, with no package-directory signal
+  required.
 
 A `--collect-only` total-count check cannot catch any of these: the total is unchanged,
 only the tagging moves. So when splitting a file:
@@ -568,6 +591,11 @@ only the tagging moves. So when splitting a file:
 3. If the audit is clean but you still want to eyeball the count shift, compare
    `pytest -m <marker> --collect-only -q | tail -1` before and after for every marker the
    file touches.
+
+The same holds for a **rename**, with one extra step: the old basename's marker is
+simply gone, so any marker a selector still wants has to be declared as a module-level
+`pytestmark` in the renamed file (the collection hook's `add_marker` is additive, so the
+file then carries both). That is remedy 1 in the feature doc's remediation ladder.
 
 This is no longer a manual habit to remember: `tests/unit/test_feature_map_markers.py`
 runs the same audit as an ordinary test, so a mistagged basename fails the suite instead

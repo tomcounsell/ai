@@ -10,7 +10,7 @@ and why:
   `_ledger_has_recorded_stage`, `_has_pr_on_branch`, `_count_live_lanes`) are
   monkeypatched directly -- these are exactly the seams the module's own
   design intends as independently testable units, mirroring how
-  `test_sdlc_progress_check.py` fences `AgentSession.query` at the boundary
+  `test_reflections_progress_check.py` fences `AgentSession.query` at the boundary
   rather than re-testing Popoto.
 * `create_session` and `await_sent_message_id` are patched at their *source*
   modules (`tools.valor_session`, `bridge.outbox_ack`) because the reflection
@@ -27,7 +27,11 @@ import pytest
 
 from reflections import sdlc_upvote_lanes as m
 
-pytestmark = [pytest.mark.unit]
+# The derived FEATURE_MAP marker for this file is now 'reflections' (the rename
+# in #3175 made the basename resolve to its package). This line preserves the
+# 'sdlc' marker the old basename derived; item.add_marker is additive on top of
+# pytestmark, so the file carries both.
+pytestmark = [pytest.mark.unit, pytest.mark.sdlc]
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +312,7 @@ class TestSkipGates:
 
 class _GateFakeQuery:
     """``AgentSession.query`` stand-in routed by the ``slug`` filter kwarg,
-    mirroring the ``_FakeQuery`` pattern in test_sdlc_progress_check.py."""
+    mirroring the ``_FakeQuery`` pattern in test_reflections_progress_check.py."""
 
     def __init__(self, rows):
         self.rows = rows

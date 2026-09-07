@@ -468,7 +468,7 @@ import-path rewrite", which is false: an import rewriter finds nothing to rewrit
 in any of them and their references survive untouched:
 
 - [ ] `tests/integration/test_updated_at_heal.py:51` — docstring, **path spelling** `bridge/utc.py::to_unix_ts`
-- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py:347` — comment, dotted spelling
+- [ ] `tests/unit/reflections/test_reflections_upvote_lanes.py:347` — comment, dotted spelling
 - [ ] `tests/unit/session_runner/test_liveness.py:181` — docstring, dotted spelling
 
 **Test files carrying both an import and a prose reference** — UPDATE: both must
@@ -784,7 +784,7 @@ Dotted spelling — `bridge.utc.…` → `utils.utc.…`:
 - [ ] `agent/session_stall_classifier.py:11` — module docstring, "Uses bridge.utc.to_unix_ts for all datetime → float conversions."
 - [ ] `bridge/telegram_bridge.py:155` — docstring, ``bridge.utc.to_unix_ts``
 - [ ] `models/job.py:695` — docstring, ``bridge.utc.to_unix_ts(job.last_active_at)``
-- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py:347` — comment, "per bridge.utc.to_unix_ts's"
+- [ ] `tests/unit/reflections/test_reflections_upvote_lanes.py:347` — comment, "per bridge.utc.to_unix_ts's"
 - [ ] `tests/unit/session_runner/test_liveness.py:181` — docstring, "(mirrors bridge.utc.to_unix_ts)"
 - [ ] `tests/unit/test_reconciler.py:1132` — docstring, "pinned via bridge.utc.to_unix_ts"
 - [ ] `tests/unit/test_session_stall_classifier.py:297` and `:298` — the two-line comment explaining the patch target, naming `bridge.utc` once each

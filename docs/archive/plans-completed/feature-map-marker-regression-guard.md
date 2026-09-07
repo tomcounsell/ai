@@ -28,7 +28,7 @@ produce this, all live in the repo today. This plan guards the first two and fil
    hit, so a generic key positioned early beats a specific key positioned late. spike-1 of #2879
    found `test_worktree_manager_config.py` would tag `config` rather than `git`, because `config`
    sits at index 45 and `worktree_manager` at index 63. The same mechanism is live now:
-   `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` tags `config`, and
+   `tests/unit/reflections/test_reflections_pm_briefings_no_slots_configured.py` tags `config`, and
    `tests/unit/session_runner/test_schema_routing.py` tags `messaging` via `routing`.
 2. **Fragment match.** The match is a bare substring, not a token, so a pattern can match the
    inside of a longer word. `test_youtube_transcription.py` tags `messaging` because `transcript`
@@ -222,7 +222,7 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
   `tests/unit/sdlc_session_ensure`, `tests/unit/valor_telegram`, `tests/unit/worktree_manager`),
   covering 47 files, of which **21 disagree with their directory**: 18 of the 19 files in
   `tests/unit/reflections/` (only `test_reflection_*`-style names already resolve correctly), both
-  files in `tests/integration/reflections/`, and `tests/unit/bridge/test_dispatch.py`.
+  files in `tests/integration/reflections/`, and `tests/unit/bridge/test_bridge_dispatch.py`.
   The four packages produced by #2879 and #2941 whose directory name resolves
   (`sdlc_router_decision`, `sdlc_session_ensure`, `valor_telegram`, `worktree_manager`) are
   **100% consistent**, which is PR #3005's 24/24 claim reproduced independently.
@@ -245,7 +245,7 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
   plural (`test_reflections_main.py`, `test_update_reflections_yaml.py`,
   `test_ui_reflections_data.py` and ten more), where both spellings map to the same `reflections`
   marker and nothing is actually mistagged. The remaining **three are genuine fragment matches**:
-  `test_pm_briefings_no_slots_configured.py` (`config` inside `configured`, tagged `config`),
+  `test_reflections_pm_briefings_no_slots_configured.py` (`config` inside `configured`, tagged `config`),
   `test_youtube_transcription.py` (`transcript` inside `transcription`, tagged `messaging`), and
   `test_long_task_checkpointing.py` (`checkpoint` inside `checkpointing`, tagged `validation`).
   Adding `"reflections": "reflections"` immediately before the existing `"reflection"` key erases
@@ -269,8 +269,8 @@ The population is `git ls-files 'tests/**/test_*.py' 'tests/test_*.py'`, 834 fil
   is taken from the directory, then "the effective marker equals the directory's marker" is true
   by construction and the guard asserts nothing. The renaming alternative is partial: prefixing
   each violating basename with its own package directory name fixes 19 of the 21 R1 violations,
-  and the two that survive are `tests/unit/reflections/test_sdlc_progress_check.py` and
-  `tests/unit/reflections/test_sdlc_upvote_lanes.py`, which still resolve to `sdlc` because `sdlc`
+  and the two that survive are `tests/unit/reflections/test_reflections_progress_check.py` and
+  `tests/unit/reflections/test_reflections_upvote_lanes.py`, which still resolve to `sdlc` because `sdlc`
   sits at insertion index 15, ahead of `reflection` at 44. The ordering trap that motivates the
   guard also blocks the obvious remedy, on a smaller set than first stated.
 - **Confidence**: high. Re-derived in critique round 2. An earlier draft of this spike and the body
@@ -463,10 +463,10 @@ couple, that is evidence R2 is the wrong rule and should be dropped rather than 
 meaninglessness.
 
 **The baseline as measured at `f3594dd23`: 24 distinct paths.** 21 from R1 (18 in
-`tests/unit/reflections/`, 2 in `tests/integration/reflections/`, `tests/unit/bridge/test_dispatch.py`),
+`tests/unit/reflections/`, 2 in `tests/integration/reflections/`, `tests/unit/bridge/test_bridge_dispatch.py`),
 2 from R2 (`tests/unit/session_runner/test_schema_routing.py`,
 `tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`), and 1 further from R3
-(`tests/unit/test_long_task_checkpointing.py`; `test_pm_briefings_no_slots_configured.py` also
+(`tests/unit/test_long_task_checkpointing.py`; `test_reflections_pm_briefings_no_slots_configured.py` also
 violates R3 but is already counted under R1). Each entry carries its own reason string. Draining
 the baseline is #3175.
 
@@ -619,7 +619,7 @@ read-only, so concurrent workers cannot interfere with it or with each other thr
 
 - [SEPARATE-SLUG #3175] Draining the 24-entry `KNOWN_MISTAGS` baseline: fixing the 18
   `tests/unit/reflections/` files, the 2 `tests/integration/reflections/` files,
-  `tests/unit/bridge/test_dispatch.py`, `tests/unit/session_runner/test_schema_routing.py`,
+  `tests/unit/bridge/test_bridge_dispatch.py`, `tests/unit/session_runner/test_schema_routing.py`,
   `tests/unit/hooks/test_pre_tool_use_foreground_subagents.py`, and
   `tests/unit/test_long_task_checkpointing.py`. Filed with its own measurements and acceptance
   criteria, including the requirement that no file loses a marker. **Scope note:** #3175's title
@@ -941,7 +941,7 @@ general review pass.
 | Stem is the shipped global replace, not a prefix strip (anti-criterion) | `! grep -qE 'removeprefix\|removesuffix\|re\.(sub\|match)' tests/marker_map.py` | exit code 0 |
 | Stem fidelity fixtures hold | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_test_judge.py')==(None,None); assert resolve_marker('test_validate_test_impact.py')==(None,None)"` | exit code 0 |
 | Resolution has one implementation (anti-criterion) | `! grep -qF 'for pattern, marker_name in FEATURE_MAP' tests/conftest.py` | exit code 0 |
-| Resolver was not made directory-authoritative (anti-criterion) | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_pm_briefings_builder.py')[0] is None"` | exit code 0 |
+| Resolver was not made directory-authoritative (anti-criterion) | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_reflections_pm_briefings_builder.py')[0] is None"` | exit code 0 |
 | Baseline did not grow (anti-criterion) | `python -c "from tests.marker_map import KNOWN_MISTAGS; assert len(KNOWN_MISTAGS) <= 24, len(KNOWN_MISTAGS)"` | exit code 0 |
 | youtube test retagged to tools | `python -c "from tests.marker_map import resolve_marker; assert resolve_marker('test_youtube_transcription.py')[0] == 'tools'"` | exit code 0 |
 | No marker lost or gained | `test "$(python tests/marker_map.py --report \| grep -vc 'NONE$')" -eq 280` | exit code 0 |
