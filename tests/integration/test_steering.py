@@ -182,6 +182,33 @@ class TestSteeringQueue:
     def test_pop_all_empty_queue(self):
         assert pop_all_steering_messages(_uid("nonexistent_session")) == []
 
+    def test_parse_failure_bound_stops_the_drain_and_leaves_the_rest_queued(self):
+        """MAX_CONSECUTIVE_PARSE_FAILURES must stop the drain, not just log it.
+
+        Regression coverage for a mutation that survived review: replacing
+        the bound's condition with `if False:` left 117 tests green because
+        nothing exercised the actual stopping behavior. Push more
+        unparseable entries than the bound, followed by one well-formed
+        message, and prove the good message stays on the list rather than
+        being returned -- the only observable evidence the drain gave up
+        early instead of draining straight through.
+        """
+        from agent.steering import MAX_CONSECUTIVE_PARSE_FAILURES
+
+        session_id = _uid("test_parse_failure_bound")
+        key = _queue_key(session_id)
+        r = _get_redis()
+        for _ in range(MAX_CONSECUTIVE_PARSE_FAILURES + 5):
+            r.rpush(key, "not valid json")
+        push_steering_message(session_id, "should stay queued", "Tom")
+
+        messages = pop_all_steering_messages(session_id)
+
+        assert messages == []
+        # The drain gave up before reaching the well-formed message; it and
+        # the trailing malformed entries remain on the list.
+        assert r.llen(key) > 0
+
     def test_concurrent_drainers_split_disjointly(self):
         """Two concurrent drainers of one session_id partition the queue with no loss/dup.
 

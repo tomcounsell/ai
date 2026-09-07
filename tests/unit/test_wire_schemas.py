@@ -59,6 +59,21 @@ class TestOutboxPayload:
         assert "type" not in emitted
         assert emitted["v"] == 1
 
+    def test_dump_keeps_an_explicit_none_but_omits_an_unset_field(self):
+        """``exclude_unset`` is the rule, not ``exclude_none`` (#3183 review tech debt).
+
+        ``exclude_none`` drops every ``None``-valued key regardless of
+        whether the writer set it -- indistinguishable from ``exclude_unset``
+        for a field that was never touched, but wrong for a field the writer
+        deliberately set to ``None``. ``reply_to=None`` here is explicit (no
+        message to reply to); ``session_id`` is left unset entirely. Only
+        the first must survive on the wire.
+        """
+        emitted = json.loads(dump(OutboxPayload(chat_id="1", text="hi", reply_to=None)))
+        assert "reply_to" in emitted
+        assert emitted["reply_to"] is None
+        assert "session_id" not in emitted
+
     def test_correlation_id_rides_the_payload(self):
         emitted = json.loads(dump(OutboxPayload(text="hi", correlation_id="cid-1")))
         assert emitted["correlation_id"] == "cid-1"
