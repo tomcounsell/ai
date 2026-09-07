@@ -128,12 +128,19 @@ sits in `KNOWN_MISTAGS` while declaring `pytest.mark.reflections` itself.
   `validation`. **Measured effect on this issue's baseline: none.**
 
 **Active plans in `docs/plans/` overlapping this area:**
-`docs/plans/feature-map-stem-anchored-strip.md` (`tracking:` → #3184) is the
-adjacent lane. Its work is **merged**, so the overlap is historical rather than
-live. This plan does not edit that document. The two share
-`tests/marker_map.py`; #3184 owned `_stem`, this plan owns `FEATURE_MAP`
-resolution semantics, `KNOWN_MISTAGS`, and the assignment mechanism in
-`tests/conftest.py`.
+Two, neither of them blocking.
+
+- `docs/plans/feature-map-stem-anchored-strip.md` (`tracking:` → #3184) is the
+  adjacent lane. Its work is **merged**, so the overlap is historical rather
+  than live. This plan does not edit that document. The two share
+  `tests/marker_map.py`; #3184 owned `_stem`, this plan owns `FEATURE_MAP`
+  resolution semantics, `KNOWN_MISTAGS`, and the assignment mechanism in
+  `tests/conftest.py`.
+- `docs/plans/pytest-clean-zero-tests-fail-closed.md` (`tracking:` → #3195,
+  `status: Ready`) touches `scripts/pytest-clean.sh` only. It names
+  `tests/marker_map.py` in its own Freshness Check as a coordination note and
+  explicitly adds no `FEATURE_MAP` entry. **Disjoint file sets; no
+  coordination needed beyond not landing both in one branch.**
 
 ## Prior Art
 
@@ -432,9 +439,14 @@ whole-token basename match that cannot fragment.
   `worker/` is touched, no Popoto model changes, no migration. Reverting the
   commit restores the previous markers exactly.
 - **Blast radius**: `tests/marker_map.py`, `tests/conftest.py`,
-  `tests/unit/test_feature_map_markers.py`, `docs/features/feature-map-marker-guard.md`.
-  Nothing imports `tests/marker_map.py` outside `tests/`
-  (verified: `git grep -l marker_map` returns those three files only).
+  `tests/unit/test_feature_map_markers.py`, plus the prose that describes them:
+  `docs/features/feature-map-marker-guard.md` and `tests/README.md`.
+  **No production code imports `tests/marker_map.py`.** `git grep -ln marker_map`
+  returns exactly three code files — `tests/conftest.py`, `tests/marker_map.py`,
+  `tests/unit/test_feature_map_markers.py` — and the rest are documents.
+  `tests/README.md` additionally publishes per-marker test *counts*
+  (`sdlc` 516, `messaging` 327, `sessions` 293) that this change moves, so it is
+  a required documentation update rather than an optional one.
 - **Systemic risk worth naming**: the marker set is a *selection* mechanism, and
   widening it widens what `-m X` collects. 43 files gain a marker, so
   `pytest -m sessions` grows from 43 to 61 files. That is the intended gain, but
