@@ -1252,7 +1252,7 @@ spike-6; a mismatch is a real failure, not a tolerance to widen.
 | Census: exactly one marker lost | `python scripts/marker_census_diff.py tests/data/marker_census_before.tsv --expect-losses tests/unit/reflections/test_pm_briefings_no_slots_configured.py:config` | exit code 0 |
 | Census: 43 files gain a marker | `python scripts/marker_census_diff.py tests/data/marker_census_before.tsv --count-gained` | output contains `43` |
 | `DIRECTORY_MAP` is populated | `python -c "import sys; sys.path.insert(0,'.'); from tests.marker_map import DIRECTORY_MAP; sys.exit(0 if len(DIRECTORY_MAP) >= 9 else 1)"` | exit code 0 |
-| Empty `DIRECTORY_MAP` fails loudly | `python -c "import sys; sys.path.insert(0,'.'); import tests.marker_map as m; m.DIRECTORY_MAP={}; ${'t'}ry: m.run_audit(); sys.exit(1)\nexcept RuntimeError: sys.exit(0)"` | exit code 0 |
+| Empty `DIRECTORY_MAP` fails loudly | `./scripts/pytest-clean.sh tests/unit/test_feature_map_markers.py -k empty_directory_map -q` | exit code 0 |
 | R1 is retired, not renamed | `grep -c 'def check_r1' tests/marker_map.py` | match count == 0 |
 | R3 is retired, not renamed | `grep -c 'def check_r3' tests/marker_map.py` | match count == 0 |
 | R4 exists | `grep -c 'def check_r4' tests/marker_map.py` | output > 0 |
