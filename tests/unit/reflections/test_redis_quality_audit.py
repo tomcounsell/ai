@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-pytestmark = pytest.mark.sdlc
+pytestmark = [pytest.mark.unit, pytest.mark.reflections]
 
 
 class TestChatUpdatedAtIsFloat:
