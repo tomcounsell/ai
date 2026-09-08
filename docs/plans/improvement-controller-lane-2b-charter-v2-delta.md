@@ -350,15 +350,53 @@ One entry per resource charter §8 names: `workspace_personal`, `workspace_work`
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+
+Both new guards are fail-closed leaves, so their exception paths are the product, not an edge case.
+
+- `is_open_source`: `subprocess.TimeoutExpired`, `FileNotFoundError` (no `gh` on PATH), `json.JSONDecodeError`, `KeyError` on `visibility`, and any non-zero exit each return `False`. Tested individually, not as one blanket "error" case — a single `except Exception` with one test would let a typo in the JSON key masquerade as a caught timeout.
+- `probe`: the same five failure shapes each resolve to `unknown` for the affected resource while every other resource still reports. One dead `op` call must not blank the whole report.
+- `load_from_file`: a missing file, an unreadable file, absent frontmatter, malformed YAML, and a wrong `owner` all return `None` and write nothing. `compute_plan_hash` returning `None` short-circuits before any query.
+- `get_goals`: an empty namespace, a charter row whose `text` reference is missing from the content store, and a `ContentField` load raising all render the partial with an empty state rather than a 500.
+
+### Empty/Invalid Input Handling
+
+- `is_open_source("")`, an unknown project key, a project with no `github` block, and a `github` block missing `org` or `repo` → `False`.
+- `probe()` against a vault with zero matching titles → every resource `absent` or `unknown`, never a raise, never an empty dict.
+- `load_from_file` on a charter with `version` absent or non-numeric → the row is still created with the digest and text; the digest is the identity and a malformed version number is a display problem, not a seeding one. `owner` is the only field whose absence refuses.
+- `load_from_file` called twice on an unchanged file → one row, the second call returning the first.
+- `get_goals` with no charter row → the partial renders with "no charter seeded", not a `None` dereference.
+
+### Error State Rendering
+
+- `goals.html` renders three distinguishable states per §11 heading: seeded content, "nothing yet, written by lane N", and "unavailable" when the underlying read raised. Collapsing the second and third into one blank would let a broken query read as an honest zero — which is Risk 2 of the parent plan, on a smaller surface.
+- The charter block renders `version`, `effective`, and the digest in full. A truncated digest cannot be compared against the file by a human, and comparing it is the point.
 
 ## Test Impact
 
-_placeholder_
+- [ ] `tests/unit/test_improvement_models.py` — UPDATE: `INDEXED_VOCABULARIES[ImprovementCase]` gains `"priority_area": PRIORITY_AREAS`; `test_declared_vocabularies_are_small` gains a per-field maximum map (default 8, one entry at 11 with its reason); import `PRIORITY_AREAS` from `models.improvement_case`
+- [ ] `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation` — UPDATE: per-model index maximum (default 2, `ImprovementCase: 3` with its reason). `test_improvement_model_indexes_are_low_cardinality` is deliberately **not** changed — spike-1 removed the reason to
+- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact list gains `"get_goals"`; it stays an exact list
+- [ ] `tests/unit/test_ui_app.py::test_index_page_links_both_improvement_partials` — REPLACE: rename to `..._links_all_improvement_partials` and assert the third `hx-get` alongside the two existing ones
+- [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` currently has no coverage there at all (`git grep ImprovementSettings -- tests/` returns only `test_improvement_evidence.py`). Add the defaults case — `daily_paid_inference_usd == 10.00`, `weekly_infrastructure_usd == 50.00`, `budget_day_boundary == "UTC"`, `budget_week_start == "monday"` — and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not fields on the model
+- [ ] `tests/unit/test_improvement_charter.py` — CREATE: load twice creates one row; a changed byte creates a second and leaves the first untouched; a file without `owner: Tom Counsell` is refused and writes nothing; a CRLF copy digests identically to an LF copy; `pinned()` returns the newest row
+- [ ] `tests/unit/test_improvement_eligibility.py` — CREATE: public `True`; private `False`; missing `github` block `False`; missing `org`/`repo` `False`; non-zero `gh` exit `False`; timeout `False`; unparseable JSON `False`; cache hit issues no subprocess
+- [ ] `tests/unit/test_improvement_resources.py` — CREATE: every resource classified; a seeded fake credential never appears anywhere in the returned structure at any depth; a non-zero `op` exit yields `unknown` and not `absent`; one failing resource does not blank the others; `probe()` never raises
+- [ ] `tests/unit/test_env_declaration_readers.py` — NO CHANGE, but must be re-run: only `IMPROVEMENT__ENABLED` is declared in `.env.example` and the rename touches no declaration. Verified at plan time; re-verified by the Verification table
+- [ ] `tests/unit/test_reflection_register.py`, `tests/unit/test_improvement_evidence.py`, `tests/unit/test_length_safe_content_store.py` — NO CHANGE: this lane touches neither the collection tick, the evidence adapters, nor the content store. Listed so the validator confirms they still pass rather than assuming it
 
 ## Rabbit Holes
 
-_placeholder_
+- **Deleting `ImprovementCase.priority` to make room for `priority_area`.** Tempting, since `priority` has no writer either and the vocabulary bound would then need no exemption. Rejected: `priority` is urgency and `priority_area` is charter §3 classification; they are orthogonal and lane 3 writes both. Removing a field the parent plan never sanctioned removing, to avoid a two-line test amendment, is the wrong trade. If a critique disagrees, it is a one-line change either way.
+- **Making `digest` indexed anyway by adding an exemption to `unbounded_markers`.** The guard is name-based on purpose, so that a field added later without thought still fails. Punching a hole in it to save a Python-side match over single-digit rows spends a durable guard on a non-problem.
+- **Building the paid-inference meter.** `daily_paid_inference_usd` is a number in a settings file after this lane; nothing reads it and nothing settles a dollar. The meter is `tools/paid_inference_meter.py` and belongs to #3215. This lane's only obligation is to stop the feature doc from claiming metering exists.
+- **Writing the ranking snapshot.** Gap G's "the ordered list is a durable artifact" is lane 5 (#3217). The issue's Dropped bucket names it explicitly. `ranking_rationale` is a free-text field on a case; it is not a snapshot.
+- **Creating the improvement control namespace for the eligibility cache.** Forbidden by the issue and resolved by making the cache process-local instead. If a builder finds themselves designing a Redis key schema, they have left the lane.
+- **Adding a `downstream_sign` tag to replace `objective`.** Considered upstream and rejected by Tom (issue Dropped bucket). `objective` is deleted, full stop.
+- **Rewriting the charter model's supersede semantics into a full amendment flow.** The loader appends and never supersedes; the docstring is corrected to match. Building the human-driven supersede path — `valor-improve` writing `state="superseded"` — is lane 3's, and doing it here would mean designing a CLI this lane may not create.
+- **Editing `docs/improvement-charter.md`.** Tom owns it. Not a rabbit hole so much as a wall; it is also a No-Go and a Verification row.
+- **Chasing every `git grep objective` hit.** Two of the four files that match are ordinary English in unrelated modules (`tools/memory_eval/query_set.py:9`, `tools/valor_session.py:1141`). Touching them is scope creep with a rename's disguise.
+- **Backfilling `charter_digest` onto existing rows.** There are none. `ImprovementCase` has no writer on `main`, so the tables are empty and a data migration would migrate nothing.
 
 ## Risks
 
