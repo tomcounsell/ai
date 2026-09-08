@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+
+from tools.process_lookup import find_python_service_pids, is_own_ancestor
 
 logger = logging.getLogger(__name__)
 
@@ -151,13 +154,8 @@ def run_cmd(
 
 def get_bridge_pid() -> int | None:
     """Get PID of running bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "telegram_bridge.py"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")
+    return pids[0] if pids else None
 
 
 def is_bridge_running() -> bool:
@@ -239,20 +237,19 @@ def restart_service(project_dir: Path) -> bool:
 
 
 def get_worker_pid() -> int | None:
-    """Get PID of running worker process."""
-    try:
-        result = run_cmd(["pgrep", "-fi", "python -m worker"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    try:
-        result = run_cmd(["pgrep", "-fi", "python.*worker/__main__"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    """Get PID of running worker process.
+
+    Both launch shapes are accepted: ``python -m worker`` (how launchd starts
+    it) and ``python .../worker/__main__.py`` (a direct start).
+
+    Ordering (#3164): the old ``pgrep`` probe preferred the ``-m worker`` shape
+    and only fell back to the script shape; this ORs both selectors and takes
+    the lowest matching PID. The answer can therefore differ from the old one
+    only when both launch shapes are live at once, which no installed path
+    produces — the launchd plist is the sole worker launcher.
+    """
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    return pids[0] if pids else None
 
 
 def is_worker_running() -> bool:
@@ -723,13 +720,8 @@ def is_update_cron_installed() -> bool:
 
 def get_email_pid() -> int | None:
     """Get PID of running email bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "bridge.email_bridge"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(module="bridge.email_bridge")
+    return pids[0] if pids else None
 
 
 def is_email_running() -> bool:
@@ -754,17 +746,39 @@ def is_email_configured(project_dir: Path) -> bool:
     return False
 
 
+def _signal_pid(pid: int, sig: int) -> None:
+    """Send ``sig`` to ``pid``.
+
+    A module-level seam so a test can patch signalling on *this* module instead
+    of on the shared ``os`` module, whose ``kill`` every other import in the
+    process also sees.
+    """
+    os.kill(pid, sig)
+
+
 def stop_email(project_dir: Path) -> bool:
     """Stop the email bridge. Returns True if it stopped."""
     service_script = project_dir / "scripts" / "valor-service.sh"
     if not service_script.exists():
         pid = get_email_pid()
-        if pid:
-            import os
-            import signal
-
+        # Never SIGTERM the email bridge this process is running inside (#3164).
+        # `get_email_pid` is ancestor-safe now, so a hosted caller can be handed
+        # its own ancestor's PID; signalling it would take the caller down.
+        # Skipping the kill also means we do not claim it stopped — the
+        # `is_email_running()` return below still reports it up.
+        # `on_unreadable=True`: this is a kill path, so an unreadable process
+        # tree must mean "refuse to signal" rather than "proceed" (see
+        # `is_own_ancestor`'s docstring for why the restart gate in
+        # `scripts/update/run.py` takes the opposite polarity).
+        if pid and is_own_ancestor(pid, on_unreadable=True):
+            logger.warning(
+                "stop_email: email bridge pid %s is an ancestor of this process — "
+                "refusing to SIGTERM it; stop it from outside a hosted session",
+                pid,
+            )
+        elif pid:
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal_pid(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         return not is_email_running()
