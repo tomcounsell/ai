@@ -72,15 +72,117 @@ Sibling issues and PRs re-resolved at plan time: #3177 OPEN, #3215 OPEN, #3216 O
 
 ## Research
 
-_placeholder_
+One external question mattered: the resource probe is the only new surface in this lane that touches a credential store, and charter §8 plus the issue's constraints demand it report state without ever emitting a credential or a prefix of one.
+
+**Query:** `1Password CLI "op item list" service account vault titles without revealing secrets exit codes`
+
+**Findings:**
+
+1. **`op item list --format=json` returns metadata only** — title, id, vault, category, timestamps. Field values are never included; retrieving a value requires an explicit `op read` or `op item get --fields`. ([1Password CLI reference](https://developer.1password.com/docs/cli/reference/management-commands/item/), [worked examples](https://msull.github.io/1password-cli-examples.html))
+   *How this informs the approach:* the probe's **presence** leg handles no secret at all. `verified` / `absent` for each named resource is decided from titles, so the only code path that ever holds a credential is the optional fingerprint leg. That is a structural reduction of the leak surface, not a discipline one, and it is what makes the "never leaks" test cheap to write.
+
+2. **Older `op` versions could exit 0 on unrecognized server errors**; a recent release corrected this to exit 1. ([1Password CLI release notes](https://app-updates.agilebits.com/product_history/CLI2))
+   *How this informs the approach:* the probe must not treat exit 0 as proof. Empty, unparseable, or unexpected-shape output resolves to `unknown`, never to `absent` — reporting "absent" for a resource that exists is the failure mode that would send a builder chasing a resource that was there all along.
+
+3. **`op run` masks secrets in its own output**, and `OP_RUN_NO_MASKING` disables that.
+   *How this informs the approach:* this repo runs `op run --no-masking` by design (`CLAUDE.md`, Secrets), so op's masking is explicitly **not** available as a backstop here. The probe's own output discipline is the only guard, which is why its test seeds a fake credential and asserts the string never appears anywhere in the returned structure.
+
+Nothing else in this lane is external. Popoto, `gh`, and the repo's schema gate are all internal and were resolved by reading code (see Spike Results).
 
 ## Spike Results
 
-_placeholder_
+Every assumption below was resolved by reading the code or running the command at the baseline commit, inside this planning pass. No agent was dispatched: each question had a one-command answer, and dispatching would have cost more than it measured. Appetite is Medium, so the cap is four spikes; six are recorded because four of them are single greps that came free with the blast-radius pass.
+
+### spike-1: Does an indexed `digest` on `ImprovementCharter` pass the schema gate?
+- **Assumption**: "`digest` can be an `IndexedField`, as the parent plan's task 9 says, because its cardinality is one value per charter version."
+- **Method**: code-read (`tests/unit/test_agentsession_index_guard_generalized.py:468-490`)
+- **Result**: **False.** `test_improvement_model_indexes_are_low_cardinality` rejects any indexed field whose *name* contains `"digest"` — the marker list is `("_id", "_at", "digest", "version", "revision", "count", "trials")` and the check is a substring test. An indexed `digest` fails that test on the name alone, regardless of its real cardinality. The guard is deliberately name-based so a future field added without touching the vocabulary map still fails.
+- **Confidence**: high
+- **Impact if false**: none — this is the finding, and it changes the design. See Technical Approach: `digest` is a plain `Field`, matched in Python over the project's charter rows, exactly as the module docstring already prescribes for `version` ("Version lookups go through the recency sort plus a Python filter"). The parent plan's `IndexedField` wording is superseded here with cause.
+
+### spike-2: Does the 11-value `priority_area` vocabulary fit the declared bound?
+- **Assumption**: "`priority_area` can be added to `INDEXED_VOCABULARIES` like any other index."
+- **Method**: code-read (`tests/unit/test_improvement_models.py:157-165`)
+- **Result**: **False.** `test_declared_vocabularies_are_small` asserts `2 <= len(vocabulary) <= 8`. Gap G's vocabulary has eleven values (`inference`, `token_efficiency`, `skills`, `personas`, `cloud_execution`, `research_process`, `evaluators`, `memory`, `orchestration`, `infrastructure`, `other`), so it fails at 11.
+- **Confidence**: high
+- **Impact if false**: none. The vocabulary is charter-derived — five priorities from §3's list, five eligible means from §3's closing sentence, plus `other` — so shrinking it loses charter fidelity. The gate is amended narrowly instead: a per-field declared maximum, defaulting to 8, with one named exemption carrying its reason.
+
+### spike-3: Does a third index on `ImprovementCase` fit the per-model index bound?
+- **Assumption**: "`ImprovementCase` has room for another `IndexedField`."
+- **Method**: code-read (`tests/unit/test_agentsession_index_guard_generalized.py:452-466`; `models/improvement_case.py:82-83`)
+- **Result**: **False.** The case already indexes `state` and `priority`. `test_improvement_models_are_enumerated_by_the_runtime_derivation` asserts `1 <= len(indexed) <= 2` for every improvement model, so a third index fails.
+- **Confidence**: high
+- **Impact if false**: none. Same treatment as spike-2: a per-model declared maximum, defaulting to 2, with `ImprovementCase: 3` carrying its reason. The alternative — deleting the writerless `priority` index to make room — is considered and rejected in Rabbit Holes.
+
+### spike-4: What does `gh repo view --json visibility` actually return?
+- **Assumption**: "Comparing the result to `"public"` decides eligibility."
+- **Method**: prototype (`gh repo view tomcounsell/ai --json visibility`)
+- **Result**: **Partly false.** It returns `{"visibility":"PUBLIC"}` — uppercase. A guard comparing against lowercase `"public"` would return `False` for every repository on earth, which is the *fail-closed* direction, so it would never raise an alarm and its "private returns False" test would pass vacuously.
+- **Confidence**: high
+- **Impact if false**: this is the single most dangerous detail in the lane. The guard normalizes with `.strip().upper()` and compares to `"PUBLIC"`, and the mutation check named in Success Criteria is precisely the one that bites here: flip the comparison and the *public* case must go red.
+
+### spike-5: Is `tools/sdlc_verdict.py::compute_plan_hash` reusable for the charter file?
+- **Assumption**: "Gap G's 'normalized `sha256:<hex>` form' means a new hasher has to be written."
+- **Method**: code-read (`tools/sdlc_verdict.py:133-157`)
+- **Result**: **False, happily.** `compute_plan_hash(path)` takes any path, reads bytes, normalizes CRLF and stray CR to LF, and returns `f"sha256:{hexdigest}"`, returning `None` on any read failure. It is not plan-specific. The charter loader calls it directly.
+- **Confidence**: high
+- **Impact if false**: a second hasher would have drifted from the first. Reuse also means a `\r\n` checkout of the charter yields the same digest as an `\n` one, which is the property that keeps the seed idempotent across machines.
+
+### spike-6: Which existing tests break on the new dashboard getter?
+- **Assumption**: "Adding a goals partial is additive and breaks nothing."
+- **Method**: code-read (`tests/unit/test_ui_app.py:721-736`)
+- **Result**: **False.** Two tests pin the current surface exactly: `test_dashboard_never_offers_experiment_or_patch_counts` asserts `exported == ["get_coverage", "get_intervention_burden", "get_provisional_assumptions"]` as a literal list, and `test_index_page_links_both_improvement_partials` asserts on "both". Adding `get_goals` and a third `hx-get` fails both.
+- **Confidence**: high
+- **Impact if false**: none — both are on the Test Impact list as UPDATE. The exact-list assertion is a feature, not an obstacle: it is what stops a future lane from quietly adding an activity-counter tile, and it must stay an exact list after the update.
 
 ## Data Flow
 
-_placeholder_
+Two flows change. Neither crosses a process boundary in this lane; both are read paths that later lanes will write against.
+
+**Flow 1 — charter file to pinned record.**
+
+```
+docs/improvement-charter.md  (Tom edits and commits; nothing else writes it)
+        │  read_bytes()
+        ▼
+tools/sdlc_verdict.py::compute_plan_hash   →  "sha256:<hex>"   (CRLF-normalized)
+        │
+        ├─ frontmatter parse → owner, version, effective
+        │        └─ owner != "Tom Counsell"  →  refuse, return None, write nothing
+        ▼
+models/improvement_charter.py::load_from_file
+        │  ImprovementCharter.query.filter(project_key=…)   ← bounded: one row per version
+        │  digest match in Python (digest is NOT indexed — spike-1)
+        ├─ digest already present  →  return the existing row, write nothing
+        └─ digest unseen           →  create() one immutable row:
+                                        version, effective, digest, text (ContentField),
+                                        state="active", created_at
+        ▼
+ui/data/improvement.py::get_goals  →  ui/templates/improvement/goals.html
+```
+
+The pinned row is the newest by `created_at` within the project partition. Rows are never updated and never deleted; `save()` is never called on an existing charter row.
+
+**Flow 2 — project key to provider eligibility.**
+
+```
+project_key  ("valor", "cyndra", …)
+        ▼
+bridge.routing.load_config()["projects"][project_key]["github"]  →  {"org": …, "repo": …}
+        │  missing key, missing github block, missing org or repo  →  False
+        ▼
+process-local TTL cache  (hit → return cached bool, no subprocess)
+        ▼
+gh repo view "<org>/<repo>" --json visibility     ← repo passed POSITIONALLY, never via cwd or GH_REPO
+        │  non-zero exit, timeout, unparseable JSON, absent key  →  False
+        ▼
+value.strip().upper() == "PUBLIC"   →  True     (spike-4: the API returns uppercase)
+                            otherwise → False
+```
+
+Every arrow that is not the happy path lands on `False`. Charter §7 makes "client" the safe default: routing client context to a non-subscription provider is the harm, and refusing to route open-source work merely costs an experiment.
+
+The resource probe has no flow to trace — it is a leaf that shells out, classifies, and returns a dict. Its shape is in Technical Approach.
 
 ## Architectural Impact
 
