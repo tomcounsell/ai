@@ -186,15 +186,38 @@ The resource probe has no flow to trace — it is a leaf that shells out, classi
 
 ## Architectural Impact
 
-_placeholder_
+The lane changes no architecture. It corrects vocabulary inside a structure PR #3224 already established, and it adds two leaf modules with no callers yet.
+
+Three shapes are worth naming because a builder could accidentally change them:
+
+1. **The charter is a file, and the record is a projection of it.** The direction is one-way and stays one-way. `models/improvement_charter.py` reads `docs/improvement-charter.md`; nothing in `models/`, `tools/`, `reflections/`, or `ui/` ever writes that file. A Verification row in the parent plan asserts exactly this by grep, and `docs/improvement-charter.md` is on lane 6's candidate-surface denylist. The loader is a reader with a `create()` on the miss path, not a sync.
+
+2. **`ImprovementCharter` rows are append-only and this lane does not supersede.** The existing module docstring describes an amendment flow that flips the previous row's `state` to `superseded`. Gap G and the issue's acceptance criterion both require that a changed byte "leaves the first untouched", which means `load_from_file` performs no such flip. This is a real divergence and it is deliberate: a loader that mutates a prior row is a `save()` on an immutable record, and the pinned version is already unambiguous from `created_at` within the partition. `state` keeps its two-value vocabulary for a human-driven supersede through `valor-improve` later; the loader simply never uses it. The docstring is corrected to say so.
+
+3. **Two new leaf modules, zero new namespaces.** `tools/improvement_eligibility.py` and `tools/improvement_resources.py` import from `bridge.routing` and the standard library, and are imported by nothing in this lane. They exist so lane 3 can call them. Neither creates a Redis key, a Popoto model, a CLI entry point, or a control namespace.
+
+The one coupling introduced is `tools/` → `bridge.routing.load_config`. That direction already exists throughout `agent/` (`agent/session_completion.py:1171`, `agent/session_executor.py:1935`, `agent/session_revival.py:310`), so it adds no new cycle and no new precedent.
 
 ## Appetite
 
-_placeholder_
+**Medium.**
+
+The unit of work is a delta, not a build: four model files gain seven fields between them and lose one, one settings block is renamed and extended, two small leaf modules are written from a specification the parent plan already fixed, one dashboard partial is added beside two that exist, and two documents are corrected. Every seam it plugs into shipped three weeks — three days, in fact — ago in PR #3224, and the schema gate that constrains it is already written.
+
+What makes it Medium rather than Small is the guard work, not the field work. Three schema-gate assertions have to be amended rather than satisfied (spikes 1 through 3), and each amendment has to stay narrow enough that the gate still bites everywhere else. Every new guard carries a mutation check. That is where the time goes.
+
+**Time-box:** one build session plus one validation session. If the guard amendments start requiring a fourth exemption, or if the charter loader grows a projection, stop and re-scope — both are signs the lane is absorbing work that belongs to #3215.
 
 ## Prerequisites
 
-_placeholder_
+**None.**
+
+This was checked rather than assumed. The issue's Recon Summary records zero pre-requisites, and the two candidates both resolve to "not needed here":
+
+- **#3220 (session execution lease)** gates lane 3's fenced dispatch. Nothing in this lane dispatches, admits, or reserves anything.
+- **The improvement control namespace** does not exist and is #3215's to create. The one design decision that could have reached for it — where the eligibility cache lives — is resolved in Technical Approach in a way that does not (a process-local TTL cache, not a Redis key).
+
+Everything this lane builds on is already on `main` at the baseline: the eight `Improvement*` models, `ImprovementSettings`, `verifying_artifact_store`, `ui/data/improvement.py`, the schema-gate tests, and `tools/sdlc_verdict.py::compute_plan_hash`.
 
 ## Solution
 
