@@ -526,11 +526,137 @@ Not applicable. Nothing here is user-facing outside this repository.
 
 ## Success Criteria
 
-_placeholder_
+Each criterion below is a row in the Verification table or a named test. None of them can pass on `main` at the baseline, which was checked rather than assumed.
+
+- [ ] `ImprovementCharter` rows carry `digest`, `effective`, and `text`; loading `docs/improvement-charter.md` twice creates one row; a changed byte creates a second row and leaves the first byte-identical; a file without `owner: Tom Counsell` is refused and writes nothing; a CRLF copy digests identically to an LF copy (`tests/unit/test_improvement_charter.py`)
+- [ ] `ImprovementCase` has `priority_area` (indexed, defaulting to `other`), `ranking_rationale`, and `charter_digest`, and has no `objective`; `ImprovementInvestigation` and `ImprovementRelease` have `charter_digest`; both schema-gate suites pass with the three narrow exemptions in place
+- [ ] `ImprovementSettings` exposes `daily_paid_inference_usd=10.00`, `weekly_infrastructure_usd=50.00`, `budget_day_boundary="UTC"`, `budget_week_start="monday"`, and has no `daily_external_llm_usd`, `portfolio_allocation`, or `daily_question_ceiling`; `tests/unit/test_env_declaration_readers.py` still passes
+- [ ] `tools/improvement_eligibility.py::is_open_source` returns `True` for a public repository and `False` for private, missing `github` block, missing `org`/`repo`, non-zero `gh` exit, timeout, and unparseable JSON; a decoy `GH_REPO` pointing at a public repository does not make a private project report open source (`tests/unit/test_improvement_eligibility.py`)
+- [ ] `tools/improvement_resources.py::probe` reports `unknown` when `op` cannot authenticate, reports `unknown` rather than `absent` on any unparseable result, never raises, and its output contains no credential bytes when fed a seeded fake through the injected runner (`tests/unit/test_improvement_resources.py`)
+- [ ] The goals partial renders with an empty namespace and with a seeded charter row, and its empty §11 headings name the lane that will fill each rather than showing a zero (`scripts/pytest-clean.sh tests/unit/test_ui_app.py -q -k improvement`)
+- [ ] `docs/features/improvement-controller.md` contains no `portfolio_allocation` and no "ceiling is zero", and does contain the three budget units, charter §9's rule with the amendment path, and a Charter section; `.env.example` names the three budget units; `docs/plans/critiques/recursive-self-improvement-capability-matrix.md` has a Lane 2b section
+- [ ] Every parent-plan Verification row that passed for PR #3224 still passes, and the v2 rows pass: charter seed round-trip, eligibility guard, resource probe, budget windows, both dollar settings, charter version 2
+- [ ] `git grep -n 'portfolio_allocation'` returns matches only in `docs/plans/` and `git grep -n '\bobjective\b' -- '*.py'` returns matches only in `tools/memory_eval/query_set.py` and `tools/valor_session.py` (ordinary English, out of scope)
+
+**Mutation checks — each guard is proven to bite, and re-measured after every review round:**
+
+- [ ] Flip `is_open_source`'s failure default from `False` to `True`: the private, missing-field, `gh`-failure, timeout, and unparseable-JSON tests all go red. If fewer than all five bite, the rest were passing vacuously
+- [ ] Change `is_open_source`'s comparison from `"PUBLIC"` to `"public"`: the public-repository test goes red. This is the spike-4 defect and it is invisible without this check
+- [ ] Remove the positional repository argument from the `gh` call and set a decoy `GH_REPO`: the wrong-repository test goes red
+- [ ] Corrupt one byte of the charter fixture: the loader produces a second digest and a second row, and the first row's fields are unchanged
+- [ ] Seed a distinctive fake credential through the probe's injected runner: it appears nowhere in the returned structure at any depth. Then remove the hashing step and confirm the test goes red
+- [ ] Make `probe` classify an unparseable `op` result as `absent` instead of `unknown`: its test goes red
+- [ ] Add a fourth `IndexedField` to any improvement model: the per-model index-maximum assertion goes red, proving the exemption did not become a loophole
+- [ ] Remove the `owner` check from `load_from_file`: the refusal test goes red
+
+**Follow-through:**
+
+- [ ] The lane 7 child issue exists, references `Refs #3177`, and carries charter §2, the resource probe's measured verified set, and Gap D's unit-3 rules
+- [ ] #3215, #3216, #3217, and #3218 each carry a comment naming the v2 items they inherit from this lane
+
+## Team Orchestration
+
+### Team Members
+
+| Member | Agent Type | Owns | Parallel with |
+|---|---|---|---|
+| `delta-builder` | builder | Tasks 1 through 4 and task 6 | none — the tasks share four model files and two test files |
+| `lane-validator` | validator | Task 5 | none — runs after the build lands |
+
+**One builder, serialized.** The temptation is to fan out records, settings, guards, and dashboard as four parallel lanes, since they look independent. They are not: tasks 1, 2, and 3 all edit `tests/unit/test_improvement_models.py`, tasks 1 and 4 both read `models/improvement_charter.py`, and two builders sharing a worktree have livelocked on this repository before. The lane is Medium; the serialization costs a session and buys a clean history.
+
+If the lane is ever split, the only safe seam is `tools/improvement_eligibility.py` plus `tools/improvement_resources.py` plus their two new test files, which touch nothing else in the repository. Everything upstream of that seam shares files.
+
+### Available Agent Types
+
+- **builder** — writes code and tests in the lane worktree, commits in small logical checkpoints
+- **validator** — runs the Verification table and every mutation check, reports pass/fail per row without editing code
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. Records: charter seed, case vocabulary, and the schema-gate exemptions
+- **Task ID**: build-records-v2
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_charter.py` (create), `tests/unit/test_improvement_models.py`, `tests/unit/test_agentsession_index_guard_generalized.py`
+- **Informed By**: spikes 1, 2, 3, 5; Gap G; the issue's acceptance criteria
+- **Assigned To**: delta-builder
+- **Agent Type**: builder
+- **Parallel**: false
+
+- Add `digest` (plain `Field`, **not** `IndexedField` — spike-1), `effective` (`Field`), and `text` (`ContentField(store=verifying_artifact_store)`) to `models/improvement_charter.py`
+- Add `load_from_file(path=Path("docs/improvement-charter.md"), project_key="valor")` as a classmethod: `compute_plan_hash` from `tools/sdlc_verdict.py` for the digest, frontmatter parse for `owner`/`version`/`effective`, refuse unless `owner == "Tom Counsell"`, match the digest in Python over `query.filter(project_key=...)`, `create()` on a miss and return the existing row on a hit. Never `save()`, never flip `state`, never delete
+- Add a `pinned(project_key)` helper returning the newest charter row by `created_at`, so no caller re-derives the pinning rule
+- Correct the module docstring: add the three fields to the `Fields:` block, rewrite the amendment paragraph to describe append-only loading, keep the literal phrase `TTL decision`
+- Add `PRIORITY_AREAS` (eleven values) to `models/improvement_case.py`; add `priority_area = IndexedField(default="other")`, `ranking_rationale = Field(null=True)`, `charter_digest = Field(null=True)`; delete `objective` at `:91` and its docstring line at `:75`; keep `charter_version`
+- Add `charter_digest = Field(null=True)` and its docstring line to `models/improvement_investigation.py` and `models/improvement_release.py`
+- Amend the three schema-gate assertions as per-key maps with defaults and one reasoned entry each (Technical Approach §3). Do **not** touch `unbounded_markers` or `FORBIDDEN_INDEX_NAMES`
+- Create `tests/unit/test_improvement_charter.py` covering: load twice → one row; changed byte → two rows, first untouched; missing `owner` → refused, zero rows written; CRLF and LF copies digest identically; `pinned()` returns the newest
+- Add `_migrate_confirm_improvement_v2_fields` to `scripts/update/migrations.py` following `_migrate_confirm_improvement_models_readable` (`:1384`), and **register it in `MIGRATIONS`**
+
+### 2. Settings: three budget units
+- **Task ID**: build-settings-v2
+- **Depends On**: none
+- **Validates**: `tests/unit/test_settings.py`, `tests/unit/test_env_declaration_readers.py`
+- **Assigned To**: delta-builder
+- **Agent Type**: builder
+- **Parallel**: false
+
+- In `config/settings.py::ImprovementSettings`: rename `daily_external_llm_usd` (`:618`) to `daily_paid_inference_usd`, keeping `default=10.00` and `ge=0.0`; add `weekly_infrastructure_usd=50.00`, `budget_day_boundary="UTC"`, `budget_week_start="monday"`; delete `portfolio_allocation` (`:630`) and its whole description block
+- Every description keeps the block's shape: what the field governs, a `PROVISIONAL/TUNABLE.` marker, and a closing `Env: IMPROVEMENT__<KEY>.` sentence
+- Rewrite the `.env.example:358-359` clause naming "daily external-LLM dollars, portfolio allocation" to name the three budget units instead
+- Add `ImprovementSettings` coverage to `tests/unit/test_settings.py` — it has none today: a defaults case for the four values and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not model fields
+
+### 3. Guards: eligibility and resource probe
+- **Task ID**: build-guards
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_eligibility.py` (create), `tests/unit/test_improvement_resources.py` (create)
+- **Informed By**: spike-4; Research findings 1 through 3; Risks 1 through 4
+- **Assigned To**: delta-builder
+- **Agent Type**: builder
+- **Parallel**: false (safe seam if the lane is ever split)
+
+- Create `tools/improvement_eligibility.py::is_open_source(project_key, *, ttl_seconds=900) -> bool` per Technical Approach §5. **The repository is passed positionally to `gh`**, never resolved through cwd or `GH_REPO`. Compare `.strip().upper()` against `"PUBLIC"`. Every uncertainty returns `False`. Process-local TTL cache with a `_clear_cache()` for tests
+- Create `tests/unit/test_improvement_eligibility.py`: public, private, missing `github`, missing `org`/`repo`, non-zero exit, timeout, unparseable JSON, absent `visibility` key, decoy `GH_REPO`, cache hit issues no subprocess
+- Create `tools/improvement_resources.py::probe(*, runner=None) -> dict` per Technical Approach §6, covering the six charter §8 resources with `verified` / `absent` / `unknown`. Presence from `op item list --format json` titles only. Fingerprints as `"sha256:<hex>"`, hashed on read, plaintext never returned, logged, or placed in an argv. `unknown` on every unparseable or non-zero result. Never raises
+- Create `tests/unit/test_improvement_resources.py`: every resource classified; a seeded fake credential absent from the returned structure at any depth (recursive scan); non-zero exit → `unknown`, not `absent`; one failing resource does not blank the others; `probe()` never raises
+
+### 4. Dashboard: the goals partial
+- **Task ID**: build-goals-partial
+- **Depends On**: build-records-v2
+- **Validates**: `tests/unit/test_ui_app.py`
+- **Informed By**: spike-6; charter §11; Risk 7
+- **Assigned To**: delta-builder
+- **Agent Type**: builder
+- **Parallel**: false
+
+- Add `ui/data/improvement.py::get_goals(project_key="valor") -> dict`: pinned charter version, effective date and full digest; the charter §3 priority list; open cases with `priority_area` and `ranking_rationale`; the §11 headings each with an explicit empty state naming the lane that fills it
+- Add `ui/templates/improvement/goals.html` following `coverage.html`'s shape, root id `improvement-goals`, three distinguishable states per heading (content / not yet, lane N / unavailable). No bare zeros
+- Add `@app.get("/_partials/improvement/goals/")` to `ui/app.py` beside the two existing partial routes, and a third `hx-get` card to `ui/templates/index.html`
+- Update `test_dashboard_never_offers_experiment_or_patch_counts` to the four-item exact list, and replace `test_index_page_links_both_improvement_partials` with an all-three assertion
+- Add empty-namespace and seeded-charter render cases
+
+### 5. Validate lane 2b
+- **Task ID**: validate-lane-2b
+- **Depends On**: build-records-v2, build-settings-v2, build-guards, build-goals-partial
+- **Assigned To**: lane-validator
+- **Agent Type**: validator
+- **Parallel**: false
+
+- Run every row of the Verification table below and report pass/fail per row. The v2 rows that fail on `main` today must pass; every row that passed for PR #3224 must still pass
+- Run all eight mutation checks from Success Criteria and report which assertion went red for each. A mutation that changes nothing is a finding, not a pass
+- Confirm `objective` and `portfolio_allocation` are gone, allowing for the two out-of-scope English matches recorded in the Freshness Check
+- Run `scripts/pytest-clean.sh` (never bare `pytest`) for every test invocation
+
+### 6. Follow-through: lane 7 and the sibling comments
+- **Task ID**: file-lane-7
+- **Depends On**: validate-lane-2b
+- **Assigned To**: delta-builder
+- **Agent Type**: builder
+- **Parallel**: false
+
+- File the lane 7 child issue through `/do-issue` with `Refs #3177`: cloud execution capacity, charter §2 verbatim, the resource probe's **measured** verified set from task 5, and Gap D's unit-3 rules
+- Comment on #3215: the #3183 half of its dependency is satisfied on `main` (`agent/agent_session_queue.py:233`, `models/dead_letter.py`); the remaining blocker is #3220; its `objective` vocabulary is replaced by `priority_area` / `ranking_rationale` / `charter_digest`; the settings it reads are now `daily_paid_inference_usd` and `weekly_infrastructure_usd`; it owns `tools/paid_inference_meter.py`, `tools/vault_write.py`, `valor-improve budget`, and `valor-improve propose-amendment`; the eligibility cache is process-local and may be promoted into the control namespace if cross-process sharing proves necessary
+- Comment on #3216, #3217, #3218 naming the v2 items each inherits: the `serves_charter` judge; the §3-ranked first experiment, the §5 skill-acquisition cycle, the ranking snapshot, the assumption digest, the no-promises detector; merge authority through the pipeline and the evaluator-replacement release type
 
 ## Verification
 
