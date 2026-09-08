@@ -60,6 +60,9 @@ Keys:
   would be re-deriving the reconciler's own cadence, so it does not.  The
   record also carries the writing ``pid``; a run counter never carries across
   a bridge restart, matching #2475's rule that a restart clears the accusation.
+  *Consecutive* is likewise enforced by the writer: a run extends only a
+  predecessor still contiguous with this cycle, so a run that stalled below the
+  alert threshold cannot be resumed hours later by one new fault cycle.
 
 All four keys are **freeform** (not Popoto-managed), so raw Redis
 ``get``/``set`` is correct here.  All other Redis writes in this codebase that
@@ -86,6 +89,21 @@ _MISSED_RECOVERY_KEY = "bridge:last_missed_recovery"
 _SCAN_OUTCOME_KEY = "bridge:last_scan_outcome"
 # Generous TTL — watchdog reads these frequently; keys must survive restarts.
 _TTL_SECONDS = 604800  # 7 days
+# Default for how recently the previous scan-outcome record must have been
+# written for this cycle to *continue* its run rather than start a new one. The
+# reconciler cycles every 180s, so this is a few intervals of slack.
+# GRAIN OF SALT: provisional/tunable. Read at call time via
+# _run_continuity_seconds() so SCAN_RUN_CONTINUITY_SECONDS is not frozen at
+# import.
+_RUN_CONTINUITY_SECONDS_DEFAULT = 900
+
+
+def _run_continuity_seconds() -> int:
+    """Return the run-contiguity window, honouring SCAN_RUN_CONTINUITY_SECONDS."""
+    try:
+        return int(os.environ.get("SCAN_RUN_CONTINUITY_SECONDS", _RUN_CONTINUITY_SECONDS_DEFAULT))
+    except ValueError:
+        return _RUN_CONTINUITY_SECONDS_DEFAULT
 
 
 def _get_redis() -> redis.Redis:
@@ -214,17 +232,30 @@ def record_scan_outcome(
     unchanged by a cycle that attempted nothing.  A record written by a
     different pid restarts the run rather than continuing it.
 
+    The word *consecutive* is enforced by the writer, not assumed by the reader.
+    A run only extends a previous record that is still contiguous with this
+    cycle (``_run_continuity_seconds()``, a few reconciler intervals); a stale
+    predecessor starts a fresh run.  Without this, a run that stalled just below
+    the alert threshold could be resumed hours later by a single new fault
+    cycle, and long-dead evidence would corroborate a live one.
+
     Returns the record that was written, or None on failure.  Best-effort: logs
     a WARNING and never raises.
     """
     try:
         r = redis_client if redis_client is not None else _get_redis()
         pid = os.getpid()
+        now = time.time()
 
         prev_run = 0
         prev = _read_scan_outcome(r)
         if prev is not None and prev.get("pid") == pid:
-            prev_run = int(prev.get("consecutive_total_fault_cycles", 0))
+            prev_ts = prev.get("ts")
+            contiguous = (
+                isinstance(prev_ts, int | float) and (now - prev_ts) <= _run_continuity_seconds()
+            )
+            if contiguous:
+                prev_run = int(prev.get("consecutive_total_fault_cycles", 0))
 
         if attempted <= 0:
             run = prev_run

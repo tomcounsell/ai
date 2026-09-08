@@ -340,6 +340,53 @@ def test_sustained_total_fault_pages_but_never_escalates_recovery_level():
 # ---------------------------------------------------------------------------
 
 
+def test_run_does_not_resume_across_a_stale_gap():
+    """*Consecutive* is enforced by the writer, not assumed by the reader.
+
+    A run that stalled just under the threshold must not be resumed hours later
+    by one new fault cycle — long-dead evidence cannot corroborate a live one.
+    """
+    from bridge.liveness import _run_continuity_seconds
+
+    r = _redis()
+    r.set(
+        _SCAN_OUTCOME_KEY,
+        json.dumps(
+            {
+                "ts": time.time() - _run_continuity_seconds() - 60,
+                "pid": os.getpid(),
+                "attempted": 2,
+                "faulted": 2,
+                "consecutive_total_fault_cycles": SCAN_TOTAL_FAULT_CYCLES - 1,
+                "sample_error": "",
+            }
+        ),
+    )
+    record = record_scan_outcome(attempted=2, faulted=2, redis_client=r)
+    assert record["consecutive_total_fault_cycles"] == 1
+    assert assess_scan_health(r, os.getpid()) == (True, "")
+
+
+def test_run_continues_across_a_contiguous_cycle():
+    """A predecessor written one reconciler interval ago still extends the run."""
+    r = _redis()
+    r.set(
+        _SCAN_OUTCOME_KEY,
+        json.dumps(
+            {
+                "ts": time.time() - 180,
+                "pid": os.getpid(),
+                "attempted": 2,
+                "faulted": 2,
+                "consecutive_total_fault_cycles": 3,
+                "sample_error": "",
+            }
+        ),
+    )
+    record = record_scan_outcome(attempted=2, faulted=2, redis_client=r)
+    assert record["consecutive_total_fault_cycles"] == 4
+
+
 def test_record_scan_outcome_run_does_not_carry_across_a_restart():
     """A record written by another pid restarts the run rather than extending it."""
     r = _redis()
