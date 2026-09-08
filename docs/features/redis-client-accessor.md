@@ -20,14 +20,14 @@ connection pool is the single fact about which Redis this process talks to:
 `tests/conftest.py` repoints it at a per-process claimed test database. A client
 derived from that pool's identity follows both. A client built by hand from
 `REDIS_URL` did neither. It resolved its own database at call time and, under
-test, twenty-three such sites wrote to production db 0 (measured during #2805:
+test, twenty-four such sites wrote to production db 0 (measured during #2805:
 `tests/unit/test_dedup.py` alone left `bridge:msgclaim:*` keys in db 0).
 
 ## The three accessors
 
 | Accessor | Returns | Used by |
 |----------|---------|---------|
-| `text_redis()` | A `decode_responses=True` client on popoto's host, port, db, and credentials, with request/response socket timeouts from `settings.timeouts.redis_socket_s`. Cached per process and rebuilt the moment popoto's pool identity changes. | Outbox writers (`agent/output_handler.py`, `agent/session_completion.py`, `tools/send_message.py`, `tools/react_with_emoji.py`, `tools/valor_telegram.py`, `tools/valor_email.py`, `reflections/pm_briefings/delivery.py`), relays (`bridge/telegram_relay.py`, `bridge/email_relay.py`, `bridge/email_bridge.py`), `bridge/liveness.py`, `bridge/dedup.py`, `bridge/email_dead_letter.py`, `tools/email_history`, `ui/app.py` |
+| `text_redis()` | A `decode_responses=True` client on popoto's host, port, db, and credentials, with request/response socket timeouts from `settings.timeouts.redis_socket_s`. Cached per process and rebuilt the moment popoto's pool identity changes. | Outbox writers (`agent/output_handler.py`, `agent/session_completion.py`, `tools/send_message.py`, `tools/react_with_emoji.py`, `tools/valor_telegram.py`, `tools/valor_email.py`, `reflections/pm_briefings/delivery.py`), relays (`bridge/telegram_relay.py`, `bridge/email_relay.py`, `bridge/email_bridge.py`), `bridge/liveness.py`, `bridge/dedup.py`, `bridge/email_dead_letter.py`, `tools/email_history`, `ui/app.py`, `monitoring/bridge_watchdog.py` |
 | `bytes_redis()` | `POPOTO_REDIS_DB` itself. | `bridge/routing.py` (the resolver cache decodes its own values) |
 | `derived_redis(**overrides)` | A fresh, uncached client on popoto's identity with the caller's connection kwargs. | The pubsub probe and listener in `agent/agent_session_queue.py`, whose `socket_timeout` contracts differ from every request/response client and must not be shared |
 
@@ -42,12 +42,30 @@ no production caller ever passed one.
 ## What prevents recurrence
 
 `tests/unit/test_redis_client_accessor.py::TestNoRawClientsInProduction` walks
-`agent/`, `bridge/`, `tools/`, `reflections/`, `ui/`, `worker/`, `models/`, and
-`config/` by AST and fails on any `redis.Redis(...)`, `redis.StrictRedis(...)`,
-`redis.from_url(...)`, or `redis.Redis.from_url(...)` call, under any import
-alias, outside `utils/redis_client.py`. The same file proves the contract
-end to end: with `REDIS_URL` pointed at db 0 for the duration of the call, a
-converted site's write still lands in the claimed test database.
+every top-level production package by AST and fails on any `redis.Redis(...)`,
+`redis.StrictRedis(...)`, `redis.from_url(...)`, or `redis.Redis.from_url(...)`
+call, under any import alias, outside `utils/redis_client.py` — which is
+exempted by explicit path, as the one sanctioned constructor.
+
+The package list is enumerated from the repository tree, and
+`test_the_scan_covers_every_production_package` asserts it stays that way: a
+package that appears in the tree but not in the list fails the suite. That
+second test is load-bearing rather than decorative. A hand-maintained package
+list fails silently when a package is added, and the failure mode is a guard
+reporting green over code it never opened — which is exactly how
+`monitoring/bridge_watchdog.py` kept a hand-built client through a sweep that
+called itself exhaustive. A new top-level package must now be scanned or
+excluded deliberately.
+
+The same file proves the contract end to end: with `REDIS_URL` pointed at db 0
+for the duration of the call, a converted site's write still lands in the
+claimed test database.
+
+This guard and the `PreToolUse` hook `validate_no_raw_redis_delete.py` cover
+different surfaces and both stay. The hook matches the text of a Bash command
+an agent is about to run, stopping raw Redis typed against Popoto-managed keys
+at the session boundary; it never reads the repository. This test reads
+committed source and fails in CI. Neither can do the other's job.
 
 ## Related
 
