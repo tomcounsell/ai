@@ -103,16 +103,20 @@ class TestCleanupGating:
         import inspect
 
         src = inspect.getsource(session_executor)
-        guard_pos = src.index("_finalize_if_still_running(\n")
+        # Anchor on the call site's unique `reason=`, not on the bare helper
+        # name — that also matches the `def`, which trivially precedes
+        # everything and would make this assertion vacuous.
+        guard_pos = src.index('reason="executor exit finalize guard (#3209)"')
         cleanup_pos = src.index("cleanup_after_merge(_repo_for_cleanup")
         assert guard_pos < cleanup_pos, (
             "the finalize guard must run before the synthetic-slug cleanup, "
             "or the busy check refuses the removal permanently"
         )
         assert 'auth.status != "running"' in src
-        # The guard's failure mode must resolve `task` defensively — a raise
-        # before `task = BackgroundTask(...)` must not raise NameError here.
-        assert 'locals().get("task")' in src
+        # `task` is pre-assigned before the `try`, so a raise before
+        # `task = BackgroundTask(...)` reaches the guard as a plain name
+        # rather than a NameError.
+        assert "\n    task = None\n" in src
 
     def test_finally_block_logs_blocked_cleanup_loudly(self):
         """Source guard (#3176): a refused cleanup (blocked_by_session) must

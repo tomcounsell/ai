@@ -526,15 +526,29 @@ and, if still `running`, calls `finalize_session()`, treating a
 `StatusConflictError` from a racing concurrent finalizer as success.
 
 The predicate is `status == "running"`, never `defer_reaction` (#3209). The
-`defer_reaction` gate it replaced sat in the `try` body, so only a normal
-return reached it — a raise walked past it into the `finally` with the row
-still `running` and no other owner, and the guard was also suppressed on
-paths where no nudge was ever enqueued. The status predicate protects the
-nudge's write on its own, on both `_enqueue_nudge` paths: the main path has
-already moved this row to `pending`, so the guard no-ops; the fallback path
-creates a fresh `pending` record under the same `session_id` and leaves the
-original `running`, so the guard finalizes exactly that stranded original
-(the phantom) while the continuation record survives for the worker to pop.
+status predicate protects the nudge's write on its own, on both
+`_enqueue_nudge` paths. The main path has already moved this row to
+`pending`, so the guard no-ops. The fallback path is entered *only because*
+`get_authoritative_session(orig_session_id)` returned `None` — no row for
+that `session_id` was visible at all — and it then creates a fresh `pending`
+record under that `session_id`, so the normal post-fallback state is exactly
+one row, the continuation, and the guard no-ops there too. (A transient
+index-visibility flap could leave an original row the nudge's re-read missed;
+if it reappears as `running` the guard finalizes that stranded original and
+still never touches the continuation, which is a distinct record with its own
+`agent_session_id`.)
+
+The status written is `failed`, not `_runner_final_status`, on two exits:
+when the executor is unwinding on an exception, and when the body raised
+before `BackgroundTask` was constructed. `_runner_final_status` returns
+`completed` whenever `task.error` is falsy and the runner exit was clean, and
+it has no notion of unwinding — a session whose executor raised did not
+complete, and recording `completed` would also disagree with the worker's own
+`failed` write in `agent_session_queue`'s outer `finally`, where a terminal →
+different-terminal write raises `StatusConflictError`. An explicit `except
+BaseException` clause in `_execute_agent_session` sets the flag and re-raises;
+the `except asyncio.CancelledError` clause precedes it, so a cancel is never
+misread as a raise.
 
 Cancellation is the one exit deliberately excluded. `_execute_agent_session`
 carries an `except asyncio.CancelledError` whose only job is to mark the exit

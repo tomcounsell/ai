@@ -123,7 +123,9 @@ def _runner_final_status(task_error, agent_session) -> str:
     return "completed"
 
 
-def _finalize_if_still_running(session_id: str, task, agent_session, reason: str) -> None:
+def _finalize_if_still_running(
+    session_id: str, task, agent_session, reason: str, raised: bool = False
+) -> None:
     """Finalize the authoritative row for ``session_id`` iff it is still ``running``.
 
     The single finalize-guarantee mechanism for ``_execute_agent_session``.
@@ -140,22 +142,41 @@ def _finalize_if_still_running(session_id: str, task, agent_session, reason: str
       row to ``pending``. ``get_authoritative_session`` prefers a ``running``
       row and finds none, so it returns the ``pending`` row and this no-ops.
       The nudge's authoritative write is never clobbered.
-    * Fallback path: a fresh ``pending`` row is created under the same
-      ``session_id`` via ``continuation_agent_session_fields`` and the ORIGINAL
-      row's status is left untouched at ``running``. ``get_authoritative_session``
-      prefers the ``running`` row, so this finalizes exactly that stranded
-      original -- the phantom -- and never the continuation, which is a distinct
-      record (its own ``agent_session_id``) that stays ``pending`` for the
-      worker to pop.
+    * Fallback path: entered ONLY because the re-read
+      ``get_authoritative_session(orig_session_id)`` returned ``None`` -- no row
+      for that ``session_id`` was visible at all. It then creates a fresh
+      ``pending`` record under that ``session_id`` via
+      ``continuation_agent_session_fields``. So the normal post-fallback state
+      is exactly one row, the ``pending`` continuation, and this no-ops. (A
+      transient index-visibility flap could leave an original row that the
+      nudge's re-read missed; if it becomes visible again as ``running``, this
+      finalizes that stranded original and still never touches the
+      continuation, which is a distinct record with its own
+      ``agent_session_id``.) Either way the nudge's write survives.
 
-    Fully synchronous on purpose: the ``finally`` may run while the enclosing
-    task is being cancelled, where an ``await`` would immediately re-raise
-    ``CancelledError`` and skip the finalize.
+    Fully synchronous on purpose: it runs inside a ``finally`` on the executor's
+    hot path, and the terminal write must land before the synthetic-slug
+    worktree cleanup a few lines later reads the row's status. Introducing an
+    ``await`` would let that ordering be rescheduled.
 
-    ``task`` may be ``None`` when the body raised before ``BackgroundTask`` was
-    constructed; ``_runner_final_status(None, None)`` returns ``"completed"``,
-    which would misreport a crash-before-start as a success, so that case
-    finalizes ``failed``.
+    Status honesty. ``_runner_final_status`` returns ``"completed"`` whenever
+    ``task.error`` is falsy and the runner exit was clean, and it has no notion
+    of the executor unwinding. So two cases bypass it and finalize ``failed``:
+
+    * ``raised=True`` -- the executor is unwinding on an exception. A session
+      whose executor raised did not complete. Recording ``completed`` there
+      would also disagree with the worker's own ``failed`` write in
+      ``agent_session_queue``'s outer ``finally``.
+    * ``task is None`` -- the body raised before ``BackgroundTask`` was
+      constructed, and ``_runner_final_status(None, None)`` would misreport a
+      crash-before-start as a success.
+
+    NOTE: ``finalize_session``'s checkpoint step runs two 5s-bounded ``git``
+    subprocesses on the event loop, and this guard now reaches them on the raise
+    path too. ``skip_checkpoint=True`` is deliberately NOT passed -- this guard
+    is the only finalizer on that path, so skipping the checkpoint would drop
+    the lane's branch state for exactly the sessions whose lane most needs
+    reclaiming. Making the checkpoint non-blocking is a separate change.
     """
     try:
         from models.session_lifecycle import (  # noqa: PLC0415
@@ -167,7 +188,10 @@ def _finalize_if_still_running(session_id: str, task, agent_session, reason: str
         auth = get_authoritative_session(session_id)
         if auth is None or auth.status != "running":
             return
-        status = _runner_final_status(task.error, agent_session) if task is not None else "failed"
+        if raised or task is None:
+            status = "failed"
+        else:
+            status = _runner_final_status(task.error, agent_session)
         try:
             finalize_session(auth, status, reason=reason)
         except StatusConflictError as conflict:
@@ -1127,6 +1151,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
     # Cancellation is the one exit whose terminal transition this function does
     # NOT own; see the `except asyncio.CancelledError` below.
     _cancelled_exit = False
+    # Set by the `except BaseException` below so the `finally`'s finalize guard
+    # knows it is unwinding on an exception and must record `failed`.
+    _raised_exit = False
+    # Bound partway through the body; pre-assigned so the `finally` can read it
+    # as a plain name on an early-raise exit. A future rename then fails loudly
+    # instead of silently degrading every exit to a `failed` finalize.
+    task = None
+    agent_session = None
     try:
         # T+0 heartbeat write: guarantee the very first health-check tick after
         # session start sees a fresh heartbeat. Uses the pre-loaded `session`
@@ -1469,7 +1501,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         )
 
         # Update the AgentSession (already created at enqueue time) with session-phase fields
-        agent_session = None
         try:
             sessions = list(
                 AgentSession.query.filter(project_key=session.project_key, status="running")
@@ -2433,11 +2464,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # _inject_self_draft_steering does NOT call _enqueue_nudge).  However, if
         # complete_transcript itself throws, the session can ghost as ``running`` for
         # up to the health-check TTL (32 min in the production timeline).  The
-        # defensive fallback below ensures a terminal finalize always lands on the
-        # COMPLETION/DELIVERY exit when complete_transcript fails.  Scoped to this
-        # exit only — the nudge / unconsumed-steering re-enqueue path is gated by
-        # chat_state.defer_reaction=True and the CancelledError path is health-checker-
-        # owned; neither is touched here.
+        # local fallback inside this block finalizes the row when complete_transcript
+        # fails, so the terminal status lands here rather than waiting on the
+        # `finally`'s `_finalize_if_still_running`, which is keyed on
+        # ``status == "running"`` and would otherwise be the one to catch it.
         if agent_session:
             try:
                 from bridge.session_transcript import complete_transcript
@@ -2504,15 +2534,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         e,
                     )
 
-        # The finalize guarantee (#2007, #3209) lives in this function's
-        # `finally` as `_finalize_if_still_running`, not here. It used to sit at
-        # this point in the body behind `if not chat_state.defer_reaction:`,
-        # which meant every non-normal-return exit -- a raise, or the health
-        # checker's CancelledError -- skipped it and left the row `running`
-        # until the health-check sweep. In the `finally` it covers all exits,
-        # and its `status == "running"` predicate is what preserves the nudge
-        # path's `pending` write that the `defer_reaction` gate used to protect.
-        #
         # Enqueue post-session memory extraction as a durable SideEffectJob.
         #
         # The row is written here and drained by the `side-effect-drain`
@@ -2720,6 +2741,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # this clause exists only to tell the `finally` which exit it is on.
         _cancelled_exit = True
         raise
+    except BaseException:
+        # A session whose executor raised did not complete. The `finally` cannot
+        # see that it is unwinding, and `_runner_final_status` has no notion of
+        # it either -- it returns `completed` whenever `task.error` is falsy and
+        # the runner exit was clean. This clause exists only to tell the
+        # `finally` which exit it is on, so the guard can write the honest
+        # terminal status. Re-raise unchanged.
+        _raised_exit = True
+        raise
     finally:
         # === Two-tier no-progress detector cleanup (#1036) ===
         # Always pop the registry entry, regardless of how the session body exited
@@ -2736,14 +2766,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Keyed on `status == "running"`, so the nudge path's `pending` write
         # survives untouched; see `_finalize_if_still_running` for why that
         # holds on both `_enqueue_nudge` paths. `task` and `agent_session` are
-        # assigned partway through the body and may not exist on an
-        # early-raise exit.
+        # pre-assigned to `None` before the `try`, so both read as plain names
+        # here even on an early-raise exit.
         if not _cancelled_exit:
             _finalize_if_still_running(
                 session.session_id,
-                locals().get("task"),
-                locals().get("agent_session"),
+                task,
+                agent_session,
                 reason="executor exit finalize guard (#3209)",
+                raised=_raised_exit,
             )
 
         # === Synthetic-slug worktree cleanup (issue #1272) ===
@@ -2799,9 +2830,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         # since a synthetic `session/dev-*` branch never
                         # satisfies sweep_worktrees' `merged_via_tree`
                         # requirement (#3176). The one exit where the row is
-                        # still `running` here is a cancellation, and there the
-                        # refusal is CORRECT: the health checker may be about
-                        # to requeue this very session into this very lane.
+                        # still `running` here is a cancellation, and that is a
+                        # deliberate NARROWING of #3176's guard, not a
+                        # strictly-equivalent replacement. On the health
+                        # checker's requeue branch the refusal is CORRECT --
+                        # it may be about to requeue this very session into
+                        # this very lane. On its terminal branches
+                        # (`abandoned`, the MAX_RECOVERY_ATTEMPTS finalize)
+                        # nothing re-enters the lane, so the lane leaks and
+                        # needs the manual reclamation logged below. That
+                        # trade buys back the requeue loop the old guard broke.
                         _repo_for_cleanup = resolve_main_repo_root(_wd)
                         cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
                         if cleanup_result.get("blocked_by_session"):
