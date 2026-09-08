@@ -11,13 +11,19 @@ The guard now lives in the ``finally`` and is keyed on
 ``status == "running"``, not on ``defer_reaction``. These tests pin the four
 behaviours that re-keying has to get right:
 
-1. raise  -> row reaches a terminal status
+1. raise  -> row reaches a terminal status, and specifically ``failed`` even
+   when ``task.error`` is falsy — a session whose executor raised did not
+   complete, and ``_runner_final_status`` has no notion of unwinding
 2. cancel -> row stays ``running`` (owned by the health checker / startup
    recovery, which requeue it; see the test for why finalizing here would
-   silently retire that retry loop)
+   silently retire that retry loop), on both the constructor-raise and the
+   production ``await task.run(...)`` shapes
 3. nudge main path     -> ``pending`` survives
-4. nudge fallback path -> ``pending`` continuation survives AND the stranded
-   original row is finalized
+4. nudge fallback path -> the ``pending`` continuation is the only row, and
+   survives
+
+Both nudge tests drive ``_enqueue_nudge`` itself rather than replaying the
+state it writes, so they pin the mechanism and not just the conclusion.
 
 Real integration tests against the local Redis test DB (autouse
 ``redis_test_db`` fixture) — no mocks for the ORM/Redis layer, only the
@@ -35,9 +41,28 @@ import pytest
 
 from agent.session_executor import _execute_agent_session
 from models.agent_session import AgentSession
-from models.session_lifecycle import get_authoritative_session
+from models.session_lifecycle import TERMINAL_STATUSES, get_authoritative_session
 
-_TERMINAL = {"completed", "failed", "killed", "abandoned", "cancelled"}
+
+class FakeBackgroundTask:
+    """Stands in for ``BackgroundTask`` so a raise (or a cancel) can land with
+    ``task`` bound and ``task.error`` falsy — the shape ``_runner_final_status``
+    reads as ``"completed"``.
+
+    ``on_run`` is what the executor's ``await task.run(...)`` raises.
+    """
+
+    on_run = None
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.error = None
+
+    async def run(self, coro, send_result=False):
+        coro.close()
+        if type(self).on_run is not None:
+            raise type(self).on_run
+        return ""
 
 
 class FakeSessionRunner:
@@ -59,8 +84,10 @@ class FakeSessionRunner:
 @pytest.fixture(autouse=True)
 def _reset_fake_runner():
     FakeSessionRunner.on_run = None
+    FakeBackgroundTask.on_run = None
     yield
     FakeSessionRunner.on_run = None
+    FakeBackgroundTask.on_run = None
 
 
 def _patch_runner():
@@ -131,7 +158,42 @@ class TestRaisingExitFinalizes:
             "a raising exit must not leave a phantom-running row — nothing "
             "downstream of the executor owns finalizing it"
         )
-        assert reloaded.status in _TERMINAL
+        assert reloaded.status in TERMINAL_STATUSES
+
+    @pytest.mark.asyncio
+    async def test_raise_with_clean_task_finalizes_failed_not_completed(self, redis_test_db):
+        """The status-honesty case: the executor unwinds on an exception while
+        ``task`` is bound and ``task.error`` is falsy.
+
+        ``_runner_final_status(None, agent_session)`` returns ``"completed"``
+        there — it has no notion of the function unwinding — so without the
+        ``raised`` flag the guard records a session that crashed as a success.
+        Beyond the false status, that also disagrees with the worker's own
+        ``failed`` write in ``agent_session_queue``'s outer ``finally``, and a
+        terminal -> different-terminal write raises ``StatusConflictError``.
+
+        Drives the real path: the raise comes out of ``await task.run(...)``
+        inside ``_execute_agent_session``, not a hand-built row state.
+        """
+        sid = _sid("exit-guard-clean-raise")
+        session = _make_session(sid)
+
+        FakeBackgroundTask.on_run = RuntimeError("boom with a clean task")
+
+        with (
+            _patch_runner(),
+            patch("agent.BackgroundTask", FakeBackgroundTask),
+        ):
+            with pytest.raises(RuntimeError, match="boom with a clean task"):
+                await _execute_agent_session(session)
+
+        reloaded = AgentSession.get_by_id(session.id)
+        assert reloaded is not None
+        assert reloaded.status == "failed", (
+            "a session whose executor raised did not complete — recording "
+            "`completed` here is a false terminal status and collides with the "
+            "worker's own `failed` write"
+        )
 
     @pytest.mark.asyncio
     async def test_raise_before_task_bound_finalizes_failed_not_completed(self, redis_test_db):
@@ -196,6 +258,35 @@ class TestCancelledExitLeavesRecoveryOwner:
             "checker's requeue (transition_status -> pending) is still legal"
         )
 
+    @pytest.mark.asyncio
+    async def test_cancel_with_task_bound_also_leaves_row_running(self, redis_test_db):
+        """The production shape: the health checker cancels ``handle.task``, so
+        the ``CancelledError`` surfaces out of ``await task.run(...)`` with
+        ``task`` already bound — not out of the ``BackgroundTask`` constructor.
+
+        ``except asyncio.CancelledError`` must win over the ``except
+        BaseException`` clause that flags a raising exit, or a cancel would be
+        finalized ``failed`` and the requeue loop would be retired.
+        """
+        sid = _sid("exit-guard-cancel-bound")
+        session = _make_session(sid)
+
+        FakeBackgroundTask.on_run = asyncio.CancelledError()
+
+        with (
+            _patch_runner(),
+            patch("agent.BackgroundTask", FakeBackgroundTask),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await _execute_agent_session(session)
+
+        reloaded = AgentSession.get_by_id(session.id)
+        assert reloaded is not None
+        assert reloaded.status == "running", (
+            "a cancel landing on `await task.run(...)` is still a cancel — the "
+            "raising-exit flag must not claim it"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3 + 4. Both _enqueue_nudge paths keep their pending write
@@ -208,65 +299,80 @@ class TestNudgePendingStateSurvives:
         """``_enqueue_nudge``'s main path moves THIS row to ``pending`` via
         ``transition_status``. The guard's ``status == "running"`` predicate
         must no-op on it — the old ``defer_reaction`` gate is what used to
-        protect this write, and re-keying must not regress it."""
-        from agent.session_executor import _finalize_if_still_running
-        from models.session_lifecycle import transition_status
+        protect this write, and re-keying must not regress it.
+
+        Drives ``_enqueue_nudge`` itself rather than replaying its write, so
+        the test pins the mechanism and not just the conclusion.
+        """
+        from agent.session_executor import _enqueue_nudge, _finalize_if_still_running
 
         sid = _sid("exit-guard-nudge-main")
         session = _make_session(sid)
-        session.auto_continue_count = 1
-        transition_status(session, "pending", reason="nudge re-enqueue (test)")
+
+        await _enqueue_nudge(
+            session,
+            branch_name="",
+            task_list_id="",
+            auto_continue_count=1,
+            output_msg="partial output",
+        )
+
+        after_nudge = get_authoritative_session(sid)
+        assert after_nudge is not None
+        assert after_nudge.status == "pending", "precondition: the nudge wrote pending"
 
         _finalize_if_still_running(sid, None, None, reason="test")
 
-        reloaded = AgentSession.get_by_id(session.id)
+        reloaded = get_authoritative_session(sid)
         assert reloaded is not None
         assert reloaded.status == "pending", "the nudge's authoritative write was clobbered"
         assert reloaded.auto_continue_count == 1
 
     @pytest.mark.asyncio
-    async def test_fallback_path_pending_continuation_survives_and_original_finalizes(
-        self, redis_test_db
-    ):
-        """The subtle one. ``_enqueue_nudge``'s fallback path creates a FRESH
-        ``pending`` record under the same ``session_id`` and leaves the
-        ORIGINAL row untouched at ``running``.
+    async def test_fallback_path_leaves_only_a_pending_continuation(self, redis_test_db):
+        """``_enqueue_nudge``'s fallback path is entered ONLY because
+        ``get_authoritative_session(orig_session_id)`` returned ``None`` — no
+        row for that ``session_id`` was visible at all. So the state it
+        produces is exactly one row, the fresh ``pending`` continuation, and
+        the guard must no-op on it.
 
-        ``get_authoritative_session`` prefers a ``running`` record, so the
-        guard finalizes exactly that stranded original — the phantom — while
-        the continuation (a distinct record, its own ``agent_session_id``)
-        stays ``pending`` for the worker to pop.
+        This is the correction to the PR's original claim that the fallback
+        "leaves the ORIGINAL row at ``running``" for the guard to clear. It
+        does not: the trigger for the fallback is the absence of that row.
+
+        Drives the real fallback by deleting the row (via the ORM) before
+        calling ``_enqueue_nudge``, which is what makes the re-read return
+        ``None``.
         """
-        from agent.session_executor import _finalize_if_still_running
+        from agent.session_executor import _enqueue_nudge, _finalize_if_still_running
 
         sid = _sid("exit-guard-nudge-fallback")
         original = _make_session(sid)
-        continuation = _make_session(
-            sid,
-            status="pending",
-            chat_id=original.chat_id,
-            message_text="continue",
-            sender_name="System (auto-continue)",
+        original.delete()
+        assert get_authoritative_session(sid) is None, "precondition: fallback trigger"
+
+        await _enqueue_nudge(
+            original,
+            branch_name="",
+            task_list_id="",
             auto_continue_count=1,
+            output_msg="partial output",
         )
-        assert continuation.id != original.id
+
+        continuation = get_authoritative_session(sid)
+        assert continuation is not None, "the fallback must have recreated the session"
+        assert continuation.status == "pending"
+        assert continuation.id != original.id, "the continuation is a distinct record"
 
         _finalize_if_still_running(sid, None, None, reason="test")
 
-        reloaded_continuation = AgentSession.get_by_id(continuation.id)
-        assert reloaded_continuation is not None
-        assert reloaded_continuation.status == "pending", (
+        reloaded = get_authoritative_session(sid)
+        assert reloaded is not None
+        assert reloaded.status == "pending", (
             "the nudge fallback's continuation record must survive untouched — "
             "it is the row the worker will pop"
         )
-        assert reloaded_continuation.auto_continue_count == 1
-
-        reloaded_original = AgentSession.get_by_id(original.id)
-        assert reloaded_original is not None
-        assert reloaded_original.status != "running", (
-            "the fallback path leaves the ORIGINAL row running with no other "
-            "owner — that is the phantom the guard exists to clear"
-        )
+        assert reloaded.auto_continue_count == 1
 
     @pytest.mark.asyncio
     async def test_guard_no_ops_on_an_already_terminal_row(self, redis_test_db):

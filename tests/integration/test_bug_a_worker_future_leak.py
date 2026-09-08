@@ -223,8 +223,10 @@ class TestBugANudgeStompGuard:
 
     When the executor enqueues a nudge, the row it hands on is left `pending`,
     and the guard's `status == "running"` predicate is what keeps it off that
-    row (#3209 re-keyed the guard from `defer_reaction` onto status). This test
-    verifies the guard stays off the nudge path.
+    row (#3209 re-keyed the guard from `defer_reaction` onto status, and
+    hoisted it into a module-level ``_finalize_if_still_running`` helper
+    called from the `finally`). This test verifies the guard stays off the
+    nudge path.
 
     Uses pure Popoto operations to simulate the before/after states.
     """
@@ -235,9 +237,13 @@ class TestBugANudgeStompGuard:
         Simulates the nudge path in _execute_agent_session:
           1. Session starts running.
           2. _enqueue_nudge transitions it to pending with auto_continue_count=1.
-          3. The guard re-reads and finds `pending`, not `running` -> no-op.
+          3. The real ``_finalize_if_still_running`` helper is invoked directly
+             (as the executor's `finally` would) — it re-reads and finds
+             `pending`, not `running`, so it no-ops.
           4. Fresh query confirms nudge state is preserved.
         """
+        from agent.session_executor import _finalize_if_still_running
+
         session_id = "bug-a-nudge-stomp-guard-001"
         project_key = "test-bug-a"
 
@@ -255,8 +261,13 @@ class TestBugANudgeStompGuard:
         assert after_nudge.status == "pending"
         assert after_nudge.auto_continue_count == 1
 
-        # Step 3: the guard re-reads and sees `pending`, so it does not finalize.
-        # We simulate by doing nothing (the guard is gated on status == running).
+        # Step 3: call the real guard exactly as `_execute_agent_session`'s
+        # `finally` would. Its `status == "running"` predicate must see
+        # `pending` here and no-op — no `task`/`agent_session` scaffolding is
+        # needed since the no-op branch returns before touching either.
+        _finalize_if_still_running(
+            session_id, task=None, agent_session=None, reason="test", raised=False
+        )
 
         # Step 4: Fresh query — nudge state must survive
         final = AgentSession.query.get(id=session.id)
