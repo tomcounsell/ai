@@ -170,7 +170,7 @@ python monitoring/bridge_watchdog.py --check-only
 
 **Why it alerts instead of restarting.** The evidence clears the #2475 bar but fails a different one: **attribution**. It says per-chat history fetches are failing; it does not say *this bridge* is the broken party. Under a Telegram-side outage, an account-level `FLOOD_WAIT`, or a network partition, every chat faults for every client on the network at once — and `last_probe_ok` stays fresh *by construction*, because dialogs-resolve-but-fetches-fault is exactly the shape being detected, so the freshness gate that protects the wedge rule offers no protection here. Making this restart-eligible would turn any Telegram-side outage into a restart every 60-second tick for the outage's duration: the #2475 storm shape with a correlated external trigger, hammering Telegram's rate limiter precisely when Telegram is already degraded, to fix a fault that is not on this machine.
 
-Telling "our client is broken" from "Telegram is broken" needs an observer this bridge does not have — a second independent client, or a fleet-wide correlation signal. That is architecture, not a threshold, so restart-eligibility remains an open question for the owner (#2691) and this check only alerts.
+Telling "our client is broken" from "Telegram is broken" needs an observer this bridge does not have — a second independent client, or a fleet-wide correlation signal. That is architecture, not a threshold, so restart-eligibility remains an open question for the owner (#3257) and this check only alerts.
 
 **Log signals**:
 ```

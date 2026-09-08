@@ -462,7 +462,7 @@ def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     Distinguishing "our client is broken" from "Telegram is broken" needs an
     observer this bridge does not have — a second, independent client, or a
     fleet-wide correlation signal.  That is architecture, not a threshold, so
-    restart-eligibility stays an open question for the owner (#2691) and this
+    restart-eligibility stays an open question for the owner (#3257) and this
     check only alerts.
     """
     from bridge.liveness import get_last_scan_outcome
