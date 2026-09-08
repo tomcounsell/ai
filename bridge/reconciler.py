@@ -139,6 +139,13 @@ async def reconcile_once(
     # bridge/catchup.py) — a post-rollout spike in re_enqueued is greppable.
     re_enqueued = 0
     skipped_duplicate = 0
+    # Per-chat scan-loop health (issue #2691). `record_probe_ok()` below fires
+    # BEFORE this loop, so a half-wedged client whose per-chat fetches all throw
+    # keeps the probe fresh and stamps no missed-recovery evidence. These two
+    # counters are what the watchdog reads to see that state.
+    scan_attempted = 0
+    scan_faulted = 0
+    scan_sample_error = ""
 
     dialogs = await client.get_dialogs()
 
@@ -254,6 +261,7 @@ async def reconcile_once(
                 continue
             per_chat_cutoff = max(per_chat_cutoff, epoch_dt)
 
+        scan_attempted += 1
         try:
             # Paged, bounded, loud fetch shared with bridge/catchup.py
             # (issues #2476/#2477) — see bridge/history_fetch.py.
@@ -404,6 +412,9 @@ async def reconcile_once(
                 )
 
         except Exception as e:
+            scan_faulted += 1
+            if not scan_sample_error:
+                scan_sample_error = f"{type(e).__name__}: {e}"
             logger.error("[reconciler] Error scanning %s: %s", chat_label, e, exc_info=True)
             continue
 
@@ -416,6 +427,37 @@ async def reconcile_once(
         from bridge.liveness import record_missed_recovery
 
         record_missed_recovery()
+
+    # Scan-loop health (issue #2691). Written HERE — after the loop — and never
+    # earlier: the absence of a fresh record is how the watchdog learns the scan
+    # did not run, and that distinction only holds if reaching this line is the
+    # sole thing that writes it. A cycle that attempted nothing still records
+    # (attempted=0), so "cycling, nothing to scan" stays distinguishable from
+    # "not cycling".
+    #
+    # Reaching this line is guaranteed for any cycle that got past
+    # get_dialogs(): every step between record_probe_ok() and here either
+    # carries its own handler (the per-chat body, check_silent_chat,
+    # get_last_processed) or is non-raising by its callee's contract
+    # (get_or_init_dm_coverage_epoch swallows everything and returns
+    # (now, True); find_project_fn / find_project_for_dm_dialog are in-memory
+    # map lookups). Adding an unguarded I/O call to the per-dialog preamble
+    # would abort the whole cycle's stamp, not just one chat, and the monitor
+    # would go dark exactly the way #2691 exists to prevent.
+    from bridge.liveness import record_scan_outcome
+
+    scan_record = record_scan_outcome(
+        attempted=scan_attempted,
+        faulted=scan_faulted,
+        sample_error=scan_sample_error,
+    )
+    if scan_faulted:
+        logger.warning(
+            "[reconciler] Scan health: attempted=%d faulted=%d consecutive_total_fault_cycles=%s",
+            scan_attempted,
+            scan_faulted,
+            (scan_record or {}).get("consecutive_total_fault_cycles", "?"),
+        )
 
     logger.debug(
         "[reconciler] Scanned %d group(s), recovered %d message(s)",

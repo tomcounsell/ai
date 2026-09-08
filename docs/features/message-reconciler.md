@@ -110,6 +110,7 @@ grep reconciler logs/bridge.log
 | `bridge/dedup.py` | The reconciler gates all re-dispatches through `is_duplicate_message()` and records recoveries via `record_message_processed()`. |
 | `monitoring/session_watchdog.py` | The session watchdog monitors stalled SDK sessions. The reconciler monitors missed Telegram messages. Different failure modes, same background-loop pattern. |
 | Bridge self-healing | The reconciler complements crash recovery (watchdog, catchup) by covering a gap that only manifests during a live, healthy connection. |
+| `monitoring/bridge_watchdog.py::assess_scan_health` | Monitors the reconciler's own per-chat scan loop. Because the wedge verdict depends on evidence only this loop can stamp, the loop is itself safety-critical: the reconciler writes `bridge:last_scan_outcome` after every cycle that got past `get_dialogs()`, and the watchdog alerts (never restarts) on a run of all-chat fault cycles. See [Bridge Self-Healing](bridge-self-healing.md). |
 
 ### The re-handling bug (#2204) class now applies to the reconciler too
 

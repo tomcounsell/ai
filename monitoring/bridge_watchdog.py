@@ -140,6 +140,17 @@ STARTUP_GRACE_SECONDS = 5 * 60  # 5 minutes — grace window after bridge start
 # How recent last_probe_ok must be to count as "API layer healthy"
 PROBE_FRESHNESS_SECONDS = 3 * 3600  # 3 hours
 
+# Reconciler scan-loop health (issue #2691). GRAIN OF SALT: provisional/tunable.
+# The reconciler cycles every RECONCILE_INTERVAL_SECONDS (180s), so 5 cycles is
+# ~15 minutes of every-chat-faulting before the watchdog alerts. Sized to outlast
+# an ordinary transient RPC blip without letting a real half-wedge sit unnoticed
+# for hours.
+SCAN_TOTAL_FAULT_CYCLES = int(os.environ.get("SCAN_TOTAL_FAULT_CYCLES", "5"))
+# How recent the scan-outcome record must be to say anything at all. Older than
+# this and the record describes a scan that is no longer running -- inconclusive,
+# never evidence. ~5 reconciler cycles plus slack.
+SCAN_STAMP_FRESHNESS_SECONDS = int(os.environ.get("SCAN_STAMP_FRESHNESS_SECONDS", "1200"))
+
 # Crash-storm / human-alert thresholds (issue #2396). Env-overridable, provisional/
 # tunable -- adjust if real-world storm sizes or alert cadence prove wrong.
 CRASH_STORM_THRESHOLD = int(os.environ.get("CRASH_STORM_THRESHOLD", "5"))
@@ -183,6 +194,11 @@ class HealthStatus:
     # nothing else. Nothing pushes a notification anywhere.
     human_alert_needed: bool = False
     restart_circuit_open: bool = False
+    # issue #2691: reconciler per-chat scan-loop health. Alert-only — it sets
+    # human_alert_needed (which delivers no notification; see #3252) and never
+    # contributes to recovery_level.
+    scan_health_ok: bool = True
+    scan_health_issue: str = ""
 
     def __post_init__(self):
         if self.zombie_pids is None:
@@ -252,20 +268,21 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     of the ceiling, requiring the recovery evidence to be that recent too — a
     wedge caught in the last half hour rather than the last four.
 
-    **Known blind spot** — read this before concluding the detector is broken
-    because a wedged bridge never restarted. ``record_probe_ok()`` fires in
-    ``bridge/reconciler.py`` right after ``get_dialogs()`` and *before* the
-    per-chat scan loop, whose body ends in ``except Exception ... continue``.
-    A half-wedged client — dialogs resolve, every per-chat history fetch throws
-    — therefore keeps the probe fresh, recovers nothing, stamps no evidence, and
-    is indistinguishable here from a quiet account. It will not be restarted.
-    That is a deliberate trade, not an oversight: every signal the wedged
-    component itself emits is circular, the reconciler is the only independent
-    observer available, and when *it* is the failing part there is nothing left
-    to ask. Nothing monitors the scan loop, so this state persists until some
-    unrelated cause restarts the bridge; the failure is loud in the logs
-    (``[reconciler] Error scanning`` at ERROR, once per chat per scan) but
-    unwatched. Turning that into a monitored signal is issue #2691.
+    **Deliberate blind spot, now monitored elsewhere** — read this before
+    concluding the detector is broken because a half-wedged bridge never
+    restarted. ``record_probe_ok()`` fires in ``bridge/reconciler.py`` right
+    after ``get_dialogs()`` and *before* the per-chat scan loop, whose body ends
+    in ``except Exception ... continue``. A half-wedged client — dialogs
+    resolve, every per-chat history fetch throws — therefore keeps the probe
+    fresh, recovers nothing, stamps no missed-recovery evidence, and is
+    indistinguishable *here* from a quiet account. This function will not
+    restart it, and that remains deliberate: every signal the wedged component
+    emits about itself is circular, and the missed-recovery key is the only
+    non-circular evidence available. That state is no longer invisible, though:
+    ``assess_scan_health()`` below reads the reconciler's own per-cycle scan
+    record and raises an alert-only issue. It alerts rather than restarts —
+    see its docstring for why, and for what that alert does and does not
+    deliver.
 
     On signal unreadable past grace window:
       => inconclusive (treated as live), emit WARNING "bridge_update_flow_signal_unreadable"
@@ -392,6 +409,104 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
         return False, _wedge_issue("possibly wedged (early warning)", UPDATE_STALENESS_WARN)
 
     return True, ""
+
+
+def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, str]:
+    """Assess whether the reconciler's per-chat scan loop is doing any work.
+
+    Returns (is_healthy, issue_description).  This is an **alert-only** signal:
+    ``check_bridge_health`` appends the issue, flips ``healthy`` to False, logs
+    it at ERROR, and sets the ``human_alert_needed`` diagnostic flag.  It
+    deliberately does NOT raise ``recovery_level``, so no recovery action fires.
+
+    What "alert" delivers today
+    ---------------------------
+    Nothing is pushed to anyone.  ``human_alert_needed`` drives the
+    ``--check-only`` output line and nothing else (see its field comment on
+    ``HealthStatus``), and ``--check-only`` has no automated caller.  The
+    delivered signal is therefore: one aggregated ERROR line per watchdog tick
+    in the watchdog log, ``healthy=False``, and a line in a CLI a human must run
+    by hand.  That is a real improvement over one ``[reconciler] Error scanning``
+    traceback per chat per scan, but it is not a notification, and no one is
+    paged.  This module delivers nothing by design — see the note in the module
+    docstring on why the crash-storm alert's AgentSession delivery was removed.
+    Wiring an out-of-band path is tracked separately (issue #3252); it is a
+    watchdog-wide concern, not specific to this check.
+
+    Why this is real evidence and not silence
+    -----------------------------------------
+    The reconciler writes ``bridge:last_scan_outcome`` after its per-chat loop
+    finishes, carrying how many chats it attempted and how many faulted.
+    ``attempted > 0 and faulted == attempted`` is an affirmative statement the
+    scan made about work it actually did.  "The scan never ran" has no
+    representation in that record at all — it is the absence of a fresh one.
+    So the two cases are separated by the shape of the data, not by a timing
+    inference here, and every not-fresh / missing / wrong-pid / zero-attempted
+    case below returns healthy.  Silence is never evidence (#2475).
+
+    Why it alerts instead of restarting
+    -----------------------------------
+    A total fault ratio clears the evidence bar but fails a different one:
+    **attribution**.  It says per-chat history fetches are failing; it does not
+    say *this bridge* is the broken party.  Under a Telegram-side outage, an
+    account-level FLOOD_WAIT, or a network partition, every chat faults for
+    every client on the network at once — and ``last_probe_ok`` stays fresh by
+    construction, because dialogs-resolve-but-fetches-fault is precisely the
+    shape being detected, so the freshness gate that protects the wedge rule
+    offers no protection here.  Making this restart-eligible would therefore
+    turn any Telegram-side outage into a restart every ``WATCHDOG_INTERVAL``
+    for the duration of the outage: the #2475 storm shape, with a correlated
+    external trigger, hammering Telegram's rate limiter exactly when Telegram
+    is already degraded, to fix a fault that is not on this machine.
+
+    Distinguishing "our client is broken" from "Telegram is broken" needs an
+    observer this bridge does not have — a second, independent client, or a
+    fleet-wide correlation signal.  That is architecture, not a threshold, so
+    restart-eligibility stays an open question for the owner (#3257) and this
+    check only alerts.
+    """
+    from bridge.liveness import get_last_scan_outcome
+
+    if bridge_pid is None:
+        return True, ""
+
+    try:
+        record = get_last_scan_outcome(r)
+    except Exception as e:
+        logger.warning("assess_scan_health: scan-outcome record unreadable: %s", e)
+        return True, ""
+
+    # No record: no scan has completed since the key was last written. Absence
+    # is the "scan never ran" case and is inconclusive by construction.
+    if not record:
+        return True, ""
+
+    # A record from a dead process describes a scan that is over.
+    if record.get("pid") != bridge_pid:
+        return True, ""
+
+    ts = record.get("ts")
+    if not isinstance(ts, int | float) or (time.time() - ts) > SCAN_STAMP_FRESHNESS_SECONDS:
+        return True, ""
+
+    attempted = record.get("attempted", 0)
+    run = record.get("consecutive_total_fault_cycles", 0)
+    if not isinstance(attempted, int) or not isinstance(run, int):
+        return True, ""
+
+    # attempted == 0 means the loop matched no chats. That is not a fault, and
+    # it is not silence either -- it is an explicit "nothing to do".
+    if attempted <= 0 or run < SCAN_TOTAL_FAULT_CYCLES:
+        return True, ""
+
+    return False, (
+        f"reconciler scan loop failing: every one of {attempted} chat(s) faulted "
+        f"for {run} consecutive scan cycles (threshold {SCAN_TOTAL_FAULT_CYCLES}), "
+        f"first error: {record.get('sample_error') or 'unknown'} — the missed-message "
+        f"evidence the wedge detector depends on cannot be produced while this holds. "
+        f"NOT auto-restarted: an all-chat fault is equally consistent with a "
+        f"Telegram-side outage, and restarting would not fix that (see #3257)"
+    )
 
 
 def are_logs_fresh() -> bool:
@@ -656,7 +771,10 @@ def check_bridge_health() -> HealthStatus:
     # Check 5: Update-flow / wedged detector (only meaningful when process is up)
     update_flow_live = True
     update_flow_issue = ""
+    scan_health_ok = True
+    scan_health_issue = ""
     if running:
+        r = None
         try:
             r = _get_watchdog_redis()
             update_flow_live, update_flow_issue = assess_update_flow(r, pid)
@@ -665,6 +783,27 @@ def check_bridge_health() -> HealthStatus:
             # Treat as inconclusive — do not trigger restart on our own errors
             update_flow_live = True
             update_flow_issue = ""
+
+        # Check 5b: reconciler scan-loop health (issue #2691). Alert only —
+        # see assess_scan_health's docstring for why this must not restart.
+        # It gets its own try/except on purpose: sharing Check 5's handler
+        # would let this alert-only check discard a genuine wedge verdict (and
+        # the level-2 restart it authorizes) by raising after Check 5 returned.
+        # The alert-only signal must never influence the restart signal.
+        if r is not None:
+            try:
+                scan_health_ok, scan_health_issue = assess_scan_health(r, pid)
+            except Exception as e:
+                logger.warning("check_bridge_health: assess_scan_health raised: %s", e)
+                scan_health_ok = True
+                scan_health_issue = ""
+
+        if not scan_health_ok:
+            issues.append(scan_health_issue)
+            # Deliberately NOT escalating recovery_level: this signal cannot
+            # attribute the fault to this bridge, so it alerts and stops there.
+            human_alert_needed = True
+            logger.error("check_bridge_health: %s", scan_health_issue)
 
         if not update_flow_live:
             issues.append(update_flow_issue)
@@ -689,6 +828,8 @@ def check_bridge_health() -> HealthStatus:
         update_flow_issue=update_flow_issue,
         human_alert_needed=human_alert_needed,
         restart_circuit_open=restart_circuit_open,
+        scan_health_ok=scan_health_ok,
+        scan_health_issue=scan_health_issue,
     )
 
 
@@ -1092,6 +1233,9 @@ def main():
         print(f"Update flow live: {status.update_flow_live}")
         if not status.update_flow_live:
             print(f"Update flow issue: {status.update_flow_issue}")
+        print(f"Reconciler scan health OK: {status.scan_health_ok}")
+        if not status.scan_health_ok:
+            print(f"Reconciler scan issue: {status.scan_health_issue}")
         print(f"Human alert needed: {status.human_alert_needed}")
         print(f"Restart circuit open: {status.restart_circuit_open}")
         return 0 if status.healthy else 1
