@@ -131,9 +131,38 @@ def _finalize_if_still_running(
     The single finalize-guarantee mechanism for ``_execute_agent_session``.
     Called from that function's ``finally``, so it covers both exits that
     function owns -- normal return AND raise -- not just the normal-return
-    path the old in-``try`` guard reached (#3209). Cancellation is deliberately
-    excluded by the caller: the health checker and startup recovery own the
-    row's fate there, and finalizing would break their requeue.
+    path the old in-``try`` guard reached (#3209).
+
+    Why finalizing the raise path here is safe, stated precisely because an
+    earlier revision of this docstring got it wrong. It is NOT that a raise
+    lacks a downstream owner. It has one: the worker's outer ``finally``
+    (``agent_session_queue.py:2957``) gates on
+    ``not session_completed and not finalized_by_execute``, and
+    ``finalized_by_execute`` is set only on a non-exceptional return
+    (``:2767``), so a raise takes that crash path and calls
+    ``_complete_agent_session(session, failed=True)`` in the SAME turn. The
+    row is therefore already destined for ``failed`` microseconds later. This
+    guard does not change that outcome -- it moves the write EARLIER, ahead of
+    the synthetic-slug worktree cleanup below, which refuses to reclaim a lane
+    whose row still reads ``running``.
+
+    Because both writers land on the same terminal status, the second one hits
+    ``finalize_session``'s idempotent same-status early return and is a no-op.
+    That agreement is load-bearing, not incidental: two writers reaching
+    DIFFERENT terminal statuses raise ``StatusConflictError``, and the worker's
+    retry at ``agent_session_queue.py:3028`` re-raises it out of the outer
+    ``finally``, killing the worker loop and stranding every session on that
+    ``worker_key`` (#3253). That is exactly why ``raised=True`` must force
+    ``failed`` below rather than letting ``_runner_final_status`` report
+    ``completed`` -- see "Status honesty".
+
+    Cancellation is deliberately excluded by the caller, and there the owner
+    argument DOES hold: ``_agent_session_health_check`` cancels the task and
+    then decides the row's fate inside the same await, commonly requeueing it
+    to ``pending``. A finalize from here would land first and turn every
+    no-progress requeue into a swallowed ``StatusConflictError``, silently
+    retiring that retry loop. A cancelled row has a live owner mid-flight; a
+    raised row's owner has already run.
 
     The predicate is ``status == "running"``, never ``defer_reaction``. That is
     what makes it safe on both ``_enqueue_nudge`` paths:
@@ -154,10 +183,13 @@ def _finalize_if_still_running(
       continuation, which is a distinct record with its own
       ``agent_session_id``.) Either way the nudge's write survives.
 
-    Fully synchronous on purpose: it runs inside a ``finally`` on the executor's
-    hot path, and the terminal write must land before the synthetic-slug
-    worktree cleanup a few lines later reads the row's status. Introducing an
-    ``await`` would let that ordering be rescheduled.
+    Fully synchronous on purpose. The reason is NOT statement ordering -- this
+    call and the worktree cleanup below are sequential statements in the same
+    coroutine, and an ``await`` between them would not reorder them. It is that
+    an ``await`` inside a ``finally`` that is unwinding an externally-requested
+    cancellation raises ``CancelledError`` at the suspension point and SKIPS the
+    rest of the ``finally``, including the cleanup. Keeping this call
+    synchronous is what guarantees the rest of the block runs.
 
     Status honesty. ``_runner_final_status`` returns ``"completed"`` whenever
     ``task.error`` is falsy and the runner exit was clean, and it has no notion
@@ -2462,12 +2494,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Bug A (issue #1730): complete_transcript is confirmed to fire on the
         # deferred-self-draft completion path (defer_reaction=False, since
         # _inject_self_draft_steering does NOT call _enqueue_nudge).  However, if
-        # complete_transcript itself throws, the session can ghost as ``running`` for
-        # up to the health-check TTL (32 min in the production timeline).  The
-        # local fallback inside this block finalizes the row when complete_transcript
-        # fails, so the terminal status lands here rather than waiting on the
-        # `finally`'s `_finalize_if_still_running`, which is keyed on
-        # ``status == "running"`` and would otherwise be the one to catch it.
+        # complete_transcript itself throws, the session would ghost as ``running``.
+        # There is no local fallback in this block -- the duplicate defensive one
+        # was removed (see the `except` below).  The `finally`'s
+        # `_finalize_if_still_running`, keyed on ``status == "running"``, is the
+        # sole owner of that path and catches it on the way out.
         if agent_session:
             try:
                 from bridge.session_transcript import complete_transcript
@@ -2723,7 +2754,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
             )
     except asyncio.CancelledError:
-        # Cancellation has an owner, and it is never this function.
+        # Cancellation has an owner that is still mid-flight when this clause
+        # runs. That is the distinction from the raise path below -- NOT that a
+        # raise has no owner at all. A raise is owned by the worker's outer
+        # `finally`, which has not run yet and will finalize the same row to the
+        # same `failed` status moments later; finalizing early there merely
+        # reorders two writes that agree. Here the owner's decision is still
+        # being made, so writing first would overrule it.
         #
         # The health checker cancels `handle.task` and then, inside the SAME
         # await, decides the row's fate itself: `abandoned`, `failed`, or --
@@ -2761,8 +2798,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # === Finalize guarantee (#2007, #3209) ===
         # Runs on every exit this function owns -- normal return AND raise --
         # and before the worktree cleanup below, which refuses to remove a lane
-        # whose row is still `running`. Cancellation is excluded because it is
-        # owned elsewhere (see the `except asyncio.CancelledError` above).
+        # whose row is still `running`. On the raise path this does not change
+        # the row's eventual status (the worker's outer `finally` writes the
+        # same `failed` in the same turn); it just gets there before the
+        # cleanup reads it. Cancellation is excluded because its owner is still
+        # deciding (see the `except asyncio.CancelledError` above).
         # Keyed on `status == "running"`, so the nudge path's `pending` write
         # survives untouched; see `_finalize_if_still_running` for why that
         # holds on both `_enqueue_nudge` paths. `task` and `agent_session` are

@@ -315,7 +315,7 @@ class TestDeferredNudgeMainPathPreservesLane:
         error handler calls ``messenger.send(...)`` -> ``route_session_output``
         (forced here to "nudge_continue"), and ``_enqueue_nudge``'s MAIN path
         re-reads the row and calls ``transition_status(session, "pending",
-        ...)`` on the SAME row. The pre-finalize guard must see a `pending`
+        ...)`` on the SAME row. The exit finalize guard must see a `pending`
         row and no-op; the synthetic cleanup must then find the row still
         non-terminal (carrying the exec_cwd stamped earlier in this same
         run) and refuse removal, preserving the lane for the continuation
@@ -347,7 +347,7 @@ class TestDeferredNudgeMainPathPreservesLane:
         assert reloaded is not None
         assert reloaded.status == "pending", (
             "the main nudge path must leave the row pending, untouched by the "
-            "pre-finalize guard (status == 'running' predicate must no-op here)"
+            "exit finalize guard (status == 'running' predicate must no-op here)"
         )
 
         wt_path = repo / ".worktrees" / slug
