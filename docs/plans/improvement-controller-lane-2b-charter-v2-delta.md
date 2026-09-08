@@ -400,15 +400,81 @@ Both new guards are fail-closed leaves, so their exception paths are the product
 
 ## Risks
 
-_placeholder_
+### Risk 1: The eligibility guard fails open and client context reaches a foreign provider
+
+The worst outcome this lane can enable. `is_open_source` returning `True` by mistake is how private client code and its context reach a non-subscription provider (charter §7, parent plan Risk 8).
+
+**Mitigation:** every branch that is not an explicit uppercase `"PUBLIC"` returns `False` — missing project, missing `github`, missing `org`/`repo`, non-zero exit, timeout, unparseable JSON, absent key, unexpected value. Each of those is a separate test rather than one blanket case. The mutation check named in Success Criteria flips the default to `True` and requires the private, missing-field, and `gh`-failure tests to go red together; if only one bites, the others were passing vacuously.
+
+### Risk 2: The guard answers about the wrong repository and exits 0
+
+`GH_REPO` is set process-wide by `agent/sdk_client.py`, and `gh` reads it before cwd. A bare `gh repo view --json visibility` inside a session would report on whatever `GH_REPO` names, exit 0, and look entirely healthy — the failure has no symptom.
+
+**Mitigation:** the repository is passed positionally, `gh repo view "<org>/<repo>"`, which overrides the environment. A test sets `GH_REPO` to a decoy public repository, asks about a private project, and asserts `False`. Without that test the defect is undetectable by reading the code, because the correct and incorrect versions differ by one argument.
+
+### Risk 3: The resource probe emits a credential
+
+Charter §8 forbids exposing secrets in logs, messages, or committed files, and this repo runs `op run --no-masking`, so op's own masking is not a backstop.
+
+**Mitigation:** the presence leg reads `op item list --format json`, which returns metadata only and never a field value, so most of the module cannot leak by construction. The fingerprint leg hashes immediately and returns `"sha256:<hex>"`; the plaintext never enters a return value, a log line, or an argv. The `runner` parameter is injectable so the test seeds a distinctive fake credential and asserts the string appears nowhere in the returned structure at any depth — a recursive scan, not a top-level key check.
+
+### Risk 4: `unknown` gets reported as `absent`
+
+A resource reported `absent` when it exists sends the next lane to acquire something already sitting in the vault, and older `op` builds could exit 0 on unrecognized server errors, so exit 0 proves nothing on its own.
+
+**Mitigation:** `absent` is written only on a successful, parseable listing that does not contain the title. Every other shape — non-zero exit, timeout, empty stdout, unparseable JSON, unexpected structure — is `unknown`. A test drives each shape and asserts the classification.
+
+### Risk 5: A schema-gate exemption quietly becomes a loophole
+
+Three assertions are amended. A flat constant raised from 8 to 12, or from 2 to 3, would stop the gate biting for every model at once, and nothing would announce it.
+
+**Mitigation:** each amendment is a per-key map with an explicit default and exactly one entry carrying its reason in a comment. A second exemption requires a second named line, which a reviewer sees. The mutation check adds a fourth indexed field to another improvement model and requires the gate to fail.
+
+### Risk 6: The loader mutates an existing charter row
+
+Charter §12 forbids retroactively rewriting evidence. A loader that flips a prior row to `superseded`, or updates a row in place on a digest change, destroys the lineage that makes an old release auditable — and the module's current docstring describes exactly that flow.
+
+**Mitigation:** `load_from_file` calls `create()` or returns an existing row, and nothing else. No `save()`, no `delete()`, no `state` write. A test corrupts one byte, reloads, and asserts two rows exist with the first's fields byte-identical to before. The docstring is corrected in the same change so the prose stops describing behavior the code does not have.
+
+### Risk 7: The goals partial shows a zero where it should show "not measured"
+
+Charter §11 warns against treating an absence of detection as a result. Six of the §11 headings have no writer until lanes 3 through 6 land, so this lane ships a surface that is mostly empty.
+
+**Mitigation:** every heading renders one of three distinguishable states — content, "nothing yet, written by lane N", or "unavailable" when the read failed. No count renders as `0` unless a query actually ran and returned nothing. `test_ui_app.py` asserts the empty-namespace render contains the lane attribution string and no bare zero.
 
 ## Race Conditions
 
-_placeholder_
+Nothing in this lane runs concurrently. There is no tick, no lease, no reservation, no shared mutable state, and no cross-process handoff — the two guards are synchronous leaves, the loader runs on demand, and the dashboard partial is a read. The one timing question worth writing down is the loader's, because a later lane will call it from a tick.
+
+### Race 1: Two callers seed the same charter digest simultaneously
+
+`load_from_file` reads (query for the digest) and then writes (`create`). Two callers arriving between the read and the write both miss and both create, producing two rows for one digest.
+
+**Why it is tolerable here, and what makes it safe later:** this lane has exactly one caller — a test — so the race cannot occur on `main` as shipped. When lane 3's controller tick calls the loader on every run, the tick is bounded by `max_concurrent_research_sessions = 1`, so it is single-flighted by the concurrency unit that already exists.
+
+**What this lane does about it anyway:** duplicate rows are harmless by construction, because rows are immutable and identical for a given digest, and `pinned()` resolves by newest `created_at` regardless of how many rows share a digest. Making the seed a compare-and-set would need an atomic primitive in the control namespace this lane is forbidden to create. The behavior is documented on `load_from_file` so lane 3 inherits the reasoning rather than rediscovering it.
+
+### Race 2: The charter file changes while a session is mid-decision
+
+Tom commits an amended charter while an action admitted under the previous digest is still running.
+
+**Not this lane's to solve, and named so it is not accidentally solved here.** Charter §12 states the rule — actions already admitted complete under the digest they carry, a new digest pins for actions admitted after it — and enforcing it requires the admission path, which is #3215's. This lane makes the rule *expressible* by putting `charter_digest` on the case, the investigation, and the release. It enforces nothing.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- [EXTERNAL] **Editing `docs/improvement-charter.md`.** Tom owns it and only Tom edits it. The builder reads it and never writes it. Asserted by a Verification row (`grep -rn "improvement-charter.md" models/ tools/ reflections/ ui/` finds no write call) and by lane 6's candidate-surface denylist.
+- [ORDERED] **The improvement control namespace.** `improve:{project_key}:*`, its Lua transition, and every reservation key are #3215's. This lane creates no Redis key outside the eight existing model keyspaces, which is why the eligibility cache is process-local.
+- [ORDERED] **The `valor-improve` CLI.** No `[project.scripts]` entry, no subcommand, no argparse. `propose`, `budget`, `propose-amendment`, `ranking`, `pause`, `resume`, and `doctor` are all #3215's or #3217's.
+- [ORDERED] **`tools/paid_inference_meter.py` and any dollar settlement.** This lane adds two dollar *settings* and removes a false metering claim from a document. It meters nothing. #3215.
+- [ORDERED] **`tools/vault_write.py`.** The one sanctioned `op item create` wrapper is #3215's, along with its `resource_acquired` evidence row. This lane's probe reads and classifies; it never writes to the vault.
+- [ORDERED] **The ranking snapshot.** The durable ordered artifact is #3217's (issue Dropped bucket). `ranking_rationale` is free text on a case and is not a snapshot.
+- [ORDERED] **The `serves_charter` judge**, blinding, and the corrected statistics. #3216.
+- [ORDERED] **Release promotion, rollback drills, and the candidate manifest denylist.** #3218.
+- [HUMAN] **The `upvote` label.** Human-owned, unchanged, untouched. Nothing in this lane reads it, writes it, or reasons about it.
+- [HUMAN] **Adding a question path to Tom.** Charter §9 permits exactly one message class, the amendment request, and it lives in #3215's `tools/improvement_amendment.py`. No poll, no `AskUserQuestion`, no `investigation_id`. The parent plan's no-routine-question anti-criterion row covers this lane too.
+- **Reopening PR #3224's evidence adapters, its collection-tick registration, its `TaskTypeProfile` retirement, or its content store.** All shipped and all correct; they are not pre-v2 in any way this charter touches.
+- **Deleting `ImprovementCase.priority` or any other field the parent plan did not sanction removing.** `objective` is the only deletion.
+- **Backfill migrations.** No `Improvement*` model has a writer on `main`, so every table is empty. The registered migration is a read-only marker.
 
 ## Update System
 
