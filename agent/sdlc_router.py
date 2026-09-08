@@ -1629,8 +1629,14 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
       evaluated after this row. Observed on lane #3195 / PR #3222, which
       escaped only by overriding ``MAX_CONCERN_RECRITIQUE_ROUNDS``.
 
-    Nothing is stranded by either stand-down: row 5 owns the started-BUILD
-    state and the PR-stage rows own the post-PR one.
+    Nothing is stranded by either stand-down. The PR-stage rows own the post-PR
+    state, and row 5 (``_rule_branch_exists_no_pr``) owns the pre-PR one — its
+    predicate is ``BUILD == in_progress OR context["branch_exists"] is True``,
+    so the branch half answers regardless of BUILD status. A BUILD cannot reach
+    ``completed`` without pushing its lane branch, so the realistic
+    crash-before-PR case carries ``branch_exists == True`` and row 5 resumes the
+    build. ``Blocked('no matching dispatch rule')`` remains only for the
+    no-live-branch subcase, where there is nothing left to resume.
     """
     if meta.get("pr_number"):
         return False
