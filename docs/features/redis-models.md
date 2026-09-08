@@ -187,7 +187,7 @@ Two rules make the exception safe rather than a loophole:
 
 Popoto field types have different implications for how records behave on mutation:
 
-- **KeyField**: Part of the Redis key. Changing a KeyField value changes the record's identity, creating a new record and orphaning the old one. Code that needs to change a KeyField value must use the **delete-and-recreate** pattern (delete old record, create new one with all fields copied).
+- **KeyField**: Part of the Redis key. Assigning a new value on an already-persisted row raises `KeyMutationError` under the pinned popoto (older pins silently forked the row instead -- a new `db_key`, orphaning the original at the old key). A genuine identity change goes through popoto's sanctioned `save(migrate_key=True)`, which deletes the old Redis key and moves the row in place; `models/knowledge_document.py::KnowledgeDocument.safe_upsert` is a worked example that also reconciles denormalized rows (`DocumentChunk`, `Memory`) carrying the same KeyField -- see [Knowledge Document Integration § Cross-Project Re-Keying](knowledge-document-integration.md#cross-project-re-keying). The delete-and-recreate pattern (delete old record, create new one with all fields copied) remains an alternative when there is no reconciliation to do.
 - **IndexedField**: Maintains a secondary index for `.filter()` queries but is NOT part of the Redis key. Mutating an IndexedField and calling `.save()` updates the record in place and correctly updates the secondary index. No delete-and-recreate needed.
 - **Field**: Plain data field with no indexing. Mutate and save freely.
 
@@ -200,6 +200,7 @@ Popoto field types have different implications for how records behave on mutatio
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
 | `parent_agent_session_id` | KeyField | No | Canonical parent reference. Set once at creation (child sessions only). |
+| `slug` | KeyField | Once | Empty-only: `bridge/session_transcript.py::start_transcript` sets it when unset, otherwise logs a warning and skips the write (issue #3247) |
 | `role` | Field | No | Set once at creation ("pm", "dev", or null for legacy) |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
 
@@ -230,4 +231,4 @@ The `status` field is an IndexedField (popoto >= 1.4.3), which eliminates the de
 
 With `status` as an IndexedField, all status transitions (session pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
 
-The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in `clone_agent_session_fields` / `continuation_agent_session_fields`, which build the field payload when a record needs re-creating for a KeyField change. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.
+The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in `clone_agent_session_fields` / `continuation_agent_session_fields`, which build the field payload when a record needs re-creating for a KeyField change. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` and `slug` mutation on an already-hydrated `AgentSession` by logging a warning and skipping the write if the value would change. That skip is an interim measure (issue #3247); a genuine rename needs `save(migrate_key=True)`. `models/knowledge_document.py::KnowledgeDocument.safe_upsert` takes the other branch of the same hazard: a `project_key` divergence is a genuine re-key driven by `projects.json`, not an error, so it routes through `doc.save(migrate_key=True)` instead of skipping -- see [Knowledge Document Integration § Cross-Project Re-Keying](knowledge-document-integration.md#cross-project-re-keying).
