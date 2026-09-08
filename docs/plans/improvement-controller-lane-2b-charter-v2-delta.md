@@ -221,7 +221,132 @@ Everything this lane builds on is already on `main` at the baseline: the eight `
 
 ## Solution
 
-_placeholder_
+### Key Elements
+
+- **A charter seed.** `ImprovementCharter` gains `digest`, `effective`, and `text`; a `load_from_file` classmethod creates one immutable row per unseen digest and refuses a file Tom does not own.
+- **A case vocabulary that cites the charter.** `priority_area` (indexed), `ranking_rationale`, and `charter_digest` on `ImprovementCase`; `charter_digest` on `ImprovementInvestigation` and `ImprovementRelease`; `objective` deleted.
+- **Three budget units in settings.** `daily_paid_inference_usd` (renamed), `weekly_infrastructure_usd`, `budget_day_boundary`, `budget_week_start`; `portfolio_allocation` deleted.
+- **Two fail-closed guards.** `is_open_source(project_key)` for charter §7, `probe()` for charter §8.
+- **A goals partial.** The §11 record with honest empty states.
+- **Corrected prose.** The feature doc, the `.env.example` comment, and the capability matrix.
+- **Three narrowly amended schema-gate assertions**, each with a named reason and a mutation check.
+
+### Flow
+
+A builder works outside-in: records first (everything else reads them), then settings (independent), then the two guards (leaves), then the dashboard (reads the records), then the docs (describe all of it), then the follow-through issues and comments.
+
+Nothing in this lane runs on a tick, holds a lease, or writes a Redis key outside the eight existing model keyspaces.
+
+### Technical Approach
+
+#### 1. Charter seed — `models/improvement_charter.py`
+
+Three new fields:
+
+```python
+digest = Field(null=True)              # "sha256:<hex>" — PLAIN, not indexed (spike-1)
+effective = Field(null=True)           # ISO date string from frontmatter
+text = ContentField(store=verifying_artifact_store)
+```
+
+`digest` is a plain `Field` and this is deliberate, against the parent plan's `IndexedField` wording. Spike-1 measured that `test_improvement_model_indexes_are_low_cardinality` rejects an indexed field whose name contains `"digest"`, on the name alone. Rather than punch a hole in a name-based guard that exists precisely to catch fields added without thought, the loader matches the digest in Python over the project's charter rows — the same technique the module docstring already prescribes for `version`. At one row per charter version, the scan is single-digit.
+
+`text` reuses the module singleton `verifying_artifact_store` from `models/verifying_artifact_store.py:137`, exactly as `ImprovementExperiment.manifest` and `ImprovementEvaluation.judge_records` already do. No new store instance, no new retention root.
+
+The loader:
+
+```python
+@classmethod
+def load_from_file(cls, path=Path("docs/improvement-charter.md"), project_key="valor") -> "ImprovementCharter | None":
+```
+
+1. `compute_plan_hash(path)` from `tools/sdlc_verdict.py` for the digest. It reads bytes, normalizes CRLF and stray CR to LF, returns `"sha256:<hex>"`, and returns `None` on any read failure (spike-5). No second hasher is written.
+2. Parse the YAML frontmatter for `owner`, `version`, `effective`.
+3. **Refuse** unless `owner` is exactly `Tom Counsell` — return `None`, write nothing, log at warning. This is the code half of "Tom owns the charter"; the grep-based Verification row is the other half.
+4. `ImprovementCharter.query.filter(project_key=project_key)`, match `digest` in Python. On a hit, return the existing row untouched.
+5. On a miss, `create()` one row with `version`, `effective`, `digest`, `text`, `state="active"`, `created_at=datetime.now(UTC)`.
+
+**Never** `save()` on an existing row, never flip a prior row to `superseded`, never delete. A changed byte therefore produces a second `active` row and leaves the first exactly as it was, which is what the acceptance criterion requires. The pinned charter is the newest by `created_at` in the partition; a `pinned(project_key)` helper beside the loader returns it so no caller re-derives that rule. The module docstring's amendment paragraph is corrected to describe this, since it currently describes a supersede flow the loader does not perform.
+
+#### 2. Case vocabulary — `models/improvement_case.py`, `_investigation.py`, `_release.py`
+
+```python
+PRIORITY_AREAS: tuple[str, ...] = (
+    "inference", "token_efficiency", "skills", "personas", "cloud_execution",
+    "research_process", "evaluators", "memory", "orchestration", "infrastructure",
+    "other",
+)
+```
+
+Five from charter §3's priority list, five from §3's closing sentence ("Research process improvements, better evaluators, memory, orchestration, and new infrastructure are all eligible means"), plus `other`. `other` is load-bearing: it is what keeps the set from reading as a fixed allocation.
+
+On `ImprovementCase`: `priority_area = IndexedField(default="other")`, `ranking_rationale = Field(null=True)`, `charter_digest = Field(null=True)`. Delete `objective = Field(null=True)` at `:91` and its docstring line at `:75`. `charter_version` (`IntField(default=0)`) **stays** — charter §12 asks for a versioned reference, the digest is the identity and the version is the human-readable name, and the loader writes both.
+
+On `ImprovementInvestigation` and `ImprovementRelease`: `charter_digest = Field(null=True)`, plus its docstring line.
+
+**Migration:** none needed for the deletion. `objective` is a plain `Field` with no index and no writer, which is precisely the contract at `models/agent_session.py:879-883`. The additions are additive. A registered marker migration follows the `_migrate_confirm_improvement_models_readable` precedent at `scripts/update/migrations.py:1384`: read-only, imports the four models, runs one bounded project-scoped query each, writes nothing, and exists so a machine carries a durable record of the schema version that introduced the v2 fields. Register it in `MIGRATIONS` — a defined-but-unregistered function never runs.
+
+#### 3. Schema-gate amendments — the three narrow exemptions
+
+Each is a declared map entry with a reason, not a loosened constant.
+
+- `tests/unit/test_improvement_models.py::test_declared_vocabularies_are_small`: replace the flat `<= 8` with a per-field maximum map defaulting to 8, carrying one entry — `(ImprovementCase, "priority_area"): 11`, reason "charter §3 vocabulary; eleven index sets per project partition, membership reads only". The `>= 2` floor and the duplicate check are untouched.
+- `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation`: replace the flat `1 <= len(indexed) <= 2` with a per-model maximum defaulting to 2, carrying one entry — `ImprovementCase: 3`, reason "`state` is lifecycle, `priority` is urgency, `priority_area` is charter §3 classification; the goals partial reads all three".
+- `INDEXED_VOCABULARIES[ImprovementCase]` gains `"priority_area": PRIORITY_AREAS`, which is what makes `test_every_indexed_field_has_a_declared_vocabulary` and `test_index_defaults_are_inside_their_vocabulary` cover it. `"other"` is in the tuple, so the default is inside its vocabulary.
+
+`unbounded_markers` and `FORBIDDEN_INDEX_NAMES` are **not** touched, because spike-1 removed the only reason to touch them.
+
+#### 4. Settings — `config/settings.py::ImprovementSettings`
+
+| Field | Change | Default |
+|---|---|---|
+| `daily_external_llm_usd` | renamed to `daily_paid_inference_usd` | `10.00` |
+| `weekly_infrastructure_usd` | new | `50.00` |
+| `budget_day_boundary` | new | `"UTC"` |
+| `budget_week_start` | new | `"monday"` |
+| `portfolio_allocation` | deleted (`:630`, no reader) | — |
+
+Every field keeps a description ending in an `Env: IMPROVEMENT__<KEY>.` sentence and a `PROVISIONAL/TUNABLE.` marker, matching the block's existing shape. The `Env:` sentences are the reader leg that `tests/unit/test_env_declaration_readers.py` walks; only `IMPROVEMENT__ENABLED` is actually declared in `.env.example`, so no declaration changes, but the convention stays intact.
+
+`.env.example:358-359` names "daily external-LLM dollars, portfolio allocation" in the `IMPROVEMENT__ENABLED` comment block. Rewrite that clause to name the three budget units. Missing this is what would fail the parent plan's `git grep portfolio_allocation` confirmation row.
+
+#### 5. `tools/improvement_eligibility.py`
+
+```python
+def is_open_source(project_key: str, *, ttl_seconds: int = 900) -> bool
+```
+
+Charter §7: any provider for open-source work; subscriptions for client work. **Fails closed to client on every uncertainty.**
+
+- Resolve `projects[project_key]["github"]` through `bridge.routing.load_config()`. Missing project, missing `github` block, missing `org` or `repo` → `False`.
+- **Pass the repository positionally**: `gh repo view "<org>/<repo>" --json visibility`. `GH_REPO` is set process-wide by `agent/sdk_client.py` and `gh` reads it before cwd, so a bare `gh repo view` would silently answer about the wrong repository and exit 0. The positional argument overrides it. This is the correctness detail most likely to be lost in implementation.
+- Bounded `subprocess.run(..., timeout=10, capture_output=True, text=True)`. Non-zero exit, timeout, empty stdout, unparseable JSON, or an absent `visibility` key → `False`.
+- `str(data["visibility"]).strip().upper() == "PUBLIC"` (spike-4: the API returns `"PUBLIC"`, uppercase).
+- **Cache in-process**, not in Redis: a module-level `dict[str, tuple[bool, float]]` keyed by `project_key` with a `time.monotonic()` expiry, default 900 seconds, and a `_clear_cache()` for tests. This answers the issue's one open question. A durable cache would mean a Popoto model (a migration, a schema-gate entry, a TTL decision) or a control-namespace key this lane is forbidden to create; a repository's visibility changes on a scale of months; and lane 3 may promote it into the control namespace later if cross-process sharing is ever shown to matter. Cheapest correct thing, no namespace, decision reversible.
+
+#### 6. `tools/improvement_resources.py`
+
+```python
+def probe(*, runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None) -> dict[str, dict]
+```
+
+One entry per resource charter §8 names: `workspace_personal`, `workspace_work`, `virtual_debit_card`, `cloudflare_account`, `cloudflare_cli`, `vault_write`. Each value is `{"state": "verified" | "absent" | "unknown", "detail": <str>, "fingerprint": <str | None>}`.
+
+- **Presence from titles only.** `op item list --vault m-valor --format json` returns metadata — title, id, vault, category, timestamps — and never a field value (Research finding 1). The whole presence leg therefore handles no credential at all.
+- **Fingerprint, never value.** Where a fingerprint is wanted, read the credential, hash it immediately, and return `"sha256:<hex>"`. The plaintext is never returned, never logged, never formatted into a message, and never placed in an argv. `CLAUDE.md`'s "compare by SHA-256 fingerprint" rule, applied.
+- **`unknown` is the honest default.** Non-zero exit, timeout, empty output, unparseable JSON, or an unexpected shape → `unknown`, never `absent`. Older `op` builds could exit 0 on unrecognized server errors (Research finding 2), so exit 0 alone proves nothing. Reporting `absent` for a resource that exists would send a builder chasing something that was already there.
+- **Never raises.** Every branch returns a dict. A probe that throws inside a controller tick is worse than one that reports `unknown`.
+- **No masking backstop.** This repo runs `op run --no-masking` by design, so op's own masking is unavailable (Research finding 3). The probe's output discipline is the only guard, which is why `runner` is injectable: the test seeds a fake credential through it and asserts the string appears nowhere in the returned structure, at any depth.
+- **`wrangler` and the vault inventory are expected to report `unknown` on this machine today.** That is a correct result, not a failing test.
+
+#### 7. Dashboard — the goals partial
+
+- `ui/data/improvement.py::get_goals(project_key="valor") -> dict`: the pinned charter's `version`, `effective`, and `digest`; the charter §3 priority list; open `ImprovementCase` rows with `priority_area` and `ranking_rationale`; and the §11 headings (acquired abilities, evaluations, rejected approaches, unresolved assumptions, resource use by budget unit) each with an explicit empty state.
+- `ui/templates/improvement/goals.html`, following `coverage.html`'s shape, root element id `improvement-goals`.
+- `@app.get("/_partials/improvement/goals/")` in `ui/app.py`, beside the two existing partial routes.
+- A third `hx-get` card in `ui/templates/index.html`.
+- **Honest empty states.** Until lanes 3 through 6 land, most §11 headings have nothing to render. Each says what would appear there and which lane writes it — "no releases yet (lane 6)" — rather than showing a zero. A zero claims a measurement was taken.
+- `test_dashboard_never_offers_experiment_or_patch_counts` keeps its exact-list form with `get_goals` added. It is what stops a future lane from quietly adding an activity counter, so it stays exact.
 
 ## Failure Path Test Strategy
 
