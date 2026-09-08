@@ -174,7 +174,7 @@ Telling "our client is broken" from "Telegram is broken" needs an observer this 
 
 **Log signals**:
 ```
-[ERROR] check_bridge_health: reconciler scan loop failing: every one of 4 chat(s) faulted for 5 consecutive scan cycles (threshold 5), first error: ConnectionError: iter_messages timed out — the missed-message evidence the wedge detector depends on cannot be produced while this holds. NOT auto-restarted: an all-chat fault is equally consistent with a Telegram-side outage, and restarting would not fix that (see #2691)
+[ERROR] check_bridge_health: reconciler scan loop failing: every one of 4 chat(s) faulted for 5 consecutive scan cycles (threshold 5), first error: ConnectionError: iter_messages timed out — the missed-message evidence the wedge detector depends on cannot be produced while this holds. NOT auto-restarted: an all-chat fault is equally consistent with a Telegram-side outage, and restarting would not fix that (see #3257)
 [WARNING] [reconciler] Scan health: attempted=4 faulted=4 consecutive_total_fault_cycles=5
 ```
 

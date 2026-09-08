@@ -434,6 +434,16 @@ async def reconcile_once(
     # sole thing that writes it. A cycle that attempted nothing still records
     # (attempted=0), so "cycling, nothing to scan" stays distinguishable from
     # "not cycling".
+    #
+    # Reaching this line is guaranteed for any cycle that got past
+    # get_dialogs(): every step between record_probe_ok() and here either
+    # carries its own handler (the per-chat body, check_silent_chat,
+    # get_last_processed) or is non-raising by its callee's contract
+    # (get_or_init_dm_coverage_epoch swallows everything and returns
+    # (now, True); find_project_fn / find_project_for_dm_dialog are in-memory
+    # map lookups). Adding an unguarded I/O call to the per-dialog preamble
+    # would abort the whole cycle's stamp, not just one chat, and the monitor
+    # would go dark exactly the way #2691 exists to prevent.
     from bridge.liveness import record_scan_outcome
 
     scan_record = record_scan_outcome(

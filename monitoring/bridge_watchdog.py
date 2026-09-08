@@ -505,7 +505,7 @@ def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
         f"first error: {record.get('sample_error') or 'unknown'} — the missed-message "
         f"evidence the wedge detector depends on cannot be produced while this holds. "
         f"NOT auto-restarted: an all-chat fault is equally consistent with a "
-        f"Telegram-side outage, and restarting would not fix that (see #2691)"
+        f"Telegram-side outage, and restarting would not fix that (see #3257)"
     )
 
 
