@@ -248,7 +248,14 @@ def record_scan_outcome(
         now = time.time()
 
         prev_run = 0
-        prev = _read_scan_outcome(r)
+        try:
+            prev = _read_scan_outcome(r)
+        except Exception as e:
+            # A corrupt stored value must never gate the write that would
+            # overwrite it, or the key stays corrupt until its TTL expires and
+            # the monitor goes silently dark.  Treat it as "no previous run".
+            logger.warning("liveness: discarding unreadable scan outcome: %s", e)
+            prev = None
         if prev is not None and prev.get("pid") == pid:
             prev_ts = prev.get("ts")
             contiguous = (
@@ -259,13 +266,13 @@ def record_scan_outcome(
 
         if attempted <= 0:
             run = prev_run
-        elif faulted >= attempted:
+        elif faulted == attempted:
             run = prev_run + 1
         else:
             run = 0
 
         record = {
-            "ts": time.time(),
+            "ts": now,
             "pid": pid,
             "attempted": int(attempted),
             "faulted": int(faulted),

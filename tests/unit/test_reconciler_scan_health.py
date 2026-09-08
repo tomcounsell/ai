@@ -302,16 +302,16 @@ def test_watchdog_suppresses_verdict_without_a_pid():
 
 
 # ---------------------------------------------------------------------------
-# Paging, not restarting: the Telegram-outage guard
+# Alerting, not restarting: the Telegram-outage guard
 # ---------------------------------------------------------------------------
 
 
-def test_sustained_total_fault_pages_but_never_escalates_recovery_level():
+def test_sustained_total_fault_alerts_but_never_escalates_recovery_level():
     """A total fault is real evidence but cannot attribute blame to this bridge.
 
     Under a Telegram-side outage every chat faults for every client at once, so
     escalating recovery_level here would restart every watchdog tick for the
-    duration of the outage — the #2475 storm shape. It must page instead.
+    duration of the outage — the #2475 storm shape. It must alert instead.
     """
     from monitoring.bridge_watchdog import HealthStatus, check_bridge_health
 
@@ -330,7 +330,7 @@ def test_sustained_total_fault_pages_but_never_escalates_recovery_level():
 
     assert isinstance(status, HealthStatus)
     assert status.scan_health_ok is False
-    assert status.human_alert_needed is True, "must page a human"
+    assert status.human_alert_needed is True, "must raise the human-alert flag"
     assert status.recovery_level == 0, "must NOT authorise a restart (Telegram-outage guard)"
     assert any("reconciler scan loop failing" in i for i in status.issues)
 
@@ -408,13 +408,149 @@ def test_record_scan_outcome_run_does_not_carry_across_a_restart():
 
 
 def test_record_scan_outcome_never_raises_on_redis_failure(caplog):
+    """A genuinely unavailable Redis returns None rather than raising.
+
+    Both calls must fail: a failing *read* alone is not a failure of this
+    function — see test_read_failure_alone_does_not_abort_the_write.
+    """
     r = MagicMock()
     r.get.side_effect = RuntimeError("redis down")
+    r.set.side_effect = RuntimeError("redis down")
     assert record_scan_outcome(attempted=1, faulted=1, redis_client=r) is None
     assert any("record_scan_outcome" in m for m in caplog.messages)
+
+
+def test_read_failure_alone_does_not_abort_the_write():
+    """The previous-record read must never gate the write that replaces it."""
+    r = MagicMock()
+    r.get.side_effect = RuntimeError("read failed")
+    record = record_scan_outcome(attempted=1, faulted=1, redis_client=r)
+    assert record is not None
+    assert record["consecutive_total_fault_cycles"] == 1
+    r.set.assert_called_once()
 
 
 def test_record_scan_outcome_truncates_sample_error():
     r = _redis()
     record = record_scan_outcome(attempted=1, faulted=1, sample_error="x" * 5000, redis_client=r)
     assert len(record["sample_error"]) == 200
+
+
+# ---------------------------------------------------------------------------
+# The stamp must self-repair from a corrupt value
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_stored_value_does_not_gate_the_write():
+    """A corrupt record must not block the write that would overwrite it.
+
+    ``record_scan_outcome`` reads the previous record to carry the run counter
+    forward. If that read is allowed to abort the whole function, the key can
+    never be repaired by the next cycle — it self-heals only when the 7-day TTL
+    from the last *good* write expires. Because the reader is the tolerant half
+    of the pair (``assess_scan_health`` returns healthy on an unreadable
+    record), the bridge would then sit in exactly the half-wedged state this
+    monitor exists to catch, reporting healthy, for up to a week.
+    """
+    r = _redis()
+    r.set(_SCAN_OUTCOME_KEY, "{not valid json")
+
+    record = record_scan_outcome(attempted=3, faulted=3, redis_client=r)
+
+    assert record is not None, "a corrupt previous value must not abort the write"
+    # Corrupt == "no previous run", so this cycle starts a fresh run at 1.
+    assert record["consecutive_total_fault_cycles"] == 1
+    stored = get_last_scan_outcome(r)
+    assert stored is not None, "the corrupt value must have been overwritten"
+    assert stored["consecutive_total_fault_cycles"] == 1
+    assert stored["attempted"] == 3
+
+    # And the run accumulates normally from there — the key is fully repaired.
+    record = record_scan_outcome(attempted=3, faulted=3, redis_client=r)
+    assert record["consecutive_total_fault_cycles"] == 2
+
+
+def test_corrupt_stored_value_still_reaches_the_alert_threshold():
+    """End to end: a corrupt key delays the alert by one cycle, never forever."""
+    r = _redis()
+    r.set(_SCAN_OUTCOME_KEY, b"\xff\xfe not json either")
+
+    for _ in range(SCAN_TOTAL_FAULT_CYCLES):
+        record_scan_outcome(attempted=2, faulted=2, sample_error="boom", redis_client=r)
+
+    healthy, issue = assess_scan_health(r, os.getpid())
+    assert healthy is False
+    assert "reconciler scan loop failing" in issue
+
+
+# ---------------------------------------------------------------------------
+# Reader: the non-int inconclusive branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "attempted,run",
+    [
+        ("2", SCAN_TOTAL_FAULT_CYCLES),
+        (2, str(SCAN_TOTAL_FAULT_CYCLES)),
+        (None, SCAN_TOTAL_FAULT_CYCLES),
+        (2, None),
+    ],
+)
+def test_watchdog_suppresses_verdict_on_non_int_counters(attempted, run):
+    """Non-int counters are inconclusive, never evidence — fail toward healthy."""
+    r = _redis()
+    r.set(
+        _SCAN_OUTCOME_KEY,
+        json.dumps(
+            {
+                "ts": time.time(),
+                "pid": os.getpid(),
+                "attempted": attempted,
+                "faulted": attempted,
+                "consecutive_total_fault_cycles": run,
+                "sample_error": "",
+            }
+        ),
+    )
+    assert assess_scan_health(r, os.getpid()) == (True, "")
+
+
+# ---------------------------------------------------------------------------
+# The alert-only check must never veto the restart-eligible wedge verdict
+# ---------------------------------------------------------------------------
+
+
+def test_scan_health_failure_cannot_discard_a_wedge_verdict():
+    """A raising Check 5b must not take Check 5's restart authority with it.
+
+    The design premise of #2691's check is that the alert-only signal never
+    influences the restart signal. Sharing one try/except with
+    ``assess_update_flow`` would break that in the one place it matters: a
+    genuine wedge verdict, already returned, silently discarded.
+    """
+    from monitoring.bridge_watchdog import check_bridge_health
+
+    with (
+        patch("monitoring.bridge_watchdog.is_bridge_running", return_value=(True, os.getpid())),
+        patch("monitoring.bridge_watchdog.are_logs_fresh", return_value=True),
+        patch("monitoring.bridge_watchdog.detect_crash_pattern", return_value=(False, None)),
+        patch("monitoring.bridge_watchdog.get_recent_crashes", return_value=[]),
+        patch("monitoring.bridge_watchdog._enumerate_claude_processes", return_value=[]),
+        patch(
+            "monitoring.bridge_watchdog.assess_update_flow",
+            return_value=(False, "bridge_update_loop_wedged"),
+        ),
+        patch(
+            "monitoring.bridge_watchdog.assess_scan_health",
+            side_effect=RuntimeError("scan health blew up"),
+        ),
+        patch("monitoring.bridge_watchdog._get_watchdog_redis", return_value=_redis()),
+    ):
+        status = check_bridge_health()
+
+    assert status.recovery_level == 2, "the wedge verdict must survive a scan-health failure"
+    assert any("bridge_update_loop_wedged" in i for i in status.issues)
+    # The failed check itself falls back to inconclusive-healthy.
+    assert status.scan_health_ok is True
+    assert status.human_alert_needed is False

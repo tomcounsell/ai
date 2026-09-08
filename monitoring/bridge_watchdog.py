@@ -142,7 +142,7 @@ PROBE_FRESHNESS_SECONDS = 3 * 3600  # 3 hours
 
 # Reconciler scan-loop health (issue #2691). GRAIN OF SALT: provisional/tunable.
 # The reconciler cycles every RECONCILE_INTERVAL_SECONDS (180s), so 5 cycles is
-# ~15 minutes of every-chat-faulting before the watchdog pages. Sized to outlast
+# ~15 minutes of every-chat-faulting before the watchdog alerts. Sized to outlast
 # an ordinary transient RPC blip without letting a real half-wedge sit unnoticed
 # for hours.
 SCAN_TOTAL_FAULT_CYCLES = int(os.environ.get("SCAN_TOTAL_FAULT_CYCLES", "5"))
@@ -194,8 +194,9 @@ class HealthStatus:
     # nothing else. Nothing pushes a notification anywhere.
     human_alert_needed: bool = False
     restart_circuit_open: bool = False
-    # issue #2691: reconciler per-chat scan-loop health. Paging-only — it sets
-    # human_alert_needed and never contributes to recovery_level.
+    # issue #2691: reconciler per-chat scan-loop health. Alert-only — it sets
+    # human_alert_needed (which delivers no notification; see #3252) and never
+    # contributes to recovery_level.
     scan_health_ok: bool = True
     scan_health_issue: str = ""
 
@@ -279,8 +280,9 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     emits about itself is circular, and the missed-recovery key is the only
     non-circular evidence available. That state is no longer invisible, though:
     ``assess_scan_health()`` below reads the reconciler's own per-cycle scan
-    record and pages a human. It pages rather than restarts — see its
-    docstring for why.
+    record and raises an alert-only issue. It alerts rather than restarts —
+    see its docstring for why, and for what that alert does and does not
+    deliver.
 
     On signal unreadable past grace window:
       => inconclusive (treated as live), emit WARNING "bridge_update_flow_signal_unreadable"
@@ -412,9 +414,24 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
 def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, str]:
     """Assess whether the reconciler's per-chat scan loop is doing any work.
 
-    Returns (is_healthy, issue_description).  This is a **paging** signal only:
-    ``check_bridge_health`` records the issue and sets ``human_alert_needed``,
-    and deliberately does NOT raise ``recovery_level``.
+    Returns (is_healthy, issue_description).  This is an **alert-only** signal:
+    ``check_bridge_health`` appends the issue, flips ``healthy`` to False, logs
+    it at ERROR, and sets the ``human_alert_needed`` diagnostic flag.  It
+    deliberately does NOT raise ``recovery_level``, so no recovery action fires.
+
+    What "alert" delivers today
+    ---------------------------
+    Nothing is pushed to anyone.  ``human_alert_needed`` drives the
+    ``--check-only`` output line and nothing else (see its field comment on
+    ``HealthStatus``), and ``--check-only`` has no automated caller.  The
+    delivered signal is therefore: one aggregated ERROR line per watchdog tick
+    in the watchdog log, ``healthy=False``, and a line in a CLI a human must run
+    by hand.  That is a real improvement over one ``[reconciler] Error scanning``
+    traceback per chat per scan, but it is not a notification, and no one is
+    paged.  This module delivers nothing by design — see the note in the module
+    docstring on why the crash-storm alert's AgentSession delivery was removed.
+    Wiring an out-of-band path is tracked separately (issue #3252); it is a
+    watchdog-wide concern, not specific to this check.
 
     Why this is real evidence and not silence
     -----------------------------------------
@@ -427,8 +444,8 @@ def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     inference here, and every not-fresh / missing / wrong-pid / zero-attempted
     case below returns healthy.  Silence is never evidence (#2475).
 
-    Why it pages instead of restarting
-    ----------------------------------
+    Why it alerts instead of restarting
+    -----------------------------------
     A total fault ratio clears the evidence bar but fails a different one:
     **attribution**.  It says per-chat history fetches are failing; it does not
     say *this bridge* is the broken party.  Under a Telegram-side outage, an
@@ -446,7 +463,7 @@ def assess_scan_health(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     observer this bridge does not have — a second, independent client, or a
     fleet-wide correlation signal.  That is architecture, not a threshold, so
     restart-eligibility stays an open question for the owner (#2691) and this
-    check pages.
+    check only alerts.
     """
     from bridge.liveness import get_last_scan_outcome
 
@@ -757,19 +774,29 @@ def check_bridge_health() -> HealthStatus:
     scan_health_ok = True
     scan_health_issue = ""
     if running:
+        r = None
         try:
             r = _get_watchdog_redis()
             update_flow_live, update_flow_issue = assess_update_flow(r, pid)
-            # Check 5b: reconciler scan-loop health (issue #2691). Paging only —
-            # see assess_scan_health's docstring for why this must not restart.
-            scan_health_ok, scan_health_issue = assess_scan_health(r, pid)
         except Exception as e:
             logger.warning("check_bridge_health: assess_update_flow raised: %s", e)
             # Treat as inconclusive — do not trigger restart on our own errors
             update_flow_live = True
             update_flow_issue = ""
-            scan_health_ok = True
-            scan_health_issue = ""
+
+        # Check 5b: reconciler scan-loop health (issue #2691). Alert only —
+        # see assess_scan_health's docstring for why this must not restart.
+        # It gets its own try/except on purpose: sharing Check 5's handler
+        # would let this alert-only check discard a genuine wedge verdict (and
+        # the level-2 restart it authorizes) by raising after Check 5 returned.
+        # The alert-only signal must never influence the restart signal.
+        if r is not None:
+            try:
+                scan_health_ok, scan_health_issue = assess_scan_health(r, pid)
+            except Exception as e:
+                logger.warning("check_bridge_health: assess_scan_health raised: %s", e)
+                scan_health_ok = True
+                scan_health_issue = ""
 
         if not scan_health_ok:
             issues.append(scan_health_issue)
