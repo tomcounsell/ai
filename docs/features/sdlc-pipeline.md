@@ -28,7 +28,7 @@ verdict is worth computing. See
 | T: Terminal lane | `stage_states["MERGE"]` settled OR `pr_state == "MERGED"` | `Terminal` — clean exit, preempts everything below. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | G1: Critique loop | Verdict NEEDS REVISION or MAJOR REWORK AND last dispatch was critique | `/do-plan` |
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` AND CRITIQUE not completed | `blocked` |
-| G3: PR lock | PR open AND last/proposed dispatch is plan-stage skill | Redirect to appropriate PR-stage skill |
+| G3: PR lock | PR open AND last/proposed dispatch is plan-stage skill | Redirect to the appropriate PR-stage skill: `/do-merge`, `/do-patch`, `/do-docs` (approved with docs pending), else `/do-pr-review` |
 | G4: Oscillation | Same skill dispatched `MAX_SAME_STAGE_DISPATCHES` times without state change | `blocked` |
 | G9: Blocked-on-conflict | Recorded REVIEW verdict is `BLOCKED_ON_CONFLICT` AND `pr_merge_state` is not in the non-conflicting set (`CLEAN`, `HAS_HOOKS`, `UNSTABLE`, `BLOCKED`, `BEHIND`) AND the verdict is not stale (#2796) | `blocked` — no SDLC skill resolves merge conflicts |
 | G8: Stage-advance verification | `context["stage_artifacts_verified"] is False` (a claimed stage artifact failed live verification) | Re-dispatch the unverified stage's skill |

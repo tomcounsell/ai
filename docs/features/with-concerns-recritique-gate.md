@@ -148,6 +148,26 @@ into the plan's `## Critique Results`, deriving the condition from
 `sdlc-tool stage-query` rather than from a `row_id` that is never plumbed into
 skill invocations. See `docs/sdlc/do-build.md`.
 
+## Stage stand-downs past the plan stage (#3237)
+
+Row 2b stands down — returns `False` without evaluating staleness at all — once
+a lane has left the plan stage, even where the bound above would otherwise
+still permit it to fire:
+
+- `meta["pr_number"]` set — a PR-stage lane has no plan-stage verdict worth
+  refreshing; rows 7-10 own that state.
+- `stage_states["BUILD"]` at `in_progress` or `completed` — the plan was
+  accepted when the build was dispatched, so the concern loop is moot.
+
+Without the BUILD stand-down, a lane whose build crashed before it pushed a PR
+had no exit: row 4c is gated on `build_status in (None, pending, ready)` and
+cannot re-fire, and row 5 (`_rule_branch_exists_no_pr`, "Build must create the
+PR — resume build"), which holds the right answer, is evaluated after row 2b in
+table order. Lane #3195 / PR #3222 escaped only by overriding
+`MAX_CONCERN_RECRITIQUE_ROUNDS`. Row 5's predicate is `BUILD == in_progress OR
+context["branch_exists"] is True`, so a crashed build with a pushed branch
+resumes even on a state read where `BUILD` itself never reached `in_progress`.
+
 ## Recovering a stuck lane
 
 - `sdlc-tool meta-set` on the plan's `revision_applied_at` (written from plan frontmatter).
