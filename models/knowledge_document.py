@@ -103,7 +103,18 @@ class KnowledgeDocument(Model):
                 doc.content = content
                 doc.content_hash = content_hash
                 doc.last_modified = mtime
-                doc.project_key = project_key
+                # project_key is a KeyField — mutating it after creation
+                # silently creates a new Redis record (orphaning the old one),
+                # leaving one file indexed twice under two projects.  Only set
+                # it when the existing value is empty (initial population).
+                if not doc.project_key:
+                    doc.project_key = project_key
+                elif str(doc.project_key) != str(project_key):
+                    logger.warning(
+                        f"KnowledgeDocument project_key mismatch for {abs_path}: "
+                        f"existing={doc.project_key}, incoming={project_key} — "
+                        f"skipping mutation (KeyField is immutable after creation)"
+                    )
                 doc.scope = scope
                 doc.save()
                 logger.info(f"KnowledgeDocument: updated: {abs_path}")

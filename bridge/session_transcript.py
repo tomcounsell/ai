@@ -85,7 +85,17 @@ def start_transcript(
             if branch_name:
                 s.branch_name = branch_name
             if slug:
-                s.slug = slug
+                # slug is a KeyField — mutating it after creation silently
+                # creates a new Redis record (orphaning the old one).  Only set
+                # it when the existing value is empty (initial population).
+                if not s.slug:
+                    s.slug = slug
+                elif str(s.slug) != str(slug):
+                    logger.warning(
+                        f"slug mismatch for session {session_id}: "
+                        f"existing={s.slug}, incoming={slug} — "
+                        f"skipping mutation (KeyField is immutable after creation)"
+                    )
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
