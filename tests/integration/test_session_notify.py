@@ -19,15 +19,33 @@ import pytest
 from agent.agent_session_queue import _push_agent_session, _session_notify_listener
 
 
+class _EmptyQueryResult(list):
+    """Stand-in for an empty Popoto QueryBuilder result.
+
+    A plain `[]` iterates fine for every `AgentSession.query.filter(...)`
+    call site that just loops or wraps in `list(...)`, but `_push_agent_session`
+    also does `AgentSession.query.filter(...).count()` (no args) — the real
+    QueryBuilder.count() takes no arguments, while `list.count()` requires
+    exactly one. Overriding `count()` here keeps this fixture a valid stand-in
+    for both call shapes instead of only the iteration one.
+    """
+
+    def count(self) -> int:
+        return 0
+
+
 @pytest.fixture
 def mock_agent_session_cls():
     """Patch AgentSession for integration tests."""
     with patch("agent.agent_session_queue.AgentSession") as mock_cls:
         mock_session = MagicMock()
         mock_session.agent_session_id = "test-session-notify-001"
-        mock_cls.query.filter.return_value = []
+        mock_cls.query.filter.return_value = _EmptyQueryResult()
         mock_cls.async_create = AsyncMock(return_value=mock_session)
         mock_cls.query.async_count = AsyncMock(return_value=1)
+        # _push_agent_session falls back to rows_for_session_id() to resolve
+        # the bound agent_session_id when no idempotency_key was supplied.
+        mock_cls.rows_for_session_id.return_value = [mock_session]
         yield mock_cls
 
 
@@ -87,7 +105,9 @@ class TestSessionNotifyPublish:
 
             # Session was created despite publish failure
             mock_agent_session_cls.async_create.assert_called_once()
-            assert isinstance(result, int)
+            depth, agent_session_id = result
+            assert isinstance(depth, int)
+            assert agent_session_id == "test-session-notify-001"
 
     def test_payload_contains_required_fields(self, mock_agent_session_cls):
         """Notification payload must include chat_id and session_id."""
@@ -158,10 +178,7 @@ class TestSessionNotifyListener:
 
         async def run_one_cycle():
             # Patch redis.Redis at the import site inside agent_session_queue
-            with (
-                patch("agent.agent_session_queue.json", wraps=json),
-                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto_redis),
-            ):
+            with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto_redis):
                 # We need to patch redis.Redis inside the function's local scope.
                 # The function does `import redis as _redis` and then calls
                 # `_redis.Redis(...)`, so we patch the module-level redis.Redis.
