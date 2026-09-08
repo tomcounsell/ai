@@ -120,16 +120,31 @@ class TestConvertedSiteWritesToTheClaimedDb:
             POPOTO_REDIS_DB.delete(key)
 
 
+# Every top-level package that ships production Python. Enumerated rather than
+# hand-picked: the first draft of this guard listed eight packages and missed
+# `monitoring/`, where `bridge_watchdog.py` kept a hand-built client that the
+# guard could not see. A package absent from this tuple is a blind spot, so the
+# companion test below asserts the tuple still covers the tree.
 _PRODUCTION_PACKAGES = (
     "agent",
+    "analytics",
     "bridge",
-    "tools",
-    "reflections",
-    "ui",
-    "worker",
-    "models",
     "config",
+    "mcp_servers",
+    "models",
+    "monitoring",
+    "reflections",
+    "scripts",
+    "tools",
+    "ui",
+    "utils",
+    "worker",
 )
+
+# `utils/redis_client.py` is the one module allowed to build a client by hand;
+# it is what every other site delegates to. Exempted by path so that adding
+# `utils` to the scan above does not exempt the rest of the package with it.
+_SANCTIONED_CONSTRUCTOR = ("utils", "redis_client.py")
 
 
 def _raw_client_constructions(path: pathlib.Path) -> list[int]:
@@ -175,12 +190,37 @@ class TestNoRawClientsInProduction:
             for path in (root / package).rglob("*.py"):
                 if ".venv" in path.parts:
                     continue
+                if path.relative_to(root).parts == _SANCTIONED_CONSTRUCTOR:
+                    continue
                 for line in _raw_client_constructions(path):
                     offenders.append(f"{path.relative_to(root)}:{line}")
         assert offenders == [], (
             "Raw Redis client construction outside utils/redis_client.py. Route the "
             "site through text_redis()/bytes_redis()/derived_redis() so tests can "
             "repoint it: " + ", ".join(offenders)
+        )
+
+    def test_the_scan_covers_every_production_package(self):
+        """A new top-level package must be added to the scan or excluded on purpose.
+
+        The guard is only as wide as its package list, and a missing entry is
+        silent: `monitoring/` was absent from the first draft and its raw client
+        survived a sweep that claimed to be exhaustive. This test fails when a
+        package appears in the tree that the list does not mention.
+        """
+        root = pathlib.Path(__file__).resolve().parents[2]
+        # Not production Python: the suite itself, docs, and build/venv dirs.
+        not_production = {"tests", "docs", "logs", "data", "site", ".venv", ".git"}
+        found = {
+            path.parts[0]
+            for path in (p.relative_to(root) for p in root.glob("*/**/*.py"))
+            if path.parts[0] not in not_production and not path.parts[0].startswith(".")
+        }
+        unscanned = sorted(found - set(_PRODUCTION_PACKAGES))
+        assert unscanned == [], (
+            "These packages ship production Python but no raw-Redis-client scan "
+            "reaches them. Add them to _PRODUCTION_PACKAGES, or to not_production "
+            f"if they are not production code: {unscanned}"
         )
 
     def test_the_scanner_sees_a_raw_construction(self, tmp_path):
