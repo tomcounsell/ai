@@ -180,7 +180,7 @@ class TestDefectBCompletionExitGuard:
         guard_logs = [
             r.getMessage()
             for r in caplog.records
-            if "Completion-exit guard finalized session" in r.getMessage()
+            if "Finalize guard finalized session" in r.getMessage()
         ]
         assert guard_logs, "expected the unconditional completion-exit guard to log its finalize"
 
@@ -220,7 +220,7 @@ class TestDefectBCompletionExitGuard:
         guard_logs = [
             r.getMessage()
             for r in caplog.records
-            if "Completion-exit guard finalized session" in r.getMessage()
+            if "Finalize guard finalized session" in r.getMessage()
         ]
         assert guard_logs, (
             "expected the post if/else completion-exit guard to cover the "

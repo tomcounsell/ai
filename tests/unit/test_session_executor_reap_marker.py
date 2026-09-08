@@ -119,6 +119,24 @@ class TestCleanupGating:
         # before `task = BackgroundTask(...)` must not raise NameError here.
         assert 'locals().get("task")' in src
 
+    def test_finally_block_carries_exit_finalize_guard(self):
+        """Source guard (#3176, #3209): the exit finalize guard must sit in the
+        `finally` AHEAD of the cleanup_after_merge call, so a raising exit's
+        still-`running` row does not permanently block its own removal."""
+        import inspect
+
+        src = inspect.getsource(session_executor)
+        guard_pos = src.index("_finalize_if_still_running(\n")
+        cleanup_pos = src.index("cleanup_after_merge(_repo_for_cleanup")
+        assert guard_pos < cleanup_pos, (
+            "the finalize guard must run before the synthetic-slug cleanup, "
+            "or the busy check refuses the removal permanently"
+        )
+        assert 'auth.status != "running"' in src
+        # The guard's failure mode must resolve `task` defensively — a raise
+        # before `task = BackgroundTask(...)` must not raise NameError here.
+        assert 'locals().get("task")' in src
+
     def test_finally_block_logs_blocked_cleanup_loudly(self):
         """Source guard (#3176): a refused cleanup (blocked_by_session) must
         emit a named [synthetic-slug] ... cleanup blocked WARNING mirroring

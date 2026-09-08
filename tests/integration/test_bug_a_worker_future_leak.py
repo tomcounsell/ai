@@ -5,7 +5,7 @@ via `finalize_session` (CAS authority), never left in `running`.
 
 Also validates the nudge-stomp guard: a nudge enqueued during execution
 (fresh successor via `enqueue_agent_session`) is NOT overwritten by the
-completion-exit finalize, and `CancelledError` leaves the session `running`
+exit finalize guard, and `CancelledError` leaves the session `running`
 (health checker owns that terminal transition by design).
 
 All tests use the real Redis test db (db=1) via the redis_test_db autouse
@@ -221,25 +221,22 @@ class TestBugAWorkerFutureLeak:
 class TestBugANudgeStompGuard:
     """The completion-exit CAS guard must NOT stomp a nudge's state.
 
-    When the executor enqueues a nudge (fresh successor via enqueue_agent_session),
-    the `defer_reaction=True` flag is set, skipping the `complete_transcript` /
-    CAS guard entirely. This test verifies the guard stays off the nudge path.
+    When the executor enqueues a nudge, the row it hands on is left `pending`,
+    and the guard's `status == "running"` predicate is what keeps it off that
+    row (#3209 re-keyed the guard from `defer_reaction` onto status). This test
+    verifies the guard stays off the nudge path.
 
     Uses pure Popoto operations to simulate the before/after states.
     """
 
-    def test_nudge_state_survives_when_defer_reaction_is_set(self, redis_test_db):
-        """When defer_reaction=True, the completion finalize block is skipped.
+    def test_nudge_state_survives_the_status_keyed_guard(self, redis_test_db):
+        """The nudge's `pending` write survives the exit finalize guard.
 
         Simulates the nudge path in _execute_agent_session:
           1. Session starts running.
           2. _enqueue_nudge transitions it to pending with auto_continue_count=1.
-          3. Because defer_reaction=True, the CAS guard does NOT run.
+          3. The guard re-reads and finds `pending`, not `running` -> no-op.
           4. Fresh query confirms nudge state is preserved.
-
-        The guard in session_executor.py only runs inside
-        `if not chat_state.defer_reaction:`, so when the nudge fires first,
-        defer_reaction is True and the guard is unreachable.
         """
         session_id = "bug-a-nudge-stomp-guard-001"
         project_key = "test-bug-a"
@@ -258,17 +255,14 @@ class TestBugANudgeStompGuard:
         assert after_nudge.status == "pending"
         assert after_nudge.auto_continue_count == 1
 
-        # Step 3: defer_reaction=True → CAS guard does NOT run
-        # (In production: the executor skips the complete_transcript block entirely.)
-        # We simulate by doing nothing (the guard is gated on `not defer_reaction`).
-        # defer_reaction = True  # guard is unreachable
+        # Step 3: the guard re-reads and sees `pending`, so it does not finalize.
+        # We simulate by doing nothing (the guard is gated on status == running).
 
         # Step 4: Fresh query — nudge state must survive
         final = AgentSession.query.get(id=session.id)
         assert final is not None
         assert final.status == "pending", (
-            f"Nudge state must survive when defer_reaction=True (guard is skipped), "
-            f"got '{final.status}'"
+            f"Nudge state must survive the status-keyed guard, got '{final.status}'"
         )
         assert final.auto_continue_count == 1
 
@@ -329,8 +323,9 @@ class TestBugACancelledErrorContract:
     The executor intentionally leaves the session in `running` on CancelledError
     so startup recovery can re-queue it.
 
-    The guard is scoped to `not chat_state.defer_reaction` in the completion
-    block; CancelledError is propagated before reaching that block.
+    The executor's `except asyncio.CancelledError` marks the exit and the
+    `finally`'s finalize guard is skipped for it, precisely so the health
+    checker's `transition_status(entry, "pending")` requeue stays legal.
     """
 
     def test_session_stays_running_when_cancelled(self, redis_test_db):
