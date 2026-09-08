@@ -23,7 +23,7 @@ What is on `main` at `2fb7df5199` today:
 
 - `config/settings.py:618` declares `daily_external_llm_usd`, and `:630` declares `portfolio_allocation` with a fixed `objective=weight` split. `git grep portfolio_allocation -- '*.py'` returns its own declaration and nothing else. There is no weekly infrastructure budget and no window-boundary fields, so charter §8's second spending category ($50 per week, sandboxes and storage and Cloudflare) cannot be admitted or reported at all.
 - `models/improvement_case.py:91` carries `objective = Field(null=True)` over the withdrawn four-objective vocabulary. It has no writer and no index. Nothing on the case records a priority area, a ranking rationale, or the charter digest the case was ranked under, and `models/improvement_investigation.py` and `models/improvement_release.py` carry no `charter_digest` either.
-- `models/improvement_charter.py:70-80` declares `version`, `scope`, `authority`, `budgets`, `approved_by`, `approved_at`, `notes` — no digest, no text, no loader. Nothing seeds the record from the file, so the controller has no pinned charter to cite, and charter §12's "versioned reference to the charter used for decisions and results" has nothing behind it.
+- `models/improvement_charter.py:70-80` declares `version`, `scope`, `authority`, `budgets`, `approved_by`, `approved_at`, `notes`, with no digest, no text, and no loader. Nothing seeds the record from the file, so the controller has no pinned charter to cite, and charter §12's "versioned reference to the charter used for decisions and results" has nothing behind it.
 - `tools/improvement_eligibility.py` and `tools/improvement_resources.py` do not exist. Charter §7 (any provider for open-source work, subscriptions for client work) and §8 (verify each named resource before relying on it) have no code behind them.
 - `docs/features/improvement-controller.md:165-171` documents the `portfolio_allocation` split and states "The ceiling is zero... The controller asks Tom nothing." Charter v2 §9 replaced both: no routine research questions, plus an explicit amendment-request path. `.env.example:358-359` repeats the same withdrawn vocabulary in prose.
 - `ui/templates/improvement/` holds `coverage.html` and `intervention_burden.html` and no goals partial, so charter §11's readable record (goals, ranking, acquired abilities, evaluations, rejected approaches, unresolved assumptions, resource use) has no surface at all.
@@ -56,21 +56,21 @@ Sibling issues and PRs re-resolved at plan time: #3177 OPEN, #3215 OPEN, #3216 O
 **Two corrections to the issue's own reference list**, found by reading rather than by trusting the citation:
 
 1. `.env.example:358-359` also carries the withdrawn vocabulary, in the `IMPROVEMENT__ENABLED` comment block: "The other IMPROVEMENT__* knobs (concurrency, daily external-LLM dollars, portfolio allocation, tick cadence)". The issue does not name it, and the parent plan's `git grep portfolio_allocation` confirmation row would fail on it. It is on the task list.
-2. `git grep 'objective' -- '*.py'` at the baseline returns matches in four files, only two of which are this lane's: `models/improvement_case.py:75,91` and `config/settings.py:634-635` (prose inside the `portfolio_allocation` description, which goes with the field). The other two — `tools/memory_eval/query_set.py:9` and `tools/valor_session.py:1141` — are ordinary English usage in unrelated modules and must not be touched. A builder running a bare `git grep objective` will see them; they are not in scope.
+2. `git grep 'objective' -- '*.py'` at the baseline returns matches in four files, only two of which are this lane's: `models/improvement_case.py:75,91` and `config/settings.py:634-635` (prose inside the `portfolio_allocation` description, which goes with the field). The other two (`tools/memory_eval/query_set.py:9` and `tools/valor_session.py:1141`) are ordinary English usage in unrelated modules and must not be touched. A builder running a bare `git grep objective` will see them; they are not in scope.
 
-**One commit landed on `main` during this planning pass**: `8517a09e8` ("Guard KeyField mutation on hydrated rows (session_transcript, knowledge_document) (#3245)"). It touches `bridge/session_transcript.py`, `models/knowledge_document.py`, `tools/knowledge/indexer.py`, four feature docs, and three test files — none of this lane's blast radius, so every citation above stands. It is worth noting anyway because it establishes the adjacent convention this lane's Risk 6 relies on: mutating an identity field on an already-persisted Popoto row forks or raises, so append-only is the correct shape for the charter loader, not merely the tidy one.
+**One commit landed on `main` during this planning pass**: `8517a09e8` ("Guard KeyField mutation on hydrated rows (session_transcript, knowledge_document) (#3245)"). It touches `bridge/session_transcript.py`, `models/knowledge_document.py`, `tools/knowledge/indexer.py`, four feature docs, and three test files, none of this lane's blast radius, so every citation above stands. It is worth noting anyway because it establishes the adjacent convention this lane's Risk 6 relies on: mutating an identity field on an already-persisted Popoto row forks or raises, so append-only is the correct shape for the charter loader, not merely the tidy one.
 
 **Plan overlap:** the only active plan touching this area is the parent, `docs/plans/recursive-self-improvement.md` (Planning, `revision_applied: true`). That is a declared parent relationship, not a collision. No other plan in `docs/plans/` mentions the improvement controller.
 
 ## Prior Art
 
-- **PR #3224 — "Recursive self-improvement controller: lanes 1 and 2"** (MERGED 2026-09-07). Shipped the eight flat `Improvement*` models, `ImprovementSettings`, the evidence adapters, the `VerifyingArtifactStore`, the collection-tick registration, the `TaskTypeProfile` retirement, and the two dashboard partials. It is the direct predecessor of this lane and the reason the corrections here are small. **This lane does not reopen its evidence adapters, its migration, or its content store.** It edits the records, settings, prose, and dashboard that #3224 left in their pre-v2 form.
-- **PR #3229 (#3183) — ETL-grade pipeline hardening** (MERGED 2026-09-07). Shipped the create-or-bind queue seam at `agent/agent_session_queue.py:233` and `models/dead_letter.py`. Nothing here touches it. It is named only because #3215's body still calls it pending, which task 5 of this plan corrects by comment.
-- **#3177 — parent tracking issue and plan.** Decisions Recorded items 4 through 6 (2026-09-07 and 2026-09-08) are the governing authority for this lane: charter v2 governs, lane 2b is its own child issue, and `objective` is deleted outright rather than renamed.
+- **PR #3224: "Recursive self-improvement controller: lanes 1 and 2"** (MERGED 2026-09-07). Shipped the eight flat `Improvement*` models, `ImprovementSettings`, the evidence adapters, the `VerifyingArtifactStore`, the collection-tick registration, the `TaskTypeProfile` retirement, and the two dashboard partials. It is the direct predecessor of this lane and the reason the corrections here are small. **This lane does not reopen its evidence adapters, its migration, or its content store.** It edits the records, settings, prose, and dashboard that #3224 left in their pre-v2 form.
+- **PR #3229 (#3183): ETL-grade pipeline hardening** (MERGED 2026-09-07). Shipped the create-or-bind queue seam at `agent/agent_session_queue.py:233` and `models/dead_letter.py`. Nothing here touches it. It is named only because #3215's body still calls it pending, which task 5 of this plan corrects by comment.
+- **#3177: parent tracking issue and plan.** Decisions Recorded items 4 through 6 (2026-09-07 and 2026-09-08) are the governing authority for this lane: charter v2 governs, lane 2b is its own child issue, and `objective` is deleted outright rather than renamed.
 - **#3215 (lane 3), #3216 (lane 4), #3217 (lane 5), #3218 (lane 6).** All open. #3215 blocks on this lane for the vocabulary and settings and separately on #3220 for the fencing lease. The other three read the digest and the settings names once this lands and are otherwise independent.
 - **The eight-model schema gate** (`tests/unit/test_improvement_models.py`, `tests/unit/test_agentsession_index_guard_generalized.py:446-490`). Not a prior attempt at this problem, but the prior work that most constrains it: PR #3224 shipped a deliberately strict, structural index gate, and three of this lane's field additions collide with it. See Spike Results.
 
-**Why previous fixes failed** does not apply. There is no prior attempt at charter v2 reconciliation to learn from — #3224 implemented the plan as it stood on 2026-09-07 and the charter changed the same day. This is a decision change propagating forward, not a defect being re-fixed.
+**Why previous fixes failed** does not apply. There is no prior attempt at charter v2 reconciliation to learn from. #3224 implemented the plan as it stood on 2026-09-07 and the charter changed the same day. This is a decision change propagating forward, not a defect being re-fixed.
 
 ## Research
 
@@ -80,11 +80,11 @@ One external question mattered: the resource probe is the only new surface in th
 
 **Findings:**
 
-1. **`op item list --format=json` returns metadata only** — title, id, vault, category, timestamps. Field values are never included; retrieving a value requires an explicit `op read` or `op item get --fields`. ([1Password CLI reference](https://developer.1password.com/docs/cli/reference/management-commands/item/), [worked examples](https://msull.github.io/1password-cli-examples.html))
+1. **`op item list --format=json` returns metadata only**: title, id, vault, category, timestamps. Field values are never included; retrieving a value requires an explicit `op read` or `op item get --fields`. ([1Password CLI reference](https://developer.1password.com/docs/cli/reference/management-commands/item/), [worked examples](https://msull.github.io/1password-cli-examples.html))
    *How this informs the approach:* the probe's **presence** leg handles no secret at all. `verified` / `absent` for each named resource is decided from titles, so the only code path that ever holds a credential is the optional fingerprint leg. That is a structural reduction of the leak surface, not a discipline one, and it is what makes the "never leaks" test cheap to write.
 
 2. **Older `op` versions could exit 0 on unrecognized server errors**; a recent release corrected this to exit 1. ([1Password CLI release notes](https://app-updates.agilebits.com/product_history/CLI2))
-   *How this informs the approach:* the probe must not treat exit 0 as proof. Empty, unparseable, or unexpected-shape output resolves to `unknown`, never to `absent` — reporting "absent" for a resource that exists is the failure mode that would send a builder chasing a resource that was there all along.
+   *How this informs the approach:* the probe must not treat exit 0 as proof. Empty, unparseable, or unexpected-shape output resolves to `unknown`, never to `absent`. Reporting "absent" for a resource that exists is the failure mode that would send a builder chasing a resource that was there all along.
 
 3. **`op run` masks secrets in its own output**, and `OP_RUN_NO_MASKING` disables that.
    *How this informs the approach:* this repo runs `op run --no-masking` by design (`CLAUDE.md`, Secrets), so op's masking is explicitly **not** available as a backstop here. The probe's own output discipline is the only guard, which is why its test seeds a fake credential and asserts the string never appears anywhere in the returned structure.
@@ -98,28 +98,28 @@ Every assumption below was resolved by reading the code or running the command a
 ### spike-1: Does an indexed `digest` on `ImprovementCharter` pass the schema gate?
 - **Assumption**: "`digest` can be an `IndexedField`, as the parent plan's task 9 says, because its cardinality is one value per charter version."
 - **Method**: code-read (`tests/unit/test_agentsession_index_guard_generalized.py:468-490`)
-- **Result**: **False.** `test_improvement_model_indexes_are_low_cardinality` rejects any indexed field whose *name* contains `"digest"` — the marker list is `("_id", "_at", "digest", "version", "revision", "count", "trials")` and the check is a substring test. An indexed `digest` fails that test on the name alone, regardless of its real cardinality. The guard is deliberately name-based so a future field added without touching the vocabulary map still fails.
+- **Result**: **False.** `test_improvement_model_indexes_are_low_cardinality` rejects any indexed field whose *name* contains `"digest"`. The marker list is `("_id", "_at", "digest", "version", "revision", "count", "trials")` and the check is a substring test. An indexed `digest` fails that test on the name alone, regardless of its real cardinality. The guard is deliberately name-based so a future field added without touching the vocabulary map still fails.
 - **Confidence**: high
-- **Impact if false**: none — this is the finding, and it changes the design. See Technical Approach: `digest` is a plain `Field`, matched in Python over the project's charter rows, exactly as the module docstring already prescribes for `version` ("Version lookups go through the recency sort plus a Python filter"). The parent plan's `IndexedField` wording is superseded here with cause.
+- **Impact if false**: none. This is the finding, and it changes the design. See Technical Approach: `digest` is a plain `Field`, matched in Python over the project's charter rows, exactly as the module docstring already prescribes for `version` ("Version lookups go through the recency sort plus a Python filter"). The parent plan's `IndexedField` wording is superseded here with cause.
 
 ### spike-2: Does the 11-value `priority_area` vocabulary fit the declared bound?
 - **Assumption**: "`priority_area` can be added to `INDEXED_VOCABULARIES` like any other index."
 - **Method**: code-read (`tests/unit/test_improvement_models.py:157-165`)
 - **Result**: **False.** `test_declared_vocabularies_are_small` asserts `2 <= len(vocabulary) <= 8`. Gap G's vocabulary has eleven values (`inference`, `token_efficiency`, `skills`, `personas`, `cloud_execution`, `research_process`, `evaluators`, `memory`, `orchestration`, `infrastructure`, `other`), so it fails at 11.
 - **Confidence**: high
-- **Impact if false**: none. The vocabulary is charter-derived — five priorities from §3's list, five eligible means from §3's closing sentence, plus `other` — so shrinking it loses charter fidelity. The gate is amended narrowly instead: a per-field declared maximum, defaulting to 8, with one named exemption carrying its reason.
+- **Impact if false**: none. The vocabulary is charter-derived (five priorities from §3's list, five eligible means from §3's closing sentence, plus `other`), so shrinking it loses charter fidelity. The gate is amended narrowly instead: a per-field declared maximum, defaulting to 8, with one named exemption carrying its reason.
 
 ### spike-3: Does a third index on `ImprovementCase` fit the per-model index bound?
 - **Assumption**: "`ImprovementCase` has room for another `IndexedField`."
 - **Method**: code-read (`tests/unit/test_agentsession_index_guard_generalized.py:452-466`; `models/improvement_case.py:82-83`)
 - **Result**: **False.** The case already indexes `state` and `priority`. `test_improvement_models_are_enumerated_by_the_runtime_derivation` asserts `1 <= len(indexed) <= 2` for every improvement model, so a third index fails.
 - **Confidence**: high
-- **Impact if false**: none. Same treatment as spike-2: a per-model declared maximum, defaulting to 2, with `ImprovementCase: 3` carrying its reason. The alternative — deleting the writerless `priority` index to make room — is considered and rejected in Rabbit Holes.
+- **Impact if false**: none. Same treatment as spike-2: a per-model declared maximum, defaulting to 2, with `ImprovementCase: 3` carrying its reason. The alternative (deleting the writerless `priority` index to make room) is considered and rejected in Rabbit Holes.
 
 ### spike-4: What does `gh repo view --json visibility` actually return?
 - **Assumption**: "Comparing the result to `"public"` decides eligibility."
 - **Method**: prototype (`gh repo view tomcounsell/ai --json visibility`)
-- **Result**: **Partly false.** It returns `{"visibility":"PUBLIC"}` — uppercase. A guard comparing against lowercase `"public"` would return `False` for every repository on earth, which is the *fail-closed* direction, so it would never raise an alarm and its "private returns False" test would pass vacuously.
+- **Result**: **Partly false.** It returns `{"visibility":"PUBLIC"}`, uppercase. A guard comparing against lowercase `"public"` would return `False` for every repository on earth, which is the *fail-closed* direction, so it would never raise an alarm and its "private returns False" test would pass vacuously.
 - **Confidence**: high
 - **Impact if false**: this is the single most dangerous detail in the lane. The guard normalizes with `.strip().upper()` and compares to `"PUBLIC"`, and the mutation check named in Success Criteria is precisely the one that bites here: flip the comparison and the *public* case must go red.
 
@@ -135,13 +135,13 @@ Every assumption below was resolved by reading the code or running the command a
 - **Method**: code-read (`tests/unit/test_ui_app.py:721-736`)
 - **Result**: **False.** Two tests pin the current surface exactly: `test_dashboard_never_offers_experiment_or_patch_counts` asserts `exported == ["get_coverage", "get_intervention_burden", "get_provisional_assumptions"]` as a literal list, and `test_index_page_links_both_improvement_partials` asserts on "both". Adding `get_goals` and a third `hx-get` fails both.
 - **Confidence**: high
-- **Impact if false**: none — both are on the Test Impact list as UPDATE. The exact-list assertion is a feature, not an obstacle: it is what stops a future lane from quietly adding an activity-counter tile, and it must stay an exact list after the update.
+- **Impact if false**: none. Both are on the Test Impact list as UPDATE. The exact-list assertion is a feature, not an obstacle: it is what stops a future lane from quietly adding an activity-counter tile, and it must stay an exact list after the update.
 
 ## Data Flow
 
 Two flows change. Neither crosses a process boundary in this lane; both are read paths that later lanes will write against.
 
-**Flow 1 — charter file to pinned record.**
+**Flow 1: charter file to pinned record.**
 
 ```
 docs/improvement-charter.md  (Tom edits and commits; nothing else writes it)
@@ -154,7 +154,7 @@ tools/sdlc_verdict.py::compute_plan_hash   →  "sha256:<hex>"   (CRLF-normalize
         ▼
 models/improvement_charter.py::load_from_file
         │  ImprovementCharter.query.filter(project_key=…)   ← bounded: one row per version
-        │  digest match in Python (digest is NOT indexed — spike-1)
+        │  digest match in Python (digest is NOT indexed, spike-1)
         ├─ digest already present  →  return the existing row, write nothing
         └─ digest unseen           →  create() one immutable row:
                                         version, effective, digest, text (ContentField),
@@ -165,7 +165,7 @@ ui/data/improvement.py::get_goals  →  ui/templates/improvement/goals.html
 
 The pinned row is the newest by `created_at` within the project partition. Rows are never updated and never deleted; `save()` is never called on an existing charter row.
 
-**Flow 2 — project key to provider eligibility.**
+**Flow 2: project key to provider eligibility.**
 
 ```
 project_key  ("valor", "cyndra", …)
@@ -184,7 +184,7 @@ value.strip().upper() == "PUBLIC"   →  True     (spike-4: the API returns uppe
 
 Every arrow that is not the happy path lands on `False`. Charter §7 makes "client" the safe default: routing client context to a non-subscription provider is the harm, and refusing to route open-source work merely costs an experiment.
 
-The resource probe has no flow to trace — it is a leaf that shells out, classifies, and returns a dict. Its shape is in Technical Approach.
+The resource probe has no flow to trace. It is a leaf that shells out, classifies, and returns a dict. Its shape is in Technical Approach.
 
 ## Architectural Impact
 
@@ -204,11 +204,11 @@ The one coupling introduced is `tools/` → `bridge.routing.load_config`. That d
 
 **Medium.**
 
-The unit of work is a delta, not a build: four model files gain seven fields between them and lose one, one settings block is renamed and extended, two small leaf modules are written from a specification the parent plan already fixed, one dashboard partial is added beside two that exist, and two documents are corrected. Every seam it plugs into shipped three weeks — three days, in fact — ago in PR #3224, and the schema gate that constrains it is already written.
+The unit of work is a delta, not a build: four model files gain seven fields between them and lose one, one settings block is renamed and extended, two small leaf modules are written from a specification the parent plan already fixed, one dashboard partial is added beside two that exist, and two documents are corrected. Every seam it plugs into shipped three weeks (three days, in fact) ago in PR #3224, and the schema gate that constrains it is already written.
 
 What makes it Medium rather than Small is the guard work, not the field work. Three schema-gate assertions have to be amended rather than satisfied (spikes 1 through 3), and each amendment has to stay narrow enough that the gate still bites everywhere else. Every new guard carries a mutation check. That is where the time goes.
 
-**Time-box:** one build session plus one validation session. If the guard amendments start requiring a fourth exemption, or if the charter loader grows a projection, stop and re-scope — both are signs the lane is absorbing work that belongs to #3215.
+**Time-box:** one build session plus one validation session. If the guard amendments start requiring a fourth exemption, or if the charter loader grows a projection, stop and re-scope. Both are signs the lane is absorbing work that belongs to #3215.
 
 ## Prerequisites
 
@@ -217,7 +217,7 @@ What makes it Medium rather than Small is the guard work, not the field work. Th
 This was checked rather than assumed. The issue's Recon Summary records zero pre-requisites, and the two candidates both resolve to "not needed here":
 
 - **#3220 (session execution lease)** gates lane 3's fenced dispatch. Nothing in this lane dispatches, admits, or reserves anything.
-- **The improvement control namespace** does not exist and is #3215's to create. The one design decision that could have reached for it — where the eligibility cache lives — is resolved in Technical Approach in a way that does not (a process-local TTL cache, not a Redis key).
+- **The improvement control namespace** does not exist and is #3215's to create. The one design decision that could have reached for it (where the eligibility cache lives) is resolved in Technical Approach in a way that does not (a process-local TTL cache, not a Redis key).
 
 Everything this lane builds on is already on `main` at the baseline: the eight `Improvement*` models, `ImprovementSettings`, `verifying_artifact_store`, `ui/data/improvement.py`, the schema-gate tests, and `tools/sdlc_verdict.py::compute_plan_hash`.
 
@@ -241,17 +241,17 @@ Nothing in this lane runs on a tick, holds a lease, or writes a Redis key outsid
 
 ### Technical Approach
 
-#### 1. Charter seed — `models/improvement_charter.py`
+#### 1. Charter seed: `models/improvement_charter.py`
 
 Three new fields:
 
 ```python
-digest = Field(null=True)              # "sha256:<hex>" — PLAIN, not indexed (spike-1)
+digest = Field(null=True)              # "sha256:<hex>", PLAIN, not indexed (spike-1)
 effective = Field(null=True)           # ISO date string from frontmatter
 text = ContentField(store=verifying_artifact_store)
 ```
 
-`digest` is a plain `Field` and this is deliberate, against the parent plan's `IndexedField` wording. Spike-1 measured that `test_improvement_model_indexes_are_low_cardinality` rejects an indexed field whose name contains `"digest"`, on the name alone. Rather than punch a hole in a name-based guard that exists precisely to catch fields added without thought, the loader matches the digest in Python over the project's charter rows — the same technique the module docstring already prescribes for `version`. At one row per charter version, the scan is single-digit.
+`digest` is a plain `Field` and this is deliberate, against the parent plan's `IndexedField` wording. Spike-1 measured that `test_improvement_model_indexes_are_low_cardinality` rejects an indexed field whose name contains `"digest"`, on the name alone. Rather than punch a hole in a name-based guard that exists precisely to catch fields added without thought, the loader matches the digest in Python over the project's charter rows, the same technique the module docstring already prescribes for `version`. At one row per charter version, the scan is single-digit.
 
 `text` reuses the module singleton `verifying_artifact_store` from `models/verifying_artifact_store.py:137`, exactly as `ImprovementExperiment.manifest` and `ImprovementEvaluation.judge_records` already do. No new store instance, no new retention root.
 
@@ -264,13 +264,13 @@ def load_from_file(cls, path=Path("docs/improvement-charter.md"), project_key="v
 
 1. `compute_plan_hash(path)` from `tools/sdlc_verdict.py` for the digest. It reads bytes, normalizes CRLF and stray CR to LF, returns `"sha256:<hex>"`, and returns `None` on any read failure (spike-5). No second hasher is written.
 2. Parse the YAML frontmatter for `owner`, `version`, `effective`.
-3. **Refuse** unless `owner` is exactly `Tom Counsell` — return `None`, write nothing, log at warning. This is the code half of "Tom owns the charter"; the grep-based Verification row is the other half.
+3. **Refuse** unless `owner` is exactly `Tom Counsell`: return `None`, write nothing, log at warning. This is the code half of "Tom owns the charter"; the grep-based Verification row is the other half.
 4. `ImprovementCharter.query.filter(project_key=project_key)`, match `digest` in Python. On a hit, return the existing row untouched.
 5. On a miss, `create()` one row with `version`, `effective`, `digest`, `text`, `state="active"`, `created_at=datetime.now(UTC)`.
 
 **Never** `save()` on an existing row, never flip a prior row to `superseded`, never delete. A changed byte therefore produces a second `active` row and leaves the first exactly as it was, which is what the acceptance criterion requires. The pinned charter is the newest by `created_at` in the partition; a `pinned(project_key)` helper beside the loader returns it so no caller re-derives that rule. The module docstring's amendment paragraph is corrected to describe this, since it currently describes a supersede flow the loader does not perform.
 
-#### 2. Case vocabulary — `models/improvement_case.py`, `_investigation.py`, `_release.py`
+#### 2. Case vocabulary: `models/improvement_case.py`, `_investigation.py`, `_release.py`
 
 ```python
 PRIORITY_AREAS: tuple[str, ...] = (
@@ -282,23 +282,23 @@ PRIORITY_AREAS: tuple[str, ...] = (
 
 Five from charter §3's priority list, five from §3's closing sentence ("Research process improvements, better evaluators, memory, orchestration, and new infrastructure are all eligible means"), plus `other`. `other` is load-bearing: it is what keeps the set from reading as a fixed allocation.
 
-On `ImprovementCase`: `priority_area = IndexedField(default="other")`, `ranking_rationale = Field(null=True)`, `charter_digest = Field(null=True)`. Delete `objective = Field(null=True)` at `:91` and its docstring line at `:75`. `charter_version` (`IntField(default=0)`) **stays** — charter §12 asks for a versioned reference, the digest is the identity and the version is the human-readable name, and the loader writes both.
+On `ImprovementCase`: `priority_area = IndexedField(default="other")`, `ranking_rationale = Field(null=True)`, `charter_digest = Field(null=True)`. Delete `objective = Field(null=True)` at `:91` and its docstring line at `:75`. `charter_version` (`IntField(default=0)`) **stays**, because charter §12 asks for a versioned reference, the digest is the identity and the version is the human-readable name, and the loader writes both.
 
 On `ImprovementInvestigation` and `ImprovementRelease`: `charter_digest = Field(null=True)`, plus its docstring line.
 
-**Migration:** none needed for the deletion. `objective` is a plain `Field` with no index and no writer, which is precisely the contract at `models/agent_session.py:879-883`. The additions are additive. A registered marker migration follows the `_migrate_confirm_improvement_models_readable` precedent at `scripts/update/migrations.py:1384`: read-only, imports the four models, runs one bounded project-scoped query each, writes nothing, and exists so a machine carries a durable record of the schema version that introduced the v2 fields. Register it in `MIGRATIONS` — a defined-but-unregistered function never runs.
+**Migration:** none needed for the deletion. `objective` is a plain `Field` with no index and no writer, which is precisely the contract at `models/agent_session.py:879-883`. The additions are additive. A registered marker migration follows the `_migrate_confirm_improvement_models_readable` precedent at `scripts/update/migrations.py:1384`: read-only, imports the four models, runs one bounded project-scoped query each, writes nothing, and exists so a machine carries a durable record of the schema version that introduced the v2 fields. Register it in `MIGRATIONS`; a defined-but-unregistered function never runs.
 
-#### 3. Schema-gate amendments — the three narrow exemptions
+#### 3. Schema-gate amendments: the three narrow exemptions
 
 Each is a declared map entry with a reason, not a loosened constant.
 
-- `tests/unit/test_improvement_models.py::test_declared_vocabularies_are_small`: replace the flat `<= 8` with a per-field maximum map defaulting to 8, carrying one entry — `(ImprovementCase, "priority_area"): 11`, reason "charter §3 vocabulary; eleven index sets per project partition, membership reads only". The `>= 2` floor and the duplicate check are untouched.
-- `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation`: replace the flat `1 <= len(indexed) <= 2` with a per-model maximum defaulting to 2, carrying one entry — `ImprovementCase: 3`, reason "`state` is lifecycle, `priority` is urgency, `priority_area` is charter §3 classification; the goals partial reads all three".
+- `tests/unit/test_improvement_models.py::test_declared_vocabularies_are_small`: replace the flat `<= 8` with a per-field maximum map defaulting to 8, carrying one entry: `(ImprovementCase, "priority_area"): 11`, reason "charter §3 vocabulary; eleven index sets per project partition, membership reads only". The `>= 2` floor and the duplicate check are untouched.
+- `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation`: replace the flat `1 <= len(indexed) <= 2` with a per-model maximum defaulting to 2, carrying one entry: `ImprovementCase: 3`, reason "`state` is lifecycle, `priority` is urgency, `priority_area` is charter §3 classification; the goals partial reads all three".
 - `INDEXED_VOCABULARIES[ImprovementCase]` gains `"priority_area": PRIORITY_AREAS`, which is what makes `test_every_indexed_field_has_a_declared_vocabulary` and `test_index_defaults_are_inside_their_vocabulary` cover it. `"other"` is in the tuple, so the default is inside its vocabulary.
 
 `unbounded_markers` and `FORBIDDEN_INDEX_NAMES` are **not** touched, because spike-1 removed the only reason to touch them.
 
-#### 4. Settings — `config/settings.py::ImprovementSettings`
+#### 4. Settings: `config/settings.py::ImprovementSettings`
 
 | Field | Change | Default |
 |---|---|---|
@@ -306,7 +306,7 @@ Each is a declared map entry with a reason, not a loosened constant.
 | `weekly_infrastructure_usd` | new | `50.00` |
 | `budget_day_boundary` | new | `"UTC"` |
 | `budget_week_start` | new | `"monday"` |
-| `portfolio_allocation` | deleted (`:630`, no reader) | — |
+| `portfolio_allocation` | deleted (`:630`, no reader) | n/a |
 
 Every field keeps a description ending in an `Env: IMPROVEMENT__<KEY>.` sentence and a `PROVISIONAL/TUNABLE.` marker, matching the block's existing shape. The `Env:` sentences are the reader leg that `tests/unit/test_env_declaration_readers.py` walks; only `IMPROVEMENT__ENABLED` is actually declared in `.env.example`, so no declaration changes, but the convention stays intact.
 
@@ -334,20 +334,20 @@ def probe(*, runner: Callable[[list[str]], subprocess.CompletedProcess] | None =
 
 One entry per resource charter §8 names: `workspace_personal`, `workspace_work`, `virtual_debit_card`, `cloudflare_account`, `cloudflare_cli`, `vault_write`. Each value is `{"state": "verified" | "absent" | "unknown", "detail": <str>, "fingerprint": <str | None>}`.
 
-- **Presence from titles only.** `op item list --vault m-valor --format json` returns metadata — title, id, vault, category, timestamps — and never a field value (Research finding 1). The whole presence leg therefore handles no credential at all.
+- **Presence from titles only.** `op item list --vault m-valor --format json` returns metadata (title, id, vault, category, timestamps) and never a field value (Research finding 1). The whole presence leg therefore handles no credential at all.
 - **Fingerprint, never value.** Where a fingerprint is wanted, read the credential, hash it immediately, and return `"sha256:<hex>"`. The plaintext is never returned, never logged, never formatted into a message, and never placed in an argv. `CLAUDE.md`'s "compare by SHA-256 fingerprint" rule, applied.
 - **`unknown` is the honest default.** Non-zero exit, timeout, empty output, unparseable JSON, or an unexpected shape → `unknown`, never `absent`. Older `op` builds could exit 0 on unrecognized server errors (Research finding 2), so exit 0 alone proves nothing. Reporting `absent` for a resource that exists would send a builder chasing something that was already there.
 - **Never raises.** Every branch returns a dict. A probe that throws inside a controller tick is worse than one that reports `unknown`.
 - **No masking backstop.** This repo runs `op run --no-masking` by design, so op's own masking is unavailable (Research finding 3). The probe's output discipline is the only guard, which is why `runner` is injectable: the test seeds a fake credential through it and asserts the string appears nowhere in the returned structure, at any depth.
 - **`wrangler` and the vault inventory are expected to report `unknown` on this machine today.** That is a correct result, not a failing test.
 
-#### 7. Dashboard — the goals partial
+#### 7. Dashboard: the goals partial
 
 - `ui/data/improvement.py::get_goals(project_key="valor") -> dict`: the pinned charter's `version`, `effective`, and `digest`; the charter §3 priority list; open `ImprovementCase` rows with `priority_area` and `ranking_rationale`; and the §11 headings (acquired abilities, evaluations, rejected approaches, unresolved assumptions, resource use by budget unit) each with an explicit empty state.
 - `ui/templates/improvement/goals.html`, following `coverage.html`'s shape, root element id `improvement-goals`.
 - `@app.get("/_partials/improvement/goals/")` in `ui/app.py`, beside the two existing partial routes.
 - A third `hx-get` card in `ui/templates/index.html`.
-- **Honest empty states.** Until lanes 3 through 6 land, most §11 headings have nothing to render. Each says what would appear there and which lane writes it — "no releases yet (lane 6)" — rather than showing a zero. A zero claims a measurement was taken.
+- **Honest empty states.** Until lanes 3 through 6 land, most §11 headings have nothing to render. Each says what would appear there and which lane writes it ("no releases yet (lane 6)") rather than showing a zero. A zero claims a measurement was taken.
 - `test_dashboard_never_offers_experiment_or_patch_counts` keeps its exact-list form with `get_goals` added. It is what stops a future lane from quietly adding an activity counter, so it stays exact.
 
 ## Failure Path Test Strategy
@@ -356,7 +356,7 @@ One entry per resource charter §8 names: `workspace_personal`, `workspace_work`
 
 Both new guards are fail-closed leaves, so their exception paths are the product, not an edge case.
 
-- `is_open_source`: `subprocess.TimeoutExpired`, `FileNotFoundError` (no `gh` on PATH), `json.JSONDecodeError`, `KeyError` on `visibility`, and any non-zero exit each return `False`. Tested individually, not as one blanket "error" case — a single `except Exception` with one test would let a typo in the JSON key masquerade as a caught timeout.
+- `is_open_source`: `subprocess.TimeoutExpired`, `FileNotFoundError` (no `gh` on PATH), `json.JSONDecodeError`, `KeyError` on `visibility`, and any non-zero exit each return `False`. Tested individually, not as one blanket "error" case. A single `except Exception` with one test would let a typo in the JSON key masquerade as a caught timeout.
 - `probe`: the same five failure shapes each resolve to `unknown` for the affected resource while every other resource still reports. One dead `op` call must not blank the whole report.
 - `load_from_file`: a missing file, an unreadable file, absent frontmatter, malformed YAML, and a wrong `owner` all return `None` and write nothing. `compute_plan_hash` returning `None` short-circuits before any query.
 - `get_goals`: an empty namespace, a charter row whose `text` reference is missing from the content store, and a `ContentField` load raising all render the partial with an empty state rather than a 500.
@@ -371,21 +371,21 @@ Both new guards are fail-closed leaves, so their exception paths are the product
 
 ### Error State Rendering
 
-- `goals.html` renders three distinguishable states per §11 heading: seeded content, "nothing yet, written by lane N", and "unavailable" when the underlying read raised. Collapsing the second and third into one blank would let a broken query read as an honest zero — which is Risk 2 of the parent plan, on a smaller surface.
+- `goals.html` renders three distinguishable states per §11 heading: seeded content, "nothing yet, written by lane N", and "unavailable" when the underlying read raised. Collapsing the second and third into one blank would let a broken query read as an honest zero, which is Risk 2 of the parent plan on a smaller surface.
 - The charter block renders `version`, `effective`, and the digest in full. A truncated digest cannot be compared against the file by a human, and comparing it is the point.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_improvement_models.py` — UPDATE: `INDEXED_VOCABULARIES[ImprovementCase]` gains `"priority_area": PRIORITY_AREAS`; `test_declared_vocabularies_are_small` gains a per-field maximum map (default 8, one entry at 11 with its reason); import `PRIORITY_AREAS` from `models.improvement_case`
-- [ ] `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation` — UPDATE: per-model index maximum (default 2, `ImprovementCase: 3` with its reason). `test_improvement_model_indexes_are_low_cardinality` is deliberately **not** changed — spike-1 removed the reason to
-- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact list gains `"get_goals"`; it stays an exact list
-- [ ] `tests/unit/test_ui_app.py::test_index_page_links_both_improvement_partials` — REPLACE: rename to `..._links_all_improvement_partials` and assert the third `hx-get` alongside the two existing ones
-- [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` currently has no coverage there at all (`git grep ImprovementSettings -- tests/` returns only `test_improvement_evidence.py`). Add the defaults case — `daily_paid_inference_usd == 10.00`, `weekly_infrastructure_usd == 50.00`, `budget_day_boundary == "UTC"`, `budget_week_start == "monday"` — and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not fields on the model
-- [ ] `tests/unit/test_improvement_charter.py` — CREATE: load twice creates one row; a changed byte creates a second and leaves the first untouched; a file without `owner: Tom Counsell` is refused and writes nothing; a CRLF copy digests identically to an LF copy; `pinned()` returns the newest row
-- [ ] `tests/unit/test_improvement_eligibility.py` — CREATE: public `True`; private `False`; missing `github` block `False`; missing `org`/`repo` `False`; non-zero `gh` exit `False`; timeout `False`; unparseable JSON `False`; cache hit issues no subprocess
-- [ ] `tests/unit/test_improvement_resources.py` — CREATE: every resource classified; a seeded fake credential never appears anywhere in the returned structure at any depth; a non-zero `op` exit yields `unknown` and not `absent`; one failing resource does not blank the others; `probe()` never raises
-- [ ] `tests/unit/test_env_declaration_readers.py` — NO CHANGE, but must be re-run: only `IMPROVEMENT__ENABLED` is declared in `.env.example` and the rename touches no declaration. Verified at plan time; re-verified by the Verification table
-- [ ] `tests/unit/test_reflection_register.py`, `tests/unit/test_improvement_evidence.py`, `tests/unit/test_length_safe_content_store.py` — NO CHANGE: this lane touches neither the collection tick, the evidence adapters, nor the content store. Listed so the validator confirms they still pass rather than assuming it
+- [ ] `tests/unit/test_improvement_models.py`, UPDATE: `INDEXED_VOCABULARIES[ImprovementCase]` gains `"priority_area": PRIORITY_AREAS`; `test_declared_vocabularies_are_small` gains a per-field maximum map (default 8, one entry at 11 with its reason); import `PRIORITY_AREAS` from `models.improvement_case`
+- [ ] `tests/unit/test_agentsession_index_guard_generalized.py::test_improvement_models_are_enumerated_by_the_runtime_derivation`, UPDATE: per-model index maximum (default 2, `ImprovementCase: 3` with its reason). `test_improvement_model_indexes_are_low_cardinality` is deliberately **not** changed, because spike-1 removed the reason to
+- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts`, UPDATE: the exact list gains `"get_goals"`; it stays an exact list
+- [ ] `tests/unit/test_ui_app.py::test_index_page_links_both_improvement_partials`, REPLACE: rename to `..._links_all_improvement_partials` and assert the third `hx-get` alongside the two existing ones
+- [ ] `tests/unit/test_settings.py`, UPDATE: `ImprovementSettings` currently has no coverage there at all (`git grep ImprovementSettings -- tests/` returns only `test_improvement_evidence.py`). Add the defaults case (`daily_paid_inference_usd == 10.00`, `weekly_infrastructure_usd == 50.00`, `budget_day_boundary == "UTC"`, `budget_week_start == "monday"`) and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not fields on the model
+- [ ] `tests/unit/test_improvement_charter.py`, CREATE: load twice creates one row; a changed byte creates a second and leaves the first untouched; a file without `owner: Tom Counsell` is refused and writes nothing; a CRLF copy digests identically to an LF copy; `pinned()` returns the newest row
+- [ ] `tests/unit/test_improvement_eligibility.py`, CREATE: public `True`; private `False`; missing `github` block `False`; missing `org`/`repo` `False`; non-zero `gh` exit `False`; timeout `False`; unparseable JSON `False`; cache hit issues no subprocess
+- [ ] `tests/unit/test_improvement_resources.py`, CREATE: every resource classified; a seeded fake credential never appears anywhere in the returned structure at any depth; a non-zero `op` exit yields `unknown` and not `absent`; one failing resource does not blank the others; `probe()` never raises
+- [ ] `tests/unit/test_env_declaration_readers.py`, NO CHANGE, but must be re-run: only `IMPROVEMENT__ENABLED` is declared in `.env.example` and the rename touches no declaration. Verified at plan time; re-verified by the Verification table
+- [ ] `tests/unit/test_reflection_register.py`, `tests/unit/test_improvement_evidence.py`, `tests/unit/test_length_safe_content_store.py`, NO CHANGE: this lane touches neither the collection tick, the evidence adapters, nor the content store. Listed so the validator confirms they still pass rather than assuming it
 
 ## Rabbit Holes
 
@@ -395,7 +395,7 @@ Both new guards are fail-closed leaves, so their exception paths are the product
 - **Writing the ranking snapshot.** Gap G's "the ordered list is a durable artifact" is lane 5 (#3217). The issue's Dropped bucket names it explicitly. `ranking_rationale` is a free-text field on a case; it is not a snapshot.
 - **Creating the improvement control namespace for the eligibility cache.** Forbidden by the issue and resolved by making the cache process-local instead. If a builder finds themselves designing a Redis key schema, they have left the lane.
 - **Adding a `downstream_sign` tag to replace `objective`.** Considered upstream and rejected by Tom (issue Dropped bucket). `objective` is deleted, full stop.
-- **Rewriting the charter model's supersede semantics into a full amendment flow.** The loader appends and never supersedes; the docstring is corrected to match. Building the human-driven supersede path — `valor-improve` writing `state="superseded"` — is lane 3's, and doing it here would mean designing a CLI this lane may not create.
+- **Rewriting the charter model's supersede semantics into a full amendment flow.** The loader appends and never supersedes; the docstring is corrected to match. Building the human-driven supersede path (`valor-improve` writing `state="superseded"`) is lane 3's, and doing it here would mean designing a CLI this lane may not create.
 - **Editing `docs/improvement-charter.md`.** Tom owns it. Not a rabbit hole so much as a wall; it is also a No-Go and a Verification row.
 - **Chasing every `git grep objective` hit.** Two of the four files that match are ordinary English in unrelated modules (`tools/memory_eval/query_set.py:9`, `tools/valor_session.py:1141`). Touching them is scope creep with a rename's disguise.
 - **Backfilling `charter_digest` onto existing rows.** There are none. `ImprovementCase` has no writer on `main`, so the tables are empty and a data migration would migrate nothing.
@@ -406,11 +406,11 @@ Both new guards are fail-closed leaves, so their exception paths are the product
 
 The worst outcome this lane can enable. `is_open_source` returning `True` by mistake is how private client code and its context reach a non-subscription provider (charter §7, parent plan Risk 8).
 
-**Mitigation:** every branch that is not an explicit uppercase `"PUBLIC"` returns `False` — missing project, missing `github`, missing `org`/`repo`, non-zero exit, timeout, unparseable JSON, absent key, unexpected value. Each of those is a separate test rather than one blanket case. The mutation check named in Success Criteria flips the default to `True` and requires the private, missing-field, and `gh`-failure tests to go red together; if only one bites, the others were passing vacuously.
+**Mitigation:** every branch that is not an explicit uppercase `"PUBLIC"` returns `False`: missing project, missing `github`, missing `org`/`repo`, non-zero exit, timeout, unparseable JSON, absent key, unexpected value. Each of those is a separate test rather than one blanket case. The mutation check named in Success Criteria flips the default to `True` and requires the private, missing-field, and `gh`-failure tests to go red together; if only one bites, the others were passing vacuously.
 
 ### Risk 2: The guard answers about the wrong repository and exits 0
 
-`GH_REPO` is set process-wide by `agent/sdk_client.py`, and `gh` reads it before cwd. A bare `gh repo view --json visibility` inside a session would report on whatever `GH_REPO` names, exit 0, and look entirely healthy — the failure has no symptom.
+`GH_REPO` is set process-wide by `agent/sdk_client.py`, and `gh` reads it before cwd. A bare `gh repo view --json visibility` inside a session would report on whatever `GH_REPO` names, exit 0, and look entirely healthy. The failure has no symptom.
 
 **Mitigation:** the repository is passed positionally, `gh repo view "<org>/<repo>"`, which overrides the environment. A test sets `GH_REPO` to a decoy public repository, asks about a private project, and asserts `False`. Without that test the defect is undetectable by reading the code, because the correct and incorrect versions differ by one argument.
 
@@ -418,13 +418,13 @@ The worst outcome this lane can enable. `is_open_source` returning `True` by mis
 
 Charter §8 forbids exposing secrets in logs, messages, or committed files, and this repo runs `op run --no-masking`, so op's own masking is not a backstop.
 
-**Mitigation:** the presence leg reads `op item list --format json`, which returns metadata only and never a field value, so most of the module cannot leak by construction. The fingerprint leg hashes immediately and returns `"sha256:<hex>"`; the plaintext never enters a return value, a log line, or an argv. The `runner` parameter is injectable so the test seeds a distinctive fake credential and asserts the string appears nowhere in the returned structure at any depth — a recursive scan, not a top-level key check.
+**Mitigation:** the presence leg reads `op item list --format json`, which returns metadata only and never a field value, so most of the module cannot leak by construction. The fingerprint leg hashes immediately and returns `"sha256:<hex>"`; the plaintext never enters a return value, a log line, or an argv. The `runner` parameter is injectable so the test seeds a distinctive fake credential and asserts the string appears nowhere in the returned structure at any depth, by recursive scan rather than a top-level key check.
 
 ### Risk 4: `unknown` gets reported as `absent`
 
 A resource reported `absent` when it exists sends the next lane to acquire something already sitting in the vault, and older `op` builds could exit 0 on unrecognized server errors, so exit 0 proves nothing on its own.
 
-**Mitigation:** `absent` is written only on a successful, parseable listing that does not contain the title. Every other shape — non-zero exit, timeout, empty stdout, unparseable JSON, unexpected structure — is `unknown`. A test drives each shape and asserts the classification.
+**Mitigation:** `absent` is written only on a successful, parseable listing that does not contain the title. Every other shape (non-zero exit, timeout, empty stdout, unparseable JSON, unexpected structure) is `unknown`. A test drives each shape and asserts the classification.
 
 ### Risk 5: A schema-gate exemption quietly becomes a loophole
 
@@ -434,7 +434,7 @@ Three assertions are amended. A flat constant raised from 8 to 12, or from 2 to 
 
 ### Risk 6: The loader mutates an existing charter row
 
-Charter §12 forbids retroactively rewriting evidence. A loader that flips a prior row to `superseded`, or updates a row in place on a digest change, destroys the lineage that makes an old release auditable — and the module's current docstring describes exactly that flow.
+Charter §12 forbids retroactively rewriting evidence. A loader that flips a prior row to `superseded`, or updates a row in place on a digest change, destroys the lineage that makes an old release auditable, and the module's current docstring describes exactly that flow.
 
 **Mitigation:** `load_from_file` calls `create()` or returns an existing row, and nothing else. No `save()`, no `delete()`, no `state` write. A test corrupts one byte, reloads, and asserts two rows exist with the first's fields byte-identical to before. The docstring is corrected in the same change so the prose stops describing behavior the code does not have.
 
@@ -442,17 +442,17 @@ Charter §12 forbids retroactively rewriting evidence. A loader that flips a pri
 
 Charter §11 warns against treating an absence of detection as a result. Six of the §11 headings have no writer until lanes 3 through 6 land, so this lane ships a surface that is mostly empty.
 
-**Mitigation:** every heading renders one of three distinguishable states — content, "nothing yet, written by lane N", or "unavailable" when the read failed. No count renders as `0` unless a query actually ran and returned nothing. `test_ui_app.py` asserts the empty-namespace render contains the lane attribution string and no bare zero.
+**Mitigation:** every heading renders one of three distinguishable states: content, "nothing yet, written by lane N", or "unavailable" when the read failed. No count renders as `0` unless a query actually ran and returned nothing. `test_ui_app.py` asserts the empty-namespace render contains the lane attribution string and no bare zero.
 
 ## Race Conditions
 
-Nothing in this lane runs concurrently. There is no tick, no lease, no reservation, no shared mutable state, and no cross-process handoff — the two guards are synchronous leaves, the loader runs on demand, and the dashboard partial is a read. The one timing question worth writing down is the loader's, because a later lane will call it from a tick.
+Nothing in this lane runs concurrently. There is no tick, no lease, no reservation, no shared mutable state, and no cross-process handoff. The two guards are synchronous leaves, the loader runs on demand, and the dashboard partial is a read. The one timing question worth writing down is the loader's, because a later lane will call it from a tick.
 
 ### Race 1: Two callers seed the same charter digest simultaneously
 
 `load_from_file` reads (query for the digest) and then writes (`create`). Two callers arriving between the read and the write both miss and both create, producing two rows for one digest.
 
-**Why it is tolerable here, and what makes it safe later:** this lane has exactly one caller — a test — so the race cannot occur on `main` as shipped. When lane 3's controller tick calls the loader on every run, the tick is bounded by `max_concurrent_research_sessions = 1`, so it is single-flighted by the concurrency unit that already exists.
+**Why it is tolerable here, and what makes it safe later:** this lane has exactly one caller (a test), so the race cannot occur on `main` as shipped. When lane 3's controller tick calls the loader on every run, the tick is bounded by `max_concurrent_research_sessions = 1`, so it is single-flighted by the concurrency unit that already exists.
 
 **What this lane does about it anyway:** duplicate rows are harmless by construction, because rows are immutable and identical for a given digest, and `pinned()` resolves by newest `created_at` regardless of how many rows share a digest. Making the seed a compare-and-set would need an atomic primitive in the control namespace this lane is forbidden to create. The behavior is documented on `load_from_file` so lane 3 inherits the reasoning rather than rediscovering it.
 
@@ -460,7 +460,7 @@ Nothing in this lane runs concurrently. There is no tick, no lease, no reservati
 
 Tom commits an amended charter while an action admitted under the previous digest is still running.
 
-**Not this lane's to solve, and named so it is not accidentally solved here.** Charter §12 states the rule — actions already admitted complete under the digest they carry, a new digest pins for actions admitted after it — and enforcing it requires the admission path, which is #3215's. This lane makes the rule *expressible* by putting `charter_digest` on the case, the investigation, and the release. It enforces nothing.
+**Not this lane's to solve, and named so it is not accidentally solved here.** Charter §12 states the rule (actions already admitted complete under the digest they carry, a new digest pins for actions admitted after it) and enforcing it requires the admission path, which is #3215's. This lane makes the rule *expressible* by putting `charter_digest` on the case, the investigation, and the release. It enforces nothing.
 
 ## No-Gos (Out of Scope)
 
@@ -482,7 +482,7 @@ Tom commits an amended charter while an action admitted under the previous diges
 
 One change, and it is the marker migration.
 
-- **`scripts/update/migrations.py`** gains `_migrate_confirm_improvement_v2_fields(project_dir)` and its `MIGRATIONS` registration. It follows `_migrate_confirm_improvement_models_readable` (`:1384`) exactly: read-only, imports `ImprovementCharter`, `ImprovementCase`, `ImprovementInvestigation`, and `ImprovementRelease`, runs one bounded project-scoped query per model to prove the keyspace resolves under the new fields, writes nothing, returns `None` on success and an error string otherwise. Idempotent by construction and recorded once in `data/migrations_completed.json`. **Registration is the whole point** — a defined-but-unregistered function never runs, and without a durable marker no machine carries a record of the schema version that introduced the v2 fields for a later subtractive migration to reason from.
+- **`scripts/update/migrations.py`** gains `_migrate_confirm_improvement_v2_fields(project_dir)` and its `MIGRATIONS` registration. It follows `_migrate_confirm_improvement_models_readable` (`:1384`) exactly: read-only, imports `ImprovementCharter`, `ImprovementCase`, `ImprovementInvestigation`, and `ImprovementRelease`, runs one bounded project-scoped query per model to prove the keyspace resolves under the new fields, writes nothing, returns `None` on success and an error string otherwise. Idempotent by construction and recorded once in `data/migrations_completed.json`. **Registration is the whole point.** A defined-but-unregistered function never runs, and without a durable marker no machine carries a record of the schema version that introduced the v2 fields for a later subtractive migration to reason from.
 - **No new dependency.** Everything imports from the standard library, `popoto`, or existing repo modules.
 - **No new config file, no new `.env` key, no new vault entry.** `.env.example` changes by one comment clause and declares nothing new.
 - **No service restart.** Nothing in `bridge/`, `worker/`, or `agent/` changes, so `./scripts/valor-service.sh restart` is not required by this lane.
@@ -519,7 +519,7 @@ Not applicable. Nothing here is user-facing outside this repository.
 
 ### Inline Documentation
 
-- [ ] `models/improvement_charter.py` module docstring: add `digest`, `effective`, and `text` to the `Fields:` block, and **correct the amendment paragraph** — it currently describes flipping a prior row to `superseded`, which `load_from_file` deliberately does not do. Keep the `TTL decision` phrase; `test_ttl_decision_is_recorded_in_the_docstring` greps for it
+- [ ] `models/improvement_charter.py` module docstring: add `digest`, `effective`, and `text` to the `Fields:` block, and **correct the amendment paragraph**, which currently describes flipping a prior row to `superseded`, which `load_from_file` deliberately does not do. Keep the `TTL decision` phrase; `test_ttl_decision_is_recorded_in_the_docstring` greps for it
 - [ ] `models/improvement_case.py` docstring: add `priority_area`, `ranking_rationale`, `charter_digest`; delete the `objective` line at `:75`
 - [ ] `models/improvement_investigation.py` and `models/improvement_release.py` docstrings: add `charter_digest`
 - [ ] `tools/improvement_eligibility.py`: module docstring stating charter §7, the fail-closed contract, why the repository is passed positionally rather than through `GH_REPO`, and why the cache is process-local
@@ -540,7 +540,7 @@ Each criterion below is a row in the Verification table or a named test. None of
 - [ ] Every parent-plan Verification row that passed for PR #3224 still passes, and the v2 rows pass: charter seed round-trip, eligibility guard, resource probe, budget windows, both dollar settings, charter version 2
 - [ ] `git grep -n 'portfolio_allocation'` returns matches only in `docs/plans/` and `git grep -n '\bobjective\b' -- '*.py'` returns matches only in `tools/memory_eval/query_set.py` and `tools/valor_session.py` (ordinary English, out of scope)
 
-**Mutation checks — each guard is proven to bite, and re-measured after every review round:**
+**Mutation checks: each guard is proven to bite, and re-measured after every review round:**
 
 - [ ] Flip `is_open_source`'s failure default from `False` to `True`: the private, missing-field, `gh`-failure, timeout, and unparseable-JSON tests all go red. If fewer than all five bite, the rest were passing vacuously
 - [ ] Change `is_open_source`'s comparison from `"PUBLIC"` to `"public"`: the public-repository test goes red. This is the spike-4 defect and it is invisible without this check
@@ -562,8 +562,8 @@ Each criterion below is a row in the Verification table or a named test. None of
 
 | Member | Agent Type | Owns | Parallel with |
 |---|---|---|---|
-| `delta-builder` | builder | Tasks 1 through 4 and task 6 | none — the tasks share four model files and two test files |
-| `lane-validator` | validator | Task 5 | none — runs after the build lands |
+| `delta-builder` | builder | Tasks 1 through 4 and task 6 | none, the tasks share four model files and two test files |
+| `lane-validator` | validator | Task 5 | none, runs after the build lands |
 
 **One builder, serialized.** The temptation is to fan out records, settings, guards, and dashboard as four parallel lanes, since they look independent. They are not: tasks 1, 2, and 3 all edit `tests/unit/test_improvement_models.py`, tasks 1 and 4 both read `models/improvement_charter.py`, and two builders sharing a worktree have livelocked on this repository before. The lane is Medium; the serialization costs a session and buys a clean history.
 
@@ -571,8 +571,8 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 
 ### Available Agent Types
 
-- **builder** — writes code and tests in the lane worktree, commits in small logical checkpoints
-- **validator** — runs the Verification table and every mutation check, reports pass/fail per row without editing code
+- **builder**: writes code and tests in the lane worktree, commits in small logical checkpoints
+- **validator**: runs the Verification table and every mutation check, reports pass/fail per row without editing code
 
 ## Step by Step Tasks
 
@@ -585,7 +585,7 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 - **Agent Type**: builder
 - **Parallel**: false
 
-- Add `digest` (plain `Field`, **not** `IndexedField` — spike-1), `effective` (`Field`), and `text` (`ContentField(store=verifying_artifact_store)`) to `models/improvement_charter.py`
+- Add `digest` (plain `Field`, **not** `IndexedField`, per spike-1), `effective` (`Field`), and `text` (`ContentField(store=verifying_artifact_store)`) to `models/improvement_charter.py`
 - Add `load_from_file(path=Path("docs/improvement-charter.md"), project_key="valor")` as a classmethod: `compute_plan_hash` from `tools/sdlc_verdict.py` for the digest, frontmatter parse for `owner`/`version`/`effective`, refuse unless `owner == "Tom Counsell"`, match the digest in Python over `query.filter(project_key=...)`, `create()` on a miss and return the existing row on a hit. Never `save()`, never flip `state`, never delete
 - Add a `pinned(project_key)` helper returning the newest charter row by `created_at`, so no caller re-derives the pinning rule
 - Correct the module docstring: add the three fields to the `Fields:` block, rewrite the amendment paragraph to describe append-only loading, keep the literal phrase `TTL decision`
@@ -606,7 +606,7 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 - In `config/settings.py::ImprovementSettings`: rename `daily_external_llm_usd` (`:618`) to `daily_paid_inference_usd`, keeping `default=10.00` and `ge=0.0`; add `weekly_infrastructure_usd=50.00`, `budget_day_boundary="UTC"`, `budget_week_start="monday"`; delete `portfolio_allocation` (`:630`) and its whole description block
 - Every description keeps the block's shape: what the field governs, a `PROVISIONAL/TUNABLE.` marker, and a closing `Env: IMPROVEMENT__<KEY>.` sentence
 - Rewrite the `.env.example:358-359` clause naming "daily external-LLM dollars, portfolio allocation" to name the three budget units instead
-- Add `ImprovementSettings` coverage to `tests/unit/test_settings.py` — it has none today: a defaults case for the four values and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not model fields
+- Add `ImprovementSettings` coverage to `tests/unit/test_settings.py`, which has none today: a defaults case for the four values and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not model fields
 
 ### 3. Guards: eligibility and resource probe
 - **Task ID**: build-guards
@@ -662,7 +662,7 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 
 ## Verification
 
-Every anti-criterion row was measured against the working tree at the baseline so none of them can pass vacuously, and the baseline count is recorded beside each. Counting rows pipe through `wc -l` and use the `match count == 0` form, which `agent/verification_parser.py:407` treats as a failure on empty stdout — so a row whose target directory vanished fails closed instead of passing.
+Every anti-criterion row was measured against the working tree at the baseline so none of them can pass vacuously, and the baseline count is recorded beside each. Counting rows pipe through `wc -l` and use the `match count == 0` form, which `agent/verification_parser.py:407` treats as a failure on empty stdout, so a row whose target directory vanished fails closed instead of passing.
 
 `scripts/pytest-clean.sh` is used for every test invocation. Bare `pytest` is never used.
 
@@ -695,7 +695,7 @@ Every anti-criterion row was measured against the working tree at the baseline s
 | Anti-criterion: no routine research-question path (charter §9; baseline **0**) | `grep -rnE "investigation_id\|daily_question_ceiling\|ask_poll\|AskUserQuestion" bridge/ tools/ config/ models/ ui/ reflections/ \| grep -i improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Anti-criterion: this lane creates no control namespace (`[ORDERED]` No-Go; baseline **0**) | `grep -rn "improve:" tools/improvement_eligibility.py tools/improvement_resources.py models/improvement_charter.py models/improvement_case.py \| wc -l` | match count == 0 |
 | Anti-criterion: this lane adds no CLI entry point (`[ORDERED]` No-Go; baseline **0**) | `grep -c "valor-improve" pyproject.toml` | match count == 0 |
-| Anti-criterion: the withdrawn vocabulary is gone from prose (measured at the baseline with `/usr/bin/grep`: **3** — `docs/features/improvement-controller.md:166`, `:169`, and `.env.example:359`. The `portfolio.allocation` dot is load-bearing: `.env.example` writes it as two words with a space, so the underscore-only pattern misses it and returns 2) | `grep -rn "portfolio.allocation\|ceiling is zero" docs/features/ .env.example \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: the withdrawn vocabulary is gone from prose (measured at the baseline with `/usr/bin/grep`: **3**, at `docs/features/improvement-controller.md:166`, `:169`, and `.env.example:359`. The `portfolio.allocation` dot is load-bearing: `.env.example` writes it as two words with a space, so the underscore-only pattern misses it and returns 2) | `grep -rn "portfolio.allocation\|ceiling is zero" docs/features/ .env.example \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Feature doc describes the v2 status quo | `grep -c "weekly_infrastructure_usd" docs/features/improvement-controller.md` | output > 0 |
 | Feature doc has a Charter section | `grep -c "^## Charter" docs/features/improvement-controller.md` | output contains 1 |
 | Capability matrix records this lane | `grep -c "Lane 2b" docs/plans/critiques/recursive-self-improvement-capability-matrix.md` | output > 0 |
@@ -705,7 +705,7 @@ Every anti-criterion row was measured against the working tree at the baseline s
 | PR #3224's content store still passes | `scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -q -k verifying` | exit code 0 |
 | PR #3224's collection-tick registration still passes | `scripts/pytest-clean.sh tests/unit/test_reflection_register.py -q -k improvement` | exit code 0 |
 | The v2 marker migration is registered, not merely defined | `grep -c "confirm_improvement_v2_fields" scripts/update/migrations.py` | output > 1 |
-| The lane 7 issue was filed (measured at the baseline: **7** issues carry `Refs #3177` — #3215, #3216, #3217, #3218, #3220, #3255, #3178 — so the bound is 7, not 5; the naive count would have passed vacuously) | `gh issue list --state all --search "\"Refs #3177\" in:body" --json number --jq length` | output > 7 |
+| The lane 7 issue was filed (measured at the baseline: **7** issues carry `Refs #3177` (#3215, #3216, #3217, #3218, #3220, #3255, #3178), so the bound is 7, not 5; the naive count would have passed vacuously) | `gh issue list --state all --search "\"Refs #3177\" in:body" --json number --jq length` | output > 7 |
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
@@ -715,7 +715,7 @@ Every anti-criterion row was measured against the working tree at the baseline s
 
 > "Whether the eligibility cache lives in the improvement control namespace (which does not exist until #3215) or as a plain Popoto record. Lane 2b must not create the control namespace."
 
-**Neither.** A process-local TTL cache (Technical Approach §5). Both offered options cost a durable structure — a namespace this lane is forbidden to create, or a Popoto model with its migration, schema-gate entry, and TTL decision — to cache a value that changes on a scale of months. A module-level dict with a monotonic expiry is the cheapest correct thing, creates nothing, and lane 3 can promote it into the control namespace if cross-process sharing is ever shown to matter. Recorded here so the decision is visible rather than incidental.
+**Neither.** A process-local TTL cache (Technical Approach §5). Both offered options cost a durable structure (a namespace this lane is forbidden to create, or a Popoto model with its migration, schema-gate entry, and TTL decision) to cache a value that changes on a scale of months. A module-level dict with a monotonic expiry is the cheapest correct thing, creates nothing, and lane 3 can promote it into the control namespace if cross-process sharing is ever shown to matter. Recorded here so the decision is visible rather than incidental.
 
 **Three deliberate divergences from the parent plan, flagged for the critique to accept or reverse.** Each has a measurement behind it, and each is a small change either way:
 
