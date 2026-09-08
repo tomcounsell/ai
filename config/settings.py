@@ -658,6 +658,58 @@ class RedisSettings(BaseModel):
         description="Redis connection URL (env: REDIS_URL)",
     )
 
+    max_connections: int = Field(
+        default=128,
+        ge=8,
+        le=4096,
+        description=(
+            "Upper bound on concurrent sockets in the pool `utils/redis_client.py` "
+            "builds for `text_redis()`. redis-py's default pool is effectively "
+            "unbounded (2**31 connections), which lets a burst of coroutines and "
+            "threadpool workers exceed the server's `maxclients`. 128 mirrors the "
+            "cap popoto sets on its own BlockingConnectionPool, so the two pools in "
+            "a process are sized alike. Provisional -- tune against observed "
+            "`CLIENT LIST` depth rather than treating it as a derived value. "
+            "Env: REDIS__MAX_CONNECTIONS."
+        ),
+    )
+    health_check_interval_s: int = Field(
+        default=30,
+        ge=0,
+        le=600,
+        description=(
+            "Seconds between redis-py liveness PINGs on an idle pooled connection "
+            "for the `text_redis()` client. Matches the value "
+            "`config/redis_bootstrap.py` sets on popoto's own pool. 0 disables the "
+            "check. Provisional -- tune if idle-socket resets are observed. "
+            "Env: REDIS__HEALTH_CHECK_INTERVAL_S."
+        ),
+    )
+    scan_count: int = Field(
+        default=500,
+        ge=10,
+        le=10000,
+        description=(
+            "SCAN cursor batch hint used by `utils.redis_client.scan_keys`. Bounds "
+            "the work of any single round trip so a keyspace sweep cannot exceed "
+            "`timeouts.redis_socket_s` the way an unbounded KEYS can. Provisional "
+            "-- larger trades round trips for per-call latency. "
+            "Env: REDIS__SCAN_COUNT."
+        ),
+    )
+    scan_key_limit: int = Field(
+        default=10000,
+        ge=100,
+        le=1000000,
+        description=(
+            "Hard ceiling on keys returned by one `utils.redis_client.scan_keys` "
+            "call. A sweep that hits this stops early and reports truncation "
+            "rather than walking a multi-million-key production keyspace in one "
+            "poll cycle; the caller picks the remainder up on its next cycle. "
+            "Provisional. Env: REDIS__SCAN_KEY_LIMIT."
+        ),
+    )
+
     @field_validator("url")
     @classmethod
     def validate_url(cls, v):

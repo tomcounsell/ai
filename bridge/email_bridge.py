@@ -888,6 +888,8 @@ class EmailOutputHandler:
 
     def __init__(self, smtp_config: dict | None = None):
         self._smtp_config = smtp_config or _get_smtp_config()
+        # Test-injection seam. Production never writes this; tests assign a
+        # fake here instead of passing a URL the constructor no longer takes.
         # An explicitly assigned client wins; otherwise the shared accessor.
         self._redis = None
 

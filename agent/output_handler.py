@@ -505,6 +505,8 @@ class TelegramRelayOutputHandler:
 
     def __init__(self, file_handler: FileOutputHandler | None = None):
         self._file_handler = file_handler
+        # Test-injection seam. Production never writes this; tests assign a
+        # fake here instead of passing a URL the constructor no longer takes.
         # An explicitly assigned client wins; otherwise the shared accessor.
         self._redis = None
 

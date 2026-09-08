@@ -63,9 +63,19 @@ class TestTextRedis:
 
     def test_ignores_redis_url_entirely(self, monkeypatch):
         monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-        redis_client._cached_text_client = None
-        redis_client._cached_text_identity = None
-        assert int(text_redis().connection_pool.connection_kwargs["db"]) == _claimed_db()
+        # Force a cache miss so the identity is recomputed under the hostile
+        # REDIS_URL. Close the client we're evicting ourselves: nulling the
+        # cache directly (rather than letting a real pool swap trigger it)
+        # bypasses text_redis()'s own `previous.close()`.
+        if redis_client._cached_text_client is not None:
+            redis_client._cached_text_client.close()
+        monkeypatch.setattr(redis_client, "_cached_text_client", None)
+        monkeypatch.setattr(redis_client, "_cached_text_identity", None)
+        try:
+            assert int(text_redis().connection_pool.connection_kwargs["db"]) == _claimed_db()
+        finally:
+            if redis_client._cached_text_client is not None:
+                redis_client._cached_text_client.close()
 
 
 class TestOtherAccessors:
@@ -147,24 +157,69 @@ _PRODUCTION_PACKAGES = (
 _SANCTIONED_CONSTRUCTOR = ("utils", "redis_client.py")
 
 
+_TARGET_CLASSES = {"Redis", "StrictRedis", "ConnectionPool"}
+
+
+def _redis_bindings(tree: ast.AST) -> tuple[set[str], dict[str, str]]:
+    """Names this module binds to the ``redis`` package or its classes.
+
+    Returns ``(module_aliases, symbol_aliases)``: ``module_aliases`` are names
+    that refer to the ``redis`` package itself (``import redis``, ``import
+    redis as _redis``, ``import redis.asyncio as aio`` — a submodule import is
+    still part of the redis family for this purpose); ``symbol_aliases`` maps
+    a bare name to the redis class it was imported as (``from redis import
+    Redis``, ``from redis import ConnectionPool as Pool``).
+    """
+    module_aliases = {"redis"}
+    symbol_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "redis":
+                    module_aliases.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split(".")[0] == "redis":
+                for alias in node.names:
+                    if alias.name in _TARGET_CLASSES:
+                        symbol_aliases[alias.asname or alias.name] = alias.name
+    return module_aliases, symbol_aliases
+
+
+def _resolves_to_class(
+    node: ast.expr, module_aliases: set[str], symbol_aliases: dict[str, str], targets: set[str]
+) -> bool:
+    """Whether ``node`` is an expression naming one of ``targets`` in the redis package.
+
+    Handles a bare/aliased name bound via ``from redis import X`` and an
+    attribute chain rooted at a redis module alias, at any nesting depth
+    (``redis.Redis``, ``redis.asyncio.Redis``, ``_redis.client.Redis``).
+    """
+    if isinstance(node, ast.Name):
+        return symbol_aliases.get(node.id) in targets
+    if isinstance(node, ast.Attribute):
+        if node.attr not in targets:
+            return False
+        root = node.value
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        return isinstance(root, ast.Name) and root.id in module_aliases
+    return False
+
+
 def _raw_client_constructions(path: pathlib.Path) -> list[int]:
     """Line numbers where a module builds a redis client by hand.
 
-    Matches ``redis.Redis(...)``, ``redis.StrictRedis(...)``,
-    ``redis.from_url(...)`` and ``redis.Redis.from_url(...)`` (also under an
-    alias such as ``import redis as _redis``), by AST rather than text so a
-    docstring that mentions the idiom does not count.
+    Matches a direct construction (``redis.Redis(...)``, ``redis.StrictRedis(...)``,
+    ``redis.ConnectionPool(...)``) or ``.from_url(...)`` on any of those, under
+    any import alias or nesting depth (``import redis as _redis``, ``from
+    redis import Redis``, ``redis.asyncio.Redis(...)``), by AST rather than
+    text so a docstring that mentions the idiom does not count.
     """
     try:
         tree = ast.parse(path.read_text())
     except (SyntaxError, UnicodeDecodeError):
         return []
-    aliases = {"redis"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "redis":
-                    aliases.add(alias.asname or "redis")
+    module_aliases, symbol_aliases = _redis_bindings(tree)
     hits = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -172,13 +227,12 @@ def _raw_client_constructions(path: pathlib.Path) -> list[int]:
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "from_url":
             base = func.value
-            if isinstance(base, ast.Attribute) and base.attr in {"Redis", "StrictRedis"}:
-                base = base.value
-            if isinstance(base, ast.Name) and base.id in aliases:
+            if isinstance(base, ast.Name) and base.id in module_aliases:
                 hits.append(node.lineno)
-        elif isinstance(func, ast.Attribute) and func.attr in {"Redis", "StrictRedis"}:
-            if isinstance(func.value, ast.Name) and func.value.id in aliases:
+            elif _resolves_to_class(base, module_aliases, symbol_aliases, _TARGET_CLASSES):
                 hits.append(node.lineno)
+        elif _resolves_to_class(func, module_aliases, symbol_aliases, _TARGET_CLASSES):
+            hits.append(node.lineno)
     return hits
 
 
@@ -234,6 +288,27 @@ class TestNoRawClientsInProduction:
             "    return a, b, c\n"
         )
         assert _raw_client_constructions(sample) == [5, 6, 7]
+
+    def test_the_scanner_sees_aliased_names_and_connection_pool(self, tmp_path):
+        """Shapes that a base-``ast.Attribute``-only matcher slips past.
+
+        A bare/aliased name pulled in via ``from redis import Redis`` (an
+        ``ast.Name`` call base, not an ``ast.Attribute``), an attribute chain
+        nested through a submodule alias (``redis.asyncio.Redis``), and both
+        call forms of ``ConnectionPool`` must all still be caught.
+        """
+        sample = tmp_path / "sample_widened.py"
+        sample.write_text(
+            "from redis import Redis, ConnectionPool\n"
+            "import redis.asyncio as aio\n\n"
+            "def f():\n"
+            '    a = Redis(host="x")\n'
+            '    b = aio.Redis(host="x")\n'
+            '    c = ConnectionPool.from_url("redis://x")\n'
+            '    d = ConnectionPool(host="x")\n'
+            "    return a, b, c, d\n"
+        )
+        assert _raw_client_constructions(sample) == [5, 6, 7, 8]
 
     def test_the_accessor_module_is_the_one_sanctioned_constructor(self):
         path = pathlib.Path(redis_client.__file__)

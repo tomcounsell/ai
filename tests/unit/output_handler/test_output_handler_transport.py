@@ -51,7 +51,6 @@ class TestReactTransportDerivation:
 
     def _make_handler(self, mock_redis=None, file_handler=None):
         handler = TelegramRelayOutputHandler(
-            redis_url="redis://localhost:6379/0",
             file_handler=file_handler,
         )
         handler._redis = mock_redis if mock_redis is not None else MagicMock()
@@ -195,7 +194,7 @@ class TestTransportAwareRouting:
     def _make_handler(self, mock_redis=None):
         from agent.output_handler import TelegramRelayOutputHandler
 
-        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h = TelegramRelayOutputHandler()
         if mock_redis is not None:
             h._redis = mock_redis
         else:
@@ -461,7 +460,7 @@ class TestDrafterHoistedAboveTransport:
     suppression-drops-payload contract)."""
 
     def _make_handler(self):
-        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h = TelegramRelayOutputHandler()
         h._redis = MagicMock()
         return h
 

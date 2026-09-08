@@ -1532,10 +1532,18 @@ async def resolve_customer(
     cache_ttl = int(resolver_config.get("cache_ttl_seconds", _DEFAULT_RESOLVER_CACHE_TTL))
     cache_key = f"customer_resolver:{project_key}:{sender}"
 
-    # Check cache
+    # Check cache.
+    #
+    # Every Redis call in this coroutine goes through `asyncio.to_thread`.
+    # `bytes_redis()` hands back popoto's own client, which sits on a
+    # `BlockingConnectionPool`: on pool exhaustion a checkout *blocks* rather
+    # than raising, and `socket_timeout` does not cover a pool-checkout block.
+    # Called inline, that would stall the entire bridge event loop. The
+    # resolver cache now shares those slots with every ORM operation in the
+    # process, so "the pool is never exhausted" is no longer a local property.
     try:
-        r = _get_redis()
-        cached = r.get(cache_key)
+        r = await asyncio.to_thread(_get_redis)
+        cached = await asyncio.to_thread(r.get, cache_key)
         if cached is not None:
             # decode bytes if needed (decode_responses=False)
             if isinstance(cached, bytes):
@@ -1578,7 +1586,9 @@ async def resolve_customer(
 
     if dispatch_error is not None:
         logger.error(f"[resolver] Dispatch failed for {sender!r}: {dispatch_error}")
-        _on_resolver_failure(project_key, imap_conn, imap_uid, r)
+        # to_thread: this does a Redis INCR on popoto's blocking pool *and* a
+        # synchronous IMAP STORE, neither of which belongs on the event loop.
+        await asyncio.to_thread(_on_resolver_failure, project_key, imap_conn, imap_uid, r)
         raise ResolverUnavailableError(
             f"Resolver dispatch failed for project={project_key!r} sender={sender!r}: "
             f"{dispatch_error}"
@@ -1588,7 +1598,7 @@ async def resolve_customer(
     cache_value = customer_id if customer_id is not None else ""
     try:
         if r is not None:
-            r.setex(cache_key, cache_ttl, cache_value.encode("utf-8"))
+            await asyncio.to_thread(r.setex, cache_key, cache_ttl, cache_value.encode("utf-8"))
     except Exception as e:
         logger.warning(f"[resolver] Redis cache write failed: {e}")
 
@@ -1600,8 +1610,8 @@ async def resolve_customer(
     # from a non-customer (issue #1817 A2).
     try:
         if r is not None:
-            r.delete(f"resolver:failures:{project_key}")
-            r.delete("email:resolver_unavailable")
+            await asyncio.to_thread(r.delete, f"resolver:failures:{project_key}")
+            await asyncio.to_thread(r.delete, "email:resolver_unavailable")
     except Exception as e:
         logger.warning(f"[resolver] Failed to clear failure counter/alert: {e}")
 

@@ -25,6 +25,12 @@ from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHO
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
 from utils.utc import utc_now
 
+logger = logging.getLogger(__name__)
+
+UI_DIR = Path(__file__).parent
+TEMPLATES_DIR = UI_DIR / "templates"
+STATIC_DIR = UI_DIR / "static"
+
 
 def _get_redis():
     """The shared text Redis client (see utils/redis_client.py)."""
@@ -32,12 +38,6 @@ def _get_redis():
 
     return text_redis()
 
-
-logger = logging.getLogger(__name__)
-
-UI_DIR = Path(__file__).parent
-TEMPLATES_DIR = UI_DIR / "templates"
-STATIC_DIR = UI_DIR / "static"
 
 # Degraded-LLM-stack markers (#3001). `/dashboard.json` is served by a
 # separate uvicorn process, so an in-process flag in the bridge or worker can

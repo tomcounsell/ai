@@ -242,7 +242,7 @@ class TestSendReturnsDeliveryOutcome:
     """Every exit path of send() returns the correct DeliveryOutcome."""
 
     def _make_handler(self):
-        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h = TelegramRelayOutputHandler()
         h._redis = MagicMock()
         return h
 
@@ -398,7 +398,7 @@ class TestDeliverSystemNotice:
         entry = self._notice_entry(session_id="notice-registered")
 
         # Real handler with a mocked Redis client — the notice must reach it.
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = MagicMock()
 
         def _bypass_drafter(_input, *, session=None, medium="telegram"):

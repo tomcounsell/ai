@@ -42,8 +42,12 @@ import smtplib
 import time
 from pathlib import Path
 
+import redis
+
 from bridge.email_bridge import _build_reply_mime, _get_smtp_config
+from bridge.relay_errors import OutboxUnavailableError, report_send_path_failure
 from config.settings import settings
+from utils.redis_client import scan_keys
 
 logger = logging.getLogger(__name__)
 
@@ -255,13 +259,32 @@ async def process_outbox() -> int:
     """Scan all ``email:outbox:*`` keys and drain them.
 
     Returns the number of payloads successfully sent in this cycle.
+
+    Raises:
+        OutboxUnavailableError: Redis could not be reached to read the queue.
+            A zero return means "nothing to send" and never "the send path is
+            broken" -- see ``bridge/relay_errors.py``.
     """
     sent = 0
     try:
         r = await asyncio.to_thread(_get_redis_connection)
-        keys = await asyncio.to_thread(r.keys, EMAIL_OUTBOX_KEY_PATTERN)
+        # Bounded SCAN, never KEYS: `text_redis()` carries a socket timeout, and
+        # a full-keyspace KEYS on a production-sized Redis can exceed it. The
+        # resulting TimeoutError would land in the blanket handler below and be
+        # reported as an empty cycle.
+        keys, truncated = await asyncio.to_thread(scan_keys, r, EMAIL_OUTBOX_KEY_PATTERN)
+        if truncated:
+            # Draining is order-independent across keys, so a partial view just
+            # means the rest arrives next cycle (100ms later).
+            logger.warning(
+                "Email relay: outbox key scan truncated at %d keys; "
+                "remainder drains on the next cycle",
+                len(keys),
+            )
 
         # Heartbeat every cycle so ``email-status`` can detect a stale relay.
+        # Deliberately AFTER the scan: a cycle that could not read the outbox
+        # must not stamp itself healthy.
         # ``ex=`` kwarg is explicit to avoid relying on redis-py's positional
         # arg ordering staying stable across versions.
         try:
@@ -298,6 +321,12 @@ async def process_outbox() -> int:
                     break
             if requeued_this_cycle:
                 continue
+    except redis.RedisError as e:
+        # Could not reach the outbox at all. Never fold this into `sent` -- a 0
+        # there is indistinguishable from an empty queue, which is how a send
+        # path stays down for a day while looking alive.
+        report_send_path_failure("email", e)
+        raise OutboxUnavailableError(f"email outbox unreachable: {e}") from e
     except Exception as e:
         logger.error(f"Email relay: outbox processing error: {e}", exc_info=True)
     return sent
@@ -306,11 +335,23 @@ async def process_outbox() -> int:
 async def run_email_relay() -> None:
     """Main relay loop. Runs alongside ``_email_inbox_loop`` via ``asyncio.gather``."""
     logger.info("Email relay started -- draining email:outbox:*")
+    consecutive_outages = 0
     while True:
         try:
             sent = await process_outbox()
             if sent > 0:
                 logger.info(f"Email relay: processed {sent} message(s)")
+            consecutive_outages = 0
+        except OutboxUnavailableError:
+            # Already logged and Sentry-reported at the raise site. Counted here
+            # so a persistent outage escalates in the log rather than repeating
+            # one indistinguishable line forever.
+            consecutive_outages += 1
+            logger.error(
+                "Email relay: outbox unreachable for %d consecutive cycle(s) -- "
+                "no email is being delivered",
+                consecutive_outages,
+            )
         except Exception as e:
             logger.error(f"Email relay: loop error: {e}", exc_info=True)
         await asyncio.sleep(EMAIL_RELAY_POLL_INTERVAL)
