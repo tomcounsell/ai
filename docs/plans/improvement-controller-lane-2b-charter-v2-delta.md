@@ -660,8 +660,65 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 
 ## Verification
 
-_placeholder_
+Every anti-criterion row was measured against the working tree at the baseline so none of them can pass vacuously, and the baseline count is recorded beside each. Counting rows pipe through `wc -l` and use the `match count == 0` form, which `agent/verification_parser.py:407` treats as a failure on empty stdout — so a row whose target directory vanished fails closed instead of passing.
+
+`scripts/pytest-clean.sh` is used for every test invocation. Bare `pytest` is never used.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Charter file exists and is human-owned | `grep -c "^owner: Tom Counsell" docs/improvement-charter.md` | output contains 1 |
+| Charter pinned is version 2 | `grep -c "^version: 2" docs/improvement-charter.md` | output contains 1 |
+| Charter seeds by digest and round-trips | `scripts/pytest-clean.sh tests/unit/test_improvement_charter.py -q` | exit code 0 |
+| Charter record carries the three new fields | `.venv/bin/python -c "from models import ImprovementCharter as C; f=set(C._meta.fields); print(len({'digest','effective','text'} - f))"` | output contains 0 |
+| Charter digest is NOT indexed (spike-1) | `.venv/bin/python -c "from popoto import IndexedField; from models import ImprovementCharter as C; print(isinstance(C._meta.fields['digest'], IndexedField))"` | output contains False |
+| Case carries the v2 vocabulary | `.venv/bin/python -c "from models import ImprovementCase as C; f=set(C._meta.fields); print(len({'priority_area','ranking_rationale','charter_digest'} - f))"` | output contains 0 |
+| `objective` is gone from the case (baseline: present at `models/improvement_case.py:91`) | `.venv/bin/python -c "from models import ImprovementCase as C; print('objective' in C._meta.fields)"` | output contains False |
+| `priority_area` is indexed and defaults inside its vocabulary | `.venv/bin/python -c "from popoto import IndexedField; from models.improvement_case import PRIORITY_AREAS; from models import ImprovementCase as C; f=C._meta.fields['priority_area']; print(isinstance(f, IndexedField) and f.default in PRIORITY_AREAS and len(PRIORITY_AREAS)==11)"` | output contains True |
+| Investigation and release carry the digest | `.venv/bin/python -c "from models import ImprovementInvestigation as I, ImprovementRelease as R; print('charter_digest' in I._meta.fields and 'charter_digest' in R._meta.fields)"` | output contains True |
+| Schema gate still bites with the exemptions in place | `scripts/pytest-clean.sh tests/unit/test_agentsession_index_guard_generalized.py tests/unit/test_improvement_models.py -q` | exit code 0 |
+| Eight flat models still exported (a missing target cannot masquerade as a pass) | `.venv/bin/python -c "import models as m; print(len([n for n in m.__all__ if n.startswith('Improvement')]))"` | output > 7 |
+| Daily paid-inference dollars set | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(int(S().daily_paid_inference_usd))"` | output contains 10 |
+| Weekly infrastructure dollars set | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(int(S().weekly_infrastructure_usd))"` | output contains 50 |
+| Budget windows disclosed | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(S().budget_day_boundary, S().budget_week_start)"` | output contains UTC monday |
+| Withdrawn settings are gone (baseline: both present, `config/settings.py:618` and `:630`) | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; f=set(S.model_fields); print(len({'daily_external_llm_usd','portfolio_allocation','daily_question_ceiling'} & f))"` | output contains 0 |
+| Concurrency bound is still one lane | `.venv/bin/python -c "from config.settings import ImprovementSettings as S; print(S().max_concurrent_research_sessions)"` | output contains 1 |
+| Settings coverage exists | `scripts/pytest-clean.sh tests/unit/test_settings.py -q` | exit code 0 |
+| `.env.example` declaration has a reader | `scripts/pytest-clean.sh tests/unit/test_env_declaration_readers.py -q` | exit code 0 |
+| Eligibility guard fails closed | `scripts/pytest-clean.sh tests/unit/test_improvement_eligibility.py -q` | exit code 0 |
+| Eligibility guard passes the repo positionally, not through the environment (Risk 2) | `grep -c 'repo view", *f*"' tools/improvement_eligibility.py; grep -rn 'gh", *"repo", *"view", *"--json"' tools/improvement_eligibility.py \| wc -l` | match count == 0 |
+| Eligibility guard compares uppercase (spike-4) | `grep -c 'PUBLIC' tools/improvement_eligibility.py` | output > 0 |
+| Resource probe never leaks | `scripts/pytest-clean.sh tests/unit/test_improvement_resources.py -q` | exit code 0 |
+| Anti-criterion: no controller module handles a credential outside the one sanctioned writer, which this lane does not create (`[EXTERNAL]` No-Go, charter §8; baseline **0**) | `grep -rnE "OP_SERVICE_ACCOUNT_TOKEN\|op run\|op item create\|Desktop/Valor/.env" models/ ui/ tools/ reflections/ \| grep improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: no improvement module writes the charter file (baseline **0**) | `grep -rn "improvement-charter.md" models/ tools/ reflections/ ui/ \| grep -v "__pycache__" \| grep -vE "read_text\|read_bytes\|load_from_file\|open\(.*'r'" \| wc -l` | match count == 0 |
+| Anti-criterion: no routine research-question path (charter §9; baseline **0**) | `grep -rnE "investigation_id\|daily_question_ceiling\|ask_poll\|AskUserQuestion" bridge/ tools/ config/ models/ ui/ reflections/ \| grep -i improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: this lane creates no control namespace (`[ORDERED]` No-Go; baseline **0**) | `grep -rn "improve:" tools/improvement_eligibility.py tools/improvement_resources.py models/improvement_charter.py models/improvement_case.py \| wc -l` | match count == 0 |
+| Anti-criterion: this lane adds no CLI entry point (`[ORDERED]` No-Go; baseline **0**) | `grep -c "valor-improve" pyproject.toml` | match count == 0 |
+| Anti-criterion: the withdrawn vocabulary is gone from prose (baseline: `docs/features/improvement-controller.md:166`, `:169`, `.env.example:359` — **3**) | `grep -rn "portfolio_allocation\|ceiling is zero" docs/features/ .env.example \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Feature doc describes the v2 status quo | `grep -c "weekly_infrastructure_usd" docs/features/improvement-controller.md` | output > 0 |
+| Feature doc has a Charter section | `grep -c "^## Charter" docs/features/improvement-controller.md` | output contains 1 |
+| Capability matrix records this lane | `grep -c "Lane 2b" docs/plans/critiques/recursive-self-improvement-capability-matrix.md` | output > 0 |
+| Dashboard partials render, goals included | `scripts/pytest-clean.sh tests/unit/test_ui_app.py -q -k improvement` | exit code 0 |
+| Goals partial is wired into the index | `grep -c "_partials/improvement/goals/" ui/templates/index.html` | output contains 1 |
+| PR #3224's evidence adapters still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -q` | exit code 0 |
+| PR #3224's content store still passes | `scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -q -k verifying` | exit code 0 |
+| PR #3224's collection-tick registration still passes | `scripts/pytest-clean.sh tests/unit/test_reflection_register.py -q -k improvement` | exit code 0 |
+| The v2 marker migration is registered, not merely defined | `grep -c "confirm_improvement_v2_fields" scripts/update/migrations.py` | output > 1 |
+| Six child issues now reference #3177 (five today plus lane 7) | `gh issue list --state all --search "\"Refs #3177\" in:body" --json number --jq length` | output > 5 |
+| Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
+| Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
 ## Open Questions
 
-_placeholder_
+**The one open question the issue raised is answered in this plan, not left for a human.**
+
+> "Whether the eligibility cache lives in the improvement control namespace (which does not exist until #3215) or as a plain Popoto record. Lane 2b must not create the control namespace."
+
+**Neither.** A process-local TTL cache (Technical Approach §5). Both offered options cost a durable structure — a namespace this lane is forbidden to create, or a Popoto model with its migration, schema-gate entry, and TTL decision — to cache a value that changes on a scale of months. A module-level dict with a monotonic expiry is the cheapest correct thing, creates nothing, and lane 3 can promote it into the control namespace if cross-process sharing is ever shown to matter. Recorded here so the decision is visible rather than incidental.
+
+**Three deliberate divergences from the parent plan, flagged for the critique to accept or reverse.** Each has a measurement behind it, and each is a small change either way:
+
+1. **`ImprovementCharter.digest` is a plain `Field`, not an `IndexedField`** as the parent plan's task 9 says. Spike-1 measured that the existing name-based index guard rejects it. Reversing this means punching a hole in `unbounded_markers`; keeping it means a Python-side match over single-digit rows.
+2. **`load_from_file` never flips a prior row to `superseded`**, though the charter model's current docstring describes that flow. Gap G and the issue's acceptance criterion both require "leaves the first untouched", so the loader appends only and the docstring is corrected to match.
+3. **`ImprovementCase.priority` is kept**, so the per-model index bound gains an exemption rather than the field being deleted to make room. Rejected alternative recorded in Rabbit Holes.
+
+**Nothing here needs Tom.** Charter §9 forbids routine research questions, and every question this lane raised was answerable from the code, the charter, or one command. No amendment request is warranted: the charter grants everything this lane does.
