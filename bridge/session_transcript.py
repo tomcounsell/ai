@@ -85,9 +85,14 @@ def start_transcript(
             if branch_name:
                 s.branch_name = branch_name
             if slug:
-                # slug is a KeyField — mutating it after creation silently
-                # creates a new Redis record (orphaning the old one).  Only set
-                # it when the existing value is empty (initial population).
+                # slug is a KeyField — reassigning it on a hydrated row raises
+                # KeyMutationError under the pinned popoto, and the broad
+                # except below swallows that before s.save() runs, discarding
+                # this whole transcript-phase update (log_path, sender_name,
+                # branch_name, classification_type, correlation_id) and the
+                # "active" lifecycle transition with it.  Only set it when the
+                # existing value is empty (initial population); a genuine
+                # rename needs save(migrate_key=True) — tracked in #3247.
                 if not s.slug:
                     s.slug = slug
                 elif str(s.slug) != str(slug):
@@ -99,9 +104,10 @@ def start_transcript(
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
-                # chat_id is a KeyField — mutating it after creation silently
-                # creates a new Redis record (orphaning the old one).  Only set
-                # it when the existing value is empty (initial population).
+                # chat_id is a KeyField — same failure as the slug branch
+                # above: a reassignment on a hydrated row raises
+                # KeyMutationError, swallowed before s.save().  Only set it
+                # when the existing value is empty (initial population).
                 if not s.chat_id:
                     s.chat_id = str(chat_id)
                 elif str(s.chat_id) != str(chat_id):

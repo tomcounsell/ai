@@ -312,24 +312,36 @@ def index_file(file_path: str) -> bool:
 
         existing_docs = KnowledgeDocument.query.filter(file_path=abs_path)
         content_changed = True
+        project_key_changed = False
         if existing_docs:
             existing_doc = existing_docs[0]
             if existing_doc.content_hash == content_hash:
                 content_changed = False
+            # A projects.json re-map moves the doc to a different project. Its
+            # chunks still carry the old key, so they need a resync even when
+            # the content itself is byte-identical.
+            project_key_changed = bool(existing_doc.project_key) and (
+                existing_doc.project_key != project_key
+            )
 
         # Upsert KnowledgeDocument
         doc = KnowledgeDocument.safe_upsert(abs_path, project_key, scope)
         if doc is None:
             return False
 
-        # Sync chunks only if content changed
-        if content_changed:
-            _sync_chunks(doc, raw_content, project_key)
+        # DocumentChunk.project_key and Memory.project_key are KeyFields of
+        # their own, and DocumentChunk.search() filters on the chunk's key
+        # independent of its parent. Both must follow doc.project_key -- the
+        # value safe_upsert actually persisted -- so a re-key moves the
+        # document, its chunks and its companion memories together instead of
+        # splitting one file across two projects' searches.
+        if content_changed or project_key_changed:
+            _sync_chunks(doc, raw_content, doc.project_key)
 
         # Create companion memories. On the safe_upsert unchanged-skip path,
         # doc is query-loaded and .content is a raw $CF: reference —
         # decoded_content resolves it to the real text (#2112).
-        _create_companion_memories(abs_path, project_key, scope, decoded_content(doc))
+        _create_companion_memories(abs_path, doc.project_key, doc.scope, decoded_content(doc))
         return True
 
     except Exception as e:

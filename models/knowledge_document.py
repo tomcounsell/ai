@@ -87,6 +87,30 @@ class KnowledgeDocument(Model):
             existing = cls.query.filter(file_path=abs_path)
             if existing:
                 doc = existing[0]
+
+                # project_key is a KeyField, so it IS the row's Redis identity.
+                # A bare reassignment on a hydrated row raises KeyMutationError
+                # under the pinned popoto, and this method's broad except would
+                # swallow that and return None, discarding the content/hash/
+                # mtime update with it. A divergence is not an error though:
+                # resolve_scope() is the authority on which project owns a path,
+                # so when projects.json re-maps a directory the document
+                # genuinely moves. Route it through popoto's sanctioned
+                # migration, which deletes the old Redis key instead of forking
+                # the row, and let scope move with it so the two never disagree.
+                # doc_id (AutoKeyField) survives the migration, so the caller
+                # can still re-partition the DocumentChunk and Memory rows that
+                # carry their own project_key KeyFields -- see
+                # tools/knowledge/indexer.py::index_file, which must resync
+                # chunks on a re-key even when the content is unchanged.
+                rekey = doc.project_key != project_key
+                if rekey and doc.project_key:
+                    logger.warning(
+                        f"KnowledgeDocument project_key change for {abs_path}: "
+                        f"existing={doc.project_key}, incoming={project_key} — "
+                        f"migrating the row's Redis identity to the incoming key"
+                    )
+
                 # Skip re-embedding only when the content is unchanged AND a
                 # populated embedding already exists. content_hash is computed
                 # from the full pre-truncation file, so a matching hash alone
@@ -96,27 +120,19 @@ class KnowledgeDocument(Model):
                 # (a positive int) once embedded and is None/0 otherwise;
                 # gating on it forces a re-embed in that case instead of
                 # silently no-op'ing the truncation fix. (issue #1876)
-                if doc.content_hash == content_hash and doc.embedding:
+                content_unchanged = doc.content_hash == content_hash and doc.embedding
+                if content_unchanged and not rekey:
                     logger.debug(f"KnowledgeDocument: unchanged, skipping: {abs_path}")
                     return doc
+
                 # Update existing document
-                doc.content = content
-                doc.content_hash = content_hash
-                doc.last_modified = mtime
-                # project_key is a KeyField — mutating it after creation
-                # silently creates a new Redis record (orphaning the old one),
-                # leaving one file indexed twice under two projects.  Only set
-                # it when the existing value is empty (initial population).
-                if not doc.project_key:
-                    doc.project_key = project_key
-                elif str(doc.project_key) != str(project_key):
-                    logger.warning(
-                        f"KnowledgeDocument project_key mismatch for {abs_path}: "
-                        f"existing={doc.project_key}, incoming={project_key} — "
-                        f"skipping mutation (KeyField is immutable after creation)"
-                    )
+                if not content_unchanged:
+                    doc.content = content
+                    doc.content_hash = content_hash
+                    doc.last_modified = mtime
+                doc.project_key = project_key
                 doc.scope = scope
-                doc.save()
+                doc.save(migrate_key=rekey)
                 logger.info(f"KnowledgeDocument: updated: {abs_path}")
                 return doc
 
