@@ -2387,11 +2387,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                             # No `is_own_ancestor` gate here, unlike the sibling
                             # kickstart in `_self_heal_stale_worker`: this branch is
                             # reached ONLY when `service.get_worker_pid()` returned
-                            # None, so the ancestor-safe lookup found nothing and
-                            # there is no PID that could be this run's own ancestor.
-                            # That positional invariant is load-bearing (#3164) — do
-                            # not hoist this call out of the `else`, or a `kickstart
-                            # -k` can SIGKILL the update run's own parent worker.
+                            # no PID — either no live worker, or a process table
+                            # that could not be read (`list_processes()` returns []
+                            # on any `ps` failure). There is therefore no PID in
+                            # hand to gate on. Safe in both cases because this is
+                            # `kickstart -k`, which asks launchd to kill-and-restart
+                            # its own job by label rather than signalling a PID this
+                            # run chose. That positional invariant is load-bearing
+                            # (#3164) — do not hoist this call out of the `else`,
+                            # where a live `worker_pid` IS in hand and skipping the
+                            # gate would let the run SIGKILL its own parent worker.
                             import subprocess
 
                             uid = os.getuid()
