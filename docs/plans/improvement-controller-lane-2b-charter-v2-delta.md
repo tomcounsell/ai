@@ -685,15 +685,15 @@ Every anti-criterion row was measured against the working tree at the baseline s
 | Settings coverage exists | `scripts/pytest-clean.sh tests/unit/test_settings.py -q` | exit code 0 |
 | `.env.example` declaration has a reader | `scripts/pytest-clean.sh tests/unit/test_env_declaration_readers.py -q` | exit code 0 |
 | Eligibility guard fails closed | `scripts/pytest-clean.sh tests/unit/test_improvement_eligibility.py -q` | exit code 0 |
-| Eligibility guard passes the repo positionally, not through the environment (Risk 2) | `grep -c 'repo view", *f*"' tools/improvement_eligibility.py; grep -rn 'gh", *"repo", *"view", *"--json"' tools/improvement_eligibility.py \| wc -l` | match count == 0 |
+| A decoy-`GH_REPO` case exists, so Risk 2 is tested rather than asserted | `grep -c "GH_REPO" tests/unit/test_improvement_eligibility.py` | output > 0 |
 | Eligibility guard compares uppercase (spike-4) | `grep -c 'PUBLIC' tools/improvement_eligibility.py` | output > 0 |
 | Resource probe never leaks | `scripts/pytest-clean.sh tests/unit/test_improvement_resources.py -q` | exit code 0 |
 | Anti-criterion: no controller module handles a credential outside the one sanctioned writer, which this lane does not create (`[EXTERNAL]` No-Go, charter §8; baseline **0**) | `grep -rnE "OP_SERVICE_ACCOUNT_TOKEN\|op run\|op item create\|Desktop/Valor/.env" models/ ui/ tools/ reflections/ \| grep improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
-| Anti-criterion: no improvement module writes the charter file (baseline **0**) | `grep -rn "improvement-charter.md" models/ tools/ reflections/ ui/ \| grep -v "__pycache__" \| grep -vE "read_text\|read_bytes\|load_from_file\|open\(.*'r'" \| wc -l` | match count == 0 |
+| Anti-criterion: no improvement module writes any file, the charter included (baseline **0**; stated as write verbs rather than as a path filter, because the loader legitimately names the path in a default argument and a docstring) | `grep -rnE "write_text\|write_bytes\|open\([^)]*[\"']w\|open\([^)]*[\"']a" models/improvement_*.py tools/improvement_*.py ui/data/improvement.py \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Anti-criterion: no routine research-question path (charter §9; baseline **0**) | `grep -rnE "investigation_id\|daily_question_ceiling\|ask_poll\|AskUserQuestion" bridge/ tools/ config/ models/ ui/ reflections/ \| grep -i improvement \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Anti-criterion: this lane creates no control namespace (`[ORDERED]` No-Go; baseline **0**) | `grep -rn "improve:" tools/improvement_eligibility.py tools/improvement_resources.py models/improvement_charter.py models/improvement_case.py \| wc -l` | match count == 0 |
 | Anti-criterion: this lane adds no CLI entry point (`[ORDERED]` No-Go; baseline **0**) | `grep -c "valor-improve" pyproject.toml` | match count == 0 |
-| Anti-criterion: the withdrawn vocabulary is gone from prose (baseline: `docs/features/improvement-controller.md:166`, `:169`, `.env.example:359` — **3**) | `grep -rn "portfolio_allocation\|ceiling is zero" docs/features/ .env.example \| grep -v "__pycache__" \| wc -l` | match count == 0 |
+| Anti-criterion: the withdrawn vocabulary is gone from prose (measured at the baseline with `/usr/bin/grep`: **3** — `docs/features/improvement-controller.md:166`, `:169`, and `.env.example:359`. The `portfolio.allocation` dot is load-bearing: `.env.example` writes it as two words with a space, so the underscore-only pattern misses it and returns 2) | `grep -rn "portfolio.allocation\|ceiling is zero" docs/features/ .env.example \| grep -v "__pycache__" \| wc -l` | match count == 0 |
 | Feature doc describes the v2 status quo | `grep -c "weekly_infrastructure_usd" docs/features/improvement-controller.md` | output > 0 |
 | Feature doc has a Charter section | `grep -c "^## Charter" docs/features/improvement-controller.md` | output contains 1 |
 | Capability matrix records this lane | `grep -c "Lane 2b" docs/plans/critiques/recursive-self-improvement-capability-matrix.md` | output > 0 |
@@ -703,7 +703,7 @@ Every anti-criterion row was measured against the working tree at the baseline s
 | PR #3224's content store still passes | `scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -q -k verifying` | exit code 0 |
 | PR #3224's collection-tick registration still passes | `scripts/pytest-clean.sh tests/unit/test_reflection_register.py -q -k improvement` | exit code 0 |
 | The v2 marker migration is registered, not merely defined | `grep -c "confirm_improvement_v2_fields" scripts/update/migrations.py` | output > 1 |
-| Six child issues now reference #3177 (five today plus lane 7) | `gh issue list --state all --search "\"Refs #3177\" in:body" --json number --jq length` | output > 5 |
+| The lane 7 issue was filed (measured at the baseline: **7** issues carry `Refs #3177` — #3215, #3216, #3217, #3218, #3220, #3255, #3178 — so the bound is 7, not 5; the naive count would have passed vacuously) | `gh issue list --state all --search "\"Refs #3177\" in:body" --json number --jq length` | output > 7 |
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
