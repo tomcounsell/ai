@@ -478,15 +478,51 @@ Tom commits an amended charter while an action admitted under the previous diges
 
 ## Update System
 
-_placeholder_
+One change, and it is the marker migration.
+
+- **`scripts/update/migrations.py`** gains `_migrate_confirm_improvement_v2_fields(project_dir)` and its `MIGRATIONS` registration. It follows `_migrate_confirm_improvement_models_readable` (`:1384`) exactly: read-only, imports `ImprovementCharter`, `ImprovementCase`, `ImprovementInvestigation`, and `ImprovementRelease`, runs one bounded project-scoped query per model to prove the keyspace resolves under the new fields, writes nothing, returns `None` on success and an error string otherwise. Idempotent by construction and recorded once in `data/migrations_completed.json`. **Registration is the whole point** — a defined-but-unregistered function never runs, and without a durable marker no machine carries a record of the schema version that introduced the v2 fields for a later subtractive migration to reason from.
+- **No new dependency.** Everything imports from the standard library, `popoto`, or existing repo modules.
+- **No new config file, no new `.env` key, no new vault entry.** `.env.example` changes by one comment clause and declares nothing new.
+- **No service restart.** Nothing in `bridge/`, `worker/`, or `agent/` changes, so `./scripts/valor-service.sh restart` is not required by this lane.
+- **No reflection registration.** The collection tick shipped in PR #3224 and is untouched; `scripts/update/reflection_register.py` and `scripts/update/run.py` are not edited.
+- **Existing installations** need nothing beyond a normal `/update`: the models gain nullable fields, the deleted `objective` has no rows, and the renamed setting has no `.env.example` declaration to migrate.
 
 ## Agent Integration
 
-_placeholder_
+**No agent integration in this lane, and that is a decision rather than an omission.**
+
+The agent reaches new functionality through a `[project.scripts]` CLI entry point it invokes with Bash, or through a direct import from the bridge. This lane adds neither, deliberately:
+
+- **No CLI entry point.** `valor-improve` and all of its subcommands are #3215's, and creating one here would violate this lane's No-Gos. `pyproject.toml` is not edited.
+- **No bridge import.** Nothing in `bridge/` calls `load_from_file`, `is_open_source`, or `probe`. The bridge is I/O only and this lane changes no message path.
+- **`tools/improvement_eligibility.py` and `tools/improvement_resources.py` are invisible to the agent by design.** They are libraries written against a specification lane 3 consumes. Wiring them to a CLI before a caller exists would ship a surface with no behavior behind it.
+- **The one agent-visible change is the dashboard**, which is a human surface, not an agent one: `GET /_partials/improvement/goals/` renders in the browser and is exercised by `tests/unit/test_ui_app.py` through the test client, not by the agent.
+
+The integration test that matters here is therefore the UI partial test, not a CLI invocation test. When #3215 adds `valor-improve`, its plan owns the `[project.scripts]` entry and the agent-invocation test for all of these modules at once.
 
 ## Documentation
 
-_placeholder_
+### Feature Documentation
+
+- [ ] Update `docs/features/improvement-controller.md`: replace the `portfolio_allocation` row at `:166` with the charter §3 ranking rule and `priority_area`; replace the "There is no `daily_question_ceiling`. The ceiling is zero..." paragraph at `:168-171` with charter §9's actual rule (no routine research questions, plus the amendment-request path that lane 3 delivers); rename the `daily_external_llm_usd` row at `:165` and add rows for `weekly_infrastructure_usd`, `budget_day_boundary`, and `budget_week_start`; remove any claim that dollars are metered today
+- [ ] Add a **Charter** section to `docs/features/improvement-controller.md` naming `docs/improvement-charter.md` as the north star, the digest seed and its immutability, the `owner: Tom Counsell` refusal, the pinning rule, and the candidate-surface denylist. Link the charter from the top of the file
+- [ ] Link `docs/improvement-charter.md` from `docs/README.md`
+- [ ] Document the goals partial in `docs/features/improvement-controller.md` beside the two existing partials, including which §11 headings are empty and which lane fills each
+- [ ] Add a **Lane 2b** section to `docs/plans/critiques/recursive-self-improvement-capability-matrix.md` marking each component of this lane implemented / deployed / measured / unknown, and record the resource probe's actual verified set as run on this machine
+- [ ] No new file in `docs/features/`: this lane corrects an existing feature doc rather than describing a new feature. `docs/features/README.md` needs no new row
+
+### External Documentation Site
+
+Not applicable. Nothing here is user-facing outside this repository.
+
+### Inline Documentation
+
+- [ ] `models/improvement_charter.py` module docstring: add `digest`, `effective`, and `text` to the `Fields:` block, and **correct the amendment paragraph** — it currently describes flipping a prior row to `superseded`, which `load_from_file` deliberately does not do. Keep the `TTL decision` phrase; `test_ttl_decision_is_recorded_in_the_docstring` greps for it
+- [ ] `models/improvement_case.py` docstring: add `priority_area`, `ranking_rationale`, `charter_digest`; delete the `objective` line at `:75`
+- [ ] `models/improvement_investigation.py` and `models/improvement_release.py` docstrings: add `charter_digest`
+- [ ] `tools/improvement_eligibility.py`: module docstring stating charter §7, the fail-closed contract, why the repository is passed positionally rather than through `GH_REPO`, and why the cache is process-local
+- [ ] `tools/improvement_resources.py`: module docstring stating charter §8, the three-state vocabulary, why `unknown` is the default on any uncertainty, and the never-emit-a-credential rule with the fingerprint form
+- [ ] `.env.example:358-359`: rewrite the "daily external-LLM dollars, portfolio allocation" clause to name the three budget units
 
 ## Success Criteria
 
