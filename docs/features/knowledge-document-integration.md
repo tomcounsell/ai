@@ -72,6 +72,14 @@ The resolver loads `~/Desktop/Valor/projects.json`, extracts `knowledge_base` pa
 
 `delete_file(file_path)` removes both the `KnowledgeDocument` and its companion memories.
 
+### Cross-Project Re-Keying
+
+`KnowledgeDocument.project_key`, `DocumentChunk.project_key`, and `Memory.project_key` are all Popoto `KeyField`s -- each model's Redis identity includes it, and each is searched on its own key independent of the others (`DocumentChunk.search()` filters on the chunk's key without consulting its parent document). When a `projects.json` change to a `knowledge_base` mapping makes `resolve_scope()` resolve an already-indexed path to a different project, `safe_upsert()` treats that divergence as a genuine re-key rather than an error: it routes through popoto's sanctioned `doc.save(migrate_key=True)`, which deletes the document's old Redis key and moves the row in place, and it moves `scope` along with `project_key` so the two fields can never disagree.
+
+`index_file()` then reads `doc.project_key` and `doc.scope` -- the values `safe_upsert()` actually persisted, not its own locally-resolved `project_key`/`scope` -- and passes them to `_sync_chunks()` and `_create_companion_memories()`. It also forces a chunk resync on a re-key even when the file's content hash is unchanged, since the existing chunks still carry the old project key. This keeps the document, its chunks, and its companion memories partitioned under exactly one project key after a divergent re-index; see `tests/unit/test_knowledge_rekey_partition.py`.
+
+The three writes (document, chunks, companion memories) are not atomic with each other, and an interrupted re-key is not automatically retried (tracked in issue #3256).
+
 ### 4. KnowledgeDocument Model
 
 A Popoto Redis model storing indexed documents:
@@ -134,7 +142,7 @@ The 200-token overlap ensures concepts at chunk boundaries appear in at least on
 
 Chunks are managed entirely by the indexer pipeline:
 
-- **On index**: After `KnowledgeDocument.safe_upsert()`, the indexer computes the content hash and compares it to the existing document's hash. If content changed, `_sync_chunks()` deletes all old chunks and creates new ones.
+- **On index**: After `KnowledgeDocument.safe_upsert()`, the indexer computes the content hash and compares it to the existing document's hash, and separately checks whether the document's project key diverged from the resolved one. If content changed **or** the project key changed, `_sync_chunks()` deletes all old chunks and creates new ones under `doc.project_key` -- a re-key forces a resync even with unchanged content, since the existing chunks still carry the old key. See [Cross-Project Re-Keying](#cross-project-re-keying) above.
 - **On delete**: `delete_file()` deletes all chunks for the document before deleting the parent.
 - **Orphan cleanup**: `_cleanup_orphan_chunks()` runs at the end of `full_scan()`, deleting any chunks whose parent `KnowledgeDocument` no longer exists.
 

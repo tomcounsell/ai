@@ -64,7 +64,7 @@ This runs unconditionally — the legacy `--chat` flag is accepted but ignored s
 | `log_path` | Field | Path to transcript .txt file |
 | `summary` | Field | Brief session outcome summary |
 | `branch_name` | Field | Git branch (for tier 2 work items) |
-| `slug` | Field | Named work item slug (tier 2) |
+| `slug` | KeyField | Named work item slug (tier 2) -- set only when empty; see [KeyField Guard](#keyfield-guard-slug-chat_id) below |
 | `tags` | ListField | Categorization tags (e.g., "pr-review") |
 | `classification_type` | Field | bug, feature, or chore |
 | `classification_confidence` | Field | 0.0-1.0 |
@@ -115,6 +115,10 @@ complete_transcript(
     summary="Fixed 3 failing tests",
 )
 ```
+
+### KeyField Guard (slug, chat_id)
+
+`slug` and `chat_id` are both Popoto `KeyField`s -- they form part of the row's Redis identity. `start_transcript()` hydrates the `AgentSession` created at enqueue time and applies transcript-phase fields to it, so reassigning either on that already-persisted row raises `KeyMutationError` under the pinned popoto. Both call sites therefore set the field only when it is currently empty; if an incoming value differs from an existing one, the assignment is skipped and a `WARNING` is logged (`"slug mismatch for session ..."` / `"chat_id mismatch for session ..."`) rather than raised, so the rest of the transcript-phase update (`log_path`, `sender_name`, `branch_name`, `classification_type`, `correlation_id`) still saves. A genuine rename needs `save(migrate_key=True)`; the silent-skip is an interim measure, tracked in issue #3247. See [Redis Model Relationships § Field Type Semantics](redis-models.md#field-type-semantics-keyfield-vs-indexedfield) for the general KeyField mutation contract.
 
 ## Integration Points
 
