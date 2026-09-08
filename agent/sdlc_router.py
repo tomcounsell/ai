@@ -472,8 +472,25 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     If an open PR exists for this issue AND the most recent dispatch was
     ``/do-plan`` or ``/do-plan-critique`` (or the LLM is asking the router
     about a plan-stage dispatch), redirect to the PR-stage skill appropriate
-    for the current state: ``/do-merge`` if review is APPROVED and docs are
-    done; ``/do-patch`` if review requested changes; otherwise ``/do-pr-review``.
+    for the current state, through a four-leg ladder:
+
+    1. REVIEW completed AND DOCS completed → ``/do-merge``
+    2. CHANGES REQUESTED, or REVIEW failed → ``/do-patch``
+    3. REVIEW completed with an APPROVED verdict AND DOCS not completed →
+       ``/do-docs``
+    4. otherwise → ``/do-pr-review``
+
+    Leg 3 is #3227. Without it an approved PR whose docs were still pending
+    fell to leg 4 and re-dispatched ``/do-pr-review`` on already-approved code
+    forever — row 9 (``_rule_review_approved_docs_not_done``) holds the correct
+    answer but the dispatch table is never reached once a guard has spoken.
+    Observed on lane #3181 / PR #3219, which burned four empty review rounds.
+
+    Leg 3 refuses a head_sha-stale approval, deferring to leg 4's re-review.
+    That keeps this guard in agreement with row 8f
+    (``_rule_review_verdict_head_stale``) and G6, both of which already refuse
+    to advance on an approval recorded before the live PR head — the DOCS leg
+    must not become the one path that trusts a stale approval.
     """
     pr_number = meta.get("pr_number")
     if not pr_number:
@@ -504,6 +521,15 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
         target = SKILL_DO_PATCH
         suffix = "review requested changes"
+    elif (
+        review_status == STATUS_COMPLETED
+        and REVIEW_APPROVED in review_verdict_norm
+        and not _review_verdict_head_is_stale(stage_states, meta, context or {})
+    ):
+        # #3227: the missing leg. An approved PR with docs pending has exactly
+        # one correct next step, and re-reviewing approved code is not it.
+        target = SKILL_DO_DOCS
+        suffix = "review APPROVED and docs pending"
     else:
         target = SKILL_DO_PR_REVIEW
         suffix = "PR exists — run review"
@@ -1586,7 +1612,30 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
       Do not delete that bound believing G5 or G4 backstops it: G5 no longer runs
       here, and G4 counts consecutive same-skill dispatches while this loop
       alternates two skills.
+
+    **Stage stand-downs (#3237).** The loop bound terminates a lane that is
+    still in the plan stage; it says nothing about a lane that has already left
+    it. Two stand-downs, mirroring every sibling plan-stage row (1, 3, 4a, 4b,
+    4c), keep this row from answering for a lane whose real state has moved on:
+
+    - ``pr_number`` set — a PR-stage lane has no plan-stage verdict worth
+      refreshing; rows 7-10 own that state.
+    - ``BUILD`` at ``in_progress`` or ``completed`` — the plan was accepted when
+      the build was dispatched, so the concern loop is moot. Without this, a
+      lane with an armed concern gate and a BUILD interrupted before it opened
+      its PR had NO exit from the plan loop: row 4c is gated on ``build_status
+      in (None, pending, ready)`` so it cannot answer, and row 5 ("Build must
+      create the PR — resume build"), which holds the right answer, is
+      evaluated after this row. Observed on lane #3195 / PR #3222, which
+      escaped only by overriding ``MAX_CONCERN_RECRITIQUE_ROUNDS``.
+
+    Nothing is stranded by either stand-down: row 5 owns the started-BUILD
+    state and the PR-stage rows own the post-PR one.
     """
+    if meta.get("pr_number"):
+        return False
+    if stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED):
+        return False
     if not _critique_verdict_is_stale(stage_states, meta):
         return False
     return bool(_latest_critique_verdict(stage_states, meta).strip())
