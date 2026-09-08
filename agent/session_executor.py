@@ -123,6 +123,79 @@ def _runner_final_status(task_error, agent_session) -> str:
     return "completed"
 
 
+def _finalize_if_still_running(session_id: str, task, agent_session, reason: str) -> None:
+    """Finalize the authoritative row for ``session_id`` iff it is still ``running``.
+
+    The single finalize-guarantee mechanism for ``_execute_agent_session``.
+    Called from that function's ``finally``, so it covers both exits that
+    function owns -- normal return AND raise -- not just the normal-return
+    path the old in-``try`` guard reached (#3209). Cancellation is deliberately
+    excluded by the caller: the health checker and startup recovery own the
+    row's fate there, and finalizing would break their requeue.
+
+    The predicate is ``status == "running"``, never ``defer_reaction``. That is
+    what makes it safe on both ``_enqueue_nudge`` paths:
+
+    * Main path: ``transition_status(session, "pending")`` already moved THIS
+      row to ``pending``. ``get_authoritative_session`` prefers a ``running``
+      row and finds none, so it returns the ``pending`` row and this no-ops.
+      The nudge's authoritative write is never clobbered.
+    * Fallback path: a fresh ``pending`` row is created under the same
+      ``session_id`` via ``continuation_agent_session_fields`` and the ORIGINAL
+      row's status is left untouched at ``running``. ``get_authoritative_session``
+      prefers the ``running`` row, so this finalizes exactly that stranded
+      original -- the phantom -- and never the continuation, which is a distinct
+      record (its own ``agent_session_id``) that stays ``pending`` for the
+      worker to pop.
+
+    Fully synchronous on purpose: the ``finally`` may run while the enclosing
+    task is being cancelled, where an ``await`` would immediately re-raise
+    ``CancelledError`` and skip the finalize.
+
+    ``task`` may be ``None`` when the body raised before ``BackgroundTask`` was
+    constructed; ``_runner_final_status(None, None)`` returns ``"completed"``,
+    which would misreport a crash-before-start as a success, so that case
+    finalizes ``failed``.
+    """
+    try:
+        from models.session_lifecycle import (  # noqa: PLC0415
+            StatusConflictError,
+            finalize_session,
+            get_authoritative_session,
+        )
+
+        auth = get_authoritative_session(session_id)
+        if auth is None or auth.status != "running":
+            return
+        status = _runner_final_status(task.error, agent_session) if task is not None else "failed"
+        try:
+            finalize_session(auth, status, reason=reason)
+        except StatusConflictError as conflict:
+            # CAS conflict = another actor (complete_transcript, a concurrent
+            # finalize, the health checker) already finalized this row. That is
+            # success, not an error -- but log it, because a silent exit here
+            # was one of the two ways a deferred self-draft flush could vanish
+            # without a trace (#3053).
+            logger.info(
+                "[executor] Finalize guard: %s already finalized (%s)",
+                session_id,
+                conflict,
+            )
+            return
+        logger.info(
+            "[executor] Finalize guard finalized session %s → %s (%s)",
+            session_id,
+            status,
+            reason,
+        )
+    except Exception as err:
+        logger.warning(
+            "[executor] Finalize guard failed for %s: %s",
+            session_id,
+            err,
+        )
+
+
 def _resolve_session_model(session: AgentSession | None) -> str | None:
     """D1 precedence cascade for session model.
 
@@ -1051,6 +1124,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
     _session_id_for_registry = session.agent_session_id
     if _session_id_for_registry:
         _active_sessions[_session_id_for_registry] = SessionHandle(task=None)
+    # Cancellation is the one exit whose terminal transition this function does
+    # NOT own; see the `except asyncio.CancelledError` below.
+    _cancelled_exit = False
     try:
         # T+0 heartbeat write: guarantee the very first health-check tick after
         # session start sees a fresh heartbeat. Uses the pre-loaded `session`
@@ -2386,13 +2462,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"session {session.session_id} (operation: finalize status to "
                     f"{_runner_final_status(task.error, agent_session)}): {e}"
                 )
-                # No fallback-finalize here: the unconditional completion-exit
-                # guard below (after this whole if/else block) re-reads the
-                # authoritative session and finalizes it if still `running`. It
-                # subsumes what used to be a duplicate defensive fallback in this
-                # except-only branch -- see the guard's comment for the full
-                # rationale (round-2 CONCERN 3: this exception-only branch never
-                # covered the `else:` / agent_session-is-None exit below anyway).
+                # No fallback-finalize here: the finalize guarantee in this
+                # function's `finally` (`_finalize_if_still_running`) re-reads
+                # the authoritative session and finalizes it if still `running`.
+                # It subsumes what used to be a duplicate defensive fallback in
+                # this except-only branch -- which never covered the `else:` /
+                # agent_session-is-None exit below anyway.
         else:
             # agent_session lookup returned None (race on status="running" filter,
             # e.g. after health-check recovery). Finalize using outer `session`
@@ -2429,73 +2504,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         e,
                     )
 
-        # Unconditional completion-exit finalize guard (Defect B, #2007).
+        # The finalize guarantee (#2007, #3209) lives in this function's
+        # `finally` as `_finalize_if_still_running`, not here. It used to sit at
+        # this point in the body behind `if not chat_state.defer_reaction:`,
+        # which meant every non-normal-return exit -- a raise, or the health
+        # checker's CancelledError -- skipped it and left the row `running`
+        # until the health-check sweep. In the `finally` it covers all exits,
+        # and its `status == "running"` predicate is what preserves the nudge
+        # path's `pending` write that the `defer_reaction` gate used to protect.
         #
-        # (a) Scope: this covers the non-deferred completion exit only, gated by
-        #     `not chat_state.defer_reaction` -- the nudge / unconsumed-steering
-        #     re-enqueue path (defer_reaction=True) is untouched, since
-        #     `_enqueue_nudge` already writes the authoritative post-nudge state
-        #     (status=pending) itself; finalizing here would clobber it.
-        #
-        # (b) Placement: this runs AFTER the entire `if agent_session: / else:`
-        #     block above closes -- deliberately NOT nested inside the
-        #     `if agent_session:` branch. A prior version of this fallback lived
-        #     only inside that branch's `except Exception` handler, which meant
-        #     the `else:` exit (agent_session lookup returned None, e.g. a race
-        #     on the status="running" filter -- see #917) had no re-read+finalize
-        #     backstop at all: if `complete_transcript` silently no-op'd there
-        #     instead of raising, the authoritative record stayed `running`
-        #     forever. Placing the guard after the whole if/else covers both exits.
-        #
-        # (c) Unconditional: this guard runs every time regardless of whether
-        #     `complete_transcript` succeeded, raised, or (in the `else` branch)
-        #     already ran its own fallback -- it re-reads the authoritative
-        #     record fresh and only acts if it is still `running`, making it a
-        #     safe no-op on the ordinary happy path. It subsumes the old
-        #     exception-only fallback that used to live inside the
-        #     `if agent_session:` branch (that one only fired when
-        #     `complete_transcript` itself raised); this is the single
-        #     finalize-guarantee mechanism for the completion exit now.
-        if not chat_state.defer_reaction:
-            try:
-                from models.session_lifecycle import (  # noqa: PLC0415
-                    StatusConflictError,
-                    finalize_session,
-                    get_authoritative_session,
-                )
-
-                _auth = get_authoritative_session(session.session_id)
-                if _auth is not None and _auth.status == "running":
-                    _guard_status = _runner_final_status(task.error, agent_session)
-                    finalize_session(
-                        _auth,
-                        _guard_status,
-                        reason="unconditional completion-exit finalize guard (#2007)",
-                    )
-                    logger.info(
-                        "[executor] Completion-exit guard finalized session %s → %s",
-                        session.session_id,
-                        _guard_status,
-                    )
-            except StatusConflictError as _guard_conflict:
-                # CAS conflict = another actor (complete_transcript, a concurrent
-                # finalize, the health-checker) already finalized this session.
-                # Treat as success -- do not re-raise. "Expected, do not treat
-                # as an error" is a reason to log at INFO, not a reason to log
-                # nothing (#3053 — this silent exit was one of the two ways a
-                # deferred self-draft flush could be skipped with no trace).
-                logger.info(
-                    "[executor] Completion-exit guard: %s already finalized (%s)",
-                    session.session_id,
-                    _guard_conflict,
-                )
-            except Exception as _guard_err:
-                logger.warning(
-                    "[executor] Completion-exit finalize guard failed for %s: %s",
-                    session.session_id,
-                    _guard_err,
-                )
-
         # Enqueue post-session memory extraction as a durable SideEffectJob.
         #
         # The row is written here and drained by the `side-effect-drain`
@@ -2684,6 +2701,25 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"[{session.project_key}] Skipping session cleanup — "
                 f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
             )
+    except asyncio.CancelledError:
+        # Cancellation has an owner, and it is never this function.
+        #
+        # The health checker cancels `handle.task` and then, inside the SAME
+        # await, decides the row's fate itself: `abandoned`, `failed`, or --
+        # the common case -- `transition_status(entry, "pending")` to requeue
+        # the session for another attempt (`_agent_session_health_check`'s
+        # recovery branches). `transition_status` rejects a terminal source
+        # status, so a finalize from here would race in first, turn that
+        # requeue into a swallowed StatusConflictError, and silently retire
+        # the health checker's entire retry loop. A worker-shutdown
+        # cancellation is owned the same way, by
+        # `_recover_interrupted_agent_sessions_startup`, which re-queues rows
+        # it finds `running`.
+        #
+        # So the row is left `running` on purpose here. Re-raise unchanged --
+        # this clause exists only to tell the `finally` which exit it is on.
+        _cancelled_exit = True
+        raise
     finally:
         # === Two-tier no-progress detector cleanup (#1036) ===
         # Always pop the registry entry, regardless of how the session body exited
@@ -2691,6 +2727,24 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # into _active_sessions across sessions on the same worker.
         if _session_id_for_registry:
             _active_sessions.pop(_session_id_for_registry, None)
+
+        # === Finalize guarantee (#2007, #3209) ===
+        # Runs on every exit this function owns -- normal return AND raise --
+        # and before the worktree cleanup below, which refuses to remove a lane
+        # whose row is still `running`. Cancellation is excluded because it is
+        # owned elsewhere (see the `except asyncio.CancelledError` above).
+        # Keyed on `status == "running"`, so the nudge path's `pending` write
+        # survives untouched; see `_finalize_if_still_running` for why that
+        # holds on both `_enqueue_nudge` paths. `task` and `agent_session` are
+        # assigned partway through the body and may not exist on an
+        # early-raise exit.
+        if not _cancelled_exit:
+            _finalize_if_still_running(
+                session.session_id,
+                locals().get("task"),
+                locals().get("agent_session"),
+                reason="executor exit finalize guard (#3209)",
+            )
 
         # === Synthetic-slug worktree cleanup (issue #1272) ===
         # Slugless eng sessions get a synthesized slug ``dev-{aid[:8]}`` and a
@@ -2734,77 +2788,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             _wd,
                         )
                     else:
-                        # Pre-finalize guard (#3176): on every raising or
-                        # cancelled exit, the unconditional completion-exit
-                        # finalize guard above never ran (it sits inside
-                        # `if not chat_state.defer_reaction:` on the
-                        # normal-return path only), so the authoritative row
-                        # can still be "running" here. The busy scan
-                        # (agent/worktree_manager.py::_scan_worktree_sessions)
-                        # now reads exec_cwd, so a still-running row would
-                        # make cleanup_after_merge's own busy check refuse
-                        # this removal -- permanently, since a synthetic
-                        # `session/dev-*` branch never satisfies
-                        # sweep_worktrees' `merged_via_tree` requirement.
-                        # Finalize first so the removal below sees a clear
-                        # lane. `status == "running"` is what makes hoisting
-                        # this out of the `defer_reaction` conditional safe:
-                        # every path that hands the row to a continuation
-                        # (the nudge re-enqueue) already leaves it `pending`
-                        # first, so this guard no-ops there.
-                        try:
-                            from models.session_lifecycle import (  # noqa: PLC0415
-                                StatusConflictError,
-                                finalize_session,
-                                get_authoritative_session,
-                            )
-
-                            _auth = get_authoritative_session(session.session_id)
-                            if _auth is not None and _auth.status == "running":
-                                # `task` is assigned partway through the body
-                                # (`task = BackgroundTask(...)`) and is not
-                                # guaranteed to exist here on an early-raise
-                                # exit -- resolve defensively and
-                                # short-circuit BEFORE _runner_final_status
-                                # is consulted. `_runner_final_status(None,
-                                # None)` returns "completed", which would
-                                # finalize a session that crashed before
-                                # starting a runner as a success; "failed" is
-                                # the honest status for that case.
-                                _task = locals().get("task")
-                                _agent_session = locals().get("agent_session")
-                                _guard_status = (
-                                    _runner_final_status(_task.error, _agent_session)
-                                    if _task is not None
-                                    else "failed"
-                                )
-                                try:
-                                    finalize_session(
-                                        _auth,
-                                        _guard_status,
-                                        reason="synthetic-cleanup pre-finalize",
-                                    )
-                                    logger.info(
-                                        "[synthetic-slug] Pre-finalize guard finalized "
-                                        "session %s → %s ahead of cleanup",
-                                        session.session_id,
-                                        _guard_status,
-                                    )
-                                except StatusConflictError:
-                                    # Someone else (the health checker, a
-                                    # concurrent finalize) already finalized
-                                    # this row. Not an error -- proceed to
-                                    # cleanup, which will now see the
-                                    # terminal status they wrote.
-                                    pass
-                        except Exception as guard_err:
-                            logger.warning(
-                                "[synthetic-slug] Pre-finalize guard failed for %s "
-                                "(non-fatal, cleanup may be refused): %s",
-                                session.session_id,
-                                guard_err,
-                            )
-
+                        # No local pre-finalize guard here: the finalize
+                        # guarantee at the top of this `finally` already ran on
+                        # every exit this function owns, so the row is terminal
+                        # before the busy scan
+                        # (worktree_manager::_scan_worktree_sessions, which
+                        # reads exec_cwd) evaluates it. That ordering is
+                        # load-bearing -- a still-`running` row makes
+                        # cleanup_after_merge refuse the removal permanently,
+                        # since a synthetic `session/dev-*` branch never
+                        # satisfies sweep_worktrees' `merged_via_tree`
+                        # requirement (#3176). The one exit where the row is
+                        # still `running` here is a cancellation, and there the
+                        # refusal is CORRECT: the health checker may be about
+                        # to requeue this very session into this very lane.
                         _repo_for_cleanup = resolve_main_repo_root(_wd)
                         cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
                         if cleanup_result.get("blocked_by_session"):

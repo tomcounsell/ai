@@ -514,20 +514,36 @@ short-lived and best-effort; the durable record of the cancellation is the
 `finalize_session(..., reason=...)` call, which lands in the `LIFECYCLE`
 transition log.
 
-**Guaranteed terminal finalize on the completion exit.**
-`complete_transcript()` now selects the record to finalize via
+**Guaranteed terminal finalize on every exit the executor owns.**
+`complete_transcript()` selects the record to finalize via
 `get_authoritative_session()` — the same running-preferring tie-break
 pattern described in [Worker Completion — Redis
 Re-read](#worker-completion--redis-re-read) above — instead of the blind
-`[0]`. The load-bearing fix for phantom running, though, is an unconditional
-completion-exit guard in `agent/session_executor.py`, placed after the
-entire `if agent_session: / else:` completion block closes so it covers
-both exits, including the case where the `agent_session` lookup returned
-`None`. It re-reads the authoritative session and, if still `running`,
-calls `finalize_session()`, treating a `StatusConflictError` from a racing
-concurrent finalizer as success. Every non-deferred completion path now
-reaches a terminal status regardless of what `complete_transcript()` did
-upstream.
+`[0]`. The load-bearing fix for phantom running, though, is
+`_finalize_if_still_running` in `agent/session_executor.py`, called from
+`_execute_agent_session`'s `finally`. It re-reads the authoritative session
+and, if still `running`, calls `finalize_session()`, treating a
+`StatusConflictError` from a racing concurrent finalizer as success.
+
+The predicate is `status == "running"`, never `defer_reaction` (#3209). The
+`defer_reaction` gate it replaced sat in the `try` body, so only a normal
+return reached it — a raise walked past it into the `finally` with the row
+still `running` and no other owner, and the guard was also suppressed on
+paths where no nudge was ever enqueued. The status predicate protects the
+nudge's write on its own, on both `_enqueue_nudge` paths: the main path has
+already moved this row to `pending`, so the guard no-ops; the fallback path
+creates a fresh `pending` record under the same `session_id` and leaves the
+original `running`, so the guard finalizes exactly that stranded original
+(the phantom) while the continuation record survives for the worker to pop.
+
+Cancellation is the one exit deliberately excluded. `_execute_agent_session`
+carries an `except asyncio.CancelledError` whose only job is to mark the exit
+so the `finally` skips the finalize. The health checker cancels the session
+task and then decides the row's fate itself inside the same await — usually
+`transition_status(entry, "pending")` to requeue it — and `transition_status`
+rejects a terminal source status, so finalizing here would win the race and
+silently retire the retry loop. Worker-shutdown cancellation is owned the
+same way by `_recover_interrupted_agent_sessions_startup`.
 
 ## Liveness Counter Re-Anchoring (issue #2716)
 
@@ -682,7 +698,7 @@ reintroduce a gate in front of the flush; that is the exact shape of the origina
 - `models/session_lifecycle.py`'s step-1 LIFECYCLE-log swallow — promoted from DEBUG to WARNING; a
   lifecycle log that cannot be written is a real observability outage on the terminal path, not a
   routine condition.
-- `agent/session_executor.py`'s unconditional completion-exit finalize guard (#2007) — the bare
+- `agent/session_executor.py`'s exit finalize guard (#2007) — the bare
   `pass` on its own `StatusConflictError` catch (meaning "another actor already finalized this
   session, treat as success") now logs at INFO naming the session and the conflict. "Expected, do
   not treat as an error" is a reason to log at INFO, not a reason to log nothing.
