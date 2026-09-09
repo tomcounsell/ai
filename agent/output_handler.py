@@ -1485,13 +1485,22 @@ class TelegramRelayOutputHandler:
         (its own transient concept — verbatim questions for the human) is
         never persisted to the session row; Job expectations (#2708) are the
         durable obligation record and live on the Job, not here.
+
+        The save is narrowed to ``["context_summary", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so this routing-field write — reached from a possibly
+        long-held ``session`` object — was silently authorized to rewrite the
+        row's lifecycle state and its status index from a stale snapshot, with
+        no LIFECYCLE log and no ``session_events`` entry.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)
 
             if context_summary:
                 session.context_summary = context_summary
-                session.save()
+                session.save(update_fields=["context_summary", "updated_at"])
                 logger.debug(
                     "Persisted routing fields to session %s (context_summary=%s)",
                     getattr(session, "session_id", "<unknown>"),
