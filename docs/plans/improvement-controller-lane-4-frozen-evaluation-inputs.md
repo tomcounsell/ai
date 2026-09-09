@@ -222,27 +222,370 @@ section is absent: there are no previous fixes to analyze.
 
 ## Spike Results
 
-placeholder
+Five code-read spikes were run against `session/sdlc-3255` at `b05dde885` during planning. Each
+resolved an assumption that would otherwise have shaped the design on a guess. No prototype spike
+was needed: every question was answerable by reading the checkout and the installed venv.
+
+### spike-1: Is a statistics dependency required for Holm?
+- **Assumption**: "Holm correction needs `scipy` or `statsmodels`."
+- **Method**: code-read (venv import probe)
+- **Finding**: **False.** `scipy` and `statsmodels` are both absent from `.venv`; `numpy` 2.4.4 is
+  present. Holm is a sort, a rank-weighted multiply, a cumulative max, and a clamp — fifteen lines.
+- **Confidence**: high
+- **Impact on plan**: `tools/improvement_eval/correction.py` is pure Python plus stdlib. No
+  dependency is added, no `pyproject.toml` change, no `/update` propagation.
+
+### spike-2: Does the private-Redis arm collide with the pytest db-claim pool?
+- **Assumption**: "A per-arm private Redis can reuse the test-suite's Redis."
+- **Method**: code-read (`tests/db_claim.py`, `tests/unit/test_test_redis_server_resolution.py`)
+- **Finding**: **It must not, and there is a documented reason.** `db_claim` is the single source of
+  "which server and which db does this pytest process own", `redis_test_host()`/`redis_test_port()`
+  resolve it, and `conftest.py` points popoto's canonical client at exactly that. Issue #2799 records
+  the live failure when an agent started a private `redis-server` for isolation and got the opposite:
+  the suite still hit 6379 and flushed production db1. A private arm server must therefore be reached
+  through an **explicitly constructed client on a unix socket**, never through popoto's canonical
+  pool and never by re-pointing `REDIS_URL`. `redis-server` v8.10.1 is on this machine at
+  `/opt/homebrew/bin/redis-server`.
+- **Confidence**: high
+- **Impact on plan**: `tools/improvement_eval/arena.py` spawns `redis-server --unixsocket <tmp>/arm.sock
+  --port 0 --save '' --appendonly no --dir <tmp>` per arm and hands back a client bound to that socket.
+  Port 0 means the arm has no TCP listener at all, so it cannot be reached by accident and cannot
+  collide with a concurrent agent's port. `db_claim` is untouched, and a test asserting that is in
+  the Verification table.
+
+### spike-3: Which of snapshot, freeze, or copy-on-write does per-arm isolation need?
+- **Assumption**: "One of the three is obviously right."
+- **Method**: code-read (`tools/memory_eval/retrieval_arms.py`, `models/memory.py`, Redis capabilities)
+- **Finding**: **Snapshot, with freeze as an independent second guard; copy-on-write is unavailable.**
+  Redis has no logical-database copy-on-write to build on, so COW would mean writing an interception
+  layer over every command — a large surface for a property a fresh process gives for free. Freeze
+  alone (a writer kill switch on one shared instance) leaves both arms in one keyspace, where a single
+  escaped write corrupts the comparison silently. Snapshot-and-restore into a fresh private process
+  gives byte-identical reads by construction and makes the freeze cheap to add on top.
+- **Confidence**: high
+- **Impact on plan**: the design is export-once, restore-per-arm, plus a writer kill switch that
+  refuses writes at the client wrapper **and** re-checks the corpus digest at arm teardown. Two
+  independent mechanisms, because a guard that can only fail one way is a guard that is trusted
+  without evidence.
+
+### spike-4: Is the calibration reference set stable?
+- **Assumption**: "Retained architectural corrections are a stable gold set."
+- **Method**: code-read (`models/improvement_evidence.py`, `reflections/improvement_collect.py`)
+- **Finding**: **False, twice over.** `ImprovementEvidence` carries `ttl = 86400 * 30`, so the
+  underlying rows expire on a 30-day rolling window. And `classify_correction` is a regex whose
+  default is `unknown` by explicit design ("a confident wrong label is worse than an honest absent
+  one"), so the `architectural` bucket is precision-oriented and small. A judge calibrated against a
+  set that rotates monthly and whose size is unmeasured is not calibrated.
+- **Confidence**: high
+- **Impact on plan**: `tools/improvement_eval/calibration.py` freezes the reference set to the
+  verifying artifact store at calibration time, content-addressed, and the calibration record cites
+  it by digest. Recalibration writes a new artifact rather than mutating one. The build reports the
+  observed set size, and a set below a floor produces `infra_failure` on the judge rather than a
+  quietly uncalibrated verdict.
+
+### spike-5: Is there an existing judge envelope to build on, or is this greenfield?
+- **Assumption**: "The judge envelope is new."
+- **Method**: code-read (`tools/cross_vendor_judge.py`, `agent/sdlc_review_consensus.py`, `tools/sdlc_verdict.py`)
+- **Finding**: **Mostly existing.** `cross_vendor_judge.py` already establishes a reserved
+  `judge_id` constant (`CROSS_VENDOR_JUDGE_ID = "cross-vendor"`, `:28`), a disjointness test
+  (`tests/unit/test_review_multi_judge.py:679`), a status-discriminated envelope
+  (`{"status": "ok"|"skipped"}`), coercion of every field with a typed fallback (`:140-165`), and
+  non-Claude provider routing under a settings gate. `_REQUIRED_KEYS = ("judge_id", "verdict",
+  "blockers")` is asserted in two places (`agent/sdlc_review_consensus.py:33`,
+  `tools/sdlc_verdict.py:332`).
+- **Confidence**: high
+- **Impact on plan**: the `serves_charter` judge copies that shape rather than inventing one, and the
+  evaluation envelope is that dict *wrapped* — experiment id, contract digest, charter digest,
+  evaluator version, trial id, raw-response reference, and the blinded arm id go around it, so the
+  inner dict stays consumable by `compute_consensus` unchanged.
 
 ## Data Flow
 
-placeholder
+One evaluation run, end to end. Every hand-off names the artifact that carries it, because a
+hand-off with no artifact is a claim nobody can check later.
+
+1. **Entry point**: `tools/improvement_eval/runner.py::evaluate(experiment_id, project_key)`.
+   Reads the `ImprovementExperiment`. **Gate 0 — the contract is frozen and unaltered.** The runner
+   recomputes the contract digest and compares it to `ImprovementExperiment.contract_digest`; a
+   mismatch, or `state != "frozen"`, ends the run as `infra_failure`. This is charter §6's
+   anti-gaming rule made mechanical: an endpoint chosen after the result is visible cannot enter.
+
+2. **Charter pin**. `ImprovementCharter.pinned(project_key)` supplies `digest`, `effective`, and
+   `text`. The digest is written onto the evaluation (the new `ImprovementEvaluation.charter_digest`)
+   and into every judge envelope. `text` is the only charter content the `serves_charter` judge ever
+   sees — the judge process is given the charter without being given the repository, which the
+   refresh comment correctly calls a convenience rather than a security boundary.
+
+3. **Corpus export** (`corpus.py`). One canonical, sorted, newline-delimited export of the project's
+   memory corpus is produced once per run, hashed, and written to the verifying artifact store. The
+   digest is the corpus identity for the whole run. `VALOR_PROJECT_KEY` is resolved here and threaded
+   into `_harness_env` so every arm subprocess partitions on the arm's project rather than on ambient
+   environment.
+
+4. **Arm assignment** (`blinding.py`). Arms are assigned randomized run ordering from a seed derived
+   from the experiment id. `arm_assignment_digest` is written before either arm runs. Each arm gets
+   a blinded id (`arm-a` / `arm-b`) with the incumbent/candidate mapping held only by the runner.
+
+5. **Arena spawn** (`arena.py`). One `redis-server` per arm, unix socket, no TCP, no persistence,
+   its own `--dir`. The export from step 3 is loaded into each. **The corpus digest is re-read from
+   each arm and compared**; unequal digests are `infra_failure` before anything is measured. This is
+   acceptance criterion 1, and it is asserted at run time rather than only in a test.
+
+6. **Writer kill switch** (`writer_guard.py`). Each arm's client is wrapped so corpus-key writes
+   raise. The wrapper is the first guard; the second is a digest re-check at arm teardown, which
+   catches a write that reached the server by some path the wrapper did not cover.
+
+7. **Gate 1 — baseline parity** (`retrieval.py`). The **incumbent** arm runs the frozen baseline
+   query set against the frozen corpus and its result is compared to the recorded baseline. A miss
+   ends the run as `infra_failure` and **the candidate arm is never invoked**. The ordering is the
+   point: an incumbent that cannot reproduce itself makes every candidate number meaningless, and
+   reading the candidate first would let the operator learn the answer before learning the run was
+   invalid.
+
+8. **Paired trials**. For each trial in the fixed batch, both arms run the same input in the
+   randomized order from step 4. A trial that errors in the harness is excluded and counted toward
+   the infra-failure cap; a trial where the *candidate* fails is a candidate failure and scores as
+   one. That distinction is `retrieval_arms.py`'s errored-vs-empty discipline, raised to the arm level.
+
+9. **Judges** (`envelope.py`, `judges/serves_charter.py`). Each trial's outputs go to the judge
+   roster carrying the blinded arm id and never the candidate's identity. `blinding.py::scan_for_identity`
+   inspects the serialized envelope before it is sent; a hit sets `blinded=False` on the evaluation
+   and is recorded rather than suppressed. Raw judge responses are written to the verifying artifact
+   store and referenced from the envelope; the envelopes themselves land in
+   `ImprovementEvaluation.judge_records`.
+
+10. **Statistics** (`statistics.py`, `correction.py`). Paired per-trial deltas per endpoint feed
+    `tools.memory_eval.metrics.bootstrap_ci` (imported, unmodified) with clustered resampling by
+    project. Per-endpoint p-values go through `holm_adjust`. The stopping rule is checked: a batch
+    short of its declared size yields `inconclusive`, never a partial-batch verdict.
+
+11. **Verdict and write**. `accept` when every required endpoint clears its margin and its
+    Holm-adjusted threshold with a CI lower bound above zero; `reject` when the measurement ran and
+    it did not; `inconclusive` when the measurement ran and could not distinguish the arms;
+    `infra_failure` when the harness broke. `correction` is written as the named string
+    (`"holm; fixed-batch(n=..., endpoints=...)"`) — a correction nobody can name was not applied.
+
+12. **Output**: one `ImprovementEvaluation` row. On any `ArtifactIntegrityError` raised anywhere in
+    steps 2, 9, or 11, the run instead writes `state="invalidated"` and **no verdict**: `verdict`
+    stays at its schema default and `has_verdict()` returns False. An unverifiable artifact is not
+    weak evidence, it is no evidence.
 
 ## Architectural Impact
 
-placeholder
+- **New dependencies**: none. Holm is pure Python (spike-1); `redis-server` v8.10.1 is already
+  installed and already a hard requirement of this repo. No `pyproject.toml` change, no
+  `/update` propagation, no new secret.
+- **Interface changes**: one additive schema change — `ImprovementEvaluation.charter_digest`, a
+  plain `Field(null=True)`, with a migration entry mirroring `_migrate_confirm_improvement_v2_fields`
+  (`scripts/update/migrations.py:1429`). One additive env change — `VALOR_PROJECT_KEY` in
+  `_harness_env` (`agent/session_executor.py:2116`), the same shape `VALOR_CORRELATION_ID` took in
+  `a9822d719`. `tools/memory_eval/metrics.py` is imported and **not** modified; that is acceptance
+  criterion 7 and a Verification row.
+- **Coupling**: `tools/improvement_eval/` depends on `models/` (the improvement records and the
+  verifying store), on `tools/memory_eval/metrics.py` (one-directional, import only), and on
+  `tools/improvement_eligibility.py` for the §7 provider decision. Nothing in `agent/`, `bridge/`,
+  or `worker/` depends on it. The direction is deliberate: the harness is a leaf, so it can be
+  deleted or replaced as a unit, which charter §6 explicitly anticipates ("research selection and
+  evaluation methods are themselves open to improvement").
+- **Data ownership**: the harness owns `ImprovementEvaluation` rows and the frozen artifacts they
+  cite (corpus export, calibration reference set, raw judge responses), all on the verifying artifact
+  store under `POPOTO_IMPROVEMENT_CONTENT_PATH`. It writes `ImprovementExperiment.state`
+  (`frozen` → `running` → `complete`/`aborted`) and nothing else on that record. It never writes
+  `ImprovementCharter` — the controller cannot amend its own authority — and it never writes
+  `ImprovementRelease`, which is lane 6's.
+- **Reversibility**: high. Deleting `tools/improvement_eval/` and the migration leaves a null column
+  and an unused env var. The `serves_charter` judge is one input to a consensus envelope and never a
+  gate on its own, so removing it degrades the roster rather than breaking it. The one irreversible
+  thing is the schema addition, and an additive nullable field on an immortal record is the cheapest
+  irreversible change available.
 
 ## Appetite
 
-placeholder
+**Size:** Large
+
+**Team:** Solo dev (the lane's Eng session), plus a validator pass per component and one
+documentarian pass.
+
+**Interactions:**
+- PM check-ins: 2-3 (the isolation mechanism choice, the stopping-rule scope, and the calibration
+  floor are each a place where a wrong call is expensive to unwind)
+- Review rounds: 2+
+
+Large is the honest size. This is eight new modules, a schema change with a migration, a change to
+the harness environment every session inherits, and a test suite whose whole job is to prove that
+guards bite. The appetite is set by alignment cost, not typing: three of the design decisions
+(snapshot-versus-freeze, fixed-batch-versus-alpha-spending, and where the calibration floor sits)
+are commitments the rest of the improvement loop inherits, and getting one wrong is a rewrite of a
+downstream lane rather than a patch here.
 
 ## Prerequisites
 
-placeholder
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `redis-server` binary | `redis-server --version` | Per-arm private Redis processes (spike-2) |
+| Python pin matches the repo | `python -c "import pathlib,sys; want=pathlib.Path('.python-version').read_text().strip(); got='.'.join(map(str,sys.version_info[:3])); sys.exit(0 if got.startswith(want) else 1)"` | Worktree venv is on the committed pin |
+| `numpy` importable | `python -c "import numpy"` | Clustered resampling; already a declared dependency |
+| Verifying artifact store writable | `python -c "from models.verifying_artifact_store import verifying_artifact_store as s; import os; os.makedirs(s.base_path, exist_ok=True)"` | Frozen corpus, calibration set, and raw judge responses land here |
+| Lane 2b charter surface present | `python -c "from models.improvement_charter import ImprovementCharter as C; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` | `serves_charter` judges against `ImprovementCharter.text` (#3255) |
+| `metrics.py` import path | `python -c "from tools.memory_eval.metrics import bootstrap_ci"` | Acceptance criterion 7 |
+
+`scipy` and `statsmodels` are deliberately absent and no check asks for them (spike-1).
 
 ## Solution
 
-placeholder
+### Key Elements
+
+- **`tools/improvement_eval/corpus.py`** — exports the project's memory corpus once per run into a
+  canonical, sorted, newline-delimited form, hashes it, and writes it to the verifying artifact
+  store. The digest is the corpus identity for the run. Restores that export into an arm's store.
+- **`tools/improvement_eval/arena.py`** — spawns one private `redis-server` per arm on a unix socket
+  with no TCP listener and no persistence, hands back an explicitly-constructed client, and tears the
+  process down. Never touches popoto's canonical pool, `REDIS_URL`, or `tests/db_claim.py`.
+- **`tools/improvement_eval/writer_guard.py`** — the writer kill switch. A client wrapper that
+  refuses corpus writes, plus an independent corpus-digest re-check at arm teardown so a write that
+  slipped past the wrapper still surfaces as `infra_failure` rather than as a result.
+- **`tools/improvement_eval/retrieval.py`** — the isolated retrieval adapter, and the **baseline
+  parity gate**: the incumbent arm reproduces its recorded baseline on the frozen corpus before any
+  candidate result is read.
+- **`tools/improvement_eval/blinding.py`** — randomized arm assignment with a recorded
+  `arm_assignment_digest`, blinded arm ids, and `scan_for_identity`, the leak detector that decides
+  what `ImprovementEvaluation.blinded` actually says.
+- **`tools/improvement_eval/envelope.py`** — the judge envelope: the existing
+  `judge_id`/`verdict`/`blockers`/`confidence` dict, wrapped with experiment id, contract digest,
+  charter digest, evaluator version, trial id, a reference to the raw response on the verifying
+  store, and the blinded arm id.
+- **`tools/improvement_eval/judges/serves_charter.py`** — the `serves_charter` judge. Scores a
+  candidate's output against `ImprovementCharter.text`, quotes the digest it judged under, routes to
+  a provider chosen by charter §7, and is one input to the consensus envelope, never a gate.
+- **`tools/improvement_eval/calibration.py`** — freezes a reference set of retained architectural
+  corrections to the verifying store and measures the judge against it with Cohen's kappa and a
+  paired position-swap consistency check.
+- **`tools/improvement_eval/correction.py`** — Holm step-down correction and the named fixed-batch
+  stopping rule, producing the exact string written to `ImprovementEvaluation.correction`.
+- **`tools/improvement_eval/statistics.py`** — per-endpoint thresholds and clustered resampling by
+  project, over `bootstrap_ci` imported from `tools/memory_eval/metrics.py`.
+- **`tools/improvement_eval/runner.py`** — the orchestration and the single writer of
+  `ImprovementEvaluation`.
+- **`tools/improvement_eval/errors.py`** — `InfraFailure`, the exception type that keeps a broken
+  harness from reading as evidence against a candidate.
+- **`ImprovementEvaluation.charter_digest`** — one additive field plus its migration, so a verdict
+  can name the charter it was measured under.
+- **`VALOR_PROJECT_KEY` in `_harness_env`** — so an arm subprocess partitions on the arm's project
+  rather than on whatever the ambient environment happens to say.
+
+### Flow
+
+Frozen `ImprovementExperiment` → `evaluate()` → **contract digest re-check** → charter pinned →
+**corpus exported and hashed** → arms assigned and digest recorded → **two private Redis arms
+restored from one export** → corpus digests compared → writer kill switch armed → **incumbent
+baseline parity gate** → paired trials in randomized order → **blinded judge envelopes** → Holm
+correction over per-endpoint bootstrap CIs → stopping rule checked → one `ImprovementEvaluation`
+
+Four exits, and which one you get is the whole design:
+
+**accept** → endpoints cleared their margins and their Holm-adjusted thresholds
+**reject** → the measurement ran and they did not
+**inconclusive** → the measurement ran and could not tell the arms apart
+**infra_failure** → the harness broke, and this says nothing about the candidate
+
+Plus one non-exit: **`state="invalidated"`, no verdict at all**, when an artifact failed its
+integrity check.
+
+### Technical Approach
+
+**Isolation is snapshot-and-restore, not freeze or copy-on-write** (spike-3). Redis offers no
+logical-database copy-on-write, and a shared instance with a kill switch keeps both arms in one
+keyspace where one escaped write corrupts the comparison invisibly. A fresh process per arm gives
+byte-identical reads by construction. The kill switch survives as an independent second guard rather
+than as the primary mechanism, because a guard that can only fail one way is a guard nobody has
+evidence about.
+
+**The arm's Redis is reached by an explicitly-constructed client on a unix socket.** This is the one
+place where following the repo's normal Redis convention would be wrong. `tests/db_claim.py` is the
+single source of "which server and which db does this pytest process own", and issue #2799 records
+what happens when a private server is introduced without respecting that: the suite kept hitting
+6379 and flushed production db1. So `arena.py` spawns `redis-server --port 0 --unixsocket
+<tmp>/arm.sock --save '' --appendonly no --dir <tmp>`, which has no TCP listener to collide with a
+concurrent agent, and reaches it through `redis.Redis(unix_socket_path=...)` constructed in place.
+`REDIS_URL` is never reassigned, `db_claim` is never called, and popoto's canonical pool is never
+re-pointed. A test asserts all three.
+
+**Byte-identical corpus reads are asserted at run time, not only in a test.** After restore, each
+arm's corpus is re-read through its own client, canonicalized the same way the export was, and
+hashed. Unequal digests, or a digest differing from the export's, end the run as `infra_failure`
+before any measurement. The acceptance criterion's test then exercises the same code path rather
+than a parallel one.
+
+**Gate ordering is load-bearing.** The contract-digest re-check runs before the charter is pinned;
+the corpus export runs before the arms spawn; the incumbent's baseline parity runs before the
+candidate arm is invoked at all. The parity gate's test asserts the candidate arm function was never
+called, not merely that the verdict came out invalid — an operator who learns the candidate's number
+and then learns the run was invalid has already been influenced by it.
+
+**Holm is three named operations** (research finding 1). Sort ascending; multiply each by
+`(m - j + 1)`; take the cumulative maximum and clamp at 1.0; map back to the original input order.
+The cumulative max is the standard defect site — CRAN's `RHSDB` shipped a release to fix exactly this
+— so the test pins the monotonicity property directly (adjusted values non-decreasing in sorted
+order) as well as a worked example, and a mutation that drops the cumulative max must turn a test
+red.
+
+**The stopping rule is fixed-batch and named in the frozen contract.** `correction` is written as a
+single string naming both the multiplicity correction and the stopping rule, for example
+`"holm; fixed-batch(n=40, endpoints=3)"`. A run that has not completed its declared batch yields
+`inconclusive` and never computes a verdict from a partial batch — interim estimation is biased
+(research finding 3), so refusing is more honest than computing and flagging.
+
+**Blinding is measured, and a leak is recorded rather than suppressed.** `scan_for_identity` runs
+over the serialized envelope immediately before it is handed to a judge, looking for the candidate's
+branch name, manifest surfaces, arm identity, and any operator-supplied identity tokens from the
+experiment. A hit sets `blinded=False` on the evaluation and annotates `notes`. It does not abort:
+an evaluation that honestly says its blinding failed is more useful than one that quietly did not
+run. `blinded=True` is only ever written when the scan ran and found nothing.
+
+**The `serves_charter` judge copies the shape that already works** (spike-5). A module-level
+`SERVES_CHARTER_JUDGE_ID = "serves-charter"` proven disjoint from `code-quality`, `risk`, and
+`cross-vendor` by a test; a status-discriminated envelope so a skip is distinguishable from an
+approval; every response field coerced with a typed fallback. Its prompt carries
+`ImprovementCharter.text` verbatim and the envelope carries the digest that text hashed to, so the
+verdict can be re-read years later against the exact authority it was measured under (charter §12).
+
+**Provider routing follows charter §7 through the existing guard.**
+`tools/improvement_eligibility.py::is_open_source(project_key)` decides: True routes the judge to any
+provider within the inference budget; False keeps it on the Claude and Codex subscriptions. That
+function already fails closed to client on every uncertainty and already passes the repository to
+`gh` positionally so `GH_REPO` cannot answer for it. This lane calls it and adds a test for each
+direction; it does not reimplement the decision.
+
+**Calibration freezes its reference set** (spike-4). `ImprovementEvidence` expires at 30 days and
+`classify_correction` is deliberately precision-oriented, so the `architectural` bucket is both
+small and rotating. `calibration.py` reads it once, writes the set to the verifying artifact store,
+and every calibration record cites that artifact by digest. Recalibration writes a new artifact
+rather than mutating one, so a kappa reported in March remains checkable in September. The reported
+numbers are Cohen's kappa (chance-corrected: raw agreement overstates discrimination by 33–41
+percentage points, research finding 2) and a paired position-swap consistency figure, because kappa
+alone produces a false sense of having addressed judge reliability. A reference set below a declared
+floor makes the judge return `infra_failure` rather than an uncalibrated opinion.
+
+**`infra_failure`, `reject`, and `invalidated` are produced by three disjoint conditions.**
+`infra_failure` comes from `errors.InfraFailure`, raised for a contract-digest mismatch, an arm that
+would not spawn, unequal corpus digests, a baseline parity miss, a judge provider that could not be
+reached, or an uncalibrated judge. `reject` comes only from a completed measurement whose endpoints
+did not clear. `invalidated` comes only from `ArtifactIntegrityError`. The runner catches those three
+in separate handlers with no shared fall-through, and a test drives each one.
+
+**"No verdict" is checkable, not aspirational.** `verdict` is an `IndexedField` with a schema default
+of `inconclusive`, so an invalidated row cannot literally hold nothing. The rule is therefore
+expressed as behavior: on invalidation the runner writes `state="invalidated"`, leaves `verdict` at
+its default, and never writes `accept` or `reject`; `runner.has_verdict(evaluation)` returns True
+only for `state == "complete"`. Consumers read `has_verdict` before `verdict`, and a test pins that
+an invalidated row never carries `accept` or `reject`.
+
+**`VALOR_PROJECT_KEY` joins `_harness_env` in the shape `VALOR_CORRELATION_ID` already took.** It is
+resolved through `config/project_key_resolver.py` and added to the dict literal at
+`agent/session_executor.py:2116`, so `tools/memory_search/__init__.py:62` and
+`reflections/redis_access.py:40` stop silently falling back to `"valor"` inside an arm subprocess.
+This is a one-line addition with a two-line test, and it is in this lane because an arm that
+partitions on ambient environment is not an isolated arm.
 
 ## Failure Path Test Strategy
 

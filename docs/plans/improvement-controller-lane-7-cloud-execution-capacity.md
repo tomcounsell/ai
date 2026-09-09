@@ -205,7 +205,44 @@ The `op` check is the one that must run **on the machine that owns the `valor` p
 
 ## Solution
 
-<!-- skeleton -->
+### Key Elements
+
+- **Probe re-run under service-account auth** — the same `tools/improvement_resources.py::probe`, run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, with its result recorded as durable evidence rather than pasted into a report. spike-4 in lane 2b showed all four vault `unknown`s come from **one** failed listing, so one successful run resolves all four together.
+- **`tools/infrastructure_budget.py`** — unit 3's meter and admission gate. Computes the ISO-week window from `budget_week_start` and `budget_day_boundary`, forecasts a recurring charge for the remainder of the window and the next, refuses what it cannot forecast, tracks credits with their expiry and the paid rate that follows, and settles from a billing API or a `spend_receipt` row. It reads `weekly_infrastructure_usd` and nothing else; the paid-inference pool is not visible to it.
+- **`spend_receipt` as a first-class evidence kind** — added to `EVIDENCE_KINDS` with a TTL decision that outlives a budget week, so a settled dollar can still be audited when someone asks in month two.
+- **The teardown policy** — a written, tested ladder that says what a budget-exhausted window actually does, given that tearing down a running trial is the wrong answer. Encoded as code, not as prose in a doc.
+- **A cloud sandbox trial** — one worker-only sandbox that claims a research session from the shared queue, runs it through the official `claude` CLI, writes its evidence where the dashboard can read it, and survives a crash unattended. One is enough to convert an expectation into a measurement.
+- **`tools/improvement_operating_report.py`** — generates charter §2's five answers from records, including the fifth. Machine-generated so it cannot drift into optimistic prose between runs, and re-runnable so the next report is comparable to this one.
+- **The concurrency revisit** — a recorded, evidence-backed decision on `max_concurrent_research_sessions`, which may well be "unchanged, and here is why."
+
+### Flow
+
+**Charter §2 expectation** → Verify what we actually have (probe under service-account auth) → **Known resource position** → Decide the provider against a forecastable rate → **Admitted, reserved acquisition** → Run one session in the sandbox unattended → **Measured operating position** → Generate the five answers from records → **Progress report on #3177, including what still prevents the result**
+
+### Technical Approach
+
+**1. Verify before acquiring, and record the verification.** The probe re-run is the lane's first task and gates every acquisition task. Charter §8's "verify availability before relying on it" is satisfied by a recorded probe result, not by a builder's recollection. Any resource still `unknown` after the service-account run is treated as **absent for acquisition purposes and unknown for reporting purposes** — the probe's own asymmetry, carried forward: we do not acquire against an uncertain credential, and we do not report a resource missing on uncertain evidence.
+
+**2. The provider is chosen on forecastability, not on price alone.** Gap D already refuses a resource whose charge cannot be forecast. spike-6 makes that rule decisive rather than decorative: Cloudflare's Containers model is per-second metered with a small included allowance and a documented failure mode where a container runs indefinitely unless explicitly destroyed. A flat monthly rate is trivially forecastable; a per-second rate is forecastable only with a bounded duty cycle. The build records the comparison and the decision, and charter §8 names Cloudflare, so a decision *against* it needs its evidence written down.
+
+**3. Unit 3 has one reader and no bridge to unit 2.** `tools/infrastructure_budget.py` imports `weekly_infrastructure_usd`, `budget_week_start`, and `budget_day_boundary`, and never `daily_paid_inference_usd`. Charter §8 forbids moving spend between categories to evade a limit; the enforcement is that no code exists to do it, and an anti-criterion in Verification asserts the absence.
+
+**4. The teardown policy, stated.** A budget-exhausted window:
+
+- **closes admission** — no new acquisition, no renewal, no scale-up, for the remainder of the window;
+- **classifies each running resource** as `trial` (attached to an open experiment that is still gathering evidence) or `standing` (no open trial depends on it);
+- **tears down `standing` resources** at the end of the window, because idle capacity is not protecting evidence;
+- **lets `trial` resources run** to the trial's end or the end of the following window, whichever comes first, and **records the continuation as a forecast overrun against the next window before it accrues**, so the next window opens already reserved against rather than discovering the charge later;
+- **requires a verified evidence export as the precondition of every teardown.** A teardown that cannot confirm the export **fails closed, leaves the resource running, and escalates.** Losing a trial's evidence to save its hosting cost is the trade this policy exists to refuse;
+- **treats a resource it cannot confirm torn down as still running and still charging.** This mirrors the probe's `unknown` bias and answers spike-6 directly: with a provider whose documented default is to run forever unless destroyed, an unconfirmed teardown is the expensive failure, not the cheap one.
+
+**5. The sandbox is worker-only.** It runs `python -m worker` and the official `claude` CLI; it does not run the Telegram bridge, does not appear in `projects.json`, and is not reached by `remote-update.sh` (spikes 2 and 3). Code reaches it by image rebuild and redeploy. This is a genuinely different update contract from the fleet's, and saying so is cheaper than discovering it when `/update` reports success against a host it never touched.
+
+**6. Durable state is decided before anything is acquired.** spike-4 leaves two options with real costs. The build picks one, writes down why, and proves the choice by the dashboard rendering a sandbox session's evidence beside a local one's. A sandbox whose evidence the dashboard cannot see has not moved the operating model, however well it ran.
+
+**7. The report is generated, not written.** `tools/improvement_operating_report.py` reads records and emits the five answers. The fifth — what still prevents the intended result — is assembled from the recorded provisional assumptions, the `unknown` entries in the latest probe, and any resource refused by admission for want of a forecast. It is structurally impossible for it to come back empty while those inputs are non-empty, which is the property that makes the report worth reading.
+
+**8. The concurrency revisit is a decision with evidence, and the null result is a real outcome.** The hypothesis to test is that a sandbox adds a *machine*, not subscription capacity — Gap D budgets Claude work as subscription concurrency precisely because the subscription is the constraint, and spike-1 confirms sandbox sessions draw on the same subscription under the same "ordinary, individual usage" standard. If that holds, the correct outcome is `max_concurrent_research_sessions` unchanged with the reasoning recorded, and the `le=4` bound at `config/settings.py:609` untouched. Raising it needs evidence that concurrency, not the subscription, was the binding constraint.
 
 ## Failure Path Test Strategy
 
