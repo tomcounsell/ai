@@ -109,9 +109,14 @@ TEAMMATE_TURN_TIMEOUT_S: float = float(
     os.environ.get("SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S", "900")
 )
 
-# TTL (seconds) on the per-session `timeout-notice-sent:{session_id}` dedupe
-# key that makes TIMEOUT_NEEDS_ATTENTION_MESSAGE a once-per-SESSION notice
-# rather than a once-per-RUN one (#3270 defect 7). PROVISIONAL/TUNABLE --
+# TTL (seconds) on the `timeout-notice-sent:{session_id}:{run_id}` dedupe key
+# that stops TIMEOUT_NEEDS_ATTENTION_MESSAGE from being re-posted on every
+# re-run of one stranded row (#3270 defect 7). The TTL is deliberately long
+# relative to the re-enqueue cadence: the incident re-ran the same row hourly
+# for hours, so a short TTL would expire between re-runs and re-spam. It is
+# safe to be long ONLY because the key is run-scoped -- a later, unrelated
+# request in the same thread carries a new record id and a fresh key.
+# PROVISIONAL/TUNABLE --
 # grain of salt: sized to comfortably outlive a stranded row's re-enqueue
 # cadence (the incident re-ran the same row hourly for hours), while still
 # expiring so abandoned sessions need no cleanup step. Override with
@@ -263,7 +268,7 @@ RUNNER_ERROR_USER_MESSAGE = (
 )
 
 
-def _claim_timeout_notice(session_id: str) -> bool:
+def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
     """Claim the right to deliver the timeout needs-attention notice ONCE.
 
     ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` describes a *session-level* condition
@@ -272,9 +277,22 @@ def _claim_timeout_notice(session_id: str) -> bool:
     incident posted the byte-identical text into a chat once per re-enqueue.
 
     Follows this repo's established one-shot-notice convention (Redis SETNX on
-    a per-session key with a TTL, e.g. ``failed-sent:{session_id}`` in
-    ``agent.session_executor``): the first caller wins, later callers are
-    suppressed. The key is a plain Redis string, NOT an AgentSession field --
+    a keyed marker with a TTL, e.g. ``self_draft_completed_flush_sent:``
+    ``{session_id}:{run_id}`` in ``agent.session_health``): the first caller
+    wins, later callers are suppressed.
+
+    **Scoped per-RUN, not per-thread.** The key carries the AgentSession
+    record's ``id`` alongside the thread ``session_id``. A resumed session
+    reuses its thread ``session_id``, so a ``session_id``-only key would
+    silently swallow the notice for a *later, unrelated* request in the same
+    chat thread -- and that suppression is unrecoverable, because
+    ``ExitReason.TURN_TIMEOUT`` is ``wrapup_eligible=False``
+    (``agent/session_runner/router.py``), so the wrap-up guard never fires to
+    say anything else. The human would get pure silence for a request they
+    made hours later. Re-runs of the SAME stranded row keep the same record
+    ``id``, which is the #3270 spam this dedupes.
+
+    The key is a plain Redis string, NOT an AgentSession field --
     a bare ``save()`` on an AgentSession is a lifecycle write (popoto's default
     save path is a full HSET and ``status`` is an ``IndexedField``), so a
     cosmetic dedupe marker must never travel on that path.
@@ -284,9 +302,13 @@ def _claim_timeout_notice(session_id: str) -> bool:
     turn that was preempted mid-flight.
 
     Args:
-        session_id: The AgentSession the notice would be delivered for. An
+        session_id: The chat thread the notice would be delivered to. An
             empty id means the row is unidentifiable, so no dedupe is possible
             and the notice is delivered.
+        run_id: The AgentSession record's ``id``, minted fresh on every
+            reply-resume. Empty is safe: it degrades to a thread-wide key for
+            a row that has no id yet, which cannot collide with an identified
+            row's key.
 
     Returns:
         True if this run owns the send, False if an earlier run already sent it.
@@ -298,7 +320,7 @@ def _claim_timeout_notice(session_id: str) -> bool:
 
         claimed = bool(
             POPOTO_REDIS_DB.set(
-                f"timeout-notice-sent:{session_id}",
+                f"timeout-notice-sent:{session_id}:{run_id}",
                 "1",
                 nx=True,
                 ex=TIMEOUT_NOTICE_DEDUP_TTL_S,
@@ -928,7 +950,8 @@ class SessionRunner:
                         # in the transcript; surface needs-attention -- but at
                         # most ONCE per session, not once per run (#3270).
                         if _claim_timeout_notice(
-                            str(getattr(self._agent_session, "session_id", "") or "")
+                            str(getattr(self._agent_session, "session_id", "") or ""),
+                            str(getattr(self._agent_session, "id", "") or ""),
                         ):
                             self._adapter.on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)
                         summary.exit_reason = ExitReason.TURN_TIMEOUT

@@ -888,7 +888,6 @@ class TelegramRelayOutputHandler:
                         if _ctx.pop("deferred_self_draft_pending", None) is not None:
                             _ctx.pop("deferred_self_draft_text", None)
                             _target.extra_context = _ctx
-                            _target.save(update_fields=["extra_context"])
                             # Stamp response_delivered_at (#3270). Reaching
                             # here means the agent redrafted a deferred reply
                             # and this send is delivering it — the second of
@@ -908,9 +907,20 @@ class TelegramRelayOutputHandler:
                             # mirrors: any caller that keeps holding this
                             # object and later hands it to a lifecycle write
                             # would otherwise persist the pre-stamp snapshot.
+                            #
+                            # Both mutations land in ONE narrow save: the
+                            # cleared `extra_context` and the stamp describe
+                            # the same delivery, and a single write keeps them
+                            # from ever persisting apart.
                             _stamp_at = datetime.now(UTC)
                             _target.response_delivered_at = _stamp_at
-                            _target.save(update_fields=["response_delivered_at", "updated_at"])
+                            _target.save(
+                                update_fields=[
+                                    "extra_context",
+                                    "response_delivered_at",
+                                    "updated_at",
+                                ]
+                            )
                             if session is not _target:
                                 session.response_delivered_at = _stamp_at
                     except Exception as _clear_err:

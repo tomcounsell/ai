@@ -846,7 +846,14 @@ def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[
         return ("unknown", None)
 
     def _same_lane(row) -> bool:
-        """Eligibility for BOTH rungs: this row belongs to this lane, period."""
+        """Eligibility for BOTH rungs: this row belongs to this lane, period.
+
+        A falsy ``lane_slug`` admits NOTHING, so the caller falls through to
+        ``("create", None)``. That is the intended fail-closed direction: with
+        no lane to match, #3270's defect was picking the most-recently-updated
+        eng row, which was routinely a slugless human conversation thread.
+        Creating a fresh session is always safe; resuming a stranger's is not.
+        """
         slug = getattr(row, "slug", None)
         return bool(lane_slug) and slug is not None and slug == lane_slug
 
