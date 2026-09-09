@@ -396,6 +396,23 @@ def create_app() -> FastAPI:
             {"coverage": get_coverage(project_key=project_key)},
         )
 
+    @app.get("/_partials/improvement/goals/", response_class=HTMLResponse)
+    def partial_improvement_goals(request: Request, project_key: str = "valor"):
+        """HTMX partial: the charter §11 readable record (#3255).
+
+        Which charter the work is ranked under, the §3 priorities, the open
+        cases and why each ranks where it does, and an explicit note for every
+        heading no lane writes yet. Empty sections name the lane that fills
+        them rather than showing a zero.
+        """
+        from ui.data.improvement import get_goals
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/goals.html",
+            {"goals": get_goals(project_key=project_key)},
+        )
+
     @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
     def partial_improvement_burden(request: Request, project_key: str = "valor"):
         """HTMX partial: how often a human had to step in, and of what kind (#3177)."""

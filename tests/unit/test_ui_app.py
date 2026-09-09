@@ -723,14 +723,49 @@ class TestImprovementPartials:
         import ui.data.improvement as improvement_data
 
         exported = [n for n in dir(improvement_data) if n.startswith("get_")]
+        # Stays an exact list on purpose: it is what stops a later lane from
+        # quietly adding an activity counter beside the honest panels.
         assert exported == [
             "get_coverage",
+            "get_goals",
             "get_intervention_burden",
             "get_provisional_assumptions",
         ]
 
-    def test_index_page_links_both_improvement_partials(self, client):
+    def test_index_page_links_all_improvement_partials(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
+        assert "/_partials/improvement/goals/" in resp.text
         assert "/_partials/improvement/coverage/" in resp.text
         assert "/_partials/improvement/burden/" in resp.text
+
+    def test_goals_partial_renders_on_an_empty_namespace(self, client):
+        """An unseeded project says so, and names no zero."""
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "No charter seeded" in resp.text
+        assert "improvement-goals" in resp.text
+
+    def test_goals_partial_attributes_every_empty_section_to_a_lane(self, client):
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        for heading in ("Acquired abilities", "Evaluations", "Rejected approaches"):
+            assert heading in resp.text
+        assert "Nothing yet;" in resp.text
+
+    def test_goals_partial_renders_a_seeded_charter_with_its_full_digest(self, client, tmp_path):
+        """The digest renders in full: comparing it by eye is the point."""
+        from models.improvement_charter import _CHARTER_PATH, ImprovementCharter
+
+        pk = "test-3255-goals"
+        copy = tmp_path / "charter.md"
+        copy.write_bytes(_CHARTER_PATH.read_bytes())
+        seeded = ImprovementCharter.load_from_file(copy, project_key=pk)
+
+        resp = client.get(f"/_partials/improvement/goals/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert seeded.digest in resp.text
+        assert "No charter seeded" not in resp.text
