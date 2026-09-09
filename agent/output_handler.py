@@ -1539,6 +1539,15 @@ class TelegramRelayOutputHandler:
         signature. The extra fields are merged into the event dict after the
         base fields are populated, so they can never shadow ``type``, ``ts``,
         ``chat_id``, ``reason``, or ``draft_preview``.
+
+        The save is narrowed to ``["session_events", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so appending a best-effort event to a possibly-stale
+        ``session`` object was silently authorized to rewrite the row's
+        lifecycle state and its status index, with no LIFECYCLE log and — the
+        sharpest irony of the write — no ``session_events`` entry recording it.
         """
         if session is None:
             return
@@ -1557,7 +1566,7 @@ class TelegramRelayOutputHandler:
             events.append(event)
             session.session_events = events
             if hasattr(session, "save"):
-                session.save()
+                session.save(update_fields=["session_events", "updated_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("RTR event append failed (non-fatal): %s", e)
 
