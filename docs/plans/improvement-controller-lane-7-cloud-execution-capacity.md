@@ -176,9 +176,10 @@ The join between the flows is the fifth answer. Flow A's remaining budget and Fl
 ## Architectural Impact
 
 - **New dependencies**: one infrastructure provider account (Cloudflare by default under charter §8, decided in task 2), its CLI (`wrangler`, currently `absent` on the probing machine), and a container image definition for the worker. No new Python runtime dependency is expected; the budget meter is stdlib plus Popoto.
-- **Interface changes**: `ImprovementEvidence.EVIDENCE_KINDS` gains `spend_receipt` — an additive change to a module constant that is read by `record_once` and asserted by tests. `ImprovementSettings` gains no new fields if #3255 lands as written; the only candidate change is relaxing the `le=4` bound on `max_concurrent_research_sessions`, and that happens only if task 9's evidence supports it.
+- **Interface changes**: `ImprovementEvidence.EVIDENCE_KINDS` gains `spend_receipt` and `resource_probe` — additive changes to a module constant that is read by `record_once` and asserted by tests. The constant's comment calls it "low-cardinality on purpose" because it backs an index, so each addition is an index-cardinality decision argued in the docstring, not a free append. `ImprovementSettings` gains no new fields if #3255 lands as written; the only candidate change is relaxing the `le=4` bound on `max_concurrent_research_sessions`, and that happens only if task 9's evidence supports it.
 - **Coupling**: this lane deliberately **decreases** coupling in one place and increases it in another. It decreases it by proving the worker is separable from the bridge and from launchd, which the codebase asserts in a docstring and has never demonstrated. It increases it by making durable state a network dependency: today a worker that loses Redis has lost localhost, which does not happen; tomorrow it has lost a network hop, which does.
-- **Data ownership**: unchanged for sessions and evidence — Redis and Popoto stay authoritative. New: the infrastructure ledger (reservations, settlements, credit expiries) is owned by this lane's meter, and receipts are owned by `ImprovementEvidence`. The vault stays the sole owner of credentials.
+- **Data ownership**: unchanged for sessions and evidence — Redis and Popoto stay authoritative. New: the infrastructure ledger (reservations, settlements, credit expiries) is owned by this lane's meter as ordinary Popoto models, and receipts are owned by `ImprovementEvidence`. One exception, declared rather than discovered: the unit-3 window counter is a plain Redis key, `improvement:budget:unit3:{window_key}`, outside Popoto so it can be reserved atomically; it migrates into lane 3's control namespace when #3215 lands. The vault stays the sole owner of credentials.
+- **Retention root**: this lane takes ownership of where improvement artifacts persist. `POPOTO_IMPROVEMENT_CONTENT_PATH` currently defaults to `data/improvement_content` inside the checkout (`models/verifying_artifact_store.py:45-56`), which a container rebuild destroys; task 7 supersedes it and publishes the destination contract lane 3's export/import will write against.
 - **Reversibility**: high, and deliberately so. Every artifact is additive: a new tool module, a new evidence kind, a new infra doc, a new report. Tearing the lane out means destroying a provider account and deleting three files. **The one irreversible act is spending money**, which is why admission refuses an unforecastable charge rather than reserving optimistically and reconciling later.
 
 ## Appetite
@@ -211,7 +212,7 @@ The `op` check is the one that must run **on the machine that owns the `valor` p
 
 - **Probe re-run under service-account auth** — the same `tools/improvement_resources.py::probe`, run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, with its result recorded as durable evidence rather than pasted into a report. spike-4 in lane 2b showed all four vault `unknown`s come from **one** failed listing, so one successful run resolves all four together.
 - **`tools/infrastructure_budget.py`** — unit 3's meter and admission gate. Computes the ISO-week window from `budget_week_start` and `budget_day_boundary`, forecasts a recurring charge for the remainder of the window and the next, refuses what it cannot forecast, tracks credits with their expiry and the paid rate that follows, and settles from a billing API or a `spend_receipt` row. It reads `weekly_infrastructure_usd` and nothing else; the paid-inference pool is not visible to it.
-- **`spend_receipt` as a first-class evidence kind** — added to `EVIDENCE_KINDS` with a TTL decision that outlives a budget week, so a settled dollar can still be audited when someone asks in month two.
+- **`spend_receipt` and `resource_probe` as first-class evidence kinds** — added to `EVIDENCE_KINDS` with a TTL decision that outlives a budget week, so a settled dollar can still be audited when someone asks in month two, and a probe result is a queryable record rather than one more `other` row. Lane 3 owns `resource_acquired` and adds it itself; the ownership split is declared in the module so the two lanes rebase instead of colliding.
 - **The teardown policy** — a written, tested ladder that says what a budget-exhausted window actually does, given that tearing down a running trial is the wrong answer. Encoded as code, not as prose in a doc.
 - **A cloud sandbox trial** — one worker-only sandbox that claims a research session from the shared queue, runs it through the official `claude` CLI, writes its evidence where the dashboard can read it, and survives a crash unattended. One is enough to convert an expectation into a measurement.
 - **`tools/improvement_operating_report.py`** — generates charter §2's five answers from records, including the fifth. Machine-generated so it cannot drift into optimistic prose between runs, and re-runnable so the next report is comparable to this one.
@@ -441,15 +442,17 @@ The agent reaches new `tools/` code through a CLI entry point in `pyproject.toml
 
 ## Success Criteria
 
-- [ ] The resource probe has been re-run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, and its result is recorded as durable evidence. No resource is reported `absent` on the strength of a run that could not read the vault.
-- [ ] The provider decision is recorded with its arithmetic against the $50/week unit, including the case against the options not chosen. Charter §8 names Cloudflare, so a decision away from it carries its evidence.
+- [ ] The resource probe has been re-run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, and its result is recorded as **one immutable `resource_probe` evidence row**. No resource is reported `absent` on the strength of a run that could not read the vault.
+- [ ] The provider decision is recorded with its arithmetic against the $50/week unit under a named duty cycle, including the case against the options not chosen. Charter §8 names Cloudflare, so a decision away from it carries its evidence.
+- [ ] **The sandbox's authentication mode is a recorded verdict with its evidence** — mode A (subscription on a host we operate, existing code path unchanged), mode B (unresolved, so no subscription-auth trial), or mode C (deferred to its own issue). A trial that ran without a recorded verdict does not satisfy this lane, and neither does a verdict inferred rather than evidenced.
+- [ ] **The artifact retention root is superseded off the checkout**, an artifact written from the sandbox loads hash-verified from a local process, and the export/import destination contract is documented for lane 3 to write against.
 - [ ] `tools/infrastructure_budget.py` admits and refuses against unit 3, computes the window from `budget_week_start` and `budget_day_boundary`, discloses both on every decision, refuses any resource whose charge cannot be forecast, and settles missing metering at the forecast rather than at zero.
-- [ ] `spend_receipt` is a recognized `EVIDENCE_KIND` with a TTL that outlives a budget week, and a receipt round-trips through `record_once` without being coerced to `"other"`.
+- [ ] `spend_receipt` and `resource_probe` are recognized `EVIDENCE_KINDS` with a TTL that outlives a budget week, and a row of each round-trips through `record_once` without being coerced to `"other"`. `resource_acquired` is left to lane 3, and the ownership split is written in `models/improvement_evidence.py` beside the constant.
 - [ ] The teardown policy is implemented and tested: admission closes, `standing` resources are torn down, `trial` resources continue to a bounded horizon with the overrun booked against the next window before it accrues, and **every teardown is gated on a verified evidence export that fails closed**.
 - [ ] At least one RSI session has run **unattended in a cloud sandbox**, crossing a credential-refresh boundary and surviving at least one induced crash, with its evidence, its budget settlement, and its recovery recorded.
 - [ ] The dashboard renders that sandbox session's evidence beside a local session's. A run whose evidence the dashboard cannot see does not satisfy this lane.
 - [ ] `max_concurrent_research_sessions` has a recorded, evidence-backed decision. "Unchanged, because the subscription and not the machine is the binding constraint" is a passing outcome; leaving the question open is not.
-- [ ] The charter §2 progress report is posted on #3177 and answers all five questions — which sessions run in cloud sandboxes, whether the loop continues unattended, what resources sustain it, what they cost against the $50/week unit with both window boundaries disclosed, and **what still prevents mostly-cloud operation**. The fifth answer is non-empty.
+- [ ] The charter §2 progress report is posted on #3177 **as soon as phase 2 completes, without waiting on the trial**, and answers all five questions — which sessions run in cloud sandboxes, whether the loop continues unattended, what resources sustain it, what they cost against the $50/week unit with both window boundaries disclosed, and **what still prevents mostly-cloud operation**. The fifth answer is non-empty.
 - [ ] Every unresolved factual claim from this lane is recorded as a provisional assumption with its evidence, confidence, consequence, and the observation that would overturn it — charter §9's shape, not a hedge in prose.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`), including the `docs/infra/` record
@@ -463,19 +466,19 @@ The lane splits cleanly into three phases with different risk profiles, and the 
 
 - **Spike agent (decisions)**
   - Name: `capacity-spiker`
-  - Role: Tasks 1 through 3. Re-runs the probe, reads live provider pricing, and answers the sandbox-feasibility question. Produces recorded findings and decisions; writes no production code.
+  - Role: Tasks 2 through 4. Re-runs the probe, reads live provider pricing, and answers the sandbox-feasibility and authentication-mode questions. Produces recorded findings and decisions; writes no production code.
   - Agent Type: general-purpose, worktree isolation
   - Resume: true
 
 - **Builder (budget, policy, records)**
   - Name: `budget-builder`
-  - Role: Tasks 4 through 6. Durable-state topology, the `spend_receipt` addition, the meter, and the teardown policy.
+  - Role: Tasks 1, 5, 6, 7, and 10. The evidence-kind additions, the meter and teardown policy, the §2 report, the durable-state topology and retention root, and the concurrency revisit.
   - Agent Type: builder. Domain: Redis/Popoto data — no raw Redis operations, model changes carry an idempotent migration registered in `MIGRATIONS`, index cardinality respected.
   - Resume: true
 
 - **Builder (sandbox trial)**
   - Name: `sandbox-builder`
-  - Role: Tasks 7 and 8. Acquisition under admission, credential storage through lane 3's vault writer, and the unattended trial.
+  - Role: Tasks 8 and 9. Acquisition under admission, credential storage through lane 3's vault writer, and the unattended trial. Runs only when #3215 has landed and task 4 returned auth mode A.
   - Agent Type: builder. Domain: security/untrusted-input — no credential in a log, a message, an argv, or a commit; compare by SHA-256 fingerprint and never echo a secret or any prefix of one.
   - Resume: true
 
@@ -487,11 +490,11 @@ The lane splits cleanly into three phases with different risk profiles, and the 
 
 - **Documentarian**
   - Name: `capacity-scribe`
-  - Role: Task 11. Feature docs, the `docs/infra/` record, and the index entries.
+  - Role: Task 11. Feature docs, the `docs/infra/` record, and the index entries — describing what actually landed, including a phase 3 that did not run.
   - Agent Type: documentarian
   - Resume: true
 
-**Two builders, and they must not share a worktree.** `budget-builder` and `sandbox-builder` are sequenced by dependency, not run in parallel: task 7 admits through task 6's meter. Shared-worktree builders have livelocked on this repository before, converging on each other's design simultaneously. If the phases are ever genuinely overlapped, the file-level ownership split is `tools/infrastructure_budget.py` plus `models/improvement_evidence.py` for the first and the deployment artifacts for the second, declared before either starts.
+**Two builders, and they must not share a worktree.** `budget-builder` and `sandbox-builder` are sequenced by dependency, not run in parallel: task 8 admits through task 5's meter. Shared-worktree builders have livelocked on this repository before, converging on each other's design simultaneously. If the phases are ever genuinely overlapped, the file-level ownership split is `tools/infrastructure_budget.py`, `tools/improvement_operating_report.py`, `models/improvement_evidence.py`, and `models/verifying_artifact_store.py` for the first, and the deployment artifacts for the second, declared before either starts.
 
 The validator gets its own worktree. A mutation review whose author is editing the same checkout corrupts both directions of the measurement.
 
