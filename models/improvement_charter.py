@@ -23,7 +23,7 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   and leaves the first exactly as it was, which is what keeps an old release
   auditable against the charter it was admitted under. ``state`` keeps its
   two-value vocabulary for a human-driven supersede later; the loader simply
-  never writes it. The controller cannot write this model at all — amending its
+  never writes it. The controller cannot write this model at all: amending its
   own objectives, authority, or budgets is outside every authority it holds.
   Only a human, through the charter file itself or a migration, writes a
   charter.
@@ -41,6 +41,7 @@ human-approved scope on top of them. See
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,8 +71,8 @@ CHARTER_STATES: tuple[str, ...] = ("active", "superseded")
 CHARTER_OWNER = "Tom Counsell"
 
 #: The charter file, anchored to this module's own checkout rather than to the
-#: process cwd. Callers start from different directories — a reflection tick, a
-#: FastAPI process, a ``.worktrees/`` checkout — and a cwd-relative default
+#: process cwd. Callers start from different directories (a reflection tick, a
+#: FastAPI process, a ``.worktrees/`` checkout), and a cwd-relative default
 #: would seed a different file, or none, per caller while a missing file
 #: returns None silently.
 _CHARTER_PATH = Path(__file__).resolve().parents[1] / "docs" / "improvement-charter.md"
@@ -147,7 +148,7 @@ class ImprovementCharter(Model):
     @classmethod
     def load_from_file(
         cls,
-        path: Path = _CHARTER_PATH,
+        path: Path | str = _CHARTER_PATH,
         project_key: str = "valor",
     ) -> ImprovementCharter | None:
         """Seed one immutable charter row from the charter file.
@@ -172,32 +173,36 @@ class ImprovementCharter(Model):
 
         Tolerated race: the digest lookup and the ``create()`` are not atomic,
         so two simultaneous callers can both miss and both create. Duplicate
-        rows for one digest are harmless — rows are immutable and identical for
-        a given digest — and :meth:`pinned` resolves by newest ``created_at``
+        rows for one digest are harmless: rows are immutable and identical for
+        a given digest, and :meth:`pinned` resolves by newest ``created_at``
         regardless of how many share a digest. Making this a compare-and-set
         would need an atomic primitive in a control namespace that does not
         exist yet.
         """
-        # Imported inside the method, not at module scope. `tools.sdlc_verdict`
-        # reaches `agent.sdlc_router`, which imports `agent/__init__`, which
-        # imports `models/__init__` — so a module-level import here closes a
-        # cycle that breaks any process importing the SDLC tools first.
-        from tools.sdlc_verdict import compute_plan_hash
-
+        # The digest, frontmatter, and text all come from one buffer read here,
+        # inside the try. Three separate reads used to run: a file edited
+        # between them could yield a stored `text` that does not hash to its
+        # `digest`, and the third read sat outside the try so a mid-read OSError
+        # propagated instead of honoring this docstring's "None when the file
+        # cannot be read" contract.
         path = Path(path)
-        digest = compute_plan_hash(path)
-        if digest is None:
-            logger.warning("improvement charter: unreadable at %s; not seeding", path)
-            return None
-
         try:
-            frontmatter = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            raw = path.read_bytes()
+            text = raw.decode("utf-8")
+            frontmatter = _parse_frontmatter(text)
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
-            logger.warning("improvement charter: frontmatter unparseable at %s: %s", path, e)
+            logger.warning("improvement charter: unreadable at %s: %s", path, e)
             return None
         if frontmatter is None:
             logger.warning("improvement charter: no usable frontmatter at %s", path)
             return None
+
+        # Same normalization tools.sdlc_verdict.compute_plan_hash applies (CRLF
+        # and stray CR collapse to LF before hashing), reused here as a formula
+        # instead of a second file read: a CRLF checkout of the charter digests
+        # identically to an LF one.
+        normalized = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        digest = f"sha256:{hashlib.sha256(normalized).hexdigest()}"
 
         if frontmatter.get("owner") != CHARTER_OWNER:
             logger.warning(
@@ -217,7 +222,7 @@ class ImprovementCharter(Model):
             "created_at": datetime.now(UTC),
             "state": "active",
             "digest": digest,
-            "text": path.read_text(encoding="utf-8"),
+            "text": text,
         }
         effective = frontmatter.get("effective")
         if effective is not None:

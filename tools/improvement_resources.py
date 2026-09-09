@@ -1,16 +1,16 @@
 """Charter §8: verify each named resource before relying on it.
 
-Charter §8 lists what the loop may use — a browser, personal and work Google
+Charter §8 lists what the loop may use (a browser, personal and work Google
 Workspace accounts, a virtual debit card, a funded Cloudflare account and its
-connected CLI — and then says the part that matters here: "These are expected
+connected CLI) and then says the part that matters here: "These are expected
 capabilities, not a claim that every credential or integration currently works.
 Verify availability before relying on it." ``probe`` is that verification.
 
 Three states, and the default is the honest one:
 
-- ``verified`` — the resource was found.
-- ``absent`` — a successful, parseable listing did not contain it.
-- ``unknown`` — anything else at all.
+- ``verified``: the resource was found.
+- ``absent``: a successful, parseable listing did not contain it.
+- ``unknown``: anything else at all.
 
 ``unknown`` is written on every uncertainty, never ``absent``. Reporting a
 resource absent when it exists sends the next lane out to acquire something
@@ -177,7 +177,7 @@ def _probe_cloudflare_cli(runner: Runner) -> dict:
     one distinction that matters here: ``FileNotFoundError`` means the binary
     genuinely is not on PATH (``absent``), while a timeout, an ``OSError``, or
     any other failure means the check was inconclusive (``unknown``). Reusing
-    ``_run`` would make a `wrangler` timeout report `absent` — a certain
+    ``_run`` would make a `wrangler` timeout report `absent`: a certain
     answer to an uncertain question, and the specific harm the three-state
     vocabulary exists to prevent.
     """

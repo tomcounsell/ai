@@ -4,7 +4,7 @@ Charter §8 names the resources the loop may use and then says the quiet part:
 "These are expected capabilities, not a claim that every credential or
 integration currently works. Verify availability before relying on it." The
 probe is that verification, and it has two obligations that pull against each
-other — report enough to be useful, and never emit a credential.
+other: report enough to be useful, and never emit a credential.
 
 Two properties carry most of the weight here. ``unknown`` is the honest default
 on any uncertainty, because reporting ``absent`` for a resource that exists
@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import sys
 
 import pytest
 
-from tools.improvement_resources import RESOURCES, STATES, probe
+from tools.improvement_resources import RESOURCES, STATES, _default_runner, probe
 
 FAKE_CREDENTIAL = "cf-tok-ZZQQ-distinctive-sentinel-9174"
 
@@ -198,10 +199,16 @@ class TestNeverRaises:
 
         assert set(report) == set(RESOURCES)
 
-    def test_the_default_runner_is_used_when_none_is_given(self):
-        """No injection: it shells out for real and still returns a full report."""
-        report = probe()
+    def test_the_default_runner_shells_out_and_captures_output(self):
+        """Exercise ``_default_runner`` directly with a harmless argv, not the real
 
-        assert set(report) == set(RESOURCES)
-        for entry in report.values():
-            assert entry["state"] in STATES
+        ``op``/``wrangler`` binaries. ``probe()`` with no injection would shell out
+        for real and wait the full 15s timeout on a machine without a service
+        account token; that belongs in a manual verification row, not the unit
+        suite.
+        """
+        result = _default_runner([sys.executable, "-c", "print('probe-ok')"])
+
+        assert isinstance(result, subprocess.CompletedProcess)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "probe-ok"

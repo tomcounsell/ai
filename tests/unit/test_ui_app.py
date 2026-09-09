@@ -769,3 +769,52 @@ class TestImprovementPartials:
         assert resp.status_code == 200
         assert seeded.digest in resp.text
         assert "No charter seeded" not in resp.text
+
+    def test_goals_partial_reports_unavailable_when_the_charter_read_raises(
+        self, client, monkeypatch
+    ):
+        """A broken charter query must not read as an honest zero."""
+        from models.improvement_charter import ImprovementCharter
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("charter store unreachable")
+
+        monkeypatch.setattr(ImprovementCharter, "pinned", classmethod(_raise))
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "The charter record could not be read" in resp.text
+        assert "No charter seeded" not in resp.text
+
+    def test_goals_partial_reports_unavailable_when_the_case_read_raises(self, client, monkeypatch):
+        """A broken case query must not read as an honest zero."""
+        from models.improvement_case import ImprovementCase
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("case store unreachable")
+
+        monkeypatch.setattr(ImprovementCase.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "Case records unavailable" in resp.text
+        assert "No cases opened yet" not in resp.text
+
+    def test_goals_partial_reports_unavailable_when_the_assumption_read_raises(
+        self, client, monkeypatch
+    ):
+        """A broken assumption query must not read as an honest zero."""
+        import ui.data.improvement as improvement_data
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("assumption read failed")
+
+        monkeypatch.setattr(improvement_data, "get_provisional_assumptions", _raise)
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "Assumptions unavailable" in resp.text
+        assert "Nothing proceeding on an unresolved assumption" not in resp.text

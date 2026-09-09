@@ -7,7 +7,7 @@ to have: it is idempotent per digest, it is append-only, it refuses a file Tom
 does not own, and it resolves the same charter regardless of the caller's cwd.
 
 Uses the autouse ``redis_test_db`` fixture (tests/conftest.py), which claims a
-per-worker test DB — production Redis is never touched. Rows are written under
+per-worker test DB, production Redis is never touched. Rows are written under
 a test-scoped ``project_key``, except the one case that must call
 ``load_from_file()`` with no arguments at all to exercise the module-anchored
 default; that row lands under the default ``valor`` key inside the claimed test
@@ -110,8 +110,8 @@ class TestAppendOnly:
         """The charter text survives the round trip, not just the digest.
 
         popoto hydrates a queried row lazily, so a ``ContentField`` reads back
-        as its ``$CF:`` store reference rather than as content — the same shape
-        ``ImprovementExperiment.manifest`` has. Resolving the reference through
+        as its ``$CF:`` store reference rather than as content (the same shape
+        ``ImprovementExperiment.manifest`` has). Resolving the reference through
         the store is what proves the text was really written.
         """
         seeded = ImprovementCharter.load_from_file(charter_copy, project_key=PK)
@@ -214,7 +214,7 @@ class TestNoImportCycle:
         ``tools.sdlc_verdict`` reaches ``agent.sdlc_router``, which imports
         ``agent/__init__``, which imports ``models/__init__``. A module-level
         ``compute_plan_hash`` import here therefore breaks any process that
-        imports the SDLC tools before ``models`` — which every ``sdlc-tool``
+        imports the SDLC tools before ``models``, which every ``sdlc-tool``
         entry point does. A subprocess is the only honest check: this test
         process has already imported ``models``, so the cycle cannot reproduce
         in it.

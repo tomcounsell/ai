@@ -106,7 +106,9 @@ def is_open_source(project_key: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) 
             text=True,
             timeout=10,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
+        # OSError covers a missing `gh` binary (FileNotFoundError is one of its
+        # subclasses), so it does not need naming separately.
         logger.warning("improvement eligibility: gh failed for %s: %s", repository, e)
         return False
 

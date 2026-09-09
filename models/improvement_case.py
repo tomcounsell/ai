@@ -9,10 +9,9 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
 - Three IndexedFields, all low-cardinality: ``state`` (seven values, see
   :data:`CASE_STATES`), ``priority`` (four values), and ``priority_area``
   (eleven values, see :data:`PRIORITY_AREAS`). They are three orthogonal
-  readings of one case — lifecycle, urgency, and charter §3 classification —
-  and the goals partial reads all three. ``revision`` is an ``IntField`` and is
-  deliberately not indexed — it grows without bound, and neither is
-  ``charter_digest``.
+  readings of one case (lifecycle, urgency, and charter §3 classification),
+  and the goals partial reads all three. ``revision`` (an ``IntField``) and
+  ``charter_digest`` are deliberately not indexed: both are unbounded.
 - **The projection is not the authority.** The control journal's Redis head
   holds the authoritative state and revision; this row is the queryable
   projection of it, updated through ORM ``save()`` after the journal commits.

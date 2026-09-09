@@ -198,7 +198,7 @@ def get_provisional_assumptions(
 
 
 #: Charter §3's early priorities, in the charter's own order. Strong starting
-#: hypotheses, explicitly "not a fixed allocation or permanent ordering" — the
+#: hypotheses, explicitly "not a fixed allocation or permanent ordering": the
 #: partial says so, because a list rendered without that sentence reads as a
 #: quota.
 CHARTER_PRIORITIES = (

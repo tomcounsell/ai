@@ -66,18 +66,18 @@ entries (`bridge/dispatch.py::_append_inbound_chat_log`) and `Memory` rows with
 read — its only assigner has no production caller, which would reproduce the
 exact defect the table below records as retired.
 
-## Lane 2b — charter v2 delta
+## Lane 2b: charter v2 delta
 
 | Component | Implemented | Deployed | Measured | Effect |
 |---|---|---|---|---|
-| `ImprovementCharter.digest` / `effective` / `text` | yes | yes (schema is live once merged) | no | n/a — storage, not behavior |
-| `ImprovementCharter.load_from_file` seed | yes | no caller yet — lane 3's tick is the first | no | unknown |
+| `ImprovementCharter.digest` / `effective` / `text` | yes | yes (schema is live once merged) | no | n/a (storage, not behavior) |
+| `ImprovementCharter.load_from_file` seed | yes | no caller yet (lane 3's tick is the first) | no | unknown |
 | `ImprovementCharter.pinned` | yes | read by the goals partial | no | n/a |
-| `PRIORITY_AREAS` + `priority_area` / `ranking_rationale` | yes | no writer yet — lane 3 opens the first case | no | n/a |
+| `PRIORITY_AREAS` + `priority_area` / `ranking_rationale` | yes | no writer yet (lane 3 opens the first case) | no | n/a |
 | `charter_digest` on case, investigation, release | yes | no writer yet | no | n/a |
 | `objective` deleted | yes | yes, no rows existed | n/a | n/a |
-| Three budget units in `ImprovementSettings` | yes | yes, defaults only | **no** | n/a — declared limits, nothing meters them |
-| `is_open_source` charter §7 guard | yes | no caller yet — lane 3 routes the first session | no | unknown |
+| Three budget units in `ImprovementSettings` | yes | yes, defaults only | **no** | n/a (declared limits, nothing meters them) |
+| `is_open_source` charter §7 guard | yes | no caller yet (lane 3 routes the first session) | no | unknown |
 | `probe()` charter §8 verification | yes | run by hand, see below | **yes, once** | n/a |
 | Goals partial (`/_partials/improvement/goals/`) | yes | yes | no | n/a |
 | `confirm_improvement_v2_fields` migration | yes | on the next `/update` per machine | no | n/a |

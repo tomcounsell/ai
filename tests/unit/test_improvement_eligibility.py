@@ -3,7 +3,7 @@
 Charter §7 draws one line: any provider may see open-source work, and client
 work stays on the subscriptions. ``is_open_source`` is the guard on that line,
 so its failure paths are the product rather than an edge case. Every one of
-them is tested separately — a single blanket "error returns False" case would
+them is tested separately: a single blanket "error returns False" case would
 let a typo in the JSON key pass as a caught timeout.
 
 Returning True by mistake is how private client context reaches a foreign
@@ -136,6 +136,18 @@ class TestRepositoryIsPassedPositionally:
         assert "acme/private-app" in run.call_args[0][0]
 
 
+#: The four shapes `tools/improvement_eligibility.py` treats as indeterminate
+#: rather than a determinate "private": a timeout, a non-zero exit (the most
+#: common real-world outage: a `gh` auth failure), empty stdout, and stdout
+#: that fails to parse as JSON. None of them may pin False for the cache TTL.
+INDETERMINATE_OUTCOMES = [
+    pytest.param({"side_effect": subprocess.TimeoutExpired(cmd="gh", timeout=10)}, id="timeout"),
+    pytest.param({"return_value": _completed("", returncode=1)}, id="non-zero-exit"),
+    pytest.param({"return_value": _completed("")}, id="empty-stdout"),
+    pytest.param({"return_value": _completed("not json")}, id="unparseable-json"),
+]
+
+
 class TestCache:
     def test_a_second_call_issues_no_subprocess(self):
         with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))) as run:
@@ -165,11 +177,18 @@ class TestCache:
             assert is_open_source("open-thing") is True
             assert is_open_source("client-thing") is False
 
-    def test_an_indeterminate_failure_is_not_cached(self):
-        """A transient `gh` outage must not pin False for the whole TTL."""
-        with _gh(side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=10)):
+    @pytest.mark.parametrize("outcome", INDETERMINATE_OUTCOMES)
+    def test_an_indeterminate_failure_is_not_cached(self, outcome):
+        """A transient `gh` outage must not pin False for the whole TTL.
+
+        Each of the four indeterminate shapes must be followed by a fresh
+        subprocess call, not a cached False. Caching False on the non-zero-exit
+        branch specifically is the outage shape a `gh` auth failure produces,
+        and it is the one the mutation check in the review bit on.
+        """
+        with _gh(**outcome):
             assert is_open_source("open-thing") is False
 
         with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))) as run:
             assert is_open_source("open-thing") is True
-        assert run.call_count == 1
+        assert run.call_count == 1, "the indeterminate outcome must not have been cached"

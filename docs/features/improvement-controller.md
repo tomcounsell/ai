@@ -172,7 +172,7 @@ Turning it back off is the same edit in reverse; no hand edit of the vault
 Three budget units, reserved separately, and one of them is not money: Claude
 work runs on the subscription and is budgeted as lane concurrency. The window
 boundaries are settings rather than assumptions because charter §8 requires them
-disclosed — a reservation that resets on an undisclosed boundary cannot be
+disclosed: a reservation that resets on an undisclosed boundary cannot be
 audited against what was actually spent.
 
 **Nothing meters dollars today.** Both dollar figures are declared limits with
@@ -196,12 +196,13 @@ question path reappears.
 ## Charter
 
 `docs/improvement-charter.md` is the north star. Tom owns it and only Tom edits
-it; nothing in `models/`, `tools/`, `reflections/`, or `ui/` writes that file,
-and it is on the candidate-surface denylist.
+it; nothing in `models/`, `tools/`, `reflections/`, or `ui/` writes that file.
+Lane 6 (#3218) adds the candidate-surface denylist that refuses it as a
+candidate.
 
 `ImprovementCharter.load_from_file` projects the file into a record. It digests
-the bytes with `tools/sdlc_verdict.py::compute_plan_hash`, which normalizes CRLF
-to LF, so the same charter digests identically on any checkout. It **refuses**
+the bytes with the same CRLF-to-LF normalization `tools/sdlc_verdict.py::compute_plan_hash`
+applies, so the same charter digests identically on any checkout. It **refuses**
 any file whose frontmatter names an owner other than `Tom Counsell`, returning
 None and writing nothing.
 
@@ -312,7 +313,7 @@ Three panels on the root dashboard.
 the work is ranked under, the §3 early priorities marked as starting hypotheses
 rather than an allocation, open cases with their `priority_area` and
 `ranking_rationale`, and unresolved assumptions. Every heading no lane writes
-yet says so and names the lane that will fill it — acquired abilities and
+yet says so and names the lane that will fill it: acquired abilities and
 resource use come with lane 3, evaluations with lane 4, rejected approaches with
 lane 5. Each section renders one of three distinguishable states: content,
 "nothing yet, written by lane N", or "unavailable" when the read failed. A bare

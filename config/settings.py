@@ -588,8 +588,8 @@ class ImprovementSettings(BaseModel):
     budgeted as SDLC lane concurrency. Paid inference on other models runs
     through the existing OpenRouter path against a daily dollar pool, settled
     per call from reported usage, with the controller and the evaluator drawing
-    separate reservations from it. Infrastructure — sandboxes, storage,
-    Cloudflare — draws on a weekly dollar pool of its own. The day and week
+    separate reservations from it. Infrastructure (sandboxes, storage,
+    Cloudflare) draws on a weekly dollar pool of its own. The day and week
     boundaries are disclosed rather than assumed, because a reservation that
     resets on an undisclosed boundary cannot be audited.
 
