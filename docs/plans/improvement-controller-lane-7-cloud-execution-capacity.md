@@ -246,15 +246,51 @@ The `op` check is the one that must run **on the machine that owns the `valor` p
 
 ## Failure Path Test Strategy
 
-<!-- skeleton -->
+This lane's failure paths are unusually consequential: one of them spends money and another loses evidence. Each gets an explicit test.
+
+### Exception Handling Coverage
+- [ ] `tools/infrastructure_budget.py` — every provider-facing call (billing API read, provider CLI invocation) is wrapped, and each handler is tested for an **observable** result: a `logger.warning` **and** a settlement that equals the forecast. Charter §8's "uncertain or missing metering is not zero cost" is a testable assertion, not a comment. Test: seed a billing reader that raises, assert settled == forecast and the warning fired.
+- [ ] `tools/improvement_operating_report.py` — a record source that raises must degrade that one answer to an explicit "could not be determined" **and keep the other four**, never blank the report. Test: raise from each of the five sources in turn, assert four answers survive and the failed one says so.
+- [ ] Teardown — a failure to *verify* the export must not fall through into teardown. Test: an export verifier that raises, and one that returns False, both leave the resource running and escalate. This is the single most important negative test in the lane, and it is mutation-checked: invert the guard and the test must fail.
+- [ ] `tools/improvement_resources.py::probe` already has full exception coverage from #3255 and is not re-tested here. Its wrapper in this lane (the recorded-evidence write) is new and is tested for the case where the probe returns and the write fails.
+- [ ] No `except Exception: pass` is introduced. Verification asserts the absence in this lane's files.
+
+### Empty/Invalid Input Handling
+- [ ] `tools/infrastructure_budget.py` with an empty ledger returns a full week of headroom, not a crash and not zero. Tested.
+- [ ] A resource declared with a `None`, empty, or non-numeric rate is **refused**, not defaulted to zero. Tested per shape; this is the "cannot be forecast is refused" rule and it is the difference between a refusal and a free acquisition.
+- [ ] A credit with no expiry is treated as expiring at the end of the current window rather than as indefinite. Tested.
+- [ ] The report with **no** sandbox sessions must produce five real answers, one of which is "none," rather than an empty section. Tested: this is the state the first report will actually be generated in, so it is the primary case, not the edge case.
+- [ ] Whitespace-only and empty `project_key` on any new record write is rejected before the write.
+
+### Error State Rendering
+- [ ] The report is the user-visible output. Its failure rendering (a source unavailable) is tested to reach the reader as a named gap, because a report that silently omits an answer reads as a report that had nothing to say.
+- [ ] A refused acquisition surfaces the refusal *and its reason* — "no forecastable rate" and "week exhausted" are different states and must not both render as "not acquired."
+- [ ] If the dashboard gains an infrastructure-spend panel, its empty and error states render before its populated state does. `ui/data/improvement.py`'s own docstring is the precedent: it refuses to ship permanently-empty tiles, and a spend panel with nothing behind it would be one.
 
 ## Test Impact
 
-<!-- skeleton -->
+- [ ] `tests/unit/test_improvement_models.py` — UPDATE: the `EVIDENCE_KINDS` membership assertions gain `spend_receipt`. Any test asserting the tuple's exact length or exact contents fails on the addition and must be updated rather than loosened.
+- [ ] `tests/unit/test_settings.py` — UPDATE **only if** task 9 changes `max_concurrent_research_sessions`. The `le=4` bound is asserted there; if the revisit concludes "unchanged," this file is untouched and that is the expected outcome.
+- [ ] `tests/unit/test_improvement_resources.py` — no change. This lane runs the probe; it does not modify it. Listed so a builder does not "improve" a file that #3255 owns while its PR is still open.
+- [ ] `tests/unit/test_ui_app.py` — UPDATE only if an infrastructure-spend partial is added. It carries the route assertions for the improvement partials; a new route without a new assertion there is an untested route.
+
+New test files, all greenfield:
+
+- [ ] `tests/unit/test_infrastructure_budget.py` — CREATE: window computation across the Monday 00:00 UTC boundary, forecast refusal, credit expiry mid-window, no-transfer-between-units, settlement from receipt and from billing API, missing metering settling at forecast.
+- [ ] `tests/unit/test_teardown_policy.py` — CREATE: the full ladder, with the export-verification guard mutation-checked in both directions.
+- [ ] `tests/unit/test_improvement_operating_report.py` — CREATE: all five answers present with no sandbox sessions; per-source degradation; the fifth answer non-empty whenever its inputs are non-empty.
+
+No integration test asserts that a real sandbox ran. That evidence is a recorded artifact from task 8, not a CI fixture — a test that provisions a paid sandbox on every run is a recurring charge disguised as a test, and Gap D would have to reserve for it.
 
 ## Rabbit Holes
 
-<!-- skeleton -->
+- **Building a general multi-provider sandbox abstraction.** One provider, chosen on recorded evidence, running one session. An interface with two implementations and no second provider in sight is speculative generality, and it makes the "which sessions run where" answer harder to compute, not easier.
+- **Migrating the whole SDLC pipeline to the cloud.** Charter §2 says *mostly cloud sandboxes* as a first-month expectation for RSI operation. This lane proves one unattended RSI session and reports the distance to "mostly." Moving ordinary lanes is a different mandate with different risks.
+- **Making `remote-update.sh` work on Linux.** Tempting, because it looks like the missing piece. It is a rewrite of a script whose first forty lines assume iCloud and launchd, in service of a host that should be updated by image rebuild anyway. spike-3 exists so nobody spends a week here.
+- **Securing a network-reachable Redis as a side quest.** If task 4 chooses shared Redis, transport security is real work with real scope — TLS, auth, network boundaries — and it belongs to a task with its own name, not to a bullet inside "make the sandbox work."
+- **Litigating Anthropic's terms.** spike-1 gives a rule and an unresolved scale question. The response to the unresolved part is a recorded provisional assumption under charter §9 and an honest fifth answer, not a legal analysis and not a message to Tom.
+- **Perfecting the cost model before spending a dollar.** A forecast good enough to admit or refuse is the bar. A model that predicts the bill to the cent is a research project, and the actual bill settles it anyway.
+- **Reporting sandbox count, uptime, or token volume as progress.** Charter §2 names all three as things that do not establish improvement. The report generator has no function that returns them, for the same reason `ui/data/improvement.py` has no function returning experiment count.
 
 ## Risks
 
