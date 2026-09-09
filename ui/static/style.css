@@ -1226,6 +1226,33 @@ a:hover {
     line-height: 1.3;
 }
 
+/* Nonzero counts on panels where zero is the healthy state (dead letters,
+   lock degradation): the neutral --text-primary above reads as "just a
+   number" for either state, so a real nonzero needs its own color. */
+.stat-card-value-alert {
+    color: var(--yellow);
+}
+
+/* --- Improvement + Pipeline integrity: compact secondary row -------------
+   Both panels are diagnostics, not the primary "what's running" view (that's
+   Jobs). They sit side-by-side in a bounded-width row instead of each
+   spanning the full page, so they read as a compact status strip rather than
+   competing with Jobs/Reflections for visual weight. */
+.compact-panels-row {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.compact-panel {
+    flex: 0 1 420px;
+    max-width: 420px;
+}
+
+.compact-panel .stats-group-cards {
+    grid-template-columns: 1fr;
+}
+
 /* --- Improvement controller panels (#3177) -------------------------------
    Reuses the existing stat-card grid; these rules only add the prose,
    table, and warning treatments the improvement panels need. The warning is

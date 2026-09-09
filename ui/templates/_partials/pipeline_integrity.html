@@ -1,16 +1,31 @@
 {# Pipeline integrity — where work leaves the pipeline, and how often the
-   coordination locks have had to fall back on their declared policy. #}
+   coordination locks have had to fall back on their declared policy.
+
+   Dead-letter stages at 0 are collapsed into a single muted line: with ~10
+   stages and usually one nonzero, listing every zero at full size buried the
+   one count that matters. #}
+{% set nonzero_rows = dead_letters.rows | selectattr('count', 'gt', 0) | list %}
+{% set zero_rows = dead_letters.rows | rejectattr('count', 'gt', 0) | list %}
 <div class="stats-grid">
     <div class="stats-group">
         <div class="stats-group-label">Dead letters ({{ dead_letters.total }} total)</div>
+        {% if nonzero_rows %}
         <div class="stats-group-cards">
-            {% for row in dead_letters.rows %}
+            {% for row in nonzero_rows %}
             <div class="stat-card">
                 <span class="stat-card-label">{{ row.stage }}</span>
-                <span class="stat-card-value">{{ row.count }}</span>
+                <span class="stat-card-value stat-card-value-alert">{{ row.count }}</span>
             </div>
             {% endfor %}
         </div>
+        {% else %}
+        <p class="improvement-meta">None.</p>
+        {% endif %}
+        {% if zero_rows %}
+        <p class="improvement-meta">
+            {{ zero_rows | map(attribute='stage') | join(', ') }} at 0.
+        </p>
+        {% endif %}
     </div>
     <div class="stats-group">
         <div class="stats-group-label">Lock degradation</div>
@@ -18,7 +33,7 @@
             {% for lock in locks %}
             <div class="stat-card">
                 <span class="stat-card-label">{{ lock.name }} — fails {{ lock.policy }}</span>
-                <span class="stat-card-value">{{ lock.count }}</span>
+                <span class="stat-card-value{% if lock.count > 0 %} stat-card-value-alert{% endif %}">{{ lock.count }}</span>
             </div>
             {% endfor %}
         </div>
