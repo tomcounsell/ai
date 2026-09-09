@@ -22,8 +22,8 @@ unrecognized server errors, so a zero exit code proves nothing by itself.
 timestamps and never a field value, so most of this module cannot leak by
 construction. Where a fingerprint is wanted the credential is read, hashed
 immediately, and reported as ``sha256:<hex>``; the plaintext is never returned,
-never logged, and never placed in an argv. This repo runs ``op run
---no-masking`` by design, so op's own masking is not available as a backstop
+never logged, and never placed in an argv. This repo disables 1Password's own
+output masking by design, so that masking is not available as a backstop here
 and this discipline is the only guard. ``runner`` is injectable so a test can
 seed a distinctive fake credential and assert it appears nowhere in the result.
 
