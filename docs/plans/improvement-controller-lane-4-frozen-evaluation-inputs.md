@@ -725,15 +725,161 @@ disposition.
 
 ## Risks
 
-placeholder
+### Risk 1: A private `redis-server` per arm collides with the machine's other Redis users
+
+**Impact:** This machine runs production Redis on 6379 and up to fifteen concurrent pytest processes
+holding claimed dbs. Issue #2799 records the exact failure: a private server introduced for isolation
+left the suite hitting 6379 and flushing production db1. Repeating it corrupts unrelated agents' runs
+and, at worst, production data.
+
+**Mitigation:** The arm server has **no TCP listener at all** — `--port 0` plus `--unixsocket` in a
+per-arm tmpdir. There is no port to collide on and no way for another process to reach it. The client
+is constructed in place with `unix_socket_path=`; `REDIS_URL` is never assigned, `db_claim` is never
+imported by `arena.py`, and popoto's canonical pool is never re-pointed. A test asserts all three by
+source inspection and by checking `popoto.redis_db.POPOTO_REDIS_DB` connection kwargs are unchanged
+across an arena context.
+
+### Risk 2: The calibration reference set is too small to calibrate anything
+
+**Impact:** `classify_correction` is precision-oriented and `ImprovementEvidence` expires at 30 days
+(spike-4). If the `architectural` bucket holds a handful of rows, a Cohen's kappa computed over it is
+noise wearing a number's clothes, and a judge reported as calibrated is worse than one reported as
+uncalibrated.
+
+**Mitigation:** A declared floor on the reference-set size, checked before any kappa is computed. Below
+the floor the judge returns `infra_failure` and the evaluation says so. The floor is a named constant
+with its rationale in the module docstring, and the build reports the observed set size on this
+machine so the number is chosen against reality rather than guessed. The frozen artifact means the
+set can be grown later without invalidating past calibrations.
+
+### Risk 3: Blinding is claimed rather than achieved
+
+**Impact:** The single most valuable property here is also the easiest to fake. A `blinded=True` that
+nobody checked converts every downstream comparison into a measurement of the judge's expectations.
+
+**Mitigation:** `blinded` is written only from the result of `scan_for_identity`, which runs over the
+serialized envelope immediately before it is sent. The mutation proof is explicit in the Failure Path
+table: hard-code `blinded=True` and `test_identity_leak_sets_blinded_false` must go red. The scan's
+own token list is derived from the experiment record (branch, manifest surfaces, arm identity) rather
+than hand-maintained, so a new identity-bearing field is covered without an edit.
+
+### Risk 4: The lane ships before #3255 merges and builds on a moving head
+
+**Impact:** `ImprovementCharter.digest`, `.text`, and `pinned()` are the surface the `serves_charter`
+judge quotes. If lane 2b's re-review changes them, this lane's judge and its migration are built on
+a shape that never landed.
+
+**Mitigation:** This plan is written against `b05dde885` and says so in the Freshness Check. The build
+does not start on the charter-consuming components until #3255 merges; the ordering is recorded in
+No-Gos with an `[ORDERED]` tag. The parts that do not touch the charter — the arena, the corpus
+export, Holm, the statistics, the parity gate — have no dependency on lane 2b and are the first tasks
+in the task list precisely so the lane is not idle while it waits.
+
+### Risk 5: `infra_failure` becomes the harness's excuse
+
+**Impact:** A verdict vocabulary that includes "the harness broke" invites a harness that breaks
+often and a loop that never learns anything. If most runs end in `infra_failure`, the separation from
+`reject` has bought nothing.
+
+**Mitigation:** `infra_failure` is raised from exactly six named conditions and from nowhere else,
+each with its own test. The final catch-all handler in `runner.py` writes `infra_failure` with the
+exception type in `notes`, so an unnamed cause is visible as an unnamed cause rather than blending
+into the six. The dashboard renders `infra_failure` counts beside the others, which makes a rising
+rate an observable fact rather than a suspicion.
+
+### Risk 6: Adding `charter_digest` to an immortal record cannot be undone
+
+**Impact:** `ImprovementEvaluation` has no TTL by design — the verdict and its lineage are the product
+of the whole loop. A field added to it is permanent, and a wrong shape is permanent too.
+
+**Mitigation:** The field is a plain nullable `Field`, not indexed, matching `charter_digest` on the
+three records that already carry it (`ImprovementCase:117`, `ImprovementInvestigation:94`,
+`ImprovementRelease:84`). It is added to `FORBIDDEN_INDEX_NAMES` so no later change can index it.
+The migration is read-only and idempotent, following `_migrate_confirm_improvement_v2_fields` exactly:
+it imports the model and runs one bounded project-scoped query to prove the keyspace resolves, and
+writes nothing.
 
 ## Race Conditions
 
-placeholder
+### Race 1: A second evaluation of the same experiment runs concurrently
+
+**Location:** `tools/improvement_eval/runner.py::evaluate`
+**Trigger:** Two callers invoke `evaluate()` for one `ImprovementExperiment` — an operator retry
+alongside a scheduled tick, or two lanes both reacting to the same frozen experiment.
+**Data prerequisite:** `ImprovementExperiment.state` must be `frozen` before either run begins, and
+must reach `running` before the second caller reads it.
+**State prerequisite:** Exactly one evaluation writes a verdict per experiment, or two verdicts
+disagree and neither is authoritative.
+**Mitigation:** The runner performs a read-modify-write of `state` from `frozen` to `running` as its
+first write and refuses to proceed when the state it read was not `frozen`. That is a
+compare-and-set in intent but not atomically — popoto offers no CAS and the improvement control
+namespace is lane 3's to build (#3215). The honest disposition, matching
+`ImprovementCharter.load_from_file`'s documented tolerated race, is: the window is small, the loser
+writes an `infra_failure` evaluation naming the state it found rather than a competing verdict, and
+`runner.py`'s docstring records that a real lease belongs to lane 3. A test drives the losing branch
+directly by pre-setting `state="running"`.
+
+### Race 2: The corpus is written while it is being exported
+
+**Location:** `tools/improvement_eval/corpus.py::export_corpus`
+**Trigger:** Memory extraction, an ingest, or a decay-prune tick writes a `Memory` row between the
+exporter's first and last read.
+**Data prerequisite:** The export must be a single consistent view, or the two arms are restored from
+a corpus that never existed at any instant.
+**State prerequisite:** The export's digest must identify the bytes both arms actually received.
+**Mitigation:** The export's digest is computed over the exported bytes, and both arms are restored
+from **those bytes**, not from a second read of the live corpus. A torn read therefore produces a
+corpus that is internally odd but identical across arms, which preserves the property the comparison
+actually needs. The exporter additionally records the record count and the export timestamp in the
+artifact's provenance header, following `tools/memory_eval/snapshot.py`'s shape, so a torn export is
+diagnosable after the fact. A run does not attempt to lock the live corpus: locking the production
+memory corpus for the duration of an evaluation is a far larger hazard than a torn read the digest
+already makes harmless.
+
+### Race 3: An arm's `redis-server` outlives its context
+
+**Location:** `tools/improvement_eval/arena.py`
+**Trigger:** The arm body raises, the process is signalled, or the harness is killed mid-run.
+**Data prerequisite:** none.
+**State prerequisite:** No orphaned `redis-server` process holds a socket or a tmpdir after the run.
+**Mitigation:** The arena is a context manager whose `finally` terminates the child and removes the
+tmpdir, and the child is spawned in its own process group so a signal to the harness does not leave
+it reparented and running. Because the socket lives inside the run's own tmpdir, an orphan that
+somehow survives is unreachable rather than dangerous. Cleanup is never done by pattern-killing
+`redis-server`: several agents run Redis on this machine and a pattern kill takes out their work.
+A test asserts the child is gone after both the clean and the raising path.
 
 ## No-Gos (Out of Scope)
 
-placeholder
+- [ORDERED] **Building the charter-consuming components before #3255 merges.** The `serves_charter`
+  judge quotes `ImprovementCharter.text` and records `ImprovementCharter.digest`, both of which land
+  in lane 2b (PR #3275, one re-review from merge). The human-gated event is that merge. The
+  non-charter components (arena, corpus export, Holm, statistics, parity gate) have no such
+  dependency and are sequenced first so the lane is never blocked as a whole.
+- [SEPARATE-SLUG #3215] **The `valor-improve` operator surface for evaluations.** Running an
+  evaluation from the command line, listing verdicts, and the break-glass pause belong to lane 3's
+  CLI, which owns the control namespace and the budget settlement this harness draws against. This
+  lane exposes `tools/improvement_eval/runner.py::evaluate` as an importable function with a
+  documented signature and stops there.
+- [SEPARATE-SLUG #3217] **Producing the first real experiment to evaluate.** Lane 5 runs the first
+  complete research cycle and writes the first frozen contract. This lane's tests drive the harness
+  from constructed fixtures, which is the correct dependency direction: the harness must be
+  trustworthy before it is pointed at a result anyone wants.
+- [SEPARATE-SLUG #3218] **Releases, exposure assignment, and rollback.** An `accept` verdict here
+  produces evidence, not a release. Lane 6 owns `ImprovementRelease`, the observation window, and the
+  rollback plan.
+- [SEPARATE-SLUG #3218] **Automated promotion on an `accept` verdict.** The contract doc states that
+  automated promotion is disabled and that no record enables it, pending separation of evaluator
+  secrets from candidate execution and a human-amended charter naming reversible surfaces. Both are
+  events outside this work.
+- **Alpha-spending stopping rules.** Not deferred to anyone: ruled out on the merits (research
+  finding 3, Rabbit Holes). Fixed-batch is a complete, named stopping rule and it is what ships.
+- **Copy-on-write arm isolation.** Ruled out on the merits by spike-3, not deferred.
+- **A kappa gate on the `serves_charter` judge.** Ruled out on the merits: the literature's own
+  conclusion is that an abstract threshold is the wrong bar. Kappa is measured, frozen, and cited;
+  gating on it is not a follow-up promise but a thing this plan says should not be done yet.
+- **Modifying `tools/memory_eval/metrics.py`.** Forbidden by acceptance criterion 7 and pinned by a
+  Verification row that asserts the file is byte-identical to main.
 
 ## Update System
 
