@@ -12,7 +12,7 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 ## What exists today
 
 Lanes 1 and 2. The records, the settings, the evidence collection tick, the
-verifying artifact store, and two dashboard panels. The control journal, the
+verifying artifact store, and three dashboard panels. The control journal, the
 research sessions, the evaluation harness, and releases arrive with lanes 3
 through 6, each as its own child issue.
 

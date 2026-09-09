@@ -787,6 +787,36 @@ class TestImprovementPartials:
         assert "The charter record could not be read" in resp.text
         assert "No charter seeded" not in resp.text
 
+    def test_goals_partial_lists_open_cases_and_omits_terminal_ones(self, client):
+        """Open is every state but released and rejected, and paused is open.
+
+        Reads through the ``state`` index one open state at a time, so this also
+        pins that the indexed lookup returns what the partition scan used to.
+        """
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+
+        pk = "test-3255-case-states"
+        now = datetime.now(UTC)
+        seeded = [
+            ImprovementCase.create(
+                project_key=pk, state=state, title=f"case-{state}", created_at=now
+            )
+            for state in ("observed", "paused", "released", "rejected")
+        ]
+        try:
+            resp = client.get(f"/_partials/improvement/goals/?project_key={pk}")
+
+            assert resp.status_code == 200
+            assert "case-observed" in resp.text
+            assert "case-paused" in resp.text
+            assert "case-released" not in resp.text
+            assert "case-rejected" not in resp.text
+        finally:
+            for row in seeded:
+                row.delete()
+
     def test_goals_partial_reports_unavailable_when_the_case_read_raises(self, client, monkeypatch):
         """A broken case query must not read as an honest zero."""
         from models.improvement_case import ImprovementCase
@@ -805,13 +835,18 @@ class TestImprovementPartials:
     def test_goals_partial_reports_unavailable_when_the_assumption_read_raises(
         self, client, monkeypatch
     ):
-        """A broken assumption query must not read as an honest zero."""
-        import ui.data.improvement as improvement_data
+        """A broken assumption query must not read as an honest zero.
+
+        Patches the real dependency, not ``get_provisional_assumptions``: the
+        classification only means something if the failure it classifies is the
+        one production can actually hit.
+        """
+        from models.improvement_investigation import ImprovementInvestigation
 
         def _raise(*args, **kwargs):
-            raise RuntimeError("assumption read failed")
+            raise RuntimeError("investigation store unreachable")
 
-        monkeypatch.setattr(improvement_data, "get_provisional_assumptions", _raise)
+        monkeypatch.setattr(ImprovementInvestigation.query, "filter", _raise)
 
         resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
 

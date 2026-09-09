@@ -182,9 +182,10 @@ class TestCache:
         """A transient `gh` outage must not pin False for the whole TTL.
 
         Each of the four indeterminate shapes must be followed by a fresh
-        subprocess call, not a cached False. Caching False on the non-zero-exit
-        branch specifically is the outage shape a `gh` auth failure produces,
-        and it is the one the mutation check in the review bit on.
+        subprocess call, not a cached False. Only a determinate answer is
+        cacheable: a `gh` auth failure surfaces as a non-zero exit, so caching
+        False there would keep an open-source project reading as private long
+        after the outage cleared.
         """
         with _gh(**outcome):
             assert is_open_source("open-thing") is False

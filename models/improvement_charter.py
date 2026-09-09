@@ -180,11 +180,9 @@ class ImprovementCharter(Model):
         exist yet.
         """
         # The digest, frontmatter, and text all come from one buffer read here,
-        # inside the try. Three separate reads used to run: a file edited
-        # between them could yield a stored `text` that does not hash to its
-        # `digest`, and the third read sat outside the try so a mid-read OSError
-        # propagated instead of honoring this docstring's "None when the file
-        # cannot be read" contract.
+        # inside the try: a stored `text` always hashes to its stored `digest`,
+        # and any read error honors this docstring's "None when the file cannot
+        # be read" contract.
         path = Path(path)
         try:
             raw = path.read_bytes()

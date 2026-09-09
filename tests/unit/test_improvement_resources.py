@@ -200,12 +200,12 @@ class TestNeverRaises:
         assert set(report) == set(RESOURCES)
 
     def test_the_default_runner_shells_out_and_captures_output(self):
-        """Exercise ``_default_runner`` directly with a harmless argv, not the real
+        """``_default_runner`` shells out and captures stdout, proven on a harmless argv.
 
-        ``op``/``wrangler`` binaries. ``probe()`` with no injection would shell out
-        for real and wait the full 15s timeout on a machine without a service
-        account token; that belongs in a manual verification row, not the unit
-        suite.
+        The argv is a throwaway interpreter, never the real ``op``/``wrangler``
+        binaries. ``probe()`` with no injection would shell out for real and wait
+        the full 15s timeout on a machine without a service account token; that
+        belongs in a manual verification row, not the unit suite.
         """
         result = _default_runner([sys.executable, "-c", "print('probe-ok')"])
 

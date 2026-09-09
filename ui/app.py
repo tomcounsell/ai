@@ -418,12 +418,22 @@ def create_app() -> FastAPI:
         """HTMX partial: how often a human had to step in, and of what kind (#3177)."""
         from ui.data.improvement import get_intervention_burden, get_provisional_assumptions
 
+        # The assumption read propagates its failures so the goals partial can
+        # tell "none" apart from "unreadable". This panel has no unavailable
+        # rendering, so it degrades to hiding the section rather than taking the
+        # whole burden panel down with it.
+        try:
+            assumptions = get_provisional_assumptions(project_key=project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement burden partial: assumption read failed: %s", exc)
+            assumptions = []
+
         return templates.TemplateResponse(
             request,
             "improvement/intervention_burden.html",
             {
                 "burden": get_intervention_burden(project_key=project_key),
-                "assumptions": get_provisional_assumptions(project_key=project_key),
+                "assumptions": assumptions,
             },
         )
 

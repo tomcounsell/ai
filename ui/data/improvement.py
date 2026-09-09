@@ -168,14 +168,17 @@ def get_provisional_assumptions(
     a recorded assumption rather than a question in someone's queue. Surfacing
     them is the whole compensating control: an assumption nobody can see is
     indistinguishable from a fact.
+
+    A failed read propagates. Returning ``[]`` here would hand every caller an
+    empty list that is indistinguishable from an honest zero, which is the one
+    thing this list exists to prevent; the caller classifies the failure.
+
+    Raises:
+        Exception: whatever the investigation read raises.
     """
     from models.improvement_investigation import ImprovementInvestigation
 
-    try:
-        rows = list(ImprovementInvestigation.query.filter(project_key=project_key))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("improvement dashboard: investigation read failed: %s", exc)
-        return []
+    rows = list(ImprovementInvestigation.query.filter(project_key=project_key))
 
     cutoff = datetime.now(UTC) - timedelta(days=window_days)
     out = []
@@ -250,10 +253,20 @@ def get_goals(project_key: str = "valor") -> dict:
     cases = []
     cases_unavailable = False
     try:
-        from models.improvement_case import ImprovementCase
+        from models.improvement_case import OPEN_CASE_STATES, ImprovementCase
 
-        rows = list(ImprovementCase.query.filter(project_key=project_key))
-        open_rows = [r for r in rows if getattr(r, "state", None) not in ("released", "rejected")]
+        # One indexed lookup per open state, which is what the ``state``
+        # IndexedField is declared for. Cases are immortal, so hydrating the
+        # whole partition and filtering in Python would grow without bound on a
+        # partial that polls every 60 seconds. The open-state vocabulary is the
+        # model's, never restated here.
+        open_rows = []
+        for state in OPEN_CASE_STATES:
+            open_rows.extend(ImprovementCase.query.filter(project_key=project_key, state=state))
+        open_rows.sort(
+            key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )
         for row in open_rows:
             cases.append(
                 {
@@ -269,9 +282,9 @@ def get_goals(project_key: str = "valor") -> dict:
         logger.warning("improvement dashboard: case read failed: %s", exc)
         cases_unavailable = True
 
+    assumptions_unavailable = False
     try:
         assumptions = get_provisional_assumptions(project_key=project_key)
-        assumptions_unavailable = False
     except Exception as exc:  # noqa: BLE001
         logger.warning("improvement dashboard: assumption read failed: %s", exc)
         assumptions = []

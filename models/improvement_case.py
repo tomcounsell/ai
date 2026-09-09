@@ -52,6 +52,16 @@ CASE_STATES: tuple[str, ...] = (
     "paused",  # break-glass, needs a human hand
 )
 
+#: The states that end a case's life. ``paused`` is deliberately absent: it is
+#: break-glass, a case waiting on a human hand, and still open work.
+TERMINAL_CASE_STATES: tuple[str, ...] = ("released", "rejected")
+
+#: The states a case is still open in. Derived from :data:`CASE_STATES` rather
+#: than listed, so adding a state to the lifecycle cannot leave the two sets
+#: disagreeing about what "open" means. Readers query the ``state`` index one
+#: value at a time from this tuple instead of hydrating the partition.
+OPEN_CASE_STATES: tuple[str, ...] = tuple(s for s in CASE_STATES if s not in TERMINAL_CASE_STATES)
+
 #: Bounded priority vocabulary.
 CASE_PRIORITIES: tuple[str, ...] = ("urgent", "high", "normal", "low")
 
