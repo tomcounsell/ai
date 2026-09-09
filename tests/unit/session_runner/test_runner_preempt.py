@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+import uuid
 from unittest.mock import patch
 
 from agent.session_runner.adapter import SessionRunnerAdapter
@@ -289,6 +290,9 @@ async def test_timeout_expiry_is_graceful_preempt_not_error():
         pid_alive_fn=lambda pid: False,
         turn_timeout_s=0.12,
     )
+    # Unique id: the notice is deduped per session (#3270 A6b), so a shared
+    # fixture id would let a previous test run's dedupe key suppress this send.
+    session.session_id = f"dbg-a6b-single-{uuid.uuid4()}"
     summary = await runner.run("long task")
     assert kills and kills[0][1] == signal.SIGTERM
     assert summary.exit_reason == "turn_timeout"
@@ -785,3 +789,66 @@ async def test_stamp_failure_never_breaks_the_turn():
 
     assert summary.exit_reason is ExitReason.PM_USER
     assert deliveries == ["done"]
+
+
+async def _run_until_timeout(session_id: str, row_id: str, deliveries: list[str]) -> None:
+    """Drive one turn to TURN_TIMEOUT for a given (thread, row) identity."""
+    driver = KillableDriver()
+
+    def fake_kill(pid, sig):
+        driver.kill_event.set()
+
+    runner, _, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        deliveries=deliveries,
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        turn_timeout_s=0.12,
+    )
+    session.session_id = session_id
+    session.id = row_id
+    summary = await runner.run("long task")
+    assert summary.exit_reason == "turn_timeout"
+
+
+async def test_timeout_notice_delivered_once_across_two_runs_of_one_row():
+    """A6b (#3270): the needs-attention notice is once per stranded ROW.
+
+    The incident: a stranded conversation row was re-enqueued on a ~hourly
+    cadence and every re-run timed out and re-posted the byte-identical
+    ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` into the human's chat. Re-runs of that
+    row keep its record ``id``, so two runs must produce exactly ONE delivery.
+    """
+    session_id = f"dbg-a6b-{uuid.uuid4()}"
+    row_id = f"row-{uuid.uuid4()}"
+    deliveries: list[str] = []
+
+    await _run_until_timeout(session_id, row_id, deliveries)
+    await _run_until_timeout(session_id, row_id, deliveries)
+
+    assert deliveries.count(TIMEOUT_NEEDS_ATTENTION_MESSAGE) == 1, (
+        f"timeout notice re-delivered once per run: {deliveries!r}"
+    )
+
+
+async def test_timeout_notice_redelivered_for_a_later_unrelated_request():
+    """A6b must not silence a NEW request that happens to time out too.
+
+    A resumed session reuses its thread ``session_id`` but is minted a fresh
+    AgentSession record ``id``. A ``session_id``-only dedupe key would suppress
+    the notice for a request the human made hours later -- and that suppression
+    is unrecoverable, because ``TURN_TIMEOUT`` is not ``wrapup_eligible``, so
+    nothing else would be said. The human would get pure silence.
+    """
+    session_id = f"dbg-a6b-{uuid.uuid4()}"
+    deliveries: list[str] = []
+
+    await _run_until_timeout(session_id, f"row-{uuid.uuid4()}", deliveries)
+    await _run_until_timeout(session_id, f"row-{uuid.uuid4()}", deliveries)
+
+    assert deliveries.count(TIMEOUT_NEEDS_ATTENTION_MESSAGE) == 2, (
+        "a later, unrelated request in the same thread was silenced by the "
+        f"A6b dedupe: {deliveries!r}"
+    )

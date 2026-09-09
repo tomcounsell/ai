@@ -1086,9 +1086,9 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
 
     - Validates session is in RESUMABLE_STATUSES (not cancelled, not running/pending)
     - Validates session has a claude_session_uuid
-    - Pushes the steering message onto the Redis steering list BEFORE transition
-      (eliminates the race window — the write is independent of any in-flight
-      ORM save on this instance)
+    - Pushes the steering message onto the resumed session's OWN steering list
+      BEFORE transition (eliminates the race window — the write is independent
+      of any in-flight ORM save on this instance)
     - Atomically transitions to pending via transition_status(..., reject_from_terminal=False)
 
     Returns a ResumeResult. Never raises — caller checks result.success.
@@ -1134,8 +1134,7 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
     # always sees it — eliminates the two-write race (transition then save).
     # This RPUSHes directly to Redis, independent of session.save(), so it
     # cannot be clobbered by a stale bound instance.
-    from agent.steering import push_steering_message
-    from models.room import room_id_for_session
+    from agent.steering import push_steering_message, remove_steering_message
 
     # Fold the session's goal into the first turn input so a resumed session
     # can state its own objective without asking the human (issue #2136),
@@ -1150,10 +1149,18 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
         if goal:
             outbound = f"[Prior session context: {goal}]\n\n{message}"
 
-    # Room-targeted: a resume steer is a conversation-level instruction, so it
-    # survives this session and is served by whichever session next drains the Room.
-    push_steering_message(
-        session_id, outbound, f"resume:{source}", room_id=room_id_for_session(session)
+    # Session-targeted: a resume names ONE row, transitions that row in place,
+    # and the worker runs it in that row's own working_dir. Passing no room_id
+    # keeps the write on `steering:{session_id}`, so only the resumed session
+    # can drain it (#3270).
+    _steer_payload = push_steering_message(
+        session_id,
+        outbound,
+        f"resume:{source}",
+        # room_id=None deliberately: see the paragraph above. A resume names ONE
+        # row; a Room write would serve this instruction to whichever session
+        # next drains that Room, which is the #3270 cross-talk.
+        room_id=None,
     )
 
     # Transition to pending (atomic — fails if another process raced us).
@@ -1163,6 +1170,16 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
             session, "pending", reason=f"resume ({source})", reject_from_terminal=False
         )
     except Exception as e:
+        # Roll the steer back. The push has to precede the transition to close
+        # the two-write race, which means a failed transition leaves a resume
+        # instruction on a row that was never resumed. The legacy leg has no
+        # TTL and, unlike the Room leg, is not age-bounded at drain time
+        # (`_drain_list` applies `steering_room_max_age_s` to the Room key
+        # only), so that orphan would be injected verbatim whenever this
+        # session next runs — hours or days later, telling it to continue a
+        # lane that already moved on. Best-effort: `remove_steering_message`
+        # never raises, and a surviving orphan must not mask the real error.
+        remove_steering_message(session_id, _steer_payload)
         return ResumeResult(
             success=False,
             session_id=session_id,

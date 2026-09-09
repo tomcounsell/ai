@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -887,7 +888,63 @@ class TelegramRelayOutputHandler:
                         if _ctx.pop("deferred_self_draft_pending", None) is not None:
                             _ctx.pop("deferred_self_draft_text", None)
                             _target.extra_context = _ctx
-                            _target.save(update_fields=["extra_context"])
+                            # Stamp response_delivered_at (#3270). Reaching
+                            # here means the agent redrafted a deferred reply
+                            # and this send is delivering it — the second of
+                            # the two real delivery paths that never recorded
+                            # the fact, leaving #918's
+                            # `_delivery_belongs_to_current_run` reading None
+                            # and the #944 orphan net free to requeue a row
+                            # that had already answered the human.
+                            #
+                            # Narrow save: a bare save() here would be a full
+                            # popoto HSET of a possibly-stale instance, i.e. a
+                            # silent lifecycle write.
+                            #
+                            # The caller's `session` object is mirrored for the
+                            # same reason the flush in
+                            # agent/session_health.py::flush_deferred_self_draft_sync
+                            # mirrors: any caller that keeps holding this
+                            # object and later hands it to a lifecycle write
+                            # would otherwise persist the pre-stamp snapshot.
+                            #
+                            # Both mutations land in ONE narrow save: the
+                            # cleared `extra_context` and the stamp describe
+                            # the same delivery, and a single write keeps them
+                            # from ever persisting apart.
+                            _stamp_at = datetime.now(UTC)
+                            _target.response_delivered_at = _stamp_at
+                            _target.save(
+                                update_fields=[
+                                    "extra_context",
+                                    "response_delivered_at",
+                                    "updated_at",
+                                ]
+                            )
+                            if session is not _target:
+                                # BOTH fields, not just the stamp. Mirroring
+                                # the stamp alone leaves the caller's own
+                                # `extra_context` still carrying
+                                # `deferred_self_draft_pending`, and
+                                # `finalize_session`'s trailing full save
+                                # re-arms it with the ORIGINALLY REJECTED
+                                # draft text -- which
+                                # `_deferred_self_draft_backstop_sweep` then
+                                # selects on that flag alone and delivers on
+                                # top of the successful resend. The precedent
+                                # site in
+                                # agent/session_health.py::flush_deferred_self_draft_sync
+                                # mirrors both for exactly this reason.
+                                session.response_delivered_at = _stamp_at
+                                _caller_ctx = dict(session.extra_context or {})
+                                _had_pending = (
+                                    _caller_ctx.pop("deferred_self_draft_pending", None) is not None
+                                )
+                                _had_text = (
+                                    _caller_ctx.pop("deferred_self_draft_text", None) is not None
+                                )
+                                if _had_pending or _had_text:
+                                    session.extra_context = _caller_ctx
                     except Exception as _clear_err:
                         # Best-effort; never blocks delivery. Worst case is the
                         # pre-existing stale-flag behavior this fix targets.
@@ -1460,13 +1517,22 @@ class TelegramRelayOutputHandler:
         (its own transient concept — verbatim questions for the human) is
         never persisted to the session row; Job expectations (#2708) are the
         durable obligation record and live on the Job, not here.
+
+        The save is narrowed to ``["context_summary", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so this routing-field write — reached from a possibly
+        long-held ``session`` object — was silently authorized to rewrite the
+        row's lifecycle state and its status index from a stale snapshot, with
+        no LIFECYCLE log and no ``session_events`` entry.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)
 
             if context_summary:
                 session.context_summary = context_summary
-                session.save()
+                session.save(update_fields=["context_summary", "updated_at"])
                 logger.debug(
                     "Persisted routing fields to session %s (context_summary=%s)",
                     getattr(session, "session_id", "<unknown>"),
@@ -1505,6 +1571,15 @@ class TelegramRelayOutputHandler:
         signature. The extra fields are merged into the event dict after the
         base fields are populated, so they can never shadow ``type``, ``ts``,
         ``chat_id``, ``reason``, or ``draft_preview``.
+
+        The save is narrowed to ``["session_events", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so appending a best-effort event to a possibly-stale
+        ``session`` object was silently authorized to rewrite the row's
+        lifecycle state and its status index, with no LIFECYCLE log and — the
+        sharpest irony of the write — no ``session_events`` entry recording it.
         """
         if session is None:
             return
@@ -1523,7 +1598,7 @@ class TelegramRelayOutputHandler:
             events.append(event)
             session.session_events = events
             if hasattr(session, "save"):
-                session.save()
+                session.save(update_fields=["session_events", "updated_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("RTR event append failed (non-fatal): %s", e)
 

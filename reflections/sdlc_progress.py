@@ -808,17 +808,28 @@ def _send_alert(project_dict: dict, message: str) -> bool:
 def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[str, Any]:
     """Return ``(kind, session)`` with kind in steer | resume | create | unknown.
 
-    Rung 1 prefers a live (non-terminal, non-ledger) eng session for the
-    project. Rung 2 falls back to a resumable eng session that carries a
-    ``claude_session_uuid`` (required by ``resume_session``). Otherwise the
-    caller creates one.
+    Rung 1 takes a live (non-terminal, non-ledger) eng session for the lane.
+    Rung 2 falls back to a resumable eng session for the lane that carries a
+    ``claude_session_uuid`` (required by ``resume_session``) and did not
+    already fail. Otherwise the caller creates one.
 
-    Within BOTH buckets, a session whose ``slug`` matches ``lane_slug`` wins
-    over a merely-more-recent one. This is not cosmetic: ``resume_session``
-    transitions the row in place and the worker runs it in that row's own
-    ``working_dir``, so resuming a session belonging to another lane makes work
-    for issue A land as commits on lane B's branch. Only when no
-    same-lane candidate exists does most-recently-updated decide.
+    The lane match is a FILTER on both buckets, not a preference: a row is
+    eligible only when its ``slug`` is non-``None`` and equal to ``lane_slug``.
+    This is not cosmetic. ``resume_session`` transitions the row in place and
+    the worker runs it in that row's own ``working_dir``, so acting on a
+    session belonging to another lane makes work for issue A land as commits on
+    lane B's branch — and acting on a *slugless* row drops an unprompted
+    message into a human conversation thread (#3270). Recency only ranks rows
+    the filter already admitted; with no same-lane candidate the caller creates
+    a fresh session, which is the recoverable outcome.
+
+    Rung 1 falls through to rung 2, never straight to ``create``: a lane with
+    no live session may still have a perfectly good resumable one.
+
+    ``failed`` is excluded from rung 2 only. A row that failed once fails the
+    same way again, so re-resuming it on a timer is a loop, not a recovery.
+    The check has no place in rung 1 — ``failed`` is terminal and can never
+    reach the live bucket.
 
     ``("unknown", None)`` means the session query itself failed — the caller
     declines to act rather than guessing.
@@ -834,21 +845,40 @@ def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[
         logger.warning("sdlc_progress: target query failed for %s: %s", project_key, exc)
         return ("unknown", None)
 
-    def _rank(row) -> tuple[int, float]:
-        """Same-lane first, then most recently updated."""
-        same_lane = 1 if (lane_slug and getattr(row, "slug", None) == lane_slug) else 0
-        return (same_lane, to_unix_ts(getattr(row, "updated_at", None)) or 0.0)
+    # A falsy ``lane_slug`` admits NOTHING, so this returns ``("create", None)``
+    # without scanning a row. That is the intended fail-closed direction: with
+    # no lane to match, #3270's defect was picking the most-recently-updated
+    # eng row, which was routinely a slugless human conversation thread.
+    # Creating a fresh session is always safe; resuming a stranger's is not.
+    # Hoisted above the loop because it is loop-invariant -- and kept BELOW the
+    # query so a Redis failure still reports ``("unknown", None)`` rather than
+    # being masked as "no candidates".
+    if not lane_slug:
+        return ("create", None)
+
+    def _same_lane(row) -> bool:
+        """Eligibility for BOTH rungs: this row belongs to this lane, period."""
+        slug = getattr(row, "slug", None)
+        return slug is not None and slug == lane_slug
+
+    def _rank(row) -> float:
+        """Most recently updated, among rows the lane filter already admitted."""
+        return to_unix_ts(getattr(row, "updated_at", None)) or 0.0
 
     live: list[Any] = []
     resumable: list[Any] = []
     for row in rows:
         try:
-            if _is_ledger(row):
+            if _is_ledger(row) or not _same_lane(row):
                 continue
             status = getattr(row, "status", None)
             if status in NON_TERMINAL_STATUSES:
                 live.append(row)
-            elif status in RESUMABLE_STATUSES and getattr(row, "claude_session_uuid", None):
+            elif (
+                status in RESUMABLE_STATUSES
+                and status != "failed"
+                and getattr(row, "claude_session_uuid", None)
+            ):
                 resumable.append(row)
         except Exception as exc:  # pragma: no cover — defensive per-row guard
             logger.debug("sdlc_progress: target selection skipped a row: %r", exc)
@@ -1046,10 +1076,10 @@ def _check_project_stalls(project: dict) -> dict:
     creates_this_tick = 0
     # Same per-call, non-atomic status as `creates_this_tick`. `actions_this_tick`
     # is the secondary count bound; `targets_this_tick` is the PRIMARY burst
-    # guard -- `_pick_steer_target` queries project-wide with same-lane only a
-    # ranking preference, so several newly-visible lanes with no same-lane
-    # session all select the SAME eng session, which a count cap alone would
-    # happily steer three times in one tick with three different issues.
+    # guard -- `_pick_steer_target` queries project-wide and filters by lane, so
+    # two newly-visible lanes resolving to the same slug still select the SAME
+    # eng session, which a count cap alone would happily steer twice in one tick
+    # with two different issues.
     actions_this_tick = 0
     targets_this_tick: set[str] = set()
 

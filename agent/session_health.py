@@ -2858,6 +2858,41 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         )
         delivered = True
 
+        # Stamp response_delivered_at (#3270). This flush is the path PM/eng
+        # replies actually take, and until now it wrote the outbox payload
+        # without recording that the human had been answered. The only two
+        # other writers (agent/session_executor.py under `action == "deliver"`,
+        # agent/session_completion.py gated on `delivery_attempted`) are
+        # unreachable from here, so #918's duplicate-delivery guard
+        # `_delivery_belongs_to_current_run` read None and returned False for
+        # every deferred-self-draft delivery — and the #944 orphan net requeued
+        # rows that had already replied, once per tick.
+        #
+        # Narrow save: a bare save() here would be a full popoto HSET of a
+        # possibly-stale instance, i.e. a silent lifecycle write.
+        #
+        # ALSO mutate the caller's in-memory `session` object, for the same
+        # reason the extra_context clear below does: `finalize_session` runs a
+        # full `session.save()` on its own `session` parameter immediately
+        # after this flush returns, which writes back whatever that object
+        # still holds. Without the mirror the stamp is erased microseconds
+        # after it lands, on the very save that finalizes the transition.
+        try:
+            _stamp_at = datetime.now(tz=UTC)
+            _stamp_target = get_authoritative_session(session_id) or source
+            _stamp_target.response_delivered_at = _stamp_at
+            _stamp_target.save(update_fields=["response_delivered_at", "updated_at"])
+            if session is not None and session is not _stamp_target:
+                session.response_delivered_at = _stamp_at
+        except Exception as _stamp_err:
+            logger.warning(
+                "[session-health] failed to stamp response_delivered_at for %s after "
+                "successful flush (non-fatal; the #918 delivery guard stays blind for "
+                "this row): %s",
+                session_id,
+                _stamp_err,
+            )
+
         # Post-delivery flag clear (#3053 correction — the flush is NOT
         # self-clearing via #2489; that clear covers only the redraft-success
         # path in TelegramRelayOutputHandler.send(), never this flush). Without
@@ -3414,6 +3449,17 @@ async def _apply_recovery_transition(
     # that the delivery belongs to the current run's epoch
     # (response_delivered_at >= started_at, falling back to created_at; a
     # legacy row with no anchor still passes through, unguarded).
+    #
+    # No live-fence gate here, unlike the sibling guard in
+    # `_agent_session_health_check` (#3270). The difference is what this branch
+    # is an alternative TO: every caller of `_apply_recovery_transition` has
+    # already evaluated liveness and decided this row is being taken away from
+    # its runner — the only open question is whether it lands `pending`,
+    # `failed`, or `abandoned`. Finalizing a delivered row `completed` is
+    # strictly the gentler of those outcomes, so adding a fence gate here would
+    # not spare a live row, it would only route it into a harsher transition.
+    # The sibling guard needs the gate precisely because it runs BEFORE any
+    # liveness evaluation.
     if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
@@ -4646,7 +4692,23 @@ async def _agent_session_health_check() -> None:
         # falling back to created_at) so a stale prior-run delivery doesn't
         # suppress recovery of a genuinely stuck current run; legacy rows
         # with no anchor still pass through unguarded.
-        if _delivery_belongs_to_current_run(entry):
+        #
+        # ...and the row must not be EXECUTING (#3270). Because this branch
+        # deliberately skips the worker_alive/_has_progress evaluation, the
+        # only thing standing between it and a live mid-turn row is this
+        # check. `response_delivered_at` is now stamped mid-run on the
+        # deferred-self-draft redraft path (`agent/output_handler.py::send`),
+        # so a long eng/PM run that answers the human and then keeps working
+        # past this 300s cadence presents exactly the shape the branch below
+        # finalizes: status `running`, delivery inside the current run's
+        # epoch. Finalizing it `completed` writes a terminal status onto a row
+        # the runner is still driving — the mid-turn status corruption #3270
+        # exists to stop. A live execution fence is the same discriminator
+        # `models/session_lifecycle.py`'s idempotent-skip WARNING uses: the
+        # per-turn subprocess is still ours and still alive. A dead or absent
+        # fence still falls through, so the #918 duplicate-delivery guard this
+        # branch exists for is unchanged for genuinely stranded rows.
+        if _delivery_belongs_to_current_run(entry) and not _session_has_live_fence(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 

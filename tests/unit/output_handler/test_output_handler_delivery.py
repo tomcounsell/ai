@@ -214,6 +214,56 @@ class TestDeferredSelfDraftRelease:
         # Concurrent keys must survive the merge.
         assert auth_session.extra_context.get("transport") == "telegram"
 
+    def test_clean_send_mirrors_the_clear_onto_the_callers_own_object(self):
+        """The clear must land on the CALLER's object too, not just the fresh read.
+
+        Failure scenario without the mirror: the redraft succeeds, the
+        authoritative row is cleared, and then ``finalize_session`` runs its
+        trailing full ``session.save()`` on the caller's object -- which still
+        holds ``deferred_self_draft_pending`` plus the originally rejected
+        draft text. That write re-arms the flag on the terminal row, and
+        ``_deferred_self_draft_backstop_sweep`` selects terminal rows on that
+        flag alone and re-delivers the rejected text on top of the successful
+        rewrite. Both fields have to be mirrored; the stamp alone is not enough.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-mirror"
+        session.response_delivered_at = None
+        session.extra_context = {
+            "transport": "telegram",
+            "deferred_self_draft_pending": True,
+            "deferred_self_draft_text": "the originally rejected text",
+        }
+
+        auth_session = MagicMock()
+        auth_session.extra_context = dict(session.extra_context)
+        auth_session.save = MagicMock()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch("agent.steering.reset_self_draft_attempts"),
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=auth_session,
+            ),
+        ):
+            outcome = asyncio.run(handler.send("123", "the successful rewrite", 0, session=session))
+
+        assert outcome == DeliveryOutcome.sent
+        assert "deferred_self_draft_pending" not in session.extra_context, (
+            "the caller's own object still carries the pending flag; "
+            "finalize_session's trailing full save will re-arm it"
+        )
+        assert "deferred_self_draft_text" not in session.extra_context
+        assert session.extra_context.get("transport") == "telegram"
+        assert session.response_delivered_at is not None
+
     def test_clean_send_without_pending_flag_does_not_touch_extra_context(self):
         """When the flag was never set, the clean path must not perform the
         authoritative RMW at all (cheap-check gate)."""

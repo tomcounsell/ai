@@ -471,6 +471,7 @@ def finalize_session(
     current_status = getattr(session, "status", None)
     if current_status == status:
         _pending_on_reread = False
+        _fresh_for_idem = None
         try:
             _idem_sid = getattr(session, "session_id", None)
             if _idem_sid:
@@ -483,12 +484,69 @@ def finalize_session(
                     )
         except Exception:
             _pending_on_reread = False
-        _idem_log = logger.info if _pending_on_reread else logger.debug
-        _idem_log(
-            f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
-            f"already in terminal state {status!r}, skipping finalize"
-            + (" (deferred_self_draft_pending still set)" if _pending_on_reread else "")
-        )
+
+        # Promoted to WARNING when a LIVE execution fence is still bound to the
+        # row (#3270). A skip is routine when nobody is executing the session
+        # any more; it is an anomaly when the runner that owns this turn is
+        # still alive, because that is the turn-end finalize racing a status
+        # some other writer already put on the row. In the #3270 incident a
+        # stale full save wrote `completed` onto a mid-turn row, the real
+        # turn-end finalize skipped here, `completed_at` was never set, no
+        # lifecycle event was emitted — and a later stale save flipped the row
+        # back to `running`, where the orphan net requeued it once a tick for
+        # days. The live fence is the discriminator rather than a caller flag
+        # or a reason-string match, because it is a property of the row rather
+        # than of the caller.
+        #
+        # What the fence actually points at: the per-turn `claude -p`
+        # subprocess stamped by `agent/session_runner/runner.py` at spawn. By
+        # the ordinary turn-end finalize (`agent/session_executor.py`'s
+        # completion-exit guard) that subprocess has already exited, so the
+        # fence reads dead and the WARNING does NOT fire on the normal path —
+        # including the #3270 turn-end skip itself, which is why the incident
+        # was invisible in the first place. The finalizes that CAN trip it are
+        # the concurrent ones: a health-check or watchdog finalize landing
+        # while a turn's subprocess is still executing. That is exactly the
+        # signal wanted here — a terminal status being written onto a row
+        # somebody else is still running.
+        #
+        # Observability ONLY. The idempotency semantics are unchanged; that is
+        # #3253's territory.
+        _live_runner_pid = None
+        try:
+            _fence_src = _fresh_for_idem if _fresh_for_idem is not None else session
+            _fence = getattr(_fence_src, "live_fence", None)
+            if _fence:
+                from agent.pid_fence import fence_is_live
+
+                _fence_pid = _fence.get("pid")
+                if _fence_pid is not None and fence_is_live(
+                    int(_fence_pid), _fence.get("create_time")
+                ):
+                    _live_runner_pid = int(_fence_pid)
+        except Exception:
+            _live_runner_pid = None
+
+        if _live_runner_pid is not None:
+            logger.warning(
+                "[lifecycle] Session %s: finalize to %r skipped as idempotent while "
+                "runner pid=%s is still live — status found on the authoritative "
+                "record is %r. The turn is ending against a status this call did not "
+                "write, so completed_at and the lifecycle event are both lost. "
+                "reason=%r",
+                getattr(session, "session_id", "?"),
+                status,
+                _live_runner_pid,
+                getattr(_fresh_for_idem, "status", current_status),
+                reason,
+            )
+        else:
+            _idem_log = logger.info if _pending_on_reread else logger.debug
+            _idem_log(
+                f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
+                f"already in terminal state {status!r}, skipping finalize"
+                + (" (deferred_self_draft_pending still set)" if _pending_on_reread else "")
+            )
         return
 
     # Terminal-state guard: refuse to re-classify a terminal session unless explicitly opted out.
