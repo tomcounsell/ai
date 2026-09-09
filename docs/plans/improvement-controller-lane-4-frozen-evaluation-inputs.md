@@ -83,6 +83,28 @@ written against lane 2b's head, not main, because the charter surface this lane 
 - `models/improvement_investigation.py:94` and `models/improvement_release.py:84` — `charter_digest` — hold.
 - `config/settings.py:622,634` — `daily_paid_inference_usd`, `weekly_infrastructure_usd` — hold.
 - `tools/improvement_eligibility.py:83` — `is_open_source(project_key, *, ttl_seconds=...)` — holds; the §7 guard.
+  **This module exists only on `b05dde885`.** `git show origin/main:tools/improvement_eligibility.py`
+  is a `fatal: path … does not exist`. It arrives with #3275, which is why the Prerequisites row now
+  imports it alongside the charter rather than checking the charter half only.
+- `scripts/update/migrations.py:1430` — `_migrate_confirm_improvement_v2_fields`, the precedent this
+  lane's migration mirrors. **Also only on `b05dde885`**; `origin/main` carries
+  `_migrate_confirm_improvement_models_readable` at `:1384` and no `_v2_fields` function at all. Both
+  the precedent and `improvement_eligibility.py` arrive with #3275. `MIGRATIONS` is declared at
+  `:1474` as `dict[str, tuple[callable, str]]`, so the registered callable is `v[0]` — a registry
+  check that reads `getattr(v, "__name__", "")` against the tuple can never match, and the
+  Verification row uses `v[0]`.
+- `agent/memory_retrieval.py:117` — `POPOTO_REDIS_DB.zrevrange(...)` inside `get_relevance_ranked`,
+  the stored-score read that makes RRF retrieval clock-independent — holds.
+- `popoto/models/query.py:494` — `now = time.time()` inside `top_by_decay`; the decay clock has no
+  parameter, which is why `top_by_decay` is an anti-criterion here — holds (popoto in `.venv`).
+- `popoto/models/base.py:2785`, `:2820` — `Model.export_records` / `Model.import_records`, the ORM
+  transfer API the corpus export uses — hold.
+- `popoto/redis_db.py:405-414` — `POPOTO_REDIS_DB` built from `REDIS_URL` at module import; the
+  mechanism the arm subprocess relies on — holds.
+- `popoto/fields/embedding_field.py:226` — `POPOTO_CONTENT_PATH` resolves the `.npy` store — holds.
+- `ui/data/improvement.py` — 295 lines on `b05dde885`, exposing `get_coverage`,
+  `get_intervention_burden`, `get_provisional_assumptions`, `get_goals`. No evaluation surface, which
+  is why this lane's Error State Rendering section no longer commits to one.
 - `agent/session_executor.py:2116` — `_harness_env` dict literal; `VALOR_PROJECT_KEY` confirmed **absent**.
 - `reflections/improvement_collect.py:112` — `classify_correction` returning `"architectural"` on `_ARCHITECTURAL_MARKERS` — holds.
 
@@ -141,7 +163,7 @@ reused rather than reinvented.
   and **issue #1626** which produced `tools/cross_vendor_judge.py`. **Relevance:** the envelope
   contract this lane wraps. `cross_vendor_judge.py` already establishes the pattern of a judge that
   (a) reserves a named `judge_id` constant proven disjoint from the others by a test
-  (`tests/unit/test_review_multi_judge.py:676`), (b) emits a status-discriminated envelope
+  (`tests/unit/test_review_multi_judge.py:675`), (b) emits a status-discriminated envelope
   (`{"status": "ok", "judge": {...}}` versus `{"status": "skipped", "reason": ...}`), and (c) routes
   to a non-Claude provider under a settings gate. The `serves_charter` judge takes all three.
   `agent/sdlc_review_consensus.py::compute_consensus` is the aggregation shape the judge envelope
@@ -293,7 +315,7 @@ was needed: every question was answerable by reading the checkout and the instal
 - **Method**: code-read (`tools/cross_vendor_judge.py`, `agent/sdlc_review_consensus.py`, `tools/sdlc_verdict.py`)
 - **Finding**: **Mostly existing.** `cross_vendor_judge.py` already establishes a reserved
   `judge_id` constant (`CROSS_VENDOR_JUDGE_ID = "cross-vendor"`, `:28`), a disjointness test
-  (`tests/unit/test_review_multi_judge.py:679`), a status-discriminated envelope
+  (`tests/unit/test_review_multi_judge.py:675`, asserting at `:679`), a status-discriminated envelope
   (`{"status": "ok"|"skipped"}`), coercion of every field with a typed fallback (`:140-165`), and
   non-Claude provider routing under a settings gate. `_REQUIRED_KEYS = ("judge_id", "verdict",
   "blockers")` is asserted in two places (`agent/sdlc_review_consensus.py:33`,
@@ -419,7 +441,7 @@ hand-off with no artifact is a claim nobody can check later.
   `/update` propagation, no new secret.
 - **Interface changes**: one additive schema change — `ImprovementEvaluation.charter_digest`, a
   plain `Field(null=True)`, with a migration entry mirroring `_migrate_confirm_improvement_v2_fields`
-  (`scripts/update/migrations.py:1429`). One additive env change — `VALOR_PROJECT_KEY` in
+  (`scripts/update/migrations.py:1430`). One additive env change — `VALOR_PROJECT_KEY` in
   `_harness_env` (`agent/session_executor.py:2116`), the same shape `VALOR_CORRELATION_ID` took in
   `a9822d719`. `tools/memory_eval/metrics.py` is imported and **not** modified; that is acceptance
   criterion 7 and a Verification row.
@@ -476,6 +498,15 @@ downstream lane rather than a patch here.
 `scipy` and `statsmodels` are deliberately absent and no check asks for them (spike-1).
 
 ## Solution
+
+**What lane 4's arms actually compare.** Two arms retrieving from one frozen memory corpus, scored on
+retrieval endpoints. That is narrower than the Problem section's framing of "a candidate agent run
+against an incumbent", and the narrowing is deliberate: every mechanism this lane exists to establish
+— frozen inputs, per-arm isolation, blinding, a parity gate, multiplicity correction, an honest
+`infra_failure` — is mechanism-agnostic, and proving it on retrieval costs minutes per run instead of
+the hours a paired agent-run comparison costs. **Comparing full candidate agent runs is a No-Go for
+this lane** and is recorded as such below. What ships here is the apparatus a later lane points at a
+bigger arm.
 
 ### Key Elements
 
@@ -684,12 +715,18 @@ its default, and never writes `accept` or `reject`; `runner.has_verdict(evaluati
 only for `state == "complete"`. Consumers read `has_verdict` before `verdict`, and a test pins that
 an invalidated row never carries `accept` or `reject`.
 
-**`VALOR_PROJECT_KEY` joins `_harness_env` in the shape `VALOR_CORRELATION_ID` already took.** It is
-resolved through `config/project_key_resolver.py` and added to the dict literal at
-`agent/session_executor.py:2116`, so `tools/memory_search/__init__.py:62` and
-`reflections/redis_access.py:40` stop silently falling back to `"valor"` inside an arm subprocess.
-This is a one-line addition with a two-line test, and it is in this lane because an arm that
-partitions on ambient environment is not an isolated arm.
+**`VALOR_PROJECT_KEY` joins `_harness_env` in the shape `VALOR_CORRELATION_ID` already took, and it
+stands on its own merit rather than on the arm.** The arm rationale was wrong: an evaluation arm is
+spawned by `arena.py`, not by `agent/session_executor.py`, so it never reads `_harness_env` at all
+and gets its `VALOR_PROJECT_KEY` from the child env dict `arena.py` builds. The defect the change
+fixes is a different and larger one, already stated in the Problem section and needing no arm to
+exist: `_harness_env` (`agent/session_executor.py:2116`) omits `VALOR_PROJECT_KEY`, while
+`tools/memory_search/__init__.py:62` (`os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)`) and
+`reflections/redis_access.py:40` both read it and both fall back to `"valor"`. So **every** `claude -p`
+harness subprocess of a non-`valor` session silently searches and writes the wrong memory partition
+today. It is a one-line addition in the same dict literal `VALOR_CORRELATION_ID` (`:2137`) joined in
+`a9822d719`, with a source-inspection test and an integration test, and it is independent of every
+other task in this lane — which is why task 4 already carries `Depends On: none`.
 
 ## Failure Path Test Strategy
 
@@ -731,14 +768,25 @@ makes the verdict worth anything is a guard, and a guard with no red-state proof
 
 ### Error State Rendering
 
-- [ ] The four verdicts and `state="invalidated"` are each rendered distinctly by
-      `ui/data/improvement.py`. `infra_failure` must not be presented anywhere as evidence about the
-      candidate; the dashboard row says the harness broke.
-- [ ] An `invalidated` evaluation renders as "cannot be scored" and never shows a verdict, matching
-      `has_verdict()`. Test the template path, not just the data function.
-- [ ] `blinded=False` is rendered as a visible qualification on the evaluation, not omitted. An
-      evaluation that cannot state that judges were blinded is not a paired comparison and the
-      dashboard shows it as one that cannot be.
+No dashboard rendering in this lane. `ui/data/improvement.py` exposes `get_coverage`,
+`get_intervention_burden`, `get_provisional_assumptions`, and `get_goals` and has no evaluation
+surface at all, and the operator surface for evaluations belongs to lane 3's `valor-improve`
+(No-Gos, `[SEPARATE-SLUG #3215]`). Committing to a UI here would have meant a file no builder owns,
+a template that does not exist, and a "test the template path" instruction with no path to test.
+
+The semantics those checkboxes were reaching for are pinned where they are actually produced, which
+is where a later dashboard will read them from:
+
+- [ ] `runner.has_verdict(evaluation)` returns True only for `state == "complete"`, and
+      `test_corrupted_archive_invalidates_without_verdict` asserts an invalidated row never carries
+      `accept` or `reject`. Any consumer that reads `has_verdict` before `verdict` renders
+      "cannot be scored" correctly by construction.
+- [ ] `infra_failure` is a distinct verdict value produced by six named conditions with a test each,
+      never merged into `reject` (`test_infra_failure_and_reject_have_disjoint_causes`). A consumer
+      cannot present it as evidence about the candidate without deliberately choosing to.
+- [ ] `blinded` is written only from `scan_for_identity`'s result and is never null on a completed
+      evaluation, so `blinded=False` is a queryable fact rather than an absence a renderer has to
+      infer. `test_identity_leak_sets_blinded_false` pins it.
 
 ### Mutation proofs (each guard, measured)
 
@@ -759,6 +807,8 @@ test is observed to fail, the mutation is reverted, and the test is observed to 
 | Writer kill switch | Remove the client wrapper (leave the digest re-check) | `test_arm_write_is_refused` |
 | Writer kill switch | Remove the digest re-check (leave the wrapper) | `test_escaped_write_surfaces_as_infra_failure` |
 | Verdict disjointness | Merge `infra_failure` into `reject` | `test_infra_failure_and_reject_have_disjoint_causes` |
+| Gate 0 crash disposition | Let Gate 0 accept `state="running"` | `test_crashed_run_leaves_a_documented_repair` |
+| Corpus restore fidelity | Drop `on_embedding_mismatch="carry"` (re-embed on restore) | `test_two_arms_rank_identically_across_a_clock_gap` |
 | §7 routing | Ignore `is_open_source` and always use any provider | `test_client_project_judge_stays_on_subscription_providers` |
 | Calibration floor | Return a judge verdict below the floor | `test_reference_set_below_floor_yields_infra_failure` |
 | `metrics.py` untouched | Edit `tools/memory_eval/metrics.py` | `test_metrics_module_is_unmodified` |
@@ -783,11 +833,14 @@ disposition.
       to end rather than only by source inspection.
 - [ ] `tests/unit/test_migrations.py` — UPDATE: register the new migration key so the
       `MIGRATIONS`-dict completeness assertions cover it, following
-      `_migrate_confirm_improvement_v2_fields` (`scripts/update/migrations.py:1429`) as the precedent.
-- [ ] `tests/unit/test_review_multi_judge.py:676` — UPDATE: the existing judge-id disjointness test
-      asserts `CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}`. Extend the same test (or add
-      an adjacent one) to include `SERVES_CHARTER_JUDGE_ID`, so a future judge id collision is caught
-      in the one place the repo already looks for it.
+      `_migrate_confirm_improvement_v2_fields` (`scripts/update/migrations.py:1430`) as the precedent.
+- [ ] `tests/unit/test_review_multi_judge.py:675` — UPDATE:
+      `test_cross_vendor_id_disjoint_from_claude_ids` is defined at `:675` with its assertion
+      `CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}` at `:679`, identical on `origin/main`
+      and `b05dde885`. Extend the same test (or add an adjacent one) to include
+      `SERVES_CHARTER_JUDGE_ID`, so a future judge id collision is caught in the one place the repo
+      already looks for it. (The critique proposed `:677`/`:681`; re-derived against both refs, the
+      correct pair is `:675`/`:679`, which is what this plan now carries.)
 
 **Not affected, deliberately:**
 
@@ -941,6 +994,42 @@ writes an `infra_failure` evaluation naming the state it found rather than a com
 `runner.py`'s docstring records that a real lease belongs to lane 3. A test drives the losing branch
 directly by pre-setting `state="running"`.
 
+### Race 1b: A crashed run leaves the experiment stuck in `running`
+
+**Location:** `tools/improvement_eval/runner.py::evaluate`
+**Trigger:** SIGKILL, a machine restart, or an unhandled crash between the `frozen` → `running` write
+and the verdict write. For a run that spawns subprocesses and takes minutes this is the likelier of
+the two state hazards, not the rarer one.
+**Data prerequisite:** none.
+**State prerequisite:** `EXPERIMENT_STATES` is `("proposed", "frozen", "running", "complete",
+"aborted")` (`models/improvement_experiment.py:46`) and nothing in this lane ever writes `running`
+back to `frozen`, so Gate 0 refuses every retry of that experiment forever.
+
+**Disposition — no automatic reclaim in this lane, and the reason is a missing field, not an
+oversight.** A reclaim predicate needs to distinguish "a run is alive" from "a run died", and the
+only timestamp `ImprovementExperiment` carries is `frozen_at` (`:86`), which dates the freeze and not
+the run. The honest options were to add a heartbeat field — a second permanent addition to an
+immortal record, in a lane already making one, to serve a recovery path whose operator surface
+belongs to lane 3 — or to keep the refusal and make the repair explicit and cheap. This lane keeps
+the refusal.
+
+**Mitigation:**
+1. `runner.py`'s module docstring records the repair verbatim, through the ORM as CLAUDE.md requires
+   and never through raw Redis:
+   ```python
+   e = ImprovementExperiment.query.filter(project_key=..., experiment_id=...).first()
+   e.state = "frozen"
+   e.save()
+   ```
+2. The same repair is written into `docs/features/improvement-evaluation.md` under a
+   "Recovering a wedged experiment" heading, so an operator finds it without reading the source.
+3. `test_crashed_run_leaves_a_documented_repair` pins the disposition rather than leaving it as
+   prose: it pre-sets `state="running"`, asserts `evaluate()` returns `infra_failure` with the found
+   state named in `notes` and writes no `accept`/`reject`, then applies the documented ORM repair and
+   asserts the next `evaluate()` proceeds past Gate 0. The wedge and its exit both ship tested.
+4. A heartbeat field and an automatic reclaim are named in No-Gos as lane 3's, so the deferral is a
+   recorded decision rather than a gap.
+
 ### Race 2: The corpus is written while it is being exported
 
 **Location:** `tools/improvement_eval/corpus.py::export_corpus`
@@ -994,6 +1083,19 @@ A test asserts the child is gone after both the clean and the raising path.
   automated promotion is disabled and that no record enables it, pending separation of evaluator
   secrets from candidate execution and a human-amended charter naming reversible surfaces. Both are
   events outside this work.
+- [SEPARATE-SLUG #3217] **Comparing full candidate *agent runs*.** This lane's arms compare retrieval
+  over a frozen memory corpus. The isolation, blinding, parity, correction, and verdict-disjointness
+  machinery is arm-shape-agnostic, and a paired agent-run arm is a much larger and much slower thing
+  to build on top of it. Lane 5 runs the first complete research cycle and is where a larger arm
+  belongs. Nothing in this lane's design forecloses it: the arm boundary is a subprocess with a JSON
+  job spec.
+- [SEPARATE-SLUG #3215] **A dashboard surface for evaluations.** `ui/data/improvement.py` has no
+  evaluation surface and lane 3 owns the operator surface. This lane makes the semantics queryable
+  (`has_verdict`, a distinct `infra_failure`, a non-null `blinded`) and stops there.
+- [SEPARATE-SLUG #3215] **A run heartbeat and automatic reclaim of a wedged experiment.** Race 1b:
+  reclaiming a `running` experiment needs a liveness timestamp `ImprovementExperiment` does not carry,
+  and adding one is a second permanent field on an immortal record in service of a recovery path lane
+  3 owns. This lane documents and tests the one-line ORM repair instead.
 - **Alpha-spending stopping rules.** Not deferred to anyone: ruled out on the merits (research
   finding 3, Rabbit Holes). Fixed-batch is a complete, named stopping rule and it is what ships.
 - **Copy-on-write arm isolation.** Ruled out on the merits by spike-3, not deferred.
@@ -1010,7 +1112,7 @@ The `/update` skill needs one change and one only: the Popoto migration.
 - [ ] Add `_migrate_improvement_evaluation_charter_digest` to `scripts/update/migrations.py` and
       register it in the `MIGRATIONS` dict. `run_pending_migrations()` iterates `MIGRATIONS`, so an
       unregistered function never runs. It is read-only and idempotent, following
-      `_migrate_confirm_improvement_v2_fields` (`:1429`) exactly: import `ImprovementEvaluation`,
+      `_migrate_confirm_improvement_v2_fields` (`:1430`) exactly: import `ImprovementEvaluation`,
       run one bounded `query.filter(project_key="valor")[:1]` to prove the keyspace resolves under
       the new field, return None on success and the error string on failure. It writes nothing and
       is recorded once in `data/migrations_completed.json`.
@@ -1075,6 +1177,17 @@ the resolved value rather than a fallback.
       reference set is frozen to the verifying artifact store and cited by digest, why (the 30-day
       `ImprovementEvidence` TTL), what is reported (Cohen's kappa and paired position-swap
       consistency), and that no kappa threshold gates anything yet.
+- [ ] Add a `## Recovering a wedged experiment` section to `docs/features/improvement-evaluation.md`
+      giving the ORM repair verbatim (`e = ImprovementExperiment.query.filter(...).first();
+      e.state = "frozen"; e.save()`), why no automatic reclaim ships in this lane
+      (`ImprovementExperiment` carries no liveness timestamp — Race 1b), and that a heartbeat and an
+      automatic reclaim belong to lane 3.
+- [ ] Add an `## Arm isolation` subsection to `docs/features/improvement-evaluation.md` describing
+      the subprocess boundary: `arena.py` spawns the server, `arm_worker.py` is the only process that
+      talks to it, `REDIS_URL`/`POPOTO_CONTENT_PATH`/`VALOR_PROJECT_KEY` live in the child's env dict,
+      and the corpus moves as popoto `export_records`/`import_records` JSONL. State plainly that the
+      parent's canonical pool is never re-pointed, because that is the constraint a later reader is
+      most likely to "simplify" away.
 - [ ] Update `docs/features/improvement-controller.md` where it describes evaluation, so the two
       documents do not disagree about what exists.
 - [ ] Verify `docs/features/README.md` already indexes `improvement-evaluation.md`; add the entry if
@@ -1093,12 +1206,23 @@ Not applicable — this repo has no Sphinx, Read the Docs, or MkDocs site.
 - [ ] `tools/improvement_eval/arena.py` module docstring records the unix-socket and `--port 0`
       decision and cites issue #2799 as the failure it avoids. This is the single most surprising
       choice in the lane and the one most likely to be "simplified" by a later reader.
+- [ ] `tools/improvement_eval/arm_worker.py` module docstring states why the arm is a *process* and
+      not a client: retrieval reads through the Popoto ORM against the process-global
+      `POPOTO_REDIS_DB`, a bare `redis.Redis(unix_socket_path=…)` cannot answer `Memory.query`, and
+      popoto binds its pool from `REDIS_URL` at import — so a child with its own `REDIS_URL` is the
+      only isolation that leaves the parent's pool alone.
+- [ ] `tools/improvement_eval/corpus.py` module docstring records that restore passes
+      `on_embedding_mismatch="carry"` and relies on `import_records`' `skip_auto_now=True`, and that
+      dropping either makes two arms rank differently even from identical bytes.
+- [ ] `tools/improvement_eval/retrieval.py` module docstring records the `top_by_decay` ban with its
+      reason (`now = time.time()` inside the call, no parameter to pin it).
 - [ ] `tools/improvement_eval/correction.py` module docstring names the three Holm operations and
       records that the cumulative maximum is the known defect site.
 - [ ] `tools/improvement_eval/calibration.py` module docstring records the frozen-set rationale and
       the reference-set floor with its number.
 - [ ] `tools/improvement_eval/runner.py` module docstring enumerates the six `infra_failure`
-      conditions and states that a real evaluation lease belongs to lane 3 (Race 1).
+      conditions, states that a real evaluation lease belongs to lane 3 (Race 1), and carries the
+      verbatim ORM repair for an experiment wedged in `running` (Race 1b).
 - [ ] `models/improvement_evaluation.py` class docstring gains `charter_digest` in the field list,
       with a sentence on charter §12's rule that actions complete under the digest they carry.
 
@@ -1156,7 +1280,16 @@ Plus the criteria this lane adds:
 - [ ] The calibration reference set is frozen to the verifying artifact store and cited by digest;
       Cohen's kappa and a paired position-swap consistency figure are recorded; a set below the floor
       yields `infra_failure`.
-- [ ] `VALOR_PROJECT_KEY` reaches the harness subprocess env with the resolved value.
+- [ ] `VALOR_PROJECT_KEY` reaches the harness subprocess env with the resolved value, justified on
+      its own merit: `tools/memory_search/__init__.py:62` and `reflections/redis_access.py:40` fall
+      back to `"valor"` today, so every `claude -p` subprocess of a non-`valor` session uses the wrong
+      memory partition.
+- [ ] The arm reads its corpus through the Popoto ORM inside its own process, and the parent's
+      canonical pool is provably unmoved — `test_parent_pool_kwargs_survive_an_arena_context`, plus
+      the anti-criteria for `set_REDIS_DB_settings`, `os.environ["REDIS_URL"] =`, raw Popoto-key
+      commands, and `top_by_decay`.
+- [ ] An experiment wedged in `state="running"` by a crash has a documented, tested ORM repair
+      (Race 1b), and no automatic reclaim ships in this lane.
 - [ ] Every guard in the Failure Path mutation table has a recorded red-state proof.
 - [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
@@ -1306,6 +1439,8 @@ theme, because two builders converging on one file is how a lane livelocks.
 - Three disjoint handlers: `InfraFailure` → `verdict="infra_failure"`; `ArtifactIntegrityError` → `state="invalidated"` with no verdict written; a final catch-all → `infra_failure` with the exception type in `notes`. No shared fall-through.
 - `has_verdict(evaluation)` returns True only for `state == "complete"`.
 - Read-modify-write `ImprovementExperiment.state` from `frozen` to `running` as the first write; the loser writes an `infra_failure` evaluation naming the state it found (Race 1), and the docstring records that a real lease is lane 3's.
+- Write the Race 1b crash disposition and its repair into the module docstring, and add `test_crashed_run_leaves_a_documented_repair`: pre-set `state="running"`, assert `infra_failure` with the found state in `notes` and no `accept`/`reject`, apply the documented ORM repair, assert the next `evaluate()` clears Gate 0.
+- Spawn each arm through `arena.py` + `arm_worker.py`; never construct a Redis client in the runner and never re-point the parent's pool.
 
 ### 7. Mutation proofs
 - **Task ID**: prove-guards
@@ -1394,7 +1529,7 @@ Structural checks: all four repo-mandated sections present and substantive (Docu
 | CONCERN | Scope & Value | The lane's stated problem and its built surface describe two different comparisons, and the one component justified only by the stated problem has no consumer in the design. The Problem and Desired Outcome are about candidate-versus-incumbent *agent runs*; every specified component is retrieval-shaped (memory-corpus export, `retrieval.py`, baseline retrieval parity, `tools/memory_eval` reuse) and nothing in Data Flow launches a candidate. Yet Data Flow step 3 justifies the `_harness_env` change as threading `VALOR_PROJECT_KEY` so every arm subprocess partitions on the arm's project, and `_harness_env` is the env for a `claude -p` harness subprocess this flow never spawns. Related to the BLOCKER above by root cause, though the remedy is different; the two readings were produced by one agent in sequence, so this is not independent corroboration. | pending | State in the Solution that lane 4's arms compare retrieval over a frozen memory corpus, and move "comparing full candidate agent runs" to No-Gos with the lane that owns it. Then re-justify `VALOR_PROJECT_KEY` on its standalone merit, which is already in the Problem section and needs no arm: `tools/memory_search/__init__.py:62` and `reflections/redis_access.py:40` both read it and both fall back to `"valor"`, so any harness subprocess of a non-`valor` session silently uses the wrong partition today. That is a real defect with a two-line fix and a source-inspection test, and it stands whether or not an evaluation arm exists. Keep the change, drop the arm rationale, keep task 4 independent as it already is. |
 | CONCERN | History & Consistency | The migration-registration Verification row reintroduces the exact weak proxy the sibling lane's own recorded critique already found and replaced. The row is `grep -c "_migrate_improvement_evaluation_charter_digest" scripts/update/migrations.py` expecting `output > 1`, and `docs/plans/improvement-controller-lane-2b-charter-v2-delta.md:736` carries the NIT saying of the identical shape that it "is satisfied by a definition plus a docstring mention". Lane 2b answered it with a registry query at `:713`. This plan's Update System section makes registration the load-bearing property in prose and then verifies it with a count a defined-but-unregistered function passes. | pending | `MIGRATIONS` is declared `dict[str, tuple[callable, str]]`, so the value is a **tuple** and the callable is `v[0]` — lane 2b's own snippet at `:713` writes `getattr(v,'__name__','')` against the tuple and can never match, so copying it verbatim reintroduces a check green for the wrong reason. Use `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` with expected `output contains True`. |
 | CONCERN | History & Consistency | Criterion 7's proof is anchored to a git ref rather than to the file, and to the wrong ref for this lane. `test_metrics_module_is_unmodified` compares the file's hash against `git show main:` and the Verification row runs `git diff --exit-code main -- tools/memory_eval/metrics.py`, while the Freshness Check declares the build-against commit is `b05dde885` on `session/sdlc-3255`. A test that shells to `git show main:` is not a property of the code: it errors where no local `main` ref exists (a `--depth 1` CI checkout, a detached HEAD, a fresh clone) and silently changes meaning whenever `main` moves. The substance is fine today — `git diff --stat main b05dde885 -- tools/memory_eval/` is empty — but the mechanism does not hold the property the criterion claims. | pending | Pin the digest in the test as a module constant: `EXPECTED_METRICS_SHA256 = "<digest>"`, then `assert hashlib.sha256(path.read_bytes()).hexdigest() == EXPECTED_METRICS_SHA256`. Resolve the path from the test file (`Path(__file__).resolve().parents[2] / "tools/memory_eval/metrics.py"`), not from cwd, because `scripts/pytest-clean.sh` pins `PYTHONPATH` to the invoking checkout and the suite runs from worktrees. Keep a git-diff row in the Verification table only as the human-facing cross-check, and against `origin/main` rather than a local `main`. Regenerating the constant deliberately is the review event the criterion wants; a git-ref comparison hides it. |
-| NIT | History & Consistency | Citation drift, and one prerequisite gate narrower than the dependency it guards. `_migrate_confirm_improvement_v2_fields` is cited four times as `scripts/update/migrations.py:1429`; on `b05dde885` it is at `:1430`, and on `main` it does not exist at all (main carries only `_migrate_confirm_improvement_models_readable` at `:1384`), which the plan never says even though the Freshness Check lists no migrations.py line among its re-verified references. `tools/improvement_eligibility.py` likewise exists only on `b05dde885`, yet the Prerequisites row "Lane 2b charter surface present" checks only `ImprovementCharter.digest/.text/.pinned`, so the gate goes green while the module carrying the §7 decision is still absent. The `test_review_multi_judge.py` disjointness test is at `:677` with its assert at `:681`, cited as `:676`/`:679`. | pending | Widen the prerequisite to one command: `python -c "from models.improvement_charter import ImprovementCharter as C; from tools.improvement_eligibility import is_open_source; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` — still one expected FAIL until #3275 merges, but now failing for the whole lane-2b surface this lane consumes rather than the charter half only. Add the migrations.py line to the Freshness Check's verified list with the correct number and say plainly that both the migration precedent and `improvement_eligibility.py` arrive with #3275. |
+| NIT | History & Consistency | Citation drift, and one prerequisite gate narrower than the dependency it guards. `_migrate_confirm_improvement_v2_fields` is cited four times as `scripts/update/migrations.py:1430`; on `b05dde885` it is at `:1430`, and on `main` it does not exist at all (main carries only `_migrate_confirm_improvement_models_readable` at `:1384`), which the plan never says even though the Freshness Check lists no migrations.py line among its re-verified references. `tools/improvement_eligibility.py` likewise exists only on `b05dde885`, yet the Prerequisites row "Lane 2b charter surface present" checks only `ImprovementCharter.digest/.text/.pinned`, so the gate goes green while the module carrying the §7 decision is still absent. The `test_review_multi_judge.py` disjointness test is at `:677` with its assert at `:681`, cited as `:676`/`:679`. | pending | Widen the prerequisite to one command: `python -c "from models.improvement_charter import ImprovementCharter as C; from tools.improvement_eligibility import is_open_source; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` — still one expected FAIL until #3275 merges, but now failing for the whole lane-2b surface this lane consumes rather than the charter half only. Add the migrations.py line to the Freshness Check's verified list with the correct number and say plainly that both the migration precedent and `improvement_eligibility.py` arrive with #3275. |
 
 ---
 
