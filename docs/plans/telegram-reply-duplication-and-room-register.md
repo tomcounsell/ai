@@ -7,7 +7,7 @@ created: 2026-09-09
 tracking: https://github.com/tomcounsell/ai/issues/3270
 last_comment_id: 5601939922
 revision_applied: true
-revision_applied_at: 2026-09-09T13:15:00Z
+revision_applied_at: 2026-09-09T13:20:00Z
 ---
 
 # Telegram: stop the unprompted repeat replies, and make replies match the room
@@ -206,11 +206,18 @@ Run the grep as an **enumeration** step in this PR and record its full output in
 
 Per this repo's sweep discipline the *enumeration* closes on a clean grep over AgentSession `.save()` call sites, never on an enumerated list — that discipline is preserved; only the *fix* is scoped to the evidenced sites.
 
-### A4. Rung 2 of the stall ladder: require a lane match
+### A4. Both rungs of the stall ladder: require a lane match
 
-In `_pick_steer_target`, a row is eligible for the resume rung only if its `slug` is non-`None` **and** equal to `lane_slug`, and its status is not `failed`. Otherwise fall through to the `create` rung. A slugless conversation thread becomes structurally ineligible. This implements the rule `_pick_steer_target`'s own docstring already states.
+`_pick_steer_target` has two rungs and **both** rank by the same `_rank` closure, in which the slug is only a tiebreaker. Rung 2 (resume) is the one that produced this incident; rung 1 (steer) has the identical defect and produces the identical symptom — `reflections/sdlc_progress.py:856-857` reads `if live: return ("steer", max(live, key=_rank))`, so when no same-lane *live* row exists the stall check steers whichever unrelated live session was updated most recently, and an unprompted message lands in a stranger's thread. Fixing only rung 2 would close the path the logs happened to record and leave its twin open.
 
-Excluding `failed` is a separate judgement worth stating: a row that failed once will fail the same way again, so re-resuming it on a timer is a loop, not a recovery.
+So: in **both** buckets, a row is eligible only if its `slug` is non-`None` **and** equal to `lane_slug`. A slugless conversation thread becomes structurally ineligible for either rung. This is one predicate applied twice, not two fixes, and it implements the rule the function's own docstring already states.
+
+Two ordering details the implementation must respect:
+
+- Rung 1 falls through to **rung 2**, not to `create`, when no same-lane live row exists. Falling straight to `create` would skip a legitimate same-lane resumable row.
+- The `failed` exclusion belongs to rung 2 only. `failed` is not in `NON_TERMINAL_STATUSES`, so it can never reach the live bucket, and writing the check in both places would be dead code.
+
+Excluding `failed` from rung 2 is a separate judgement worth stating: a row that failed once will fail the same way again, so re-resuming it on a timer is a loop, not a recovery.
 
 ### A5. Session-scope the resume steer
 
@@ -244,7 +251,9 @@ Per the repo's no-legacy rule: describe only the current status quo. Do not writ
 
 Every guard here certifies an absence, so **every test must be proven RED against the known-bad behavior before the fix lands.** A guard that was never red proves nothing. Concretely, for each item below: write the test, run it on the unfixed tree and record the failure, then apply the fix and confirm green.
 
-- **A4 red-first:** build a project with one stalled lane (slug `X`) and one slugless, recently-updated, `completed` eng session. Assert `_pick_steer_target(project, lane_slug="X")` returns `("create", None)`. On current code it returns `("resume", <the slugless row>)`.
+- **A4 rung 2 red-first:** build a project with one stalled lane (slug `X`) and one slugless, recently-updated, `completed` eng session carrying a `claude_session_uuid`. Assert `_pick_steer_target(project, lane_slug="X")` returns `("create", None)`. On current code it returns `("resume", <the slugless row>)`.
+- **A4 rung 1 red-first:** same fixture but the slugless row is in a status inside `NON_TERMINAL_STATUSES`. Assert the function never returns `("steer", <the slugless row>)`. On current code it does — this is the twin defect, and it is the one nothing in the incident logs happened to record.
+- **A4 fall-through:** one slugless live row plus one same-lane resumable row. Assert the result is `("resume", <the same-lane row>)`, proving rung 1 falls through to rung 2 rather than to `create`.
 - **A4 failed-row red-first:** same fixture with the candidate in `failed`. Assert it is never selected for the resume rung.
 - **A5 red-first:** call `resume_session` and assert the steering write lands on the session-scoped key. On current code it lands on `steering:room:{room_id}`.
 - **A1 red-first:** drive a deferred-self-draft delivery through `flush_deferred_self_draft_sync` and assert `response_delivered_at` is set afterward. On current code it stays `None`.
@@ -272,7 +281,7 @@ Every guard here certifies an absence, so **every test must be proven RED agains
 
 ## Risks
 
-- **A4 could starve legitimate recovery.** Requiring a slug match means a stalled lane whose session lost its slug now falls to the `create` rung instead of resuming. That is the correct trade — creating a fresh session is recoverable, resuming a stranger's conversation is not — but it will change stall-recovery behavior in production and should be watched after deploy.
+- **A4 could starve legitimate recovery.** Requiring a slug match in both rungs means a stalled lane whose session lost its slug now falls to the `create` rung instead of being steered or resumed. That is the correct trade — creating a fresh session is recoverable, resuming a stranger's conversation is not — but it will change stall-recovery behavior in production and should be watched after deploy.
 - **A1 could surface latent duplicate delivery.** Stamping `response_delivered_at` on a path that never stamped it will start firing `#918`'s guard on rows where it previously stayed silent. That is the intent, but it makes a previously-dead code path live; the A1 integration test exists specifically to characterize it before it ships.
 - **A3a is still the highest-blast-radius code change in this PR**, though scoping it to two evidenced sites in one file cuts that radius substantially. Per-site commits keep it bisectable. The residual risk moves to A3b's follow-up issue, where it gets its own review pass.
 - **B1 changes agent behavior through prompt text**, which cannot be fully verified by unit tests. The real verification is observational: read the room after deploy.
@@ -326,7 +335,7 @@ The behavior is therefore reachable by the agent immediately after a service res
 
 ## Success Criteria
 
-- Zero `resume (sdlc-stall)` transitions on slugless sessions, verified by a red-first unit test and by log inspection after deploy.
+- Zero `resume (sdlc-stall)` transitions **and zero stall-check steers** on slugless sessions, verified by red-first unit tests on both rungs and by log inspection after deploy.
 - `_pick_steer_target` never returns a `failed` row from the resume rung.
 - `resume_session` writes to the session-scoped steering key.
 - `response_delivered_at` is set after a deferred-self-draft delivery, and the health check finalizes such a row `completed` rather than requeuing it.
@@ -343,7 +352,9 @@ The behavior is therefore reachable by the agent immediately after a service res
 
 Two independent tracks, disjoint file sets, one branch (`session/dev-1aafae58`) and one worktree.
 
-**Track A — defect #3270** (`reflections/sdlc_progress.py`, `tools/valor_session.py`, `agent/session_health.py`, `agent/output_handler.py`, `agent/sdk_client.py`, `agent/health_check.py`, `tools/session_tags.py`, `agent/pipeline_state.py`, `tools/valor_telegram.py`, `agent/session_runner/runner.py`, `models/session_lifecycle.py`) — `agent/session_runner/harness/claude.py` left the file set when A6a was deferred.
+**Track A — defect #3270** (`reflections/sdlc_progress.py`, `tools/valor_session.py`, `agent/session_health.py`, `agent/output_handler.py`, `agent/session_runner/runner.py`, `models/session_lifecycle.py`)
+
+This set lists only files a remaining task actually modifies. `agent/session_runner/harness/claude.py` left it when A6a was deferred; `agent/sdk_client.py`, `agent/health_check.py`, `tools/session_tags.py`, `agent/pipeline_state.py`, and `tools/valor_telegram.py` left it when A3b was deferred — A3b greps and files an issue, it changes no code. `tools/valor_telegram.py` in particular is a No-Go (its flags are asserted by an integration test, #2694) and must not be edited by this plan at all.
 
 **Track B — defect #3271** (`.claude/commands/roles/prime-pm-role.md`, `.claude/commands/roles/prime-teammate-role.md`, `config/personas/segments/identity.md`, `docs/features/pm-voice-refinement.md`)
 
@@ -355,14 +366,14 @@ The file sets do not intersect, so the tracks can run concurrently as separate b
 
 ### Track A
 
-- [ ] A0. Write the red-first tests for A4 and A5 in `tests/unit/reflections/test_reflections_progress_check.py`; run them and **record the failures** before writing any fix.
+- [ ] A0. Write the red-first tests for A4 (both rungs, plus the fall-through case) and A5 in `tests/unit/reflections/test_reflections_progress_check.py`; run them and **record the failures** before writing any fix.
 - [ ] A1. Enumerate every `finalize_session` caller and classify each as fresh-reading or stale-passing; record the result for the PR body. Then stamp `response_delivered_at` in `flush_deferred_self_draft_sync` and the deferred-self-draft redraft path in `output_handler.send`, with a narrow `save(update_fields=[...])`, **including the caller-object mirror in this same task** — the mirror is part of the fix, not a follow-on. Red-first test proves the field stays `None` today.
 - [ ] A1c. Red-first test: `finalize_session` end-to-end with a stale caller object whose `response_delivered_at` is `None`; assert the stamp survives the trailing save. **Runs before A1b** — A1b depends on the mirror, so the checkbox order here matches the real dependency. Add a sibling case for the `output_handler.py::send` stamp for each stale-passing caller A1's enumeration found.
 - [ ] A1b. Integration test: with the stamp and mirror present, the health check finalizes the row `completed` instead of requeuing to `pending`. This is the orphan-bounce reproduction.
 - [ ] A2. Add the WARNING in `finalize_session` when an idempotent skip coincides with a bound live runner PID. No behavior change.
 - [ ] A3a. Narrow `agent/output_handler.py:1468` and `:1526` to `update_fields`, one commit each, naming the fields now written. Include the stale-snapshot regression test, parametrized over both call sites.
 - [ ] A3b. Run the grep enumeration over AgentSession `.save()` call sites and file "AgentSession `save()` hardening sweep" with the full output, citing this plan's Architectural Impact section. Record the issue number in the PR body. **No code fix for those sites in this PR.**
-- [ ] A4. Narrow `_pick_steer_target` rung 2 to require a non-`None` slug equal to `lane_slug`, and exclude `failed`. Update the docstring to describe a filter rather than a preference. Turn A0's tests green.
+- [ ] A4. Narrow **both** rungs of `_pick_steer_target` to require a non-`None` slug equal to `lane_slug`; exclude `failed` in rung 2 only; keep rung 1 falling through to rung 2. Update the docstring to describe a filter rather than a preference. Turn A0's tests green.
 - [ ] A5. Session-scope the resume steer in `resume_session`; replace the `:1153-1154` comment along with the behavior.
 - [ ] A6b. Dedupe `TIMEOUT_NEEDS_ATTENTION_MESSAGE` to once per session. (A6a is deferred to the A3b follow-up issue; fold it into that issue's body rather than filing a third.)
 - [ ] A7. Review the `tests/unit/test_session_health_*.py` modules flagged in Test Impact; update any case asserting the pre-fix contract.
@@ -371,7 +382,7 @@ The file sets do not intersect, so the tracks can run concurrently as separate b
 
 - [ ] B1. Add the "Match the room" section under `# Persona behaviors to keep` in `prime-pm-role.md` and under `# Teammate persona` in `prime-teammate-role.md`. Edit in place; verify inodes unchanged. Do not touch existing paragraphs or headers.
 - [ ] B1b. Run `tests/unit/test_pm_progress_updates.py` and confirm it passes **unmodified**.
-- [ ] B2. Correct `config/personas/segments/identity.md` (`:39-40`, `:57-59`) and `docs/features/pm-voice-refinement.md` (`:9`, `:17`, `:21`, `:25`, `:29`, `:52`), including both wrong symbol references. Describe only the current status quo.
+- [ ] B2. Correct `config/personas/segments/identity.md` (`:39-40`, `:57-59`) and `docs/features/pm-voice-refinement.md` (`:9`, `:17`, `:21`, `:29`, `:52`), including both wrong symbol references. Re-verify each line number against the file at build time; the doc may have drifted. Describe only the current status quo.
 
 ### Shared
 
