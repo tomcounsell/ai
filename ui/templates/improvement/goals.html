@@ -30,18 +30,18 @@
     <p class="improvement-meta"><code>{{ goals.charter.digest }}</code></p>
     {% endif %}
 
-    <h3>Early priorities</h3>
+    <h4>Early priorities</h4>
     <p class="improvement-meta">
         Charter §3 starting hypotheses, not a fixed allocation or a permanent
         ordering. The ranking changes as evidence changes.
     </p>
-    <ol class="improvement-priorities">
+    <ol class="improvement-list">
         {% for priority in goals.priorities %}
         <li>{{ priority }}</li>
         {% endfor %}
     </ol>
 
-    <h3>Open cases</h3>
+    <h4>Open cases</h4>
     {% if goals.cases_unavailable %}
     <p class="improvement-warning">Case records unavailable; the read failed.</p>
     {% elif goals.no_cases_yet %}
@@ -50,7 +50,7 @@
         charter digest above.
     </p>
     {% else %}
-    <table class="improvement-cases">
+    <table class="improvement-table">
         <thead>
             <tr>
                 <th>Case</th>
@@ -72,7 +72,7 @@
     </table>
     {% endif %}
 
-    <h3>Unresolved assumptions</h3>
+    <h4>Unresolved assumptions</h4>
     {% if goals.assumptions_unavailable %}
     <p class="improvement-warning">Assumptions unavailable; the read failed.</p>
     {% elif not goals.assumptions %}
@@ -80,7 +80,7 @@
         Nothing proceeding on an unresolved assumption right now.
     </p>
     {% else %}
-    <ul class="improvement-assumptions">
+    <ul class="improvement-list">
         {% for assumption in goals.assumptions %}
         <li>{{ assumption.assumption }}</li>
         {% endfor %}
@@ -88,7 +88,7 @@
     {% endif %}
 
     {% for section in goals.pending_sections %}
-    <h3>{{ section.heading }}</h3>
+    <h4>{{ section.heading }}</h4>
     <p class="improvement-meta">Nothing yet; {{ section.written_by }}.</p>
     {% endfor %}
 </div>

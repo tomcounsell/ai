@@ -170,9 +170,26 @@ def _probe_vault_resources(runner: Runner) -> dict[str, dict]:
 
 
 def _probe_cloudflare_cli(runner: Runner) -> dict:
-    completed = _run(runner, ["wrangler", "--version"])
-    if completed is None:
+    """Classify the wrangler CLI, distinguishing "not installed" from "uncertain".
+
+    Calls the runner directly rather than through :func:`_run`, because
+    ``_run`` collapses every exception into a single ``None`` and loses the
+    one distinction that matters here: ``FileNotFoundError`` means the binary
+    genuinely is not on PATH (``absent``), while a timeout, an ``OSError``, or
+    any other failure means the check was inconclusive (``unknown``). Reusing
+    ``_run`` would make a `wrangler` timeout report `absent` — a certain
+    answer to an uncertain question, and the specific harm the three-state
+    vocabulary exists to prevent.
+    """
+    try:
+        completed = runner(["wrangler", "--version"])
+    except FileNotFoundError:
         return _entry("absent", "wrangler is not installed or not on PATH")
+    except Exception as e:
+        logger.debug("resource probe: wrangler --version failed: %s", e)
+        return _entry("unknown", f"wrangler check did not complete: {e}")
+    if not isinstance(completed, subprocess.CompletedProcess):
+        return _entry("unknown", "wrangler check returned an unexpected result")
     if completed.returncode != 0:
         return _entry("unknown", f"wrangler exited {completed.returncode}")
     return _entry("verified", "wrangler answers on PATH")

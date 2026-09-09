@@ -147,6 +147,20 @@ class TestUnknownIsTheHonestDefault:
 
         assert probe(runner=timing_out)["cloudflare_account"]["state"] == "unknown"
 
+    def test_a_wrangler_timeout_is_unknown_not_absent(self):
+        """The wrangler leg's mirror of the vault leg's timeout test.
+
+        A timeout is uncertainty, not evidence the binary is missing. Only
+        `FileNotFoundError` earns `absent`; this must not collapse to it.
+        """
+
+        def timing_out(argv):
+            if argv[0] == "wrangler":
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=15)
+            return _completed(VAULT_LISTING)
+
+        assert probe(runner=timing_out)["cloudflare_cli"]["state"] == "unknown"
+
 
 class TestOneFailureDoesNotBlankTheRest:
     def test_a_dead_vault_still_leaves_the_cli_classified(self):
