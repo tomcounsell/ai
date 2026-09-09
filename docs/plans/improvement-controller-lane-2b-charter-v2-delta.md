@@ -609,7 +609,7 @@ If the lane is ever split, the only safe seam is `tools/improvement_eligibility.
 - **Agent Type**: builder
 - **Parallel**: false
 
-- In `config/settings.py::ImprovementSettings`: rename `daily_external_llm_usd` (`:618`) to `daily_paid_inference_usd`, keeping `default=10.00` and `ge=0.0`; add `weekly_infrastructure_usd=50.00`, `budget_day_boundary: Literal["UTC"] = "UTC"`, `budget_week_start: Literal["monday", "sunday"] = "monday"` (typed so a bad env override fails at settings load rather than at lane 3's first window computation); delete `portfolio_allocation` (`:630`) and its whole description block
+- In `config/settings.py::ImprovementSettings`: rename `daily_external_llm_usd` (`:618`) to `daily_paid_inference_usd`, keeping `default=10.00` and `ge=0.0`; extend `from typing import Any` at `config/settings.py:13` to `from typing import Any, Literal`; add `weekly_infrastructure_usd=50.00`, `budget_day_boundary: Literal["UTC"] = "UTC"`, `budget_week_start: Literal["monday", "sunday"] = "monday"` (typed so a bad env override fails at settings load rather than at lane 3's first window computation); delete `portfolio_allocation` (`:630`) and its whole description block
 - Every description keeps the block's shape: what the field governs, a `PROVISIONAL/TUNABLE.` marker, and a closing `Env: IMPROVEMENT__<KEY>.` sentence
 - Rewrite the `.env.example:358-359` clause naming "daily external-LLM dollars, portfolio allocation" to name the three budget units instead
 - Add `ImprovementSettings` coverage to `tests/unit/test_settings.py`, which has none today: a defaults case for the four values and an absence case asserting `daily_external_llm_usd`, `portfolio_allocation`, and `daily_question_ceiling` are not model fields
@@ -717,6 +717,12 @@ Every anti-criterion row was measured against the working tree at the baseline s
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 
 ## Critique Results
+
+Round 2 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses (Agent tool unavailable: fork directive forbids subagent spawning), plus automated structural checks, over the revised plan at `4d03a3434`. **READY TO BUILD (no concerns)**: 0 blockers, 0 concerns, 0 nits. Every round-1 finding carries a non-pending Addressed By and its Implementation Note is embedded where the builder reads it (Technical Approach §1 and §4, tasks 1, 2, and 6, Test Impact, Documentation, Verification). The Verification table parses at 41 rows, 0 malformed. One builder note that is not a finding: `config/settings.py:13` reads `from typing import Any`, so task 2 extends that import to include `Literal` when it types the two window fields.
+
+No findings from the war room.
+
+### Round 1 (superseded verdict; all findings addressed above)
 
 Round 1 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency), sequential lenses (Agent tool unavailable: fork directive forbids subagent spawning), plus automated structural checks. **READY TO BUILD (with concerns)**: 0 blockers, 3 concerns, 3 nits.
 
