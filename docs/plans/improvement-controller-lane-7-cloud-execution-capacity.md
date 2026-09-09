@@ -294,15 +294,80 @@ No integration test asserts that a real sandbox ran. That evidence is a recorded
 
 ## Risks
 
-<!-- skeleton -->
+### Risk 1: Subscription capacity is not available to a sandbox at the scale §2 expects
+**Impact:** The first-month expectation is unreachable by any amount of infrastructure work. A lane that acquires sandboxes without resolving this buys hosting for sessions that cannot authenticate.
+**Mitigation:** spike-1 resolved the rule (official CLI on a remote host: supported; subscription OAuth in a hosted runtime: blocked since January 2026) and left only the scale question open. The build runs the official CLI and nothing else, records the scale question as a provisional assumption with the observation that would overturn it (a rate-limit or account action attributable to sandbox usage), and reports it as the fifth answer. **This risk materializing is a successful outcome for this lane**, because the charter asks for an honest account of what prevents the result, not for the result at any cost.
+
+### Risk 2: A running resource keeps charging after the week is exhausted
+**Impact:** Silent budget overrun, and charter §8's limit breached by inaction rather than by decision.
+**Mitigation:** The teardown policy makes continuation an explicit, recorded forecast overrun against the next window, booked before it accrues. `standing` resources are torn down; only `trial` resources continue, and only to a bounded horizon.
+
+### Risk 3: Teardown destroys the evidence the trial was gathering
+**Impact:** The lane spends money to produce evidence and then deletes it — the exact failure Gap D's "does not tear down running resources" clause anticipates.
+**Mitigation:** Verified export is the precondition of teardown, and the guard fails closed: a verifier that raises or returns False leaves the resource running and escalates. Mutation-checked in both directions, because a guard that never fires is indistinguishable from no guard.
+
+### Risk 4: The sandbox runs and its evidence never reaches the dashboard
+**Impact:** The most expensive kind of null result — a successful unattended run that cannot be reported, because §2 asks *which sessions* ran in sandboxes and the answer lives in records nobody can query.
+**Mitigation:** spike-4 makes durable-state topology a decision (task 4) that precedes acquisition, and "the dashboard renders a sandbox session's evidence beside a local one's" is a success criterion with a Verification row.
+
+### Risk 5: A metered provider's charge cannot be forecast, and admission refuses the charter's own named resource
+**Impact:** Charter §8 names a funded Cloudflare account. Refusing it on forecastability grounds looks like the lane ignoring the charter.
+**Mitigation:** It is the opposite, and the plan says so where a reader will find it: Gap D's refusal rule is charter-derived, and a decision against Cloudflare is recorded with its evidence and its arithmetic. §8 grants authority to use the account; it does not require spending through it on an unforecastable rate. If a bounded duty cycle makes the rate forecastable, the refusal does not arise.
+
+### Risk 6: The lane is blocked behind two unlanded lanes and stalls entirely
+**Impact:** #3255 is an open PR and #3215 has no PR and no plan. A lane that waits for both does nothing for weeks.
+**Mitigation:** The task list is explicitly split. Tasks 1 through 5 (probe re-run, provider decision, sandbox feasibility, state topology, evidence-kind and meter) need only #3255. Tasks 6 through 8 (acquisition, credential storage, the trial) need #3215's vault writer and control namespace. Tasks 9 and 10 (concurrency revisit, report) need whatever has landed by then and are written to produce a truthful report from a partial position — which is precisely what charter §2 asks for.
+
+### Risk 7: "Unattended" is claimed on a run too short to have tested it
+**Impact:** A four-hour green run reported as unattended operation, when the known headless failure mode is an OAuth refresh 401 at token expiry (spike-2's finding on issue #50743).
+**Mitigation:** The trial's duration criterion is defined by **crossing a credential-refresh boundary and surviving at least one induced crash**, not by wall-clock hours. A run that has not crossed both has produced a different, lesser finding, and the report says which.
+
+### Risk 8: The progress report drifts into optimism between runs
+**Impact:** Charter §2's reporting obligation is discharged in form and defeated in substance — the specific dishonesty the parent plan names.
+**Mitigation:** The report is generated from records rather than written, the fifth answer is assembled from recorded assumptions, `unknown` probe entries, and refused acquisitions, and the generator has no function returning sandbox count, uptime, or token volume. A Verification anti-criterion asserts those functions do not exist.
 
 ## Race Conditions
 
-<!-- skeleton -->
+### Race 1: Concurrent admission against the same budget window
+**Location:** `tools/infrastructure_budget.py`, the admission path
+**Trigger:** Two acquisitions admitted in the same tick, or a controller tick overlapping an operator-initiated acquisition. Each reads the window's remaining headroom, each sees room, both are admitted, and the sum exceeds `weekly_infrastructure_usd`.
+**Data prerequisite:** The window's reserved total must reflect every prior admission before the next admission reads it.
+**State prerequisite:** No two admissions may hold a read-modify-write on the same window concurrently.
+**Mitigation:** Reserve-then-check in a single atomic step against the window key, the same shape Gap D specifies for unit 2's `outstanding_slots + 1 <= max` check. A read followed by a separate write is the bug; the test drives two concurrent admissions whose sum exceeds the limit and asserts exactly one is admitted.
+
+### Race 2: A resource is torn down while its trial is still writing evidence
+**Location:** the teardown path, against Flow B step 4
+**Trigger:** The window ends, the resource is classified `standing` because the trial's last evidence write has not landed yet, and teardown proceeds while a session is mid-write.
+**Data prerequisite:** The `trial` / `standing` classification must be read after any in-flight session on that resource has quiesced, not concurrently with it.
+**State prerequisite:** A session claimed on that resource must be either complete or re-queued before classification is trusted.
+**Mitigation:** Classification reads session state and treats a resource with any claimed-and-unfinished session as `trial` regardless of its declared attachment. Combined with export-verification-before-teardown, an in-flight write blocks teardown twice over. The uncertain case resolves toward "leave it running," which costs money; the alternative costs evidence.
+
+### Race 3: The report reads a window mid-settlement
+**Location:** `tools/improvement_operating_report.py`, the cost answer
+**Trigger:** The report runs while a settlement is being written, and reads reserved-but-unsettled figures as though settled.
+**Data prerequisite:** Reserved and settled totals must be read as one consistent snapshot.
+**State prerequisite:** None beyond a consistent read.
+**Mitigation:** The report reads reserved and settled as a single snapshot and **publishes both figures separately** rather than a derived net. Two disclosed numbers cannot be internally inconsistent the way one derived number can, and the parent plan's "raw measures publish beside normalized ones" rule already requires it.
+
+### Race 4: The probe result is read while being re-run
+**Location:** task 1's recorded probe evidence
+**Trigger:** The report or an admission reads the latest probe row while a fresh probe is being recorded, and sees a partial state.
+**Data prerequisite:** A probe result is consumed only as a complete, single record.
+**State prerequisite:** None.
+**Mitigation:** The probe's result is written as **one immutable record per run** and readers take the newest complete one. `probe()` already returns a complete dict for all six resources or an `unknown` entry per resource, so there is no partial shape to write — the record is written once or not at all, never patched field by field.
 
 ## No-Gos (Out of Scope)
 
-<!-- skeleton -->
+- `[EXTERNAL]` **Granting the `valor-local` service account write access to the `m-valor` vault.** Tom's action; the parent plan already names it as his one remaining manual step. Until it lands, this lane can read the vault under the service account but cannot store an issued credential, so tasks 6 and 7 stop at the boundary rather than working around it.
+- `[EXTERNAL]` **Funding the provider account and any card authorization it needs.** Charter §8 grants authority to spend within the limit and names a virtual debit card; it does not make a card work. A declined card is a human/world condition this lane reports rather than routes around.
+- `[ORDERED]` **Every acquisition task waits on #3215's `tools/vault_write.py`.** Lane 3 has no PR and no plan as of this writing. Storing a credential any other way violates charter §8's vault rule, and there is no acceptable interim shape — a credential in `.env`, in a log, or in a commit is the failure the rule exists to prevent.
+- `[ORDERED]` **The whole lane waits on PR #3275.** The probe, the three budget units, and the window-boundary settings all live there. Building against the branch would fork the settings vocabulary a second time, which is the exact cost lane 2b was created to avoid paying four times.
+- `[SEPARATE-SLUG #3218]` **Production promotion and rollback of anything this lane builds.** Lane 6 owns promotion, rollback drills, and the recursive comparison. A sandbox trial produces evidence; it does not promote a release.
+- `[SEPARATE-SLUG #3217]` **Running the first complete research cycle in the sandbox.** Lane 5 owns the first full cycle and runs it on this machine by the parent plan's own sequencing. This lane proves one session runs unattended remotely; it does not take lane 5's cycle hostage to that.
+- `[EXTERNAL]` **Making the Telegram bridge run in a sandbox.** Bridge hosting requires a `projects.json` machine-roster entry and an owner decision about inbound routing, and `~/Desktop/Valor/projects.json` is Tom's iCloud-private file, invisible from a sandbox. The sandbox target is worker-only (spike-2), and this stays out by design rather than by omission.
+- `[SEPARATE-SLUG #3216]` **Anything about evaluation inputs, blinding, or statistics for work produced in a sandbox.** Lane 4 owns evaluation; a sandbox is where a session runs, not how its output is judged.
+
+Also deliberately not done, and needing no tag because they are not deferrals — they are refusals with anti-criteria in Verification: no `CLAUDE_CODE_OAUTH_TOKEN` is introduced anywhere in the repository (spike-1's forbidden shortcut); no code path reads the paid-inference pool while computing infrastructure headroom (charter §8's no-transfer rule); and the report generator contains no function returning sandbox count, uptime, or token volume (charter §2's explicit non-measures).
 
 ## Update System
 

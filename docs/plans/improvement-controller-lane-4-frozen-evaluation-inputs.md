@@ -589,15 +589,139 @@ partitions on ambient environment is not an isolated arm.
 
 ## Failure Path Test Strategy
 
-placeholder
+This lane is almost entirely failure paths. The happy path is one function call; everything that
+makes the verdict worth anything is a guard, and a guard with no red-state proof is decoration.
+
+### Exception Handling Coverage
+
+- [ ] No `except Exception: pass` is introduced anywhere in `tools/improvement_eval/`. The three
+      broad handlers that do exist in `runner.py` — `InfraFailure`, `ArtifactIntegrityError`, and a
+      final catch-all — each write an observable outcome (a state, a verdict, and a `notes` string)
+      and log at `warning` or above. A test asserts each handler's observable effect, not just that
+      it did not raise.
+- [ ] `arena.py`'s subprocess teardown uses a `finally` that terminates the `redis-server` and
+      removes the socket even when the arm body raised. Test: force an exception inside the arm
+      context and assert the process is gone (`pid` not alive) and the tmpdir is cleaned.
+- [ ] `judges/serves_charter.py` follows `cross_vendor_judge.py`'s coercion pattern: every field
+      from the model response has a typed fallback, and an unparseable response returns
+      `{"status": "skipped", "reason": ...}` rather than a fabricated verdict. Test: feed prose,
+      feed truncated JSON, feed a JSON object missing every key.
+- [ ] `tools/improvement_eligibility.py::is_open_source` is already fail-closed and separately
+      tested; this lane adds only the two call-direction tests and does not re-test its internals.
+
+### Empty/Invalid Input Handling
+
+- [ ] `holm_adjust([])` returns `[]`. `holm_adjust([p])` returns `[min(1.0, p)]`. A p-value outside
+      `[0, 1]`, a `None`, or a `NaN` raises `ValueError` rather than silently producing an adjusted
+      value — a correction computed from a malformed input is worse than a refusal.
+- [ ] An empty corpus export produces a valid digest over zero records and the run proceeds to the
+      parity gate, which fails it. Test that the empty case reaches `infra_failure` through the
+      parity gate rather than crashing in the exporter.
+- [ ] Zero completed trials, or fewer than the declared fixed batch, yields `inconclusive` with a
+      `notes` string naming the shortfall. `bootstrap_ci` already returns non-significant below two
+      deltas; the harness must not paper over that by treating a one-trial run as measured.
+- [ ] A calibration reference set of size zero, or below the declared floor, makes the judge return
+      `infra_failure`. Test both boundaries: exactly at the floor passes, one below fails.
+- [ ] `scan_for_identity` on an empty envelope returns "no leak" and on a whitespace-only identity
+      token raises rather than matching everything.
+
+### Error State Rendering
+
+- [ ] The four verdicts and `state="invalidated"` are each rendered distinctly by
+      `ui/data/improvement.py`. `infra_failure` must not be presented anywhere as evidence about the
+      candidate; the dashboard row says the harness broke.
+- [ ] An `invalidated` evaluation renders as "cannot be scored" and never shows a verdict, matching
+      `has_verdict()`. Test the template path, not just the data function.
+- [ ] `blinded=False` is rendered as a visible qualification on the evaluation, not omitted. An
+      evaluation that cannot state that judges were blinded is not a paired comparison and the
+      dashboard shows it as one that cannot be.
+
+### Mutation proofs (each guard, measured)
+
+Every guard below ships with a recorded red-state proof: the named mutation is applied, the named
+test is observed to fail, the mutation is reverted, and the test is observed to pass.
+
+| Guard | Mutation | Test that must go red |
+|---|---|---|
+| Holm monotonicity | Drop the cumulative maximum | `test_holm_adjusted_values_are_non_decreasing` |
+| Holm suppression | Return raw p-values unchanged | `test_holm_suppresses_the_spurious_winner` |
+| Artifact integrity | Catch `ArtifactIntegrityError` and continue | `test_corrupted_archive_invalidates_without_verdict` |
+| Parity gate ordering | Move the parity check after the candidate arm | `test_parity_miss_never_invokes_the_candidate_arm` |
+| Corpus identity | Skip the per-arm digest comparison | `test_two_arms_read_a_byte_identical_corpus` |
+| Blinding | Return `blinded=True` unconditionally | `test_identity_leak_sets_blinded_false` |
+| Writer kill switch | Remove the client wrapper (leave the digest re-check) | `test_arm_write_is_refused` |
+| Writer kill switch | Remove the digest re-check (leave the wrapper) | `test_escaped_write_surfaces_as_infra_failure` |
+| Verdict disjointness | Merge `infra_failure` into `reject` | `test_infra_failure_and_reject_have_disjoint_causes` |
+| §7 routing | Ignore `is_open_source` and always use any provider | `test_client_project_judge_stays_on_subscription_providers` |
+| Calibration floor | Return a judge verdict below the floor | `test_reference_set_below_floor_yields_infra_failure` |
+| `metrics.py` untouched | Edit `tools/memory_eval/metrics.py` | `test_metrics_module_is_unmodified` |
 
 ## Test Impact
 
-placeholder
+Most of this lane is new test surface. Four existing files need changes, and each is named with its
+disposition.
+
+- [ ] `tests/unit/test_improvement_models.py` — UPDATE: `FORBIDDEN_INDEX_NAMES` (`:104-120`) already
+      lists `contract_digest`; add `charter_digest` so the new `ImprovementEvaluation` field is
+      pinned as never-indexed by the same cardinality rule that governs its siblings. The
+      `INDEXED_VOCABULARIES` entry for `ImprovementEvaluation` is unchanged — the new field is a
+      plain `Field`, so no vocabulary is added and no `VOCABULARY_MAXIMUMS` exemption is needed.
+- [ ] `tests/unit/test_session_executor_extraction_decoupling.py::test_harness_env_declares_correlation_id`
+      (`:161`) — UPDATE: add a sibling assertion in the same class for `VALOR_PROJECT_KEY`, matching
+      the existing source-inspection shape (`assert '"VALOR_PROJECT_KEY"' in source`). Do not modify
+      the correlation-id assertion; it is a separate regression pin.
+- [ ] `tests/integration/test_session_spawning.py` — UPDATE: the `_harness_env` construction tests
+      (`:87`, `:124`, `:148`) build the dict by hand. Add one case asserting `VALOR_PROJECT_KEY` is
+      present and equals the resolved project key, so an arm subprocess's partition is covered end
+      to end rather than only by source inspection.
+- [ ] `tests/unit/test_migrations.py` — UPDATE: register the new migration key so the
+      `MIGRATIONS`-dict completeness assertions cover it, following
+      `_migrate_confirm_improvement_v2_fields` (`scripts/update/migrations.py:1429`) as the precedent.
+- [ ] `tests/unit/test_review_multi_judge.py:676` — UPDATE: the existing judge-id disjointness test
+      asserts `CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}`. Extend the same test (or add
+      an adjacent one) to include `SERVES_CHARTER_JUDGE_ID`, so a future judge id collision is caught
+      in the one place the repo already looks for it.
+
+**Not affected, deliberately:**
+
+- `tests/unit/test_memory_eval.py` — untouched. `metrics.py` is imported and not modified, so its
+  tests keep passing unchanged; that is the evidence for acceptance criterion 7, and a Verification
+  row asserts the file itself is byte-identical to main.
+- `tests/db_claim.py` and `tests/unit/test_test_redis_server_resolution.py` — untouched by design.
+  The arm arena deliberately does not participate in the db-claim pool (spike-2), and a new test
+  asserts `arena.py` never calls into `db_claim` or reassigns `REDIS_URL`.
+- `tests/unit/test_settings.py` — untouched. No new setting is added in this lane; the budget
+  settings this harness draws against already exist and are lane 3's to meter.
 
 ## Rabbit Holes
 
-placeholder
+- **Building copy-on-write over Redis.** Spike-3 settled this: Redis has no logical-database
+  copy-on-write, so building it means intercepting every command, and the property it would buy is
+  free from a fresh process. If a later lane finds snapshot-and-restore too slow, that is a
+  performance problem with a measurement, not a reason to start here.
+- **Alpha-spending functions.** The strictly harder commitment, and it needs a pre-specified maximum
+  sample size the loop has no evidence to choose yet. A half-implemented spending function produces
+  precisely the peeking it exists to prevent. Fixed-batch is a complete, honest stopping rule and it
+  is what this lane ships.
+- **Chasing a kappa threshold.** The temptation is to pick 0.7 and gate on it. The literature's own
+  conclusion is that the bar is human–human agreement on the same set, not an abstract number, and
+  that kappa reported alone creates false confidence. Measure it, freeze the set, cite it, and let a
+  later lane with real agreement data set a gate.
+- **Making the `serves_charter` judge a gate.** The family plan says explicitly that its verdict is
+  one input to the consensus envelope and never a gate on its own. A charter-alignment judge with
+  veto power over its own controller's experiments is the shape this whole design exists to avoid.
+- **Rewriting `tools/memory_eval/`.** Its arms and gates are retrieval-specific. Extending it to
+  carry general candidate-versus-incumbent semantics would couple two evaluation systems whose
+  lifecycles differ, and acceptance criterion 7 forbids it outright.
+- **Generalizing the arena into a reusable test fixture.** A private-Redis context manager looks like
+  something the whole suite should have. It is not: `tests/db_claim.py` is the suite's isolation
+  mechanism and issue #2799 is what happens when a second one appears beside it. The arena is
+  harness-internal and stays that way.
+- **Perfecting `classify_correction`.** The regex is precision-oriented on purpose and its author
+  documented why. Improving it changes the calibration set's composition, which is a measurement
+  question for a lane that has a measurement, not a plausible-looking regex edit here.
+- **Wiring an automated promotion path.** An `accept` verdict produces a proposal for a human. The
+  contract doc is explicit that automated promotion stays disabled and that no record enables it.
 
 ## Risks
 
