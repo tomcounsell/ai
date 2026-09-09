@@ -64,6 +64,8 @@ class ImprovementRelease(Model):
         approved_by: The human who approved it, when one has.
         approved_at: When they approved it.
         outcome: What actually happened during the observation window.
+        charter_digest: The ``sha256:<hex>`` of the charter this release was
+            admitted under. Not indexed (unbounded).
     """
 
     id = AutoKeyField()
@@ -79,3 +81,4 @@ class ImprovementRelease(Model):
     approved_by = Field(null=True)
     approved_at = DatetimeField(null=True)
     outcome = Field(null=True)
+    charter_digest = Field(null=True)

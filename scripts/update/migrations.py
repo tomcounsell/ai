@@ -1427,6 +1427,50 @@ def _migrate_confirm_improvement_models_readable(project_dir: Path) -> str | Non
         return str(e)
 
 
+def _migrate_confirm_improvement_v2_fields(project_dir: Path) -> str | None:
+    """Confirm the charter-v2 fields on the Improvement* models (issue #3255).
+
+    Purely additive to four existing models: ``ImprovementCharter`` gains
+    ``digest``, ``effective``, and ``text``; ``ImprovementCase`` gains
+    ``priority_area``, ``ranking_rationale``, and ``charter_digest``;
+    ``ImprovementInvestigation`` and ``ImprovementRelease`` gain
+    ``charter_digest``. The one removal, ``ImprovementCase.objective``, was a
+    plain unindexed field with no writer, so there is nothing to backfill and
+    no index set to strip.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the v2 vocabulary — without it there
+    is no record on a machine that the charter-digest fields were ever
+    registered, and a later subtractive migration has no predecessor to reason
+    from.
+
+    Read-only: it imports each class and runs one bounded, project-scoped query
+    per model to prove the keyspace resolves under the new fields. Writes
+    nothing. Returns None on success, error string on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models import (
+            ImprovementCase,
+            ImprovementCharter,
+            ImprovementInvestigation,
+            ImprovementRelease,
+        )
+
+        for model in (
+            ImprovementCharter,
+            ImprovementCase,
+            ImprovementInvestigation,
+            ImprovementRelease,
+        ):
+            list(model.query.filter(project_key="valor"))[:1]
+        return None
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "side_effect_job_model": (
         _migrate_side_effect_job_model,
@@ -1558,6 +1602,12 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_improvement_models_readable": (
         _migrate_confirm_improvement_models_readable,
         "Register the eight additive Improvement* models (issue #3177) and "
+        "confirm their keyspace resolves",
+    ),
+    "confirm_improvement_v2_fields": (
+        _migrate_confirm_improvement_v2_fields,
+        "Register the charter-v2 fields on ImprovementCharter, ImprovementCase, "
+        "ImprovementInvestigation, and ImprovementRelease (issue #3255) and "
         "confirm their keyspace resolves",
     ),
     "backfill_job_last_active_scores": (

@@ -31,7 +31,7 @@ from models import (
     ImprovementModelRevision,
     ImprovementRelease,
 )
-from models.improvement_case import CASE_PRIORITIES, CASE_STATES
+from models.improvement_case import CASE_PRIORITIES, CASE_STATES, PRIORITY_AREAS
 from models.improvement_charter import CHARTER_STATES
 from models.improvement_evaluation import EVALUATION_STATES, EVALUATION_VERDICTS
 from models.improvement_evidence import EVIDENCE_CLASSIFICATIONS, EVIDENCE_KINDS
@@ -52,7 +52,11 @@ INDEXED_VOCABULARIES: dict[type, dict[str, tuple[str, ...]]] = {
         "classification": EVIDENCE_CLASSIFICATIONS,
     },
     ImprovementModelRevision: {"state": MODEL_REVISION_STATES},
-    ImprovementCase: {"state": CASE_STATES, "priority": CASE_PRIORITIES},
+    ImprovementCase: {
+        "state": CASE_STATES,
+        "priority": CASE_PRIORITIES,
+        "priority_area": PRIORITY_AREAS,
+    },
     ImprovementInvestigation: {
         "kind": INVESTIGATION_KINDS,
         "state": INVESTIGATION_STATES,
@@ -84,6 +88,16 @@ IMMORTAL_MODELS = (
     ImprovementEvaluation,
     ImprovementRelease,
 )
+
+#: How many values a declared vocabulary may hold, per field. The default is
+#: the general rule; an entry here is a named, reasoned exemption, and adding a
+#: second one costs a second line a reviewer sees.
+DEFAULT_VOCABULARY_MAXIMUM = 8
+VOCABULARY_MAXIMUMS: dict[tuple[type, str], int] = {
+    # charter §3 vocabulary; eleven index sets per project partition,
+    # membership reads only.
+    (ImprovementCase, "priority_area"): 11,
+}
 
 #: Cardinality tripwire: field names that must never carry an index, whatever
 #: model they appear on. These are the shapes the schema gate exists to stop.
@@ -157,9 +171,12 @@ class TestIndexCardinalityGate:
     @pytest.mark.parametrize("model", ALL_MODELS, ids=lambda m: m.__name__)
     def test_declared_vocabularies_are_small(self, model):
         for name, vocabulary in INDEXED_VOCABULARIES[model].items():
-            assert 2 <= len(vocabulary) <= 8, (
-                f"{model.__name__}.{name} has {len(vocabulary)} values; an index set "
-                "per value stops being cheap well before this."
+            maximum = VOCABULARY_MAXIMUMS.get((model, name), DEFAULT_VOCABULARY_MAXIMUM)
+            assert 2 <= len(vocabulary) <= maximum, (
+                f"{model.__name__}.{name} has {len(vocabulary)} values against a maximum "
+                f"of {maximum}; an index set per value stops being cheap well before "
+                "this. A larger vocabulary needs a named entry in VOCABULARY_MAXIMUMS "
+                "carrying its reason."
             )
             assert len(set(vocabulary)) == len(vocabulary), "duplicate value in vocabulary"
 
