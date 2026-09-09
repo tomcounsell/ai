@@ -1086,9 +1086,9 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
 
     - Validates session is in RESUMABLE_STATUSES (not cancelled, not running/pending)
     - Validates session has a claude_session_uuid
-    - Pushes the steering message onto the Redis steering list BEFORE transition
-      (eliminates the race window — the write is independent of any in-flight
-      ORM save on this instance)
+    - Pushes the steering message onto the resumed session's OWN steering list
+      BEFORE transition (eliminates the race window — the write is independent
+      of any in-flight ORM save on this instance)
     - Atomically transitions to pending via transition_status(..., reject_from_terminal=False)
 
     Returns a ResumeResult. Never raises — caller checks result.success.
@@ -1135,7 +1135,6 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
     # This RPUSHes directly to Redis, independent of session.save(), so it
     # cannot be clobbered by a stale bound instance.
     from agent.steering import push_steering_message
-    from models.room import room_id_for_session
 
     # Fold the session's goal into the first turn input so a resumed session
     # can state its own objective without asking the human (issue #2136),
@@ -1150,11 +1149,11 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
         if goal:
             outbound = f"[Prior session context: {goal}]\n\n{message}"
 
-    # Room-targeted: a resume steer is a conversation-level instruction, so it
-    # survives this session and is served by whichever session next drains the Room.
-    push_steering_message(
-        session_id, outbound, f"resume:{source}", room_id=room_id_for_session(session)
-    )
+    # Session-targeted: a resume names ONE row, transitions that row in place,
+    # and the worker runs it in that row's own working_dir. Passing no room_id
+    # keeps the write on `steering:{session_id}`, so only the resumed session
+    # can drain it (#3270).
+    push_steering_message(session_id, outbound, f"resume:{source}")
 
     # Transition to pending (atomic — fails if another process raced us).
     # Steering message is already persisted above, so no race window.
