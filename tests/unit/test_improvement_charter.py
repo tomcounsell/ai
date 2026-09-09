@@ -205,3 +205,31 @@ class TestModuleAnchoredDefault:
 
         assert row is not None
         assert row.digest == compute_plan_hash(_CHARTER_PATH)
+
+
+class TestNoImportCycle:
+    def test_the_sdlc_tools_import_cleanly_in_a_fresh_interpreter(self):
+        """`models.improvement_charter` must not close an import cycle.
+
+        ``tools.sdlc_verdict`` reaches ``agent.sdlc_router``, which imports
+        ``agent/__init__``, which imports ``models/__init__``. A module-level
+        ``compute_plan_hash`` import here therefore breaks any process that
+        imports the SDLC tools before ``models`` — which every ``sdlc-tool``
+        entry point does. A subprocess is the only honest check: this test
+        process has already imported ``models``, so the cycle cannot reproduce
+        in it.
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [sys.executable, "-c", "import tools.sdlc_meta_set"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        assert result.returncode == 0, result.stderr[-2000:]

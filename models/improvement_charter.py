@@ -59,7 +59,6 @@ from popoto import (
 from popoto.fields.content_field import ContentField
 
 from models.verifying_artifact_store import verifying_artifact_store
-from tools.sdlc_verdict import compute_plan_hash
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +178,12 @@ class ImprovementCharter(Model):
         would need an atomic primitive in a control namespace that does not
         exist yet.
         """
+        # Imported inside the method, not at module scope. `tools.sdlc_verdict`
+        # reaches `agent.sdlc_router`, which imports `agent/__init__`, which
+        # imports `models/__init__` — so a module-level import here closes a
+        # cycle that breaks any process importing the SDLC tools first.
+        from tools.sdlc_verdict import compute_plan_hash
+
         path = Path(path)
         digest = compute_plan_hash(path)
         if digest is None:
