@@ -7,8 +7,10 @@ layer), while every per-chat history fetch faults (so nothing is recovered and
 invisible to the watchdog. These tests assert the reconciler now records it and
 the watchdog can read it.
 
-Redis here is the pytest-claimed test db; the liveness keys are freeform, so
-plain get/set is correct (see bridge/liveness.py).
+Redis here is the pytest-claimed test db, resolved through
+``tests.db_claim.redis_test_url()`` rather than re-derived from the environment
+(#3263/#3264); the liveness keys are freeform, so plain get/set is correct
+(see bridge/liveness.py).
 """
 
 import json
@@ -30,6 +32,7 @@ from monitoring.bridge_watchdog import (
     SCAN_TOTAL_FAULT_CYCLES,
     assess_scan_health,
 )
+from tests.db_claim import redis_test_url
 
 
 def _make_dialog(chat_title, entity_id=100):
@@ -58,8 +61,7 @@ def _make_message(msg_id, text="hello"):
 def _redis():
     import redis as redis_lib
 
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis_lib.Redis.from_url(url, decode_responses=True)
+    return redis_lib.Redis.from_url(redis_test_url(), decode_responses=True)
 
 
 @pytest.fixture(autouse=True)
