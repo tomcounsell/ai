@@ -225,3 +225,182 @@ async def test_health_check_finalizes_delivered_row_instead_of_requeuing(cleanup
         "the health check requeued a row that had already answered the human -- "
         f"got status={after.status!r}; each requeue posts another unprompted reply"
     )
+
+
+# ---------------------------------------------------------------------------
+# The stamp arms a guard that must not fire on a LIVE row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_health_check_leaves_a_live_fenced_delivered_row_alone(cleanup):
+    """A running row with a LIVE execution fence is never finalized here.
+
+    The delivery guard in ``_agent_session_health_check`` deliberately skips
+    the ``worker_alive``/``_has_progress`` evaluation, so before #3270 the only
+    thing keeping it off a mid-turn row was that ``response_delivered_at`` was
+    effectively never set. A1 changed that: the redraft path in
+    ``agent/output_handler.py::send`` now stamps mid-run, while the row is
+    still ``running``. A long eng/PM run that answers the human and then keeps
+    working past the 300s health-check cadence therefore presents exactly the
+    shape this guard finalizes -- and finalizing it writes a terminal status
+    onto a row its runner is still driving, which is the mid-turn corruption
+    #3270 exists to stop.
+
+    The fence here is this test process' own pid, so ``fence_is_live`` answers
+    with a real, unmocked liveness verdict.
+    """
+    import os
+
+    from agent.pid_fence import proc_create_time
+
+    sid = f"{SID_PREFIX}live-fence"
+    cleanup.append(sid)
+    session = _make_session(sid, pending_self_draft=False)
+    session.stamp_execution_spawn(
+        pid=os.getpid(),
+        create_time=proc_create_time(os.getpid()),
+        cwd="/tmp",
+        harness="claude",
+    )
+    session.response_delivered_at = datetime.now(tz=UTC)
+    session.save()
+
+    entry = get_authoritative_session(sid)
+    assert entry is not None and entry.status == "running"
+    assert (entry.live_fence or {}).get("pid") == os.getpid(), "precondition: fence is bound"
+
+    # The worker bookkeeping also says this row is being executed, so the ONLY
+    # thing that can finalize it in this pass is the delivery guard.
+    mock_cls = MagicMock()
+    mock_cls.query.filter.return_value = [entry]
+    live_worker = MagicMock()
+    live_worker.done.return_value = False
+    with (
+        patch("agent.session_health.AgentSession", mock_cls),
+        patch("agent.session_health._active_workers", {entry.worker_key: live_worker}),
+        patch("agent.session_health._active_sessions", {entry.agent_session_id: MagicMock()}),
+    ):
+        from agent.session_health import _agent_session_health_check
+
+        await _agent_session_health_check()
+
+    after = get_authoritative_session(sid)
+    assert after is not None
+    assert after.status == "running", (
+        "the delivery guard finalized a row whose runner is still executing -- "
+        f"got status={after.status!r}, the mid-turn terminal-status corruption of #3270"
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_check_still_finalizes_a_delivered_row_with_a_dead_fence(cleanup):
+    """The twin of the test above: no live fence, so #918's guard still fires.
+
+    Same row shape, same fresh ``response_delivered_at`` -- only the fence
+    differs (a pid that is not ours). The liveness gate must narrow the guard
+    to genuinely stranded rows, not disable it.
+    """
+    from agent.pid_fence import proc_create_time
+
+    sid = f"{SID_PREFIX}dead-fence"
+    cleanup.append(sid)
+    session = _make_session(sid, pending_self_draft=False)
+    # A recorded create_time that cannot match whatever holds this pid now:
+    # `fence_is_live` answers False for both "dead" and "recycled".
+    session.stamp_execution_spawn(
+        pid=999_999,
+        create_time=(proc_create_time(1) or 1.0) - 10_000.0,
+        cwd="/tmp",
+        harness="claude",
+    )
+    session.response_delivered_at = datetime.now(tz=UTC)
+    session.save()
+
+    entry = get_authoritative_session(sid)
+    assert entry is not None and entry.status == "running"
+
+    # Identical worker bookkeeping to the live-fence twin above, so the fence
+    # is the ONLY variable between the two tests.
+    mock_cls = MagicMock()
+    mock_cls.query.filter.return_value = [entry]
+    live_worker = MagicMock()
+    live_worker.done.return_value = False
+    with (
+        patch("agent.session_health.AgentSession", mock_cls),
+        patch("agent.session_health._active_workers", {entry.worker_key: live_worker}),
+        patch("agent.session_health._active_sessions", {entry.agent_session_id: MagicMock()}),
+    ):
+        from agent.session_health import _agent_session_health_check
+
+        await _agent_session_health_check()
+
+    after = get_authoritative_session(sid)
+    assert after is not None
+    assert after.status == "completed", (
+        "the #918 duplicate-delivery guard stopped firing on a stranded "
+        f"delivered row -- got status={after.status!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A1c sibling -- the output_handler.send stamp, through a stale-passing caller
+# ---------------------------------------------------------------------------
+
+
+def test_send_stamp_survives_finalize_session_by_the_same_caller_object(cleanup):
+    """The second stamp site, exercised through the caller shape that clobbers.
+
+    The `finalize_session` caller enumeration classified two production paths
+    as BOTH stale-passing and holding the very object handed to
+    `TelegramRelayOutputHandler.send` as ``session=``:
+    `agent/session_completion.py:1144` (`parent`, the same object passed to
+    `send_cb` a few lines earlier) and the notice-delivery finalizes in
+    `agent/session_health.py` (`entry`, routed into `send` via
+    `deliver_system_notice`). Both then hand that object to `finalize_session`,
+    whose trailing bare `session.save()` writes the object's whole in-memory
+    snapshot back over the row.
+
+    So this test reproduces that exact ordering on one object: redraft-success
+    `send`, then `finalize_session` on the same object. Without the
+    caller-object mirror the stamp is erased and the cleared
+    `deferred_self_draft_pending` is re-armed with the originally rejected
+    draft text -- which `_deferred_self_draft_backstop_sweep` selects on and
+    re-delivers on top of the successful rewrite.
+    """
+    import asyncio
+
+    from agent.output_handler import TelegramRelayOutputHandler
+    from bridge.message_drafter import MessageDraft
+
+    sid = f"{SID_PREFIX}send-stamp-stale"
+    cleanup.append(sid)
+    session = _make_session(sid)
+    assert session.response_delivered_at is None, "precondition: unstamped"
+
+    handler = TelegramRelayOutputHandler()
+    handler._redis = MagicMock()
+
+    async def _bypass_drafter(text, *, session=None, medium="telegram"):
+        return MessageDraft(text=text, artifacts={})
+
+    with (
+        patch("bridge.message_drafter.draft_message", _bypass_drafter),
+        patch("agent.steering.reset_self_draft_attempts"),
+    ):
+        asyncio.run(handler.send(sid, "the successful rewrite", 0, session=session))
+
+    # The caller now hands its OWN object to finalize_session, as the two
+    # enumerated production sites do.
+    finalize_session(session, "completed", reason="test: caller-object finalize")
+
+    fresh = get_authoritative_session(sid)
+    assert fresh is not None
+    assert fresh.status == "completed"
+    assert fresh.response_delivered_at is not None, (
+        "finalize_session's trailing full save erased the send-path stamp"
+    )
+    assert not (fresh.extra_context or {}).get("deferred_self_draft_pending"), (
+        "finalize_session's trailing full save re-armed deferred_self_draft_pending "
+        "with the originally rejected draft text; the backstop sweep will re-deliver it"
+    )

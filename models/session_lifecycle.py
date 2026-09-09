@@ -495,8 +495,20 @@ def finalize_session(
         # lifecycle event was emitted — and a later stale save flipped the row
         # back to `running`, where the orphan net requeued it once a tick for
         # days. The live fence is the discriminator rather than a caller flag
-        # or a reason-string match: health-checker and watchdog finalizes run
-        # precisely when the runner is gone, so they cannot trip it.
+        # or a reason-string match, because it is a property of the row rather
+        # than of the caller.
+        #
+        # What the fence actually points at: the per-turn `claude -p`
+        # subprocess stamped by `agent/session_runner/runner.py` at spawn. By
+        # the ordinary turn-end finalize (`agent/session_executor.py`'s
+        # completion-exit guard) that subprocess has already exited, so the
+        # fence reads dead and the WARNING does NOT fire on the normal path —
+        # including the #3270 turn-end skip itself, which is why the incident
+        # was invisible in the first place. The finalizes that CAN trip it are
+        # the concurrent ones: a health-check or watchdog finalize landing
+        # while a turn's subprocess is still executing. That is exactly the
+        # signal wanted here — a terminal status being written onto a row
+        # somebody else is still running.
         #
         # Observability ONLY. The idempotency semantics are unchanged; that is
         # #3253's territory.

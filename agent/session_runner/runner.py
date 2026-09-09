@@ -335,7 +335,7 @@ def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
     if not claimed:
         logger.info(
             "[%s] timeout needs-attention notice suppressed — already delivered "
-            "for this session (#3270)",
+            "for this run (#3270)",
             session_id,
         )
     return claimed
@@ -947,7 +947,7 @@ class SessionRunner:
                     if handle.kill_cause == "timeout":
                         # Graceful preempt, not an error: partial work stays
                         # in the transcript; surface needs-attention -- but at
-                        # most ONCE per session, not once per run (#3270).
+                        # most ONCE per run, not once per chat thread (#3270).
                         if _claim_timeout_notice(
                             str(getattr(self._agent_session, "session_id", "") or ""),
                             str(getattr(self._agent_session, "id", "") or ""),

@@ -25,7 +25,11 @@ _RESUMABLE_STATUSES = frozenset({"completed", "killed", "failed", "abandoned"})
 
 
 class _KeyRecordingRedis:
-    """Records RPUSH/LPUSH targets so the chosen steering key is assertable."""
+    """Records RPUSH/LPUSH targets so the chosen steering key is assertable.
+
+    ``lrem`` is modelled too, because the rollback path has to remove exactly
+    the entry it pushed rather than truncating the list.
+    """
 
     def __init__(self):
         self.pushes: list[tuple[str, str]] = []
@@ -35,6 +39,11 @@ class _KeyRecordingRedis:
 
     def lpush(self, key, payload):
         self.pushes.append((key, payload))
+
+    def lrem(self, key, count, payload):
+        before = len(self.pushes)
+        self.pushes = [p for p in self.pushes if p != (key, payload)]
+        return before - len(self.pushes)
 
 
 @pytest.fixture
@@ -81,3 +90,41 @@ def test_resume_steer_lands_on_the_session_key_not_the_room_key(redis_keys):
     )
     assert not any(key.startswith("steering:room:") for key in keys)
     assert json.loads(redis_keys.pushes[0][1])["text"].endswith("Continue.")
+
+
+def test_a_failed_transition_leaves_no_orphaned_resume_steer(redis_keys):
+    """The push precedes the transition, so a failed transition must roll it back.
+
+    ``resume_session`` pushes BEFORE ``transition_status`` on purpose (it closes
+    the two-write race). When the transition then raises, the row is never
+    resumed -- but the steer is already on ``steering:{session_id}``, which
+    carries no TTL and, unlike the Room leg, is never age-bounded at drain time
+    (``_drain_list`` applies ``steering_room_max_age_s`` to the Room key only).
+    Left there, "your lane stalled, continue" is injected verbatim the next
+    time that session runs, however many hours later.
+    """
+    session = _session("sess-rollback")
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("another process raced us")
+
+    with (
+        patch("tools.valor_session._load_env"),
+        patch("tools.valor_session._publish_resume_notify"),
+        patch.dict(
+            "sys.modules",
+            {
+                "models.session_lifecycle": MagicMock(
+                    transition_status=_boom,
+                    RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                ),
+            },
+        ),
+    ):
+        result = resume_session(session, "Continue.", source="sdlc-stall")
+
+    assert not result.success
+    assert redis_keys.pushes == [], (
+        "a resume steer outlived the transition that failed; it will be "
+        f"injected on the next run of this session -- leftover: {redis_keys.pushes}"
+    )

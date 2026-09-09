@@ -148,16 +148,26 @@ class _FakeQuery:
         return _Rows()
 
 
+# The lane every default-fixture test stalls: ``stalled_pr`` serves
+# ``_pr(branch="session/sdlc-1395")``, so this is the slug the lane filter
+# (#3270) actually matches against on those tests. ``_Row`` defaults to it so
+# the filter is EXERCISED rather than bypassed -- a row seeded with a
+# match-anything slug would let every ladder test pass even if the filter were
+# deleted. Tests that stall a differently-named lane pass that lane's real
+# slug; tests about the filter itself pass a rival slug or ``None``.
+_DEFAULT_LANE_SLUG = "sdlc-1395"
+
+
 class _AnyLane(str):
     """A slug that belongs to whichever lane the test is exercising.
 
-    Target selection filters rows by lane (#3270), so a slugless row is
-    ineligible for every rung. The ladder tests below are about the *ladder* --
-    cooldowns, attempt budgets, action windows, escalation volume -- and not
-    about which row gets picked, so their seeded session uses this slug to say
-    "this row belongs to the lane under test" without each of them repeating
-    the lane's slug. Tests that are about lane matching pass a real slug, or
-    ``None`` for the slugless conversation thread the filter must exclude.
+    Deliberately narrow: the ONLY remaining use is the pair of target-dedupe
+    tests that need one row to be selected for TWO different lanes in a single
+    tick. Post-#3270 a real row cannot do that (it carries one slug), so the
+    scenario the dedupe defends against is reachable only through this
+    sentinel. Never reach for it to avoid naming a lane -- pass the lane's
+    real slug, or ``None`` for the slugless conversation thread the filter
+    must exclude.
     """
 
     def __eq__(self, other):
@@ -185,7 +195,7 @@ class _Row:
         claude_session_uuid=None,
         updated_at=None,
         project_key="valor",
-        slug=_ANY_LANE,
+        slug=_DEFAULT_LANE_SLUG,
     ):
         self.session_id = session_id
         self.status = status
@@ -461,7 +471,7 @@ def test_human_named_lane_is_discovered_and_steered(lab, stub_workdir, gh_payloa
         }
     ]
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha-dev-1", now - 9 * 3600))
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="dev-41a59eee")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -506,7 +516,9 @@ def test_ledger_rung_resolves_a_lane_the_branch_name_cannot(lab, stub_workdir, s
     """Rung 1: a recorded ``pr_number`` binds a human-named lane to its issue."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/dashboard-jinja-filter-registrar")]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [
+        _Row("eng-live", status="running", slug="dashboard-jinja-filter-registrar")
+    ]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -518,7 +530,7 @@ def test_ledger_rung_wins_over_a_disagreeing_closing_reference(lab, stub_workdir
     """The entire justification for the rung ordering, asserted directly."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[555])]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -563,7 +575,7 @@ def test_two_ledger_records_on_one_pr_are_ambiguous_not_an_overwrite(
         _LedgerRecord(pr_number=2798, issue_number=2719),
         _LedgerRecord(pr_number=2798, issue_number=2720),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -576,7 +588,9 @@ def test_two_closing_references_are_ambiguous_and_produce_no_action(lab, stub_wo
     stale_lanes["prs"] = [
         _lane_pr(2746, "session/hook-validator-target-resolution", closing=[2689, 2738])
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [
+        _Row("eng-live", status="running", slug="hook-validator-target-resolution")
+    ]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -599,7 +613,7 @@ def test_cross_repo_closing_reference_does_not_resolve(lab, stub_workdir, stale_
             "closingIssuesReferences": [_closing_ref(77, owner="tomcounsell", repo="popoto")],
         }
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -628,7 +642,7 @@ def test_no_target_repo_issues_no_ledger_query_and_trusts_no_reference(
     """Both read-based rungs need a repo to scope by; without one they are skipped."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[999])]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_PROJECT)  # no github block
 
@@ -643,7 +657,7 @@ def test_the_ledger_is_enumerated_once_per_tick_not_once_per_pr(lab, stub_workdi
         _lane_pr(2, "session/lane-two", closing=[102]),
         _lane_pr(3, "session/lane-three", closing=[103]),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="lane-one")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -659,7 +673,7 @@ def test_errored_ledger_still_lets_a_steer_through(lab, stub_workdir, stale_lane
     """Reading is fail-soft: a Redis outage must not blind the detector."""
     lab.ledger.raises = True
     stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="dev-41a59eee")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -755,7 +769,7 @@ def test_two_lanes_never_dispatch_to_the_same_session_in_one_tick(lab, stub_work
         _lane_pr(1, "session/lane-one", closing=[101]),
         _lane_pr(2, "session/lane-two", closing=[102]),
     ]
-    lab.query.by_project = [_Row("only-eng-session", status="running")]
+    lab.query.by_project = [_Row("only-eng-session", status="running", slug=_ANY_LANE)]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -768,7 +782,7 @@ def test_a_lane_deferred_by_the_target_dedupe_owes_no_cooldown(lab, stub_workdir
         _lane_pr(1, "session/lane-one", closing=[101]),
         _lane_pr(2, "session/lane-two", closing=[102]),
     ]
-    lab.query.by_project = [_Row("only-eng-session", status="running")]
+    lab.query.by_project = [_Row("only-eng-session", status="running", slug=_ANY_LANE)]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -839,7 +853,7 @@ def test_escalation_volume_with_resume_disabled_is_one_page_per_visible_lane(
         _lane_pr(2, "session/lane-two", closing=[102]),
         _lane_pr(3, "session/lane-three", closing=[103]),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="lane-one")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 

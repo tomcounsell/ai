@@ -189,7 +189,9 @@ class TestCmdResumeHappyPath:
 
         assert result == 0
         # Steering message must be pushed to Redis before transition_status is called
-        mock_push.assert_called_once_with("sess-ok", "Do the patch.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-ok", "Do the patch.", "resume:valor-session resume", room_id=None
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -306,6 +308,7 @@ class TestCmdResumeKilledFailedSupport:
             "sess-k",
             "Pick up where we left off.",
             "resume:valor-session resume",
+            room_id=None,
         )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
@@ -315,7 +318,9 @@ class TestCmdResumeKilledFailedSupport:
         session = _make_session("sess-f", status="failed", claude_session_uuid="uuid-failed")
         result, mock_transition, mock_push = self._run_resume(session, message="Recover.")
         assert result == 0
-        mock_push.assert_called_once_with("sess-f", "Recover.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-f", "Recover.", "resume:valor-session resume", room_id=None
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -477,6 +482,7 @@ class TestCmdResumeAbandonedSupport:
             "sess-a",
             "Pick up where we left off.",
             "resume:valor-session resume",
+            room_id=None,
         )
         mock_transition.assert_called_once()
         _, kwargs = mock_transition.call_args
@@ -642,7 +648,7 @@ class TestResumeSessionCore:
 
         assert result.success is True
         assert call_order.index("push") < call_order.index("transition")
-        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli")
+        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id=None)
 
     def test_transition_error_returns_failure(self):
         session = self._make_mock_session(status="failed")

@@ -922,7 +922,29 @@ class TelegramRelayOutputHandler:
                                 ]
                             )
                             if session is not _target:
+                                # BOTH fields, not just the stamp. Mirroring
+                                # the stamp alone leaves the caller's own
+                                # `extra_context` still carrying
+                                # `deferred_self_draft_pending`, and
+                                # `finalize_session`'s trailing full save
+                                # re-arms it with the ORIGINALLY REJECTED
+                                # draft text -- which
+                                # `_deferred_self_draft_backstop_sweep` then
+                                # selects on that flag alone and delivers on
+                                # top of the successful resend. The precedent
+                                # site in
+                                # agent/session_health.py::flush_deferred_self_draft_sync
+                                # mirrors both for exactly this reason.
                                 session.response_delivered_at = _stamp_at
+                                _caller_ctx = dict(session.extra_context or {})
+                                _had_pending = (
+                                    _caller_ctx.pop("deferred_self_draft_pending", None) is not None
+                                )
+                                _had_text = (
+                                    _caller_ctx.pop("deferred_self_draft_text", None) is not None
+                                )
+                                if _had_pending or _had_text:
+                                    session.extra_context = _caller_ctx
                     except Exception as _clear_err:
                         # Best-effort; never blocks delivery. Worst case is the
                         # pre-existing stale-flag behavior this fix targets.
