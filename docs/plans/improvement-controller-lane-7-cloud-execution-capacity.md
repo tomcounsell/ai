@@ -266,7 +266,7 @@ No mode introduces a *new* consumer of the token. Mode A hands the existing cons
 
 The parent plan scopes one more thing to this lane that round 1 found silently dropped: lane 7 "supersedes the local retention root and migrates export/import" (`docs/plans/recursive-self-improvement.md:804`), and lanes 1 and 2 "keep the local retention root plus export/import so lane 7 has something to migrate" (`:572`). That root is real and already on `main`: `models/verifying_artifact_store.py::_default_base_path` (`:45-56`) resolves `POPOTO_IMPROVEMENT_CONTENT_PATH`, defaulting to `data/improvement_content` **inside the repo checkout** — a path a container rebuilds away on every redeploy. Two distinct pieces of work follow, and conflating them is how one of them gets lost:
 
-- **Supersession** is a topology choice this lane owns end to end: the retention root moves off the checkout to whatever the topology decision above chose, exercised by writing an artifact from the sandbox and loading it — hash-verified, since `VerifyingArtifactStore` re-hashes on every load — from a local process. That is one acceptance test and it belongs here.
+- **Supersession** is a topology choice this lane owns end to end: the retention root moves off the checkout to whatever the topology decision above chose, exercised by a **cross-process** round trip that needs no provider account — `POPOTO_IMPROVEMENT_CONTENT_PATH` pointed at the new root, an artifact written through `VerifyingArtifactStore` from one process and loaded, hash-verified since the store re-hashes on every load, from a second process started in a different working directory. `_default_base_path` reads the env var fresh on every call for exactly this reason (its own docstring says so at `:45-56`), so a second local process is a faithful stand-in for the container. That is one acceptance test, it belongs here, and it is satisfiable in phase 2. The literal sandbox-to-local round trip is a stronger observation of the same property and is recorded as task 9 evidence; it is not the bar, because under mode B there is no sandbox and this lane's supersession would otherwise have an acceptance test that can never pass.
 - **Migrating export/import** is data movement whose other end does not exist yet: `valor-improve export` / `import` is lane 3's (`:424`, `:800`), unwritten. This lane therefore ships the **destination contract** — the retention root's new location, its verification-on-load guarantee, and a documented archive path — and lane 3 writes against it. It does not write `valor-improve export`. Task 7 records this split so the parent plan's lane-7 success line is fully owned rather than half-owned, and so lane 3's export has a landing place named before it needs one.
 
 **7. The report is generated, not written.** `tools/improvement_operating_report.py` reads records and emits the five answers. The fifth — what still prevents the intended result — is assembled from the recorded provisional assumptions, the `unknown` entries in the latest probe, and any resource refused by admission for want of a forecast. It is structurally impossible for it to come back empty while those inputs are non-empty, which is the property that makes the report worth reading.
@@ -458,13 +458,13 @@ The agent reaches new `tools/` code through a CLI entry point in `pyproject.toml
 - [ ] The resource probe has been re-run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, and its result is recorded as **one immutable `resource_probe` evidence row**. No resource is reported `absent` on the strength of a run that could not read the vault.
 - [ ] The provider decision is recorded with its arithmetic against the $50/week unit under a named duty cycle, including the case against the options not chosen. Charter §8 names Cloudflare, so a decision away from it carries its evidence.
 - [ ] **The sandbox's authentication mode is a recorded verdict with its evidence** — mode A (subscription on a host we operate, existing code path unchanged), mode B (unresolved, so no subscription-auth trial), or mode C (deferred to its own issue). A trial that ran without a recorded verdict does not satisfy this lane, and neither does a verdict inferred rather than evidenced.
-- [ ] **The artifact retention root is superseded off the checkout**, an artifact written from the sandbox loads hash-verified from a local process, and the export/import destination contract is documented for lane 3 to write against.
+- [ ] **The artifact retention root is superseded off the checkout**, proven by a cross-process round trip that needs no provider account (`POPOTO_IMPROVEMENT_CONTENT_PATH` at the chosen durable root, written from one process, loaded hash-verified from a second started in a different working directory), and the export/import destination contract is documented for lane 3 to write against. The literal sandbox-to-local round trip is task 9's recorded evidence, not this criterion's bar — this is a phase-2 criterion and phase 2 does not presume a sandbox.
 - [ ] `tools/infrastructure_budget.py` admits and refuses against unit 3, computes the window from `budget_week_start` and `budget_day_boundary`, discloses both on every decision, refuses any resource whose charge cannot be forecast, and settles missing metering at the forecast rather than at zero.
 - [ ] `spend_receipt` and `resource_probe` are recognized `EVIDENCE_KINDS` with a TTL that outlives a budget week, and a row of each round-trips through `record_once` without being coerced to `"other"`. `resource_acquired` is left to lane 3, and the ownership split is written in `models/improvement_evidence.py` beside the constant.
 - [ ] The teardown policy is implemented and tested: admission closes, `standing` resources are torn down, `trial` resources continue to a bounded horizon with the overrun booked against the next window before it accrues, and **every teardown is gated on a verified evidence export that fails closed**.
-- [ ] At least one RSI session has run **unattended in a cloud sandbox**, crossing a credential-refresh boundary and surviving at least one induced crash, with its evidence, its budget settlement, and its recovery recorded.
-- [ ] The dashboard renders that sandbox session's evidence beside a local session's. A run whose evidence the dashboard cannot see does not satisfy this lane.
-- [ ] `max_concurrent_research_sessions` has a recorded, evidence-backed decision. "Unchanged, because the subscription and not the machine is the binding constraint" is a passing outcome; leaving the question open is not.
+- [ ] At least one RSI session has run **unattended in a cloud sandbox**, crossing a credential-refresh boundary and surviving at least one induced crash, with its evidence, its budget settlement, and its recovery recorded — **or, if #3215 never landed or task 4 recorded mode B, recorded as not reached with the auth verdict (or the missing vault writer) named as its cause.**
+- [ ] The dashboard renders that sandbox session's evidence beside a local session's. A run whose evidence the dashboard cannot see does not satisfy this lane — **or, under the same two conditions, recorded as not reached with its cause.**
+- [ ] `max_concurrent_research_sessions` has a recorded, evidence-backed decision. "Unchanged, because the subscription and not the machine is the binding constraint" is a passing outcome; leaving the question *unrecorded* is not — **and under mode B or an unlanded #3215 the recorded disposition is "not reached, because no trial ran," which is a disposition rather than an open question.**
 - [ ] The charter §2 progress report is posted on #3177 **as soon as phase 2 completes, without waiting on the trial**, and answers all five questions — which sessions run in cloud sandboxes, whether the loop continues unattended, what resources sustain it, what they cost against the $50/week unit with both window boundaries disclosed, and **what still prevents mostly-cloud operation**. The fifth answer is non-empty.
 - [ ] Every unresolved factual claim from this lane is recorded as a provisional assumption with its evidence, confidence, consequence, and the observation that would overturn it — charter §9's shape, not a hedge in prose.
 - [ ] Tests pass (`/do-test`)
@@ -567,6 +567,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 - Apply Gap D's rule as the deciding criterion: **a resource whose charge cannot be forecast is refused.** State for each candidate whether the charge is forecastable and under what duty-cycle assumption.
 - Enumerate free tiers and credits with expiry dates and the paid rate that follows each.
 - Produce a decision with its evidence. Charter §8 names Cloudflare, so a decision against it must show its arithmetic.
+- **This task creates `docs/infra/improvement-cloud-execution.md`.** It is the file's first writer and therefore its owner-of-record; task 4 appends the auth verdict, task 7 appends the export/import destination contract, and task 11 completes it and creates the *feature* doc. Round 2 found three tasks describing the same file with no stated creator, which is how a doc ends up written twice or not at all.
 
 ### 4. Establish sandbox feasibility, and decide the authentication mode
 - **Task ID**: spike-sandbox-feasibility
@@ -623,7 +624,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 ### 7. Decide and implement the durable-state topology, including the retention root
 - **Task ID**: build-state-topology
 - **Depends On**: spike-sandbox-feasibility
-- **Validates**: a test proving a worker with a non-local Redis writes evidence the dashboard's read path returns; a test loading a sandbox-written artifact from a local process through `VerifyingArtifactStore` (hash-verified on every load, archive path included); `tests/unit/test_length_safe_content_store.py` (UPDATE)
+- **Validates**: a test proving a worker with a non-local Redis writes evidence the dashboard's read path returns; a **cross-process** retention-root round trip needing no provider account — `POPOTO_IMPROVEMENT_CONTENT_PATH` pointed at the chosen durable root, written through `VerifyingArtifactStore` from one process, loaded hash-verified from a second process started in a different working directory; `tests/unit/test_length_safe_content_store.py` (UPDATE, `test_retention_root_is_separate_from_the_shared_content_path` at `:224`)
 - **Informed By**: spike-4 (`redis://localhost:6379/0` default, no TLS or auth in settings, `worker:registered_pid:*` presumes one shared Redis)
 - **Assigned To**: `budget-builder`
 - **Agent Type**: builder — Domain: Redis/Popoto data
@@ -631,7 +632,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 - Choose between a sandbox-local Redis with an export path and a network-reachable shared Redis, and write down the cost of the option not chosen.
 - If shared: transport security is in scope for this task and is named work, not a footnote.
 - If local: the export path is in scope, and "the dashboard renders it" is the acceptance test either way.
-- **Supersede the local artifact retention root.** The parent plan scopes this here (`docs/plans/recursive-self-improvement.md:804`, with `:572` explaining that lanes 1 and 2 kept it "so lane 7 has something to migrate"), and round 1 caught it being dropped. `models/verifying_artifact_store.py::_default_base_path` (`:45-56`) resolves `POPOTO_IMPROVEMENT_CONTENT_PATH`, defaulting to `data/improvement_content` **inside the repo checkout** — which an image rebuild destroys on every redeploy. Move it to the durable store chosen above, keep the separation from the shared popoto content directory that `_default_base_path` exists to enforce, and prove it: write an artifact from the sandbox, load it from a local process, and let `VerifyingArtifactStore`'s re-hash-on-every-load do the verifying.
+- **Supersede the local artifact retention root.** The parent plan scopes this here (`docs/plans/recursive-self-improvement.md:804`, with `:572` explaining that lanes 1 and 2 kept it "so lane 7 has something to migrate"), and round 1 caught it being dropped. `models/verifying_artifact_store.py::_default_base_path` (`:45-56`) resolves `POPOTO_IMPROVEMENT_CONTENT_PATH`, defaulting to `data/improvement_content` **inside the repo checkout** — which an image rebuild destroys on every redeploy. Move it to the durable store chosen above, keep the separation from the shared popoto content directory that `_default_base_path` exists to enforce, and prove it **without needing a sandbox to exist**. `_default_base_path` (`:45-56`) reads `POPOTO_IMPROVEMENT_CONTENT_PATH` fresh on every call rather than through the cached settings singleton — its docstring says so, and that is exactly what lets a second process with a different working directory stand in for the container. So the testable acceptance is: point the env var at the chosen durable root, write through `VerifyingArtifactStore` from one process, load from a second process started elsewhere, and let the re-hash-on-every-load do the verifying. **The literal sandbox-to-local round trip stays as task 9's recorded evidence**, not as this phase-2 task's acceptance bar — task 7 is declared phase 2 and phase 2 ships without #3215 and without a provider account, so an acceptance test that presumes a running sandbox could never be satisfied under mode B, which is an outcome task 4 is explicitly instructed to return absent an affirmative vendor finding.
 - **Ship the export/import destination contract; do not write export/import.** `valor-improve export` / `import` is lane 3's (`docs/plans/recursive-self-improvement.md:424`, `:800`) and does not exist yet, so there is nothing to migrate today. What this lane owes is the other end: the retention root's new location, its verification-on-load guarantee, and a documented archive path, written into `docs/infra/improvement-cloud-execution.md` so lane 3 writes against a named target instead of inventing one. Supersession and migration are two different pieces of work and this task says which one it is doing.
 - All reads and writes go through the Popoto ORM. No raw Redis operations on Popoto-managed keys.
 
@@ -661,6 +662,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 - **Induce at least one crash** and confirm unattended recovery: either the sandbox restarts and resumes, or the session is re-queued and another worker takes it. Both are acceptable; neither happening is not.
 - **State the claim precisely in the recorded result.** What this trial tests is unattended operation **across access-token refreshes within the long-lived token's life**. It does **not** test unattended rotation of `CLAUDE_CODE_OAUTH_TOKEN` itself, which `docs/infra/granite-oauth-token.md` records as a manual, browser-bound, roughly annual act the sandbox cannot perform. Say so; the report inherits whatever this task claims.
 - Confirm the dashboard renders this session's evidence beside a local session's.
+- **Record the sandbox-to-local artifact round trip as trial evidence**: write an artifact from the sandbox through `VerifyingArtifactStore` against task 7's superseded retention root, load it hash-verified from a local process, and record the result. This is the stronger observation of the property task 7 already proved cross-process; it lives here because it needs a sandbox, and task 7's acceptance deliberately does not.
 - If the trial fails, **record why and stop**. A failed trial with a recorded cause is a valid input to task 6's regeneration and is worth more than a retried trial with a lost cause.
 
 ### 10. Revisit `max_concurrent_research_sessions`
@@ -673,23 +675,25 @@ The validator gets its own worktree. A mutation review whose author is editing t
 - Test the hypothesis that a sandbox adds a machine and not subscription capacity, against what the trial actually showed.
 - Record the decision with its evidence. **"Unchanged, because the subscription and not the machine is the binding constraint" is a valid and likely outcome**, and recording it closes the question Gap D left open.
 - Raising the value past 4 is a change to the `le` bound at `config/settings.py:609`, not an env override. Do it only if the evidence supports it, and say so in the commit.
+- **Under mode B, or with #3215 unlanded, this task does not run.** Its criterion says leaving the question open is not a passing outcome, so the mode-B path records the explicit disposition instead: "not reached, because no trial ran; cause = task 4's auth verdict / absent vault writer." A recorded not-reached is a disposition, not an open question, and it is what keeps mode B from forcing a stated non-passing outcome on a task that was correctly prevented from running.
 
 ### 11. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-operating-report
+- **Depends On**: build-operating-report, spike-sandbox-feasibility, build-state-topology — the three artifacts this task's own bullets have to write down, with `spike-provider` reached transitively through `spike-sandbox-feasibility`. Phase-3 inputs (the trial, the concurrency revisit) fold in **if they have run**, the same way task 6 already folds phase 3 in. Round 2 caught this task depending on the report alone, which let a builder following the graph document a provider decision, an auth verdict, and a retention-root supersession before any of them existed.
 - **Validates**: the four Verification rows that check documentation artifacts exist and are indexed (`docs/infra/improvement-cloud-execution.md` present, `docs/features/README.md` carries both entries)
 - **Assigned To**: `capacity-scribe`
 - **Agent Type**: documentarian
 - **Parallel**: false
 - **Document what landed, not what was planned.** If phase 3 did not run, the feature doc says the sandbox topology is decided and unbuilt, and names the auth verdict that stopped it. A doc describing an unbuilt sandbox in the present tense is the drift Risk 8 exists to prevent.
 - Update `docs/features/improvement-controller.md` with unit 3, its window computation, the `improvement:budget:unit3:{window_key}` namespace, and the teardown policy.
-- Create `docs/features/improvement-cloud-execution.md` and `docs/infra/improvement-cloud-execution.md`. The infra doc carries the provider decision and its arithmetic, the auth verdict, the retention-root supersession and the export/import destination contract, the redeploy contract that replaces `/update` for this host, and the teardown-and-destroy-account rollback.
+- Create `docs/features/improvement-cloud-execution.md`. **Complete** `docs/infra/improvement-cloud-execution.md`, which task 3 created and tasks 4 and 7 appended to — this task does not create it. The infra doc ends up carrying the provider decision and its arithmetic (task 3), the auth verdict (task 4), the retention-root supersession and the export/import destination contract (task 7), plus the redeploy contract that replaces `/update` for this host and the teardown-and-destroy-account rollback (this task).
+- Task 12's grep rows over that file are the only checks that the auth verdict, the duty cycle, and the destination contract were written down rather than decided in a builder's head. Do not delete them to make validation easier.
 - Add both feature entries to the `docs/features/README.md` index table.
 - Describe the new status quo only. No migration narrative, no "previously we…".
 
 ### 12. Final validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: document-feature, build-concurrency-revisit (satisfied-if-run: under mode B or with #3215 unlanded, `build-concurrency-revisit` does not run and its criteria are marked not reached rather than blocking validation)
 - **Validates**: a per-row pass/fail report over the Verification table, posted to the PR; every anti-criterion additionally shown in its red state with the FAIL output captured
 - **Assigned To**: `capacity-validator`
 - **Agent Type**: validator
@@ -697,7 +701,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 - Run every Verification row and report pass/fail per row.
 - **Demonstrate each anti-criterion red before trusting it green.** The OAuth row is diff-scoped precisely so this is possible; a row that starts red on `main` cannot be shown to bite.
 - Re-run the mutation check on the export-verification guard; a green test that reaches no code is the failure mode this exists to catch.
-- Confirm every Success Criterion, including the ones that are decisions rather than code, and mark the phase-3 criteria **not reached** rather than passed if #3215 never landed.
+- Confirm every Success Criterion, including the ones that are decisions rather than code. **Mark the phase-3 criteria not reached — rather than passed, and rather than failed — if `#3215 never landed` OR `task 4 recorded mode B`.** The condition is disjunctive on purpose: with #3215 landed and task 4 returning mode B, tasks 9 and 10 still do not run, and a rule conditioned only on #3215 would leave three Success Criteria with no recorded disposition at all. Record which arm of the disjunction fired, since the report's fifth answer already claims to cover the mode-B case.
 
 ## Verification
 
@@ -707,7 +711,6 @@ The validator gets its own worktree. A mutation review whose author is editing t
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Both new evidence kinds are real | `python -c "from models.improvement_evidence import EVIDENCE_KINDS as K; print(set(('spend_receipt','resource_probe')) <= set(K))"` | output contains True |
-| This lane did not claim lane 3's kind | `python -c "from models.improvement_evidence import EVIDENCE_KINDS as K; print('resource_acquired' in K)"` | False until #3215 lands; either value passes afterward |
 | A receipt is not coerced to `other` | `./scripts/pytest-clean.sh tests/unit/test_improvement_models.py -k spend_receipt -q` | exit code 0 |
 | A probe row is not coerced to `other` | `./scripts/pytest-clean.sh tests/unit/test_improvement_models.py -k resource_probe -q` | exit code 0 |
 | Unit 3 has a meter with a reader | `python -c "import tools.infrastructure_budget as m; print(hasattr(m,'admit'))"` | output contains True |
@@ -732,7 +735,7 @@ The validator gets its own worktree. A mutation review whose author is editing t
 
 ### Anti-criteria
 
-These live in a code block rather than in the table above, and that is a fix from critique round 1 rather than a style choice. A markdown table cell cannot carry a literal `|`, so every alternation and every shell pipe inside one has to be escaped — and round 1 measured what the escaping actually did: `grep -cE "a\|b" file` treats the backslash-pipe as a **literal pipe character** in ERE and matches nothing, returning `0` with exit 1. Read raw or read as table-escaping, three of this plan's five anti-criteria were passing vacuously. A check that cannot fail is worse than no check, which is the precise thing the paragraph below claims to prevent, so the checks moved somewhere pipes are unambiguous and the patterns were rewritten to avoid alternation entirely.
+These live in a code block rather than in the table above, and that is a fix from critique round 1 rather than a style choice. A markdown table cell cannot carry a literal `|`, so every alternation and every shell pipe inside one has to be escaped — and round 1 measured what the escaping actually did: `grep -cE "a\|b" file` treats the backslash-pipe as a **literal pipe character** in ERE and matches nothing, returning `0` with exit 1. Read raw or read as table-escaping, three of the five anti-criteria round 1 measured were passing vacuously. A check that cannot fail is worse than no check, which is the precise thing the paragraph below claims to prevent, so the checks moved somewhere pipes are unambiguous and the patterns were rewritten to avoid alternation entirely.
 
 Two mechanical traps these commands are written around, both verified on this machine: **`grep -c` given more than one file prints `path:count` per file, not a single number**, so every count check below takes exactly one file; and **`grep -c` exits 1 when the count is 0**, so the expectation is on the printed number, never on the exit code.
 
@@ -768,6 +771,35 @@ grep -cE 'except Exception: *pass' tools/improvement_operating_report.py
 #    so grepping it needs a negation filter that is itself untestable.
 grep -c -e 'launchctl' -e 'remote-update.sh' -e 'VALOR_LAUNCHD' deploy/sandbox/entrypoint.sh
 # expected: prints 0
+
+# 6. This lane did not claim lane 3's evidence kind.
+#    Diff-scoped, and it lives here rather than in the table for the same reason
+#    checks 1-5 do: the honest form needs a shell pipe, and a markdown cell cannot
+#    carry a literal one. It compares the tuple's contents across this lane's diff
+#    instead of testing membership on the current tuple, so it keeps biting after
+#    #3215 lands -- once resource_acquired is on main, a membership test passes for
+#    a reason that has nothing to do with this lane, which is the vacuous shape
+#    round 1 measured. Comparing sets also survives task 1 naming resource_acquired
+#    in the module's ownership declaration, which a text grep would false-positive on.
+python - <<'EOF'
+import ast, subprocess
+def kinds(ref):
+    src = subprocess.run(["git", "show", ref + ":models/improvement_evidence.py"],
+                         capture_output=True, text=True).stdout
+    for node in ast.walk(ast.parse(src)):
+        # EVIDENCE_KINDS is an annotated assignment (AnnAssign), not Assign --
+        # verified against models/improvement_evidence.py:58. Handle both so the
+        # check survives the annotation being dropped.
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else getattr(node, "targets", [])
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
+            getattr(t, "id", None) == "EVIDENCE_KINDS" for t in targets
+        ):
+            return set(ast.literal_eval(node.value))
+    return set()
+print(kinds("HEAD") - kinds("origin/main") == {"spend_receipt", "resource_probe"})
+EOF
+# expected: output contains True
+# red state: add 'resource_acquired' to the tuple on this branch  ->  False
 ```
 
 Every anti-criterion above must be demonstrated in its red state before it is trusted. Introduce the violation deliberately, capture the FAIL output, revert, and paste the FAIL into the PR description. An anti-criterion that has only ever passed is a check nobody has proven can fail, and this repo has shipped several of those. Check 1 carries its red-state command inline because it is the one round 1 found unsatisfiable — a criterion that starts red on `main` can never be shown to bite.
