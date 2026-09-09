@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-09
 tracking: https://github.com/tomcounsell/ai/issues/3270
 last_comment_id: 5601939922
+revision_applied: true
+revision_applied_at: 2026-09-09T13:05:00Z
 ---
 
 # Telegram: stop the unprompted repeat replies, and make replies match the room
@@ -166,24 +168,41 @@ Ordered by data flow, not by severity.
 
 Stamp the field in `flush_deferred_self_draft_sync` (`agent/session_health.py`, immediately after `delivered = True`) and in the deferred-self-draft redraft path in `agent/output_handler.py::send`. Use a narrow `save(update_fields=[...])`. Without this, `#918`'s guard stays dead no matter what else changes, and the orphan net keeps requeuing rows that already answered the human.
 
+**The stamp must be mirrored onto the caller's in-memory object, or it does not survive.** `flush_deferred_self_draft_sync` is fresh-reading by design (`models/session_lifecycle.py:384-386`): it re-reads `get_authoritative_session()` and writes that object. But `finalize_session` calls the flush at `:404` and then, at `:595-607`, runs a bare `session.save()` on the **caller's** possibly-stale object — a full popoto HSET that rewrites `response_delivered_at` back to `None`. Stamping only the fresh object therefore ships a fix that is erased microseconds later, on exactly the `bridge/session_transcript.py:343` path that produced this incident.
+
+So in the same block where the flush sets `delivered = True`, also mutate the caller's object:
+
+```python
+if session is not None and session is not _clear_target:
+    session.response_delivered_at = <the same value written to _clear_target>
+```
+
+This is not a new pattern. It is the identical workaround already applied to `extra_context` a few lines below, whose comment records that the trailing full save "silently resurrects the just-cleared flag". Follow that precedent's shape exactly, including the identity check, so a future reader sees one convention rather than two.
+
+The A1b test is a **`finalize_session` end-to-end** test, never a `flush_deferred_self_draft_sync`-in-isolation test. An isolated test passes against the fresh read while the production bug survives intact; that discrepancy is the whole finding.
+
 ### A2. Make the turn-end finalize observable when it is skipped
 
 `finalize_session`'s idempotency check (`models/session_lifecycle.py:459,472`) treats "already terminal" as success and returns silently. When the caller is a turn-end finalize and a live runner PID is bound to the row, that silence is exactly what strands the session. Log at **WARNING** (not DEBUG) in that case, naming the session id, the status found, and the status requested.
 
 This is deliberately observability, not a behavior change. Changing the idempotency semantics is out of scope and belongs to #3253's area. A WARNING here would have made this incident visible in minutes instead of days.
 
-### A3. Sweep the bare `save()` calls that race lifecycle transitions
+### A3a. Narrow the two evidenced `save()` sites (ships here)
 
-Narrow to `update_fields` at each site. Ordered by demonstrated risk:
+Narrow to `update_fields` at the two sites the #3270 investigation actually implicates as writers on the incident path:
 
 - `agent/output_handler.py:1468` (`_persist_routing_fields`) → `save(update_fields=["context_summary", "updated_at"])`
 - `agent/output_handler.py:1526` (`_append_rtr_event`) → `save(update_fields=["session_events", "updated_at"])`
-- `agent/sdk_client.py:413` (`_store_claude_session_uuid`) → `save(update_fields=["claude_session_uuid", "updated_at"])` — its sibling at `:389` already does exactly this, so this is bringing one site in line with its neighbour
-- `agent/health_check.py:654` (per-tool-call counter; hottest path of the set)
-- `tools/session_tags.py:64`, `:82`, `:281` — auto-tagging runs adjacent to `finalize_session`
-- `agent/pipeline_state.py:495`, `tools/valor_telegram.py:791` — lower risk, same treatment for consistency
 
-Per this repo's sweep discipline, the sweep closes on a clean `grep` over AgentSession `.save()` call sites, not on this enumerated list. Any site the grep surfaces that is not listed here gets the same judgement applied.
+Ship the stale-snapshot regression test alongside these. That test — not the site count — is what encodes the architectural rule, and it guards every future site.
+
+### A3b. Enumerate the rest; fix them under a separate issue
+
+The remaining bare-`save()` sites (`agent/sdk_client.py:413`, `agent/health_check.py:654`, `tools/session_tags.py:64/:82/:281`, `agent/pipeline_state.py:495`, `tools/valor_telegram.py:791`, plus anything the grep surfaces) are a **latent hazard class**, not this bug. `sdk_client.py:413` was explicitly refuted as this incident's writer during recon; the rest were listed for consistency and carry no evidence at all. Fixing nine sites behind one review pass spends this plan's entire blast-radius budget on theoretical completeness.
+
+Run the grep as an **enumeration** step in this PR and record its full output in a new issue, "AgentSession `save()` hardening sweep", citing this plan's Architectural Impact section and the `docs/features/agent-session-lifecycle-writes.md` doc that D1 creates. Fix them there, one commit per site, on their own review pass.
+
+Per this repo's sweep discipline the *enumeration* closes on a clean grep over AgentSession `.save()` call sites, never on an enumerated list — that discipline is preserved; only the *fix* is scoped to the evidenced sites.
 
 ### A4. Rung 2 of the stall ladder: require a lane match
 
@@ -218,10 +237,6 @@ Correct `config/personas/segments/identity.md` (`:39-40` HTML comment referencin
 
 Per the repo's no-legacy rule: describe only the current status quo. Do not write "this used to condense output."
 
-### B3. Reconcile `SELF_DRAFT_INSTRUCTION`
-
-`bridge/message_drafter.py:1025-1033` currently mandates "2-4 bullet points", which pushes directly against prose-in-chat. Reconcile it with B1. `tests/unit/test_message_drafter.py:284-287` asserts the instruction contains "outcome", "narration", and "bullet" and stays under 1000 chars — that assertion must be updated deliberately and the change justified in the PR body, not worked around.
-
 ## Failure Path Test Strategy
 
 Every guard here certifies an absence, so **every test must be proven RED against the known-bad behavior before the fix lands.** A guard that was never red proves nothing. Concretely, for each item below: write the test, run it on the unfixed tree and record the failure, then apply the fix and confirm green.
@@ -230,23 +245,23 @@ Every guard here certifies an absence, so **every test must be proven RED agains
 - **A4 failed-row red-first:** same fixture with the candidate in `failed`. Assert it is never selected for the resume rung.
 - **A5 red-first:** call `resume_session` and assert the steering write lands on the session-scoped key. On current code it lands on `steering:room:{room_id}`.
 - **A1 red-first:** drive a deferred-self-draft delivery through `flush_deferred_self_draft_sync` and assert `response_delivered_at` is set afterward. On current code it stays `None`.
+- **A1 caller-object red-first:** call `finalize_session` end-to-end with a **stale caller object** whose `response_delivered_at` starts `None`, and assert the field survives `finalize_session`'s own trailing save. Against a fresh-object-only fix this test is RED while an isolated flush test is green — that gap is the point of the test.
 - **A1 integration:** with the stamp in place, assert the health check finalizes the row `completed` instead of requeuing it to `pending` — this is the orphan-bounce reproduction, and it is the test that proves the loop is actually broken rather than merely narrowed.
-- **A3 red-first:** the highest-value test in the set. Load a row, mutate an unrelated field on a stale in-memory copy while a *different* status has been written to Redis, call the production save path, and assert the Redis status is unchanged. On current code the stale status wins. This is the test that encodes the architectural rule from Architectural Impact.
+- **A3a red-first:** the highest-value test in the set. Load a row, mutate an unrelated field on a stale in-memory copy while a *different* status has been written to Redis, call the production save path, and assert the Redis status is unchanged. On current code the stale status wins. This is the test that encodes the architectural rule from Architectural Impact.
 - **A6:** assert rate-limit termination produces an operator route and **no** user-facing chat payload; assert the timeout notice is delivered once across two runs of the same session.
 - **B1:** assert both prime files contain the new section, and that `tests/unit/test_pm_progress_updates.py` still passes unmodified.
 
 ## Test Impact
 
 - [ ] `tests/unit/reflections/test_reflections_progress_check.py` — UPDATE: this is the existing `_pick_steer_target` coverage. Its current cases encode the "most recently updated wins" fallback that A4 removes. Re-read every case and update the ones that assert the old ranking; add the new red-first cases beside them.
-- [ ] `tests/unit/test_message_drafter.py:284-287` — UPDATE: the `SELF_DRAFT_INSTRUCTION` content assertion, if B3 changes the bullet mandate. Justify the change in the PR body.
 - [ ] `tests/unit/test_pm_progress_updates.py` — NO CHANGE EXPECTED, and this is an acceptance criterion, not an assumption. It asserts exact substrings of `prime-pm-role.md` and bans the four `PHRASING_WORKAROUND_STRINGS` (`:80-85`). B1 adds a section; it must not rewrite existing paragraphs or headers. If this file needs to change, that is a signal B1 went out of bounds.
 - [ ] `tests/unit/test_session_health_*.py` (the `deferred_backstop`, `orphan_reap`, and `fence_guards` modules in particular) — REVIEW: A1 changes when `response_delivered_at` is set, which is an input to `_delivery_belongs_to_current_run`. Any case that relies on the field being `None` on a delivered row is asserting the bug and must be updated.
-- [ ] Tests covering the swept `save()` sites (`output_handler`, `sdk_client`, `health_check`, `session_tags`, `pipeline_state`, `valor_telegram`) — REVIEW: narrowing to `update_fields` changes which fields persist. Any test asserting an incidental field write through one of these paths must be updated to reflect the narrowed contract.
+- [ ] Tests covering the two narrowed `save()` sites in `agent/output_handler.py` — REVIEW: narrowing to `update_fields` changes which fields persist. Any test asserting an incidental field write through one of these paths must be updated to reflect the narrowed contract.
 - [ ] `tests/unit/test_pm_progress_updates.py::TestPromiseGateFallbackAllowsTaughtPhrasings` — REVIEW: new prompt text must not introduce forward-deferral phrasing of the `TAUGHT_BLOCKED` shape (`:76`).
 
 ## Rabbit Holes
 
-- **The `save()` sweep is the budget risk.** Narrowing a save changes which fields persist, and a site that was accidentally relying on the full write will break in a way unit tests may not catch. Mitigation: sweep by grep, change one site per commit, and for each site name in the commit message which fields are now written. If a site's correct field set is genuinely unclear, leave it and file a follow-up rather than guessing.
+- **The `save()` sweep is the budget risk, which is why the fix is scoped to two sites.** Narrowing a save changes which fields persist, and a site that was accidentally relying on the full write will break in a way unit tests may not catch. Mitigation: A3a fixes only the two evidenced sites, one commit each, naming in the commit message which fields are now written; A3b enumerates the rest into a follow-up issue. Do not let the grep's output pull unevidenced sites back into this PR.
 - **Rate-limit detection invites string matching.** `harness/claude.py:658-659` already recorded the stance that stderr substring matching is brittle across CLI versions and locales, and that stance is correct. Do not build a keyword list. Prefer exit codes and structured result fields; if no structured signal exists, say so and scope A6 to the routing half (never relay harness failure text to the room) rather than inventing a fragile detector.
 - **Do not fix the `identity.md` injection gap.** Wiring `compose_system_prompt` into the runner is a real and separate problem with its own blast radius. This plan corrects identity.md's false claims in place and fixes the file that is actually operative.
 - **Do not rewrite the primes.** B1 adds a section. The temptation to tidy neighbouring paragraphs while in the file is exactly what breaks `test_pm_progress_updates.py`'s exact-substring assertions.
@@ -256,16 +271,16 @@ Every guard here certifies an absence, so **every test must be proven RED agains
 
 - **A4 could starve legitimate recovery.** Requiring a slug match means a stalled lane whose session lost its slug now falls to the `create` rung instead of resuming. That is the correct trade — creating a fresh session is recoverable, resuming a stranger's conversation is not — but it will change stall-recovery behavior in production and should be watched after deploy.
 - **A1 could surface latent duplicate delivery.** Stamping `response_delivered_at` on a path that never stamped it will start firing `#918`'s guard on rows where it previously stayed silent. That is the intent, but it makes a previously-dead code path live; the A1 integration test exists specifically to characterize it before it ships.
-- **A3 is the highest-blast-radius change** and touches files owned by other concerns. Per-site commits keep it bisectable.
+- **A3a is still the highest-blast-radius code change in this PR**, though scoping it to two evidenced sites in one file cuts that radius substantially. Per-site commits keep it bisectable. The residual risk moves to A3b's follow-up issue, where it gets its own review pass.
 - **B1 changes agent behavior through prompt text**, which cannot be fully verified by unit tests. The real verification is observational: read the room after deploy.
 
 ## Race Conditions
 
-The defect *is* a race: a read-modify-write on an AgentSession with no compare-and-swap, where the field being clobbered (`status`) is not the field being written. A3 does not add locking; it removes the write. Narrowing to `update_fields` means the concurrent lifecycle transition and the incidental field update no longer contend for the same key, because they no longer write the same fields.
+The defect *is* a race: a read-modify-write on an AgentSession with no compare-and-swap, where the field being clobbered (`status`) is not the field being written. A3a does not add locking; it removes the write. Narrowing to `update_fields` means the concurrent lifecycle transition and the incidental field update no longer contend for the same key, because they no longer write the same fields.
 
 Two ordering facts the implementation must respect:
 
-- `transition_status` and `finalize_session` both save **the caller's object, not the fresh re-read** (documented at `models/session_lifecycle.py:836-837`). So a long-held session object passed into a lifecycle call carries its own stale snapshot. Narrowing the incidental saves reduces the window but does not eliminate this; do not assume A3 makes lifecycle writes safe in general.
+- `transition_status` and `finalize_session` both save **the caller's object, not the fresh re-read** (documented at `models/session_lifecycle.py:836-837`). So a long-held session object passed into a lifecycle call carries its own stale snapshot. Narrowing the incidental saves reduces the window but does not eliminate this; do not assume A3a makes lifecycle writes safe in general. A1's caller-object mirror is the concrete instance of this hazard that this plan must handle head-on.
 - `agent/session_health.py:3841` sets `entry.started_at = None`, which is **not** in `_requeue_fields` (`:3927-3934`) but is persisted anyway by the full save inside the following `transition_status`. It is load-bearing for requeue semantics. If that path is narrowed, make the `None` write explicit rather than incidental — this is a real trap, and it also explains the bogus `duration_in_prev_state=6698.9s` observed at 15:07:33 (the `created_at` fallback at `models/agent_session.py:2268`).
 
 ## No-Gos (Out of Scope)
@@ -283,7 +298,7 @@ Two ordering facts the implementation must respect:
 No update-script changes required. Two propagation facts the implementer must honor:
 
 - The prime files under `.claude/commands/roles/` are **hardlinked fleet-wide**. Edit them in place with `Edit`; never replace-and-rename, which breaks the hardlink. Verify the inode is unchanged after editing.
-- No new dependency, config file, or migration is introduced. No Popoto schema change: A1 stamps an existing field and A3 narrows existing writes, so `scripts/update/migrations.py` needs no entry.
+- No new dependency, config file, or migration is introduced. No Popoto schema change: A1 stamps an existing field and A3a narrows existing writes, so `scripts/update/migrations.py` needs no entry.
 
 After merge, `/update` propagates the change to running services, and the bridge/worker need `./scripts/valor-service.sh restart` for the prompt and runtime changes to take effect.
 
@@ -291,7 +306,7 @@ After merge, `/update` propagates the change to running services, and the bridge
 
 No new CLI entry point and no new bridge import. Every change modifies code already on the live path:
 
-- A1/A3 run inside the worker's existing session-execution path.
+- A1/A3a run inside the worker's existing session-execution path.
 - A4/A5 run inside the reflections stall-check job.
 - A6 runs inside the session runner.
 - B1 changes a prompt file the runner already reads on turn 1 (`role_driver.py:379-394`).
@@ -302,7 +317,7 @@ The behavior is therefore reachable by the agent immediately after a service res
 
 - [ ] Update `docs/features/pm-voice-refinement.md` — remove the `DRAFTER_SYSTEM_PROMPT` / LLM-drafter claims (`:9`, `:17`, `:21`, `:29`, `:52`) and fix the two wrong symbol references (`_parse_summary_and_questions` → `_parse_draft_and_questions`; `_truncate_at_sentence_boundary` location).
 - [ ] Update `config/personas/segments/identity.md` — remove the stale HTML comment (`:39-40`) and the Haiku-condensing claim (`:57-59`).
-- [ ] Create `docs/features/agent-session-lifecycle-writes.md` — document the architectural rule that a bare `save()` on an AgentSession is a lifecycle write (popoto full-HSET semantics, `status` as `IndexedField`, no audit trail), and the `update_fields` convention that A3 establishes. This is the durable knowledge from this investigation and the thing that prevents the next instance.
+- [ ] Create `docs/features/agent-session-lifecycle-writes.md` — document the architectural rule that a bare `save()` on an AgentSession is a lifecycle write (popoto full-HSET semantics, `status` as `IndexedField`, no audit trail), and the `update_fields` convention that A3a establishes. This is the durable knowledge from this investigation and the thing that prevents the next instance.
 - [ ] Add the new doc to the `docs/features/README.md` index table.
 - [ ] Update `docs/features/session-steering.md` to reflect session-scoped resume steers (A5).
 
@@ -312,7 +327,9 @@ The behavior is therefore reachable by the agent immediately after a service res
 - `_pick_steer_target` never returns a `failed` row from the resume rung.
 - `resume_session` writes to the session-scoped steering key.
 - `response_delivered_at` is set after a deferred-self-draft delivery, and the health check finalizes such a row `completed` rather than requeuing it.
-- A stale in-memory AgentSession copy can no longer overwrite a concurrently-written `status` through any of the swept save sites.
+- A stale in-memory AgentSession copy can no longer overwrite a concurrently-written `status` through either narrowed `output_handler.py` save site, proven by the stale-snapshot regression test.
+- `response_delivered_at` survives a full `finalize_session` call made with a stale caller object.
+- The remaining bare-`save()` sites are enumerated by grep and filed as a follow-up issue, with that issue number recorded in the PR body.
 - A turn-end finalize skipped as idempotent while a runner PID is bound emits a WARNING.
 - Rate-limit termination reaches the operator and never the room; the timeout notice is delivered at most once per session.
 - Both prime files carry the room-matching guidance; `tests/unit/test_pm_progress_updates.py` passes unmodified; prime file inodes are unchanged.
@@ -325,9 +342,11 @@ Two independent tracks, disjoint file sets, one branch (`session/dev-1aafae58`) 
 
 **Track A — defect #3270** (`reflections/sdlc_progress.py`, `tools/valor_session.py`, `agent/session_health.py`, `agent/output_handler.py`, `agent/sdk_client.py`, `agent/health_check.py`, `tools/session_tags.py`, `agent/pipeline_state.py`, `tools/valor_telegram.py`, `agent/session_runner/runner.py`, `agent/session_runner/harness/claude.py`, `models/session_lifecycle.py`)
 
-**Track B — defect #3271** (`.claude/commands/roles/prime-pm-role.md`, `.claude/commands/roles/prime-teammate-role.md`, `config/personas/segments/identity.md`, `docs/features/pm-voice-refinement.md`, `bridge/message_drafter.py`)
+**Track B — defect #3271** (`.claude/commands/roles/prime-pm-role.md`, `.claude/commands/roles/prime-teammate-role.md`, `config/personas/segments/identity.md`, `docs/features/pm-voice-refinement.md`)
 
-The file sets do not intersect, so the tracks can run concurrently as separate builders in the same worktree. Sequence within Track A is load-bearing (A1 before the A1 integration test; A3 site-by-site); Track B has no internal ordering constraint beyond B1 before B3.
+The file sets do not intersect, so the tracks can run concurrently as separate builders in the same worktree. Sequence within Track A is load-bearing (A1 before the A1 integration test; A3a site-by-site); Track B has no internal ordering constraint.
+
+**Commit ordering is load-bearing.** Track B commits **first** and stays independently revertable — its commits touch no file Track A touches, so if Track A stalls in review the prompt-only fix for #3271 can be cherry-picked out, or the Track A commits reverted, without disturbing it. This is the adopted mitigation for shipping both defects in one PR; see the Critique Results table for why one branch is a lane-identity constraint rather than a choice.
 
 ## Step by Step Tasks
 
@@ -337,7 +356,9 @@ The file sets do not intersect, so the tracks can run concurrently as separate b
 - [ ] A1. Stamp `response_delivered_at` in `flush_deferred_self_draft_sync` and the deferred-self-draft redraft path in `output_handler.send`, with a narrow `save(update_fields=[...])`. Red-first test proves the field stays `None` today.
 - [ ] A1b. Integration test: with the stamp present, the health check finalizes the row `completed` instead of requeuing to `pending`. This is the orphan-bounce reproduction.
 - [ ] A2. Add the WARNING in `finalize_session` when an idempotent skip coincides with a bound live runner PID. No behavior change.
-- [ ] A3. Sweep the bare `save()` sites, one commit per site, each commit message naming the fields now written. Close the sweep on a clean grep over AgentSession `.save()` call sites, not on the enumerated list. Include the stale-snapshot regression test.
+- [ ] A1c. Red-first test: `finalize_session` end-to-end with a stale caller object whose `response_delivered_at` is `None`; assert the stamp survives the trailing save. Then add the caller-object mirror that turns it green.
+- [ ] A3a. Narrow `agent/output_handler.py:1468` and `:1526` to `update_fields`, one commit each, naming the fields now written. Include the stale-snapshot regression test.
+- [ ] A3b. Run the grep enumeration over AgentSession `.save()` call sites and file "AgentSession `save()` hardening sweep" with the full output, citing this plan's Architectural Impact section. Record the issue number in the PR body. **No code fix for those sites in this PR.**
 - [ ] A4. Narrow `_pick_steer_target` rung 2 to require a non-`None` slug equal to `lane_slug`, and exclude `failed`. Update the docstring to describe a filter rather than a preference. Turn A0's tests green.
 - [ ] A5. Session-scope the resume steer in `resume_session`; replace the `:1153-1154` comment along with the behavior.
 - [ ] A6a. Route rate-limit / usage-limit termination to the operator once; never emit it as a chat payload. If no structured signal exists, scope to the routing half and say so.
@@ -349,7 +370,6 @@ The file sets do not intersect, so the tracks can run concurrently as separate b
 - [ ] B1. Add the "Match the room" section under `# Persona behaviors to keep` in `prime-pm-role.md` and under `# Teammate persona` in `prime-teammate-role.md`. Edit in place; verify inodes unchanged. Do not touch existing paragraphs or headers.
 - [ ] B1b. Run `tests/unit/test_pm_progress_updates.py` and confirm it passes **unmodified**.
 - [ ] B2. Correct `config/personas/segments/identity.md` (`:39-40`, `:57-59`) and `docs/features/pm-voice-refinement.md` (`:9`, `:17`, `:21`, `:25`, `:29`, `:52`), including both wrong symbol references. Describe only the current status quo.
-- [ ] B3. Reconcile `SELF_DRAFT_INSTRUCTION` with B1; update `tests/unit/test_message_drafter.py:284-287` deliberately and justify in the PR body.
 
 ### Shared
 
@@ -357,7 +377,7 @@ The file sets do not intersect, so the tracks can run concurrently as separate b
 - [ ] D2. Update `docs/features/session-steering.md` for session-scoped resume steers.
 - [ ] V1. Run narrow-scope tests on touched modules only via `scripts/pytest-clean.sh`.
 - [ ] V2. `python -m ruff check` and `python -m ruff format`.
-- [ ] V3. Open the PR with `Closes #3270` and `Closes #3271`.
+- [ ] V3. Open the PR with `Closes #3270` and `Closes #3271`, Track B's commits first, and the A3b follow-up issue number in the body.
 
 ## Verification
 
@@ -375,18 +395,20 @@ Round 1 — FULL depth, independent roster (3 critics: Risk & Robustness, Scope 
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | A1's stamp site is clobbered by `finalize_session`'s own trailing full save. `models/session_lifecycle.py:404` calls `flush_deferred_self_draft_sync(session, status)`, which is documented at `:384-386` as "fresh-reading: re-reads get_authoritative_session() internally, so it is unaffected by the caller's possibly-stale session". `:607` then runs a bare `session.save()` (no `update_fields`) on the caller's stale object. Stamping only the fresh object writes `response_delivered_at` and has it immediately reset to `None` on the very save that finalizes the transition — on exactly the `bridge/session_transcript.py:343` path that produced the incident. A1 would ship, tests could pass against the fresh read, and the #918 guard would stay dead in production. | pending | Mirror the existing caller-object precedent: in the same block where the flush sets `delivered = True`, also mutate the caller's object, i.e. `if session is not None and session is not _clear_target: session.response_delivered_at = <same value written to _clear_target>`. This is the identical workaround already applied to `extra_context` a few lines below, whose comment states the full save "silently resurrects the just-cleared flag". The A1b integration test MUST drive the real `finalize_session` chain with a stale caller object whose `response_delivered_at` starts `None`, not `flush_deferred_self_draft_sync` in isolation — an isolated test passes while the production bug remains. |
-| CONCERN | Scope & Value | The A3 sweep lists nine sites but the evidence backs at most two. The #3270 investigation names `agent/output_handler.py:1468` and `:1526` as PLAUSIBLE, explicitly REFUTES `agent/sdk_client.py:413` ("latent hazard, not this bug"), and has zero evidence for `health_check.py:654`, `session_tags.py:64/82/281`, `pipeline_state.py:495`, `valor_telegram.py:791` — included only "for consistency". The plan itself calls A3 its highest-blast-radius change and budget risk, so most of that radius is theoretical completeness rather than the demonstrated defect. | pending | Split A3 into A3a (the two evidenced `output_handler.py` sites plus the stale-snapshot regression test) shipped in this PR, and A3b (everything else) filed as a separate "AgentSession save() hardening sweep" issue citing this plan's Architectural Impact section. Retain the grep as an *enumeration* step so no site is missed, but scope the *fix* in this PR to the evidenced sites. |
-| CONCERN | Scope & Value | The plan bundles the low-risk, prompt-only #3271 fix with the highest-blast-radius lifecycle sweep for #3270 in one PR, behind one set of red-first tests and one review pass. The human's literal complaint ("I'm not your log file") is independently fixable and mergeable, but per V3 it ships only when the riskier fix is done. | pending | Constrained by lane identity: this session owns exactly one worktree and branch (`session/dev-1aafae58`), so one branch means one PR. Mitigation adopted instead of a split: commit Track B first and keep it independently revertable, so Track B can be cherry-picked out if Track A stalls in review. Recorded as a named deviation for the decider to override. |
-| NIT | Scope & Value | `SELF_DRAFT_INSTRUCTION` fires only when the delivery validator rejects a message — a narrow corrective path, not the one that produced the 1029-word reply the human complained about. Changing this tested constant chases consistency rather than the demonstrated defect. | pending | Resolve Open Question 3 in favor of option (a): leave the bullet mandate alone. Drop task B3 and remove the `tests/unit/test_message_drafter.py:284-287` row from Test Impact. |
+| BLOCKER | Risk & Robustness | A1's stamp site is clobbered by `finalize_session`'s own trailing full save. `models/session_lifecycle.py:404` calls `flush_deferred_self_draft_sync(session, status)`, which is documented at `:384-386` as "fresh-reading: re-reads get_authoritative_session() internally, so it is unaffected by the caller's possibly-stale session". `:607` then runs a bare `session.save()` (no `update_fields`) on the caller's stale object. Stamping only the fresh object writes `response_delivered_at` and has it immediately reset to `None` on the very save that finalizes the transition — on exactly the `bridge/session_transcript.py:343` path that produced the incident. A1 would ship, tests could pass against the fresh read, and the #918 guard would stay dead in production. | **Accepted.** A1 rewritten to require the caller-object mirror with the `extra_context` precedent's exact shape; new task A1c adds the `finalize_session` end-to-end red-first test, and a matching bullet was added to Failure Path Test Strategy. | Mirror the existing caller-object precedent: in the same block where the flush sets `delivered = True`, also mutate the caller's object, i.e. `if session is not None and session is not _clear_target: session.response_delivered_at = <same value written to _clear_target>`. This is the identical workaround already applied to `extra_context` a few lines below, whose comment states the full save "silently resurrects the just-cleared flag". The A1b integration test MUST drive the real `finalize_session` chain with a stale caller object whose `response_delivered_at` starts `None`, not `flush_deferred_self_draft_sync` in isolation — an isolated test passes while the production bug remains. |
+| CONCERN | Scope & Value | The A3 sweep lists nine sites but the evidence backs at most two. The #3270 investigation names `agent/output_handler.py:1468` and `:1526` as PLAUSIBLE, explicitly REFUTES `agent/sdk_client.py:413` ("latent hazard, not this bug"), and has zero evidence for `health_check.py:654`, `session_tags.py:64/82/281`, `pipeline_state.py:495`, `valor_telegram.py:791` — included only "for consistency". The plan itself calls A3 its highest-blast-radius change and budget risk, so most of that radius is theoretical completeness rather than the demonstrated defect. | **Accepted.** A3 split into A3a (the two evidenced `output_handler.py` sites plus the stale-snapshot regression test, ships here) and A3b (grep enumeration filed as a separate hardening issue, no code fix here). Rabbit Holes, Risks, Test Impact, Success Criteria, and the task list all follow the split. | Split A3 into A3a (the two evidenced `output_handler.py` sites plus the stale-snapshot regression test) shipped in this PR, and A3b (everything else) filed as a separate "AgentSession save() hardening sweep" issue citing this plan's Architectural Impact section. Retain the grep as an *enumeration* step so no site is missed, but scope the *fix* in this PR to the evidenced sites. |
+| CONCERN | Scope & Value | The plan bundles the low-risk, prompt-only #3271 fix with the highest-blast-radius lifecycle sweep for #3270 in one PR, behind one set of red-first tests and one review pass. The human's literal complaint ("I'm not your log file") is independently fixable and mergeable, but per V3 it ships only when the riskier fix is done. | **Deviation, named for the decider.** Lane identity gives this session exactly one worktree and one branch, so a two-PR split is not available without a second lane. Mitigation adopted: Track B commits first and stays independently revertable, recorded in Team Orchestration and in V3. The PM may overrule and authorize a second lane. | Constrained by lane identity: this session owns exactly one worktree and branch (`session/dev-1aafae58`), so one branch means one PR. Mitigation adopted instead of a split: commit Track B first and keep it independently revertable, so Track B can be cherry-picked out if Track A stalls in review. Recorded as a named deviation for the decider to override. |
+| NIT | Scope & Value | `SELF_DRAFT_INSTRUCTION` fires only when the delivery validator rejects a message — a narrow corrective path, not the one that produced the 1029-word reply the human complained about. Changing this tested constant chases consistency rather than the demonstrated defect. | **Accepted.** Open Question 3 resolved as option (a); section B3 and task B3 deleted, `bridge/message_drafter.py` removed from Track B's file set, and the `tests/unit/test_message_drafter.py` row removed from Test Impact. | Resolve Open Question 3 in favor of option (a): leave the bullet mandate alone. Drop task B3 and remove the `tests/unit/test_message_drafter.py:284-287` row from Test Impact. |
 
 
 ---
 
 ## Open Questions
 
-1. **A6a rate-limit detection — is there a structured signal?** The harness deliberately avoids stderr substring matching (`harness/claude.py:658-659`), and I have not found a structured exit-code or result-field signal for a usage-limit stop. If none exists, the honest scope for A6a is the routing half only: never relay harness failure text to the room, and let the operator route carry whatever the harness produced. Confirm this narrowing is acceptable rather than building a keyword detector the codebase has already argued against.
+All three are resolved as of the round-1 revision. None remain open; nothing here blocks build.
 
-2. **A4's `failed`-row exclusion — any legitimate caller?** Excluding `failed` from the resume rung is the right call for conversation threads, but if some SDLC recovery flow depends on resuming a genuinely failed *lane* session, this narrows it. I found no such caller, but this is a behavior change to production recovery and worth a second opinion.
+1. **A6a rate-limit detection — is there a structured signal?** **Resolved: no, and A6a is scoped to the routing half only.** The harness deliberately avoids stderr substring matching (`harness/claude.py:658-659`) and no structured exit-code or result-field signal for a usage-limit stop exists. A6a therefore implements one rule: never relay harness failure text to the room, route it to the operator instead. No keyword detector is built. If a structured signal appears later, tightening A6a is a follow-up, not a blocker.
 
-3. **B3 scope — how far to reconcile `SELF_DRAFT_INSTRUCTION`?** It currently mandates "2-4 bullet points" for *validator-rejected* messages, which is a narrower context than ordinary chat replies. Options: (a) leave the bullet mandate alone since it only fires on rejection, (b) soften it to match B1. I lean (b) for consistency, but (a) is defensible and avoids touching a tested constant.
+2. **A4's `failed`-row exclusion — any legitimate caller?** **Resolved: the exclusion stays.** No caller was found that depends on resuming a genuinely `failed` lane session from the stall rung, and the ladder's `create` rung is a strictly safer fallback. This is a production recovery behavior change and is listed under Risks for post-deploy observation.
+
+3. **B3 scope — how far to reconcile `SELF_DRAFT_INSTRUCTION`?** **Resolved as option (a): leave it alone.** It fires only when the delivery validator rejects a message — a narrow corrective path, not the one that produced the 1029-word reply. Section B3 and task B3 are deleted; `bridge/message_drafter.py` is untouched by this plan.
