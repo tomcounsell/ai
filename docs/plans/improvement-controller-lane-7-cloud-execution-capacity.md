@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-09-10
 tracking: https://github.com/tomcounsell/ai/issues/3274
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-09T17:57:12Z
 ---
 
 # Improvement controller lane 7: cloud execution capacity
