@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+import uuid
 from unittest.mock import patch
 
 from agent.session_runner.adapter import SessionRunnerAdapter
@@ -289,6 +290,9 @@ async def test_timeout_expiry_is_graceful_preempt_not_error():
         pid_alive_fn=lambda pid: False,
         turn_timeout_s=0.12,
     )
+    # Unique id: the notice is deduped per session (#3270 A6b), so a shared
+    # fixture id would let a previous test run's dedupe key suppress this send.
+    session.session_id = f"dbg-a6b-single-{uuid.uuid4()}"
     summary = await runner.run("long task")
     assert kills and kills[0][1] == signal.SIGTERM
     assert summary.exit_reason == "turn_timeout"
@@ -785,3 +789,41 @@ async def test_stamp_failure_never_breaks_the_turn():
 
     assert summary.exit_reason is ExitReason.PM_USER
     assert deliveries == ["done"]
+
+
+async def test_timeout_notice_delivered_once_across_two_runs_of_one_session():
+    """A6b (#3270): the needs-attention notice is per-SESSION, not per-run.
+
+    The incident: a stranded conversation row was re-enqueued on a ~hourly
+    cadence and every re-run timed out and re-posted the byte-identical
+    ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` into the human's chat. Two runs of the
+    SAME ``session_id`` must produce exactly ONE delivery.
+    """
+    session_id = f"dbg-a6b-{uuid.uuid4()}"
+    deliveries: list[str] = []
+
+    async def _timeout_run() -> None:
+        driver = KillableDriver()
+
+        def fake_kill(pid, sig):
+            driver.kill_event.set()
+
+        runner, _, session = make_preempt_runner(
+            driver,
+            steering=lambda: [],
+            deliveries=deliveries,
+            kill_fn=fake_kill,
+            killpg_fn=fake_kill,
+            pid_alive_fn=lambda pid: False,
+            turn_timeout_s=0.12,
+        )
+        session.session_id = session_id
+        summary = await runner.run("long task")
+        assert summary.exit_reason == "turn_timeout"
+
+    await _timeout_run()
+    await _timeout_run()
+
+    assert deliveries.count(TIMEOUT_NEEDS_ATTENTION_MESSAGE) == 1, (
+        f"timeout notice re-delivered once per run: {deliveries!r}"
+    )

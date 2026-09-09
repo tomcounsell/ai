@@ -109,6 +109,17 @@ TEAMMATE_TURN_TIMEOUT_S: float = float(
     os.environ.get("SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S", "900")
 )
 
+# TTL (seconds) on the per-session `timeout-notice-sent:{session_id}` dedupe
+# key that makes TIMEOUT_NEEDS_ATTENTION_MESSAGE a once-per-SESSION notice
+# rather than a once-per-RUN one (#3270 defect 7). PROVISIONAL/TUNABLE --
+# grain of salt: sized to comfortably outlive a stranded row's re-enqueue
+# cadence (the incident re-ran the same row hourly for hours), while still
+# expiring so abandoned sessions need no cleanup step. Override with
+# SESSION_RUNNER_TIMEOUT_NOTICE_DEDUP_TTL_S.
+TIMEOUT_NOTICE_DEDUP_TTL_S: int = int(
+    os.environ.get("SESSION_RUNNER_TIMEOUT_NOTICE_DEDUP_TTL_S", "86400")
+)
+
 # How often the preempt watcher polls the steering list during a turn.
 # Provisional/tunable — override with SESSION_RUNNER_STEER_POLL_INTERVAL_S.
 STEER_POLL_INTERVAL_S: float = float(os.environ.get("SESSION_RUNNER_STEER_POLL_INTERVAL_S", "2.0"))
@@ -250,6 +261,63 @@ TIMEOUT_NEEDS_ATTENTION_MESSAGE = (
 RUNNER_ERROR_USER_MESSAGE = (
     "I hit a problem finishing this and had to stop. Please try again or follow up."
 )
+
+
+def _claim_timeout_notice(session_id: str) -> bool:
+    """Claim the right to deliver the timeout needs-attention notice ONCE.
+
+    ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` describes a *session-level* condition
+    ("I've paused the work and kept the progress so far"), so re-delivering it
+    on every re-run of the same row is pure noise to the human -- the #3270
+    incident posted the byte-identical text into a chat once per re-enqueue.
+
+    Follows this repo's established one-shot-notice convention (Redis SETNX on
+    a per-session key with a TTL, e.g. ``failed-sent:{session_id}`` in
+    ``agent.session_executor``): the first caller wins, later callers are
+    suppressed. The key is a plain Redis string, NOT an AgentSession field --
+    a bare ``save()`` on an AgentSession is a lifecycle write (popoto's default
+    save path is a full HSET and ``status`` is an ``IndexedField``), so a
+    cosmetic dedupe marker must never travel on that path.
+
+    **Fail-open**: if Redis is unavailable the notice is delivered anyway. A
+    duplicate needs-attention message is strictly better than silence about a
+    turn that was preempted mid-flight.
+
+    Args:
+        session_id: The AgentSession the notice would be delivered for. An
+            empty id means the row is unidentifiable, so no dedupe is possible
+            and the notice is delivered.
+
+    Returns:
+        True if this run owns the send, False if an earlier run already sent it.
+    """
+    if not session_id:
+        return True
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        claimed = bool(
+            POPOTO_REDIS_DB.set(
+                f"timeout-notice-sent:{session_id}",
+                "1",
+                nx=True,
+                ex=TIMEOUT_NOTICE_DEDUP_TTL_S,
+            )
+        )
+    except Exception as dedup_err:
+        logger.debug(
+            "[%s] timeout-notice dedupe unavailable (%s); delivering anyway",
+            session_id,
+            dedup_err,
+        )
+        return True
+    if not claimed:
+        logger.info(
+            "[%s] timeout needs-attention notice suppressed — already delivered "
+            "for this session (#3270)",
+            session_id,
+        )
+    return claimed
 
 
 def turn_timeout_for(session_type: str | None) -> float:
@@ -857,8 +925,12 @@ class SessionRunner:
                     self._record_turn_event(handle, turn_end_source=source)
                     if handle.kill_cause == "timeout":
                         # Graceful preempt, not an error: partial work stays
-                        # in the transcript; surface needs-attention.
-                        self._adapter.on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)
+                        # in the transcript; surface needs-attention -- but at
+                        # most ONCE per session, not once per run (#3270).
+                        if _claim_timeout_notice(
+                            str(getattr(self._agent_session, "session_id", "") or "")
+                        ):
+                            self._adapter.on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)
                         summary.exit_reason = ExitReason.TURN_TIMEOUT
                         break
                     # Steer preempt: pending steers drain at the next
