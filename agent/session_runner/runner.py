@@ -116,10 +116,8 @@ TEAMMATE_TURN_TIMEOUT_S: float = float(
 # for hours, so a short TTL would expire between re-runs and re-spam. It is
 # safe to be long ONLY because the key is run-scoped -- a later, unrelated
 # request in the same thread carries a new record id and a fresh key.
-# PROVISIONAL/TUNABLE --
-# grain of salt: sized to comfortably outlive a stranded row's re-enqueue
-# cadence (the incident re-ran the same row hourly for hours), while still
-# expiring so abandoned sessions need no cleanup step. Override with
+# PROVISIONAL/TUNABLE -- grain of salt: it still expires, so abandoned
+# sessions need no cleanup step. Override with
 # SESSION_RUNNER_TIMEOUT_NOTICE_DEDUP_TTL_S.
 TIMEOUT_NOTICE_DEDUP_TTL_S: int = int(
     os.environ.get("SESSION_RUNNER_TIMEOUT_NOTICE_DEDUP_TTL_S", "86400")
@@ -306,14 +304,15 @@ def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
             empty id means the row is unidentifiable, so no dedupe is possible
             and the notice is delivered.
         run_id: The AgentSession record's ``id``, minted fresh on every
-            reply-resume. Empty is safe: it degrades to a thread-wide key for
-            a row that has no id yet, which cannot collide with an identified
-            row's key.
+            reply-resume. Empty means the run is unidentifiable, so the notice
+            is delivered rather than deduped on a thread-wide key -- that key
+            would be the silence bug in miniature, and failing open here is the
+            same stance as the Redis-outage path above.
 
     Returns:
         True if this run owns the send, False if an earlier run already sent it.
     """
-    if not session_id:
+    if not session_id or not run_id:
         return True
     try:
         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
