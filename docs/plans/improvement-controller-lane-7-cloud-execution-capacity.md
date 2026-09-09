@@ -106,7 +106,7 @@ Searched closed issues and merged PRs for cloud execution, sandboxes, Cloudflare
 
 ## Spike Results
 
-Six spikes ran during planning, four code-reads and two web-research. They are recorded here so the build does not re-investigate them. The build opens with a second, shorter spike phase for the two questions that need a live provider account to answer (see tasks 1 through 3).
+Six spikes ran during planning, four code-reads and two web-research. They are recorded here so the build does not re-investigate them. The build opens with a second, shorter spike phase for the two questions that need a live provider account to answer (see tasks 2 through 4).
 
 ### spike-1: May RSI sessions consume Claude subscription capacity from a cloud sandbox?
 - **Assumption**: "Charter §2's cloud-sandbox operating model is an infrastructure problem."
@@ -384,7 +384,7 @@ Phase 1 (evidence kinds, probe re-run, provider decision, sandbox feasibility) a
 
 ## No-Gos (Out of Scope)
 
-- `[EXTERNAL]` **Granting the `valor-local` service account write access to the `m-valor` vault.** Tom's action; the parent plan already names it as his one remaining manual step. Until it lands, this lane can read the vault under the service account but cannot store an issued credential, so tasks 6 and 7 stop at the boundary rather than working around it.
+- `[EXTERNAL]` **Granting the `valor-local` service account write access to the `m-valor` vault.** Tom's action; the parent plan already names it as his one remaining manual step. Until it lands, this lane can read the vault under the service account but cannot store an issued credential, so tasks 8 and 9 stop at the boundary rather than working around it.
 - `[EXTERNAL]` **Funding the provider account and any card authorization it needs.** Charter §8 grants authority to spend within the limit and names a virtual debit card; it does not make a card work. A declined card is a human/world condition this lane reports rather than routes around.
 - `[ORDERED]` **Every acquisition task waits on #3215's `tools/vault_write.py`.** Lane 3 has no PR and no plan as of this writing. Storing a credential any other way violates charter §8's vault rule, and there is no acceptable interim shape — a credential in `.env`, in a log, or in a commit is the failure the rule exists to prevent.
 - `[ORDERED]` **The whole lane waits on PR #3275.** The probe, the three budget units, and the window-boundary settings all live there. Building against the branch would fork the settings vocabulary a second time, which is the exact cost lane 2b was created to avoid paying four times.
