@@ -10,7 +10,7 @@ every call site that migrated to `settings.timeouts.<field>` changes too.
 import pytest
 from pydantic import ValidationError
 
-from config.settings import Settings, TimeoutSettings
+from config.settings import ImprovementSettings, Settings, TimeoutSettings
 
 
 class TestTimeoutSettingsDefaults:
@@ -128,3 +128,45 @@ class TestTimeoutSettingsEnvOverride:
 
         with pytest.raises(ValidationError):
             Settings()
+
+
+class TestImprovementSettingsBudgetUnits:
+    """The three budget units charter v2 reserves separately (#3255).
+
+    Two are dollars on different windows, and the third is not money at all
+    (Claude concurrency). The window boundaries are typed rather than free
+    strings so a bad override fails at settings load rather than at the first
+    window computation.
+    """
+
+    def test_budget_defaults(self):
+        s = ImprovementSettings()
+
+        assert s.daily_paid_inference_usd == 10.00
+        assert s.weekly_infrastructure_usd == 50.00
+        assert s.budget_day_boundary == "UTC"
+        assert s.budget_week_start == "monday"
+
+    def test_concurrency_is_still_the_third_unit(self):
+        assert ImprovementSettings().max_concurrent_research_sessions == 1
+
+    @pytest.mark.parametrize(
+        "withdrawn",
+        ["daily_external_llm_usd", "portfolio_allocation", "daily_question_ceiling"],
+    )
+    def test_withdrawn_vocabulary_is_absent(self, withdrawn):
+        """Charter v2 replaced all three; a leftover would be read as current."""
+        assert withdrawn not in ImprovementSettings.model_fields
+
+    @pytest.mark.parametrize(
+        "field,bad_value",
+        [
+            ("budget_day_boundary", "PST"),
+            ("budget_week_start", "Monday"),
+            ("daily_paid_inference_usd", -1.0),
+            ("weekly_infrastructure_usd", -1.0),
+        ],
+    )
+    def test_invalid_values_fail_at_load(self, field, bad_value):
+        with pytest.raises(ValidationError):
+            ImprovementSettings(**{field: bad_value})
