@@ -7,6 +7,7 @@ deserves to exist.
 Tracking issue: [#3177](https://github.com/tomcounsell/ai/issues/3177).
 Plan: [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md).
 Current state: [capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md).
+North star: [`docs/improvement-charter.md`](../improvement-charter.md), which Tom owns and only Tom edits.
 
 ## What exists today
 
@@ -162,16 +163,80 @@ Turning it back off is the same edit in reverse; no hand edit of the vault
 |---|---|---|
 | `enabled` | `False` | Master switch. `IMPROVEMENT__ENABLED` |
 | `max_concurrent_research_sessions` | `1` | Claude work is budgeted as SDLC lane concurrency, not dollars: the subscription is the constraint |
-| `daily_external_llm_usd` | `10.00` | Daily pool for non-Claude calls through OpenRouter, settled per call from reported usage; controller and evaluator draw separate reservations |
-| `portfolio_allocation` | `architectural=0.5,stakeholder=0.25,quality=0.25` | How effort splits across the charter objectives. A portfolio, not a quota |
+| `daily_paid_inference_usd` | `10.00` | Daily pool for paid inference on non-Claude models through OpenRouter; controller and evaluator draw separate reservations |
+| `weekly_infrastructure_usd` | `50.00` | Weekly pool for sandboxes, storage, and Cloudflare, charter §8's second spending category |
+| `budget_day_boundary` | `UTC` | The timezone whose midnight ends a budget day |
+| `budget_week_start` | `monday` | The weekday an infrastructure budget week begins on |
 | `controller_tick_seconds` | `900` | Cadence, matching the registered reflection |
 
-**There is no `daily_question_ceiling`.** The ceiling is zero and the capability
-does not exist. The controller asks Tom nothing: it resolves uncertainty from
-Tom-sourced memories and online research, and records what it cannot resolve as
-a provisional assumption with its evidence, shown on the dashboard as an
-assumption rather than a fact. A Verification row in the plan fails the build if
-a question path reappears.
+Three budget units, reserved separately, and one of them is not money: Claude
+work runs on the subscription and is budgeted as lane concurrency. The window
+boundaries are settings rather than assumptions because charter §8 requires them
+disclosed — a reservation that resets on an undisclosed boundary cannot be
+audited against what was actually spent.
+
+**Nothing meters dollars today.** Both dollar figures are declared limits with
+no meter behind them; `tools/paid_inference_meter.py` arrives with lane 3.
+Uncertain metering is not zero cost.
+
+**There is no fixed allocation across areas.** Ranking is by expected
+contribution to the north star (charter §3), recorded per case as
+`ranking_rationale` beside the `priority_area` and the charter digest it was
+ranked under. The eleven-value `PRIORITY_AREAS` vocabulary is a classification,
+not a quota.
+
+**There is no `daily_question_ceiling`.** Charter §9 forbids routine research
+questions: the controller resolves uncertainty from Tom-sourced memories and
+online research, and records what it cannot resolve as a provisional assumption
+with its evidence, shown on the dashboard as an assumption rather than a fact.
+One message class is permitted, the evidence-backed charter amendment request,
+and it arrives with lane 3. A Verification row fails the build if a routine
+question path reappears.
+
+## Charter
+
+`docs/improvement-charter.md` is the north star. Tom owns it and only Tom edits
+it; nothing in `models/`, `tools/`, `reflections/`, or `ui/` writes that file,
+and it is on the candidate-surface denylist.
+
+`ImprovementCharter.load_from_file` projects the file into a record. It digests
+the bytes with `tools/sdlc_verdict.py::compute_plan_hash`, which normalizes CRLF
+to LF, so the same charter digests identically on any checkout. It **refuses**
+any file whose frontmatter names an owner other than `Tom Counsell`, returning
+None and writing nothing.
+
+The record is append-only. One immutable row per unseen digest; an amended
+charter adds a row and leaves the earlier one exactly as it was, because an
+evaluation or release that cites a charter must still resolve it years later.
+The loader never calls `save()` on an existing row, never flips a prior row to
+`superseded`, and never deletes. `ImprovementCharter.pinned(project_key)` is the
+charter in force: the newest row by `created_at`.
+
+`digest` is a plain field rather than an index. The schema gate rejects an
+indexed field whose name marks it unbounded, so the loader matches the digest in
+Python over the project's charter rows, which number one per version.
+
+`ImprovementCase`, `ImprovementInvestigation`, and `ImprovementRelease` each
+carry `charter_digest`, so a decision records the exact charter text it was
+admitted under. The version is the human-readable name; the digest is the
+identity.
+
+## Provider eligibility and resources
+
+`tools/improvement_eligibility.py::is_open_source(project_key)` is the charter
+§7 guard: any provider may see open-source work, and client work stays on the
+Claude and Codex subscriptions. It **fails closed to client** on every
+uncertainty, and it passes the repository to `gh` positionally, because
+`GH_REPO` is set process-wide and `gh` reads it before cwd. Its cache is
+process-local rather than a Redis key, and caches only determinate answers.
+
+`tools/improvement_resources.py::probe()` is the charter §8 verification: each
+named resource is reported `verified`, `absent`, or `unknown`. `unknown` is the
+default on any uncertainty, never `absent`, because reporting a resource absent
+when it exists sends the next lane out to acquire something already in the
+vault. Presence comes from `op item list` titles, which carry no field values;
+where a fingerprint is wanted the credential is hashed immediately and reported
+as `sha256:<hex>`. The probe never raises and never emits a credential.
 
 ## Control namespace contract (lane 3)
 
@@ -241,7 +306,19 @@ content without a path heuristic.
 
 ## Dashboard
 
-Two panels on the root dashboard, both backed by `ImprovementEvidence`.
+Three panels on the root dashboard.
+
+**Goals** is the charter §11 readable record: which charter version and digest
+the work is ranked under, the §3 early priorities marked as starting hypotheses
+rather than an allocation, open cases with their `priority_area` and
+`ranking_rationale`, and unresolved assumptions. Every heading no lane writes
+yet says so and names the lane that will fill it — acquired abilities and
+resource use come with lane 3, evaluations with lane 4, rejected approaches with
+lane 5. Each section renders one of three distinguishable states: content,
+"nothing yet, written by lane N", or "unavailable" when the read failed. A bare
+zero would claim a measurement was taken.
+
+The other two panels are backed by `ImprovementEvidence`.
 
 **Coverage** comes first and is the denominator. A falling correction count with
 a falling scan count is not an improvement, and coverage is what makes the two
@@ -252,8 +329,8 @@ count below it is a count of nothing, rather than showing a comforting zero.
 raw count beside every share. `unknown` is expected to be the largest bucket.
 An empty window reads as "nothing observed", never "nothing happened".
 
-`ui/data/improvement.py` exports exactly three getters, and a test pins that
-list. **Experiment count and merged-patch count are activity, not improvement**,
+`ui/data/improvement.py` exports exactly four getters, and a test pins that
+list as an exact list. **Experiment count and merged-patch count are activity, not improvement**,
 and there is deliberately no function here that returns them.
 
 Cases, hypotheses, rejected experiments, spend, release lineage, and the

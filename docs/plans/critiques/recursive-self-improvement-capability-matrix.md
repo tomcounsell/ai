@@ -66,6 +66,49 @@ entries (`bridge/dispatch.py::_append_inbound_chat_log`) and `Memory` rows with
 read — its only assigner has no production caller, which would reproduce the
 exact defect the table below records as retired.
 
+## Lane 2b — charter v2 delta
+
+| Component | Implemented | Deployed | Measured | Effect |
+|---|---|---|---|---|
+| `ImprovementCharter.digest` / `effective` / `text` | yes | yes (schema is live once merged) | no | n/a — storage, not behavior |
+| `ImprovementCharter.load_from_file` seed | yes | no caller yet — lane 3's tick is the first | no | unknown |
+| `ImprovementCharter.pinned` | yes | read by the goals partial | no | n/a |
+| `PRIORITY_AREAS` + `priority_area` / `ranking_rationale` | yes | no writer yet — lane 3 opens the first case | no | n/a |
+| `charter_digest` on case, investigation, release | yes | no writer yet | no | n/a |
+| `objective` deleted | yes | yes, no rows existed | n/a | n/a |
+| Three budget units in `ImprovementSettings` | yes | yes, defaults only | **no** | n/a — declared limits, nothing meters them |
+| `is_open_source` charter §7 guard | yes | no caller yet — lane 3 routes the first session | no | unknown |
+| `probe()` charter §8 verification | yes | run by hand, see below | **yes, once** | n/a |
+| Goals partial (`/_partials/improvement/goals/`) | yes | yes | no | n/a |
+| `confirm_improvement_v2_fields` migration | yes | on the next `/update` per machine | no | n/a |
+
+**The resource probe's measured result**, run on Tom's MacBook Air at build
+time. This is one machine at one moment, not a fleet statement.
+
+| Resource | State | Why |
+|---|---|---|
+| `workspace_personal` | unknown | the `m-valor` vault listing could not be read |
+| `workspace_work` | unknown | same |
+| `virtual_debit_card` | unknown | same |
+| `cloudflare_account` | unknown | same |
+| `cloudflare_cli` | absent | `wrangler` is not installed on this machine |
+| `vault_write` | absent | the sanctioned vault writer is lane 3's and does not exist |
+
+The four `unknown`s are an environment result, not a vault result. `op` is
+installed but `OP_SERVICE_ACCOUNT_TOKEN` was not set in the build shell, so the
+CLI fell back to an interactive prompt and the probe's timeout bounded it. That
+is exactly why `unknown` and `absent` are separate states: reporting these four
+absent would send lane 3 out to acquire accounts that may well already exist.
+Re-run the probe under the service-account token before treating any of them as
+missing.
+
+**The honest reading of this lane.** It corrects vocabulary and adds two guards
+with no callers. Nothing here changes behavior on merge day: the guards are
+libraries lane 3 consumes, the seed has no caller, and the goals partial renders
+mostly empty sections that name the lane which will fill each. The one thing it
+does change is that the settings and the feature doc stop describing decisions
+the charter withdrew.
+
 ## Retired instrumentation
 
 | Component | Status | Why |
