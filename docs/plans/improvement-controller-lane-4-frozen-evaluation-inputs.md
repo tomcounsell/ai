@@ -752,6 +752,9 @@ test is observed to fail, the mutation is reverted, and the test is observed to 
 | Artifact integrity | Catch `ArtifactIntegrityError` and continue | `test_corrupted_archive_invalidates_without_verdict` |
 | Parity gate ordering | Move the parity check after the candidate arm | `test_parity_miss_never_invokes_the_candidate_arm` |
 | Corpus identity | Skip the per-arm digest comparison | `test_two_arms_read_a_byte_identical_corpus` |
+| Retrieval reproducibility | Rank through `Query.top_by_decay` instead of `retrieve_memories` | `test_two_arms_rank_identically_across_a_clock_gap` |
+| Relevance carry-over | Drop `skip_auto_now` from the restore (re-stamp relevance at import) | `test_two_arms_rank_identically_across_a_clock_gap` |
+| Parent pool isolation | Call `set_REDIS_DB_settings` in the parent instead of spawning `arm_worker` | `test_parent_pool_kwargs_survive_an_arena_context` |
 | Blinding | Return `blinded=True` unconditionally | `test_identity_leak_sets_blinded_false` |
 | Writer kill switch | Remove the client wrapper (leave the digest re-check) | `test_arm_write_is_refused` |
 | Writer kill switch | Remove the digest re-check (leave the wrapper) | `test_escaped_write_surfaces_as_infra_failure` |
@@ -792,8 +795,11 @@ disposition.
   tests keep passing unchanged; that is the evidence for acceptance criterion 7, and a Verification
   row asserts the file itself is byte-identical to main.
 - `tests/db_claim.py` and `tests/unit/test_test_redis_server_resolution.py` — untouched by design.
-  The arm arena deliberately does not participate in the db-claim pool (spike-2), and a new test
-  asserts `arena.py` never calls into `db_claim` or reassigns `REDIS_URL`.
+  The arm arena deliberately does not participate in the db-claim pool (spike-2), and new tests
+  assert that nothing under `tools/improvement_eval/` imports `db_claim`, assigns
+  `os.environ["REDIS_URL"]`, or calls `set_REDIS_DB_settings`. The arm's `REDIS_URL` lives in a
+  subprocess env dict, which is a different thing and is what the corrected anti-criterion regex
+  distinguishes.
 - `tests/unit/test_settings.py` — untouched. No new setting is added in this lane; the budget
   settings this harness draws against already exist and are lane 3's to meter.
 
@@ -1100,13 +1106,19 @@ Not applicable — this repo has no Sphinx, Read the Docs, or MkDocs site.
 
 The seven acceptance criteria from issue #3216, unchanged, each with the artifact that proves it:
 
-- [ ] **Two arms on private Redis processes produce byte-identical corpus reads** — asserted at run
-      time in `arena.py` (unequal digests end the run as `infra_failure`) and pinned by
-      `test_two_arms_read_a_byte_identical_corpus`.
+- [ ] **Two arms on private Redis processes produce byte-identical corpus reads** — each arm re-runs
+      `export_records` against its own pool after restore and the digests are compared at run time
+      (unequal digests end the run as `infra_failure`), pinned by
+      `test_two_arms_read_a_byte_identical_corpus`. Byte identity alone is not the claim the criterion
+      needs, so it is paired with `test_two_arms_rank_identically_across_a_clock_gap`, which queries
+      the two arms with a deliberate wall-clock gap between them and asserts identical ranked ids —
+      the reproducibility property that `skip_auto_now=True` on restore and the ban on
+      `Query.top_by_decay` together buy.
 - [ ] **Baseline retrieval parity holds on the frozen corpus, and a parity miss invalidates the run
-      before any candidate result is read** — pinned by `test_parity_miss_never_invokes_the_candidate_arm`,
-      which asserts the candidate arm callable was never invoked, not merely that the outcome was
-      invalid.
+      before any candidate result is read** — the gate compares ranked memory ids against a baseline
+      record that stores the corpus digest it was captured under, and is pinned by
+      `test_parity_miss_never_invokes_the_candidate_arm`, which asserts the candidate arm subprocess
+      was never spawned, not merely that the outcome was invalid.
 - [ ] **A corrupted artifact invalidates the evaluation rather than scoring it, proven by a mutation
       test that corrupts the archive copy specifically** — `test_corrupted_archive_invalidates_without_verdict`
       writes an artifact, corrupts `.versions/{prefix}/{hash}{ext}` while leaving the live path
@@ -1158,8 +1170,8 @@ theme, because two builders converging on one file is how a lane livelocks.
 
 - **Builder (arena and corpus)**
   - Name: `arena-builder`
-  - Role: Owns `tools/improvement_eval/{corpus,arena,writer_guard,retrieval,errors}.py` and their
-    tests. The isolation substrate and the parity gate.
+  - Role: Owns `tools/improvement_eval/{corpus,arena,arm_worker,writer_guard,retrieval,errors}.py`
+    and their tests. The isolation substrate, the arm subprocess, and the parity gate.
   - Agent Type: builder
   - Domain: Redis/Popoto data — arms must never touch popoto's canonical pool, `REDIS_URL`, or
     `tests/db_claim.py`; every corpus read goes through the arm's explicitly-constructed client.
@@ -1226,11 +1238,12 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/improvement_eval/__init__.py` and `errors.py` with `InfraFailure`.
-- `corpus.py`: canonical sorted newline-delimited export with a provenance header (record count, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape; hash it; write to the verifying artifact store; restore into a given client.
-- `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; return `redis.Redis(unix_socket_path=...)`; `finally` terminates the child and removes the tmpdir. Never import `tests.db_claim`, never assign `REDIS_URL`, never re-point popoto's pool.
-- Re-read and re-hash each arm's corpus after restore; unequal digests raise `InfraFailure`.
-- `writer_guard.py`: client wrapper refusing corpus writes, plus an independent teardown digest re-check.
-- `retrieval.py`: arm-scoped retrieval adapter and `baseline_parity()`; a miss raises `InfraFailure`.
+- `corpus.py`: `export_corpus(project_key)` calls `Memory.export_records(project_key=..., stream=fh)`, hashes the JSONL bytes, and writes them to the verifying artifact store with a provenance header (record count from the manifest's `matched_count`, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape. `restore_corpus(jsonl_bytes)` calls `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`. No raw Redis command anywhere in this module.
+- `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; yields the socket path and the per-arm tmpdir; `finally` terminates the child and removes the tmpdir. It opens no Redis client of its own. Never import `tests.db_claim`, never assign `os.environ["REDIS_URL"]`, never call `set_REDIS_DB_settings`.
+- `arm_worker.py`: `python -m tools.improvement_eval.arm_worker`, reading a JSON job spec on stdin and writing JSON on stdout. Modes: `restore`, `retrieve`, `digest`. Launched by `arena.py` with `env={**os.environ, "REDIS_URL": f"unix://{sock}", "POPOTO_CONTENT_PATH": ..., "VALOR_PROJECT_KEY": ..., "POPOTO_EMBEDDING_INVALIDATION": "none"}` — a dict for the call, never an assignment into the parent's environment.
+- After restore, each arm re-runs `export_records` against its own pool and reports the digest; unequal digests raise `InfraFailure`.
+- `writer_guard.py`: an ORM-level guard in the arm worker that refuses `Memory.save`/`Memory.delete` after restore, plus an independent corpus-digest re-check at arm teardown.
+- `retrieval.py`: arm-scoped adapter over `agent.memory_retrieval.retrieve_memories`, returning ranked memory ids; `baseline_parity()` compares those ids to the recorded baseline captured under the same corpus digest; a miss raises `InfraFailure`. Never calls `Query.top_by_decay`.
 
 ### 2. Holm correction, stopping rule, statistics
 - **Task ID**: build-stats
@@ -1339,16 +1352,22 @@ executed against the tree at plan time to confirm it runs and produces the shape
 | End-to-end evaluation test passes | `scripts/pytest-clean.sh tests/integration/test_improvement_eval_end_to_end.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/improvement_eval/ models/improvement_evaluation.py scripts/update/migrations.py agent/session_executor.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/improvement_eval/ models/improvement_evaluation.py` | exit code 0 |
-| `metrics.py` unmodified (criterion 7) | `git diff --exit-code main -- tools/memory_eval/metrics.py` | exit code 0 |
+| `metrics.py` unmodified (criterion 7) | `.venv/bin/python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('tools/memory_eval/metrics.py').read_bytes()).hexdigest())"` | output is `424dbce86534f955d39f2e56be92ba40b090172045b81e06e6dd8241a84702e7` |
+| `metrics.py` unmodified — human cross-check | `git diff --exit-code origin/main -- tools/memory_eval/metrics.py` | exit code 0 |
 | `metrics.py` is imported (criterion 7) | `grep -rE "from tools\.memory_eval(\.metrics)? import" tools/improvement_eval/ \| wc -l` | output > 0 |
 | `charter_digest` on the evaluation record | `python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
 | `charter_digest` pinned as never-indexed | `grep -c '"charter_digest"' tests/unit/test_improvement_models.py` | output > 0 |
-| Migration function registered in `MIGRATIONS` | `grep -c "_migrate_improvement_evaluation_charter_digest" scripts/update/migrations.py` | output > 1 |
+| Migration function registered in `MIGRATIONS` | `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` | output contains `True` |
 | `VALOR_PROJECT_KEY` in `_harness_env` | `grep -c '"VALOR_PROJECT_KEY"' agent/session_executor.py` | output > 0 |
 | Judge id disjoint from the existing roster | `python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
 | §7 guard is called, not reimplemented | `grep -r "is_open_source" tools/improvement_eval/ \| wc -l` | output > 0 |
 | Anti-criterion: arena never touches the db-claim pool | `grep -r "db_claim" tools/improvement_eval/ \| wc -l` | match count == 0 |
-| Anti-criterion: arena never reassigns `REDIS_URL` | `grep -rE "REDIS_URL[^\"]*=\|environ\[.REDIS_URL.\]" tools/improvement_eval/ \| wc -l` | match count == 0 |
+| Anti-criterion: the parent never reassigns `REDIS_URL` | `grep -rE "os\.environ\[[\"']REDIS_URL[\"']\][[:space:]]*=\|os\.environ\.setdefault\([[:space:]]*[\"']REDIS_URL\|putenv\([[:space:]]*[\"']REDIS_URL" tools/improvement_eval/ \| wc -l` | match count == 0 (the arm's `REDIS_URL` is a **key in a subprocess env dict**, which this regex deliberately permits and the old `REDIS_URL[^\"]*=` form would have flagged) |
+| Anti-criterion: the parent's canonical pool is never re-pointed | `grep -rE "set_REDIS_DB_settings" tools/improvement_eval/ \| wc -l` | match count == 0 |
+| Anti-criterion: retrieval never ranks through the unpinnable decay clock | `grep -rE "top_by_decay" tools/improvement_eval/ \| wc -l` | match count == 0 |
+| Anti-criterion: no raw Redis command on Popoto-managed keys | `grep -rE "\.(hgetall\|hget\|hmget\|hscan\|scan_iter\|zadd\|zrem\|sadd\|srem)\(" tools/improvement_eval/ \| wc -l` | match count == 0 |
+| Corpus transfer goes through the ORM API | `grep -rE "export_records\|import_records" tools/improvement_eval/ \| wc -l` | output > 0 |
+| The arm subprocess carries its own content path | `grep -c "POPOTO_CONTENT_PATH" tools/improvement_eval/arena.py` | output > 0 |
 | Anti-criterion: no bridge/worker/agent import of the harness | `grep -rE "tools[./]improvement_eval" bridge/ worker/ agent/ \| wc -l` | match count == 0 |
 | Anti-criterion: no CLI entry point added | `grep -cE "improvement.eval" pyproject.toml` | match count == 0 |
 | Anti-criterion: no MCP surface added | `grep -rE "improvement.eval" mcp_servers/ \| wc -l` | match count == 0 |
