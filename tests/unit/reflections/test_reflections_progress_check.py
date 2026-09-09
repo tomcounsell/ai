@@ -1007,6 +1007,60 @@ def test_target_falls_back_to_recency_when_no_session_matches_the_lane(fake_quer
     assert (kind, session.session_id) == ("steer", "newest")
 
 
+# ---------------------------------------------------------------------------
+# The lane match is a FILTER, not a ranking preference (#3270)
+#
+# Both rungs rank with the same closure, in which the slug used to be only a
+# tiebreaker. With no same-lane candidate the ladder therefore reached for the
+# most-recently-updated eng row -- routinely a slugless human conversation
+# thread, which the stall check then steered or resumed on behalf of unrelated
+# engineering work. A row with no slug, or a slug belonging to another lane, is
+# now structurally ineligible for either rung.
+# ---------------------------------------------------------------------------
+
+
+def test_resume_rung_never_reaches_a_slugless_conversation_thread(fake_query):
+    """The #3270 loop: a finished chat thread resumed for an unrelated lane."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("chat-thread", status="completed", claude_session_uuid="u1", slug=None, updated_at=now)
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
+
+
+def test_steer_rung_never_reaches_a_slugless_conversation_thread(fake_query):
+    """Rung 1's twin of the same defect: an unprompted steer into a stranger's thread."""
+    now = time.time()
+    fake_query.by_project = [_Row("chat-thread", status="running", slug=None, updated_at=now)]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
+
+
+def test_steer_rung_falls_through_to_the_resume_rung_not_to_create(fake_query):
+    """No same-lane LIVE row must not skip a perfectly good same-lane resumable one."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("chat-thread", status="running", slug=None, updated_at=now),
+        _Row(
+            "this-lane",
+            status="completed",
+            claude_session_uuid="u1",
+            slug="X",
+            updated_at=now - 3600,
+        ),
+    ]
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="X")
+    assert (kind, session.session_id) == ("resume", "this-lane")
+
+
+def test_resume_rung_never_selects_a_failed_row(fake_query):
+    """A row that failed once fails the same way again -- re-resuming it is a loop."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("this-lane", status="failed", claude_session_uuid="u1", slug="X", updated_at=now)
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
+
+
 def test_ladder_threads_the_stalled_lanes_slug_into_target_selection(lab, stub_workdir, stalled_pr):
     now = time.time()
     lab.query.by_project = [
