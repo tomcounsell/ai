@@ -2858,6 +2858,41 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         )
         delivered = True
 
+        # Stamp response_delivered_at (#3270). This flush is the path PM/eng
+        # replies actually take, and until now it wrote the outbox payload
+        # without recording that the human had been answered. The only two
+        # other writers (agent/session_executor.py under `action == "deliver"`,
+        # agent/session_completion.py gated on `delivery_attempted`) are
+        # unreachable from here, so #918's duplicate-delivery guard
+        # `_delivery_belongs_to_current_run` read None and returned False for
+        # every deferred-self-draft delivery — and the #944 orphan net requeued
+        # rows that had already replied, once per tick.
+        #
+        # Narrow save: a bare save() here would be a full popoto HSET of a
+        # possibly-stale instance, i.e. a silent lifecycle write.
+        #
+        # ALSO mutate the caller's in-memory `session` object, for the same
+        # reason the extra_context clear below does: `finalize_session` runs a
+        # full `session.save()` on its own `session` parameter immediately
+        # after this flush returns, which writes back whatever that object
+        # still holds. Without the mirror the stamp is erased microseconds
+        # after it lands, on the very save that finalizes the transition.
+        try:
+            _stamp_at = datetime.now(tz=UTC)
+            _stamp_target = get_authoritative_session(session_id) or source
+            _stamp_target.response_delivered_at = _stamp_at
+            _stamp_target.save(update_fields=["response_delivered_at", "updated_at"])
+            if session is not None and session is not _stamp_target:
+                session.response_delivered_at = _stamp_at
+        except Exception as _stamp_err:
+            logger.warning(
+                "[session-health] failed to stamp response_delivered_at for %s after "
+                "successful flush (non-fatal; the #918 delivery guard stays blind for "
+                "this row): %s",
+                session_id,
+                _stamp_err,
+            )
+
         # Post-delivery flag clear (#3053 correction — the flush is NOT
         # self-clearing via #2489; that clear covers only the redraft-success
         # path in TelegramRelayOutputHandler.send(), never this flush). Without

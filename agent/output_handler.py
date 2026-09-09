@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -888,6 +889,30 @@ class TelegramRelayOutputHandler:
                             _ctx.pop("deferred_self_draft_text", None)
                             _target.extra_context = _ctx
                             _target.save(update_fields=["extra_context"])
+                            # Stamp response_delivered_at (#3270). Reaching
+                            # here means the agent redrafted a deferred reply
+                            # and this send is delivering it — the second of
+                            # the two real delivery paths that never recorded
+                            # the fact, leaving #918's
+                            # `_delivery_belongs_to_current_run` reading None
+                            # and the #944 orphan net free to requeue a row
+                            # that had already answered the human.
+                            #
+                            # Narrow save: a bare save() here would be a full
+                            # popoto HSET of a possibly-stale instance, i.e. a
+                            # silent lifecycle write.
+                            #
+                            # The caller's `session` object is mirrored for the
+                            # same reason the flush in
+                            # agent/session_health.py::flush_deferred_self_draft_sync
+                            # mirrors: any caller that keeps holding this
+                            # object and later hands it to a lifecycle write
+                            # would otherwise persist the pre-stamp snapshot.
+                            _stamp_at = datetime.now(UTC)
+                            _target.response_delivered_at = _stamp_at
+                            _target.save(update_fields=["response_delivered_at", "updated_at"])
+                            if session is not _target:
+                                session.response_delivered_at = _stamp_at
                     except Exception as _clear_err:
                         # Best-effort; never blocks delivery. Worst case is the
                         # pre-existing stale-flag behavior this fix targets.
