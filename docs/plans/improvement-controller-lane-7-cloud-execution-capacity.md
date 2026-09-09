@@ -371,23 +371,107 @@ Also deliberately not done, and needing no tag because they are not deferrals �
 
 ## Update System
 
-<!-- skeleton -->
+Two changes, and one deliberate exclusion that matters more than either.
+
+**Changes to the fleet path:**
+
+- `.env.example` gains the provider's credential key with a real comment block, plus `# @passthrough wrangler` if the provider CLI reads a key this codebase never does. Every declaration is required unless its block carries a bare `# @optional`, so an optional key gets that marker deliberately rather than by whatever the env-completeness check happens to flag on one machine.
+- If a Popoto model is added for the infrastructure ledger, `scripts/update/migrations.py` gains an idempotent migration registered in the `MIGRATIONS` dict — required, since `run_pending_migrations()` iterates that dict and an unregistered function never runs. The `spend_receipt` addition is a value in a module constant, not a schema change, and needs no migration; the reader should not go looking for one.
+
+**The exclusion:** **the sandbox is not a fleet machine and `/update` must not try to reach it.** spike-3 found three macOS assumptions in the first forty lines of `scripts/remote-update.sh` and `scripts/valor-service.sh` — an iCloud-synced `~/Desktop/Valor/.env`, `launchctl` for every service operation, and `worker/__main__.py`'s `VALOR_LAUNCHD` branch. A Linux container has none of them. Code reaches the sandbox by **image rebuild and redeploy**, a separate contract documented in `docs/infra/`, and the sandbox is absent from the machine roster in `projects.json`.
+
+This distinction is worth writing down precisely because the failure is quiet. The prior-art cluster (#1898, #2013, #2089, #2104, #2161) is five separate issues in which the update path reported success while the target was running old code or was down. Adding a host the path cannot see and never claims to have updated is the safe shape; adding one it claims to have updated is the sixth issue in that series.
 
 ## Agent Integration
 
-<!-- skeleton -->
+The agent reaches new `tools/` code through a CLI entry point in `pyproject.toml [project.scripts]` or through a direct import from the bridge. Nothing here is bridge-internal, so it is all CLI.
+
+- **Preferred surface: subcommands on lane 3's `valor-improve`** (#3215). This lane adds `budget`, `teardown`, and `report` subcommands rather than three new console scripts. Three sibling entry points for one subsystem is the fragmentation the single CLI exists to prevent, and `docs/tools-reference.md` would have to carry all three.
+- **If `valor-improve` has not landed when this lane builds**, the tools are invoked as module paths (`python -m tools.infrastructure_budget`, `python -m tools.improvement_operating_report`) and the subcommands are wired when lane 3 arrives. **No standalone `[project.scripts]` entry is added** — a console script created as a stopgap outlives the stopgap, and the No-Legacy rule then makes someone delete it later.
+- **The bridge imports none of this.** The controller tick calls the budget module directly, in-process, the same way it calls the probe.
+- **Every new subcommand or module entry point ships informative `--help`.** The repo's stated convention is that `--help` substitutes for memorized invocations, and a tool that spends money is a poor place to break it.
+- **Integration test:** a test invokes the report path through the same entry point the agent would use and asserts all five answers appear. A tool the agent cannot actually invoke is a tool that does not exist, and this one exists to be run.
 
 ## Documentation
 
-<!-- skeleton -->
+### Feature Documentation
+- [ ] Update `docs/features/improvement-controller.md` with unit 3's metering, the window boundaries as they are actually computed, and the teardown policy. The file already documents units 1 and 2; a third unit that lives only in a plan is a unit nobody will honor.
+- [ ] Create `docs/features/improvement-cloud-execution.md` describing the sandbox topology (worker-only, official CLI, durable-state choice), how it is updated, and how its evidence reaches the dashboard.
+- [ ] Add both entries to the `docs/features/README.md` index table.
+
+### Infrastructure Documentation
+- [ ] Create `docs/infra/improvement-cloud-execution.md` — the durable infra record, using the Current State / New Requirements / Rules & Constraints / Rollback Plan structure. It carries the provider decision and its arithmetic, the rate and quota constraints, the redeploy contract that replaces `/update` for this host, and the teardown-and-destroy-account rollback. Infra docs are never archived when plans ship, which is the point: the next person to ask "why not Cloudflare" (or "why Cloudflare") finds the answer here rather than in an archived plan.
+
+### External Documentation Site
+- [ ] Not applicable. This repo publishes no external documentation site.
+
+### Inline Documentation
+- [ ] `tools/infrastructure_budget.py` — a module docstring that states the window computation, the refusal rule, and the no-transfer rule, in the style the sibling improvement modules already use. `tools/improvement_resources.py`'s docstring is the model: it explains *why* `unknown` is the default, which is why nobody has since "fixed" it to `absent`.
+- [ ] The teardown policy's ladder is documented at its implementation, not only in this plan. A plan is archived; the code is read.
+- [ ] `tools/improvement_operating_report.py` — a docstring naming the five answers and stating that sandbox count, uptime, and token volume are deliberately absent, so a future contributor adding one meets the reason first.
 
 ## Success Criteria
 
-<!-- skeleton -->
+- [ ] The resource probe has been re-run on the machine that owns `valor` with `OP_SERVICE_ACCOUNT_TOKEN` set, and its result is recorded as durable evidence. No resource is reported `absent` on the strength of a run that could not read the vault.
+- [ ] The provider decision is recorded with its arithmetic against the $50/week unit, including the case against the options not chosen. Charter §8 names Cloudflare, so a decision away from it carries its evidence.
+- [ ] `tools/infrastructure_budget.py` admits and refuses against unit 3, computes the window from `budget_week_start` and `budget_day_boundary`, discloses both on every decision, refuses any resource whose charge cannot be forecast, and settles missing metering at the forecast rather than at zero.
+- [ ] `spend_receipt` is a recognized `EVIDENCE_KIND` with a TTL that outlives a budget week, and a receipt round-trips through `record_once` without being coerced to `"other"`.
+- [ ] The teardown policy is implemented and tested: admission closes, `standing` resources are torn down, `trial` resources continue to a bounded horizon with the overrun booked against the next window before it accrues, and **every teardown is gated on a verified evidence export that fails closed**.
+- [ ] At least one RSI session has run **unattended in a cloud sandbox**, crossing a credential-refresh boundary and surviving at least one induced crash, with its evidence, its budget settlement, and its recovery recorded.
+- [ ] The dashboard renders that sandbox session's evidence beside a local session's. A run whose evidence the dashboard cannot see does not satisfy this lane.
+- [ ] `max_concurrent_research_sessions` has a recorded, evidence-backed decision. "Unchanged, because the subscription and not the machine is the binding constraint" is a passing outcome; leaving the question open is not.
+- [ ] The charter §2 progress report is posted on #3177 and answers all five questions — which sessions run in cloud sandboxes, whether the loop continues unattended, what resources sustain it, what they cost against the $50/week unit with both window boundaries disclosed, and **what still prevents mostly-cloud operation**. The fifth answer is non-empty.
+- [ ] Every unresolved factual claim from this lane is recorded as a provisional assumption with its evidence, confidence, consequence, and the observation that would overturn it — charter §9's shape, not a hedge in prose.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`), including the `docs/infra/` record
+- [ ] The report generator is invocable through the same entry point the agent would use, and a test proves it
 
 ## Team Orchestration
 
-<!-- skeleton -->
+The lane splits cleanly into three phases with different risk profiles, and the split is real rather than cosmetic: phase 1 spends nothing and can start the moment #3275 merges, phase 2 spends money and blocks on #3215, phase 3 is honest bookkeeping over whatever the first two produced.
+
+### Team Members
+
+- **Spike agent (decisions)**
+  - Name: `capacity-spiker`
+  - Role: Tasks 1 through 3. Re-runs the probe, reads live provider pricing, and answers the sandbox-feasibility question. Produces recorded findings and decisions; writes no production code.
+  - Agent Type: general-purpose, worktree isolation
+  - Resume: true
+
+- **Builder (budget, policy, records)**
+  - Name: `budget-builder`
+  - Role: Tasks 4 through 6. Durable-state topology, the `spend_receipt` addition, the meter, and the teardown policy.
+  - Agent Type: builder. Domain: Redis/Popoto data — no raw Redis operations, model changes carry an idempotent migration registered in `MIGRATIONS`, index cardinality respected.
+  - Resume: true
+
+- **Builder (sandbox trial)**
+  - Name: `sandbox-builder`
+  - Role: Tasks 7 and 8. Acquisition under admission, credential storage through lane 3's vault writer, and the unattended trial.
+  - Agent Type: builder. Domain: security/untrusted-input — no credential in a log, a message, an argv, or a commit; compare by SHA-256 fingerprint and never echo a secret or any prefix of one.
+  - Resume: true
+
+- **Validator**
+  - Name: `capacity-validator`
+  - Role: Runs the Verification table and every mutation check. Reports pass/fail per row and edits no code.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `capacity-scribe`
+  - Role: Task 11. Feature docs, the `docs/infra/` record, and the index entries.
+  - Agent Type: documentarian
+  - Resume: true
+
+**Two builders, and they must not share a worktree.** `budget-builder` and `sandbox-builder` are sequenced by dependency, not run in parallel: task 7 admits through task 6's meter. Shared-worktree builders have livelocked on this repository before, converging on each other's design simultaneously. If the phases are ever genuinely overlapped, the file-level ownership split is `tools/infrastructure_budget.py` plus `models/improvement_evidence.py` for the first and the deployment artifacts for the second, declared before either starts.
+
+The validator gets its own worktree. A mutation review whose author is editing the same checkout corrupts both directions of the measurement.
+
+### Available Agent Types
+
+- **general-purpose**: spikes, web research, code reads. Returns findings, not code.
+- **builder**: implementation and tests in the lane worktree, committed in small logical checkpoints with explicit paths.
+- **validator**: read-only verification, no Write or Edit.
+- **documentarian**: documentation only.
 
 ## Step by Step Tasks
 
