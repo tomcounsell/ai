@@ -1207,7 +1207,34 @@ theme, because two builders converging on one file is how a lane livelocks.
 
 ## Verification
 
-placeholder
+| Check | Command | Expected |
+|-------|---------|----------|
+| Harness unit tests pass | `scripts/pytest-clean.sh tests/unit/ -k improvement_eval -q` | exit code 0 |
+| Judge and calibration tests pass | `scripts/pytest-clean.sh tests/unit/test_serves_charter_judge.py tests/unit/test_improvement_eval_calibration.py -q` | exit code 0 |
+| Record and migration tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_models.py tests/unit/test_migrations.py -q` | exit code 0 |
+| Harness env integration test passes | `scripts/pytest-clean.sh tests/integration/test_session_spawning.py -q` | exit code 0 |
+| End-to-end evaluation test passes | `scripts/pytest-clean.sh tests/integration/test_improvement_eval_end_to_end.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check tools/improvement_eval/ models/improvement_evaluation.py scripts/update/migrations.py agent/session_executor.py` | exit code 0 |
+| Format clean | `python -m ruff format --check tools/improvement_eval/ models/improvement_evaluation.py` | exit code 0 |
+| `metrics.py` unmodified (criterion 7) | `git diff --exit-code main -- tools/memory_eval/metrics.py` | exit code 0 |
+| `metrics.py` is imported | `grep -rn "from tools.memory_eval.metrics import\|from tools.memory_eval import metrics" tools/improvement_eval/ \| wc -l` | output > 0 |
+| `charter_digest` on the evaluation record | `python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
+| `charter_digest` never indexed | `grep -c '"charter_digest"' tests/unit/test_improvement_models.py` | output > 0 |
+| Migration registered | `grep -c "_migrate_improvement_evaluation_charter_digest" scripts/update/migrations.py` | output > 1 |
+| `VALOR_PROJECT_KEY` in `_harness_env` | `grep -c '"VALOR_PROJECT_KEY"' agent/session_executor.py` | output > 0 |
+| Judge id disjoint | `python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
+| §7 guard is called, not reimplemented | `grep -rn "is_open_source" tools/improvement_eval/ \| wc -l` | output > 0 |
+| Anti-criterion: arena never touches the db-claim pool | `grep -rn "db_claim" tools/improvement_eval/` | match count == 0 |
+| Anti-criterion: arena never reassigns `REDIS_URL` | `grep -rnE "REDIS_URL.*=|environ\[.REDIS_URL.\]|setenv\(.REDIS_URL." tools/improvement_eval/` | match count == 0 |
+| Anti-criterion: no bridge/worker/agent import of the harness | `grep -rn "tools.improvement_eval\|tools/improvement_eval" bridge/ worker/ agent/` | match count == 0 |
+| Anti-criterion: no CLI entry point added | `grep -c "improvement-eval\|improvement_eval" pyproject.toml` | match count == 0 |
+| Anti-criterion: no MCP surface added | `grep -c "improvement_eval" .mcp.json` | match count == 0 |
+| Anti-criterion: no swallowed exceptions | `grep -rnE "except [A-Za-z]*(Exception)?:\s*$" -A1 tools/improvement_eval/ \| grep -c "pass$"` | match count == 0 |
+| Anti-criterion: no alpha-spending shipped | `grep -rniE "alpha[_ ]spend\|obrien|pocock" tools/improvement_eval/` | match count == 0 |
+| Anti-criterion: no automated promotion | `grep -rn "ImprovementRelease" tools/improvement_eval/` | match count == 0 |
+| Anti-criterion: harness never writes the charter | `grep -rnE "ImprovementCharter[^)]*\.(save|create|delete)\(" tools/improvement_eval/` | match count == 0 |
+| Anti-criterion: no broad process kill in arena teardown | `grep -rnE "pkill\|killall" tools/improvement_eval/` | match count == 0 |
+| No stale xfails | `grep -rn 'xfail' tests/unit/ \| grep -i improvement_eval` | exit code 1 |
 
 ## Critique Results
 
@@ -1217,4 +1244,22 @@ placeholder
 
 ## Open Questions
 
-placeholder
+1. **Where does the calibration reference-set floor sit?** The build reports the observed count of
+   `ImprovementEvidence` rows classified `architectural` on this machine. If that number is in the
+   low teens, a floor that respects it is a floor that never blocks anything, and a floor that
+   respects the statistics blocks the judge permanently until lane 5 generates more corrections.
+   The plan's current disposition is to set the floor from the measured number and record the
+   reasoning in the module docstring, accepting that early calibrations are weak and honestly
+   labelled. Confirm that is the intended tradeoff rather than gating the judge until the set grows.
+
+2. **Should the `serves_charter` judge ship in this lane at all if #3255 slips?** The lane's other
+   six acceptance criteria have no dependency on lane 2b. If PR #3275's re-review drags, the honest
+   options are to ship lane 4 without the judge and file it as a follow-up, or to hold the whole
+   lane. The plan currently sequences the judge last so either choice stays available; naming the
+   preference now avoids a decision made under deadline pressure later.
+
+3. **Is a fixed-batch stopping rule sufficient for the loop's first year?** Research finding 3 says
+   alpha-spending is the strictly harder commitment and needs a maximum sample size nobody can yet
+   choose. That reasoning holds today. It stops holding the moment the loop wants to run an
+   experiment long enough that waiting for a full batch is the dominant cost. Confirm fixed-batch is
+   accepted as this lane's complete answer rather than a stepping stone with an implied follow-up.
