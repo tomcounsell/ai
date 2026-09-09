@@ -687,25 +687,67 @@ The validator gets its own worktree. A mutation review whose author is editing t
 | Tests pass | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py tests/unit/test_teardown_policy.py tests/unit/test_improvement_operating_report.py tests/unit/test_improvement_models.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| `spend_receipt` is a real evidence kind | `python -c "from models.improvement_evidence import EVIDENCE_KINDS; print('spend_receipt' in EVIDENCE_KINDS)"` | output contains True |
+| Both new evidence kinds are real | `python -c "from models.improvement_evidence import EVIDENCE_KINDS as K; print(set(('spend_receipt','resource_probe')) <= set(K))"` | output contains True |
+| This lane did not claim lane 3's kind | `python -c "from models.improvement_evidence import EVIDENCE_KINDS as K; print('resource_acquired' in K)"` | False until #3215 lands; either value passes afterward |
 | A receipt is not coerced to `other` | `./scripts/pytest-clean.sh tests/unit/test_improvement_models.py -k spend_receipt -q` | exit code 0 |
+| A probe row is not coerced to `other` | `./scripts/pytest-clean.sh tests/unit/test_improvement_models.py -k resource_probe -q` | exit code 0 |
 | Unit 3 has a meter with a reader | `python -c "import tools.infrastructure_budget as m; print(hasattr(m,'admit'))"` | output contains True |
 | Window boundaries disclosed on every decision | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k boundary -q` | exit code 0 |
 | Unforecastable charge is refused | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k forecast_refus -q` | exit code 0 |
 | Missing metering settles at forecast, not zero | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k missing_metering -q` | exit code 0 |
 | Concurrent admission cannot double-spend a window | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k concurrent_admission -q` | exit code 0 |
+| No acquisition path bypasses the meter | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k no_acquisition_bypasses -q` | exit code 0 |
 | Teardown fails closed without a verified export | `./scripts/pytest-clean.sh tests/unit/test_teardown_policy.py -k export_verification -q` | exit code 0 |
 | Report answers all five §2 questions from a zero-sandbox position | `./scripts/pytest-clean.sh tests/unit/test_improvement_operating_report.py -k five_answers -q` | exit code 0 |
 | The fifth answer is non-empty when its inputs are | `./scripts/pytest-clean.sh tests/unit/test_improvement_operating_report.py -k what_prevents -q` | exit code 0 |
+| The retention root is superseded and still verifies on load (phase 2) | `./scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -k retention_root -q` | exit code 0 |
+| The auth verdict is recorded, not implied | `grep -c "Auth verdict" docs/infra/improvement-cloud-execution.md` | prints a number > 0 |
+| The provider decision names its duty cycle | `grep -c "duty cycle" docs/infra/improvement-cloud-execution.md` | prints a number > 0 |
+| The export/import destination contract is written down | `grep -c "export/import destination" docs/infra/improvement-cloud-execution.md` | prints a number > 0 |
 | Infra record exists and is not archived | `test -f docs/infra/improvement-cloud-execution.md` | exit code 0 |
-| Feature docs indexed | `grep -c "improvement-cloud-execution" docs/features/README.md` | output > 0 |
-| **Anti-criterion** — no subscription OAuth token anywhere in the repo | `grep -rn "CLAUDE_CODE_OAUTH_TOKEN" --include="*.py" --include="*.sh" --include="*.example" --include="*.toml" . \| wc -l` | match count == 0 |
-| **Anti-criterion** — no transfer between budget units | `grep -cE "daily_paid_inference_usd\|daily_external_llm_usd" tools/infrastructure_budget.py` | match count == 0 |
-| **Anti-criterion** — the report returns no sandbox count, uptime, or token volume | `grep -cE "def .*(sandbox_count\|uptime\|token_volume\|token_count)" tools/improvement_operating_report.py` | match count == 0 |
-| **Anti-criterion** — no silently swallowed exceptions in this lane's modules | `grep -cE "except Exception: *pass" tools/infrastructure_budget.py tools/improvement_operating_report.py` | match count == 0 |
-| **Anti-criterion** — the sandbox is not a fleet machine | `grep -rn "remote-update.sh\|launchctl" docs/infra/improvement-cloud-execution.md \| grep -v "does not\|not reached\|instead of" \| wc -l` | match count == 0 |
+| Feature docs indexed | `grep -c "improvement-cloud-execution" docs/features/README.md` | prints a number > 0 |
 
-Every anti-criterion above must be demonstrated in its red state before it is trusted. Introduce the violation deliberately, capture the FAIL output, revert, and paste the FAIL into the PR description. An anti-criterion that has only ever passed is a check nobody has proven can fail, and this repo has shipped several of those.
+### Anti-criteria
+
+These live in a code block rather than in the table above, and that is a fix from critique round 1 rather than a style choice. A markdown table cell cannot carry a literal `|`, so every alternation and every shell pipe inside one has to be escaped — and round 1 measured what the escaping actually did: `grep -cE "a\|b" file` treats the backslash-pipe as a **literal pipe character** in ERE and matches nothing, returning `0` with exit 1. Read raw or read as table-escaping, three of this plan's five anti-criteria were passing vacuously. A check that cannot fail is worse than no check, which is the precise thing the paragraph below claims to prevent, so the checks moved somewhere pipes are unambiguous and the patterns were rewritten to avoid alternation entirely.
+
+Two mechanical traps these commands are written around, both verified on this machine: **`grep -c` given more than one file prints `path:count` per file, not a single number**, so every count check below takes exactly one file; and **`grep -c` exits 1 when the count is 0**, so the expectation is on the printed number, never on the exit code.
+
+```bash
+# 1. No NEW consumer of the subscription OAuth token.
+#    Diff-scoped on purpose. Repo-wide this is red before the lane starts: 34 matches
+#    on main at 191bd42a1, across .env.example, tools/doctor.py, role_driver.py,
+#    claude_diagnostics.py and four test files -- because the token IS the repo's
+#    sanctioned headless auth path. spike-1 blocks token + THIRD-PARTY HARNESS and
+#    supports token + OFFICIAL CLI, which is what subscription_auth_env already builds.
+#    Deployment artifacts (Dockerfile, wrangler config) legitimately inject it as a
+#    secret and are excluded by the '*.py' pathspec.
+git diff --name-only origin/main...HEAD -- '*.py' | xargs -r grep -l CLAUDE_CODE_OAUTH_TOKEN | wc -l
+# expected: 0
+# red state: echo agent/session_runner/role_driver.py | xargs -r grep -l CLAUDE_CODE_OAUTH_TOKEN | wc -l  ->  1
+
+# 2. No transfer between budget units (charter SS8).
+grep -c -e 'daily_paid_inference_usd' -e 'daily_external_llm_usd' tools/infrastructure_budget.py
+# expected: prints 0 (exit status 1 -- that is grep's no-match exit, not a failure)
+
+# 3. The report returns no sandbox count, uptime, or token volume (charter SS2 non-measures).
+grep -c -e 'def .*sandbox_count' -e 'def .*uptime' -e 'def .*token_volume' -e 'def .*token_count' tools/improvement_operating_report.py
+# expected: prints 0
+
+# 4. No silently swallowed exceptions in this lane's modules. One file per invocation.
+grep -cE 'except Exception: *pass' tools/infrastructure_budget.py
+grep -cE 'except Exception: *pass' tools/improvement_operating_report.py
+# expected: each prints 0
+
+# 5. The sandbox is not a fleet machine (phase 3 only; skipped under auth mode B).
+#    Checked against the deployment artifact rather than against prose in a doc --
+#    the doc mentions launchd and remote-update.sh precisely in order to disown them,
+#    so grepping it needs a negation filter that is itself untestable.
+grep -c -e 'launchctl' -e 'remote-update.sh' -e 'VALOR_LAUNCHD' deploy/sandbox/entrypoint.sh
+# expected: prints 0
+```
+
+Every anti-criterion above must be demonstrated in its red state before it is trusted. Introduce the violation deliberately, capture the FAIL output, revert, and paste the FAIL into the PR description. An anti-criterion that has only ever passed is a check nobody has proven can fail, and this repo has shipped several of those. Check 1 carries its red-state command inline because it is the one round 1 found unsatisfiable — a criterion that starts red on `main` can never be shown to bite.
 
 ## Critique Results
 
