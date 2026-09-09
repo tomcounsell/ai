@@ -103,23 +103,105 @@ Searched closed issues and merged PRs for cloud execution, sandboxes, Cloudflare
 
 ## Spike Results
 
-<!-- skeleton -->
+Six spikes ran during planning, four code-reads and two web-research. They are recorded here so the build does not re-investigate them. The build opens with a second, shorter spike phase for the two questions that need a live provider account to answer (see tasks 1 through 3).
+
+### spike-1: May RSI sessions consume Claude subscription capacity from a cloud sandbox?
+- **Assumption**: "Charter §2's cloud-sandbox operating model is an infrastructure problem."
+- **Method**: web-research
+- **Finding**: It is a compliance problem first. Anthropic blocks Free/Pro/Max OAuth tokens outside the official Claude Code CLI (enforced January 2026), and since 2026-04-04 subscription limits cannot be consumed by third-party harnesses at all. Running the **official CLI on a remote host is explicitly supported**, which is the shape this repo already has: `worker/` spawns `claude -p` as a subprocess of the official CLI. What is *not* resolvable from public documentation is whether a continuously-running fleet of sandboxes falls inside "ordinary, individual usage," the standard subscription limits are written against.
+- **Confidence**: high on the rule, **low on the scale question**
+- **Impact on plan**: The lane proceeds on the official-CLI path and nothing else. The scale question becomes a recorded provisional assumption under charter §9 (evidence, confidence, consequence, and the observation that would overturn it) rather than a blocker or a question to Tom, and it is a named candidate for the fifth answer in the §2 progress report. It also kills, before anyone writes code, the tempting shortcut of exporting a `CLAUDE_CODE_OAUTH_TOKEN` into a hosted runtime.
+
+### spike-2: Can a cloud sandbox run the worker without becoming a bridge host?
+- **Assumption**: "Any machine running this codebase has to be registered in `projects.json`'s machine roster, so a sandbox collides with single-machine ownership."
+- **Method**: code-read (`worker/__main__.py`, `bridge/config_validation.py:546`, `docs/features/single-machine-ownership.md`)
+- **Finding**: No collision. `worker/__main__.py`'s own docstring states the supported topology: "Developer workstations run just the worker. Bridge machines run bridge + worker as separate processes." A worker-only host takes work off the Redis queue and never resolves an inbound bridge-contact identifier, so `validate_projects_config` has nothing to complain about. The constraint binds only if a sandbox ever runs the Telegram bridge.
+- **Confidence**: high
+- **Impact on plan**: The sandbox target is **worker-only**, stated as a No-Go for bridge hosting rather than left implicit. This removes what looked like the lane's hardest architectural obstacle.
+
+### spike-3: What does the fleet-update path assume that a Linux sandbox will not have?
+- **Assumption**: "`/update` reaches a sandbox the same way it reaches a laptop."
+- **Method**: code-read (`scripts/remote-update.sh`, `worker/__main__.py`, `scripts/valor-service.sh`)
+- **Finding**: Three hard macOS assumptions, all in the first forty lines of the update path. `remote-update.sh` insists on a `~/Desktop/Valor/.env` symlink and warns about iCloud sync when it is missing. `scripts/valor-service.sh` sources `lib/launchctl.sh` and drives `launchctl` for every service operation. `worker/__main__.py` branches on `VALOR_LAUNCHD` to decide whether to load dotenv at all. A Linux container has no launchd, no iCloud, and no `~/Desktop/Valor`.
+- **Confidence**: high
+- **Impact on plan**: A sandbox is not a fleet machine and must not be pushed through `remote-update.sh`. Code reaches it by image rebuild and redeploy, which is a different update contract and is written into the Update System section. It also means the prior-art cluster of launchd restart bugs (#2013, #2089, #2104, #2161) is *not* inherited verbatim — but its lesson, that unattended restart fails silently and reports success, is.
+
+### spike-4: Where do evidence, the control namespace, and artifacts live for a remote worker?
+- **Assumption**: "Redis is shared, so a sandbox worker just points at it."
+- **Method**: code-read (`config/settings.py:653-668`, `.env.example:198`, `tests/_worker_guard.py`)
+- **Finding**: `RedisSettings.url` defaults to `redis://localhost:6379/0` and there is no TLS, password, or `rediss://` handling anywhere in settings. The `worker:registered_pid:*` liveness convention is a plain Redis string key, so it presumes one shared Redis. A sandbox therefore has exactly two options, and both cost something: its own Redis, which strands every `ImprovementEvidence` row where the dashboard cannot see it, or a network-reachable shared Redis, which does not exist today and would need transport security before it does.
+- **Confidence**: high
+- **Impact on plan**: Durable-state topology is a first-class design decision in this lane, not a deployment detail. It is task 4, it precedes acquisition, and "the sandbox writes evidence the dashboard can read" is a success criterion rather than an assumption.
+
+### spike-5: Can a spend receipt be recorded today?
+- **Assumption**: "Receipt-based metering is available as the fallback when a provider has no billing API."
+- **Method**: code-read (`models/improvement_evidence.py:58-64`, `:219-223`)
+- **Finding**: No. `EVIDENCE_KINDS` is `("correction", "inspiration", "shipped_work", "owner_liveness", "other")` on `main` and on the #3255 branch alike, and `record_once` silently rewrites any other kind to `"other"` after a `logger.warning`. A receipt would land in the same bucket as everything else uncategorized and be unqueryable as spend.
+- **Confidence**: high
+- **Impact on plan**: Adding `spend_receipt` to the vocabulary is this lane's, and it drags a TTL question with it: `ImprovementEvidence` expires on a 30-day window, which is shorter than the audit life of a budget week. Both are task 5.
+
+### spike-6: Does Cloudflare fit the $50/week unit for a 24/7 sandbox?
+- **Assumption**: "Charter §8 names a funded Cloudflare account, so Cloudflare is the answer."
+- **Method**: web-research
+- **Finding**: Cloudflare is a *candidate*, and a metered one. Containers and Sandboxes are GA as of 2026-04-13 on a scale-to-zero model: $5/month Workers Paid including 25 GiB-hours of memory, 375 vCPU-minutes, and 200 GB-hours of disk, then per-second overage. A continuously-running instance blows through the included allowance in the first day or two, and instances cap at 4 GiB RAM and half a vCPU. Sandboxes sleep after 10 minutes idle unless `keepAlive` is set, and the SDK requires an explicit `sandbox.destroy()` or containers run indefinitely.
+- **Confidence**: medium (rates partly from third-party calculators and community discussion; the live pricing page is the authority and is re-read in task 2)
+- **Impact on plan**: The provider question stays open into the build with Cloudflare as the default rather than the foregone conclusion, and Gap D's "**a resource whose charge cannot be forecast is refused**" becomes the deciding rule between per-second metering and a flat monthly rate. Half a vCPU is separately a real risk for a `claude -p` subprocess and is a measured criterion in task 3.
 
 ## Data Flow
 
-<!-- skeleton -->
+Two flows matter in this lane, and they are separate on purpose. Conflating them is how a progress report ends up reporting activity as improvement.
+
+**Flow A — a dollar becomes an auditable, forecast reservation.**
+
+1. **Entry point**: the controller (or an operator running `valor-improve`) proposes acquiring or renewing an infrastructure resource.
+2. **Forecast**: `tools/infrastructure_budget.py` computes the resource's charge for the remainder of the current ISO week plus its forecast for the next, from a declared recurring rate. **A resource whose charge cannot be forecast is refused here**, before any provider call. A free tier, credit, or promotion is admitted with its expiry and the paid rate that follows it, and a credit expiring inside the window converts to a forecast charge on its expiry day.
+3. **Admission**: the forecast is checked against `weekly_infrastructure_usd` for the window keyed by `budget_week_start` and `budget_day_boundary`. Both boundary settings are echoed into the decision record, because a reservation resetting on an undisclosed boundary cannot be audited. Unit 2's headroom is never read here; there is no code path between the units.
+4. **Acquisition**: on admission, the resource is acquired under charter §8 authority, using only resources the probe reports `verified`. Any credential issued lands in `m-valor` through lane 3's `tools/vault_write.py` and never touches a log, a message, or a committed file.
+5. **Settlement**: actual spend arrives from the provider's billing API where one exists, and otherwise from a receipt written as an `ImprovementEvidence` row of kind `spend_receipt`. Missing or uncertain metering settles as **the forecast**, never as zero.
+6. **Output**: the week's reserved, settled, and remaining figures, with both boundary settings disclosed, readable by the dashboard and by the progress report.
+
+**Flow B — a sandbox session becomes reportable evidence.**
+
+1. **Entry point**: the controller admits a research session under `max_concurrent_research_sessions`.
+2. **Dispatch**: the session is placed on the shared Redis queue. Nothing in the queue names a machine, which is why a remote worker can take it and why the sandbox needs no bridge identity.
+3. **Execution**: the sandbox's `python -m worker` claims the session and spawns `claude -p` through the official CLI — the only shape spike-1 leaves open.
+4. **Persistence**: the session writes `AgentSession` state, `ImprovementEvidence` rows, and artifacts to the durable store chosen in task 4. This is the step that fails silently today if the sandbox runs its own Redis: the run succeeds and the evidence is invisible.
+5. **Liveness and recovery**: the sandbox writes `worker:registered_pid:*`; a crash is detected and the sandbox restarts unattended, or the session is re-queued.
+6. **Output**: the dashboard shows the session's evidence beside every local session's, and the §2 progress report can say *which* sessions ran where, on what, at what cost, and what stopped the rest.
+
+The join between the flows is the fifth answer. Flow A's remaining budget and Flow B's completed-unattended count are two different measurements, and neither one alone says whether the operating model moved.
 
 ## Architectural Impact
 
-<!-- skeleton -->
+- **New dependencies**: one infrastructure provider account (Cloudflare by default under charter §8, decided in task 2), its CLI (`wrangler`, currently `absent` on the probing machine), and a container image definition for the worker. No new Python runtime dependency is expected; the budget meter is stdlib plus Popoto.
+- **Interface changes**: `ImprovementEvidence.EVIDENCE_KINDS` gains `spend_receipt` — an additive change to a module constant that is read by `record_once` and asserted by tests. `ImprovementSettings` gains no new fields if #3255 lands as written; the only candidate change is relaxing the `le=4` bound on `max_concurrent_research_sessions`, and that happens only if task 9's evidence supports it.
+- **Coupling**: this lane deliberately **decreases** coupling in one place and increases it in another. It decreases it by proving the worker is separable from the bridge and from launchd, which the codebase asserts in a docstring and has never demonstrated. It increases it by making durable state a network dependency: today a worker that loses Redis has lost localhost, which does not happen; tomorrow it has lost a network hop, which does.
+- **Data ownership**: unchanged for sessions and evidence — Redis and Popoto stay authoritative. New: the infrastructure ledger (reservations, settlements, credit expiries) is owned by this lane's meter, and receipts are owned by `ImprovementEvidence`. The vault stays the sole owner of credentials.
+- **Reversibility**: high, and deliberately so. Every artifact is additive: a new tool module, a new evidence kind, a new infra doc, a new report. Tearing the lane out means destroying a provider account and deleting three files. **The one irreversible act is spending money**, which is why admission refuses an unforecastable charge rather than reserving optimistically and reconciling later.
 
 ## Appetite
 
-<!-- skeleton -->
+**Size:** Large
+
+**Team:** Solo dev (spike agent, builder, validator, documentarian), PM
+
+**Interactions:**
+- PM check-ins: 2-3 (provider selection is a spend decision; the teardown policy is a policy decision; the concurrency revisit changes an operating parameter)
+- Review rounds: 2+
+
+Large is the honest size, and most of it is not coding time. The lane has three distinct kinds of work with different failure modes — a compliance and provider decision that cannot be rushed, a metering and policy build that is ordinary engineering, and a report whose whole value is that it is truthful — plus a dependency on two lanes that have not landed. The alignment overhead is the appetite.
 
 ## Prerequisites
 
-<!-- skeleton -->
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| #3255 landed on `main` | `git -C . fetch origin main -q && git show origin/main:tools/improvement_resources.py > /dev/null 2>&1` | The resource probe this lane re-runs |
+| Unit 3 exists in settings | `python -c "from config.settings import ImprovementSettings as S; assert 'weekly_infrastructure_usd' in S.model_fields and 'budget_week_start' in S.model_fields"` | The budget this lane meters, and its disclosed window |
+| `op` authenticates non-interactively | `test -n "$OP_SERVICE_ACCOUNT_TOKEN" && OP_CACHE=false op vault list --format json > /dev/null` | The probe's `unknown`s resolve only under the service account |
+| Vault writer available (acquisition tasks only) | `test -f tools/vault_write.py` | Lane 3 (#3215) owns credential writes; no credential is stored without it |
+| `gh` reaches this repo | `GH_REPO=tomcounsell/ai gh issue view 3274 --json number -q .number` | The progress report is posted to #3177 |
+
+The `op` check is the one that must run **on the machine that owns the `valor` project**, not on whichever machine the builder happens to be on. A probe re-run somewhere else measures a different machine and answers a different question. `wrangler` is deliberately absent from this table: whether it is needed is task 2's output, and requiring it up front presumes the provider decision.
 
 ## Solution
 
