@@ -148,6 +148,31 @@ class _FakeQuery:
         return _Rows()
 
 
+class _AnyLane(str):
+    """A slug that belongs to whichever lane the test is exercising.
+
+    Target selection filters rows by lane (#3270), so a slugless row is
+    ineligible for every rung. The ladder tests below are about the *ladder* --
+    cooldowns, attempt budgets, action windows, escalation volume -- and not
+    about which row gets picked, so their seeded session uses this slug to say
+    "this row belongs to the lane under test" without each of them repeating
+    the lane's slug. Tests that are about lane matching pass a real slug, or
+    ``None`` for the slugless conversation thread the filter must exclude.
+    """
+
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(str(self))
+
+
+_ANY_LANE = _AnyLane("<any-lane>")
+
+
 class _Row:
     """Minimal AgentSession row shape the reflection actually reads."""
 
@@ -160,7 +185,7 @@ class _Row:
         claude_session_uuid=None,
         updated_at=None,
         project_key="valor",
-        slug=None,
+        slug=_ANY_LANE,
     ):
         self.session_id = session_id
         self.status = status
@@ -907,45 +932,60 @@ def test_lane_is_live_malformed_payload_is_unknown(fake_redis, fake_query):
 
 def test_target_prefers_live_over_resumable(fake_query):
     fake_query.by_project = [
-        _Row("resumable", status="completed", claude_session_uuid="u1"),
-        _Row("live", status="running"),
+        _Row("resumable", status="completed", claude_session_uuid="u1", slug="sdlc-1395"),
+        _Row("live", status="running", slug="sdlc-1395"),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("steer", "live")
 
 
-def test_target_live_picks_most_recently_updated(fake_query):
+def test_target_live_picks_most_recently_updated_within_the_lane(fake_query):
+    """Recency still decides -- but only among rows the lane filter admitted."""
     now = time.time()
     fake_query.by_project = [
-        _Row("old", status="running", updated_at=now - 900),
-        _Row("newest", status="running", updated_at=now),
+        _Row("old", status="running", slug="sdlc-1395", updated_at=now - 900),
+        _Row("newest", status="running", slug="sdlc-1395", updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("steer", "newest")
 
 
-def test_target_falls_back_to_most_recent_resumable(fake_query):
+def test_target_falls_back_to_the_most_recent_resumable_in_the_lane(fake_query):
     now = time.time()
     fake_query.by_project = [
-        _Row("older", status="completed", claude_session_uuid="u1", updated_at=now - 900),
-        _Row("newer", status="killed", claude_session_uuid="u2", updated_at=now),
+        _Row(
+            "older",
+            status="completed",
+            claude_session_uuid="u1",
+            slug="sdlc-1395",
+            updated_at=now - 900,
+        ),
+        _Row("newer", status="killed", claude_session_uuid="u2", slug="sdlc-1395", updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("resume", "newer")
 
 
 def test_target_resumable_without_uuid_is_not_resumable(fake_query):
     """resume_session requires a claude_session_uuid; without one we create."""
-    fake_query.by_project = [_Row("no-uuid", status="completed", claude_session_uuid=None)]
-    assert sdlc_progress._pick_steer_target("valor") == ("create", None)
+    fake_query.by_project = [
+        _Row("no-uuid", status="completed", claude_session_uuid=None, slug="sdlc-1395")
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
 
 
 def test_target_ledger_anchors_are_never_selected(fake_query):
     fake_query.by_project = [
-        _Row("sdlc-local-1395", status="running", is_ledger=True),
-        _Row("ledger-terminal", status="completed", is_ledger=True, claude_session_uuid="u1"),
+        _Row("sdlc-local-1395", status="running", is_ledger=True, slug="sdlc-1395"),
+        _Row(
+            "ledger-terminal",
+            status="completed",
+            is_ledger=True,
+            claude_session_uuid="u1",
+            slug="sdlc-1395",
+        ),
     ]
-    assert sdlc_progress._pick_steer_target("valor") == ("create", None)
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
 
 
 def test_target_query_is_scoped_to_project_and_eng(fake_query):
@@ -997,14 +1037,19 @@ def test_resume_target_also_prefers_the_stalled_lanes_own_session(fake_query):
     assert (kind, session.session_id) == ("resume", "this-lane")
 
 
-def test_target_falls_back_to_recency_when_no_session_matches_the_lane(fake_query):
+def test_target_is_the_create_rung_when_no_session_matches_the_lane(fake_query):
+    """No same-lane row means a FRESH session, never the most recent stranger.
+
+    This case used to assert the recency fallback. That fallback is the #3270
+    defect: a stalled lane with no session of its own reached for whichever eng
+    row was touched last, up to and including a human conversation thread.
+    """
     now = time.time()
     fake_query.by_project = [
-        _Row("old", status="running", slug="sdlc-1", updated_at=now - 900),
-        _Row("newest", status="running", slug=None, updated_at=now),
+        _Row("other-lane", status="running", slug="sdlc-1", updated_at=now - 900),
+        _Row("slugless", status="running", slug=None, updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
-    assert (kind, session.session_id) == ("steer", "newest")
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
 
 
 # ---------------------------------------------------------------------------
