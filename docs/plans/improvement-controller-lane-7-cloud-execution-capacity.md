@@ -475,11 +475,187 @@ The validator gets its own worktree. A mutation review whose author is editing t
 
 ## Step by Step Tasks
 
-<!-- skeleton -->
+Three phases. **Phase 1 (tasks 1-3) needs only #3275 merged and spends nothing. Phase 2 (tasks 4-8) builds the meter and runs the trial; tasks 7 and 8 additionally need #3215's vault writer. Phase 3 (tasks 9-12) reports honestly on whatever the first two produced, and is written to work from a partial position.**
+
+### 1. Re-run the resource probe under service-account authentication
+- **Task ID**: spike-probe-rerun
+- **Depends On**: none (after PR #3275 merges)
+- **Validates**: a recorded probe result; `tests/unit/test_improvement_resources.py` unchanged and still passing
+- **Informed By**: lane 2b's measured position; the code-read showing all four vault `unknown`s share one failed listing
+- **Assigned To**: `capacity-spiker`
+- **Agent Type**: general-purpose
+- **Parallel**: true
+- Run on the machine that owns the `valor` project, with `OP_SERVICE_ACCOUNT_TOKEN` from the vault `.env` and `OP_CACHE=false`. A run elsewhere measures a different machine.
+- Record the full six-resource result as durable evidence, not as prose in a report.
+- Report each resource's state change from lane 2b's baseline. A resource still `unknown` stays `unknown`; do not promote it to `absent` on a second inconclusive run.
+- Do not modify `tools/improvement_resources.py`. #3255 owns it.
+
+### 2. Decide the provider against unit 3, on forecastability
+- **Task ID**: spike-provider
+- **Depends On**: spike-probe-rerun
+- **Informed By**: spike-6 (Cloudflare GA pricing, scale-to-zero, 4 GiB / 0.5 vCPU cap, `keepAlive` plus explicit `destroy()`)
+- **Assigned To**: `capacity-spiker`
+- **Agent Type**: general-purpose
+- **Parallel**: false
+- Re-read the live Cloudflare Containers pricing page; spike-6's rates came partly from third-party calculators and the vendor page is the authority.
+- Compute the weekly cost of a continuously-available worker-only instance under each candidate, showing the arithmetic against $50/week.
+- Apply Gap D's rule as the deciding criterion: **a resource whose charge cannot be forecast is refused.** State for each candidate whether the charge is forecastable and under what duty-cycle assumption.
+- Enumerate free tiers and credits with expiry dates and the paid rate that follows each.
+- Produce a decision with its evidence. Charter §8 names Cloudflare, so a decision against it must show its arithmetic.
+
+### 3. Establish sandbox feasibility for the official CLI
+- **Task ID**: spike-sandbox-feasibility
+- **Depends On**: spike-provider
+- **Informed By**: spike-1 (official CLI supported remotely; subscription OAuth blocked in hosted runtimes; the scale question unresolved), spike-2 (worker-only topology needs no bridge identity)
+- **Assigned To**: `capacity-spiker`
+- **Agent Type**: general-purpose
+- **Parallel**: false
+- Confirm the official `claude` CLI installs and authenticates in the chosen runtime, on the supported path only. **Do not introduce `CLAUDE_CODE_OAUTH_TOKEN` into a hosted runtime**; spike-1 established that shortcut is blocked and out of terms.
+- Measure whether half a vCPU (Cloudflare's per-instance cap) actually carries a `claude -p` subprocess plus a worker, or whether it does not. This is a measurement, and a negative result is a finding.
+- Check the provider's datacenter IP reputation against the reported Hetzner-range blocking (spike-2's second finding).
+- Record the "ordinary, individual usage" scale question as a **provisional assumption** under charter §9: evidence, confidence, consequence, and the observation that would overturn it.
+- Do not acquire anything. This task decides whether acquisition is worth attempting.
+
+### 4. Decide and implement the durable-state topology
+- **Task ID**: build-state-topology
+- **Depends On**: spike-sandbox-feasibility
+- **Validates**: a test proving a worker with a non-local Redis writes evidence the dashboard's read path returns
+- **Informed By**: spike-4 (`redis://localhost:6379/0` default, no TLS or auth in settings, `worker:registered_pid:*` presumes one shared Redis)
+- **Assigned To**: `budget-builder`
+- **Agent Type**: builder — Domain: Redis/Popoto data
+- **Parallel**: false
+- Choose between a sandbox-local Redis with an export path and a network-reachable shared Redis, and write down the cost of the option not chosen.
+- If shared: transport security is in scope for this task and is named work, not a footnote.
+- If local: the export path is in scope, and "the dashboard renders it" is the acceptance test either way.
+- All reads and writes go through the Popoto ORM. No raw Redis operations on Popoto-managed keys.
+
+### 5. Add `spend_receipt` to the evidence vocabulary
+- **Task ID**: build-spend-receipt
+- **Depends On**: none within phase 2 (independent of task 4)
+- **Validates**: `tests/unit/test_improvement_models.py` (UPDATE)
+- **Informed By**: spike-5 (`record_once` coerces an unrecognized kind to `"other"` after a warning)
+- **Assigned To**: `budget-builder`
+- **Agent Type**: builder — Domain: Redis/Popoto data
+- **Parallel**: true
+- Add `spend_receipt` to `EVIDENCE_KINDS` in `models/improvement_evidence.py`.
+- Resolve the TTL question explicitly: `ImprovementEvidence` expires on a 30-day window, shorter than the audit life of a budget week. State the decision and its reasoning in the module docstring, where the next reader meets it.
+- Update the existing membership and cardinality assertions rather than loosening them.
+- Adding a value to a module constant is not a schema change and needs no migration. If the TTL decision forces a model change, that change **does** need an idempotent migration registered in the `MIGRATIONS` dict.
+
+### 6. Build the unit-3 meter and the teardown policy
+- **Task ID**: build-infrastructure-budget
+- **Depends On**: build-spend-receipt
+- **Validates**: `tests/unit/test_infrastructure_budget.py` (create), `tests/unit/test_teardown_policy.py` (create)
+- **Informed By**: Gap D's unit-3 rules; spike-6's `keepAlive`-plus-`destroy()` failure mode
+- **Assigned To**: `budget-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Window computation from `budget_week_start` and `budget_day_boundary`, with both disclosed on every decision record.
+- Admission reserves the remainder of the current window and forecasts the next. **Refuse any resource whose charge cannot be forecast** — test the `None`, empty, and non-numeric rate shapes separately.
+- Credits and free tiers carry an expiry and the paid rate that follows; a credit expiring inside the window converts to a forecast charge on its expiry day.
+- Settlement from a billing API where one exists, otherwise from a `spend_receipt` row. **Missing or uncertain metering settles at the forecast, never at zero.**
+- Reserve-then-check atomically against the window key (Race 1). Test two concurrent admissions whose sum exceeds the limit; exactly one is admitted.
+- Implement the teardown ladder from Technical Approach §4 in full: admission closes, `standing` torn down, `trial` continued to a bounded horizon with the overrun booked forward, **verified export as the precondition of every teardown, failing closed**, and an unconfirmed teardown treated as still running and still charging.
+- Mutation-check the export-verification guard in both directions. A guard that never fires is indistinguishable from no guard.
+- Import nothing from the paid-inference pool. There must be no code path from unit 2's headroom to unit 3's.
+
+### 7. Acquire the resource under admission
+- **Task ID**: build-acquisition
+- **Depends On**: build-infrastructure-budget, spike-provider, **#3215's `tools/vault_write.py`**
+- **Assigned To**: `sandbox-builder`
+- **Agent Type**: builder — Domain: security/untrusted-input
+- **Parallel**: false
+- Acquire only against resources the task-1 probe reports `verified`. A resource still `unknown` is not acquired against.
+- Every charge passes through task 6's admission first. No acquisition path bypasses the meter.
+- Any issued credential is written to `m-valor` through lane 3's vault writer. Never a log, a message, an argv, or a commit; compare by SHA-256 fingerprint and never echo a secret or any prefix of one.
+- Record the acquisition, its forecast, its expiry, and any credit that applies.
+
+### 8. Run one unattended session in the sandbox
+- **Task ID**: build-sandbox-trial
+- **Depends On**: build-acquisition, build-state-topology
+- **Validates**: recorded trial evidence — the session's records, its budget settlement, and its recovery
+- **Assigned To**: `sandbox-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Worker-only: `python -m worker` plus the official `claude` CLI. No Telegram bridge, no `projects.json` entry, no `remote-update.sh`.
+- The session is claimed from the shared queue like any other. Nothing in the queue names a machine, and nothing should start to.
+- Run long enough to **cross a credential-refresh boundary** — spike-2's known headless 401 is exactly the failure "unattended" has to survive.
+- **Induce at least one crash** and confirm unattended recovery: either the sandbox restarts and resumes, or the session is re-queued and another worker takes it. Both are acceptable; neither happening is not.
+- Confirm the dashboard renders this session's evidence beside a local session's.
+- If the trial fails, **record why and stop**. A failed trial with a recorded cause is a valid input to task 10 and is worth more than a retried trial with a lost cause.
+
+### 9. Revisit `max_concurrent_research_sessions`
+- **Task ID**: build-concurrency-revisit
+- **Depends On**: build-sandbox-trial
+- **Validates**: `tests/unit/test_settings.py` (UPDATE only if the value or bound changes)
+- **Assigned To**: `budget-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Test the hypothesis that a sandbox adds a machine and not subscription capacity, against what the trial actually showed.
+- Record the decision with its evidence. **"Unchanged, because the subscription and not the machine is the binding constraint" is a valid and likely outcome**, and recording it closes the question Gap D left open.
+- Raising the value past 4 is a change to the `le` bound at `config/settings.py:609`, not an env override. Do it only if the evidence supports it, and say so in the commit.
+
+### 10. Generate the charter §2 progress report
+- **Task ID**: build-operating-report
+- **Depends On**: build-concurrency-revisit
+- **Validates**: `tests/unit/test_improvement_operating_report.py` (create)
+- **Assigned To**: `budget-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- `tools/improvement_operating_report.py` generates the five answers from records: which sessions ran in cloud sandboxes, whether the loop continued unattended, what resources sustain it, what they cost against unit 3 with both window boundaries disclosed, and what still prevents the intended result.
+- The fifth answer is assembled from recorded provisional assumptions, `unknown` entries in the latest probe, and any acquisition refused for want of a forecast. Test that it is non-empty whenever those inputs are non-empty.
+- Publish reserved and settled figures **separately**, never a derived net (Race 3).
+- **No function returns sandbox count, uptime, or token volume.** Charter §2 names all three as non-establishing, and their absence is asserted in Verification.
+- The report must produce five real answers from a zero-sandbox position, since that is the state the first run will be in.
+- Post it as a comment on #3177.
+
+### 11. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-operating-report
+- **Assigned To**: `capacity-scribe`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/improvement-controller.md` with unit 3, its window computation, and the teardown policy.
+- Create `docs/features/improvement-cloud-execution.md` and `docs/infra/improvement-cloud-execution.md`.
+- Add both feature entries to the `docs/features/README.md` index table.
+- Describe the new status quo only. No migration narrative, no "previously we…".
+
+### 12. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: `capacity-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row and report pass/fail per row.
+- Re-run the mutation check on the export-verification guard; a green test that reaches no code is the failure mode this exists to catch.
+- Confirm every Success Criterion, including the ones that are decisions rather than code.
 
 ## Verification
 
-<!-- skeleton -->
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py tests/unit/test_teardown_policy.py tests/unit/test_improvement_operating_report.py tests/unit/test_improvement_models.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| `spend_receipt` is a real evidence kind | `python -c "from models.improvement_evidence import EVIDENCE_KINDS; print('spend_receipt' in EVIDENCE_KINDS)"` | output contains True |
+| A receipt is not coerced to `other` | `./scripts/pytest-clean.sh tests/unit/test_improvement_models.py -k spend_receipt -q` | exit code 0 |
+| Unit 3 has a meter with a reader | `python -c "import tools.infrastructure_budget as m; print(hasattr(m,'admit'))"` | output contains True |
+| Window boundaries disclosed on every decision | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k boundary -q` | exit code 0 |
+| Unforecastable charge is refused | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k forecast_refus -q` | exit code 0 |
+| Missing metering settles at forecast, not zero | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k missing_metering -q` | exit code 0 |
+| Concurrent admission cannot double-spend a window | `./scripts/pytest-clean.sh tests/unit/test_infrastructure_budget.py -k concurrent_admission -q` | exit code 0 |
+| Teardown fails closed without a verified export | `./scripts/pytest-clean.sh tests/unit/test_teardown_policy.py -k export_verification -q` | exit code 0 |
+| Report answers all five §2 questions from a zero-sandbox position | `./scripts/pytest-clean.sh tests/unit/test_improvement_operating_report.py -k five_answers -q` | exit code 0 |
+| The fifth answer is non-empty when its inputs are | `./scripts/pytest-clean.sh tests/unit/test_improvement_operating_report.py -k what_prevents -q` | exit code 0 |
+| Infra record exists and is not archived | `test -f docs/infra/improvement-cloud-execution.md` | exit code 0 |
+| Feature docs indexed | `grep -c "improvement-cloud-execution" docs/features/README.md` | output > 0 |
+| **Anti-criterion** — no subscription OAuth token anywhere in the repo | `grep -rn "CLAUDE_CODE_OAUTH_TOKEN" --include="*.py" --include="*.sh" --include="*.example" --include="*.toml" . \| wc -l` | match count == 0 |
+| **Anti-criterion** — no transfer between budget units | `grep -cE "daily_paid_inference_usd\|daily_external_llm_usd" tools/infrastructure_budget.py` | match count == 0 |
+| **Anti-criterion** — the report returns no sandbox count, uptime, or token volume | `grep -cE "def .*(sandbox_count\|uptime\|token_volume\|token_count)" tools/improvement_operating_report.py` | match count == 0 |
+| **Anti-criterion** — no silently swallowed exceptions in this lane's modules | `grep -cE "except Exception: *pass" tools/infrastructure_budget.py tools/improvement_operating_report.py` | match count == 0 |
+| **Anti-criterion** — the sandbox is not a fleet machine | `grep -rn "remote-update.sh\|launchctl" docs/infra/improvement-cloud-execution.md \| grep -v "does not\|not reached\|instead of" \| wc -l` | match count == 0 |
+
+Every anti-criterion above must be demonstrated in its red state before it is trusted. Introduce the violation deliberately, capture the FAIL output, revert, and paste the FAIL into the PR description. An anti-criterion that has only ever passed is a check nobody has proven can fail, and this repo has shipped several of those.
 
 ## Critique Results
 
@@ -489,4 +665,11 @@ The validator gets its own worktree. A mutation review whose author is editing t
 
 ## Open Questions
 
-<!-- skeleton -->
+1. **The scale question in spike-1 is the lane's central unknown, and it is not mine to answer.** Anthropic permits the official Claude Code CLI on a remote host and blocks subscription OAuth in hosted runtimes; what is undocumented is whether a continuously-running sandbox consuming subscription concurrency counts as the "ordinary, individual usage" subscription limits are written against. Charter §9 forbids routing research questions to Tom, so the plan's answer is to record a provisional assumption and report it as the fifth answer. **Is that the disposition you want, or is this the rare case where an evidence-backed amendment request under §9 is the right move — since it touches authority and budget rather than a research choice?** This is the one question in the plan I genuinely cannot resolve from evidence.
+
+2. **Charter §8 names a funded Cloudflare account, and spike-6 suggests Cloudflare's per-second Containers pricing may not survive Gap D's forecastability rule for a 24/7 instance.** The plan lets the evidence decide and requires the arithmetic to be recorded either way. **Confirming: is spending unit 3 with a provider the charter does not name acceptable when the arithmetic supports it, or does §8's naming carry a preference the arithmetic should not override?**
+
+3. **Task 8's trial spends real money for one measurement.** The success bar is deliberately strict — cross a credential-refresh boundary and survive an induced crash — which means a multi-day run rather than an afternoon. **Is a multi-day paid trial within the appetite, or should the first trial be time-boxed shorter and produce a lesser, cheaper finding?**
+
+4. **The plan predicts task 9 concludes "`max_concurrent_research_sessions` unchanged."** If sandboxes add machines and not subscription capacity, raising it changes nothing except how fast the subscription is exhausted. **Is a recorded null result an acceptable outcome for that task, or do you want the revisit to carry a bias toward raising it?**
+

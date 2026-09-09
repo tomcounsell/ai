@@ -883,27 +883,327 @@ A test asserts the child is gone after both the clean and the raising path.
 
 ## Update System
 
-placeholder
+The `/update` skill needs one change and one only: the Popoto migration.
+
+- [ ] Add `_migrate_improvement_evaluation_charter_digest` to `scripts/update/migrations.py` and
+      register it in the `MIGRATIONS` dict. `run_pending_migrations()` iterates `MIGRATIONS`, so an
+      unregistered function never runs. It is read-only and idempotent, following
+      `_migrate_confirm_improvement_v2_fields` (`:1429`) exactly: import `ImprovementEvaluation`,
+      run one bounded `query.filter(project_key="valor")[:1]` to prove the keyspace resolves under
+      the new field, return None on success and the error string on failure. It writes nothing and
+      is recorded once in `data/migrations_completed.json`.
+
+Nothing else in the update path changes:
+
+- **No new dependency to propagate.** Holm is pure Python and `redis-server` is already required
+  (spike-1).
+- **No new secret or config file.** The `serves_charter` judge's provider routing reuses the
+  existing settings and the existing `is_open_source` guard; no `.env` key is added, so
+  `.env.example` and `config/settings.py` are untouched and `tests/unit/test_env_completeness.py`
+  stays green without edits.
+- **No service restart.** `tools/improvement_eval/` is not imported by the bridge, the worker, or
+  any agent code path, so `./scripts/valor-service.sh restart` is not required by this change.
+- **`POPOTO_IMPROVEMENT_CONTENT_PATH`** already exists and already defaults to
+  `data/improvement_content` inside the repo (`models/verifying_artifact_store.py:52-56`). The new
+  artifacts this lane writes (corpus exports, calibration sets, raw judge responses) land under that
+  root, so retention policy for them is already whatever lane 1 decided it was.
 
 ## Agent Integration
 
-placeholder
+**No agent integration in this lane, deliberately, with one exception that is not an exception.**
+
+`tools/improvement_eval/` is a harness, not an agent-reachable tool. Nothing in it should be
+invocable by an agent mid-conversation: an evaluation takes minutes, spawns subprocesses, and writes
+an immortal record. Exposing it as a CLI entry point in `pyproject.toml [project.scripts]` or as an
+MCP tool would make it reachable by accident, and the operator surface for it belongs to lane 3's
+`valor-improve` CLI, which owns the control namespace and the budget settlement (No-Gos,
+`[SEPARATE-SLUG #3215]`). So:
+
+- **No new `[project.scripts]` entry.** `runner.evaluate(experiment_id, project_key)` is an
+  importable function with a documented signature and a docstring naming lane 3 as its operator
+  surface. A Verification row asserts `pyproject.toml` gained no `improvement-eval` script.
+- **No bridge import.** `bridge/telegram_bridge.py` does not reference this module and must not.
+  A test asserts the import graph: nothing under `bridge/`, `worker/`, or `agent/` imports
+  `tools.improvement_eval`.
+- **No MCP surface.** No `mcp_servers/` entry, no `.mcp.json` change.
+
+The one genuine agent-facing change is `VALOR_PROJECT_KEY` in `_harness_env`
+(`agent/session_executor.py:2116`), which is the opposite direction: it makes every harness
+subprocess resolve its project partition correctly, including but not limited to an evaluation arm's.
+Its integration test lives in `tests/integration/test_session_spawning.py` alongside the existing
+`SESSION_TYPE` and `TELEGRAM_CHAT_ID` cases, asserting the variable reaches the subprocess env with
+the resolved value rather than a fallback.
 
 ## Documentation
 
-placeholder
+### Feature Documentation
+
+- [ ] Update `docs/features/improvement-evaluation.md` — it currently reads as a contract for work
+      not yet done ("The harness itself, the frozen corpora, per-arm isolation, and the judge
+      envelope arrive with lane 4"). Rewrite those passages to describe the shipped status quo: the
+      module layout, the four verdicts and the invalidated state, the gate ordering, the named
+      stopping rule, and the `serves_charter` judge with its calibration artifact. No historical
+      narration, no "previously this document said" — describe only what is true after this lands.
+- [ ] Add the isolation decision to that document: snapshot-and-restore with a writer kill switch,
+      and why copy-on-write and shared-instance freeze were rejected (spike-3). The contract doc
+      currently says "This lane decides which of the three it needs"; it should say which.
+- [ ] Add a `## Calibration` section to `docs/features/improvement-evaluation.md` recording that the
+      reference set is frozen to the verifying artifact store and cited by digest, why (the 30-day
+      `ImprovementEvidence` TTL), what is reported (Cohen's kappa and paired position-swap
+      consistency), and that no kappa threshold gates anything yet.
+- [ ] Update `docs/features/improvement-controller.md` where it describes evaluation, so the two
+      documents do not disagree about what exists.
+- [ ] Verify `docs/features/README.md` already indexes `improvement-evaluation.md`; add the entry if
+      it does not.
+- [ ] Update `docs/plans/critiques/recursive-self-improvement-capability-matrix.md` rows that this
+      lane moves from "planned" to "implemented" or "measured". The matrix's whole purpose is the
+      distinction between implemented and measured; a row this lane makes *measurable* rather than
+      merely present must say so.
+
+### External Documentation Site
+
+Not applicable — this repo has no Sphinx, Read the Docs, or MkDocs site.
+
+### Inline Documentation
+
+- [ ] `tools/improvement_eval/arena.py` module docstring records the unix-socket and `--port 0`
+      decision and cites issue #2799 as the failure it avoids. This is the single most surprising
+      choice in the lane and the one most likely to be "simplified" by a later reader.
+- [ ] `tools/improvement_eval/correction.py` module docstring names the three Holm operations and
+      records that the cumulative maximum is the known defect site.
+- [ ] `tools/improvement_eval/calibration.py` module docstring records the frozen-set rationale and
+      the reference-set floor with its number.
+- [ ] `tools/improvement_eval/runner.py` module docstring enumerates the six `infra_failure`
+      conditions and states that a real evaluation lease belongs to lane 3 (Race 1).
+- [ ] `models/improvement_evaluation.py` class docstring gains `charter_digest` in the field list,
+      with a sentence on charter §12's rule that actions complete under the digest they carry.
 
 ## Success Criteria
 
-placeholder
+The seven acceptance criteria from issue #3216, unchanged, each with the artifact that proves it:
+
+- [ ] **Two arms on private Redis processes produce byte-identical corpus reads** — asserted at run
+      time in `arena.py` (unequal digests end the run as `infra_failure`) and pinned by
+      `test_two_arms_read_a_byte_identical_corpus`.
+- [ ] **Baseline retrieval parity holds on the frozen corpus, and a parity miss invalidates the run
+      before any candidate result is read** — pinned by `test_parity_miss_never_invokes_the_candidate_arm`,
+      which asserts the candidate arm callable was never invoked, not merely that the outcome was
+      invalid.
+- [ ] **A corrupted artifact invalidates the evaluation rather than scoring it, proven by a mutation
+      test that corrupts the archive copy specifically** — `test_corrupted_archive_invalidates_without_verdict`
+      writes an artifact, corrupts `.versions/{prefix}/{hash}{ext}` while leaving the live path
+      absent, and asserts `state="invalidated"`, `has_verdict()` False, and `verdict` not in
+      `("accept", "reject")`.
+- [ ] **Judges receive a blinded arm ID and `ImprovementEvaluation.blinded` reflects reality, proven
+      by a test that fails if identity leaks into the envelope** —
+      `test_identity_leak_sets_blinded_false` injects the candidate's branch name into the envelope
+      and asserts `blinded=False`; its sibling asserts a clean envelope yields `blinded=True` only
+      after the scan ran.
+- [ ] **Holm correction is applied and named in `ImprovementEvaluation.correction`; a test shows an
+      uncorrected run reporting a spurious winner and the corrected run not doing so** —
+      `test_holm_suppresses_the_spurious_winner` runs a seeded null-effect family through both paths
+      and asserts the uncorrected path reports at least one winner at alpha=0.05 while the corrected
+      path reports none. `correction` is asserted to contain both the correction name and the
+      stopping rule.
+- [ ] **`infra_failure` and `reject` are produced by distinguishable conditions, with a test for
+      each** — six named `infra_failure` conditions each get a test, `reject` gets one driven by a
+      completed measurement that did not clear, and `test_infra_failure_and_reject_have_disjoint_causes`
+      asserts no shared code path produces both.
+- [ ] **`tools/improvement_eval/` imports `tools/memory_eval/metrics.py` and does not modify it** —
+      `test_metrics_module_is_unmodified` compares the file's hash against `git show main:` and a
+      Verification row runs `git diff --exit-code main -- tools/memory_eval/metrics.py`.
+
+Plus the criteria this lane adds:
+
+- [ ] `ImprovementEvaluation.charter_digest` exists, is populated by the runner from
+      `ImprovementCharter.pinned()`, is never indexed (added to `FORBIDDEN_INDEX_NAMES`), and has a
+      registered migration.
+- [ ] The `serves_charter` judge quotes `ImprovementCharter.text` and records the digest it judged
+      under; `SERVES_CHARTER_JUDGE_ID` is proven disjoint from `code-quality`, `risk`, and
+      `cross-vendor`; its verdict is one input to the consensus envelope and gates nothing on its own.
+- [ ] Charter §7 routing is honored in both directions: an open-source project may route the judge to
+      any provider, a client project stays on the Claude and Codex subscriptions, both tested.
+- [ ] The calibration reference set is frozen to the verifying artifact store and cited by digest;
+      Cohen's kappa and a paired position-swap consistency figure are recorded; a set below the floor
+      yields `infra_failure`.
+- [ ] `VALOR_PROJECT_KEY` reaches the harness subprocess env with the resolved value.
+- [ ] Every guard in the Failure Path mutation table has a recorded red-state proof.
+- [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-placeholder
+The lead orchestrates and never builds directly. The split below is by **file ownership**, not by
+theme, because two builders converging on one file is how a lane livelocks.
+
+### Team Members
+
+- **Builder (arena and corpus)**
+  - Name: `arena-builder`
+  - Role: Owns `tools/improvement_eval/{corpus,arena,writer_guard,retrieval,errors}.py` and their
+    tests. The isolation substrate and the parity gate.
+  - Agent Type: builder
+  - Domain: Redis/Popoto data — arms must never touch popoto's canonical pool, `REDIS_URL`, or
+    `tests/db_claim.py`; every corpus read goes through the arm's explicitly-constructed client.
+  - Resume: true
+
+- **Builder (statistics)**
+  - Name: `stats-builder`
+  - Role: Owns `tools/improvement_eval/{correction,statistics}.py` and their tests. Holm, the
+    fixed-batch stopping rule, per-endpoint thresholds, clustered resampling.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (judges and blinding)**
+  - Name: `judge-builder`
+  - Role: Owns `tools/improvement_eval/{blinding,envelope,calibration}.py`,
+    `tools/improvement_eval/judges/serves_charter.py`, and their tests.
+  - Agent Type: builder
+  - Domain: security/untrusted-input — a judge's response is untrusted data; every field is coerced
+    with a typed fallback and an unparseable response is a skip, never a fabricated verdict.
+  - Resume: true
+
+- **Builder (records and environment)**
+  - Name: `records-builder`
+  - Role: Owns `models/improvement_evaluation.py`, `scripts/update/migrations.py`,
+    `agent/session_executor.py`, and the four existing test files in Test Impact. The smallest
+    surface and the only one that touches shared files, so it is deliberately one owner.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (runner)**
+  - Name: `runner-builder`
+  - Role: Owns `tools/improvement_eval/runner.py` and the end-to-end tests. Starts after the four
+    component builders so it composes finished interfaces rather than negotiating them.
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer (mutation proofs)**
+  - Name: `mutation-prover`
+  - Role: Runs every row of the Failure Path mutation table in its **own worktree**, records the
+    red-state output, reverts, and reports. Sole ownership of that checkout for the duration.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator (harness)**
+  - Name: `harness-validator`
+  - Role: Read-only verification of the seven acceptance criteria and the Verification table.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `improvement-eval-docs`
+  - Role: Executes every item in the Documentation section.
+  - Agent Type: documentarian
+  - Resume: true
 
 ## Step by Step Tasks
 
-placeholder
+### 1. Arena, corpus export, writer kill switch, parity gate
+- **Task ID**: build-arena
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_eval_arena.py` (create), `tests/unit/test_improvement_eval_corpus.py` (create)
+- **Informed By**: spike-2 (private Redis must not touch `db_claim`; `redis-server` v8.10.1 present), spike-3 (snapshot-and-restore, not COW or shared-instance freeze)
+- **Assigned To**: arena-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/improvement_eval/__init__.py` and `errors.py` with `InfraFailure`.
+- `corpus.py`: canonical sorted newline-delimited export with a provenance header (record count, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape; hash it; write to the verifying artifact store; restore into a given client.
+- `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; return `redis.Redis(unix_socket_path=...)`; `finally` terminates the child and removes the tmpdir. Never import `tests.db_claim`, never assign `REDIS_URL`, never re-point popoto's pool.
+- Re-read and re-hash each arm's corpus after restore; unequal digests raise `InfraFailure`.
+- `writer_guard.py`: client wrapper refusing corpus writes, plus an independent teardown digest re-check.
+- `retrieval.py`: arm-scoped retrieval adapter and `baseline_parity()`; a miss raises `InfraFailure`.
+
+### 2. Holm correction, stopping rule, statistics
+- **Task ID**: build-stats
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_eval_correction.py` (create), `tests/unit/test_improvement_eval_statistics.py` (create)
+- **Informed By**: spike-1 (no scipy/statsmodels; pure Python), research finding 1 (cumulative-max monotonicity is the defect site), research finding 3 (fixed-batch only)
+- **Assigned To**: stats-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `correction.py`: `holm_adjust(p_values)` as three named operations — sort ascending, multiply by `(m - j + 1)`, cumulative-max then clamp at 1.0 — then map back to the original input order. Raise `ValueError` on a p-value outside `[0, 1]`, on `None`, and on `NaN`.
+- `correction.py`: `FixedBatchStoppingRule` with a declared batch size; `describe()` returns the exact string written to `ImprovementEvaluation.correction`, e.g. `"holm; fixed-batch(n=40, endpoints=3)"`.
+- `statistics.py`: per-endpoint thresholds and clustered resampling by project over `bootstrap_ci` **imported** from `tools.memory_eval.metrics`. Do not edit that file.
+- Tests pin monotonicity as a property, the worked example from research finding 1, and the seeded spurious-winner suppression.
+
+### 3. Blinding, judge envelope, `serves_charter`, calibration
+- **Task ID**: build-judges
+- **Depends On**: none for `blinding.py` and `envelope.py`; the charter-quoting parts of `serves_charter.py` and `calibration.py` wait on #3255 merging (No-Gos, `[ORDERED]`)
+- **Validates**: `tests/unit/test_improvement_eval_blinding.py` (create), `tests/unit/test_serves_charter_judge.py` (create), `tests/unit/test_improvement_eval_calibration.py` (create)
+- **Informed By**: spike-4 (reference set decays; freeze it), spike-5 (copy `cross_vendor_judge.py`'s envelope shape), research finding 2 (Cohen's kappa plus paired position-swap)
+- **Assigned To**: judge-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `blinding.py`: seeded arm assignment with `arm_assignment_digest`; blinded ids; `scan_for_identity(serialized_envelope, experiment)` deriving its token list from the experiment record rather than a hand-maintained list.
+- `envelope.py`: wrap the `judge_id`/`verdict`/`blockers`/`confidence` dict with experiment id, contract digest, charter digest, evaluator version, trial id, raw-response reference, blinded arm id. The inner dict stays consumable by `agent/sdlc_review_consensus.py::compute_consensus` unchanged.
+- `judges/serves_charter.py`: `SERVES_CHARTER_JUDGE_ID = "serves-charter"`; status-discriminated envelope; every response field coerced with a typed fallback; prompt carries `ImprovementCharter.text` verbatim; provider chosen by `tools.improvement_eligibility.is_open_source`.
+- `calibration.py`: read `ImprovementEvidence` rows classified `architectural`, freeze the set to the verifying artifact store, cite it by digest, compute Cohen's kappa and paired position-swap consistency, and raise `InfraFailure` below the declared floor. Report the observed set size on this machine so the floor is chosen against reality.
+
+### 4. `charter_digest`, migration, `VALOR_PROJECT_KEY`
+- **Task ID**: build-records
+- **Depends On**: none (independent of #3255 — the field is additive and does not import the charter)
+- **Validates**: `tests/unit/test_improvement_models.py`, `tests/unit/test_migrations.py`, `tests/unit/test_session_executor_extraction_decoupling.py`, `tests/integration/test_session_spawning.py`
+- **Assigned To**: records-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `charter_digest = Field(null=True)` to `ImprovementEvaluation` with its docstring entry naming charter §12.
+- Add `charter_digest` to `FORBIDDEN_INDEX_NAMES` in `tests/unit/test_improvement_models.py`.
+- Add `_migrate_improvement_evaluation_charter_digest` to `scripts/update/migrations.py` and register it in `MIGRATIONS`; read-only and idempotent, mirroring `_migrate_confirm_improvement_v2_fields`.
+- Add `"VALOR_PROJECT_KEY": <resolved>` to the `_harness_env` dict literal at `agent/session_executor.py:2116`, resolved through `config/project_key_resolver.py`.
+- Update the four existing tests per Test Impact. Do not modify the correlation-id assertion.
+
+### 5. Validate the components
+- **Task ID**: validate-components
+- **Depends On**: build-arena, build-stats, build-judges, build-records
+- **Assigned To**: harness-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Confirm each module's public interface matches what `runner.py` will compose.
+- Confirm `tools/memory_eval/metrics.py` is byte-identical to main.
+- Confirm nothing under `bridge/`, `worker/`, or `agent/` imports `tools.improvement_eval`.
+- Confirm `arena.py` does not import `tests.db_claim` and does not assign `REDIS_URL`.
+
+### 6. The runner
+- **Task ID**: build-runner
+- **Depends On**: validate-components
+- **Validates**: `tests/unit/test_improvement_eval_runner.py` (create), `tests/integration/test_improvement_eval_end_to_end.py` (create)
+- **Assigned To**: runner-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Compose the gate order from Data Flow, exactly: contract-digest re-check, charter pin, corpus export, arm assignment, arena spawn plus digest comparison, writer guard, incumbent parity gate, paired trials, judges, statistics and Holm, stopping-rule check, verdict.
+- Three disjoint handlers: `InfraFailure` → `verdict="infra_failure"`; `ArtifactIntegrityError` → `state="invalidated"` with no verdict written; a final catch-all → `infra_failure` with the exception type in `notes`. No shared fall-through.
+- `has_verdict(evaluation)` returns True only for `state == "complete"`.
+- Read-modify-write `ImprovementExperiment.state` from `frozen` to `running` as the first write; the loser writes an `infra_failure` evaluation naming the state it found (Race 1), and the docstring records that a real lease is lane 3's.
+
+### 7. Mutation proofs
+- **Task ID**: prove-guards
+- **Depends On**: build-runner
+- **Assigned To**: mutation-prover
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Work in a dedicated worktree with sole ownership; no other agent edits that checkout for the duration.
+- For each row of the Failure Path mutation table: apply the mutation, run the named test, record the failure output verbatim, revert, re-run, confirm green.
+- Report any row where the test stayed green — that is a guard that reaches no code, and it blocks the lane.
+
+### 8. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-runner
+- **Assigned To**: improvement-eval-docs
+- **Agent Type**: documentarian
+- **Parallel**: true
+- Execute every item in the Documentation section.
+
+### 9. Final validation
+- **Task ID**: validate-all
+- **Depends On**: prove-guards, document-feature
+- **Assigned To**: harness-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table.
+- Confirm all seven issue acceptance criteria and the six added ones.
+- Confirm every mutation row has a recorded red-state proof.
+- Generate the final report.
 
 ## Verification
 
