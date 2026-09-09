@@ -286,16 +286,17 @@ This lane's failure paths are unusually consequential: one of them spends money 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_improvement_models.py` — UPDATE: the `EVIDENCE_KINDS` membership assertions gain `spend_receipt`. Any test asserting the tuple's exact length or exact contents fails on the addition and must be updated rather than loosened.
+- [ ] `tests/unit/test_improvement_models.py` — UPDATE: the `EVIDENCE_KINDS` membership assertions gain **both** `spend_receipt` and `resource_probe`. Any test asserting the tuple's exact length or exact contents fails on the addition and must be updated rather than loosened.
 - [ ] `tests/unit/test_settings.py` — UPDATE **only if** task 9 changes `max_concurrent_research_sessions`. The `le=4` bound is asserted there; if the revisit concludes "unchanged," this file is untouched and that is the expected outcome.
 - [ ] `tests/unit/test_improvement_resources.py` — no change. This lane runs the probe; it does not modify it. Listed so a builder does not "improve" a file that #3255 owns while its PR is still open.
 - [ ] `tests/unit/test_ui_app.py` — UPDATE only if an infrastructure-spend partial is added. It carries the route assertions for the improvement partials; a new route without a new assertion there is an untested route.
 
 New test files, all greenfield:
 
-- [ ] `tests/unit/test_infrastructure_budget.py` — CREATE: window computation across the Monday 00:00 UTC boundary, forecast refusal, credit expiry mid-window, no-transfer-between-units, settlement from receipt and from billing API, missing metering settling at forecast.
+- [ ] `tests/unit/test_infrastructure_budget.py` — CREATE: window computation across the Monday 00:00 UTC boundary, forecast refusal, credit expiry mid-window, no-transfer-between-units, settlement from receipt and from billing API, missing metering settling at forecast, concurrent admission against one window, and `test_no_acquisition_bypasses_admission` (task 8's `Validates`, described there).
 - [ ] `tests/unit/test_teardown_policy.py` — CREATE: the full ladder, with the export-verification guard mutation-checked in both directions.
 - [ ] `tests/unit/test_improvement_operating_report.py` — CREATE: all five answers present with no sandbox sessions; per-source degradation; the fifth answer non-empty whenever its inputs are non-empty.
+- [ ] `tests/unit/test_length_safe_content_store.py` — UPDATE if task 7 supersedes the retention root. `TestVerifyingArtifactStore` lives there and `test_retention_root_is_separate_from_the_shared_content_path` (`:224`) asserts the current `data/improvement_content` default through `_default_base_path`. A superseded root changes what that test asserts, and it must be updated rather than deleted — the separation it guards is the reason the root exists.
 
 No integration test asserts that a real sandbox ran. That evidence is a recorded artifact from task 8, not a CI fixture — a test that provisions a paid sandbox on every run is a recurring charge disguised as a test, and Gap D would have to reserve for it.
 
