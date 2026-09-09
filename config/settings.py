@@ -10,7 +10,7 @@ import logging.handlers
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -583,11 +583,15 @@ class ImprovementSettings(BaseModel):
     ``docs/plans/recursive-self-improvement.md`` fails the build if a question
     path reappears anywhere in bridge/, tools/, config/, models/, or ui/.
 
-    Budget is two units, neither of them a per-experiment dollar ceiling for
-    Claude. Claude work runs on the subscription and is budgeted as SDLC lane
-    concurrency; external LLM calls run through the existing OpenRouter path
-    against a daily dollar pool, settled per call from reported usage, with the
-    controller and the evaluator drawing separate reservations from it.
+    Budget is three separately reserved units, none of them a per-experiment
+    dollar ceiling for Claude. Claude work runs on the subscription and is
+    budgeted as SDLC lane concurrency. Paid inference on other models runs
+    through the existing OpenRouter path against a daily dollar pool, settled
+    per call from reported usage, with the controller and the evaluator drawing
+    separate reservations from it. Infrastructure (sandboxes, storage,
+    Cloudflare) draws on a weekly dollar pool of its own. The day and week
+    boundaries are disclosed rather than assumed, because a reservation that
+    resets on an undisclosed boundary cannot be audited.
 
     Every default here is PROVISIONAL/TUNABLE. ``enabled`` defaults to False:
     nothing in this system runs until it is deliberately turned on.
@@ -615,26 +619,47 @@ class ImprovementSettings(BaseModel):
             "Env: IMPROVEMENT__MAX_CONCURRENT_RESEARCH_SESSIONS."
         ),
     )
-    daily_external_llm_usd: float = Field(
+    daily_paid_inference_usd: float = Field(
         default=10.00,
         ge=0.0,
         description=(
-            "Daily dollar pool for non-Claude LLM calls through the OpenRouter "
-            "path, settled per call from the usage reported in each response "
-            "envelope. The controller and the evaluator draw separate "
-            "reservations from this one pool, so a runaway research loop "
-            "cannot starve the evaluator that would catch it. "
-            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__DAILY_EXTERNAL_LLM_USD."
+            "Daily dollar pool for paid inference on non-Claude models through "
+            "the OpenRouter path, settled per call from the usage reported in "
+            "each response envelope. The controller and the evaluator draw "
+            "separate reservations from this one pool, so a runaway research "
+            "loop cannot starve the evaluator that would catch it. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__DAILY_PAID_INFERENCE_USD."
         ),
     )
-    portfolio_allocation: str = Field(
-        default="architectural=0.5,stakeholder=0.25,quality=0.25",
+    weekly_infrastructure_usd: float = Field(
+        default=50.00,
+        ge=0.0,
         description=(
-            "How research effort is split across the three charter objectives, "
-            "as comma-separated ``objective=weight`` pairs. Read as a "
-            "portfolio, not a target: an objective starved for several cycles "
-            "is a signal to look at, not a quota to fill. PROVISIONAL/TUNABLE. "
-            "Env: IMPROVEMENT__PORTFOLIO_ALLOCATION."
+            "Weekly dollar pool for the infrastructure the loop runs on: "
+            "sandboxes, storage, and Cloudflare. Reserved separately from paid "
+            "inference and on a different window, because a week is the unit a "
+            "sandbox or a storage bucket is actually billed and reasoned about "
+            "in. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__WEEKLY_INFRASTRUCTURE_USD."
+        ),
+    )
+    budget_day_boundary: Literal["UTC"] = Field(
+        default="UTC",
+        description=(
+            "The timezone whose midnight ends a budget day. Disclosed rather "
+            "than assumed: a reservation that resets on an undisclosed "
+            "boundary cannot be audited against what was actually spent. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__BUDGET_DAY_BOUNDARY."
+        ),
+    )
+    budget_week_start: Literal["monday", "sunday"] = Field(
+        default="monday",
+        description=(
+            "The weekday a budget week begins on, for the infrastructure pool. "
+            "Disclosed for the same reason as the day boundary, and typed so a "
+            "bad override fails at settings load rather than at the first "
+            "window computation. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__BUDGET_WEEK_START."
         ),
     )
     controller_tick_seconds: int = Field(

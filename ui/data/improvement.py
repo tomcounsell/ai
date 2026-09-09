@@ -168,14 +168,17 @@ def get_provisional_assumptions(
     a recorded assumption rather than a question in someone's queue. Surfacing
     them is the whole compensating control: an assumption nobody can see is
     indistinguishable from a fact.
+
+    A failed read propagates. Returning ``[]`` here would hand every caller an
+    empty list that is indistinguishable from an honest zero, which is the one
+    thing this list exists to prevent; the caller classifies the failure.
+
+    Raises:
+        Exception: whatever the investigation read raises.
     """
     from models.improvement_investigation import ImprovementInvestigation
 
-    try:
-        rows = list(ImprovementInvestigation.query.filter(project_key=project_key))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("improvement dashboard: investigation read failed: %s", exc)
-        return []
+    rows = list(ImprovementInvestigation.query.filter(project_key=project_key))
 
     cutoff = datetime.now(UTC) - timedelta(days=window_days)
     out = []
@@ -195,3 +198,111 @@ def get_provisional_assumptions(
         )
     out.sort(key=lambda d: d["created_at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
     return out
+
+
+#: Charter §3's early priorities, in the charter's own order. Strong starting
+#: hypotheses, explicitly "not a fixed allocation or permanent ordering": the
+#: partial says so, because a list rendered without that sentence reads as a
+#: quota.
+CHARTER_PRIORITIES = (
+    "Discover free or inexpensive inference and integrate suitable models",
+    "Improve token efficiency without losing needed context or reasoning",
+    "Expand and improve the skill library",
+    "Design narrow subagent personas for niche tasks",
+    "Acquire cloud execution capacity for continuous operation",
+)
+
+#: The charter §11 headings this build cannot fill yet, and the lane that will.
+#: Each renders as "nothing yet, written by lane N" rather than as a zero: a
+#: zero claims a measurement was taken.
+PENDING_SECTIONS = (
+    ("Acquired abilities", "lane 3 records these as it acquires them"),
+    ("Evaluations", "lane 4 writes the paired blinded evaluations"),
+    ("Rejected approaches", "lane 5 records what was tried and set aside"),
+    ("Resource use by budget unit", "lane 3 meters paid inference and infrastructure"),
+)
+
+
+def get_goals(project_key: str = "valor") -> dict:
+    """The charter §11 readable record: goals, ranking, and what is not measured.
+
+    Three distinguishable states per section, never two. Content, "nothing yet,
+    written by lane N", and "unavailable" when the underlying read raised.
+    Collapsing the last two would let a broken query read as an honest zero,
+    which is the specific dishonesty the charter warns against.
+    """
+    charter = None
+    charter_unavailable = False
+    try:
+        from models.improvement_charter import ImprovementCharter
+
+        pinned = ImprovementCharter.pinned(project_key=project_key)
+        if pinned is not None:
+            charter = {
+                "version": getattr(pinned, "version", None),
+                "effective": getattr(pinned, "effective", None),
+                # Full digest, never truncated: comparing it against the file
+                # by eye is the point of showing it at all.
+                "digest": getattr(pinned, "digest", None),
+                "created_at": getattr(pinned, "created_at", None),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: charter read failed: %s", exc)
+        charter_unavailable = True
+
+    cases = []
+    cases_unavailable = False
+    try:
+        from models.improvement_case import OPEN_CASE_STATES, ImprovementCase
+
+        # One indexed lookup per open state, which is what the ``state``
+        # IndexedField is declared for. Cases are immortal, so hydrating the
+        # whole partition and filtering in Python would grow without bound on a
+        # partial that polls every 60 seconds. The open-state vocabulary is the
+        # model's, never restated here.
+        open_rows = []
+        for state in OPEN_CASE_STATES:
+            open_rows.extend(ImprovementCase.query.filter(project_key=project_key, state=state))
+        open_rows.sort(
+            key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )
+        for row in open_rows:
+            cases.append(
+                {
+                    "title": getattr(row, "title", None),
+                    "state": getattr(row, "state", None),
+                    "priority": getattr(row, "priority", None),
+                    "priority_area": getattr(row, "priority_area", None),
+                    "ranking_rationale": getattr(row, "ranking_rationale", None),
+                    "charter_digest": getattr(row, "charter_digest", None),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: case read failed: %s", exc)
+        cases_unavailable = True
+
+    assumptions_unavailable = False
+    try:
+        assumptions = get_provisional_assumptions(project_key=project_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: assumption read failed: %s", exc)
+        assumptions = []
+        assumptions_unavailable = True
+
+    return {
+        "project_key": project_key,
+        "charter": charter,
+        "charter_unavailable": charter_unavailable,
+        "charter_missing": charter is None and not charter_unavailable,
+        "priorities": list(CHARTER_PRIORITIES),
+        "cases": cases,
+        "cases_unavailable": cases_unavailable,
+        "no_cases_yet": not cases and not cases_unavailable,
+        "assumptions": assumptions,
+        "assumptions_unavailable": assumptions_unavailable,
+        "pending_sections": [
+            {"heading": heading, "written_by": written_by}
+            for heading, written_by in PENDING_SECTIONS
+        ],
+    }

@@ -723,14 +723,133 @@ class TestImprovementPartials:
         import ui.data.improvement as improvement_data
 
         exported = [n for n in dir(improvement_data) if n.startswith("get_")]
+        # Stays an exact list on purpose: it is what stops a later lane from
+        # quietly adding an activity counter beside the honest panels.
         assert exported == [
             "get_coverage",
+            "get_goals",
             "get_intervention_burden",
             "get_provisional_assumptions",
         ]
 
-    def test_index_page_links_both_improvement_partials(self, client):
+    def test_index_page_links_all_improvement_partials(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
+        assert "/_partials/improvement/goals/" in resp.text
         assert "/_partials/improvement/coverage/" in resp.text
         assert "/_partials/improvement/burden/" in resp.text
+
+    def test_goals_partial_renders_on_an_empty_namespace(self, client):
+        """An unseeded project says so, and names no zero."""
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "No charter seeded" in resp.text
+        assert "improvement-goals" in resp.text
+
+    def test_goals_partial_attributes_every_empty_section_to_a_lane(self, client):
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        for heading in ("Acquired abilities", "Evaluations", "Rejected approaches"):
+            assert heading in resp.text
+        assert "Nothing yet;" in resp.text
+
+    def test_goals_partial_renders_a_seeded_charter_with_its_full_digest(self, client, tmp_path):
+        """The digest renders in full: comparing it by eye is the point."""
+        from models.improvement_charter import _CHARTER_PATH, ImprovementCharter
+
+        pk = "test-3255-goals"
+        copy = tmp_path / "charter.md"
+        copy.write_bytes(_CHARTER_PATH.read_bytes())
+        seeded = ImprovementCharter.load_from_file(copy, project_key=pk)
+
+        resp = client.get(f"/_partials/improvement/goals/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert seeded.digest in resp.text
+        assert "No charter seeded" not in resp.text
+
+    def test_goals_partial_reports_unavailable_when_the_charter_read_raises(
+        self, client, monkeypatch
+    ):
+        """A broken charter query must not read as an honest zero."""
+        from models.improvement_charter import ImprovementCharter
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("charter store unreachable")
+
+        monkeypatch.setattr(ImprovementCharter, "pinned", classmethod(_raise))
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "The charter record could not be read" in resp.text
+        assert "No charter seeded" not in resp.text
+
+    def test_goals_partial_lists_open_cases_and_omits_terminal_ones(self, client):
+        """Open is every state but released and rejected, and paused is open.
+
+        Reads through the ``state`` index one open state at a time, so this also
+        pins that the indexed lookup returns what the partition scan used to.
+        """
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+
+        pk = "test-3255-case-states"
+        now = datetime.now(UTC)
+        seeded = [
+            ImprovementCase.create(
+                project_key=pk, state=state, title=f"case-{state}", created_at=now
+            )
+            for state in ("observed", "paused", "released", "rejected")
+        ]
+        try:
+            resp = client.get(f"/_partials/improvement/goals/?project_key={pk}")
+
+            assert resp.status_code == 200
+            assert "case-observed" in resp.text
+            assert "case-paused" in resp.text
+            assert "case-released" not in resp.text
+            assert "case-rejected" not in resp.text
+        finally:
+            for row in seeded:
+                row.delete()
+
+    def test_goals_partial_reports_unavailable_when_the_case_read_raises(self, client, monkeypatch):
+        """A broken case query must not read as an honest zero."""
+        from models.improvement_case import ImprovementCase
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("case store unreachable")
+
+        monkeypatch.setattr(ImprovementCase.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "Case records unavailable" in resp.text
+        assert "No cases opened yet" not in resp.text
+
+    def test_goals_partial_reports_unavailable_when_the_assumption_read_raises(
+        self, client, monkeypatch
+    ):
+        """A broken assumption query must not read as an honest zero.
+
+        Patches the real dependency, not ``get_provisional_assumptions``: the
+        classification only means something if the failure it classifies is the
+        one production can actually hit.
+        """
+        from models.improvement_investigation import ImprovementInvestigation
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("investigation store unreachable")
+
+        monkeypatch.setattr(ImprovementInvestigation.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/goals/?project_key=test-3255-empty")
+
+        assert resp.status_code == 200
+        assert "Assumptions unavailable" in resp.text
+        assert "Nothing proceeding on an unresolved assumption" not in resp.text

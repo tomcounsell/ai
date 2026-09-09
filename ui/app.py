@@ -396,17 +396,44 @@ def create_app() -> FastAPI:
             {"coverage": get_coverage(project_key=project_key)},
         )
 
+    @app.get("/_partials/improvement/goals/", response_class=HTMLResponse)
+    def partial_improvement_goals(request: Request, project_key: str = "valor"):
+        """HTMX partial: the charter §11 readable record (#3255).
+
+        Which charter the work is ranked under, the §3 priorities, the open
+        cases and why each ranks where it does, and an explicit note for every
+        heading no lane writes yet. Empty sections name the lane that fills
+        them rather than showing a zero.
+        """
+        from ui.data.improvement import get_goals
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/goals.html",
+            {"goals": get_goals(project_key=project_key)},
+        )
+
     @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
     def partial_improvement_burden(request: Request, project_key: str = "valor"):
         """HTMX partial: how often a human had to step in, and of what kind (#3177)."""
         from ui.data.improvement import get_intervention_burden, get_provisional_assumptions
+
+        # The assumption read propagates its failures so the goals partial can
+        # tell "none" apart from "unreadable". This panel has no unavailable
+        # rendering, so it degrades to hiding the section rather than taking the
+        # whole burden panel down with it.
+        try:
+            assumptions = get_provisional_assumptions(project_key=project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement burden partial: assumption read failed: %s", exc)
+            assumptions = []
 
         return templates.TemplateResponse(
             request,
             "improvement/intervention_burden.html",
             {
                 "burden": get_intervention_burden(project_key=project_key),
-                "assumptions": get_provisional_assumptions(project_key=project_key),
+                "assumptions": assumptions,
             },
         )
 

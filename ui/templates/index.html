@@ -86,6 +86,9 @@ function toggleStats() {
             never achievements: nothing here reports experiment count or merged-patch
             count, because activity is not improvement.
         </p>
+        <div id="improvement-goals-panel"
+             hx-get="/_partials/improvement/goals/" hx-trigger="revealed, every 60s"
+             hx-swap="innerHTML"></div>
         <div id="improvement-coverage-panel"
              hx-get="/_partials/improvement/coverage/" hx-trigger="revealed, every 60s"
              hx-swap="innerHTML"></div>

@@ -1,0 +1,94 @@
+{# Improvement: goals and their relationship to the charter (#3255).
+
+   Charter §11 asks for a readable record of current goals, their relationship
+   to the charter, opportunity ranking, acquired abilities, evaluations,
+   rejected approaches, unresolved assumptions, and resource use.
+
+   Most of that has no writer yet. Every heading below therefore renders one of
+   three distinguishable states (content, "nothing yet, written by lane N", or
+   "unavailable" when the read failed) and never a bare zero. A zero claims a
+   measurement was taken, and the charter is explicit that an absence of
+   detection is not a result.
+#}
+<div class="improvement-panel" id="improvement-goals">
+    {% if goals.charter_unavailable %}
+    <p class="improvement-warning">
+        The charter record could not be read. This panel cannot say which
+        charter the work below was ranked under.
+    </p>
+    {% elif goals.charter_missing %}
+    <p class="improvement-warning">
+        No charter seeded for <code>{{ goals.project_key }}</code>. Nothing has
+        pinned <code>docs/improvement-charter.md</code> into a record yet, so no
+        case can cite the version it was ranked under.
+    </p>
+    {% else %}
+    <p class="improvement-meta">
+        Charter version {{ goals.charter.version }},
+        effective {{ goals.charter.effective or 'undated' }}.
+    </p>
+    <p class="improvement-meta"><code>{{ goals.charter.digest }}</code></p>
+    {% endif %}
+
+    <h4>Early priorities</h4>
+    <p class="improvement-meta">
+        Charter §3 starting hypotheses, not a fixed allocation or a permanent
+        ordering. The ranking changes as evidence changes.
+    </p>
+    <ol class="improvement-list">
+        {% for priority in goals.priorities %}
+        <li>{{ priority }}</li>
+        {% endfor %}
+    </ol>
+
+    <h4>Open cases</h4>
+    {% if goals.cases_unavailable %}
+    <p class="improvement-warning">Case records unavailable; the read failed.</p>
+    {% elif goals.no_cases_yet %}
+    <p class="improvement-meta">
+        No cases opened yet. Lane 3 opens the first one, ranked under the
+        charter digest above.
+    </p>
+    {% else %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>Case</th>
+                <th>Area</th>
+                <th>State</th>
+                <th>Why it ranks here</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for case in goals.cases %}
+            <tr>
+                <td>{{ case.title or 'untitled' }}</td>
+                <td>{{ (case.priority_area or 'other') | replace('_', ' ') }}</td>
+                <td>{{ case.state }}</td>
+                <td>{{ case.ranking_rationale or 'no rationale recorded' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <h4>Unresolved assumptions</h4>
+    {% if goals.assumptions_unavailable %}
+    <p class="improvement-warning">Assumptions unavailable; the read failed.</p>
+    {% elif not goals.assumptions %}
+    <p class="improvement-meta">
+        Nothing proceeding on an unresolved assumption right now.
+    </p>
+    {% else %}
+    <ul class="improvement-list">
+        {% for assumption in goals.assumptions %}
+        <li>{{ assumption.assumption }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% for section in goals.pending_sections %}
+    <h4>{{ section.heading }}</h4>
+    <p class="improvement-meta">Nothing yet; {{ section.written_by }}.</p>
+    {% endfor %}
+</div>

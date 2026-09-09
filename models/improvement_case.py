@@ -6,9 +6,12 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   ``project_key`` (``KeyField``) for the partition. A single recency
   ``SortedField(created_at, partition_by="project_key")`` serves the "open
   cases for this project" read without an unbounded index.
-- Two IndexedFields, both low-cardinality: ``state`` (seven values, see
-  :data:`CASE_STATES`) and ``priority`` (four values). ``revision`` is an
-  ``IntField`` and is deliberately not indexed — it grows without bound.
+- Three IndexedFields, all low-cardinality: ``state`` (seven values, see
+  :data:`CASE_STATES`), ``priority`` (four values), and ``priority_area``
+  (eleven values, see :data:`PRIORITY_AREAS`). They are three orthogonal
+  readings of one case (lifecycle, urgency, and charter §3 classification),
+  and the goals partial reads all three. ``revision`` (an ``IntField``) and
+  ``charter_digest`` are deliberately not indexed: both are unbounded.
 - **The projection is not the authority.** The control journal's Redis head
   holds the authoritative state and revision; this row is the queryable
   projection of it, updated through ORM ``save()`` after the journal commits.
@@ -49,8 +52,36 @@ CASE_STATES: tuple[str, ...] = (
     "paused",  # break-glass, needs a human hand
 )
 
+#: The states that end a case's life. ``paused`` is deliberately absent: it is
+#: break-glass, a case waiting on a human hand, and still open work.
+TERMINAL_CASE_STATES: tuple[str, ...] = ("released", "rejected")
+
+#: The states a case is still open in. Derived from :data:`CASE_STATES` rather
+#: than listed, so adding a state to the lifecycle cannot leave the two sets
+#: disagreeing about what "open" means. Readers query the ``state`` index one
+#: value at a time from this tuple instead of hydrating the partition.
+OPEN_CASE_STATES: tuple[str, ...] = tuple(s for s in CASE_STATES if s not in TERMINAL_CASE_STATES)
+
 #: Bounded priority vocabulary.
 CASE_PRIORITIES: tuple[str, ...] = ("urgent", "high", "normal", "low")
+
+#: Charter §3's classification of what a case is trying to improve. Five come
+#: from the charter's priority list and five from its closing sentence naming
+#: the eligible means; ``other`` is what keeps the set from reading as a fixed
+#: allocation. Orthogonal to :data:`CASE_PRIORITIES`, which is urgency.
+PRIORITY_AREAS: tuple[str, ...] = (
+    "inference",
+    "token_efficiency",
+    "skills",
+    "personas",
+    "cloud_execution",
+    "research_process",
+    "evaluators",
+    "memory",
+    "orchestration",
+    "infrastructure",
+    "other",
+)
 
 
 class ImprovementCase(Model):
@@ -72,7 +103,10 @@ class ImprovementCase(Model):
         evidence_ids: JSON list of ``ImprovementEvidence`` ids.
         job_id: The ``Job`` carrying the intended outcome, when one exists.
         charter_version: The charter version in force when the case was opened.
-        objective: Which charter objective this case serves.
+        charter_digest: The ``sha256:<hex>`` of the charter the case was ranked
+            under. The version is the human-readable name; this is the identity.
+        priority_area: One of :data:`PRIORITY_AREAS`. Low-cardinality index.
+        ranking_rationale: Why this case sits where it does in the order.
         updated_at: Last projection write.
     """
 
@@ -81,6 +115,7 @@ class ImprovementCase(Model):
     created_at = SortedField(type=datetime, partition_by="project_key")
     state = IndexedField(default="observed")
     priority = IndexedField(default="normal")
+    priority_area = IndexedField(default="other")
     revision = IntField(default=0)
     title = Field(null=True)
     summary = Field(null=True)
@@ -88,5 +123,6 @@ class ImprovementCase(Model):
     evidence_ids = Field(null=True)
     job_id = Field(null=True)
     charter_version = IntField(default=0)
-    objective = Field(null=True)
+    charter_digest = Field(null=True)
+    ranking_rationale = Field(null=True)
     updated_at = Field(null=True)

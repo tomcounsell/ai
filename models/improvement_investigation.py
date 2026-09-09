@@ -74,6 +74,8 @@ class ImprovementInvestigation(Model):
         expires_at: When these claims should stop being trusted.
         cost_usd: External-LLM dollars this investigation settled against the
             daily reservation.
+        charter_digest: The ``sha256:<hex>`` of the charter in force when this
+            investigation was admitted. Not indexed (unbounded).
     """
 
     id = AutoKeyField()
@@ -89,6 +91,7 @@ class ImprovementInvestigation(Model):
     interpretation = Field(null=True)
     expires_at = DatetimeField(null=True)
     cost_usd = Field(null=True)
+    charter_digest = Field(null=True)
 
     class Meta:
         # 30 days, matching ReflectionRun. Retrieval-dated external claims

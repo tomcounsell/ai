@@ -453,16 +453,29 @@ def test_improvement_models_are_enumerated_by_the_runtime_derivation():
     """All eight improvement records expose IndexedFields the same way AgentSession does."""
     from popoto import IndexedField
 
+    from models import ImprovementCase
+
     models_seen = _improvement_models()
     assert len(models_seen) == 8, [m.__name__ for m in models_seen]
 
+    # Every improvement record carries at least one lifecycle index, and never
+    # more than two by default. More than that is a modeling smell, not a
+    # performance one: it means the record is tracking several orthogonal
+    # lifecycles and should be two records. An entry below is a named, reasoned
+    # exemption; a second one costs a second line a reviewer sees.
+    default_maximum = 2
+    index_maximums = {
+        # `state` is lifecycle, `priority` is urgency, `priority_area` is
+        # charter §3 classification; the goals partial reads all three.
+        ImprovementCase: 3,
+    }
+
     for model in models_seen:
         indexed = {name for name, f in model._meta.fields.items() if isinstance(f, IndexedField)}
-        # Every improvement record carries at least one lifecycle index, and
-        # never more than two. More than that is a modeling smell, not a
-        # performance one: it means the record is tracking several orthogonal
-        # lifecycles and should be two records.
-        assert 1 <= len(indexed) <= 2, f"{model.__name__} indexes {indexed}"
+        maximum = index_maximums.get(model, default_maximum)
+        assert 1 <= len(indexed) <= maximum, (
+            f"{model.__name__} indexes {indexed} against a maximum of {maximum}"
+        )
 
 
 def test_improvement_model_indexes_are_low_cardinality():
