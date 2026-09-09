@@ -248,10 +248,15 @@ was needed: every question was answerable by reading the checkout and the instal
   `/opt/homebrew/bin/redis-server`.
 - **Confidence**: high
 - **Impact on plan**: `tools/improvement_eval/arena.py` spawns `redis-server --unixsocket <tmp>/arm.sock
-  --port 0 --save '' --appendonly no --dir <tmp>` per arm and hands back a client bound to that socket.
-  Port 0 means the arm has no TCP listener at all, so it cannot be reached by accident and cannot
-  collide with a concurrent agent's port. `db_claim` is untouched, and a test asserting that is in
-  the Verification table.
+  --port 0 --save '' --appendonly no --dir <tmp>` per arm. Port 0 means the arm has no TCP listener at
+  all, so it cannot be reached by accident and cannot collide with a concurrent agent's port.
+  `db_claim` is untouched, and a test asserting that is in the Verification table. **Revision note:**
+  this spike's original conclusion — "reach the arm through an explicitly constructed client on a unix
+  socket" — was wrong about the second half. A bare client cannot answer `Memory.query`, which is how
+  every retrieval path in this repo reads. The correct conclusion is that the arm is reached through
+  its *own process*, whose `REDIS_URL` points at the socket, so popoto's canonical pool inside that
+  child is the arm. The parent's pool is still never re-pointed, which is what spike-2 and #2799 were
+  really protecting.
 
 ### spike-3: Which of snapshot, freeze, or copy-on-write does per-arm isolation need?
 - **Assumption**: "One of the three is obviously right."
@@ -316,36 +321,73 @@ hand-off with no artifact is a claim nobody can check later.
    sees — the judge process is given the charter without being given the repository, which the
    refresh comment correctly calls a convenience rather than a security boundary.
 
-3. **Corpus export** (`corpus.py`). One canonical, sorted, newline-delimited export of the project's
-   memory corpus is produced once per run, hashed, and written to the verifying artifact store. The
-   digest is the corpus identity for the whole run. `VALOR_PROJECT_KEY` is resolved here and threaded
-   into `_harness_env` so every arm subprocess partitions on the arm's project rather than on ambient
-   environment.
+3. **Corpus export** (`corpus.py`). The project's memory corpus is exported once per run through
+   popoto's ORM-native transfer API — `Memory.export_records(project_key=..., stream=fh)`
+   (`popoto/models/base.py:2785`, delegating to `popoto/transfer/export.py`) — which writes a
+   manifest line followed by one JSON Lines record per memory, carrying every field plus the
+   auxiliary state each field declares through `export_state` (BM25 posting data, the relevance
+   score, confidence, the embedding vector). The JSONL bytes are hashed and written to the verifying
+   artifact store; that digest is the corpus identity for the whole run. Nothing here issues a raw
+   Redis command: the export is a documented ORM read, so it is binary-safe on
+   `Memory.embedding`'s float32 bytes and cannot desynchronize an index from its hash.
 
 4. **Arm assignment** (`blinding.py`). Arms are assigned randomized run ordering from a seed derived
    from the experiment id. `arm_assignment_digest` is written before either arm runs. Each arm gets
    a blinded id (`arm-a` / `arm-b`) with the incumbent/candidate mapping held only by the runner.
 
-5. **Arena spawn** (`arena.py`). One `redis-server` per arm, unix socket, no TCP, no persistence,
-   its own `--dir`. The export from step 3 is loaded into each. **The corpus digest is re-read from
-   each arm and compared**; unequal digests are `infra_failure` before anything is measured. This is
-   acceptance criterion 1, and it is asserted at run time rather than only in a test.
+5. **Arena spawn and arm subprocess** (`arena.py`, `arm_worker.py`). Per arm: one `redis-server` on
+   a unix socket in a per-arm tmpdir, with `--port 0` (no TCP listener), no persistence, and its own
+   `--dir`. The arm is then reached **only** by a child Python process,
+   `python -m tools.improvement_eval.arm_worker`, spawned with an env dict that is built for the
+   child and never assigned into the parent's `os.environ`:
+
+   ```python
+   child_env = {
+       **os.environ,
+       "REDIS_URL": f"unix://{sock_path}",          # popoto binds here at import
+       "POPOTO_CONTENT_PATH": str(arm_tmp / "content"),  # per-arm .npy embedding store
+       "VALOR_PROJECT_KEY": project_key,
+       "POPOTO_EMBEDDING_INVALIDATION": "none",
+   }
+   subprocess.run([sys.executable, "-m", "tools.improvement_eval.arm_worker"], env=child_env, ...)
+   ```
+
+   This is the whole answer to "how does an arm read its own corpus". Popoto builds
+   `POPOTO_REDIS_DB` from `REDIS_URL` at module import (`popoto/redis_db.py:405-414`), and
+   `redis.BlockingConnectionPool.from_url("unix:///…")` resolves to a `UnixDomainSocketConnection`
+   — verified in this venv. So inside the child, and only inside the child, the canonical pool *is*
+   the arm's private server, and `Memory.query`, `agent.memory_retrieval.retrieve_memories`, and
+   `tools.memory_search.search` all work unmodified through the ORM. The parent's pool is never
+   re-pointed, `set_REDIS_DB_settings` is never called, and no bare client is ever asked to answer
+   `Memory.query`. The child restores the step-3 JSONL with
+   `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`, which
+   preserves keys, saves with `skip_auto_now=True` (so the relevance timestamp carries rather than
+   resetting to import time), and carries the exported vectors instead of re-embedding — no Ollama
+   call, no non-determinism. **The corpus digest is then recomputed inside each arm by re-running
+   `export_records` against the arm's own pool and comparing**; unequal digests are `infra_failure`
+   before anything is measured. That is acceptance criterion 1, asserted at run time rather than
+   only in a test.
 
 6. **Writer kill switch** (`writer_guard.py`). Each arm's client is wrapped so corpus-key writes
    raise. The wrapper is the first guard; the second is a digest re-check at arm teardown, which
    catches a write that reached the server by some path the wrapper did not cover.
 
 7. **Gate 1 — baseline parity** (`retrieval.py`). The **incumbent** arm runs the frozen baseline
-   query set against the frozen corpus and its result is compared to the recorded baseline. A miss
-   ends the run as `infra_failure` and **the candidate arm is never invoked**. The ordering is the
-   point: an incumbent that cannot reproduce itself makes every candidate number meaningless, and
-   reading the candidate first would let the operator learn the answer before learning the run was
-   invalid.
+   query set against the frozen corpus and the **ordered list of returned memory ids** is compared to
+   the ids recorded in the baseline, which stores the corpus digest it was captured under. Ids, not
+   scores: RRF fusion scores are stable here but comparing them buys nothing the ranking does not
+   already prove, and a float equality across two processes is a gate that fails for reasons nobody
+   wants to debug. A miss ends the run as `infra_failure` and **the candidate arm is never invoked**.
+   The ordering is the point: an incumbent that cannot reproduce itself makes every candidate number
+   meaningless, and reading the candidate first would let the operator learn the answer before
+   learning the run was invalid.
 
-8. **Paired trials**. For each trial in the fixed batch, both arms run the same input in the
-   randomized order from step 4. A trial that errors in the harness is excluded and counted toward
-   the infra-failure cap; a trial where the *candidate* fails is a candidate failure and scores as
-   one. That distinction is `retrieval_arms.py`'s errored-vs-empty discipline, raised to the arm level.
+8. **Paired trials**. For each trial in the fixed batch, both arms run the same retrieval input in
+   the randomized order from step 4, each inside its own `arm_worker` subprocess, and hand back the
+   ranked ids and per-endpoint metrics as JSON on stdout. A trial that errors in the harness is
+   excluded and counted toward the infra-failure cap; a trial where the *candidate* fails is a
+   candidate failure and scores as one. That distinction is `retrieval_arms.py`'s errored-vs-empty
+   discipline, raised to the arm level.
 
 9. **Judges** (`envelope.py`, `judges/serves_charter.py`). Each trial's outputs go to the judge
    roster carrying the blinded arm id and never the candidate's identity. `blinding.py::scan_for_identity`
@@ -426,8 +468,10 @@ downstream lane rather than a patch here.
 | Python pin matches the repo | `python -c "import pathlib,sys; want=pathlib.Path('.python-version').read_text().strip(); got='.'.join(map(str,sys.version_info[:3])); sys.exit(0 if got.startswith(want) else 1)"` | Worktree venv is on the committed pin |
 | `numpy` importable | `python -c "import numpy"` | Clustered resampling; already a declared dependency |
 | Verifying artifact store writable | `python -c "from models.verifying_artifact_store import verifying_artifact_store as s; import os; os.makedirs(s.base_path, exist_ok=True)"` | Frozen corpus, calibration set, and raw judge responses land here |
-| Lane 2b charter surface present | `python -c "from models.improvement_charter import ImprovementCharter as C; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` | `serves_charter` judges against `ImprovementCharter.text` (#3255) |
+| Lane 2b surface present (charter **and** eligibility) | `python -c "from models.improvement_charter import ImprovementCharter as C; from tools.improvement_eligibility import is_open_source; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` | `serves_charter` judges against `ImprovementCharter.text` and routes through `is_open_source`; **both** arrive with #3255, so the gate covers the whole lane-2b surface this lane consumes rather than the charter half only. Expected FAIL until #3275 merges. |
 | `metrics.py` import path | `python -c "from tools.memory_eval.metrics import bootstrap_ci"` | Acceptance criterion 7 |
+| Popoto transfer API present | `python -c "from models.memory import Memory; assert hasattr(Memory,'export_records') and hasattr(Memory,'import_records')"` | The corpus export/restore is `export_records`/`import_records`; without them the arm has no legal corpus load |
+| `unix://` URL support in the pinned redis-py | `python -c "import redis; p=redis.BlockingConnectionPool.from_url('unix:///tmp/x.sock'); assert p.connection_kwargs.get('path')=='/tmp/x.sock'"` | The arm subprocess reaches its server through `REDIS_URL=unix://…`; popoto builds its pool with `from_url` |
 
 `scipy` and `statsmodels` are deliberately absent and no check asks for them (spike-1).
 
@@ -435,18 +479,30 @@ downstream lane rather than a patch here.
 
 ### Key Elements
 
-- **`tools/improvement_eval/corpus.py`** — exports the project's memory corpus once per run into a
-  canonical, sorted, newline-delimited form, hashes it, and writes it to the verifying artifact
-  store. The digest is the corpus identity for the run. Restores that export into an arm's store.
+- **`tools/improvement_eval/corpus.py`** — exports the project's memory corpus once per run through
+  `Memory.export_records(project_key=..., stream=fh)` (popoto's ORM transfer API), hashes the JSONL
+  bytes, and writes them to the verifying artifact store. The digest is the corpus identity for the
+  run. Restore is `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`,
+  which preserves keys, saves with `skip_auto_now=True`, and carries vectors rather than re-embedding.
 - **`tools/improvement_eval/arena.py`** — spawns one private `redis-server` per arm on a unix socket
-  with no TCP listener and no persistence, hands back an explicitly-constructed client, and tears the
-  process down. Never touches popoto's canonical pool, `REDIS_URL`, or `tests/db_claim.py`.
+  with no TCP listener and no persistence, hands back the socket path and the per-arm tmpdir, and
+  tears the process down. It never opens a client of its own: the arm is reached only through
+  `arm_worker.py`. Never re-points popoto's canonical pool, never assigns `REDIS_URL` in the parent
+  process, never imports `tests/db_claim.py`.
+- **`tools/improvement_eval/arm_worker.py`** — the arm-side entry point, run as
+  `python -m tools.improvement_eval.arm_worker` in a child process whose env dict carries
+  `REDIS_URL=unix://<arm.sock>`, `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`, and
+  `POPOTO_EMBEDDING_INVALIDATION=none`. Reads a job spec on stdin, restores the corpus, runs the
+  retrieval, re-exports for the digest check, and writes JSON on stdout. Every Redis touch inside it
+  goes through the ORM against the child's own canonical pool.
 - **`tools/improvement_eval/writer_guard.py`** — the writer kill switch. A client wrapper that
   refuses corpus writes, plus an independent corpus-digest re-check at arm teardown so a write that
   slipped past the wrapper still surfaces as `infra_failure` rather than as a result.
-- **`tools/improvement_eval/retrieval.py`** — the isolated retrieval adapter, and the **baseline
-  parity gate**: the incumbent arm reproduces its recorded baseline on the frozen corpus before any
-  candidate result is read.
+- **`tools/improvement_eval/retrieval.py`** — the isolated retrieval adapter over
+  `agent.memory_retrieval.retrieve_memories` (the four-signal RRF path, all of whose inputs are
+  persisted state), and the **baseline parity gate**: the incumbent arm reproduces its recorded
+  baseline's ranked memory ids on the frozen corpus before any candidate result is read. It never
+  calls `Query.top_by_decay`, whose clock cannot be pinned.
 - **`tools/improvement_eval/blinding.py`** — randomized arm assignment with a recorded
   `arm_assignment_digest`, blinded arm ids, and `scan_for_identity`, the leak detector that decides
   what `ImprovementEvaluation.blinded` actually says.
@@ -500,21 +556,69 @@ byte-identical reads by construction. The kill switch survives as an independent
 than as the primary mechanism, because a guard that can only fail one way is a guard nobody has
 evidence about.
 
-**The arm's Redis is reached by an explicitly-constructed client on a unix socket.** This is the one
-place where following the repo's normal Redis convention would be wrong. `tests/db_claim.py` is the
-single source of "which server and which db does this pytest process own", and issue #2799 records
-what happens when a private server is introduced without respecting that: the suite kept hitting
-6379 and flushed production db1. So `arena.py` spawns `redis-server --port 0 --unixsocket
-<tmp>/arm.sock --save '' --appendonly no --dir <tmp>`, which has no TCP listener to collide with a
-concurrent agent, and reaches it through `redis.Redis(unix_socket_path=...)` constructed in place.
-`REDIS_URL` is never reassigned, `db_claim` is never called, and popoto's canonical pool is never
-re-pointed. A test asserts all three.
+**The arm's Redis is reached by a child process whose own `REDIS_URL` points at the arm socket.**
+This is the single design decision that makes the rest of the lane implementable, and the plan
+commits to it rather than leaving two routes open.
+
+Retrieval in this repo goes through the Popoto ORM against the process-global `POPOTO_REDIS_DB`
+(`tools/memory_search/__init__.py:45,:381`; `agent/memory_retrieval.py`;
+`reflections/redis_access.py::get_redis`). A bare `redis.Redis(unix_socket_path=…)` cannot answer
+`Memory.query`, and re-pointing the parent's canonical pool would break every other consumer in the
+process. Both dead ends have the same escape: **give the arm its own process.** Popoto builds
+`POPOTO_REDIS_DB` from `REDIS_URL` at module import time (`popoto/redis_db.py:405-414`), so a child
+launched with `REDIS_URL=unix://<arm.sock>` in its env dict has a canonical pool bound to the arm and
+a parent whose pool never moved. `redis.BlockingConnectionPool.from_url` parses the `unix://` scheme
+into a `UnixDomainSocketConnection` — confirmed against the pinned redis-py in this venv.
+
+So: `arena.py` spawns `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no
+--dir <tmp>` (no TCP listener, so no port for a concurrent agent to collide on — issue #2799 is the
+failure this avoids), and `arm_worker.py` is the only thing that ever talks to it, as
+`subprocess.run([sys.executable, "-m", "tools.improvement_eval.arm_worker"], env=child_env)`.
+`child_env` is a dict built for the call. The parent's `os.environ["REDIS_URL"]` is never assigned,
+`set_REDIS_DB_settings` is never called, `tests/db_claim.py` is never imported, and no raw Redis
+command is issued against a Popoto-managed key from either side. Three tests assert exactly that,
+and the anti-criteria below match the assignment forms that would violate it rather than the
+dict-literal key the design requires.
+
+`POPOTO_CONTENT_PATH` rides along in the same dict. It is what `EmbeddingField` resolves its `.npy`
+store from (`popoto/fields/embedding_field.py:226`), so without it two arms would share the parent's
+embedding directory and the isolation would be half-built.
+
+**Corpus transfer is popoto's own transfer API, not a hand-rolled text export.**
+`Model.export_records` / `Model.import_records` (`popoto/models/base.py:2785`, `:2820`) write and
+read JSON Lines with a leading manifest, preserve keys, collect each field's auxiliary state through
+its `export_state` hook, and import by `instance.save(skip_auto_now=True)`. That last flag is
+load-bearing: `Memory.relevance` is a `DecayingSortedField` with `auto_now=True`, so a plain re-save
+would stamp every record with import time and destroy the corpus's temporal structure. Passing
+`on_embedding_mismatch="carry"` imports the exported vectors rather than re-embedding, so a restore
+makes no Ollama call and is deterministic. Using the ORM's own transfer path is also what keeps this
+lane inside CLAUDE.md's rule that Popoto-managed keys are read and written through the ORM.
 
 **Byte-identical corpus reads are asserted at run time, not only in a test.** After restore, each
-arm's corpus is re-read through its own client, canonicalized the same way the export was, and
-hashed. Unequal digests, or a digest differing from the export's, end the run as `infra_failure`
-before any measurement. The acceptance criterion's test then exercises the same code path rather
-than a parallel one.
+arm re-runs `export_records` against its own pool, hashes the result the same way the original export
+was hashed, and reports the digest. Unequal digests between arms, or a digest differing from the
+export's, end the run as `infra_failure` before any measurement. The acceptance criterion's test
+exercises that same code path rather than a parallel one.
+
+**Retrieval reproducibility is a property of the ranking path, and the plan pins the path.** Identical
+bytes are necessary and not sufficient: `Memory.relevance` is a `DecayingSortedField` whose Lua
+computes `base_score * elapsed_days ** (-decay_rate)`, and `Query.top_by_decay` takes its clock from
+`now = time.time()` inside the call (`popoto/models/query.py:494`) with no parameter to pin it — the
+`as_of` argument gates bitemporal validity, not the decay arithmetic. A harness that ranked through
+`top_by_decay` would therefore be irreproducible by construction and there would be no argument to
+make about tolerances.
+
+It does not rank that way. The production retrieval path is
+`agent.memory_retrieval.retrieve_memories`, whose four RRF signals are BM25, the **stored** relevance
+sorted-set scores read by a plain `zrevrange` (`agent/memory_retrieval.py:117`), confidence, and
+cosine similarity over the on-disk embedding matrix. Every one of those is a read of persisted state,
+and `import_records`' `skip_auto_now=True` carries the persisted relevance scores across unchanged.
+Two arms restored from one export therefore rank identically regardless of when each is queried, and
+an incumbent baseline recorded against that corpus digest reproduces. **`top_by_decay` is an
+anti-criterion for this lane** — a Verification row greps for it under `tools/improvement_eval/` and
+expects zero matches, and `test_two_arms_rank_identically_across_a_clock_gap` runs the two arms with
+a deliberate sleep between them and asserts the ranked ids match, which is the property criterion 1
+actually needs and which an exporter-canonicalization assertion never proved.
 
 **Gate ordering is load-bearing.** The contract-digest re-check runs before the charter is pinned;
 the corpus export runs before the arms spawn; the incumbent's baseline parity runs before the
@@ -733,11 +837,23 @@ left the suite hitting 6379 and flushing production db1. Repeating it corrupts u
 and, at worst, production data.
 
 **Mitigation:** The arm server has **no TCP listener at all** — `--port 0` plus `--unixsocket` in a
-per-arm tmpdir. There is no port to collide on and no way for another process to reach it. The client
-is constructed in place with `unix_socket_path=`; `REDIS_URL` is never assigned, `db_claim` is never
-imported by `arena.py`, and popoto's canonical pool is never re-pointed. A test asserts all three by
-source inspection and by checking `popoto.redis_db.POPOTO_REDIS_DB` connection kwargs are unchanged
-across an arena context.
+per-arm tmpdir. There is no port to collide on and no way for another process to reach it. `REDIS_URL`
+points at the arm **only inside the child process's env dict**, which is constructed for the
+`subprocess.run` call and never assigned into the parent's `os.environ`; `set_REDIS_DB_settings` is
+never called; `tests/db_claim.py` is never imported by this package. Three tests, and the last is the
+one that actually bites:
+
+1. `test_arena_never_assigns_redis_url_in_the_parent` — source inspection for
+   `os.environ["REDIS_URL"] = …` and `os.environ.setdefault("REDIS_URL"…)` anywhere under
+   `tools/improvement_eval/`, expecting none. (The old anti-criterion regex `REDIS_URL[^"]*=` matched
+   a dict-literal key, which this design uses deliberately, and would have failed for the wrong
+   reason; the Verification table below carries the corrected form.)
+2. `test_arena_does_not_touch_the_db_claim_pool` — no import of `tests.db_claim`.
+3. `test_parent_pool_kwargs_survive_an_arena_context` — capture
+   `popoto.redis_db.POPOTO_REDIS_DB.connection_pool.connection_kwargs`, enter and exit a full arena
+   context including a spawned `arm_worker`, and assert the parent's kwargs are the identical dict.
+   Under the subprocess design this assertion is honestly true rather than aspirational: nothing in
+   the parent process ever rebinds the pool.
 
 ### Risk 2: The calibration reference set is too small to calibrate anything
 
