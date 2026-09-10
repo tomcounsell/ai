@@ -9,7 +9,7 @@ also_closes: https://github.com/tomcounsell/ai/issues/3260
 lane_slug: sdlc-3249
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-10T02:40:46Z
+revision_applied_at: 2026-09-10T02:55:42Z
 ---
 
 # Router plan-stage stand-down sweep, and G3's merge leg verdict gate
@@ -327,6 +327,35 @@ call sites edited, three terminal merge-site changes (G3 leg 1, G6, row 10) plus
 DOCS gate, and one test file extended. Every state to be tested has already been probed and
 recorded in the two issues' Recon Summaries or in this plan's revision-round probes, so the
 expensive part — establishing what the router actually does — is already paid for.
+
+**The existing-suite audit (step 9) is bounded by measurement, not by hope.** Test Impact
+calls the `..._terminal.py` / `..._convergence.py` audit "the largest audit in the lane", so
+its size was measured on baseline `aee2644c9` rather than estimated. Across all four audit
+targets, an AST sweep for test functions that assert a `/do-merge` dispatch **and** supply no
+`pr_head_sha` (directly or via their context helper) returns **three**:
+
+| Fixture | Path it takes | Why it breaks |
+|---|---|---|
+| `test_sdlc_router_decision_dispatch_rows.py::test_all_completed_dispatches_merge` | row 10 | called with no `context` argument at all |
+| `test_sdlc_router.py::test_terminal_merge_ready_dispatches_merge_despite_plan_revising` | G6 | `context={}` |
+| `test_sdlc_router.py::test_row10_fires_with_recorded_approved_verdict` | row 10 | `context={}` |
+
+All three also omit `latest_review_head_sha` from meta, so the fix per fixture is to supply
+**both** halves of the real signal — `meta['latest_review_head_sha']` and a matching
+`context['pr_head_sha']` — exactly the shape `tools/sdlc_next_skill._build_context`
+produces. Supplying only `pr_head_sha` leaves the verdict unattributable and still not fresh.
+
+`test_sdlc_router_decision_terminal.py` needs **no** edits: its `_ctx()` helper (`:79-82`)
+already sets `pr_head_sha = HEAD` and its `_meta()` helper (`:63-76`) already sets
+`latest_review_head_sha = HEAD`. `..._convergence.py` has no merge-asserting fixture at all.
+Two further fixtures assert *not*-`/do-merge`
+(`test_empty_states_past_docs_never_dispatches_merge`,
+`test_review_completed_no_verdict_routes_to_review`) and stay green under a `Blocked`
+outcome, so they are not in the count.
+
+So the largest audit is three fixtures, and the appetite covers it. The measurement is the
+bound — if the real number comes in materially higher, the premise moved and step 9 says to
+stop, not to grind.
 
 **There is no scope cut available in this plan.** Every item is either the issue itself or
 ratified: the rows 1/2/2b/2c/3 sweep is #3249; the 4b/4c de-duplication is ratified design
@@ -734,9 +763,12 @@ needs this setup; rows 1, 2, 2b and 2c are reached without touching the hash.
       `test_sdlc_router_decision_convergence.py` — AUDIT: these exercise G6, **row 10** and
       the merge fast-path. Any case that reaches `/do-merge` (via G6 or row 10) without a
       `pr_head_sha` in context now returns `Blocked(guard_id='NO_RULE')` and must be UPDATED
-      by supplying the key — the shape production actually produces — never by relaxing the
-      assertion. Expect this to be the largest audit in the lane: row 10 is the router's
-      default merge landing and fixtures that omit `pr_head_sha` are common.
+      by supplying the key pair (`meta['latest_review_head_sha']` **and** a matching
+      `context['pr_head_sha']`) — the shape production actually produces — never by relaxing
+      the assertion. **Measured on baseline `aee2644c9`: `..._terminal.py` needs zero edits
+      (its `_ctx()`/`_meta()` helpers already carry both halves) and `..._convergence.py` has
+      no merge-asserting fixture.** The three fixtures that do break are enumerated in the
+      **Appetite** table, and step 9 carries the stop-and-report threshold.
 - [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_with_concerns.py` — AUDIT:
       rows 4b/4c live here. The refactor is behavior-identical, so every case must stay green
       unmodified; a failure means step 6 changed behavior and must be reverted to the literal
@@ -941,8 +973,10 @@ below.
 8. Row 5 (`_rule_branch_exists_no_pr`) is **unchanged**. `git diff` shows no hunk touching it.
 9. T1–T18 all pass, and each new assertion has a captured RED run from before the fix. The
    T14 and T14b REDs are on the ABSENT-key case specifically.
-10. Full `tests/unit/sdlc_router_decision/` and `tests/unit/test_sdlc_router.py` are green via
-    `scripts/pytest-clean.sh`; every existing assertion that changed is enumerated in the PR body.
+10. Full `tests/unit/sdlc_router_decision/`, `tests/unit/test_sdlc_router.py` and
+    `tests/unit/test_sdlc_skill_md_parity.py` are green via `scripts/pytest-clean.sh`; every
+    existing assertion that changed is enumerated in the PR body. The step-9 audit changed no
+    more than six fixtures, or the lane stopped and reported instead.
 11. `python -m ruff check` and `python -m ruff format` clean.
 12. Every checkbox under **Documentation** is done. The `.claude/skills-global/do-sdlc/SKILL.md`
     edits are exactly **three**, all inside the Step 3.5 guard table region: the G3 ladder row
@@ -1004,12 +1038,26 @@ test file, so parallel edits would only manufacture conflicts.
    this task. Commit.
 9. **Audit the existing suites** named in **Test Impact**
    (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`,
-   `tests/unit/test_sdlc_router.py`). For each failure, decide UPDATE-the-expectation vs
-   the-change-is-wrong, and record every changed assertion for the PR body. Confirm
-   `test_sdlc_router.py::TestHeadShaStaleness` needed no edit. Commit.
-10. **Run the full router suites** — `tests/unit/sdlc_router_decision/` and
-    `tests/unit/test_sdlc_router.py` — via `scripts/pytest-clean.sh`. Never bare `pytest`,
-    never `pkill -f pytest`.
+   `tests/unit/test_sdlc_router.py`, plus `tests/unit/test_sdlc_skill_md_parity.py`). For
+   each failure, decide UPDATE-the-expectation vs the-change-is-wrong, and record every
+   changed assertion for the PR body. Confirm
+   `test_sdlc_router.py::TestHeadShaStaleness` and `test_sdlc_skill_md_parity.py` needed no
+   edit.
+
+   **Expected size, measured on baseline `aee2644c9`: three fixtures** — the three named in
+   the Appetite table. Fix each by supplying **both** `meta['latest_review_head_sha']` and a
+   matching `context['pr_head_sha']`; never by relaxing an assertion, never by asserting
+   `Blocked` where the fixture's intent was a merge.
+
+   **Stop-and-report threshold.** If the audit turns up **more than six** failing fixtures
+   across these suites, or any failure that cannot be fixed by supplying the real key pair
+   (i.e. it would require weakening an assertion or changing a fixture's intent),
+   **stop and report** — do not keep patching. Either the appetite premise moved or the
+   change is wrong, and both are decisions for the supervisor, not the builder. Report the
+   count, the file:test list, and which category each failure fell into. Commit.
+10. **Run the full router suites** — `tests/unit/sdlc_router_decision/`,
+    `tests/unit/test_sdlc_router.py` and `tests/unit/test_sdlc_skill_md_parity.py` — via
+    `scripts/pytest-clean.sh`. Never bare `pytest`, never `pkill -f pytest`.
 11. **Documentation pass**: every checkbox under **Documentation**. Edit
     `.claude/skills-global/do-sdlc/SKILL.md` in place (hardlinked — never replace-and-rename).
     Commit.
@@ -1134,9 +1182,24 @@ the last entry in `DISPATCH_RULES`.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | History & Consistency (Consistency Auditor); driver-verified | Two **Documentation** checkboxes instruct the builder to update "the same SKILL.md dispatch table's **row 10** entry" and "the **plan-stage rows** in the same SKILL.md dispatch table" (rows 1, 2, 2b, 2c, 3). **No such row-numbered dispatch table exists in `.claude/skills-global/do-sdlc/SKILL.md`** — its only table near there is the Step 3.5 *guard* table (`:243-254`, rows `T`/`G1`…`G6`), and Step 4 deliberately has no hand-authored row table. Re-introducing one is actively forbidden by `tests/unit/test_sdlc_skill_md_parity.py::test_step4_has_no_hand_authored_dispatch_table`, which fails on any line matching `^\|\s*\d+[a-z]?\s*\|` inside Step 4. Success Criterion 12 ("every checkbox under Documentation is done") is therefore unsatisfiable as written. Related: **Test Impact never lists `tests/unit/test_sdlc_skill_md_parity.py`** even though the plan edits the exact SKILL.md guard rows that test parses. | pending (BUILD carries) | Delete the two dispatch-table checkboxes; the row-level routing change needs no SKILL.md edit because SKILL.md carries no row table. Keep the three that are real and whose line refs the driver verified: G3's ladder at `:248`, G6's condition at `:254`, the "Open-PR step-asides" note at `:263` — and note that `:263`'s note is written in terms of **guards** (G1/G5/G3/G7), not rows, so reword it to add the shared `_plan_stage_stood_down` condition rather than "instead of listing rows individually". Add `tests/unit/test_sdlc_skill_md_parity.py` to **Test Impact** as AUDIT: `test_every_guard_has_skill_md_row`, `test_g6_guard_row_present_in_skill_md` and `test_escaped_pipe_in_cell_is_preserved` all parse the guard table being edited, and `test_every_dispatch_rule_has_documented_predicate` requires every `DISPATCH_RULES` predicate to keep a non-empty `__doc__` (satisfied by the `__doc__ =` reassignments at `agent/sdlc_router.py:2037-2060`, which the sweep must not disturb). Run it in step 11 and step 12. |
-| CONCERN | Risk & Robustness (Skeptic); driver-verified | **spike-1 and Data Flow name `tools/sdlc_next_skill.py` as the sole producer of `context['pr_head_sha']`; it is not the sole caller of the router.** `agent/session_runner/runner.py:1557` calls `decide_next_dispatch(stage_states, meta)` with **no `context` argument at all**, so `context` resolves to `{}` and `pr_head_sha` is unconditionally absent on that path regardless of real freshness. Post-fix, a genuinely merge-ready lane read through that path gets `Blocked(guard_id='NO_RULE')` where it previously got `Dispatch(/do-merge)`. Driver-traced: the consumer is the completion guard's `_load_ledger` → `next_skill = getattr(decision, "skill", None)`, and `next_skill` feeds only `completion_guard._reroute_message` (`:85-87`), which already falls back to "the next pipeline stage (run `sdlc-tool next-skill`)". The allow/refuse decision comes from `is_pipeline_complete`, not from this value. So the blast radius is **advisory nudge text only** — which is why this is a concern, not a blocker — but the plan's "every reachable path" / "sole producer" framing is factually incomplete. | pending (BUILD carries) | Do **not** change `agent/sdlc_router.py` for this, and do **not** add a `context` argument at `agent/session_runner/runner.py:1557` (that is a different lane's file surface and would widen the diff). Correct the claim: spike-1's Result and the **Data Flow** section should say the CLI producer is the only caller that assembles a real `context`, and name `agent/session_runner/runner.py:1557` as a second, context-less caller whose only consumer of the result is the completion guard's advisory `reroute_message`. Add a Risks row: "merge-ready nudge text degrades from `/do-merge` to the generic fallback on the context-less runner path — cosmetic, fail-open, no gate effect." |
-| CONCERN | Scope & Value (Simplifier) | **Appetite's bounding facts do not bound the largest piece of work in the plan.** Appetite lists "two new small predicates, seven predicate call sites edited, three terminal merge-site changes … and one test file extended" — but **Test Impact** separately requires AUDITing four *existing* suites (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`, `tests/unit/test_sdlc_router.py`) and calls one of them "**the largest audit in the lane**" because "row 10 is the router's default merge landing and fixtures that omit `pr_head_sha` are common". That audit is open-ended per-fixture judgement, not a bounded edit, and it is invisible in the appetite estimate — the exact shape of a Small-appetite plan that runs long and then gets narrowed under pressure. | pending (BUILD carries) | Additive, no scope change. Add the audit to Appetite's bounding facts with a measured count taken before step 9 begins: `grep -c` the `pr_head_sha`-less merge fixtures in `tests/unit/sdlc_router_decision/test_sdlc_router_decision_terminal.py` and `..._convergence.py` and state the number. Then give **Step-by-Step task 9** an explicit stop-and-report threshold — e.g. if the audit requires editing more than ~15 existing assertions, stop and report to the supervisor rather than continuing, since a fixture count that large is evidence the change is broader than the plan modelled. The disposition rule itself is already correct and must not be relaxed: supply the real `pr_head_sha` key, never weaken the assertion. |
+| CONCERN | History & Consistency (Consistency Auditor); driver-verified | Two **Documentation** checkboxes instruct the builder to update "the same SKILL.md dispatch table's **row 10** entry" and "the **plan-stage rows** in the same SKILL.md dispatch table" (rows 1, 2, 2b, 2c, 3). **No such row-numbered dispatch table exists in `.claude/skills-global/do-sdlc/SKILL.md`** — its only table near there is the Step 3.5 *guard* table (`:243-254`, rows `T`/`G1`…`G6`), and Step 4 deliberately has no hand-authored row table. Re-introducing one is actively forbidden by `tests/unit/test_sdlc_skill_md_parity.py::test_step4_has_no_hand_authored_dispatch_table`, which fails on any line matching `^\|\s*\d+[a-z]?\s*\|` inside Step 4. Success Criterion 12 ("every checkbox under Documentation is done") is therefore unsatisfiable as written. Related: **Test Impact never lists `tests/unit/test_sdlc_skill_md_parity.py`** even though the plan edits the exact SKILL.md guard rows that test parses. | **ADDRESSED (revision 2) — ACCEPT, applied as described.** Independently re-verified before acceptance: `.claude/skills-global/do-sdlc/SKILL.md` carries only the Step 3.5 guard table (`:243-254`), and `test_step4_has_no_hand_authored_dispatch_table` exists at `tests/unit/test_sdlc_skill_md_parity.py:90`. Both dispatch-table checkboxes are **deleted**; the three real targets (G3 `:248`, G6 `:254`, Open-PR step-asides `:263`) are kept, with `:263` reworded to add the shared condition in guard terms. A new explicit **do-not** checkbox forbids re-introducing a row table and points row-level wording at the `DISPATCH_RULES` `__doc__` strings (`agent/sdlc_router.py:2037-2060`). Success Criterion 12 now enumerates the three SKILL.md edits and requires the parity suite green unmodified. `tests/unit/test_sdlc_skill_md_parity.py` added to **Test Impact** as AUDIT, and to steps 9 and 10 and SC10. Appetite's "optional SKILL.md dispatch-table polish" trim item — which referred to the deleted checkboxes — is removed. | Delete the two dispatch-table checkboxes; the row-level routing change needs no SKILL.md edit because SKILL.md carries no row table. Keep the three that are real and whose line refs the driver verified: G3's ladder at `:248`, G6's condition at `:254`, the "Open-PR step-asides" note at `:263` — and note that `:263`'s note is written in terms of **guards** (G1/G5/G3/G7), not rows, so reword it to add the shared `_plan_stage_stood_down` condition rather than "instead of listing rows individually". Add `tests/unit/test_sdlc_skill_md_parity.py` to **Test Impact** as AUDIT: `test_every_guard_has_skill_md_row`, `test_g6_guard_row_present_in_skill_md` and `test_escaped_pipe_in_cell_is_preserved` all parse the guard table being edited, and `test_every_dispatch_rule_has_documented_predicate` requires every `DISPATCH_RULES` predicate to keep a non-empty `__doc__` (satisfied by the `__doc__ =` reassignments at `agent/sdlc_router.py:2037-2060`, which the sweep must not disturb). Run it in step 11 and step 12. |
+| CONCERN | Risk & Robustness (Skeptic); driver-verified | **spike-1 and Data Flow name `tools/sdlc_next_skill.py` as the sole producer of `context['pr_head_sha']`; it is not the sole caller of the router.** `agent/session_runner/runner.py:1557` calls `decide_next_dispatch(stage_states, meta)` with **no `context` argument at all**, so `context` resolves to `{}` and `pr_head_sha` is unconditionally absent on that path regardless of real freshness. Post-fix, a genuinely merge-ready lane read through that path gets `Blocked(guard_id='NO_RULE')` where it previously got `Dispatch(/do-merge)`. Driver-traced: the consumer is the completion guard's `_load_ledger` → `next_skill = getattr(decision, "skill", None)`, and `next_skill` feeds only `completion_guard._reroute_message` (`:85-87`), which already falls back to "the next pipeline stage (run `sdlc-tool next-skill`)". The allow/refuse decision comes from `is_pipeline_complete`, not from this value. So the blast radius is **advisory nudge text only** — which is why this is a concern, not a blocker — but the plan's "every reachable path" / "sole producer" framing is factually incomplete. | **ADDRESSED (revision 2) — ACCEPT, applied as described.** Independently re-verified: `agent/session_runner/runner.py:1557` is `decide_next_dispatch(stage_states, meta)` with no `context`, and `completion_guard.py` takes its allow/refuse from `is_pipeline_complete` (`:155`) while `_reroute_message` (`:85-87`) carries the generic fallback. spike-1 is re-scoped to "*gating* path", its Result now carries a **Caller survey** and a **Blast radius** paragraph naming the second caller and bounding it to advisory nudge text; **Data Flow** step 1 records the same; the "sole producer" wording in the Solution absent-key note (`:477`) and in the Risks row is corrected to "the only caller that assembles a `context`"; and a new Risks row records the cosmetic, fail-open nudge-text degradation. Per the disposition, **neither `agent/sdlc_router.py` nor `runner.py:1557` is changed in this lane** — stated explicitly in spike-1. | Do **not** change `agent/sdlc_router.py` for this, and do **not** add a `context` argument at `agent/session_runner/runner.py:1557` (that is a different lane's file surface and would widen the diff). Correct the claim: spike-1's Result and the **Data Flow** section should say the CLI producer is the only caller that assembles a real `context`, and name `agent/session_runner/runner.py:1557` as a second, context-less caller whose only consumer of the result is the completion guard's advisory `reroute_message`. Add a Risks row: "merge-ready nudge text degrades from `/do-merge` to the generic fallback on the context-less runner path — cosmetic, fail-open, no gate effect." |
+| CONCERN | Scope & Value (Simplifier) | **Appetite's bounding facts do not bound the largest piece of work in the plan.** Appetite lists "two new small predicates, seven predicate call sites edited, three terminal merge-site changes … and one test file extended" — but **Test Impact** separately requires AUDITing four *existing* suites (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`, `tests/unit/test_sdlc_router.py`) and calls one of them "**the largest audit in the lane**" because "row 10 is the router's default merge landing and fixtures that omit `pr_head_sha` are common". That audit is open-ended per-fixture judgement, not a bounded edit, and it is invisible in the appetite estimate — the exact shape of a Small-appetite plan that runs long and then gets narrowed under pressure. | **ADDRESSED (revision 2) — ACCEPT, applied additively.** The count was **measured, not estimated**: an AST sweep over all four audit targets on baseline `aee2644c9` for test functions that assert a `/do-merge` dispatch and supply no `pr_head_sha` (directly or via a context helper) returns **three** — `..._dispatch_rows.py::test_all_completed_dispatches_merge`, `test_sdlc_router.py::test_terminal_merge_ready_dispatches_merge_despite_plan_revising`, `test_sdlc_router.py::test_row10_fires_with_recorded_approved_verdict`. `..._terminal.py` needs **zero** edits (its `_ctx()` at `:79-82` and `_meta()` at `:63-76` already carry `pr_head_sha` and `latest_review_head_sha`) and `..._convergence.py` has no merge-asserting fixture, so the critique's premise that this is "the largest audit in the lane" does not survive measurement — that Test Impact sentence is corrected. Appetite gains the measured table and the note that all three fixtures also lack `latest_review_head_sha`, so the fix supplies **both** halves of the real signal. Step 9 gains an explicit **stop-and-report threshold**: more than **six** failing fixtures, or any failure not fixable by supplying the real key pair, stops the lane and reports. SC10 pins the same bound. The disposition rule is **not relaxed** anywhere: supply the real key, never weaken the assertion. Threshold set at six rather than the critique's "~15" because the measured baseline is three; ~15 would not have bounded anything. | Additive, no scope change. Add the audit to Appetite's bounding facts with a measured count taken before step 9 begins: `grep -c` the `pr_head_sha`-less merge fixtures in `tests/unit/sdlc_router_decision/test_sdlc_router_decision_terminal.py` and `..._convergence.py` and state the number. Then give **Step-by-Step task 9** an explicit stop-and-report threshold — e.g. if the audit requires editing more than ~15 existing assertions, stop and report to the supervisor rather than continuing, since a fixture count that large is evidence the change is broader than the plan modelled. The disposition rule itself is already correct and must not be relaxed: supply the real `pr_head_sha` key, never weaken the assertion. |
+
+**Revision 2 (2026-09-10): all three round-2 concerns closed in one narrow pass.** The
+supervisor's disposition on all three was ACCEPT-and-apply-as-described. Each was
+independently re-verified against `main` @ `aee2644c9` before being applied — the missing
+SKILL.md dispatch table, the context-less `runner.py:1557` call site and its bounded
+consumer chain, and the `pr_head_sha`-less fixture count (measured by AST sweep, not
+guessed). No blockers remain. Nothing was restructured, no settled scope was reopened, and
+no new scope was added: every non-negotiable survives untouched — the new
+`_review_verdict_head_is_verified_fresh` with its three terminal call sites,
+`_review_verdict_head_is_stale` and row 8f unmodified, G3 leg 3's `docs_status` clause, the
+once-expressed shared stand-down routed through rows 1/2/2b/2c/3 plus 4b/4c alongside (never
+substituted for) 4a/4b/4c's narrower `build_status` gates, row 5 untouched, the fail-closed
+`Blocked(guard_id='NO_RULE')` landing pinned by `guard_id`, ABSENT-key RED proofs for G6 and
+row 10, and the `Closes #3260` / `Closes #3249` / `Refs #2062` trailers. Dispositions:
+3 addressed, 0 deferred, 0 rejected.
 
 ## Resolved Questions
 
