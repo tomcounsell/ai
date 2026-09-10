@@ -9,7 +9,7 @@ also_closes: https://github.com/tomcounsell/ai/issues/3260
 lane_slug: sdlc-3249
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-10T02:37:07Z
+revision_applied_at: 2026-09-10T02:44:32Z
 ---
 
 # Router plan-stage stand-down sweep, and G3's merge leg verdict gate
@@ -605,10 +605,10 @@ existing helper style (`_build_in_progress_states`, `_plan_context`, `_approved_
 | T2 | row 2 | `PLAN=completed`, `CRITIQUE=pending`, open PR #999, `last_dispatched_skill=/do-build`, `REVIEW=pending` | `Dispatch(/do-pr-review, row_id='7')` |
 | T3 | row 2 | same, no PR, `BUILD=in_progress`, branch exists | `Dispatch(/do-build, row_id='5')` |
 | T4 | row 2c | `CRITIQUE=in_progress`, no verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
-| T5 | row 3 | `NEEDS REVISION` verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
+| T5 | row 3 | `NEEDS REVISION` verdict, **`context['current_plan_hash']` DIFFERENT from the verdict's `artifact_hash`** (see the G5 note below — mandatory, or row 3 is never reached), `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')`; pre-fix `Dispatch(/do-plan, row_id='3')` |
 | T5b | **row 2b** | stale critique verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` — 2b converted to the shared helper |
 | T5c | row 2b negative control | genuinely stale critique verdict, `BUILD=pending`, no PR | row 2b still fires `/do-plan-critique` — the conversion is behavior-identical |
-| T6 | rows 1/2/2b/2c/3 negative control | `BUILD=pending`, no PR | each row still fires its own skill — the sweep must not disable the rows |
+| T6 | rows 1/2/2b/2c/3 negative control | `BUILD=pending`, no PR. **The row-3 leg needs the same changed-plan-hash setup as T5**, or G5 answers instead of row 3 | each row still fires its own skill — the sweep must not disable the rows |
 | T7 | rows 4b/4c | the `pr_number` and `BUILD=completed` states each row already refuses | unchanged answers (refactor is behavior-identical) |
 | T8 | rows 4a/**4b**/4c narrowing guard | `BUILD=failed`, with-concerns verdict, no PR | all three rows still decline — proves the narrower `build_status` gate was not replaced by the broader helper. Row 4b must be asserted explicitly, not just 4a/4c |
 | T9 | G3 leg 1 | `REVIEW=completed`, `DOCS=completed`, verdict `CHANGES REQUESTED` at live head | `Dispatch(/do-patch, row_id='G3')` (leg 2) |
@@ -646,6 +646,38 @@ answer first. Follow the recon's shape: set `last_dispatched_skill=/do-plan-crit
 `pr_merge_state="DIRTY"` on the G3 probes so G6 cannot pre-empt them, and use
 `pr_merge_state="CLEAN"` only on the G6 probes.
 
+### Guard-ordering hygiene for the row-3 probes: G5 pre-empts row 3 (probed)
+
+**T5 and T6's row-3 leg are unreachable unless the plan hash is deliberately changed.** Row
+3 (`_rule_critique_needs_revision`) sits behind `guard_g5_artifact_hash_cache`, which
+short-circuits whenever the CRITIQUE verdict's `artifact_hash` equals
+`context["current_plan_hash"]` and returns the cached verdict's downstream decision. The
+existing helpers in the test file line those two values up by default:
+`_plan_context()` returns `{"current_plan_hash": _PLAN_HASH, ...}` and the state builders
+stamp the same `_PLAN_HASH` into the verdict record. So the naive T5 shape never reaches row
+3 at all — probed against both the patched and the unpatched router, **identical output on
+both sides**:
+
+```
+Dispatch(skill='/do-plan',
+         reason='G5: cached CRITIQUE verdict is NEEDS REVISION on unchanged plan hash',
+         row_id='G5')
+```
+
+A test in that shape is green before and after the sweep, cannot be proven RED, and
+therefore violates rule 1 above while appearing to pass. Give the row-3 probes a
+`current_plan_hash` that differs from the verdict's `artifact_hash` so G5 steps aside. With
+that one change the real RED/GREEN pair appears (both probed):
+
+```
+pre-fix : Dispatch(skill='/do-plan',  reason='Revise plan based on critique findings', row_id='3')
+post-fix: Dispatch(skill='/do-build', reason='Build must create the PR — resume build',  row_id='5')
+```
+
+and the row-3 negative control (`BUILD=pending`, same changed hash) correctly stays
+`Dispatch(row_id='3')` on both sides. Row 3 is the only swept row whose negative control
+needs this setup; rows 1, 2, 2b and 2c are reached without touching the hash.
+
 ## Test Impact
 
 - [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py` —
@@ -657,7 +689,7 @@ answer first. Follow the recon's shape: set `last_dispatched_skill=/do-plan-crit
       is the behavior-identity proof for that conversion. `TestG3DocsLeg` must likewise stay
       green unmodified after leg 3 gains its `docs_status` clause: its cases run with DOCS
       pending, which the clause does not touch.
-- [ ] `tests/unit/test_sdlc_router.py:1484-1488` — UPDATE (verify only): this is the direct
+- [ ] `tests/unit/test_sdlc_router.py::TestHeadShaStaleness` (currently `:1477-1500`) — UPDATE (verify only): this is the direct
       unit test of `_review_verdict_head_is_stale`. That function is deliberately unchanged,
       so these cases must stay green **unmodified**. If any of them needs editing, the
       existing predicate was touched and the change is wrong. T17 pins the same contract from
@@ -831,7 +863,7 @@ below.
    three terminal `/do-merge` dispatches: G3 leg 1 (`:518`),
    `guard_g6_terminal_merge_ready` (`:976`), and `_rule_ready_to_merge` (row 10, `:2029`).
 2. `_review_verdict_head_is_stale` is byte-identical to its pre-change form, and
-   `tests/unit/test_sdlc_router.py:1484-1488` passes **unmodified**.
+   `tests/unit/test_sdlc_router.py::TestHeadShaStaleness` passes **unmodified** — cite the class, not a line range, which has already drifted once (the absent-key case `test_inert_when_context_signal_absent` is at `:1490` on this baseline, not `:1484`).
 3. G3 leg 1 requires `REVIEW_APPROVED in review_verdict_norm` AND a verified-fresh head.
    `CHANGES REQUESTED` routes to `/do-patch`; a stale or unverifiable `APPROVED` routes to
    `/do-pr-review`; a fresh `APPROVED` with DOCS complete still routes to `/do-merge`.
@@ -921,7 +953,7 @@ test file, so parallel edits would only manufacture conflicts.
    (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`,
    `tests/unit/test_sdlc_router.py`). For each failure, decide UPDATE-the-expectation vs
    the-change-is-wrong, and record every changed assertion for the PR body. Confirm
-   `test_sdlc_router.py:1484-1488` needed no edit. Commit.
+   `test_sdlc_router.py::TestHeadShaStaleness` needed no edit. Commit.
 10. **Run the full router suites** — `tests/unit/sdlc_router_decision/` and
     `tests/unit/test_sdlc_router.py` — via `scripts/pytest-clean.sh`. Never bare `pytest`,
     never `pkill -f pytest`.
@@ -969,6 +1001,50 @@ test file, so parallel edits would only manufacture conflicts.
 - **Lint.** `python -m ruff check` and `python -m ruff format` clean.
 - **Docs.** Every **Documentation** checkbox ticked; the SKILL.md hardlink intact after the
   edit.
+
+## Probe Ledger (independent re-verification, 2026-09-10)
+
+Every routing claim this plan relies on was re-probed independently at revision time, by
+patching a **copy** of `agent/sdlc_router.py` (all three merge sites + the leg-3 DOCS gate +
+the five stand-down rows), importing it under a separate module name, and calling the real
+`decide_next_dispatch` / `guard_g3_pr_lock` against both the patched and the unpatched
+module. No claim below is an inference.
+
+This ledger exists because the round-1 design asserted a routing fact (*"G6's absent-key
+fall-through lands on row 8f"*) from a **code comment** rather than a probe — in a lane
+whose entire subject is code whose comments misdescribe its behavior. Every future edit to
+this plan's routing claims must clear the same bar.
+
+**Site enumeration** (`grep -n 'SKILL_DO_MERGE' agent/sdlc_router.py`): `:163` constant,
+`:519` G3 leg 1, `:979` G6, `:2245` row 10. Exactly **three** dispatch sites; all three route
+through `_review_verdict_head_is_verified_fresh` after this change.
+
+| Probe | State | Unpatched (pre-fix) | Patched (post-fix) |
+|---|---|---|---|
+| G3 leg 1, absent key, `DOCS=completed` | leg-1 patch only | — | `Dispatch(/do-docs, row_id='G3')` ← blocker 1 confirmed |
+| same, with leg-3 `docs_status != STATUS_COMPLETED` | | — | `Dispatch(/do-pr-review, row_id='G3')` |
+| G6 shape, absent key, `DOCS=completed`, CLEAN+CI | end to end | `Dispatch(/do-merge, row_id='G6')` | `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` |
+| same, every `DISPATCH_RULES` predicate evaluated individually | | — | **zero rows accept** — confirms no row owns the state |
+| positive control, `pr_head_sha` matches | | `/do-merge` G6 | `Dispatch(/do-merge, row_id='G6')` |
+| stale-key control | | row 8f | `Dispatch(/do-pr-review, row_id='8f')` |
+| empty-sentinel + `pr_head_sha_lookup_failed` | | row 8f | `Dispatch(/do-pr-review, row_id='8f')` |
+| T1 row 1 | | `Dispatch(/do-plan, row_id='1')` | `Dispatch(/do-build, row_id='5')` |
+| T2 row 2, open PR | | `Dispatch(/do-plan-critique, row_id='2')` | `Dispatch(/do-pr-review, row_id='7')` |
+| T3 row 2, no PR | | `Dispatch(/do-plan-critique, row_id='2')` | `Dispatch(/do-build, row_id='5')` |
+| T4 row 2c | | `Dispatch(/do-plan-critique, row_id='2c')` | `Dispatch(/do-build, row_id='5')` |
+| T5 row 3, **changed plan hash** | | `Dispatch(/do-plan, row_id='3')` | `Dispatch(/do-build, row_id='5')` |
+| T5 row 3, *unchanged* plan hash | the naive shape | `Dispatch(/do-plan, row_id='G5')` | `Dispatch(/do-plan, row_id='G5')` ← **identical, cannot go RED** |
+| T5b row 2b conversion | | `Dispatch(/do-build, row_id='5')` | `Dispatch(/do-build, row_id='5')` ← behavior-identical, as ruled |
+| T5c row 2b negative | `BUILD=pending`, stale verdict | `Dispatch(/do-plan-critique, row_id='2b')` | same |
+| T6 negatives, rows 1/2/2c | `BUILD=pending` | each fires its own row | unchanged |
+
+**Rejected alternative, also probed.** Widening row 8f to
+`not _review_verdict_head_is_verified_fresh` *does* give the absent-key state a routable
+landing (`Dispatch(/do-pr-review, row_id='8f')`) instead of `Blocked`. It is rejected because
+the same edit diverts absent-key + `DOCS=pending` lanes away from row 9 `/do-docs` to
+`/do-pr-review` — a behavior change on a second state, to buy a routable landing for a state
+production cannot reach. `Blocked` is fail-closed and *reported*; the alternative is a silent
+routing change. Row 8f stays untouched.
 
 ## Critique Results
 
