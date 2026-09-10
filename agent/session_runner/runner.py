@@ -646,6 +646,17 @@ class SessionRunner:
         role = "teammate" if (self._session_type or "").lower() == "teammate" else "pm"
         settings_path, edge_file = self._adapter.provision_hook_channel(role)
         session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        # Codex dev lane (plan #2001, Phase 3): flagged eng sessions get the
+        # Codex PM prime variant plus the session-local MCP config carrying
+        # codex_dev. Unflagged sessions get neither (both default None, so
+        # the Claude argv stays byte-identical). Teammate/top-level paths
+        # can never be flagged (creation validates eng-only).
+        dev_harness = getattr(self._agent_session, "dev_harness", None)
+        mcp_config = None
+        if role == "pm" and dev_harness == "codex":
+            from agent.codex_dev_config import codex_mcp_config_for
+
+            mcp_config = codex_mcp_config_for(self._agent_session)
         return HeadlessRoleDriver(
             role=role,
             session_id=session_id,
@@ -661,6 +672,8 @@ class SessionRunner:
             on_spawn=self._on_turn_spawn,
             on_stdout_event=self._on_stdout_event_liveness,
             on_init=self._on_init_composed,
+            dev_harness=dev_harness,
+            mcp_config=mcp_config,
         )
 
     def _on_stdout_event_liveness(self) -> None:

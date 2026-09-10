@@ -30,6 +30,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -232,6 +233,7 @@ async def _push_agent_session(
     requires_real_chrome: bool = False,
     idempotency_key: str | None = None,
     status: str = "pending",
+    dev_harness: str | None = None,
     **_kwargs,
 ) -> tuple[int, str]:
     """Create an agent session in Redis; return the queue depth and the session's id.
@@ -284,6 +286,22 @@ async def _push_agent_session(
         if not child_sessions_allowed():
             raise ChildSessionsDisabledError()
         logger.warning(BYPASS_WARNING)
+
+    # Codex dev-lane selection (plan #2001, Phase 3): creation-time-only,
+    # validated before any Redis write. Only eng sessions may be flagged;
+    # only "codex" is a valid non-None value. Fires before the
+    # stale-terminal reconcile and the create below, so the refused path
+    # has zero side effects.
+    if dev_harness is not None:
+        if dev_harness != "codex":
+            raise ValueError(
+                f"Unknown dev_harness value: {dev_harness!r}. Allowed: 'codex' or None."
+            )
+        if session_type != SessionType.ENG:
+            raise ValueError(
+                f"dev_harness='codex' requires an eng session (got {session_type!r}). "
+                "Teammate and top-level sessions remain Claude-only."
+            )
 
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
@@ -438,6 +456,9 @@ async def _push_agent_session(
         project_config=project_config or None,
         model=model or None,
         requires_real_chrome=requires_real_chrome,
+        dev_harness=dev_harness,
+        codex_turn_count=(0 if dev_harness == "codex" else None),
+        dev_lane_fence=(uuid.uuid4().hex if dev_harness == "codex" else None),
         thread_first_created_at=(thread_rollup or {}).get("thread_first_created_at"),
         thread_turn_count=(thread_rollup or {}).get("thread_turn_count", 0),
         thread_tool_call_count=(thread_rollup or {}).get("thread_tool_call_count", 0),

@@ -339,6 +339,35 @@ def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | No
         return str(e)
 
 
+def _migrate_confirm_codex_dev_lane_fields_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession Codex dev-lane fields (issue #2001) read on legacy rows.
+
+    One idempotent migration registering the five new nullable fields
+    (dev_harness, codex_thread_id, codex_version, codex_turn_count,
+    dev_lane_fence). Purely additive, no backfill. Mirrors
+    ``_migrate_confirm_run_identity_fields_readable``: a read-only probe
+    over a small sample of existing records proving Popoto's lazy-load
+    descriptor healing resolves cleanly for rows written before the fields
+    existed. Writes nothing. Returns None on success, error string on
+    failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.dev_harness  # noqa: B018 -- read-only healing probe
+            _ = session.codex_thread_id  # noqa: B018 -- read-only healing probe
+            _ = session.codex_version  # noqa: B018 -- read-only healing probe
+            _ = session.codex_turn_count  # noqa: B018 -- read-only healing probe
+            _ = session.dev_lane_fence  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_confirm_is_ledger_field_readable(project_dir: Path) -> str | None:
     """Confirm AgentSession.is_ledger (issue #2042) is readable on legacy rows.
 
@@ -1602,6 +1631,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_backfill_job_last_active_scores,
         "Repair tz-skewed Job.last_active_at sorted-set scores via field-scoped "
         "ORM re-saves (issue #2636)",
+    ),
+    "confirm_codex_dev_lane_fields_readable": (
+        _migrate_confirm_codex_dev_lane_fields_readable,
+        "Confirm AgentSession Codex dev-lane fields (issue #2001) read cleanly on legacy rows",
     ),
     "clear_orphaned_warn_state_key": (
         _migrate_clear_orphaned_warn_state_key,

@@ -2238,6 +2238,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
             resume=_resume_ctx,
         )
 
+        # Codex dev-lane preflight (plan #2001, Phase 3): flagged eng
+        # sessions validate binary/version/auth/sandbox/worktree BEFORE the
+        # top-level Claude runner starts. The top-level path still
+        # constructs Claude in every case (asserted by
+        # test_session_executor_runner_dispatch) — only flagged eng gets
+        # the Codex Dev tool, via the runner's conditional MCP config.
+        # Fail-fast: a missing provision raises with an actionable error
+        # instead of failing mid-turn inside the PM.
+        if getattr(agent_session, "dev_harness", None) == "codex":
+            from agent.codex_dev_config import preflight_codex_dev_lane
+
+            _codex_lane_error = preflight_codex_dev_lane(agent_session, str(working_dir))
+            if _codex_lane_error is not None:
+                raise RuntimeError(f"Codex dev lane preflight failed: {_codex_lane_error}")
+
         # The message the runner receives: the full-context turn input, so
         # resumed (reply-to) threads keep their conversation context. On a
         # resumed session this IS the reply/steer — the runner injects it as
