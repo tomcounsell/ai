@@ -843,13 +843,15 @@ def kill_stale_processes() -> int:
     bridge-descended caller kill its own live ancestor bridge.
     Do not "finish the sweep" by converting this call site.
 
-    The sweep is not complete elsewhere either, so do not read this comment as
-    "everything else is done": ``scripts/migrate_session_type_pm_to_eng.py``
-    and ``scripts/merge_dev_chat_into_eng.py`` still ``pgrep`` for the worker.
-    Those are one-shot migration guards ("is the worker stopped before I
-    migrate?"), where the ancestor defect fails *dangerous* rather than safe —
-    a worker-hosted caller reads a live worker as stopped. Tracked as
-    follow-ups on #3187, not fixed here (#3164 closes with this PR).
+    Every *read* probe in the repo is converted as of #3187/#3265, so the rule
+    that decides this is not "which files are left" but the failure direction:
+    ``pgrep`` stays wherever the PID feeds an unconditional kill, because there
+    hiding an ancestor is the protection. The other sites that keep it for this
+    reason are ``tools/agent_session_scheduler.py::_find_process_by_session_id``
+    (cancels a session by PID) and the xdist reapers in ``scripts/reap-xdist.sh``,
+    ``scripts/pytest-clean.sh`` and ``tests/conftest.py``. A read probe that
+    needs a PID from an ancestor-safe lookup and then signals it must gate on
+    ``tools.process_lookup.is_own_ancestor`` instead.
     """
     killed = 0
     try:

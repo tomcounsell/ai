@@ -1061,6 +1061,14 @@ def _find_process_by_session_id(session_id: str) -> int | None:
 
     Uses pgrep -f to find processes whose arguments contain the session_id.
     Returns the PID if found, None otherwise.
+
+    Deliberately stays on ``pgrep`` rather than ``tools.process_lookup``
+    (#3187): the only caller signals the PID it gets back, and the target is a
+    session process that may well host the caller. BSD ``pgrep``'s exclusion of
+    the caller's ancestors is the protection there, not the defect it is
+    everywhere else — see ``monitoring/bridge_watchdog.py::kill_stale_processes``
+    for the rule. The explicit non-self check below is not sufficient on its
+    own; it skips only this process, not the chain above it.
     """
     if not session_id:
         return None

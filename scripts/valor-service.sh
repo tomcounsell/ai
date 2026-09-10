@@ -11,6 +11,8 @@ VENV="$PROJECT_DIR/.venv"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/launchctl.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/service_pids.sh"
 
 # Source .env so SERVICE_LABEL_PREFIX (and other env vars) are available.
 # Failures are non-fatal — we fall back to defaults below.
@@ -103,7 +105,7 @@ usage() {
 }
 
 get_pid() {
-    pgrep -f "telegram_bridge.py" 2>/dev/null || true
+    service_pids_bridge || true
 }
 
 is_running() {
@@ -250,6 +252,9 @@ stop_bridge() {
         rm -f "$PID_FILE"
         return 0
     fi
+
+    service_pid_refuse_self_kill "$pid" "bridge" \
+        "launchctl kickstart -k gui/$(id -u)/$PLIST_NAME" || return 1
 
     echo "Stopping bridge (PID: $pid)..."
 
@@ -689,7 +694,7 @@ tail_logs() {
 # === Worker Management ===
 
 get_worker_pid() {
-    pgrep -fi "python -m worker" 2>/dev/null || pgrep -fi "python.*worker/__main__" 2>/dev/null || true
+    service_pids_worker || true
 }
 
 is_worker_running() {
@@ -757,6 +762,9 @@ stop_worker() {
         echo "Worker is not running"
         return 0
     fi
+
+    service_pid_refuse_self_kill "$pid" "worker" \
+        "launchctl kickstart -k gui/$(id -u)/$WORKER_PLIST_NAME" || return 1
 
     echo "Stopping worker (PID: $pid)..."
 
@@ -1047,7 +1055,7 @@ tail_worker_logs() {
 # =============================================================================
 
 get_email_pid() {
-    pgrep -f "bridge.email_bridge" 2>/dev/null || true
+    service_pids_email || true
 }
 
 is_email_running() {
@@ -1130,6 +1138,9 @@ stop_email() {
         echo "Email bridge is not running"
         return 0
     fi
+
+    service_pid_refuse_self_kill "$pid" "email bridge" \
+        "launchctl kickstart -k gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
 
     echo "Stopping email bridge (PID: $pid)..."
     kill "$pid" 2>/dev/null || true

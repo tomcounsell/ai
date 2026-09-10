@@ -263,4 +263,6 @@ echo "To check status: launchctl list | grep worker"
 echo "To stop: launchctl bootout gui/$(id -u)/$LABEL"
 echo "To run manually: python -m worker"
 echo "NOTE: VALOR_WORKER_MODE=standalone is now explicit in the plist."
-echo "      Run 'ps eww \$(pgrep -f \"python -m worker\")' after install to confirm."
+# Not pgrep (#3265): run from a worker-hosted session it returns nothing, and
+# the operator reads a healthy worker as absent.
+echo "      Run 'ps eww \$(python -m tools.process_lookup --module worker)' after install to confirm."
