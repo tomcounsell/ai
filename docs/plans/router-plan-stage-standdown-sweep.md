@@ -221,19 +221,25 @@ The change sits at one point in a three-hop chain and reads a signal produced up
    (G1–G6, G9), then `DISPATCH_RULES` in row order. The router itself makes no `gh` calls;
    it reads only what `context` carries. Three freshness readings coexist after this change:
    - `_review_verdict_head_is_stale` — *"is there positive evidence of staleness?"*, inert
-     on an absent key. Keeps its exact current contract and its four current call sites
-     (`:527` G3 leg 3, `:976` G6 → moves, `:1998` row 8f, `:2029` row 10).
+     on an absent key. Its body keeps its exact current contract. Of its four current call
+     sites it retains two: `:527` (G3 leg 3) and `:1998` (row 8f). The other two — `:976`
+     (G6) and `:2029` (row 10) — swap to the new predicate because both are terminal
+     `/do-merge` dispatches.
    - `_review_verdict_head_is_verified_fresh` (**new**) — *"is there positive evidence of
-     freshness?"*, False on an absent key. Used **only** on terminal `/do-merge` dispatch:
-     G3 leg 1 (`:518`) and G6 (`:976`).
+     freshness?"*, False on an absent key. Used **only** on terminal `/do-merge` dispatch,
+     at exactly three sites: G3 leg 1 (`:518`), G6 (`:976`) and row 10 (`:2029`).
    - `_plan_stage_stood_down` (**new, shared**) — *"has this lane left the plan stage?"*,
      True when `meta['pr_number']` is set or `BUILD in (in_progress, completed)`.
+
+   One further consumer changes without gaining a new predicate: **G3 leg 3** picks up an
+   explicit `docs_status != STATUS_COMPLETED` gate. It never checked DOCS; it only behaved
+   correctly because the unconditional leg 1 above it consumed every DOCS-complete case.
 
 3. **Downstream authorization — `tools/merge_predicate.py`.** Untouched. It keeps its
    independent verdict and freshness checks and remains the authorization gate. This change
    converges the *router* onto the predicate; it does not move authorization into the router.
 
-The stand-down flows the other way: rows 1/2/2c/3 and 4b/4c call `_plan_stage_stood_down`
+The stand-down flows the other way: rows 1/2/2b/2c/3 and 4b/4c call `_plan_stage_stood_down`
 and return False, letting evaluation fall through to row 5 (pre-PR) or rows 7–10 (post-PR).
 
 ## Why Previous Fixes Failed
@@ -247,10 +253,16 @@ layer or aimed at a symptom. What failed was **scope**, twice:
   class whose other instances were already visible. #3249 exists specifically to break that
   pattern, which is why narrowing this plan to row 2 would reproduce the failure it was
   filed against.
-- **#2062 shipped the freshness predicate and a comment describing stronger behavior than
-  the code has.** G6's `:971-975` comment claims a lookup failure "fails closed toward
-  stale" — true for the EMPTY sentinel, false for an absent key. A correct mechanism plus a
-  comment that overstates it is how the gap stayed invisible for a release cycle.
+- **#2062 shipped the freshness predicate and a comment stating a fail-closed intent
+  broader than the delivered behavior.** G6's `:971-975` comment is literally true about
+  the case it names — the EMPTY-sentinel lookup failure, which the predicate does handle
+  correctly. What it does not name, and what the code does not do, is the ABSENT-key case.
+  A correct mechanism plus a comment whose stated intent runs past it is how the gap stayed
+  invisible for a release cycle.
+- **The same fix, applied to two of three sites, would have relocated the hole.** The
+  critique's row-10 probe is the third instance of this plan's own lesson: a defect class
+  closes on a sweep of every site, proven by probe, not on the sites the design happened to
+  enumerate.
 
 The lesson carried into this plan: express the condition **once**, apply it to **every**
 site of the class in the same diff, and prove each site reachable by probe rather than by
@@ -265,27 +277,41 @@ Three architectural notes worth recording:
 
 - **Two freshness predicates is the design, not duplication.** They answer genuinely
   different questions and the difference is load-bearing at exactly one place: an absent
-  signal. Non-terminal consumers (rows 8f/10, G3 leg 3) legitimately want the inert reading;
-  terminal merge dispatch does not. Each gets its own named predicate with the absent-key
+  signal. Non-terminal consumers (row 8f, G3 leg 3) legitimately want the inert reading;
+  terminal merge dispatch (G3 leg 1, G6, row 10) does not. **The split is by dispatch
+  terminality, not by guard-vs-row**: row 10 is a dispatch-table row and still takes the
+  strict predicate because it dispatches `/do-merge`; row 8f is right next to it and keeps
+  the inert one because it dispatches `/do-pr-review`. Each gets its own named predicate with the absent-key
   behavior stated in its docstring, so neither call site has to remember an implicit rule.
 - **The stand-down becomes a named concept.** Today "this lane has left the plan stage" is
-  an idiom hand-copied into six predicates (and twice within two of them). After this change
-  it is one function with one docstring, which is what makes the *next* plan-stage row
-  correct by default.
+  an idiom hand-copied into seven predicates (and twice within two of them). After this
+  change it is one function with one docstring — with **no** remaining hand-written copy,
+  row 2b's included — which is what makes the *next* plan-stage row correct by default.
 - **Router/predicate convergence continues.** This is the fourth step of the #2062 program:
   the router's routing opinion now matches `tools/merge_predicate`'s authorization opinion on
-  both terminal merge paths. Divergence between them is the drift this closes.
+  **all three** terminal merge paths. Divergence between them is the drift this closes.
 
 ## Appetite
 
-**Small.** Roughly a day. The bounding facts: two new small predicates, six predicate call
-sites edited, two one-line guard changes, and one test file extended. Every state to be
-tested has already been probed and recorded in the two issues' Recon Summaries, so the
+**Small.** Roughly a day. The bounding facts: two new small predicates, seven predicate
+call sites edited, three terminal merge-site changes (G3 leg 1, G6, row 10) plus G3 leg 3's
+DOCS gate, and one test file extended. Every state to be tested has already been probed and
+recorded in the two issues' Recon Summaries or in this plan's revision-round probes, so the
 expensive part — establishing what the router actually does — is already paid for.
 
-If the work threatens to exceed the appetite, the thing to cut is **not** the sweep (that is
-the issue) and **not** the G6 widening (ratified). Cut the rows 4b/4c de-duplication, which
-is hygiene rather than a behavior fix.
+**There is no scope cut available in this plan.** Every item is either the issue itself or
+ratified: the rows 1/2/2b/2c/3 sweep is #3249; the 4b/4c de-duplication is ratified design
+Part C and is separately hard-required by Success Criterion 7 and tests T7/T8; the G6 and
+row-10 widenings are the #3260 fix (dropping row 10 relocates the hole rather than closing
+it). Pre-authorizing the 4b/4c cut is exactly the "narrow it to keep the diff small"
+reflex #3249 was filed against, so it is not offered here.
+
+The only genuinely discretionary work is the optional polish in the **Documentation**
+section — the SKILL.md dispatch-table wording refinements beyond the G3/G6/row-10 condition
+rows. If the appetite is threatened, that is the sole item to trim, and it must be named in
+the PR body. If ratified scope is nonetheless dropped, Success Criterion 7 and tests T7/T8
+must be struck in the same revision and the drop stated explicitly in the PR body — never
+silently.
 
 ## Prerequisites
 
