@@ -7,7 +7,7 @@ created: 2026-09-09
 tracking: https://github.com/tomcounsell/ai/issues/3253
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-10T02:19:31Z
+revision_applied_at: 2026-09-10T02:33:24Z
 ---
 
 # Worker loop dies on terminal-status conflict in the session-completion `finally`
@@ -328,7 +328,10 @@ No new configuration key. No new thread, task, or timer.
 ## Appetite
 
 **Small.** Roughly 40 lines of production change inside one `finally` block, one new test
-file, and two documentation edits. No new abstractions, no new constants, no migration.
+file, **three mechanical patch-target repairs in one existing test file**
+(`tests/unit/test_worker_persistent.py` — pre-existing defect, independently justified, see
+`## Test Impact`), and two documentation edits. No new abstractions, no new constants, no
+migration.
 
 The fix is deliberately smaller than its two predecessors: #1803 and #2088 each needed a
 bounded escalation or spin guard because the pop site **re-pops the same session every
@@ -494,8 +497,9 @@ addition to `tests/unit/test_worker_persistent.py` avoids a collision surface wi
 lanes and keeps the family's regression suite findable by name.
 
 **Test-infrastructure hazard that must not be repeated.** The existing worker-loop tests
-patch `asq.AgentSession.get` with `create=True`
-(`tests/unit/test_worker_persistent.py:386`, `:474-479`). `AgentSession.get` **does not
+patch `asq.AgentSession.get` with `create=True` at **three** sites —
+`tests/unit/test_worker_persistent.py:386`, `:477-482`, `:567-572` (see `## Test Impact`
+for the per-site enumeration). `AgentSession.get` **does not
 exist** — verified: `hasattr(AgentSession, "get")` is `False`, while
 `hasattr(AgentSession.query, "get")` is `True`. The guard at `:3001` calls
 `AgentSession.query.get(...)`, so those patches bind a phantom attribute and the guard's
@@ -526,16 +530,31 @@ whole formatted lines, so a later copy-edit of a log message does not break the 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_persistent.py::TestWorkerLoop::test_standalone_processes_nudge_without_exit`
-      — **UPDATE**: change `patch.object(asq.AgentSession, "get", ..., create=True)` (`:474-479`)
-      to `patch.object(asq.AgentSession.query, "get", ...)`. The `create=True` patch binds a
-      phantom attribute the production code never calls. The test passes today and will pass
-      after the fix either way (its `finalized_by_execute=True` path skips the completion
-      block entirely), so this is a correctness repair of the test's own premise, not a
-      response to a behaviour change. Verify it still passes after the edit.
-- [ ] `tests/unit/test_worker_persistent.py` corrupted-pop test at `:386`
-      — **UPDATE**: same phantom-target repair (`asq.AgentSession.get` → `asq.AgentSession.query.get`).
-      Same rationale; no behavioural dependency on this plan's change.
+**Phantom patch target — THREE sites, not two.** `tests/unit/test_worker_persistent.py`
+patches the non-existent attribute `asq.AgentSession.get` with `create=True` at **three**
+places. All three are UPDATE targets in T3; repairing fewer than three leaves a phantom
+mock alive while the acceptance predicate reports clean (see the corrected union predicate
+in T3 / SC10 / V8). Line spans re-verified against this checkout at revision time:
+
+- [ ] `tests/unit/test_worker_persistent.py:386` —
+      `TestPersistentMode::test_corrupted_pop_guard_resets_on_successful_pop` (single-line form)
+      — **UPDATE**: `patch.object(asq.AgentSession, "get", return_value=mock_fresh, create=True)`
+      → `patch.object(asq.AgentSession.query, "get", return_value=mock_fresh)`. Drop
+      `create=True`: `AgentSession.query.get` really exists, so keeping it would mask a
+      future rename. No behavioural dependency on this plan's change.
+- [ ] `tests/unit/test_worker_persistent.py:477-482` —
+      `TestPersistentMode::test_standalone_processes_nudge_without_exit` (multi-line form;
+      the `asq.AgentSession,` argument is on `:478`)
+      — **UPDATE**: same repair. The `create=True` patch binds a phantom attribute the
+      production code never calls. The test passes today and will pass after the fix either
+      way (its `finalized_by_execute=True` path skips the completion block entirely), so this
+      is a correctness repair of the test's own premise, not a response to a behaviour
+      change. Verify it still passes after the edit.
+- [ ] `tests/unit/test_worker_persistent.py:567-572` —
+      `TestGracefulShutdown::test_shutdown_exits_after_current_session` (multi-line form;
+      the `asq.AgentSession,` argument is on `:568`)
+      — **UPDATE**: same repair. This is the site the round-2 critique found missing from
+      the plan; it is invisible to the old single-line grep predicate.
 - [ ] `tests/unit/test_agent_session_queue.py`, `tests/unit/test_agent_session_queue_async.py`,
       `tests/unit/test_worker_cancel_requeue.py`, `tests/unit/test_crash_snapshot.py`
       — **NO CHANGE, but must be re-run**: all four drive `_worker_loop` and are the blast
@@ -555,8 +574,8 @@ whole formatted lines, so a later copy-edit of a log message does not break the 
       — **NO CHANGE, run as regression**: this file exists to pin `_active_workers` patch
       targets, and `:3054`'s pop is on the changed code's escape path. Cheap insurance.
 
-No test is DELETED and none is REPLACED. Two are UPDATEd for a patch-target defect the new
-tests must not inherit.
+No test is DELETED and none is REPLACED. **Three** patch sites in one file are UPDATEd for a
+patch-target defect the new tests must not inherit.
 
 ## Rabbit Holes
 
@@ -595,7 +614,7 @@ tests must not inherit.
 | R3 | S2's restructure changes behaviour on the read-failure path (the handler's original purpose) | Low | High — would regress the nudge fallback | TC5 pins the read-failure path explicitly: exactly one `_complete_agent_session` call plus the WARNING. Task 3's validation runs the four existing `_worker_loop` suites unchanged. |
 | R4 | `_should_complete` control-flow rewrite introduces a path where the session is never completed at all (silent `running` leak) | Low | High | Every branch either logs a skip with its reason or sets `_should_complete = True`; there is no fallthrough. TC1/TC5 assert the two ends. Reviewer check in Task 3: the block has exactly one `_complete_agent_session` call and every `elif` terminates in a log. |
 | R5 | PR #3248 merges first and shifts the line numbers this plan cites | Medium | Low | #3248 touches `agent/session_executor.py` only — zero overlap. Prerequisites carry the rebase-and-re-run instruction; the anchors used are code shapes (`elif fresh.status == "pending"`, `except Exception as guard_err`), not line numbers. |
-| R6 | Sweep (Task 5) finds additional unguarded lifecycle writes in `_worker_loop`, expanding scope mid-build | Low-Medium | Medium | If the sweep finds sites of the *same* shape, guard them in this PR (same fix, same appetite). If it finds a site needing *different* remediation, record it in the PR body and file a follow-up rather than growing this one. Decision rule stated so the builder does not have to improvise. |
+| R6 | Sweep (Task 5) finds additional unguarded lifecycle writes in `_worker_loop`, expanding scope mid-build | **Low** (downgraded from Low-Medium at round-2 critique) | Medium | The round-2 critique pre-ran T5's sweep against the checkout: the only two other lifecycle writes in `_worker_loop` are already guarded (`finalize_session` at `:2743`, covered by the exec-task `except Exception` at `:2937`; `transition_status` at `:2883`, own handler). The sweep is expected to come up clean. The decision rule stands anyway: same-shape sites get the same guard in this PR; a site needing *different* remediation is recorded in the PR body and filed as a follow-up rather than growing this one. |
 
 ## Race Conditions
 
@@ -757,8 +776,8 @@ Each criterion names the task that satisfies it and the check that proves it.
 | SC6 | The four existing `_worker_loop` suites pass unchanged (no behaviour regression from the restructure) | T3 | Verification row V3 |
 | SC7 | Every failure-path test was observed **RED** against pre-fix code before the fix landed | T1 | RED run output pasted into the PR body |
 | SC8 | No unguarded lifecycle write remains anywhere in `_worker_loop` — the class is closed, not the instance | T5 | Sweep output pasted into the PR body |
-| SC9 | Both doc surfaces reflect the widened invariant and the seventh catch-and-log call site | T4 | Verification row V5 |
-| SC10 | The phantom `AgentSession.get` patch target is repaired in the two existing tests and not inherited by the new ones | T1, T3 | `grep -rn 'AgentSession, "get"' tests/` returns no hits |
+| SC9 | Both doc surfaces reflect the widened invariant and the seventh catch-and-log call site | T4 | Verification rows V5 **and** V5b (one row per doc surface — V5 alone leaves the `session-lifecycle.md` edit unchecked) |
+| SC10 | The phantom `AgentSession.get` patch target is repaired at **all three** existing sites (`test_worker_persistent.py:386`, `:477-482`, `:567-572`) and not inherited by the new ones | T1, T3 | Union predicate, both commands returning no output: `grep -rn 'AgentSession, "get"' tests/` **and** `grep -rn 'asq\.AgentSession,$' tests/`. Observed RED pre-fix at 1 + 2 = 3 hits. No `-P` form (BSD grep false-green). |
 | SC11 | Lint and format clean; no new dependency, constant, env var, or Popoto migration | T3 | Verification rows V4, V6 |
 
 ## Team Orchestration
@@ -797,7 +816,10 @@ validates it.
 - Patch `asq.AgentSession.query.get`, **never** `asq.AgentSession.get`. Include a guard
   assertion in the module — `assert not hasattr(asq.AgentSession, "get")` and
   `assert hasattr(asq.AgentSession.query, "get")` — so the phantom-target mistake fails
-  loudly instead of silently mocking nothing.
+  loudly instead of silently mocking nothing. Note this module-level assertion catches the
+  mistake only in *this* new file; the three pre-existing sites in
+  `tests/unit/test_worker_persistent.py` are repaired in T3 and pinned by the union grep
+  predicate (SC10 / V8), not by this assertion.
 - Drive the real `_worker_loop` coroutine; patch `_pop_agent_session`,
   `_execute_agent_session`, `_complete_agent_session`, `_check_restart_flag`, and
   `save_session_snapshot` as the existing suites do. Use `caplog` at
@@ -839,9 +861,17 @@ scripts/pytest-clean.sh tests/unit/test_worker_loop_completion_conflict.py -q -k
 - **Delete** the retry at `:3028`. Verify by count: exactly one `_complete_agent_session`
   call remains in the block.
 - Add the three inline comments from the Documentation section.
-- Repair the two phantom patch targets in `tests/unit/test_worker_persistent.py`
-  (`:386`, `:474-479`): `asq.AgentSession, "get", …, create=True` →
-  `asq.AgentSession.query, "get", …`.
+- Repair **all three** phantom patch targets in `tests/unit/test_worker_persistent.py` —
+  `:386` (single-line), `:477-482` (multi-line), `:567-572` (multi-line) — enumerated
+  per-site in `## Test Impact`. The edit is identical at each:
+  `patch.object(asq.AgentSession, "get", return_value=mock_fresh, create=True)` →
+  `patch.object(asq.AgentSession.query, "get", return_value=mock_fresh)`. Drop `create=True`;
+  `AgentSession.query.get` really exists, so retaining it would mask a future rename.
+  **Three, not two** — the old plan text named only two, and the old single-line grep
+  predicate could see only one of them.
+- **Run the phantom-site predicate BEFORE the repair and confirm it is RED (3 total hits).**
+  A guard never observed failing against the known-bad state is not evidence. Both commands
+  must return 0 hits after the repair.
 
 **Validate:**
 ```bash
@@ -854,8 +884,17 @@ scripts/pytest-clean.sh tests/unit/test_worker_persistent.py \
                         tests/unit/test_active_workers_patch_targets.py -q             # no regressions
 grep -c "_complete_agent_session(session, failed=session_failed)" agent/agent_session_queue.py
 # EXPECTED: 1
-grep -rn 'AgentSession, "get"' tests/
-# EXPECTED: no output
+
+# Phantom patch target — UNION of two line-scoped greps. Neither alone is sufficient:
+# the first sees only the single-line form, the second only the multi-line form.
+grep -rn 'AgentSession, "get"' tests/     # PRE-FIX: 1 hit  (:386)   POST-FIX: no output
+grep -rn 'asq\.AgentSession,$' tests/     # PRE-FIX: 2 hits (:478, :568)  POST-FIX: no output
+# Both repaired forms read `asq.AgentSession.query, "get"` / `asq.AgentSession.query,`
+# and match neither pattern.
+#
+# DO NOT collapse these into a single `grep -P` / `grep -z` PCRE one-liner. macOS ships
+# BSD grep, which has no `-P`: the command fails with `invalid option`, and a piped
+# `grep -c` then prints 0 — a false green that hides every remaining phantom site.
 ```
 
 ### T4 — Documentation
@@ -890,6 +929,15 @@ site list).
 - **Decision rule:** a newly found site of the *same* shape gets the same guard in this PR.
   A site needing *different* remediation is recorded in the PR body and filed as a follow-up
   issue; do not grow this PR's appetite.
+- **Expected outcome: clean.** The round-2 critique ran this exact sweep command against the
+  checkout and it works as written. The two *other* lifecycle writes it surfaces inside
+  `_worker_loop` are **already guarded**: `finalize_session(fresh, "cancelled", …)`
+  (`agent/agent_session_queue.py:2743`) sits inside the exec-task `try` whose
+  `except Exception` at `:2937` catches it into `session_failed = True`, and
+  `transition_status(session, "paused", …)` (`:2883`) carries its own
+  `except Exception as _ts_err` handler. Still run the sweep and paste its output — the
+  class closes on a clean sweep, not on this pre-verification — but do not budget for
+  mid-build scope growth here.
 
 **Validate:**
 ```bash
@@ -940,10 +988,11 @@ python -m ruff format --check agent/agent_session_queue.py tests/unit/test_worke
 | V2 — worker survives and keeps draining (SC1, SC2) | `scripts/pytest-clean.sh tests/unit/test_worker_loop_completion_conflict.py -q -k "TC2 or TC3 or TC4 or TC6"` | exit code 0 |
 | V3 — no regression in existing worker-loop suites (SC6) | `scripts/pytest-clean.sh tests/unit/test_worker_persistent.py tests/unit/test_agent_session_queue.py tests/unit/test_agent_session_queue_async.py tests/unit/test_worker_cancel_requeue.py tests/unit/test_crash_snapshot.py tests/unit/test_active_workers_patch_targets.py -q` | exit code 0 |
 | V4 — lint clean | `python -m ruff check agent/agent_session_queue.py tests/unit/test_worker_loop_completion_conflict.py` | exit code 0 |
-| V5 — docs updated (SC9) | `grep -c "Worker-Loop Exception Resilience" docs/features/agent-session-queue.md` | output contains 1 |
+| V5 — queue doc updated (SC9) | `grep -c "Worker-Loop Exception Resilience" docs/features/agent-session-queue.md` | output contains 1 |
+| V5b — lifecycle doc updated (SC9) | `grep -n "agent_session_queue.py" docs/features/session-lifecycle.md \| grep -i "completion"` | >=1 hit (the worker completion `finally` added as the seventh catch-and-log caller at `docs/features/session-lifecycle.md:145-151`) |
 | V6 — format clean | `python -m ruff format --check agent/agent_session_queue.py tests/unit/test_worker_loop_completion_conflict.py` | exit code 0 |
 | V7 — the retry is deleted, not guarded (SC4) | `grep -c "_complete_agent_session(session, failed=session_failed)" agent/agent_session_queue.py` | output contains 1 |
-| V8 — phantom patch target eliminated (SC10) | `grep -rc 'AgentSession, "get"' tests/ \| grep -v ':0' \| wc -l` | output contains 0 |
+| V8 — phantom patch target eliminated, all three sites (SC10) | Both of: `grep -rn 'AgentSession, "get"' tests/` and `grep -rn 'asq\.AgentSession,$' tests/` | **both** produce no output. Pre-fix these return 1 hit (`:386`) and 2 hits (`:478`, `:568`) respectively — run them before the repair to prove the guard is RED. The union of the two line-scoped patterns is required: the first is blind to the multi-line `patch.object(` form. **Never** substitute a single `grep -P`/`-z` PCRE form — BSD grep on macOS rejects `-P`, and a piped `grep -c` then prints `0`, a false green. |
 | V9 — integration drain continuity (SC2) | `scripts/pytest-clean.sh tests/integration/test_worker_drain.py tests/integration/test_worker_wedge_pending.py -q` | exit code 0 |
 | V10 — no Popoto migration was added (SC11) | `git diff --name-only origin/main...HEAD -- scripts/update/migrations.py \| wc -l` | output contains 0 |
 
@@ -958,9 +1007,9 @@ below). The plan's own code citations were re-verified line-by-line against
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness + Scope & Value + History & Consistency + Structural Checks (4-way independent convergence; History & Consistency rated it BLOCKER, the other two CONCERN — aggregated as CONCERN because it cannot make S1/S2 wrong or unbuildable, only false-green a secondary test-hygiene criterion) | The phantom-patch-target repair is under-enumerated **and** its verification predicate is blind to the shape it certifies. `tests/unit/test_worker_persistent.py` contains **three** phantom `patch.object(asq.AgentSession, "get", …, create=True)` sites, not two: `:386` (single-line), `:477-482` (multi-line — the plan mis-cites this as `:474-479`), and `:568-573` (multi-line — **not named anywhere in the plan**). Separately, the grep used by T3, SC10 and V8 (`AgentSession, "get"`) is line-scoped and matches ONLY `:386`; it structurally cannot see the two multi-line sites. So after repairing `:386` alone, V8 reports clean while two phantom patches survive — reproducing, in the verification layer, exactly the "silently tests nothing" failure the plan's own Failure Path Test Strategy warns against. | pending | Two-part, both mechanical. (1) **Enumeration:** add `tests/unit/test_worker_persistent.py:568-573` as a third UPDATE bullet in `## Test Impact` and a third repair target in T3, and correct the second site's citation from `:474-479` to `:477-482`. The edit is identical at all three: `patch.object(asq.AgentSession, "get", return_value=mock_fresh, create=True)` → `patch.object(asq.AgentSession.query, "get", return_value=mock_fresh)` (drop `create=True`; `AgentSession.query.get` really exists, so `create=True` would mask a future rename). (2) **Predicate:** replace the V8/SC10/T3 command with the **union of two line-scoped greps**, asserting both return empty. Run against this checkout to confirm the guard is RED before the repair: `grep -rn 'AgentSession, "get"' tests/` returns **1** hit (`:386`) and `grep -rn 'asq\.AgentSession,$' tests/` returns **2** hits (`:478`, `:568`) — 3 phantom sites total, matching the enumeration above. After all three repairs both commands return 0, because the repaired lines read `asq.AgentSession.query, "get"` / `asq.AgentSession.query,` and match neither pattern. **Do not use a single `-P`/`-z` PCRE one-liner** — macOS ships BSD grep, which has no `-P`, so that form fails with `invalid option` and `grep -c` then reports `0`, i.e. a false green. Do not ship V8 in its current single-line-only form. |
-| CONCERN | Scope & Value | SC9 claims "**Both** doc surfaces reflect the widened invariant and the seventh catch-and-log call site" but cites only V5 as proof, and V5 greps `docs/features/agent-session-queue.md` alone. The `docs/features/session-lifecycle.md` edit has no row in the global `## Verification` table — the only check for it lives inside T4's own Validate block. A build that lands the first doc edit and drops the second shows a green V5 and an apparently-satisfied SC9. | pending | Promote T4's existing second validate line into the Verification table verbatim as a new row **V5b**: `grep -n "agent_session_queue.py" docs/features/session-lifecycle.md \| grep -i "completion"` , expected `>=1 hit`; then change SC9's Proof cell from `V5` to `V5, V5b`. No new check needs inventing — T4 already runs the right command, it just is not part of the acceptance surface the reviewer reads. The target list to append to is `docs/features/session-lifecycle.md:145-151`, the six-caller catch-and-log audit; the worker completion `finally` is the seventh. |
-| NIT | Scope & Value | T3 bundles the S2 production restructure with the pre-existing, independently-justified phantom-mock repair in `tests/unit/test_worker_persistent.py`, and the `## Appetite` inventory ("one `finally` block … one new test file, and two documentation edits") never itemizes that third file. The bundling is well justified elsewhere in the plan; only the appetite accounting omits it. | pending | — |
+| CONCERN | Risk & Robustness + Scope & Value + History & Consistency + Structural Checks (4-way independent convergence; History & Consistency rated it BLOCKER, the other two CONCERN — aggregated as CONCERN because it cannot make S1/S2 wrong or unbuildable, only false-green a secondary test-hygiene criterion) | The phantom-patch-target repair is under-enumerated **and** its verification predicate is blind to the shape it certifies. `tests/unit/test_worker_persistent.py` contains **three** phantom `patch.object(asq.AgentSession, "get", …, create=True)` sites, not two: `:386` (single-line), `:477-482` (multi-line — the plan mis-cites this as `:474-479`), and `:568-573` (multi-line — **not named anywhere in the plan**). Separately, the grep used by T3, SC10 and V8 (`AgentSession, "get"`) is line-scoped and matches ONLY `:386`; it structurally cannot see the two multi-line sites. So after repairing `:386` alone, V8 reports clean while two phantom patches survive — reproducing, in the verification layer, exactly the "silently tests nothing" failure the plan's own Failure Path Test Strategy warns against. | **Addressed — concern-closing revision 2026-09-10.** All three sites re-verified against this checkout at revision time and enumerated per-site in `## Test Impact` (`:386`, `:477-482`, `:567-572` — the third site's span is `:567-572`, one line earlier than the critique's `:568-573`; the grep-visible `asq.AgentSession,` argument lines are `:478` and `:568`). Propagated to the `## Failure Path Test Strategy` hazard note, T1's guard-assertion caveat, T3's repair bullet, SC10, and V8. The union predicate replaces the single-line-only form everywhere, with the RED-before-repair requirement (1 + 2 = 3 hits) and the explicit BSD-grep `-P` warning carried in T3, SC10 and V8. | Two-part, both mechanical. (1) **Enumeration:** add `tests/unit/test_worker_persistent.py:568-573` as a third UPDATE bullet in `## Test Impact` and a third repair target in T3, and correct the second site's citation from `:474-479` to `:477-482`. The edit is identical at all three: `patch.object(asq.AgentSession, "get", return_value=mock_fresh, create=True)` → `patch.object(asq.AgentSession.query, "get", return_value=mock_fresh)` (drop `create=True`; `AgentSession.query.get` really exists, so `create=True` would mask a future rename). (2) **Predicate:** replace the V8/SC10/T3 command with the **union of two line-scoped greps**, asserting both return empty. Run against this checkout to confirm the guard is RED before the repair: `grep -rn 'AgentSession, "get"' tests/` returns **1** hit (`:386`) and `grep -rn 'asq\.AgentSession,$' tests/` returns **2** hits (`:478`, `:568`) — 3 phantom sites total, matching the enumeration above. After all three repairs both commands return 0, because the repaired lines read `asq.AgentSession.query, "get"` / `asq.AgentSession.query,` and match neither pattern. **Do not use a single `-P`/`-z` PCRE one-liner** — macOS ships BSD grep, which has no `-P`, so that form fails with `invalid option` and `grep -c` then reports `0`, i.e. a false green. Do not ship V8 in its current single-line-only form. |
+| CONCERN | Scope & Value | SC9 claims "**Both** doc surfaces reflect the widened invariant and the seventh catch-and-log call site" but cites only V5 as proof, and V5 greps `docs/features/agent-session-queue.md` alone. The `docs/features/session-lifecycle.md` edit has no row in the global `## Verification` table — the only check for it lives inside T4's own Validate block. A build that lands the first doc edit and drops the second shows a green V5 and an apparently-satisfied SC9. | **Addressed — concern-closing revision 2026-09-10.** T4's second validate line is promoted verbatim into the `## Verification` table as row **V5b** (`grep -n "agent_session_queue.py" docs/features/session-lifecycle.md \| grep -i "completion"`, expected `>=1 hit`), V5 is retitled "queue doc updated" to make the split explicit, and SC9's Proof cell now reads "V5 **and** V5b (one row per doc surface)". | Promote T4's existing second validate line into the Verification table verbatim as a new row **V5b**: `grep -n "agent_session_queue.py" docs/features/session-lifecycle.md \| grep -i "completion"` , expected `>=1 hit`; then change SC9's Proof cell from `V5` to `V5, V5b`. No new check needs inventing — T4 already runs the right command, it just is not part of the acceptance surface the reviewer reads. The target list to append to is `docs/features/session-lifecycle.md:145-151`, the six-caller catch-and-log audit; the worker completion `finally` is the seventh. |
+| NIT | Scope & Value | T3 bundles the S2 production restructure with the pre-existing, independently-justified phantom-mock repair in `tests/unit/test_worker_persistent.py`, and the `## Appetite` inventory ("one `finally` block … one new test file, and two documentation edits") never itemizes that third file. The bundling is well justified elsewhere in the plan; only the appetite accounting omits it. | **Addressed — concern-closing revision 2026-09-10.** `## Appetite` now itemizes "three mechanical patch-target repairs in one existing test file (`tests/unit/test_worker_persistent.py` — pre-existing defect, independently justified)". The bundling into T3 is retained deliberately: the repair and the new tests must not diverge on the patch target, so they land together. | — |
 
 **Also verified during this pass, and recorded so the builder does not re-investigate:** the
 two *other* lifecycle writes inside `_worker_loop` that T5's sweep will surface are **already
