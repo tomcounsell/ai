@@ -31,8 +31,14 @@ The final section covers the one-shot migration guards in
 ``scripts/migrate_session_type_pm_to_eng.py`` and
 ``scripts/merge_dev_chat_into_eng.py`` (#3187), whose ``pgrep`` probes failed in
 the dangerous direction: a live worker read as stopped and the migration
-proceeded. Their worker precondition is exercised against a decoy subprocess
-this module spawns itself, so it runs on every machine.
+proceeded. Two topologies are covered, and the distinction matters:
+
+* a decoy spawned as a **child**, which pins launch-shape and liveness-recheck
+  coverage and runs on every machine — but which BSD ``pgrep`` would also have
+  found, so it does not exercise the defect;
+* a decoy the guard runs as a **descendant** of, which is where the defect lives
+  and is the only shape that reproduces it. macOS-only, since the ancestor
+  exclusion being closed is a BSD ``pgrep`` behavior.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -60,6 +67,10 @@ FRAMEWORK_PYTHON = (
 BRIDGE_SCRIPT = "/Users/valorengels/src/ai/bridge/telegram_bridge.py"
 BRIDGE_SUFFIX = "bridge/telegram_bridge.py"
 WORKER_SUFFIX = "worker/__main__.py"
+
+# This checkout, pinned onto the probe subprocess's sys.path so the guard under
+# test is the worktree's copy rather than whatever the ambient PATH resolves.
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
 class _FakeCompleted:
@@ -855,3 +866,64 @@ def test_migration_email_guard_exits_on_a_live_email_bridge_pid(module_name, mon
         guard_module._check_email_bridge_not_running()
 
     assert exit_info.value.code == 1
+
+
+# The decoy re-execs the guard in a CHILD of itself, which is the topology the
+# defect needs: `$1` is the path of the script that actually calls the guard.
+_MIGRATION_DECOY = """
+import subprocess, sys
+sys.exit(subprocess.run([sys.executable, sys.argv[1]]).returncode)
+"""
+
+# Runs as a grandchild of the worker-shaped decoy — the migration script's real
+# position when it is launched from inside a worker-hosted agent session.
+_MIGRATION_GUARD_PROBE = """
+import sys
+sys.path.insert(0, {repo!r})
+import importlib
+
+guard = importlib.import_module({module!r})
+# Neutralise the heartbeat-file signal so the process-table signal is the only
+# thing that can trip the guard.
+guard.WORKER_HEARTBEAT_THRESHOLD = 0
+try:
+    guard._check_worker_not_running()
+except SystemExit as exc:
+    print("GUARD_TRIPPED", exc.code)
+else:
+    print("GUARD_PASSED")
+"""
+
+
+@pytest.mark.macos_only
+@pytest.mark.parametrize("module_name", MIGRATION_GUARD_MODULES)
+def test_migration_worker_guard_trips_when_run_inside_the_live_worker(module_name, tmp_path):
+    """The actual #3187 topology: the guard runs as a DESCENDANT of the worker.
+
+    The other worker-guard test above spawns its decoy as a *child*, which BSD
+    ``pgrep`` would have found — so it pins launch-shape coverage, not the
+    ancestor defect. This one puts the guard where the defect lives: a migration
+    launched from inside a worker-hosted agent session, where ``pgrep -f`` hid
+    the very worker whose absence the guard is asserting, let the precondition
+    pass, and mutated session rows underneath a running worker.
+
+    macOS-only: the ancestor exclusion being closed here is a BSD ``pgrep``
+    behavior, and the premise does not hold on Linux/procps.
+    """
+    decoy = tmp_path / "worker" / "__main__.py"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text(_MIGRATION_DECOY)
+    probe = tmp_path / "probe.py"
+    probe.write_text(_MIGRATION_GUARD_PROBE.format(repo=str(PROJECT_ROOT), module=module_name))
+
+    result = subprocess.run(
+        [sys.executable, str(decoy), str(probe)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert "GUARD_TRIPPED 1" in result.stdout, (
+        "the guard let the migration proceed while its own host worker was live "
+        f"(stdout={result.stdout!r} stderr={result.stderr[-2000:]!r})"
+    )
