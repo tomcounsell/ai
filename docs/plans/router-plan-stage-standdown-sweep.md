@@ -335,12 +335,13 @@ row-10 widenings are the #3260 fix (dropping row 10 relocates the hole rather th
 it). Pre-authorizing the 4b/4c cut is exactly the "narrow it to keep the diff small"
 reflex #3249 was filed against, so it is not offered here.
 
-The only genuinely discretionary work is the optional polish in the **Documentation**
-section — the SKILL.md dispatch-table wording refinements beyond the G3/G6/row-10 condition
-rows. If the appetite is threatened, that is the sole item to trim, and it must be named in
-the PR body. If ratified scope is nonetheless dropped, Success Criterion 7 and tests T7/T8
-must be struck in the same revision and the drop stated explicitly in the PR body — never
-silently.
+**There is no discretionary trim available either.** The Documentation section is down to
+three SKILL.md edits (all in the Step 3.5 guard table region), one feature-doc update, and
+one test-module docstring — each of which describes behavior this diff actually changes.
+The earlier "optional SKILL.md dispatch-table polish" is gone: no such table exists and
+adding one is forbidden (see **Documentation**). If ratified scope is nonetheless dropped,
+Success Criterion 7 and tests T7/T8 must be struck in the same revision and the drop stated
+explicitly in the PR body — never silently.
 
 ## Prerequisites
 
@@ -741,6 +742,17 @@ needs this setup; rows 1, 2, 2b and 2c are reached without touching the hash.
       unmodified; a failure means step 6 changed behavior and must be reverted to the literal
       duplicated checks.
 
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — AUDIT (must stay green **unmodified**).
+      It parses the very guard rows this lane edits: `test_guard_row_ids_in_python` and
+      `test_every_guard_has_skill_md_row` cross-check the Step 3.5 table (`:243-254`) against
+      the Python `GUARDS` list, so a malformed edit to the G3 (`:248`) or G6 (`:254`) row
+      breaks it. `test_step4_has_no_hand_authored_dispatch_table` forbids re-introducing a
+      row-numbered dispatch table (the reason two Documentation checkboxes were struck).
+      `test_every_dispatch_rule_has_documented_predicate` requires every `DISPATCH_RULES`
+      predicate to keep a non-empty `__doc__` — the `__doc__ =` reassignments at
+      `agent/sdlc_router.py:2037-2060` — so rewriting rows 1/2/2b/2c/3/4b/4c must not drop or
+      blank any of them. Any red here means the edit was wrong, never that the test is stale.
+
 No expected-failure markers exist for these defects — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
 tests/unit/sdlc_router_decision/` returns nothing, so there are no xfails (decorator or
 runtime) to convert.
@@ -872,18 +884,23 @@ below.
 - [ ] Update `.claude/skills-global/do-sdlc/SKILL.md:254` — G6's condition row: add "AND the
       REVIEW verdict's head is verified fresh against `context['pr_head_sha']`".
       Edit in place; do not replace-and-rename (it is hardlinked to `~/.claude/skills/`).
-- [ ] Update the same SKILL.md dispatch table's **row 10** entry with the same
-      verified-fresh condition, and leave row 8f's entry unchanged.
-- [ ] Update the plan-stage rows in the same SKILL.md dispatch table so rows 1, 2, 2b, 2c and
-      3 all record the shared plan-stage stand-down.
 - [ ] Update the "Open-PR step-asides" note (`.claude/skills-global/do-sdlc/SKILL.md:263`) to
       name the shared `_plan_stage_stood_down` condition instead of listing rows individually.
+      This note is written in terms of guards, not numbered rows, so it needs no table.
+- [ ] **Do NOT add row-level SKILL.md entries for rows 1/2/2b/2c/3/8f/10.** There is no
+      row-numbered dispatch table in `.claude/skills-global/do-sdlc/SKILL.md` — the only
+      table there is the **Step 3.5 GUARD table** (`:243-254`), and Step 4 deliberately
+      delegates to `sdlc-tool next-skill` instead of restating the rows (#1216).
+      Re-introducing one is actively forbidden by
+      `tests/unit/test_sdlc_skill_md_parity.py::test_step4_has_no_hand_authored_dispatch_table`.
+      The row-level contract lives in the `DISPATCH_RULES` predicate `__doc__` strings
+      (`agent/sdlc_router.py:2037-2060`), which is where any row wording change belongs.
 - [ ] Update the module docstring of
       `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`,
       which currently says row 2's missing step-aside "is tracked as #3249" — describe the
       new status quo, no historical artifact.
 - [ ] No new feature doc and no `docs/features/README.md` entry: this modifies behavior
-      already documented by `gh-stale-state-verdict-gate.md` and the do-sdlc dispatch tables
+      already documented by `gh-stale-state-verdict-gate.md` and the do-sdlc **guard table**
       rather than adding a capability.
 - [ ] No `docs/infra/` doc: no new dependency, service, external API call, quota, or
       deployment change.
@@ -927,7 +944,11 @@ below.
 10. Full `tests/unit/sdlc_router_decision/` and `tests/unit/test_sdlc_router.py` are green via
     `scripts/pytest-clean.sh`; every existing assertion that changed is enumerated in the PR body.
 11. `python -m ruff check` and `python -m ruff format` clean.
-12. Every checkbox under **Documentation** is done.
+12. Every checkbox under **Documentation** is done. The `.claude/skills-global/do-sdlc/SKILL.md`
+    edits are exactly **three**, all inside the Step 3.5 guard table region: the G3 ladder row
+    (`:248`), the G6 condition row (`:254`), and the "Open-PR step-asides" note (`:263`). No
+    row-numbered dispatch table is added — `tests/unit/test_sdlc_skill_md_parity.py` stays green
+    unmodified, including `test_step4_has_no_hand_authored_dispatch_table`.
 13. PR body names the G6 **and row-10** widenings as deliberate; cites
     `agent/sdlc_router.py:971-975` as evidence of G6's fail-closed *intent* while stating
     plainly that the ABSENT-key case is the newly closed gap the comment never covered; and
