@@ -67,6 +67,45 @@ _STRIPPED_HARNESS_ENV_KEYS = (
 _HARNESS_TLS_STREAK_TTL_S = int(os.environ.get("HARNESS_TLS_STREAK_TTL_S", "300"))
 
 
+def _merge_mcp_config(harness_cmd: list[str], mcp_config: dict | None) -> None:
+    """Splice a per-session MCP config into ``harness_cmd`` in place.
+
+    When ``mcp_config`` is None this is a no-op (unflagged turns stay
+    byte-identical). Otherwise the ``mcpServers`` mapping is merged into an
+    existing belt-resolved ``--mcp-config=`` entry when one is present
+    (explicit servers win per name) or appended as a new
+    ``--mcp-config=<json> --strict-mcp-config`` pair. Merging — never a
+    second ``--mcp-config`` flag — keeps exactly one config source
+    authoritative per turn.
+    """
+    if not mcp_config:
+        return
+    extra = mcp_config.get("mcpServers", mcp_config)
+    if not isinstance(extra, dict):
+        logger.warning("[harness] ignoring malformed mcp_config (no mcpServers mapping)")
+        return
+    for idx, part in enumerate(harness_cmd):
+        if part.startswith("--mcp-config="):
+            try:
+                current = json.loads(part[len("--mcp-config="):])
+            except (json.JSONDecodeError, ValueError):
+                current = {}
+            servers = current.get("mcpServers", {}) if isinstance(current, dict) else {}
+            if not isinstance(servers, dict):
+                servers = {}
+            servers.update(extra)
+            harness_cmd[idx] = "--mcp-config=" + json.dumps(
+                {"mcpServers": servers}, sort_keys=True, separators=(",", ":")
+            )
+            return
+    harness_cmd.append(
+        "--mcp-config="
+        + json.dumps({"mcpServers": extra}, sort_keys=True, separators=(",", ":"))
+    )
+    if "--strict-mcp-config" not in harness_cmd:
+        harness_cmd.append("--strict-mcp-config")
+
+
 def stripped_harness_env(base: dict) -> dict:
     """Return a copy of ``base`` with all three ANTHROPIC_* auth vars popped.
 
@@ -246,6 +285,7 @@ async def get_response_via_harness(
     role: str | None = None,
     start_new_session: bool = False,
     json_schema: dict | None = None,
+    mcp_config: dict | None = None,
     worker_label: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
@@ -425,6 +465,11 @@ async def get_response_via_harness(
     # structured shape.
     if json_schema:
         harness_cmd.extend(["--json-schema", json.dumps(json_schema)])
+
+    # Per-session MCP config (plan #2001, Phase 3): session-local tool
+    # surface for flagged turns only. Merges with a belt-resolved config
+    # when both are present; None leaves the argv byte-identical.
+    _merge_mcp_config(harness_cmd, mcp_config)
 
     # System prompt injection (issue #1148). Use --append-system-prompt
     # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
@@ -1798,6 +1843,7 @@ class ClaudeHarnessAdapter:
             role=request.role,
             start_new_session=request.start_new_session,
             json_schema=request.json_schema,
+            mcp_config=request.mcp_config,
             on_sdk_started=_on_sdk_started,
             on_sdk_finished=_on_sdk_finished,
             on_stdout_event=_on_stdout_event,
