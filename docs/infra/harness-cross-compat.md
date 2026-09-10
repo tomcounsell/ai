@@ -8,9 +8,11 @@
   Claude is the only concrete implementation on current main.
 - Eng-session developer work runs as a resumable Claude subagent inside the
   top-level PM turn. Its continuation id and cwd are persisted on AgentSession.
-- Codex CLI installation and authentication are currently machine-local and are
-  not managed by `/update`. The primary development machine has
-  `codex-cli 0.144.3` and a saved ChatGPT login.
+- Codex CLI installation and authentication are managed by the opt-in
+  provisioner (`scripts/update/codex_cli.py`, Step 3.95) on machines that set
+  `CODEX__INSTALL_ENABLED=1`; everywhere else the lane preflights fail-closed.
+  The floor is `0.144.3` (provisioned machine verified at `0.154.0` with a
+  saved ChatGPT login).
 
 ## New Requirements
 

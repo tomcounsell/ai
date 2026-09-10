@@ -497,6 +497,7 @@ All open questions resolved; incorporated throughout the plan and into the phase
 
 1. **Harness selection policy:** manual only for now. The eventual policy remains a deliberately open question, carried in #2001 — not resolved by this plan.
 2. **Session types:** codex applies ONLY to dev eng subsessions. Every top-level session connected to bridge messaging (PM, teammate) is claude-only. Phase 3 reframed from whole-session harness swap to PM-drives-external-codex-dev; #2001 supersedes any residual whole-session wording here.
+3. **Reconciliation (2026-09-11, #2001 shipped):** the built lane matches this framing exactly — `CodexHarnessAdapter` is unreachable from `HeadlessRoleDriver`, selection is manual at create and immutable, and automatic selection remains an explicitly unresolved owner policy. No residual whole-session wording above required correction beyond the standing supersession note.
 3. **Codex auth:** subscription plan (`~/.codex/auth.json`) with `CODEX_API_KEY` as backup.
 4. **Prefix-regex fallback:** stays at Phase 2 landing; Phase 3's acceptance criteria include filing a follow-up issue to evaluate its removal one week after schema routing lands (telemetry-driven).
 5. **#1855 disposition:** not pre-decided — Phase 1's plan step does further research and decides.

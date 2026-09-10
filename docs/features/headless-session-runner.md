@@ -562,7 +562,7 @@ prior substrate was retired outright rather than patched again.
 |------|---------|
 | `agent/session_runner/runner.py` | Turn loop, steer-preempt watcher, resume-scalar timing |
 | `agent/session_runner/role_driver.py` | Drives one turn through `HarnessAdapter`, prime vs. resume, turn-end reconciliation |
-| `agent/session_runner/harness/{base,claude,events}.py` | `HarnessAdapter` protocol, `TurnRequest`/`TurnResult`/`TurnEvent`, the `claude -p` adapter — see [HarnessAdapter Seam](harness-adapter.md) |
+| `agent/session_runner/harness/{base,claude,codex,events}.py` | `HarnessAdapter` protocol, `TurnRequest`/`TurnResult`/`TurnEvent`, the `claude -p` adapter plus the Codex dev-lane adapter — see [HarnessAdapter Seam](harness-adapter.md) and [Codex Exec Dev Lane](codex-exec-dev-lane.md) |
 | `agent/session_runner/belt_resolver.py` | Turn-start persona toolbelt resolution, enforce-state stamp, `[missing-capability]` escalation forwarding |
 | `agent/session_runner/router.py` | `classify_pm_prefix`, `ExitReason` StrEnum, `TurnFailure`, derived exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
@@ -571,7 +571,7 @@ prior substrate was retired outright rather than patched again.
 | `.claude/hooks/pre_tool_use.py` | `_enforce_foreground_subagents` — foreground-only subagent PreToolUse guard for eng sessions (#2420 Layer 1) |
 | `.claude/agents/dev.md` | The `dev` subagent definition |
 | `.claude/commands/roles/` | Role prime commands (`/roles:prime-{pm,dev,teammate}-role`) |
-| `models/agent_session.py` | `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version` fields |
+| `models/agent_session.py` | `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version` fields, plus the nullable Codex dev-lane fields (`dev_harness`, `codex_thread_id`, `codex_version`, `codex_turn_count`, `dev_lane_fence`) |
 
 ## See Also
 
@@ -582,4 +582,5 @@ prior substrate was retired outright rather than patched again.
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes
 - [Agent Teams Headless Policy](agent-teams-headless-policy.md) — why every headless spawn disables Claude Code agent teams (in-process teammates don't survive the per-turn `--resume`), and the `--settings` override that enforces it
 - [Granite OAuth Token Prevention](../infra/granite-oauth-token.md) — the auth credential the runner injects
+- [Codex Exec Dev Lane](codex-exec-dev-lane.md) — the opt-in Codex executor for dev work inside flagged eng sessions: session-scoped MCP tool, write-or-kill persistence, lease-serialized turns
 - [Claude Child Keychain/TLS Diagnostics](claude-child-keychain-tls-diagnostics.md) — `HarnessExitClass` early-exit classifier and the per-class Sentry bucket split at BRANCH C
