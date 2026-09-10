@@ -175,36 +175,43 @@ class TestTC2TerminalWriteConflictSurvives:
 
 
 class TestTC3ReadWriteRowDivergence:
-    """TC3 -- the redis_key read and the session_id write resolve DIFFERENT rows.
+    """TC3 -- pins the intended TC2/TC3 distinction: a different-row conflict.
 
-    The guard reads the authoritative row by `redis_key`; `_complete_agent_session`
-    re-resolves by `session_id` for its CAS. Those two lookups can land on
-    different rows, so a guard read that sees a live row does not prove the
-    write targets that same row. S1's terminal-skip is keyed on the row the
-    guard read, so it structurally cannot close this window -- only S2's typed
-    catch does.
+    Scope, stated precisely because an earlier version of this docstring
+    overstated it: this test does NOT exercise a `_worker_loop` code path
+    distinct from TC2. `_complete_agent_session` is mocked, and the loop's
+    handler never reads `conflict_err.session_id` (it logs the exception
+    whole) nor `fresh.session_id`, so both tests drive identical control flow.
+    Real read/write row divergence lives inside the CAS re-read of the live
+    `_complete_agent_session`, which this suite deliberately does not drive
+    (plan `## No-Gos` excludes touching `session_completion.py`).
 
-    This is what separates TC3 from TC2: there the conflict is on the same row
-    the guard just read, so S1 merely lost a race it could in principle have
-    won. Here S1 could never have fired at all.
+    What this test DOES pin is the fixture-level semantic distinction the two
+    cases are meant to represent -- TC2 a same-row conflict, TC3 a
+    different-row one -- and it fails loudly rather than silently collapsing
+    back into a duplicate of TC2 if either identity is edited away. The
+    worker-survives-any-`StatusConflictError` guarantee itself is established
+    by TC2; this case guards the distinction, not a second code path.
     """
 
     @pytest.mark.asyncio
     async def test_divergent_row_resolution_survives(self, caplog):
         chat_id = "tc3_row_divergence"
-        # The row the guard's redis_key read resolves: live, so S1's skip
-        # cannot fire and control reaches the completion write.
+        # Stands for the row the guard's redis_key read resolves: live, so
+        # S1's skip cannot fire and control reaches the completion write.
         guard_row = _fresh_row("running", session_id="row-resolved-by-redis-key")
-        # The row the write's CAS re-read resolves by session_id: a DIFFERENT
-        # row, already terminal.
+        # Stands for the row the write's CAS re-read would resolve by
+        # session_id: a DIFFERENT row, already terminal. Fixture identity
+        # only -- the loop never inspects it (see the class docstring).
         conflict = StatusConflictError(
             "row-resolved-by-session-id",
             "failed",
             "completed",
             reason="divergent row",
         )
-        # Pin the divergence itself. Without this the test silently degrades
-        # into a second copy of TC2 if either identity is ever edited.
+        # Pin the TC2/TC3 distinction. This is a guard on the fixture, not
+        # an observation of the code under test: without it, editing either
+        # identity would silently turn this into a second copy of TC2.
         assert conflict.session_id != guard_row.session_id, (
             "TC3 must raise the conflict on a DIFFERENT row than the guard read "
             "resolved -- a same-row conflict is TC2's case, not this one."
@@ -221,7 +228,7 @@ class TestTC3ReadWriteRowDivergence:
         assert chat_id not in _active_workers
         assert complete_mock.await_count == 1
         # S1 demonstrably did NOT skip -- the write was reached, which is the
-        # precondition for this window existing at all.
+        # precondition for a different-row conflict arising at all.
         assert not any("already terminal" in r.message for r in caplog.records)
         assert any("lost to a concurrent terminal writer" in r.message for r in caplog.records)
 
