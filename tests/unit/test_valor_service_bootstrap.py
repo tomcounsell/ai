@@ -3,8 +3,8 @@
 Runs the REAL script inside a sandboxed fake project: a tmp project dir carrying the
 real ``valor-service.sh`` + ``scripts/lib/launchctl.sh``, a stub ``launchctl`` on PATH
 that mimics the errno-5 EIO race with a configurable ``kickstart -k`` recovery, a stub
-``pgrep`` that reports a process found only for worker-pattern queries, and an
-overridden ``$HOME``. No real launchd services are touched.
+``scripts/lib/service_pids.sh`` that reports a process found only for worker-pattern
+queries, and an overridden ``$HOME``. No real launchd services are touched.
 
 Covers, for each of the three bare-bootstrap call sites hardened by #2013
 (``install_bridge_components`` L548, ``bootstrap_plist_idempotent`` L392 — hit once
@@ -26,7 +26,7 @@ one run (bridge install L548 + ``bootstrap_plist_idempotent`` L392 for both the
 update-cron and watchdog labels — bridge role defaults to true when no
 ``projects.json`` is present, so the sandbox never needs to fabricate one). Its
 trailing ``status_bridge`` call independently returns non-zero in this sandbox (no real
-bridge process is ever spawned — see the pgrep stub below) which aborts the script
+bridge process is ever spawned — see the service_pids stub below) which aborts the script
 under ``set -e`` AFTER all three bootstrap call sites have already run. That is an
 unrelated environmental artifact of the sandbox, not a bootstrap failure, so the
 ``install`` tests assert on CALL_LOG/stdout/stderr markers (proving every stage was
@@ -119,54 +119,65 @@ case "$cmd" in
 esac
 """
 
-# Only "worker"-pattern pgrep queries report a process found. This keeps
-# `stop_bridge`'s retry loop from spinning (bridge queries report "not found" so
-# `stop_bridge` short-circuits immediately) while `is_worker_running` reports success
-# right away for worker-start.
-PGREP_STUB = """#!/bin/bash
-echo "PGREP $*" >> "$CALL_LOG"
-# Env-gated (webui `restart` tests, #2123): report the bridge process as running
-# so restart_bridge's post-kickstart is_running probe succeeds. Existing tests
-# never set PGREP_BRIDGE_FOUND, so their behavior is unchanged.
-if [ -n "${PGREP_BRIDGE_FOUND:-}" ]; then
+# A stub of `scripts/lib/service_pids.sh`, installed into the fake project's
+# `scripts/lib/` (#3187/#3265). It replaces the old `pgrep` stub on PATH, and is
+# a strictly tighter seam: the real helper shells out to `ps` against the host
+# process table, so shadowing `pgrep` no longer intercepts anything. Stubbing
+# the helper catches every probe by name instead.
+#
+# Only "worker" queries report a process found. This keeps `stop_bridge`'s retry
+# loop from spinning (bridge queries report "not found" so `stop_bridge`
+# short-circuits immediately) while `is_worker_running` reports success right
+# away for worker-start.
+#
+# `service_pid_is_own_ancestor` always answers "no": the PIDs this stub invents
+# are not real, and nothing in the sandbox is a descendant of them, so the stop
+# paths must proceed exactly as they would against an unrelated live service.
+# The refusal branch has its own coverage in tests/unit/test_service_pids_lib.py.
+SERVICE_PIDS_STUB = """
+service_pids() {
+    echo "SERVICE_PIDS $*" >> "$CALL_LOG"
+    # Env-gated (webui `restart` tests, #2123): report the bridge process as
+    # running so restart_bridge's post-kickstart is_running probe succeeds.
+    # Existing tests never set SERVICE_PIDS_BRIDGE_FOUND.
+    if [ -n "${SERVICE_PIDS_BRIDGE_FOUND:-}" ]; then
+        for a in "$@"; do
+            case "$a" in
+                *telegram_bridge*) echo 88888; return 0 ;;
+            esac
+        done
+    fi
+    # Env-gated (#1338 email-start-via-launchd test): report the email bridge as
+    # running ONLY after launchd has bootstrapped it (a prior email-bridge
+    # bootstrap is in the call log). This mirrors reality — the bridge is not
+    # running before start_email routes through launchd — so start_email's early
+    # is_email_running short-circuit does not fire, but its post-bootstrap probe
+    # succeeds. Existing tests never set SERVICE_PIDS_EMAIL_FOUND.
+    _email_booted=""
+    if [ -n "${SERVICE_PIDS_EMAIL_FOUND:-}" ]; then
+        grep -q "bootstrap.*email-bridge" "$CALL_LOG" 2>/dev/null && _email_booted=1
+    fi
+    if [ -n "$_email_booted" ]; then
+        for a in "$@"; do
+            case "$a" in
+                *email_bridge*) echo 77777; return 0 ;;
+            esac
+        done
+    fi
     for a in "$@"; do
         case "$a" in
-            *telegram_bridge*)
-                echo 88888
-                exit 0
-                ;;
+            *worker*) echo 99999; return 0 ;;
         esac
     done
-fi
-# Env-gated (#1338 email-start-via-launchd test): report the email bridge as
-# running ONLY after launchd has bootstrapped it (a prior email-bridge bootstrap
-# is in the call log). This mirrors reality — the bridge is not running before
-# start_email routes through launchd — so start_email's early is_email_running
-# short-circuit does not fire, but its post-bootstrap probe succeeds. Existing
-# tests never set PGREP_EMAIL_FOUND, so their behavior is unchanged.
-_email_booted=""
-if [ -n "${PGREP_EMAIL_FOUND:-}" ]; then
-    grep -q "bootstrap.*email-bridge" "$CALL_LOG" 2>/dev/null && _email_booted=1
-fi
-if [ -n "$_email_booted" ]; then
-    for a in "$@"; do
-        case "$a" in
-            *email_bridge*)
-                echo 77777
-                exit 0
-                ;;
-        esac
-    done
-fi
-for a in "$@"; do
-    case "$a" in
-        *worker*)
-            echo 99999
-            exit 0
-            ;;
-    esac
-done
-exit 1
+    return 1
+}
+
+service_pids_worker() { service_pids --module worker --script-suffix worker/__main__.py; }
+service_pids_bridge() { service_pids --script-suffix bridge/telegram_bridge.py; }
+service_pids_email() { service_pids --module bridge.email_bridge; }
+
+service_pid_is_own_ancestor() { return 1; }
+service_pid_refuse_self_kill() { return 0; }
 """
 
 
@@ -184,14 +195,12 @@ class Harness:
         (scripts_dir / "lib").mkdir(parents=True)
         (scripts_dir / "valor-service.sh").write_text(REAL_SCRIPT.read_text())
         (scripts_dir / "lib" / "launchctl.sh").write_text(REAL_LAUNCHCTL_LIB.read_text())
+        (scripts_dir / "lib" / "service_pids.sh").write_text(SERVICE_PIDS_STUB)
 
         self.stub_bin.mkdir()
         launchctl = self.stub_bin / "launchctl"
         launchctl.write_text(LAUNCHCTL_STUB)
         launchctl.chmod(0o755)
-        pgrep = self.stub_bin / "pgrep"
-        pgrep.write_text(PGREP_STUB)
-        pgrep.chmod(0o755)
 
         self.agents_dir = self.home / "Library" / "LaunchAgents"
         self.agents_dir.mkdir(parents=True)
@@ -394,7 +403,7 @@ def test_worker_start_pid_verification_failure_warns(harness):
 #
 # These tests drive the REAL `restart` arm end-to-end. restart_bridge and
 # restart_worker are steered down their fast kickstart paths via the env-gated
-# LAUNCHCTL_LIST_LOADED / PGREP_BRIDGE_FOUND stub branches above, then
+# LAUNCHCTL_LIST_LOADED / SERVICE_PIDS_BRIDGE_FOUND stub branches above, then
 # restart_webui runs against the stubs below.
 #
 # NOTE on `kill`: bash's builtin `kill` preempts any PATH stub, so the KILL stub
@@ -499,7 +508,7 @@ class WebuiHarness(Harness):
             "WEBUI_STATE_DIR": str(self.webui_state),
             # Steer restart_bridge/restart_worker down their kickstart paths.
             "LAUNCHCTL_LIST_LOADED": "1",
-            "PGREP_BRIDGE_FOUND": "1",
+            "SERVICE_PIDS_BRIDGE_FOUND": "1",
             # Tiny env-overridable verify windows so failure scenarios stay fast.
             "WEBUI_PORT_FREE_RETRIES": "3",
             "WEBUI_SERVE_RETRIES": "10",
@@ -611,7 +620,7 @@ def test_email_start_routes_through_launchd_when_plist_installed(harness):
     # nohup process — it routes through launchd (enable + bootstrap, since the
     # list probe reports the label not loaded) so there's a single owner.
     _seed_email_plist(harness)
-    result = harness.run("email-start", extra_env={"PGREP_EMAIL_FOUND": "1"})
+    result = harness.run("email-start", extra_env={"SERVICE_PIDS_EMAIL_FOUND": "1"})
     email_calls = _email_launchctl_calls(harness)
     assert any(line.startswith("LAUNCHCTL enable") for line in email_calls), harness.calls()
     assert any("bootstrap " in line for line in email_calls), harness.calls()
