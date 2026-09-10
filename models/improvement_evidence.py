@@ -6,7 +6,7 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   ``project_key`` (``KeyField``) for the partition. A single recency
   ``SortedField(created_at, partition_by="project_key")`` serves every "what
   has the system observed lately" read.
-- Two IndexedFields, both low-cardinality: ``kind`` (five values, see
+- Two IndexedFields, both low-cardinality: ``kind`` (seven values, see
   :data:`EVIDENCE_KINDS`) and ``classification`` (five values, see
   :data:`EVIDENCE_CLASSIFICATIONS`). The schema gate's rule is a cardinality
   rule — never index a pid, uuid, or timestamp. ``source_session_id`` and
@@ -55,11 +55,28 @@ from popoto import (
 logger = logging.getLogger(__name__)
 
 #: What produced this evidence. Low-cardinality on purpose — this is an index.
+#: Kind ownership across lanes (lane 7, #3274): this lane owns ``spend_receipt``
+#: and ``resource_probe``. Lane 3 (#3215) owns ``resource_acquired`` and adds it
+#: itself; whoever lands second rebases onto the already-extended tuple.
+#: ``spend_receipt`` earns its partition because it is the budget's fallback
+#: settlement path — a receipt coerced to ``other`` is unqueryable as spend.
+#: ``resource_probe`` earns its partition because the probe result must be one
+#: immutable record per run, and ``other`` rows are indistinguishable from every
+#: other ``other`` row. Two is the whole ask; a third value needs its own
+#: index-cardinality argument here, not a free append.
+#:
+#: TTL decision (lane 7, #3274): the 30-day window stands. A budget week is 7
+#: days, so a settled dollar stays queryable for a full month of audit after
+#: its week closes; anything that must outlive that is distilled onto the
+#: immortal ``ImprovementCase`` before the row expires. Widening the window is
+#: a charter decision, not a builder decision.
 EVIDENCE_KINDS: tuple[str, ...] = (
     "correction",  # a human corrected the agent mid-flight
     "inspiration",  # a Tom-sourced memory worth researching
     "shipped_work",  # expectation_reconciler's shipped-work evidence
     "owner_liveness",  # expectation_reconciler's owner-liveness evidence
+    "spend_receipt",  # unit-3 settlement fallback (lane 7, #3274)
+    "resource_probe",  # one immutable probe record per run (lane 7, #3274)
     "other",
 )
 

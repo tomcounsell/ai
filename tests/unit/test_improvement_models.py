@@ -256,6 +256,41 @@ class TestRoundTrip:
         assert found, f"{model.__name__}.{name}={value!r} did not read back through its index"
 
 
+class TestLane7EvidenceKinds:
+    """Lane 7 (#3274) owns ``spend_receipt`` and ``resource_probe``.
+
+    Both must round-trip through ``record_once`` without being coerced to
+    ``other``. ``resource_acquired`` is lane 3's kind; anti-criterion 6 in the
+    lane 7 plan guards that split at the diff level.
+    """
+
+    def test_spend_receipt_is_a_declared_kind(self):
+        assert "spend_receipt" in EVIDENCE_KINDS
+
+    def test_spend_receipt_round_trips_without_coercion(self):
+        row = ImprovementEvidence.record_once(
+            PK,
+            "spend_receipt",
+            text="unit-3 settlement fallback",
+            source_ref="lane7-spend-receipt-probe",
+        )
+        assert row is not None
+        assert row.kind == "spend_receipt"
+
+    def test_resource_probe_is_a_declared_kind(self):
+        assert "resource_probe" in EVIDENCE_KINDS
+
+    def test_resource_probe_round_trips_without_coercion(self):
+        row = ImprovementEvidence.record_once(
+            PK,
+            "resource_probe",
+            text="six-resource probe result",
+            source_ref="lane7-resource-probe-probe",
+        )
+        assert row is not None
+        assert row.kind == "resource_probe"
+
+
 class TestExportedFromModelsPackage:
     def test_all_eight_are_exported(self):
         import models as m
