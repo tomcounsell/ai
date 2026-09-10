@@ -748,7 +748,19 @@ test file, so parallel edits would only manufacture conflicts.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+FULL depth (force-FULL: `agent/sdlc_router.py` is a doctrine path). Roster 3/3 complete,
+3/3 grounded. Mode: independent roster (3 critics). Both BLOCKERs were independently
+re-verified by the driver with live `decide_next_dispatch` / `guard_g3_pr_lock` probes
+against `main` before being recorded — neither is an inference.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness (Skeptic); driver-verified | Solution step 2 claims "Fall-through is already correct and needs no other edit" — it is not. G3 leg 3 (`agent/sdlc_router.py:524-528`) never checks `docs_status`; it only works today because the unconditional leg 1 intercepts every `docs_status == completed` case first. Once leg 1 requires a verified-fresh head, the ABSENT-key state (T11) falls to leg 3, which reads the UNMODIFIED `_review_verdict_head_is_stale` (False on an absent key) and dispatches `/do-docs` with the reason "review APPROVED and docs pending" while DOCS is `completed`. T11's expected `/do-pr-review` is therefore wrong as written. Driver probe: `guard_g3_pr_lock` with `REVIEW=completed, APPROVED, pr_head_sha` absent returns `Dispatch(/do-docs, row_id='G3')`. | pending | Add `and docs_status != STATUS_COMPLETED` to G3 leg 3's `elif` condition in the same hunk as the leg-1 change. Leg 3 keeps its existing `_review_verdict_head_is_stale` call, so Success Criterion 1's "exactly two call sites" for the NEW predicate still holds. Record the leg-3 gate in Solution step 2, in the Step-by-Step task 4, and fix T11's expected value; add a T11b covering `DOCS=pending` + absent key so the leg-3 narrowing is itself pinned. |
+| BLOCKER | History & Consistency (Consistency Auditor); driver-verified | The G6 fall-through claim is false, and it makes Success Criterion 4, T14 and the No-Gos mutually unsatisfiable. On the ABSENT-key state G6 returns `None`, but row 8f (`_rule_review_verdict_head_stale`, `:1976-1999`) calls `_review_verdict_head_is_stale`, which returns `False` on an absent key — so 8f declines. Row 9 declines (DOCS complete). Row 10 (`_rule_ready_to_merge`, `:2018-2035`) calls the same inert predicate, so it also reads "not stale" and dispatches `/do-merge`. Driver probe with G6 removed from `GUARDS`: `Dispatch(/do-merge, row_id='10')`. The absent-key merge hole is relocated from G6 to row 10, not closed — and the No-Gos forbid touching row 10. | pending | Row 10 must join the widening: `if not _review_verdict_head_is_verified_fresh(stage_states, meta, context): return False` in `_rule_ready_to_merge` (row 10 is a terminal `/do-merge` dispatch, exactly the class the new predicate is scoped to). Row 8f stays on the existing predicate. This makes the new predicate's call-site count THREE — update Success Criterion 1 and the No-Go "DO NOT change rows 8f or 10" to "DO NOT change row 8f" — and T14's expectation becomes `/do-pr-review` via row 8f only if 8f is also widened, so state explicitly which row owns the absent-key landing and pin it with a `row_id` assertion, not just a skill assertion. Escalate to the design owner before building: this is a fact that the ratified design's Part B got wrong, not a scope choice the builder may take alone. |
+| CONCERN | Scope & Value (Simplifier) | The Appetite section pre-authorizes cutting the rows 4b/4c de-duplication under time pressure, but that fold is explicit ratified scope (design Part C: "Also fold in rows 4b/4c") and is separately hard-required by the plan's own Success Criterion 7 and by T7/T8. As written a builder could take the cut and ship a PR that fails the plan's own Definition of Done — the same "narrow it to keep the diff small" failure mode #3249 was filed against. | pending | Replace the cut-line: the only cuttable item at Small appetite is the optional docs polish, not ratified scope. If 4b/4c is nonetheless cut, Success Criterion 7 and tests T7/T8 must be struck in the same revision and the drop named in the PR body — never silently. The 4b/4c edit itself is two lines per row: swap the leading `if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:` for `if _plan_stage_stood_down(stage_states, meta):` and delete the second `if meta.get("pr_number"): return False`. |
+| CONCERN | History & Consistency (Archaeologist) | The Problem section says G6's WS3d comment at `:971-975` "already asserts the behavior it does not have" and calls it "the same lie." The comment's literal text covers the EMPTY-sentinel lookup-failure case only — which `_review_verdict_head_is_stale` handles correctly. It never mentions the ABSENT-key case, which is the actual gap. A reviewer reading the comment literally will read the PR body's citation as overclaimed. | pending | Reword to: the comment states a fail-closed intent that is broader than the delivered behavior (it covers the empty sentinel but not the absent key). Carry the same wording into the PR-body paragraph required by Success Criterion 13, so the citation of `agent/sdlc_router.py:971-975` matches what the comment actually says. |
+| NIT | Driver (structural) | Solution step 6 and No-Go 4 both say "rows 4a/4c" carry the narrower `build_status in (None, "pending", "ready")` gate, but row 4b carries it too (`:1247`). T8 likewise only names 4a/4c, so row 4b's `BUILD == failed` behavior is unpinned by any test. | pending | — |
+| NIT | Driver (structural) | Cross-reference check: Success Criterion 4 ("G6 ... lands that state on row 8f → `/do-pr-review`") contradicts No-Go "DO NOT change rows 8f or 10". Resolved by BLOCKER 2's revision; recorded here so the cross-reference table is honest. | pending | — |
 
 ---
 
@@ -764,3 +776,17 @@ None blocking. One scope call is deliberately surfaced rather than taken unilate
    (its inline pair is literally the helper's body), but it is outside the ratified list, so
    the decision belongs to the critique, not to the builder. **Default if unanswered: leave
    row 2b as-is and stay inside the ratified scope.**
+
+   **RULED (critique, 2026-09-10): convert row 2b through `_plan_stage_stood_down` in this
+   lane.** The default is overturned. The design names 2b as the pattern *source*, which
+   says where the shape came from, not that it must keep its own copy; leaving it means the
+   sweep ships with the last hand-written copy of the exact condition it exists to express
+   once, and the plan's own Success Criterion 5 ("`_plan_stage_stood_down` ... is the **only**
+   place the #3249 condition is written") is then false on landing. The conversion is
+   provably behavior-identical: row 2b's `:1641-1644` pair is literally the helper's body,
+   in the same order. Scope cost is two lines. Fold it into Solution step 5 as a fifth row,
+   add it to the table there, keep its long `#3237` docstring (rewritten to name the helper),
+   and add a T5b probe — row 2b with `BUILD=in_progress`, no PR, branch exists →
+   `Dispatch(/do-build, row_id='5')` — plus a negative control that 2b still fires on a
+   genuinely stale critique verdict with `BUILD=pending`. Success Criterion 5 and 6 must both
+   name row 2b.
