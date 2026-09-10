@@ -4,8 +4,10 @@
 
 - Every bridge-connected top-level session runs through the local `claude -p`
   harness with subscription authentication.
-- `agent/session_runner/harness/` provides a normalized adapter protocol, but
-  Claude is the only concrete implementation on current main.
+- `agent/session_runner/harness/` provides a normalized adapter protocol, with
+  `claude.py` driving every top-level turn and `codex.py` serving as the
+  opt-in dev-lane executor inside flagged eng sessions — see
+  [Codex Exec Dev Lane](../features/codex-exec-dev-lane.md).
 - Eng-session developer work runs as a resumable Claude subagent inside the
   top-level PM turn. Its continuation id and cwd are persisted on AgentSession.
 - Codex CLI installation and authentication are managed by the opt-in

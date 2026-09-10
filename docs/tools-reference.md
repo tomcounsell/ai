@@ -449,6 +449,12 @@ python -m tools.valor_session create --role eng --slug fix-the-bug --message "Fi
 # Explicit project key override (useful in scripts/CI where cwd may not match)
 python -m tools.valor_session create --role eng --slug ad-hoc-task --message "..." --project-key valor
 
+# Opt-in Codex dev lane (eng only, immutable after creation; see docs/features/codex-exec-dev-lane.md)
+python -m tools.valor_session create --role eng --slug codex-task --message "..." --dev-harness codex
+
+# One-way operator downgrade back to the Claude dev lane (refused while the lane lease is held)
+python -m tools.valor_session update-dev-harness --id <SESSION_ID> --to claude
+
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>
 python -m tools.valor_session kill --all
