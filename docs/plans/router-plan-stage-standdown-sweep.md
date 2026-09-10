@@ -498,31 +498,131 @@ runtime) to convert.
 
 ## Rabbit Holes
 
-_placeholder_
+- **Unifying the two freshness predicates.** They look like near-duplicates and the pull to
+  collapse them into one parameterized function is strong. Resist it: the difference is one
+  boolean on one input, and the parameter would immediately be got wrong at a call site. Two
+  named functions with two docstrings is the deliverable.
+- **"While I'm here" guard reordering.** `GUARDS` evaluation order
+  (`[T, G1, G2, G3, G4, G9, G8, G7, G5, G6]`) is pinned and load-bearing. Nothing in this
+  plan requires touching it, and a reorder would invalidate every probe in the coverage
+  matrix.
+- **Auditing all ~25 dispatch rows for stand-downs.** The sweep is over the **plan-stage**
+  rows the issue names (1, 2, 2c, 3, plus the 4b/4c duplication). PR-stage and patch-stage
+  rows have different correct step-asides and are a separate class.
+- **Rewriting the recon probes as a reusable harness.** Tempting, and out of scope. Use the
+  existing helper functions in the test file.
+- **Chasing `tools/merge_predicate.py` into agreement.** It already agrees. This change moves
+  the router toward the predicate; touching the predicate reverses the direction of the fix.
+- **Fixing the "Known gap — stale REVIEW verdict after PATCH" note** in
+  `.claude/skills-global/do-sdlc/SKILL.md:278`. That describes a *different* staleness axis
+  (`/do-patch`-relative, `_review_verdict_is_stale`) and is not touched here.
 
 ## Risks
 
-_placeholder_
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| The G6 widening reads as an out-of-scope hunk and gets bounced at review | Medium | PR body names it explicitly as a ratified widening and cites the WS3d comment at `agent/sdlc_router.py:971-975`. Non-negotiable, not optional prose. |
+| A live lane stalls because `pr_head_sha` is genuinely absent on some path not surveyed | Low | spike-1 traced the sole producer and both call sites' gates. Worst case is a `/do-pr-review` dispatch, not a bad merge — the failure mode is noise, not damage. |
+| The 4b/4c refactor silently changes behavior | Medium | Argued explicitly in Solution step 6 (the trailing `build_status in (None, pending, ready)` already excludes `in_progress`), and pinned by T7/T8 plus the unmodified `test_..._with_concerns.py` suite. Any red there means revert step 6. |
+| Existing tests encode the defect and get "fixed" by relaxing assertions | Medium | Test Impact lists the audit targets by file with explicit dispositions and requires supplying the real context key rather than weakening an assertion. Every changed existing assertion is called out in the PR body. |
+| Standing four rows down strands a lane at `Blocked` | Low | spike-2 plus #3249's recorded second probe pass: every state lands on row 5 or row 7. The residual `Blocked` subcase (BUILD settled AND no live branch) is inherited from #3246 unchanged. |
+| Rebase conflict with a parallel lane | Low | The two live lanes touch `scripts/`, `tools/process_lookup.py`, `monitoring/` and `agent/agent_session_queue.py` — disjoint from every file here. #3260 and #3249 are one lane precisely to avoid conflicting with each other. |
+| Someone widens row 5 to catch the stood-down lanes | **High** | See No-Gos. This is the known trap and the failure is silent. |
 
 ## Race Conditions
 
-_placeholder_
+The router is a pure function: `decide_next_dispatch(stage_states, meta, context)` performs
+no I/O, makes no `gh` calls, and mutates no shared state. Nothing in this change introduces
+async work, shared mutable state, or a cross-process handoff, so there is no new timing
+hazard to design against.
+
+One **pre-existing** ordering fact this change interacts with, worth stating so it is not
+mistaken for a race: `context['pr_head_sha']` is a point-in-time read taken by
+`tools/sdlc_next_skill._build_context` before the router runs. A commit landing between that
+read and the merge dispatch would leave the router acting on a head that is one commit
+behind. That window exists today and is unchanged here; it is closed downstream by
+`tools/merge_predicate.py`, which re-reads at merge time. The change strictly narrows the
+window (the router now refuses more, never fewer, states) and must not be relied on to close
+it — that remains the merge predicate's job.
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- **DO NOT widen row 5 under any circumstances.** This is *the* trap, carried from #3246 and
+  restated in #3249: *"do not widen row 5 to absorb these states. Row 5 precedes row 6, so
+  widening it diverts `TEST == failed` lanes away from `/do-patch`."* Once rows 1/2/2c/3
+  stand down on BUILD, those lanes need somewhere to land and row 5 is the tempting
+  catch-all. It is the wrong place and **the failure is silent** — a lane with failing tests
+  gets sent to `/do-build` instead of `/do-patch` and nothing reports it. The correct landing
+  is row 5's **existing, unmodified** predicate: `build_status == in_progress OR
+  context['branch_exists'] is True`. The branch half already answers regardless of BUILD
+  status. **No widening is required, and none is permitted.**
+- **DO NOT modify `_review_verdict_head_is_stale`.** Its absent-key → `False` contract is
+  correct for its non-terminal consumers and is documented in its own docstring. The new
+  behavior arrives as a sibling.
+- **DO NOT change rows 8f or 10.** They already call the existing predicate and need no
+  change; row 8f is the landing row this plan depends on.
+- **DO NOT replace rows 4a/4c's `build_status in (None, "pending", "ready")` gates** with the
+  shared helper. Those gates are strictly narrower (they also exclude `BUILD == failed`);
+  substituting would be a behavior change. Add alongside, never substitute.
+- **DO NOT touch G6's other gates** (`pr_merge_state`, `ci_all_passing`, the DOCS gate) or
+  the `REVIEW_APPROVED` gate. One line plus its comment.
+- **DO NOT relax or modify `tools/merge_predicate.py`.**
+- **DO NOT touch the parallel lanes' files**: `scripts/`, `tools/process_lookup.py`,
+  `monitoring/`, `agent/agent_session_queue.py`.
+- **DO NOT edit the shared checkout root** at `/Users/valorengels/src/ai` for code. All code
+  work happens in `/Users/valorengels/src/ai/.worktrees/sdlc-3249` on branch
+  `session/sdlc-3249`. Plan and `.md` docs are the exception: they commit directly on `main`.
 
 ## Update System
 
-_placeholder_
+No update-system changes required. This is a pure change to an in-repo Python module and its
+tests: no new dependency, no new config file, no new env key, no new launchd plist, no
+migration. `scripts/remote-update.sh` and the `/update` skill propagate it as an ordinary
+code change on `main`.
+
+One propagation note that is **not** an update-script change: the dispatch/guard tables in
+`.claude/skills-global/do-sdlc/SKILL.md` are hardlinked to `~/.claude/skills/` by `/update`.
+Editing that file in-place (never replace-and-rename, which breaks the hardlink) means a
+routine `/update` after merge carries the corrected G3/G6 descriptions fleet-wide. Per
+project convention, run `/update` after this merges so running services pick up the new ref.
 
 ## Agent Integration
 
-_placeholder_
+No agent integration required — this is entirely internal to the router. No new CLI entry
+point in `pyproject.toml [project.scripts]`, and the bridge imports nothing new.
+
+The router already reaches the agent through the existing surface: `sdlc-tool next-skill`
+(`tools/sdlc_next_skill.py`) calls `decide_next_dispatch` and is the only caller that
+assembles a real `context`. That path is unchanged in shape — the same `pr_head_sha` key the
+producer already writes is simply read by one more predicate. The `/sdlc` router skill and
+`/do-sdlc` supervisor consume `next-skill`'s output and need no change beyond the doc updates
+below.
 
 ## Documentation
 
-_placeholder_
+- [ ] Update `docs/features/gh-stale-state-verdict-gate.md` — document the two-predicate
+      split: `_review_verdict_head_is_stale` (inert on an absent signal, for non-terminal
+      consumers) vs `_review_verdict_head_is_verified_fresh` (positive evidence required, for
+      terminal `/do-merge` dispatch only), and state the rule that terminal merge dispatch
+      uses the latter.
+- [ ] Update `.claude/skills-global/do-sdlc/SKILL.md:248` — G3's ladder description: leg 1 now
+      reads "`/do-merge` (REVIEW and DOCS complete, verdict `APPROVED`, head verified fresh)".
+- [ ] Update `.claude/skills-global/do-sdlc/SKILL.md:254` — G6's condition row: add "AND the
+      REVIEW verdict's head is verified fresh against `context['pr_head_sha']`".
+      Edit in place; do not replace-and-rename (it is hardlinked to `~/.claude/skills/`).
+- [ ] Update the plan-stage rows in the same SKILL.md dispatch table so rows 1, 2, 2c and 3
+      record the plan-stage stand-down, matching what row 2b already documents.
+- [ ] Update the "Open-PR step-asides" note (`.claude/skills-global/do-sdlc/SKILL.md:263`) to
+      name the shared `_plan_stage_stood_down` condition instead of listing rows individually.
+- [ ] Update the module docstring of
+      `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`,
+      which currently says row 2's missing step-aside "is tracked as #3249" — describe the
+      new status quo, no historical artifact.
+- [ ] No new feature doc and no `docs/features/README.md` entry: this modifies behavior
+      already documented by `gh-stale-state-verdict-gate.md` and the do-sdlc dispatch tables
+      rather than adding a capability.
+- [ ] No `docs/infra/` doc: no new dependency, service, external API call, quota, or
+      deployment change.
 
 ## Success Criteria
 
