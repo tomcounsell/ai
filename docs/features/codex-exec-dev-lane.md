@@ -72,7 +72,7 @@ thread id, so create, first turn, resumed turn, steer, preempt, restart, and
 completion all share one thread).
 
 A registered idempotent migration confirms the nullable fields read cleanly
-on legacy rows. No raw Redis operations, no backfill.
+on pre-existing rows, using the ORM only and touching no indexes.
 
 ## Steering and Concurrency
 

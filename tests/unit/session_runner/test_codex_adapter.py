@@ -12,9 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from unittest.mock import AsyncMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from agent.session_runner.harness import events as harness_events
 from agent.session_runner.harness.base import TurnRequest
@@ -130,6 +128,7 @@ def _request(**overrides) -> TurnRequest:
 
 # --- argv / stdin ------------------------------------------------------------
 
+
 def test_first_turn_argv_globals_before_exec_and_prompt_on_stdin():
     captured: dict = {}
     fake = _FakeProc(stdout=_success_stdout())
@@ -177,18 +176,14 @@ def test_hostile_instruction_goes_to_stdin_not_argv():
 
 
 def test_empty_instruction_rejected_before_spawn():
-    with patch(
-        "agent.session_runner.harness.codex.asyncio.create_subprocess_exec"
-    ) as spawn:
+    with patch("agent.session_runner.harness.codex.asyncio.create_subprocess_exec") as spawn:
         result = _run(CodexHarnessAdapter().run_turn(_request(message="   ")))
     spawn.assert_not_called()
     assert result.error_detail is not None and "Empty" in result.error_detail
 
 
 def test_malformed_thread_id_refuses_resume():
-    with patch(
-        "agent.session_runner.harness.codex.asyncio.create_subprocess_exec"
-    ) as spawn:
+    with patch("agent.session_runner.harness.codex.asyncio.create_subprocess_exec") as spawn:
         result = _run(CodexHarnessAdapter().run_turn(_request(prior_uuid="not-a-uuid")))
     spawn.assert_not_called()
     assert "Malformed" in (result.error_detail or "")
@@ -196,13 +191,12 @@ def test_malformed_thread_id_refuses_resume():
 
 # --- success path ------------------------------------------------------------
 
+
 def test_success_maps_usage_structured_output_and_events():
     seen: list = []
     fake = _FakeProc(stdout=_success_stdout(report="hello"))
     with _patch_spawn(fake, {}):
-        result = _run(
-            CodexHarnessAdapter().run_turn(_request(), on_event=seen.append)
-        )
+        result = _run(CodexHarnessAdapter().run_turn(_request(), on_event=seen.append))
     assert result.error_detail is None
     assert result.final_text == "hello"
     assert result.structured_output == {"report": "hello", "complete": True}
@@ -225,6 +219,7 @@ def test_default_schema_requires_every_property_key():
 
 
 # --- failure paths -----------------------------------------------------------
+
 
 def test_native_turn_failed_produces_bounded_error_detail():
     fake = _FakeProc(stdout=_failed_stdout(), returncode=1)
@@ -257,11 +252,7 @@ def test_malformed_jsonl_skipped_and_terminal_still_parsed():
 
 
 def test_non_json_schema_text_is_typed_failure_not_loop():
-    stdout = _success_stdout().decode().replace(
-        '{"report": "did the thing", "complete": true}'.replace(" ", ""),
-        "just prose, no json",
-    )
-    # Simpler: craft an agent message with plain prose.
+    # Craft an agent message with plain prose.
     lines = [
         json.dumps({"type": "thread.started", "thread_id": THREAD_A}),
         json.dumps(
@@ -312,6 +303,7 @@ def test_secrets_scrubbed_from_error_detail():
 
 # --- spawn env allowlist -----------------------------------------------------
 
+
 def test_spawn_env_allowlist():
     with patch.dict(
         os.environ,
@@ -340,6 +332,7 @@ def test_spawn_env_single_use_api_key_only_when_passed():
 
 
 # --- version / preflight -----------------------------------------------------
+
 
 def test_parse_codex_version():
     assert parse_codex_version("codex-cli 0.154.0") == (0, 154, 0)

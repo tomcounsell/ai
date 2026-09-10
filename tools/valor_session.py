@@ -671,8 +671,7 @@ def create_session(
                 return CreateResult(
                     success=False,
                     error=(
-                        f"Unknown --dev-harness value: {dev_harness!r}. "
-                        "Allowed values: 'codex'."
+                        f"Unknown --dev-harness value: {dev_harness!r}. Allowed values: 'codex'."
                     ),
                     notes=notes,
                 )
@@ -1001,7 +1000,7 @@ def cmd_update_dev_harness(args: argparse.Namespace) -> int:
         from agent.codex_dev_lease import DevLaneBusy, acquire_dev_lease
     except ImportError:
         acquire_dev_lease = None  # type: ignore[assignment]
-        DevLaneBusy = RuntimeError  # type: ignore[assignment,misc]
+        DevLaneBusy = RuntimeError  # type: ignore[assignment,misc]  # noqa: N806
     if acquire_dev_lease is not None:
         try:
             with acquire_dev_lease(str(session.id), timeout_s=0):

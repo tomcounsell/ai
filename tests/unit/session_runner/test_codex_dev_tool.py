@@ -314,7 +314,7 @@ def test_native_failure_renders_typed_error(monkeypatch):
     assert logged[0][1]["outcome"] == "native-failure"
 
 
-def test_persist_failure_kills_tree_and_returns_typed_error(monkeypatch):
+def test_persist_failure_tree_kill_on_save_error(monkeypatch):
     import agent.codex_dev_lease as lease_mod
     import agent.codex_turn_log as log_mod
     import agent.session_runner.harness.codex as codex_mod

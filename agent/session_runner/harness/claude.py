@@ -87,7 +87,7 @@ def _merge_mcp_config(harness_cmd: list[str], mcp_config: dict | None) -> None:
     for idx, part in enumerate(harness_cmd):
         if part.startswith("--mcp-config="):
             try:
-                current = json.loads(part[len("--mcp-config="):])
+                current = json.loads(part[len("--mcp-config=") :])
             except (json.JSONDecodeError, ValueError):
                 current = {}
             servers = current.get("mcpServers", {}) if isinstance(current, dict) else {}
@@ -99,8 +99,7 @@ def _merge_mcp_config(harness_cmd: list[str], mcp_config: dict | None) -> None:
             )
             return
     harness_cmd.append(
-        "--mcp-config="
-        + json.dumps({"mcpServers": extra}, sort_keys=True, separators=(",", ":"))
+        "--mcp-config=" + json.dumps({"mcpServers": extra}, sort_keys=True, separators=(",", ":"))
     )
     if "--strict-mcp-config" not in harness_cmd:
         harness_cmd.append("--strict-mcp-config")

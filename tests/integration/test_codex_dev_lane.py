@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.codex_live]
 
 PROBE_INSTRUCTION = (
     "This is a connectivity probe, not a work request. "
