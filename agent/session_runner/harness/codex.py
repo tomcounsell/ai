@@ -21,8 +21,9 @@ Key Codex-vs-Claude differences (documented once, here):
 - Codex does not attach a parsed ``structured_output`` object to a terminal
   event: with ``--output-schema`` the schema-conforming JSON arrives as the
   final agent-message TEXT, which this adapter decodes and validates.
-- ``--ephemeral`` is never passed (thread continuity is the point) and the
-  deprecated ``--full-auto`` is never passed (``-a never`` is the policy).
+- Ephemeral threading is never requested (thread continuity is the point)
+  and the deprecated full-auto approval mode is never enabled (``-a never``
+  is the policy).
 - First-event persistence contract: the caller persists the thread id from
   the synchronous ``session.started`` event (``on_event`` fires in-line,
   before ``run_turn()`` returns) — mirroring the Claude adapter's Race 1
@@ -65,9 +66,7 @@ CODEX_DEFAULT_SANDBOX = "workspace-write"
 
 # Codex thread ids are UUIDs (spike-1 observed
 # ``019f5a7e-339a-7323-bf14-1d30931abc86``).
-_CODEX_THREAD_ID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+_CODEX_THREAD_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 # Bounded native-failure detail (bytes/chars, never secrets — stderr is
 # scrubbed before truncation).
@@ -242,8 +241,8 @@ def build_codex_argv(
     and the turn flags. ``--color never`` rides the first turn only —
     ``exec resume`` rejects ``--color`` (live-measured); its ``auto``
     default emits no color on a pipe. The prompt travels on stdin (final
-    ``-``), never as an argv element. ``--ephemeral`` and ``--full-auto``
-    are never emitted (asserted by the Verification table).
+    ``-``), never as an argv element. Neither ephemeral threading nor the
+    full-auto approval mode is ever emitted (asserted by the Verification table).
     """
     argv = [
         "codex",
@@ -362,7 +361,9 @@ def kill_codex_tree(root_pid: int) -> list[dict[str, Any]]:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         if survivors:
-            logger.warning("[codex] %d process(es) survived tree kill: %s", len(survivors), survivors)
+            logger.warning(
+                "[codex] %d process(es) survived tree kill: %s", len(survivors), survivors
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[codex] wait_procs failed (non-fatal): %s", exc)
     try:
@@ -524,7 +525,9 @@ class CodexHarnessAdapter:
                 )
                 stderr_text = (raw_stderr or b"").decode("utf-8", errors="replace")
             except TimeoutError:
-                logger.error("[codex] turn timed out after %.0fs — killing tree", self._turn_timeout_s)
+                logger.error(
+                    "[codex] turn timed out after %.0fs — killing tree", self._turn_timeout_s
+                )
                 if proc.pid is not None:
                     kill_codex_tree(proc.pid)
                 try:
@@ -613,9 +616,9 @@ class CodexHarnessAdapter:
                 tail = scrub_secret_text(stderr_text)[-_ERROR_DETAIL_MAX_CHARS:]
                 error_detail = (
                     f"Codex exited with code {returncode} and no terminal turn event. "
-                    f"Stderr tail: {tail!r}." if tail.strip() else (
-                        f"Codex exited with code {returncode} and no terminal turn event."
-                    )
+                    f"Stderr tail: {tail!r}."
+                    if tail.strip()
+                    else (f"Codex exited with code {returncode} and no terminal turn event.")
                 )
             elif not saw_terminal:
                 error_detail = (

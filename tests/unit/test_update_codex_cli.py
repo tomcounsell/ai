@@ -1,10 +1,10 @@
 """Unit tests for opt-in Codex CLI provisioning (plan #2001 Task 4b).
 
 The lane is off by default: with ``CODEX__INSTALL_ENABLED`` unset the
-provisioner touches nothing (no npm, no ``codex --version``). Enabled
-machines install when absent, upgrade below the floor, and skip at/above
-it. Every failure degrades to a ``failed`` result — never a raise — so
-the update run stays green.
+provisioner never shells out to npm (at most a read-only version probe).
+Enabled machines install when absent, upgrade below the floor, and skip
+at/above it. Every failure degrades to a ``failed`` result — never a
+raise — so the update run stays green.
 """
 
 from __future__ import annotations
