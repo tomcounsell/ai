@@ -584,6 +584,24 @@ def test_is_own_ancestor_polarity_does_not_affect_conclusive_answers(on_unreadab
 
 
 # ---------------------------------------------------------------------------
+# CLI --is-own-ancestor: exit code 0 = ancestor, 3 = definitively not an
+# ancestor. 3 is dedicated so it cannot collide with the generic exit code 1 a
+# Python crash (an import failure, an unhandled exception before argparse even
+# runs) also produces — shell callers treat every code other than 0 and 3 as
+# inconclusive and fail closed as "ancestor".
+# ---------------------------------------------------------------------------
+
+
+def test_cli_is_own_ancestor_exits_0_for_a_real_ancestor():
+    assert process_lookup._main(["--is-own-ancestor", str(os.getpid())]) == 0
+
+
+def test_cli_is_own_ancestor_exits_3_for_a_definitive_non_ancestor():
+    """Exit 3, NOT 1 — 1 is reserved for a generic crash, not this conclusive answer."""
+    assert process_lookup._main(["--is-own-ancestor", "1"]) == 3
+
+
+# ---------------------------------------------------------------------------
 # Failure paths: always [], never an exception, never a guessed PID
 # ---------------------------------------------------------------------------
 

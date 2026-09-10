@@ -57,16 +57,19 @@ service_pids() {
         -m tools.process_lookup "$@" 2>/dev/null
 }
 
-# Only exit 1 — the CLI's definitive "walked to init, no match" — counts as "not
-# an ancestor". Every other exit is inconclusive and answers "yes, ancestor":
-# argparse rejecting a malformed PID token (2), a missing interpreter (127), an
-# import failure. Mapping those to "no" would fail OPEN in exactly the case the
-# guard exists for, which is how a probe failure turns into signalling our own
-# host service.
+# Only exit 3 — the CLI's dedicated, definitive "walked to init, no match" code
+# — counts as "not an ancestor". Every other exit is inconclusive and answers
+# "yes, ancestor": exit 1 from a generic Python crash (import failure, an
+# unhandled exception before argparse even runs), argparse rejecting a
+# malformed PID token (2), a missing interpreter (127). Exit 3 is dedicated
+# specifically so it cannot collide with that generic crash exit code 1 —
+# mapping a crash to "no" would fail OPEN in exactly the case the guard exists
+# for, which is how a probe failure turns into signalling our own host
+# service.
 service_pid_is_own_ancestor() {
     PYTHONPATH="$_SERVICE_PIDS_ROOT" "$_SERVICE_PIDS_PYTHON" \
         -m tools.process_lookup --is-own-ancestor "$1" 2>/dev/null
-    [ "$?" -eq 1 ] && return 1
+    [ "$?" -eq 3 ] && return 1
     return 0
 }
 

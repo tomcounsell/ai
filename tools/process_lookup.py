@@ -364,15 +364,27 @@ def _main(argv: list[str]) -> int:
         "--is-own-ancestor",
         type=int,
         metavar="PID",
-        help="exit 0 if PID is an ancestor of this process, 1 otherwise; prints nothing",
+        help=(
+            "exit 0 if PID is an ancestor of this process; exit 3 if it is "
+            "definitively not; any other exit code is inconclusive and must "
+            "be treated as an ancestor (fail closed); prints nothing"
+        ),
     )
     args = parser.parse_args(argv)
 
     if args.is_own_ancestor is not None:
-        # Fail closed: an unreadable process tree answers "treat it as an
-        # ancestor", because every shell caller of this flag is about to decide
-        # whether to signal that PID.
-        return 0 if is_own_ancestor(args.is_own_ancestor, on_unreadable=True) else 1
+        # Exit code contract: 0 = is an ancestor, 3 = conclusively NOT an
+        # ancestor (walked to init with no match). Exit 3 is a dedicated code
+        # rather than reusing exit 1, because exit 1 is also what a generic
+        # Python crash (import error, unhandled exception before argparse
+        # even runs) produces — a caller checking "exit 1 means not an
+        # ancestor" would read that crash as a conclusive "no" and fail open.
+        # Every exit code other than 0 and 3 (1, 2, 127, ...) must be treated
+        # by callers as inconclusive and handled the same as "is an ancestor"
+        # (fail closed), because it means the walk never ran to completion.
+        if is_own_ancestor(args.is_own_ancestor, on_unreadable=True):
+            return 0
+        return 3
 
     if args.command_substring is not None:
         if args.module or args.script_suffix:

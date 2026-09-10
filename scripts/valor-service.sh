@@ -811,6 +811,8 @@ disable_worker() {
         # bootout failed or the manual fallback path is running — fall back
         # to PID kill so the operator's intent is honored.
         local pid=$(get_worker_pid)
+        service_pid_refuse_self_kill "$pid" "worker" \
+            "launchctl kickstart -k gui/$(id -u)/$WORKER_PLIST_NAME" || return 1
         echo "Worker still running after bootout; killing PID $pid..."
         kill "$pid" 2>/dev/null || true
         for i in {1..10}; do
@@ -1188,6 +1190,8 @@ disable_email() {
         # bootout failed or a foreground (nohup) bridge is running — fall back
         # to PID kill so the operator's intent is honored.
         local pid=$(get_email_pid)
+        service_pid_refuse_self_kill "$pid" "email bridge" \
+            "launchctl kickstart -k gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
         echo "Email bridge still running after bootout; killing PID $pid..."
         kill "$pid" 2>/dev/null || true
         for i in {1..10}; do

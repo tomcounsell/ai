@@ -148,10 +148,10 @@ def test_refuse_self_kill_checks_every_pid_in_the_list(tmp_path):
 def test_refuse_self_kill_fails_closed_when_the_lookup_cannot_run(tmp_path):
     """An unanswerable question must refuse, not proceed.
 
-    Anything short of the CLI's definitive "walked to init, no match" (exit 1) is
-    inconclusive: argparse rejecting a malformed PID token, a missing
-    interpreter, an import failure. Treating those as "not an ancestor" is how a
-    probe failure escalates into signalling our own host service.
+    Anything short of the CLI's dedicated definitive "walked to init, no match"
+    exit code (3) is inconclusive: argparse rejecting a malformed PID token, a
+    missing interpreter, an import failure. Treating those as "not an ancestor"
+    is how a probe failure escalates into signalling our own host service.
     """
     result = _run_under_decoy(
         tmp_path,
@@ -162,5 +162,32 @@ def test_refuse_self_kill_fails_closed_when_the_lookup_cannot_run(tmp_path):
     )
     assert result.returncode == 0, (
         f"guard failed OPEN when the lookup could not run: {result.stdout!r}"
+    )
+    assert "REFUSING to stop worker" in result.stdout
+
+
+def test_refuse_self_kill_fails_closed_on_a_generic_python_crash(tmp_path):
+    """A generic crash's exit 1 must never be read as the CLI's "not an ancestor".
+
+    Pointing ``_SERVICE_PIDS_ROOT`` at an empty directory makes
+    ``-m tools.process_lookup`` fail to import (``ModuleNotFoundError``), which
+    CPython reports with exit code 1 — the same generic crash code an unhandled
+    exception produces anywhere, and NOT the CLI's dedicated exit code 3 for a
+    conclusive "definitively not an ancestor". Before the guard's exit codes
+    were split, this exact shape (a broken ``_SERVICE_PIDS_ROOT``, a partial
+    checkout, an import error) collided with the real "not an ancestor" answer
+    and made the guard fail OPEN. Regression test for that collision.
+    """
+    empty_root = tmp_path / "empty_root"
+    empty_root.mkdir()
+    result = _run_under_decoy(
+        tmp_path,
+        'echo "DECOY $DECOY_PID"\n'
+        f'_SERVICE_PIDS_ROOT="{empty_root}"\n'
+        'service_pid_refuse_self_kill "$DECOY_PID" worker alt && exit 9\n'
+        "exit 0\n",
+    )
+    assert result.returncode == 0, (
+        f"guard failed OPEN on a generic python crash exit code: {result.stdout!r}"
     )
     assert "REFUSING to stop worker" in result.stdout

@@ -58,15 +58,28 @@ Two properties make the refusal trustworthy:
 1. **It checks every PID in the list.** A selector can return several — a
    double-bridge is precisely the state `start_bridge.sh` cleans up — and all of
    them are about to be signalled.
-2. **It fails closed.** Only the CLI's definitive "walked to init, no match"
-   (exit 1) counts as "not an ancestor". Argparse rejecting a malformed PID
-   token, a missing interpreter, an import failure — every other outcome answers
-   "yes, ancestor". Mapping those to "no" would fail open in exactly the case the
-   guard exists for.
+2. **It fails closed.** Only the CLI's dedicated exit code 3 — "walked to init,
+   no match", a conclusive "not an ancestor" — counts as "not an ancestor".
+   Exit 3 is a dedicated code rather than the more obvious exit 1, because exit
+   1 is also what a generic Python crash (an import failure, an unhandled
+   exception before argparse even runs) produces; reusing it would let a
+   broken checkout read as a conclusive "no". Argparse rejecting a malformed
+   PID token, a missing interpreter, a crash — every outcome other than 0 and
+   3 answers "yes, ancestor". Mapping those to "no" would fail open in exactly
+   the case the guard exists for.
 
-A refusal propagates. `restart_bridge`, `restart_worker`, `restart_email` and the
-bridge install path abort rather than starting anyway, which would leave two
-services running.
+A refusal propagates through every fallback PID-kill branch, including
+`restart_bridge`, `restart_worker`, `restart_email`, `disable_worker`,
+`disable_email`, and the bridge install path, which abort rather than
+proceeding — proceeding anyway could leave two services running. That
+propagation holds for the launchd-fallback branch each of those functions
+falls back to when `bootout`/`bootstrap` alone did not stick. It does **not**
+cover the separate `launchctl kickstart -k` branch some call sites take as
+their fast path when the service is already loaded — `launchctl kickstart -k`
+signals through launchd by label, not through this module's PID lookup, so
+there is no PID here for the refusal to gate on. That branch bypasses the
+refusal entirely; it is inherent to using launchctl directly, not a gap in
+this module.
 
 ## Which probes keep `pgrep`
 

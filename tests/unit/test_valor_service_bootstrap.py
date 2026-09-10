@@ -636,3 +636,71 @@ def test_email_stop_transient_bootout_when_launchd_loaded(harness):
     assert any(line.startswith("LAUNCHCTL bootout") for line in email_calls), harness.calls()
     assert "use email-disable to keep it down" in result.stdout, result.stdout
     assert result.returncode == 0
+
+
+# === disable_worker / disable_email refuse a self-kill (#3187, #3208 review) ===
+#
+# `service_pids` always reports the target as found — never "not running" — so
+# `is_worker_running` / `is_email_running` stay true across the disable
+# functions' post-bootout recheck, forcing the PID-kill fallback branch every
+# time. `service_pid_is_own_ancestor` is stubbed to always answer "yes", but
+# `service_pid_refuse_self_kill` is deliberately left as the REAL function body
+# from scripts/lib/service_pids.sh (not re-stubbed to a trivial return) so the
+# `|| return 1` propagation out of disable_worker/disable_email is actually
+# exercised end-to-end, not just assumed.
+_ALWAYS_FOUND_SELF_KILL_STUB = """
+service_pids() {
+    echo "SERVICE_PIDS $*" >> "$CALL_LOG"
+    for a in "$@"; do
+        case "$a" in
+            *worker*) echo 99999; return 0 ;;
+            *email_bridge*) echo 77777; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+service_pids_worker() { service_pids --module worker --script-suffix worker/__main__.py; }
+service_pids_bridge() { service_pids --script-suffix bridge/telegram_bridge.py; }
+service_pids_email() { service_pids --module bridge.email_bridge; }
+
+service_pid_is_own_ancestor() { return 0; }
+
+service_pid_refuse_self_kill() {
+    local pids="$1" name="$2" alternative="$3" pid
+    for pid in $pids; do
+        if service_pid_is_own_ancestor "$pid"; then
+            echo "REFUSING to stop $name (PID: $pid): it is an ancestor of this process."
+            echo "  This command is running inside a session hosted by that $name, so"
+            echo "  killing it would terminate this command before it could finish."
+            echo "  Run it from a shell outside the service, or use: $alternative"
+            return 1
+        fi
+    done
+    return 0
+}
+"""
+
+
+def _install_always_found_self_kill_stub(harness: Harness) -> None:
+    (harness.proj / "scripts" / "lib" / "service_pids.sh").write_text(_ALWAYS_FOUND_SELF_KILL_STUB)
+
+
+def test_disable_worker_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("worker-disable")
+    assert "REFUSING to stop worker" in result.stdout, result.stdout
+    # The refusal must abort disable_worker — the "killing PID" fallback line and
+    # the function's own trailing success message must never be reached.
+    assert "killing PID" not in result.stdout, result.stdout
+    assert "auto-respawn disabled" not in result.stdout, result.stdout
+    assert result.returncode == 1
+
+
+def test_disable_email_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("email-disable")
+    assert "REFUSING to stop email bridge" in result.stdout, result.stdout
+    assert "killing PID" not in result.stdout, result.stdout
+    assert "auto-respawn disabled" not in result.stdout, result.stdout
+    assert result.returncode == 1
