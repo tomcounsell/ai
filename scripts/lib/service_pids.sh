@@ -25,8 +25,9 @@
 #       → exit 0 if <pid> is an ancestor of this shell. Kill paths MUST gate on
 #         this. `pgrep` made caller-fratricide unreachable by accident; an
 #         ancestor-safe lookup makes it an explicit decision, and the answer
-#         fails closed (an unreadable process tree reports "yes, ancestor") so a
-#         probe failure can never escalate into signalling our own host service.
+#         fails closed (anything short of a definitive "no" reports "yes,
+#         ancestor") so a probe failure can never escalate into signalling our
+#         own host service.
 #
 # Sourcing this file requires SCRIPT_DIR or PROJECT_DIR to already be set by the
 # sourcing script; both `valor-service.sh` and `start_bridge.sh` set them at the
@@ -56,9 +57,17 @@ service_pids() {
         -m tools.process_lookup "$@" 2>/dev/null
 }
 
+# Only exit 1 — the CLI's definitive "walked to init, no match" — counts as "not
+# an ancestor". Every other exit is inconclusive and answers "yes, ancestor":
+# argparse rejecting a malformed PID token (2), a missing interpreter (127), an
+# import failure. Mapping those to "no" would fail OPEN in exactly the case the
+# guard exists for, which is how a probe failure turns into signalling our own
+# host service.
 service_pid_is_own_ancestor() {
     PYTHONPATH="$_SERVICE_PIDS_ROOT" "$_SERVICE_PIDS_PYTHON" \
         -m tools.process_lookup --is-own-ancestor "$1" 2>/dev/null
+    [ "$?" -eq 1 ] && return 1
+    return 0
 }
 
 # Gate every `kill` that acts on a PID from this file. Exit 1 (and explain) when
@@ -73,16 +82,25 @@ service_pid_is_own_ancestor() {
 # half-finished stop. Refusing with instructions is the only outcome that is
 # both truthful and survivable.
 #
-# $1 = pid, $2 = human-readable service name, $3 = launchctl-based alternative
+# $1 = one or more whitespace-separated PIDs, $2 = human-readable service name,
+# $3 = launchctl-based alternative.
+#
+# $1 is deliberately a LIST, not a single PID: every selector below can return
+# more than one (a double-bridge is precisely the state `start_bridge.sh` is
+# cleaning up), and each of those PIDs is about to be signalled. Checking only
+# the first would let a caller kill its own ancestor whenever the ancestor is
+# not the lowest-numbered match. Unquoted expansion is what splits the list.
 service_pid_refuse_self_kill() {
-    local pid="$1" name="$2" alternative="$3"
-    if service_pid_is_own_ancestor "$pid"; then
-        echo "REFUSING to stop $name (PID: $pid): it is an ancestor of this process."
-        echo "  This command is running inside a session hosted by that $name, so"
-        echo "  killing it would terminate this command before it could finish."
-        echo "  Run it from a shell outside the service, or use: $alternative"
-        return 1
-    fi
+    local pids="$1" name="$2" alternative="$3" pid
+    for pid in $pids; do
+        if service_pid_is_own_ancestor "$pid"; then
+            echo "REFUSING to stop $name (PID: $pid): it is an ancestor of this process."
+            echo "  This command is running inside a session hosted by that $name, so"
+            echo "  killing it would terminate this command before it could finish."
+            echo "  Run it from a shell outside the service, or use: $alternative"
+            return 1
+        fi
+    done
     return 0
 }
 

@@ -305,8 +305,10 @@ restart_bridge() {
             return 1
         fi
     else
-        # Fallback: manual stop/start
-        stop_bridge
+        # Fallback: manual stop/start. The stop can now REFUSE (it is an
+        # ancestor of this shell), and starting anyway would leave two bridges
+        # on one Telethon session file — so propagate rather than continue.
+        stop_bridge || return 1
         sleep 1
         start_bridge
     fi
@@ -551,8 +553,10 @@ print(f"  Injected {injected} env vars into plist")
 PYEOF
     fi
 
-    # Stop any running instance first
-    stop_bridge
+    # Stop any running instance first. A refusal means a live bridge already
+    # hosts this shell; bootstrapping the plist over it is the double-bridge
+    # race this stop exists to prevent, so abort instead of installing.
+    stop_bridge || return 1
 
     # Load the bridge service
     launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_PATH" "$PLIST_NAME" verify-pid \
@@ -939,7 +943,9 @@ restart_worker() {
             return 1
         fi
     else
-        stop_worker
+        # A refused stop (the worker is an ancestor of this shell) must not fall
+        # through to start_worker — that would put a second worker on the queue.
+        stop_worker || return 1
         sleep 1
         start_worker
     fi
@@ -1160,7 +1166,9 @@ stop_email() {
 
 restart_email() {
     echo "Restarting email bridge..."
-    stop_email
+    # As in restart_bridge: a refused stop must not fall through to a start that
+    # would leave two bridges polling the same IMAP mailbox.
+    stop_email || return 1
     sleep 1
     start_email
 }

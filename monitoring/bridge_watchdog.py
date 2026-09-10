@@ -843,15 +843,27 @@ def kill_stale_processes() -> int:
     bridge-descended caller kill its own live ancestor bridge.
     Do not "finish the sweep" by converting this call site.
 
-    Every *read* probe in the repo is converted as of #3187/#3265, so the rule
-    that decides this is not "which files are left" but the failure direction:
-    ``pgrep`` stays wherever the PID feeds an unconditional kill, because there
-    hiding an ancestor is the protection. The other sites that keep it for this
-    reason are ``tools/agent_session_scheduler.py::_find_process_by_session_id``
-    (cancels a session by PID) and the xdist reapers in ``scripts/reap-xdist.sh``,
-    ``scripts/pytest-clean.sh`` and ``tests/conftest.py``. A read probe that
-    needs a PID from an ancestor-safe lookup and then signals it must gate on
-    ``tools.process_lookup.is_own_ancestor`` instead.
+    As of #3187/#3265 the rule that decides this is not "which files are left"
+    but two questions, asked in order.
+
+    1. Can the probe's target ever be an ancestor of the probe? Two ``pgrep``
+       read probes survive the sweep because it structurally cannot be:
+       ``scripts/update/service.py::get_caffeinate_status`` and
+       ``tools/transcribe/__init__.py::_is_superwhisper_available``. Both
+       targets are standalone processes — a launchd job running
+       ``/usr/bin/caffeinate``, and a user-launched GUI app — that never spawn
+       an agent session, so they cannot appear in a caller's ancestor chain.
+       Anything that *could* be an ancestor is converted.
+    2. Does the PID feed an unconditional kill? ``pgrep`` stays there, because
+       hiding an ancestor is the protection rather than the defect. This call
+       site and ``tools/agent_session_scheduler.py::_find_process_by_session_id``
+       (cancels a session by PID) keep it for that reason, as do the xdist
+       reapers in ``scripts/reap-xdist.sh``, ``scripts/pytest-clean.sh`` and
+       ``tests/conftest.py``.
+
+    A probe that needs a PID from an ancestor-safe lookup and then signals it
+    must gate on ``tools.process_lookup.is_own_ancestor`` (Python) or
+    ``service_pid_refuse_self_kill`` (shell) instead.
     """
     killed = 0
     try:

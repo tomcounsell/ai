@@ -264,5 +264,9 @@ echo "To stop: launchctl bootout gui/$(id -u)/$LABEL"
 echo "To run manually: python -m worker"
 echo "NOTE: VALOR_WORKER_MODE=standalone is now explicit in the plist."
 # Not pgrep (#3265): run from a worker-hosted session it returns nothing, and
-# the operator reads a healthy worker as absent.
-echo "      Run 'ps eww \$(python -m tools.process_lookup --module worker)' after install to confirm."
+# the operator reads a healthy worker as absent. Both launch shapes are named,
+# PYTHONPATH is pinned so the recipe works from any cwd, and the `&&` is what
+# keeps a no-match (exit 1) from running `ps eww` with no PID argument.
+echo "      Confirm the plist env took effect with:"
+echo "        WORKER_PID=\$(PYTHONPATH=$PROJECT_DIR $PROJECT_DIR/.venv/bin/python -m tools.process_lookup \\"
+echo "          --module worker --script-suffix worker/__main__.py) && ps eww \$WORKER_PID"
