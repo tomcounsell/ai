@@ -381,8 +381,36 @@ if (
     suffix = "review clean and docs complete"
 ```
 
-Fall-through is already correct and needs no other edit: `CHANGES REQUESTED` now reaches
-leg 2 (`/do-patch`), and a stale or unverifiable APPROVED reaches leg 4 (`/do-pr-review`).
+**Leg 3 needs a DOCS gate in the same hunk — fall-through is NOT already correct.** Leg 3
+(`:524-531`) checks `review_status`, `REVIEW_APPROVED` and `not
+_review_verdict_head_is_stale`, and **never checks `docs_status`**. It only behaves
+correctly today because the unconditional leg 1 intercepts every `docs_status == completed`
+case before leg 3 is reached. Once leg 1 requires a verified-fresh head, the ABSENT-key
+state falls to leg 3, which reads the UNMODIFIED (and inert-on-absent-key)
+`_review_verdict_head_is_stale` and dispatches `/do-docs` with the reason *"review APPROVED
+and docs pending"* while DOCS is already `completed`. Driver-verified by probe:
+`guard_g3_pr_lock` with `REVIEW=completed`, `APPROVED`, `pr_head_sha` absent returns
+`Dispatch(/do-docs, row_id='G3')`.
+
+So leg 3's `elif` gains one clause, in the same hunk as the leg-1 change:
+
+```python
+elif (
+    review_status == STATUS_COMPLETED
+    and docs_status != STATUS_COMPLETED
+    and REVIEW_APPROVED in review_verdict_norm
+    and not _review_verdict_head_is_stale(stage_states, meta, context or {})
+):
+```
+
+Leg 3 keeps its existing `_review_verdict_head_is_stale` call — it dispatches `/do-docs`,
+not a merge — so Success Criterion 1's call-site count for the NEW predicate is unaffected
+by this clause.
+
+With both clauses in place the fall-through is correct: `CHANGES REQUESTED` reaches leg 2
+(`/do-patch`); an APPROVED that is stale, unverifiable, or absent-key reaches leg 4
+(`/do-pr-review`); and an APPROVED with DOCS genuinely pending still reaches leg 3
+(`/do-docs`), which T11b pins.
 
 **Deliberate strengthening over #3260's stated AC.** The acceptance criteria in #3260's
 comment thread (comment `5583298719`, carried over from the duplicate #3261) ask for
@@ -402,20 +430,58 @@ if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
 ```
 
 replacing `if _review_verdict_head_is_stale(stage_states, meta, context):`. The WS3d comment
-directly above (`:971-975`) is updated in the same hunk to describe the absent-key case as
-well, so the comment stops overstating the code — that overstatement is the whole reason
-this hunk is in scope.
+directly above (`:971-975`) is updated in the same hunk to name the ABSENT-key case
+explicitly, so the comment's stated intent and the delivered behavior finally line up. Word
+it as an extension, not a correction of a falsehood: the existing sentence is accurate about
+the empty sentinel; what it lacked was the absent-key clause.
 
 **Conditions on this change, non-negotiable:**
 - Strictly the predicate swap plus its comment. Do **not** touch G6's other gates
   (`pr_number` `:953-955`, `pr_merge_state`, `ci_all_passing`, the DOCS gate, the
   `REVIEW_APPROVED` gate `:966-969`) and do **not** touch row 8f.
 - **The PR body must name the deliberate widening** and cite the WS3d comment at
-  `agent/sdlc_router.py:971-975`, so a reviewer seeing an out-of-scope hunk understands why
-  it is there.
-- Fall-through is safe and verified: absent key → not verified fresh → `return None` →
-  dispatch table → row 8f → `/do-pr-review`.
+  `agent/sdlc_router.py:971-975` — stating that the comment is evidence of G6's fail-closed
+  **intent**, and that the ABSENT-key case is the newly closed gap the comment never
+  covered. Do not claim the comment already asserts the absent-key behavior; it does not,
+  and a reviewer reading it literally will mark the citation overclaimed.
+- Fall-through is safe but is **not** row 8f — see step 3b and **Success Criterion 4**.
 - Add `Refs #2062` alongside the closers.
+
+### 3b. Row 10 uses the same predicate (`:2029`) — REQUIRED, not optional
+
+`_rule_ready_to_merge` (row 10, `:2017`) is the third terminal `/do-merge` site and carries
+the identical absent-key fail-open. Without this hunk the two-site fix **relocates** the
+#3260 hole from G6 to row 10 instead of closing it (probe evidence in **Freshness Check**).
+
+```python
+# WS3d (#2062) / #3260: a terminal merge dispatch requires POSITIVE evidence
+# that the APPROVED verdict judged the live head. An absent pr_head_sha signal
+# is not evidence — row 10 must decline rather than merge on it.
+if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
+    return False
+```
+
+replacing `if _review_verdict_head_is_stale(stage_states, meta, context): return False`.
+
+**Where the absent-key state lands, stated exactly (probed, not inferred).** Row 10 is the
+last entry in `DISPATCH_RULES`; row 8f is inert on an absent key and row 9 declines because
+DOCS is complete. So once G6 and row 10 both decline, **no row owns the state** and
+`decide_next_dispatch` returns
+`Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')`.
+
+That is the intended outcome, not a gap:
+- It is fail-closed. The alternative is merging on absent freshness evidence, which is the
+  defect.
+- Production cannot reach it. spike-1 traced the sole producer:
+  `tools/sdlc_next_skill._build_context` sets `pr_head_sha` unconditionally whenever
+  `pr_number` is set and a REVIEW verdict is recorded, and both conditions hold on every
+  path that reaches row 10. The `Blocked` is a backstop against non-CLI and future callers.
+- Widening row 8f to absorb it is **out of scope** (see **No-Gos**): 8f dispatches
+  `/do-pr-review`, not a merge, so the inert reading is correct for it, and changing it
+  would convert a fail-closed escalation into a silent re-review loop for a state that
+  should never occur.
+
+T14 pins this landing by `guard_id`, and T14b pins row 10 in isolation with G6 removed.
 
 ### 4. New shared predicate `_plan_stage_stood_down` (added above row 1, near `:1121`)
 
@@ -441,12 +507,13 @@ def _plan_stage_stood_down(stage_states: dict, meta: dict) -> bool:
     return stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED)
 ```
 
-### 5. Route the four plan-stage rows through it
+### 5. Route the five plan-stage rows through it
 
 | Row | Function | Line | Today | Change |
 |-----|----------|------|-------|--------|
 | 1 | `_rule_no_plan` | `:1121` | `pr_number` only | replace with `_plan_stage_stood_down` |
 | 2 | `_rule_plan_not_critiqued` | `:1153` | **neither** | add `_plan_stage_stood_down` as the first check |
+| 2b | `_rule_critique_verdict_stale` | `:1594` (pair at `:1641-1644`) | hand-written copy of both signals | replace the pair with `_plan_stage_stood_down` |
 | 2c | `_rule_critique_in_progress_no_verdict` | `:1650` | `pr_number` only | replace with `_plan_stage_stood_down` |
 | 3 | `_rule_critique_needs_revision` | `:1180` | `pr_number` only | replace with `_plan_stage_stood_down` |
 
@@ -461,6 +528,23 @@ Row 2's docstring gains a sentence recording that it had no step-aside at all an
 (#3249); rows 1/2c/3's existing step-aside comments are rewritten to name the shared helper
 rather than restating the condition.
 
+**Row 2b is in scope (critique ruling, 2026-09-10).** The ratified design cites row 2b's
+`:1641-1644` pair as the *pattern source*, which says where the shape came from, not that
+2b must keep its own copy. Leaving it converted-by-nobody would ship the sweep with the
+last hand-written copy of the exact condition the sweep exists to express once, and would
+make this plan's own Success Criterion 5 false on landing. The conversion is provably
+behavior-identical — 2b's inline pair is literally the helper's body, in the same order:
+
+```python
+if meta.get("pr_number"):
+    return False
+if stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED):
+    return False
+```
+
+Scope cost is two lines. Keep row 2b's long `#3237` docstring, rewritten only to name the
+helper instead of restating the condition. Pinned by T5b plus its negative control.
+
 ### 6. Fold rows 4b/4c's duplicated `pr_number` checks into the helper
 
 Rows 4b (`~:1214`) and 4c (`~:1249`) each check `meta.get("pr_number")` **twice** in the
@@ -474,10 +558,12 @@ broader than the check it replaces (it also catches `BUILD == in_progress`), but
 end with `return build_status in (None, "pending", "ready")`, which already excludes
 `in_progress`. So no input changes answer.
 
-**Keep rows 4a/4c's `build_status in (None, "pending", "ready")` gates.** They are strictly
-NARROWER than the shared stand-down — they also exclude `BUILD == failed`. The helper is
-added *alongside* them, **never substituted for them**; substituting would be a behavior
-change. Row 4a is otherwise untouched.
+**Keep rows 4a/4b/4c's `build_status in (None, "pending", "ready")` gates.** All three
+carry it — 4a at `:1210`, 4b at `:1247`, 4c in its own trailing return — and all three are
+strictly NARROWER than the shared stand-down, because they also exclude `BUILD == failed`.
+The helper is added *alongside* them, **never substituted for them**; substituting would be
+a behavior change. Row 4a is otherwise untouched. T8 pins the `BUILD == failed` behavior of
+all three rows, 4b included.
 
 ### 7. Docs
 
@@ -486,8 +572,10 @@ and the terminal-dispatch rule (see **Documentation**).
 
 ### What this plan does NOT change
 
-- `_review_verdict_head_is_stale` itself, or its remaining call sites at `:527` (G3 leg 3),
-  `:1998` (row 8f) and `:2029` (row 10).
+- `_review_verdict_head_is_stale` itself. Its body is byte-identical after this change; it
+  retains its call sites at `:527` (G3 leg 3, whose surrounding `elif` gains a DOCS clause
+  but whose predicate call is unchanged) and `:1998` (row 8f, entirely untouched).
+- Row 8f (`_rule_review_verdict_head_stale`). It dispatches `/do-pr-review`, not a merge.
 - `tools/merge_predicate.py` — authorization stays where it is, and is not relaxed.
 - Row 5. See **No-Gos**.
 
