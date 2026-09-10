@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-09-10
 tracking: https://github.com/tomcounsell/ai/issues/3216
-last_comment_id: 5603829139
+last_comment_id: 5620338927
 revision_applied: true
 revision_applied_at: 2026-09-09T17:55:19Z
 ---
@@ -70,13 +70,14 @@ reference set of retained architectural corrections.
 
 ## Freshness Check
 
-**Baseline commit:** `191bd42a1339d695c406642d9e7d6ceffd5d67e1` (main, 2026-09-10)
-**Build-against commit:** `b05dde885` on `session/sdlc-3255` (lane 2b, PR #3275) — this plan is
-written against lane 2b's head, not main, because the charter surface this lane consumes lands there.
+**Baseline commit:** `dea9ed5db8620d548435dda8c4c2f469e352f956` (main, 2026-09-10)
+**Build-against commit:** main itself. Lane 2b (PR #3275) merged as `aff4d7e2e`, so the
+charter surface this lane consumes is on main and the `b05dde885` worktree head is retired.
+Every reference below was re-verified against this baseline for revision 3.
 **Issue filed at:** 2026-09-07T04:45:09Z
 **Disposition:** Minor drift
 
-**File:line references re-verified (on `b05dde885`):**
+**File:line references re-verified (on `dea9ed5db`):**
 
 - `models/improvement_evaluation.py:52` — `EVALUATION_VERDICTS = ("accept", "reject", "inconclusive", "infra_failure")` — holds.
 - `models/improvement_evaluation.py:87-92` — `blinded`, `arm_assignment_digest`, `trials`, `effect`, `confidence_interval`, `correction` — all hold, all plain `Field(null=True)`.
@@ -84,19 +85,17 @@ written against lane 2b's head, not main, because the charter surface this lane 
 - `models/verifying_artifact_store.py:70-118` — `load()` re-hashes the archive fallback; the archive-mismatch raise is at `:102`, the live-corrupt-no-archive raise at `:110` — holds, and the two raises are separately reachable, which the mutation test needs.
 - `models/improvement_experiment.py:78-88` — `state`, `contract_digest`, `manifest`, `frozen_at`, `charter_version` — hold.
 - `tools/memory_eval/metrics.py:68-99` — `bootstrap_ci` seeded, `BootstrapCI.significant = lower > 0.0` — holds.
-- `models/improvement_charter.py:137-139` — `digest`, `effective`, `text` — hold. `pinned()` at `:234`, `load_from_file()` at `:148`.
-- `models/improvement_case.py:109,117,118` — `priority_area`, `charter_digest`, `ranking_rationale` — hold.
+- `models/improvement_charter.py:138-140` — `digest`, `effective`, `text` — hold. `pinned()` at `:237`, `load_from_file()` at `:149`.
+- `models/improvement_case.py:118,126,127` — `priority_area`, `charter_digest`, `ranking_rationale` — hold.
 - `models/improvement_investigation.py:94` and `models/improvement_release.py:84` — `charter_digest` — hold.
 - `config/settings.py:622,634` — `daily_paid_inference_usd`, `weekly_infrastructure_usd` — hold.
-- `tools/improvement_eligibility.py:83` — `is_open_source(project_key, *, ttl_seconds=...)` — holds; the §7 guard.
-  **This module exists only on `b05dde885`.** `git show origin/main:tools/improvement_eligibility.py`
-  is a `fatal: path … does not exist`. It arrives with #3275, which is why the Prerequisites row now
+- `tools/improvement_eligibility.py:83` — `is_open_source(project_key, *, ttl_seconds=...)` — holds.
+  Arrived with #3275 (merged as `aff4d7e2e`) and is now on main, so the Prerequisites row
   imports it alongside the charter rather than checking the charter half only.
-- `scripts/update/migrations.py:1430` — `_migrate_confirm_improvement_v2_fields`, the precedent this
-  lane's migration mirrors. **Also only on `b05dde885`**; `origin/main` carries
-  `_migrate_confirm_improvement_models_readable` at `:1384` and no `_v2_fields` function at all. Both
-  the precedent and `improvement_eligibility.py` arrive with #3275. `MIGRATIONS` is declared at
-  `:1474` as `dict[str, tuple[callable, str]]`, so the registered callable is `v[0]` — a registry
+- `scripts/update/migrations.py:1434` — `_migrate_confirm_improvement_v2_fields`, the precedent this
+  lane's migration mirrors. Arrived with #3275 and is now on main (`origin/main` used to carry
+  only `_migrate_confirm_improvement_models_readable` at `:1384`). `MIGRATIONS` is declared at
+  `:1462` as `dict[str, tuple[callable, str]]`, so the registered callable is `v[0]` — a registry
   check that reads `getattr(v, "__name__", "")` against the tuple can never match, and the
   Verification row uses `v[0]`.
 - `agent/memory_retrieval.py:117` — `POPOTO_REDIS_DB.zrevrange(...)` inside `get_relevance_ranked`,
@@ -107,8 +106,8 @@ written against lane 2b's head, not main, because the charter surface this lane 
   transfer API the corpus export uses — hold.
 - `popoto/redis_db.py:405-414` — `POPOTO_REDIS_DB` built from `REDIS_URL` at module import; the
   mechanism the arm subprocess relies on — holds.
-- `popoto/fields/embedding_field.py:226` — `POPOTO_CONTENT_PATH` resolves the `.npy` store — holds.
-- `ui/data/improvement.py` — 295 lines on `b05dde885`, exposing `get_coverage`,
+- `popoto/fields/embedding_field.py:227` — `POPOTO_CONTENT_PATH` resolves the `.npy` store — holds.
+- `ui/data/improvement.py` — 308 lines on `dea9ed5db`, exposing `get_coverage`,
   `get_intervention_burden`, `get_provisional_assumptions`, `get_goals`. No evaluation surface, which
   is why this lane's Error State Rendering section no longer commits to one.
 - `agent/session_executor.py:2116` — `_harness_env` dict literal; `VALOR_PROJECT_KEY` confirmed **absent**.
@@ -118,7 +117,8 @@ written against lane 2b's head, not main, because the charter surface this lane 
 
 - #3177 (parent) — OPEN. The family plan `docs/plans/recursive-self-improvement.md` still names this lane at `:801` and `:408`.
 - #3215 (lane 3, declared dependency) — OPEN, unstarted. See Prerequisites for why this lane does not block on it.
-- #3255 / PR #3275 (lane 2b) — OPEN, one re-review from merge. This lane's Prerequisites record the ordering.
+- #3255 / PR #3275 (lane 2b) — MERGED as `aff4d7e2e`. The charter surface this lane consumes
+  is on main; the `[ORDERED]` gate in No-Gos is satisfied and task 3b proceeds.
 - #3217 (lane 5), #3218 (lane 6) — OPEN. Neither blocks this lane; both consume it.
 
 **Commits on main since the issue was filed (touching referenced files):**
@@ -126,6 +126,10 @@ written against lane 2b's head, not main, because the charter surface this lane 
 - `5b994db3f` "Recursive self-improvement controller: lanes 1 and 2" — created every record this lane writes. Not drift; it is the premise.
 - `a9822d719` "ETL-grade pipeline hardening" — touched `agent/session_executor.py`. Read the diff: it added `VALOR_CORRELATION_ID` to `_harness_env`. That is the exact shape this lane adds `VALOR_PROJECT_KEY` in, and it moved no line this plan depends on beyond the dict literal's own extent.
 - `2a1138d5f` "Synthetic-slug worktrees are invisible to both busy-guard predicates" — irrelevant to this surface.
+- `aff4d7e2e` "Improvement controller lane 2b: charter v2 delta" (PR #3275, merged) — created
+  the charter surface this lane consumes (`ImprovementCharter.digest`/`.text`/`.pinned()`,
+  `tools/improvement_eligibility.py`, `_migrate_confirm_improvement_v2_fields`). Not drift; it
+  retires the `b05dde885` build-against head and satisfies the `[ORDERED]` No-Go gate.
 
 **Active plans in `docs/plans/` overlapping this area:** none. `recursive-self-improvement.md` is the
 family plan this lane serves, and `improvement-controller-lane-2b-charter-v2-delta.md` is the sibling
@@ -496,7 +500,7 @@ downstream lane rather than a patch here.
 | Python pin matches the repo | `python -c "import pathlib,sys; want=pathlib.Path('.python-version').read_text().strip(); got='.'.join(map(str,sys.version_info[:3])); sys.exit(0 if got.startswith(want) else 1)"` | Worktree venv is on the committed pin |
 | `numpy` importable | `python -c "import numpy"` | Clustered resampling; already a declared dependency |
 | Verifying artifact store writable | `python -c "from models.verifying_artifact_store import verifying_artifact_store as s; import os; os.makedirs(s.base_path, exist_ok=True)"` | Frozen corpus, calibration set, and raw judge responses land here |
-| Lane 2b surface present (charter **and** eligibility) | `python -c "from models.improvement_charter import ImprovementCharter as C; from tools.improvement_eligibility import is_open_source; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` | `serves_charter` judges against `ImprovementCharter.text` and routes through `is_open_source`; **both** arrive with #3255, so the gate covers the whole lane-2b surface this lane consumes rather than the charter half only. Expected FAIL until #3275 merges. |
+| Lane 2b surface present (charter **and** eligibility) | `python -c "from models.improvement_charter import ImprovementCharter as C; from tools.improvement_eligibility import is_open_source; assert hasattr(C,'digest') and hasattr(C,'text') and hasattr(C,'pinned')"` | `serves_charter` judges against `ImprovementCharter.text` and routes through `is_open_source`; **both** arrived with #3255, so the gate covers the whole lane-2b surface this lane consumes rather than the charter half only. Passes on main since `aff4d7e2e` merged. |
 | `metrics.py` import path | `python -c "from tools.memory_eval.metrics import bootstrap_ci"` | Acceptance criterion 7 |
 | Popoto transfer API present | `python -c "from models.memory import Memory; assert hasattr(Memory,'export_records') and hasattr(Memory,'import_records')"` | The corpus export/restore is `export_records`/`import_records`; without them the arm has no legal corpus load |
 | `unix://` URL support in the pinned redis-py | `python -c "import redis; p=redis.BlockingConnectionPool.from_url('unix:///tmp/x.sock'); assert p.connection_kwargs.get('path')=='/tmp/x.sock'"` | The arm subprocess reaches its server through `REDIS_URL=unix://…`; popoto builds its pool with `from_url` |
