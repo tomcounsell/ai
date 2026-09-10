@@ -71,9 +71,16 @@ def reset_shutdown_flag():
     asq._session_state._shutdown_requested = False
 
 
-def _fresh_row(status):
+def _fresh_row(status, session_id=None):
+    """A stand-in for the authoritative Redis row the guard reads.
+
+    `session_id` identifies WHICH row the lookup resolved. It matters only for
+    TC3, where the point is that the guard's `redis_key` read and the
+    completion write's `session_id` re-read can land on different rows.
+    """
     fresh = MagicMock()
     fresh.status = status
+    fresh.session_id = session_id
     return fresh
 
 
@@ -168,23 +175,54 @@ class TestTC2TerminalWriteConflictSurvives:
 
 
 class TestTC3ReadWriteRowDivergence:
-    """TC3 -- the redis_key read and the session_id write can disagree."""
+    """TC3 -- the redis_key read and the session_id write resolve DIFFERENT rows.
+
+    The guard reads the authoritative row by `redis_key`; `_complete_agent_session`
+    re-resolves by `session_id` for its CAS. Those two lookups can land on
+    different rows, so a guard read that sees a live row does not prove the
+    write targets that same row. S1's terminal-skip is keyed on the row the
+    guard read, so it structurally cannot close this window -- only S2's typed
+    catch does.
+
+    This is what separates TC3 from TC2: there the conflict is on the same row
+    the guard just read, so S1 merely lost a race it could in principle have
+    won. Here S1 could never have fired at all.
+    """
 
     @pytest.mark.asyncio
     async def test_divergent_row_resolution_survives(self, caplog):
         chat_id = "tc3_row_divergence"
-        conflict = StatusConflictError("s1", "failed", "completed", reason="divergent row")
+        # The row the guard's redis_key read resolves: live, so S1's skip
+        # cannot fire and control reaches the completion write.
+        guard_row = _fresh_row("running", session_id="row-resolved-by-redis-key")
+        # The row the write's CAS re-read resolves by session_id: a DIFFERENT
+        # row, already terminal.
+        conflict = StatusConflictError(
+            "row-resolved-by-session-id",
+            "failed",
+            "completed",
+            reason="divergent row",
+        )
+        # Pin the divergence itself. Without this the test silently degrades
+        # into a second copy of TC2 if either identity is ever edited.
+        assert conflict.session_id != guard_row.session_id, (
+            "TC3 must raise the conflict on a DIFFERENT row than the guard read "
+            "resolved -- a same-row conflict is TC2's case, not this one."
+        )
+
         with caplog.at_level(logging.INFO, logger="agent.agent_session_queue"):
             complete_mock = await _run_single_session_loop(
                 chat_id=chat_id,
-                # Guard read sees a non-terminal row -- S1's skip cannot fire --
-                # but the write resolves a different, terminal row internally.
-                guard_read_return=_fresh_row("running"),
+                guard_read_return=guard_row,
                 complete_side_effect=conflict,
             )
 
+        # Loop returned normally (no exception escaped _worker_loop).
         assert chat_id not in _active_workers
         assert complete_mock.await_count == 1
+        # S1 demonstrably did NOT skip -- the write was reached, which is the
+        # precondition for this window existing at all.
+        assert not any("already terminal" in r.message for r in caplog.records)
         assert any("lost to a concurrent terminal writer" in r.message for r in caplog.records)
 
 
