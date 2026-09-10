@@ -127,27 +127,136 @@ recon probes, re-verified above.
 
 ## Spike Results
 
-_placeholder_
+Small appetite caps spikes at two. Both load-bearing assumptions were resolvable by direct
+inspection at plan time and were resolved inline rather than dispatched — a spike agent
+would have read the same two files.
+
+### spike-1: Requiring a *present* `pr_head_sha` costs live lanes nothing
+
+- **Assumption**: "On every path that can reach G3 leg 1 or G6, `context['pr_head_sha']` is
+  already present, so a predicate that returns False on an absent key never strands a real lane."
+- **Method**: code-read (`tools/sdlc_next_skill.py:505-533`, resolved inline).
+- **Result**: **CONFIRMED.** `_build_context` sets the key unconditionally when
+  `meta['pr_number']` is truthy AND a REVIEW verdict is recorded — a real SHA on success, or
+  `""` plus `pr_head_sha_lookup_failed` on failure. The comment at `:507-511` states the
+  fail-closed contract explicitly: it "never silently omits the key." The key is omitted
+  only when there is no PR or no recorded verdict. G3 leg 1 requires `review_status ==
+  completed`, and G6 gates on `pr_number` (`:953-955`) and `REVIEW_APPROVED` (`:966-969`),
+  so both producer conditions hold on every reachable path.
+- **Confidence**: high.
+- **Impact if false**: live lanes would fall through to `/do-pr-review` instead of merging —
+  noisy but not unsafe. This is why the design accepts the closed-by-default posture: the
+  failure mode of requiring presence is a re-review, and the failure mode of not requiring
+  it is a merge dispatch on unverified evidence.
+
+### spike-2: Nothing is stranded once rows 1/2/2c/3 stand down on BUILD
+
+- **Assumption**: "Rows that stand down on `BUILD in (in_progress, completed)` have a
+  correct landing row, without widening row 5."
+- **Method**: code-read plus the recon probes recorded in #3249.
+- **Result**: **CONFIRMED.** Row 5 `_rule_branch_exists_no_pr` fires on
+  `BUILD == in_progress OR context['branch_exists'] is True`; the branch half answers
+  regardless of BUILD status, and a BUILD cannot reach `completed` without pushing its lane
+  branch. #3249's second probe pass re-ran all five states with the shared stand-down applied
+  (monkeypatched) and every one routed correctly: rows 1/2/2c/3 with `BUILD=in_progress` and
+  no PR → `Dispatch(/do-build, row_id='5')`; row 2 with an open PR and `REVIEW=pending` →
+  `Dispatch(/do-pr-review, row_id='7')`. None reached `Blocked`.
+- **Confidence**: high.
+- **Impact if false**: a lane would dead-end at `Blocked('no matching dispatch rule')`. The
+  residual `Blocked` subcase (BUILD settled AND no live branch) is inherited from #3246
+  unchanged — there is nothing left to resume there, so it is correct, not a regression.
 
 ## Data Flow
 
-_placeholder_
+The change sits at one point in a three-hop chain and reads a signal produced upstream.
+
+1. **Producer — `tools/sdlc_next_skill.py::_build_context` (`:505-533`).** Given
+   `stage_states` and `meta`, when `meta['pr_number']` is set and a REVIEW verdict exists in
+   `_verdicts` or `meta['latest_review_verdict']`, it calls `_fetch_pr_head_sha` (which
+   resolves through `tools/pr_head_resolver.py::resolve_pr_head_sha`, never a bare `gh`
+   read) and writes `context['pr_head_sha']` — the SHA on success, `""` plus
+   `context['pr_head_sha_lookup_failed'] = True` on failure. **The key is never omitted when
+   both conditions hold.**
+
+2. **Consumer — `agent/sdlc_router.py::decide_next_dispatch` (`:2306`).** Guards run first
+   (G1–G6, G9), then `DISPATCH_RULES` in row order. The router itself makes no `gh` calls;
+   it reads only what `context` carries. Three freshness readings coexist after this change:
+   - `_review_verdict_head_is_stale` — *"is there positive evidence of staleness?"*, inert
+     on an absent key. Keeps its exact current contract and its four current call sites
+     (`:527` G3 leg 3, `:976` G6 → moves, `:1998` row 8f, `:2029` row 10).
+   - `_review_verdict_head_is_verified_fresh` (**new**) — *"is there positive evidence of
+     freshness?"*, False on an absent key. Used **only** on terminal `/do-merge` dispatch:
+     G3 leg 1 (`:518`) and G6 (`:976`).
+   - `_plan_stage_stood_down` (**new, shared**) — *"has this lane left the plan stage?"*,
+     True when `meta['pr_number']` is set or `BUILD in (in_progress, completed)`.
+
+3. **Downstream authorization — `tools/merge_predicate.py`.** Untouched. It keeps its
+   independent verdict and freshness checks and remains the authorization gate. This change
+   converges the *router* onto the predicate; it does not move authorization into the router.
+
+The stand-down flows the other way: rows 1/2/2c/3 and 4b/4c call `_plan_stage_stood_down`
+and return False, letting evaluation fall through to row 5 (pre-PR) or rows 7–10 (post-PR).
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+No prior fix attempted either of these two defects, so nothing was applied at the wrong
+layer or aimed at a symptom. What failed was **scope**, twice:
+
+- **#3237 and #3227 were each fixed as a single row/guard.** PR #3246 fixed row 2b and G3's
+  DOCS leg and consciously left the four siblings alone. That was the right call for that
+  diff's risk posture, but it is the third consecutive round of fixing one instance of a
+  class whose other instances were already visible. #3249 exists specifically to break that
+  pattern, which is why narrowing this plan to row 2 would reproduce the failure it was
+  filed against.
+- **#2062 shipped the freshness predicate and a comment describing stronger behavior than
+  the code has.** G6's `:971-975` comment claims a lookup failure "fails closed toward
+  stale" — true for the EMPTY sentinel, false for an absent key. A correct mechanism plus a
+  comment that overstates it is how the gap stayed invisible for a release cycle.
+
+The lesson carried into this plan: express the condition **once**, apply it to **every**
+site of the class in the same diff, and prove each site reachable by probe rather than by
+reading the predicate.
 
 ## Architectural Impact
 
-_placeholder_
+Contained. One module changes (`agent/sdlc_router.py`), plus its unit tests and one docs
+page. No schema, no Popoto model, no config, no new dependency, no CLI surface.
+
+Three architectural notes worth recording:
+
+- **Two freshness predicates is the design, not duplication.** They answer genuinely
+  different questions and the difference is load-bearing at exactly one place: an absent
+  signal. Non-terminal consumers (rows 8f/10, G3 leg 3) legitimately want the inert reading;
+  terminal merge dispatch does not. Each gets its own named predicate with the absent-key
+  behavior stated in its docstring, so neither call site has to remember an implicit rule.
+- **The stand-down becomes a named concept.** Today "this lane has left the plan stage" is
+  an idiom hand-copied into six predicates (and twice within two of them). After this change
+  it is one function with one docstring, which is what makes the *next* plan-stage row
+  correct by default.
+- **Router/predicate convergence continues.** This is the fourth step of the #2062 program:
+  the router's routing opinion now matches `tools/merge_predicate`'s authorization opinion on
+  both terminal merge paths. Divergence between them is the drift this closes.
 
 ## Appetite
 
-_placeholder_
+**Small.** Roughly a day. The bounding facts: two new small predicates, six predicate call
+sites edited, two one-line guard changes, and one test file extended. Every state to be
+tested has already been probed and recorded in the two issues' Recon Summaries, so the
+expensive part — establishing what the router actually does — is already paid for.
+
+If the work threatens to exceed the appetite, the thing to cut is **not** the sweep (that is
+the issue) and **not** the G6 widening (ratified). Cut the rows 4b/4c de-duplication, which
+is hygiene rather than a behavior fix.
 
 ## Prerequisites
 
-_placeholder_
+- **PR #3246 merged** (`2fb7df519`, 2026-09-08) — establishes the canonical stand-down shape
+  and creates `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`,
+  the file this plan extends. ✅ satisfied.
+- **Lane identity recorded** — slug `sdlc-3249`, worktree
+  `/Users/valorengels/src/ai/.worktrees/sdlc-3249`, branch `session/sdlc-3249`, both already
+  at `origin/main`. ✅ satisfied. Do not re-derive.
+- No new dependency, service, credential, or migration. Nothing else blocks build.
 
 ## Solution
 
