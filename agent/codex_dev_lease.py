@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 # the lane without operator action. The handler refreshes nothing — a
 # turn that outlives the TTL is itself past the turn timeout and gets
 # killed, so the lease outliving any live turn is the invariant, not a
-# refresh loop.
+# refresh loop. Enforced at the settings layer: CodexSettings.turn_timeout_s
+# carries le=900 so no operator override can silently break this invariant.
 DEV_LEASE_TTL_S = 900
 DEV_LEASE_ACQUIRE_POLL_S = 0.2
 
@@ -46,7 +47,7 @@ return 0
 """
 
 
-class DevLaneBusy(RuntimeError):
+class DevLaneBusy(RuntimeError):  # noqa: N818 -- established name across the lease/server/telemetry surface
     """The session's dev lane is held by another live Codex turn."""
 
 

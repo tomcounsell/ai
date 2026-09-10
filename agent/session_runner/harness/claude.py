@@ -74,9 +74,10 @@ def _merge_mcp_config(harness_cmd: list[str], mcp_config: dict | None) -> None:
     byte-identical). Otherwise the ``mcpServers`` mapping is merged into an
     existing belt-resolved ``--mcp-config=`` entry when one is present
     (explicit servers win per name) or appended as a new
-    ``--mcp-config=<json> --strict-mcp-config`` pair. Merging — never a
-    second ``--mcp-config`` flag — keeps exactly one config source
-    authoritative per turn.
+    ``--mcp-config=<json>`` entry. ``--strict-mcp-config`` is ensured in
+    both branches so ambient global MCP servers stay hidden from flagged
+    turns. Merging — never a second ``--mcp-config`` flag — keeps exactly
+    one config source authoritative per turn.
     """
     if not mcp_config:
         return
@@ -97,6 +98,11 @@ def _merge_mcp_config(harness_cmd: list[str], mcp_config: dict | None) -> None:
             harness_cmd[idx] = "--mcp-config=" + json.dumps(
                 {"mcpServers": servers}, sort_keys=True, separators=(",", ":")
             )
+            # The merge branch must stay strict too: without the flag the
+            # belt-resolved servers run alongside ambient global MCP servers,
+            # widening the flagged PM's tool surface.
+            if "--strict-mcp-config" not in harness_cmd:
+                harness_cmd.append("--strict-mcp-config")
             return
     harness_cmd.append(
         "--mcp-config=" + json.dumps({"mcpServers": extra}, sort_keys=True, separators=(",", ":"))

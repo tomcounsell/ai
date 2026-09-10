@@ -263,6 +263,18 @@ def test_resume_reuses_persisted_thread(monkeypatch):
     assert saved.get("saves", 0) == 0  # nothing changed: no write needed
 
 
+def test_resume_turn_with_session_started_consumes_budget(monkeypatch):
+    # Resume-shaped counterpart: a resume turn whose transcript DOES carry
+    # thread.started (surfaced as SESSION_STARTED) increments the
+    # max_resumed_turns budget — resumed turns never ride free.
+    session, saved = _session(codex_thread_id=THREAD_A, codex_turn_count=2)
+    out, calls, _logged = _call(monkeypatch, session, result=_ok_result(), events=_started_events())
+    assert out["ok"] is True
+    assert calls["request"].prior_uuid == THREAD_A
+    assert out["turn_count"] == 3
+    assert saved["codex_turn_count"] == 3
+
+
 def test_max_turn_guard_stops_with_thread_preserved(monkeypatch):
     session, _ = _session(codex_thread_id=THREAD_A, codex_turn_count=10)
     out, calls, logged = _call(monkeypatch, session, result=_ok_result())

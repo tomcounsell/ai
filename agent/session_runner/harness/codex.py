@@ -504,6 +504,20 @@ class CodexHarnessAdapter:
                     start_new_session=False,
                 )
             except FileNotFoundError as exc:
+                # create_subprocess_exec raises FileNotFoundError for a
+                # missing binary AND a missing cwd — disambiguate so a bad
+                # working_dir never masquerades as a missing install.
+                if not os.path.isdir(request.working_dir):
+                    return TurnResult(
+                        resume_handle=resume_thread,
+                        final_text="",
+                        events=collected,
+                        returncode=None,
+                        error_detail=(
+                            f"Codex working directory not found: "
+                            f"{request.working_dir!r} ({exc}). Refusing spawn."
+                        ),
+                    )
                 return TurnResult(
                     resume_handle=resume_thread,
                     final_text="",

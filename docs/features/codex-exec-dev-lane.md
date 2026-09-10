@@ -88,7 +88,7 @@ with a retryable error instead of resuming a superseded thread.
 | Setting (`CODEX__*`) | Default | Meaning |
 |---|---|---|
 | `CODEX__MAX_RESUMED_TURNS` | 10 | Resume bound; exhaustion keeps the thread and errors actionably, no silent rollover |
-| `CODEX__TURN_TIMEOUT_S` | 600 | Per-turn wall clock; timeout kills the tree, thread preserved |
+| `CODEX__TURN_TIMEOUT_S` | 600 | Per-turn wall clock; timeout kills the tree, thread preserved; capped at 900 (dev-lane lease TTL) |
 | `CODEX__SANDBOX` | `workspace-write` | `danger-full-access` requires an explicit machine setting and never comes from the create flag |
 | `CODEX__INSTALL_ENABLED` | false | Opt-in `/update` provisioning of `@openai/codex` at/above floor `0.144.3` |
 

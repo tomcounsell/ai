@@ -158,6 +158,25 @@ def test_resume_argv_inserts_resume_and_drops_color():
     assert "--json" in argv and "--output-schema" in argv
 
 
+def test_resume_transcript_still_emits_session_started():
+    # Resume-shaped fixture: a resume turn (prior_uuid set) whose transcript
+    # carries thread.started pins the budget-accounting event. If the CLI
+    # ever omits thread.started on resume, this test fails loudly instead
+    # of letting resumed turns silently stop consuming max_resumed_turns.
+    seen: list = []
+    captured: dict = {}
+    fake = _FakeProc(stdout=_success_stdout(thread_id=THREAD_A))
+    with _patch_spawn(fake, captured):
+        result = _run(
+            CodexHarnessAdapter().run_turn(_request(prior_uuid=THREAD_A), on_event=seen.append)
+        )
+    assert result.error_detail is None
+    assert result.resume_handle == THREAD_A
+    started = [e for e in seen if e.type == harness_events.SESSION_STARTED]
+    assert len(started) == 1
+    assert started[0].data["handle"] == THREAD_A
+
+
 def test_build_codex_argv_color_only_first_turn():
     first = build_codex_argv(thread_id=None, schema_path="/tmp/s.json", worktree="/tmp")
     resumed = build_codex_argv(thread_id=THREAD_A, schema_path="/tmp/s.json", worktree="/tmp")
@@ -290,6 +309,24 @@ def test_missing_binary_is_actionable():
         result = _run(CodexHarnessAdapter().run_turn(_request()))
     assert result.error_detail is not None
     assert "not found" in result.error_detail
+
+
+def test_missing_working_dir_reports_cwd_not_binary():
+    # create_subprocess_exec raises FileNotFoundError for a missing cwd
+    # too — the adapter must blame the directory, not the install.
+    async def _raise(*argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    with patch(
+        "agent.session_runner.harness.codex.asyncio.create_subprocess_exec",
+        side_effect=_raise,
+    ):
+        result = _run(
+            CodexHarnessAdapter().run_turn(_request(working_dir="/nonexistent-codex-cwd-xyz"))
+        )
+    assert result.error_detail is not None
+    assert "working directory" in result.error_detail.lower()
+    assert "/nonexistent-codex-cwd-xyz" in result.error_detail
 
 
 def test_secrets_scrubbed_from_error_detail():

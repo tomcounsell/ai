@@ -51,6 +51,15 @@ def test_config_merges_into_existing_entry_without_second_flag():
     assert sum(p.startswith("--mcp-config=") for p in argv) == 1
     payload = json.loads(argv[1][len("--mcp-config=") :])
     assert set(payload["mcpServers"]) == {"belt", "codex_dev"}
+    # The merge branch stays strict too: ambient global MCP servers stay
+    # hidden from flagged turns even when a belt entry already exists.
+    assert "--strict-mcp-config" in argv
+
+
+def test_merge_branch_does_not_duplicate_strict_flag():
+    argv = ["claude", '--mcp-config={"mcpServers":{"belt":{}}}', "--strict-mcp-config"]
+    _merge_mcp_config(argv, _lane_config())
+    assert argv.count("--strict-mcp-config") == 1
 
 
 def test_malformed_config_is_ignored():

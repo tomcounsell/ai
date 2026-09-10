@@ -1100,8 +1100,12 @@ class CodexSettings(BaseModel):
     turn_timeout_s: float = Field(
         default=600.0,
         gt=0,
+        le=900,
         description=(
             "Per-turn budget (seconds) bounding one codex_dev.run tool call. "
+            "Upper-bounded by the dev-lane lease TTL (900s, see "
+            "agent/codex_dev_lease.py): a turn that outlives the lease lets "
+            "a second turn acquire it and race on one thread. "
             "Provisional/tunable. Override via CODEX__TURN_TIMEOUT_S."
         ),
     )

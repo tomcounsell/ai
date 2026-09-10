@@ -191,6 +191,9 @@ class TestCodexSettings:
 
     def test_per_key_env_override(self, monkeypatch):
         monkeypatch.setenv("VALOR_LAUNCHD", "1")  # skip reading the real .env file
+        monkeypatch.setenv("CODEX__INSTALL_ENABLED", "1")
+        monkeypatch.setenv("CODEX__NPM_PACKAGE", "@openai/codex-test")
+        monkeypatch.setenv("CODEX__MIN_VERSION", "0.200.0")
         monkeypatch.setenv("CODEX__SANDBOX", "danger-full-access")
         monkeypatch.setenv("CODEX__MAX_RESUMED_TURNS", "20")
         monkeypatch.setenv("CODEX__TURN_TIMEOUT_S", "120")
@@ -198,6 +201,9 @@ class TestCodexSettings:
 
         fresh = Settings()
 
+        assert fresh.codex.install_enabled is True
+        assert fresh.codex.npm_package == "@openai/codex-test"
+        assert fresh.codex.min_version == "0.200.0"
         assert fresh.codex.sandbox == "danger-full-access"
         assert fresh.codex.max_resumed_turns == 20
         assert fresh.codex.turn_timeout_s == 120.0
@@ -208,6 +214,7 @@ class TestCodexSettings:
         [
             ("sandbox", "read-only"),
             ("turn_timeout_s", 0),
+            ("turn_timeout_s", 901),
             ("max_resumed_turns", 0),
             ("max_resumed_turns", 101),
         ],
