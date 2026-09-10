@@ -49,12 +49,26 @@ the #3246/#3245/#3244 batch. The concern is defense-in-depth and drift — the r
 lanes to attempt merges the gate will reject is exactly the disagreement that later gets
 "fixed" by relaxing the predicate.
 
-**#3260 widened to G6 (ratified).** `guard_g6_terminal_merge_ready` (`:976`) has the
-identical absent-key fail-open on the OTHER terminal `/do-merge` fast-path. Its own comment
-at `:971-975` already asserts the behavior it does not have — *"never fast-path a
-head_sha-stale APPROVED verdict ... (or the live-head lookup failed, which fails closed
-toward stale)"* — while the code returns "not stale" on an absent signal. Same lie, one
-guard over, same diff.
+**#3260 widened to G6 and row 10 (ratified + critique correction).**
+`guard_g6_terminal_merge_ready` (`:976`) has the identical absent-key fail-open on the
+second terminal `/do-merge` fast-path. Its WS3d comment at `:971-975` states a fail-closed
+*intent* — *"never fast-path a head_sha-stale APPROVED verdict ... (or the live-head lookup
+failed, which fails closed toward stale)"* — that is **broader than the delivered
+behavior**. Read literally, the comment covers the EMPTY-sentinel lookup-failure case, which
+`_review_verdict_head_is_stale` already handles correctly. It never mentions the ABSENT-key
+case, and that is the actual gap: on an absent key the predicate returns "not stale" and G6
+fast-paths to merge. The comment is not a lie about the empty sentinel; it is an intent the
+code does not carry all the way to the absent-key input.
+
+`_rule_ready_to_merge` (row 10, `:2017`, stale call at `:2029`) is the **third** terminal
+`/do-merge` site with the same absent-key fail-open, and the critique proved by live probe
+that fixing only G3 leg 1 and G6 *relocates* the hole rather than closing it: with G6
+widened, an absent-key APPROVED state falls through row 8f (inert on an absent key) and row
+9 (DOCS complete) straight into row 10's `/do-merge`. Verified at plan-revision time:
+baseline `decide_next_dispatch` on that state returns
+`Dispatch(/do-merge, row_id='G6')`; with G6 alone widened it returns
+`Dispatch(/do-merge, row_id='10')`. Row 10 is therefore in scope. Row 8f is **not** — it
+dispatches `/do-pr-review`, not a merge, and the inert reading is correct for it.
 
 ## Freshness Check
 
@@ -91,6 +105,29 @@ Baseline: `main` @ `a15c5eab7` (2026-09-10). Both issues recorded their recon ag
 neither of which touches these rows or guards. Two lanes run in parallel on this machine —
 `pgrep-sweep-finish` (`scripts/`, `tools/process_lookup.py`, `monitoring/`) and a lane on
 `agent/agent_session_queue.py` — and neither touches any file this plan modifies. No overlap.
+
+**Revision-round re-verification (revision 1, `main` @ `5bf9333a4`).** The two critique
+BLOCKERs were re-probed independently at revision time before being written into the plan;
+neither is carried on the critique's word:
+
+- **Blocker 1 (G3 leg 3).** `guard_g3_pr_lock` at `:518-531` re-read verbatim: leg 3's
+  `elif` checks `review_status`, `REVIEW_APPROVED`, and `not _review_verdict_head_is_stale`
+  — and **never** `docs_status`. Confirmed. It works today only because the unconditional
+  leg 1 intercepts every `docs_status == completed` case first.
+- **Blocker 2 (row 10).** Live `decide_next_dispatch` probe on the absent-`pr_head_sha`
+  APPROVED/DOCS-complete state: baseline → `Dispatch(/do-merge, row_id='G6')`; with G6
+  widened only → `Dispatch(/do-merge, row_id='10')`. The hole relocates. Confirmed.
+- **Post-fix landing, probed (this is a correction to both the ratified design and the
+  critique's proposed remedy).** With G6 **and** row 10 widened and row 8f untouched, the
+  absent-key state returns **`Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')`**,
+  not `/do-pr-review` via row 8f. Row 10 is the last entry in `DISPATCH_RULES`, row 8f is
+  inert on an absent key, and row 9 declines because DOCS is complete — so **no row owns the
+  absent-key landing**. `Blocked` is the correct, fail-closed answer for a state that
+  spike-1 shows no production producer can emit; it escalates to a human instead of merging
+  on absent evidence. Widening row 8f to absorb it is explicitly out of scope (see
+  **No-Gos**). The same probe confirms the controls are unaffected: fresh key →
+  `Dispatch(/do-merge, row_id='G6')`; stale key → `Dispatch(/do-pr-review, row_id='8f')`;
+  empty sentinel + `pr_head_sha_lookup_failed` → `Dispatch(/do-pr-review, row_id='8f')`.
 
 **Bug reproduction.** Both defects were reproduced at recon time by direct
 `decide_next_dispatch` probes (recorded verbatim in each issue's Recon Summary), and the
