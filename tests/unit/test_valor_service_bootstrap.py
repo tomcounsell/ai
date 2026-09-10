@@ -592,8 +592,8 @@ def _email_launchctl_calls(harness: Harness) -> list[str]:
 
 def test_email_disable_disables_and_bootouts(harness):
     # email-disable is the symmetric teardown: launchctl disable + bootout so the
-    # KeepAlive=true job stays down. pgrep reports the email bridge not running,
-    # so no PID-kill fallback fires.
+    # KeepAlive=true job stays down. The stubbed lookup reports the email bridge
+    # not running, so no PID-kill fallback fires.
     result = harness.run("email-disable")
     email_calls = _email_launchctl_calls(harness)
     assert any(line.startswith("LAUNCHCTL disable") for line in email_calls), harness.calls()
