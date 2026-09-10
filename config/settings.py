@@ -1052,6 +1052,85 @@ class SessionRunnerSettings(BaseModel):
     )
 
 
+class CodexSettings(BaseModel):
+    """Codex exec dev-lane configuration (plan #2001, Phase 3).
+
+    Provisional typed knobs for the opt-in Codex dev lane. Every value is
+    env-overridable via the ``CODEX__`` prefix (e.g.
+    ``CODEX__MAX_RESUMED_TURNS=20``) through the settings catalog — no
+    inline literals elsewhere. All defaults are provisional/tunable; a
+    version-floor bump must update fixtures/probes before changing the
+    gate (see agent/session_runner/harness/codex.py).
+    """
+
+    install_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in Codex CLI provisioning via scripts/update/codex_cli.py. "
+            "Default OFF — only opted-in machines install/upgrade @openai/codex. "
+            "Override via CODEX__INSTALL_ENABLED=1."
+        ),
+    )
+    npm_package: str = Field(
+        default="@openai/codex",
+        description="npm package name for Codex CLI provisioning. Override via CODEX__NPM_PACKAGE.",
+    )
+    min_version: str = Field(
+        default="0.144.3",
+        description=(
+            "Minimum verified Codex CLI version (JSONL/resume/schema contract, "
+            "live-probed). Override via CODEX__MIN_VERSION."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional Codex model override for dev turns. None inherits the "
+            "CLI default. Override via CODEX__MODEL."
+        ),
+    )
+    sandbox: str = Field(
+        default="workspace-write",
+        description=(
+            "Default Codex sandbox for dev turns. Only 'workspace-write' or "
+            "'danger-full-access' are accepted (validated); the CLI flag path "
+            "never selects danger-full-access. Override via CODEX__SANDBOX."
+        ),
+    )
+    turn_timeout_s: float = Field(
+        default=600.0,
+        gt=0,
+        le=900,
+        description=(
+            "Per-turn budget (seconds) bounding one codex_dev.run tool call. "
+            "Upper-bounded by the dev-lane lease TTL (900s, see "
+            "agent/codex_dev_lease.py): a turn that outlives the lease lets "
+            "a second turn acquire it and race on one thread. "
+            "Provisional/tunable. Override via CODEX__TURN_TIMEOUT_S."
+        ),
+    )
+    max_resumed_turns: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Provisional bound on resumed turns against one Codex thread. At "
+            "the limit the lane stops with an actionable PM-visible error "
+            "while preserving the thread — never silent rollover. "
+            "Override via CODEX__MAX_RESUMED_TURNS."
+        ),
+    )
+
+    @field_validator("sandbox")
+    @classmethod
+    def validate_sandbox(cls, v):
+        """Only the two explicit sandbox policies are accepted."""
+        allowed = ("workspace-write", "danger-full-access")
+        if v not in allowed:
+            raise ValueError(f"Codex sandbox must be one of: {', '.join(allowed)}")
+        return v
+
+
 class PathSettings(BaseModel):
     """Path settings derived from project root. No hardcoded usernames."""
 
@@ -1249,6 +1328,7 @@ class Settings(BaseSettings):
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     session_runner: SessionRunnerSettings = Field(default_factory=SessionRunnerSettings)
+    codex: CodexSettings = Field(default_factory=CodexSettings)
     improvement: ImprovementSettings = Field(default_factory=ImprovementSettings)
 
     @field_validator("environment")

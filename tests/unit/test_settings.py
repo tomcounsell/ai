@@ -10,7 +10,7 @@ every call site that migrated to `settings.timeouts.<field>` changes too.
 import pytest
 from pydantic import ValidationError
 
-from config.settings import ImprovementSettings, Settings, TimeoutSettings
+from config.settings import CodexSettings, ImprovementSettings, Settings, TimeoutSettings
 
 
 class TestTimeoutSettingsDefaults:
@@ -170,3 +170,55 @@ class TestImprovementSettingsBudgetUnits:
     def test_invalid_values_fail_at_load(self, field, bad_value):
         with pytest.raises(ValidationError):
             ImprovementSettings(**{field: bad_value})
+
+
+class TestCodexSettings:
+    """CODEX__* knobs for the opt-in Codex dev lane (plan #2001, Phase 3)."""
+
+    def test_defaults(self):
+        s = CodexSettings()
+
+        assert s.install_enabled is False
+        assert s.npm_package == "@openai/codex"
+        assert s.min_version == "0.144.3"
+        assert s.model is None
+        assert s.sandbox == "workspace-write"
+        assert s.turn_timeout_s == 600.0
+        assert s.max_resumed_turns == 10
+
+    def test_wired_into_settings(self):
+        assert Settings().codex.sandbox == "workspace-write"
+
+    def test_per_key_env_override(self, monkeypatch):
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")  # skip reading the real .env file
+        monkeypatch.setenv("CODEX__INSTALL_ENABLED", "1")
+        monkeypatch.setenv("CODEX__NPM_PACKAGE", "@openai/codex-test")
+        monkeypatch.setenv("CODEX__MIN_VERSION", "0.200.0")
+        monkeypatch.setenv("CODEX__SANDBOX", "danger-full-access")
+        monkeypatch.setenv("CODEX__MAX_RESUMED_TURNS", "20")
+        monkeypatch.setenv("CODEX__TURN_TIMEOUT_S", "120")
+        monkeypatch.setenv("CODEX__MODEL", "gpt-5-codex")
+
+        fresh = Settings()
+
+        assert fresh.codex.install_enabled is True
+        assert fresh.codex.npm_package == "@openai/codex-test"
+        assert fresh.codex.min_version == "0.200.0"
+        assert fresh.codex.sandbox == "danger-full-access"
+        assert fresh.codex.max_resumed_turns == 20
+        assert fresh.codex.turn_timeout_s == 120.0
+        assert fresh.codex.model == "gpt-5-codex"
+
+    @pytest.mark.parametrize(
+        "field,bad_value",
+        [
+            ("sandbox", "read-only"),
+            ("turn_timeout_s", 0),
+            ("turn_timeout_s", 901),
+            ("max_resumed_turns", 0),
+            ("max_resumed_turns", 101),
+        ],
+    )
+    def test_invalid_values_fail_at_load(self, field, bad_value):
+        with pytest.raises(ValidationError):
+            CodexSettings(**{field: bad_value})

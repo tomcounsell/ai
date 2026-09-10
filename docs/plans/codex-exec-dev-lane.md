@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -921,3 +921,30 @@ build directly.
 | CONCERN | Risk & Robustness | log_codex_turn JSONL is the audit source of truth with one line per turn, but no stated behavior exists for lane-file write failure (disk full, permission, worktree removed), so turn_count can advance while evidence is silently lost | explicit best-effort-with-recorded-gap degraded mode in Task 3 (`ok`/`degraded`, `codex_turn_log_failed`), Task 5 counts only `ok` lines with a warning on `degraded` | Signature def log_codex_turn(lane_path: Path, record: dict) -> Literal["ok", "degraded"]; wrap open(lane_path, "a") in try/except OSError, on failure logger.error("codex_turn_log_failed") and return "degraded"; Task 5 asserts live_probe_pass_count only over "ok" lines; atomic append with os.O_APPEND and flush()+fsync() per line |
 | CONCERN | Scope & Value | Appetite states 4b REQUIRED in DONE path while Task 5 parks 4b on probe failure, leaving no terminal DONE state when probes fail and turning the off-ramp into a stall | terminal parked-4b DONE guard in Appetite, Task 5 disposition, and Success Criteria (outside-lane failure parks to a linked follow-up; lane-defect failure withholds DONE) | Add guard language such as DONE = Tasks 1-8 pass, OR Tasks 1-3+5 pass with 4b parked and a filed follow-up issue linked from the plan; without this the lane cannot converge on probe failure because REQUIRED and parked contradict |
 | NIT | Scope & Value | Three per-turn evidence surfaces (Task 3 helper JSONL, Task 5 lane-file assertion, Task 4b backfill) risk duplicate telemetry if each layer re-specifies schema and retention | Task 3 declared the single schema of record; Task 5 and Task 4b reference it with no new per-turn fields | Keep the single Task 3 writer as the schema of record and state Task 5 and Task 4b only read it |
+
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound (round-5 verdict
+READY TO BUILD WITH CONCERNS, concern re-critique rounds 3 of 3). The concerns
+below were carried into BUILD unresolved and are accepted on the record.
+
+- **kill_codex_tree enumerate-kill-wait contract** — the plan states recursive
+  SIGKILL plus wait without a fully specified enumerate-kill-wait contract with
+  PID start-time re-validation. Accepted because: non-blocking by definition of
+  CONCERN, and the plan already carries the enumerate-kill-wait contract with PID
+  start-time validation in Technical Approach, Race 1, and Task 3; the build
+  implements it directly with the recycled-PID-never-signalled fixture.
+- **log_codex_turn degraded mode** — no stated behavior for lane-file write
+  failure in the plan body beyond the Task 3 signature. Accepted because:
+  non-blocking by definition of CONCERN, and the plan carries explicit
+  best-effort-with-recorded-gap semantics (`ok`/`degraded`,
+  `codex_turn_log_failed`); the build implements that signature and Task 5
+  counts only `ok` lines.
+- **DONE guard terminal parked-4b** — REQUIRED 4b versus parked-4b off-ramp
+  tension. Accepted because: the Appetite DONE guard is terminal as written
+  (tasks 1-8 pass, or tasks 1-3+5 pass with 4b parked to a linked follow-up on
+  outside-lane probe failure); the build follows the guard and lets live probes
+  decide.
+- **NIT: single schema of record** — three per-turn evidence surfaces risk
+  duplication. Accepted because: Task 3 is declared the single schema of record
+  and the build keeps it so, with Tasks 5 and 4b only reading it.

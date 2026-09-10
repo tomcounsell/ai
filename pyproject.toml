@@ -234,4 +234,5 @@ markers = [
     "models: Redis/Popoto model relationships and persistence",
     "webui: Web UI dashboards, routes, templates",
     "analytics: Unified analytics collection, query, and dashboard",
+    "codex_live: Live codex exec probes on a provisioned machine (plan #2001)",
 ]

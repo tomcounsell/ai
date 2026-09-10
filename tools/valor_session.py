@@ -565,6 +565,7 @@ def create_session(
     requires_real_chrome: bool = False,
     job_id: str | None = None,
     expect_what: str | None = None,
+    dev_harness: str | None = None,
 ) -> CreateResult:
     """Programmatic core for session creation, shared by ``cmd_create`` and by
     callers that need to provision a session without going through the CLI.
@@ -659,6 +660,30 @@ def create_session(
                 ),
                 notes=notes,
             )
+
+        # Codex dev-lane selection (plan #2001, Phase 3): creation-time-only,
+        # validated before any slug/project/filesystem/Redis side effect.
+        # Only eng sessions may be flagged; the value is immutable after
+        # creation (no update path changes it except the one-way
+        # `update-dev-harness` codex-to-claude downgrade).
+        if dev_harness is not None:
+            if dev_harness != "codex":
+                return CreateResult(
+                    success=False,
+                    error=(
+                        f"Unknown --dev-harness value: {dev_harness!r}. Allowed values: 'codex'."
+                    ),
+                    notes=notes,
+                )
+            if resolved_session_type != SessionType.ENG:
+                return CreateResult(
+                    success=False,
+                    error=(
+                        "--dev-harness codex requires --role eng. Teammate and "
+                        "top-level sessions remain Claude-only."
+                    ),
+                    notes=notes,
+                )
 
         if telegram_message_id and chat_id == "0":
             logger.warning(
@@ -779,6 +804,7 @@ def create_session(
                 model=model,
                 project_config=project_config,
                 requires_real_chrome=requires_real_chrome,
+                dev_harness=dev_harness,
             )
             return session_id
 
@@ -904,6 +930,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         requires_real_chrome=bool(getattr(args, "needs_real_chrome", False)),
         job_id=getattr(args, "job_id", None),
         expect_what=getattr(args, "expect_what", None),
+        dev_harness=getattr(args, "dev_harness", None),
     )
 
     # Presentation of the core's progress notes lives here, not in the core.
@@ -924,6 +951,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                     "status": "created",
                     "project_key": result.project_key,
                     "model": model,
+                    "dev_harness": getattr(args, "dev_harness", None),
                     "worker_healthy": result.worker_healthy,
                     "worker_state": worker_state,
                     "worker_heartbeat_age_s": result.worker_heartbeat_age_s,
@@ -937,10 +965,71 @@ def cmd_create(args: argparse.Namespace) -> int:
         print(f"  Project key: {result.project_key}")
         if model:
             print(f"  Model:       {model}")
+        if getattr(args, "dev_harness", None):
+            print(f"  Dev harness: {getattr(args, 'dev_harness')}")
         print(f"  Message: {message[:80]}")
         print(f"  Chat ID: {chat_id}")
         if worker_state == "down":
             print(_worker_down_message(result.worker_heartbeat_age_s), file=sys.stderr)
+    return 0
+
+
+def cmd_update_dev_harness(args: argparse.Namespace) -> int:
+    """One-way operator downgrade of an eng session's dev lane (plan #2001).
+
+    `codex` → `claude` only. Gated on the session's dev-lane lease (refuses
+    while a Codex turn holds it), preserves `codex_thread_id` for forensics,
+    and re-primes the PM for `Agent(dev)` (priming is conditional on the
+    persisted value, so clearing the flag is the re-prime). The downgraded
+    value flows through queue recreation via the model-derived field copy.
+    """
+    _load_env()
+    session = _find_session(args.id)
+    if session is None:
+        print(f"Error: no session found for id {args.id!r}", file=sys.stderr)
+        return 1
+    if getattr(session, "dev_harness", None) != "codex":
+        print(
+            f"Error: session {args.id!r} dev_harness is "
+            f"{getattr(session, 'dev_harness', None)!r}, not 'codex' — "
+            "only a codex-to-claude downgrade is supported.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        from agent.codex_dev_lease import DevLaneBusy, acquire_dev_lease
+    except ImportError:
+        acquire_dev_lease = None  # type: ignore[assignment]
+        DevLaneBusy = RuntimeError  # type: ignore[assignment,misc]  # noqa: N806
+    if acquire_dev_lease is not None:
+        try:
+            with acquire_dev_lease(str(session.id), timeout_s=0):
+                pass
+        except DevLaneBusy:
+            print(
+                f"Error: session {args.id!r} dev lane is busy "
+                "(a Codex turn holds the lease) — retry when idle.",
+                file=sys.stderr,
+            )
+            return 1
+    preserved_thread = getattr(session, "codex_thread_id", None)
+    session.dev_harness = None
+    session.save()
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "session_id": args.id,
+                    "dev_harness": None,
+                    "preserved_codex_thread_id": preserved_thread,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"Downgraded session {args.id!r} dev lane to Claude (Agent(dev)).")
+        if preserved_thread:
+            print(f"  Preserved codex_thread_id for forensics: {preserved_thread}")
     return 0
 
 
@@ -2241,6 +2330,18 @@ def main() -> int:
             "recorded instead and the PM is nudged to refine it."
         ),
     )
+    create_parser.add_argument(
+        "--dev-harness",
+        choices=["codex"],
+        default=None,
+        help=(
+            "In-turn dev-lane executor for eng sessions (plan #2001, Phase 3). "
+            "'codex' routes developer work through a resumable `codex exec` "
+            "thread via a session-scoped MCP tool; the top-level PM stays "
+            "Claude. Omit for the default Claude Agent(dev) lane. Eng-only, "
+            "creation-time-only (immutable after creation)."
+        ),
+    )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # resume subcommand
@@ -2422,6 +2523,20 @@ def main() -> int:
     )
     policy_list_parser.add_argument("--json", action="store_true", help="Output JSON")
 
+    # update-dev-harness subcommand (plan #2001, Phase 3)
+    udh_parser = subparsers.add_parser(
+        "update-dev-harness",
+        help="One-way operator downgrade of an eng session's dev lane (codex-to-claude)",
+    )
+    udh_parser.add_argument("--id", required=True, help="Session ID to downgrade")
+    udh_parser.add_argument(
+        "--to",
+        required=True,
+        choices=["claude"],
+        help="Downgrade target (only 'claude'; the downgrade is one-way)",
+    )
+    udh_parser.add_argument("--json", action="store_true", help="Output JSON")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -2438,6 +2553,7 @@ def main() -> int:
 
     dispatch = {
         "create": cmd_create,
+        "update-dev-harness": cmd_update_dev_harness,
         "resume": cmd_resume,
         "steer": cmd_steer,
         "status": cmd_status,

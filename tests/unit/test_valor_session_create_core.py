@@ -301,3 +301,64 @@ class TestPayloadThreading:
         assert result.worker_heartbeat_age_s == 1.0
         assert result.project_key == "test-2696"
         assert result.session_id
+
+
+class TestCreateDevHarness:
+    """Creation-time Codex dev-lane selection (plan #2001, Phase 3).
+
+    The ``dev_harness`` capability is immutable after creation, so the only
+    enforcement point is here: unknown values and non-eng roles refuse
+    before any slug/project/filesystem/Redis side effect, and a flagged
+    eng create threads the value into the ``_push_agent_session`` payload.
+    """
+
+    def test_unknown_dev_harness_is_refused(self, spy):
+        result = valor_session.create_session(
+            message="Run /sdlc for issue #2696",
+            slug="sdlc-2696",
+            project_key="test-2696",
+            dev_harness="bogus",
+        )
+
+        assert result.success is False
+        assert "Unknown --dev-harness" in (result.error or "")
+        assert spy["resolve"] == []
+        assert spy["worktree"] == []
+        assert spy["push"] == []
+
+    def test_non_eng_dev_harness_is_refused(self, spy):
+        result = valor_session.create_session(
+            message="chat about the weather",
+            role="teammate",
+            session_type="teammate",
+            slug="sdlc-2696",
+            project_key="test-2696",
+            dev_harness="codex",
+        )
+
+        assert result.success is False
+        assert "--dev-harness codex requires --role eng" in (result.error or "")
+        assert spy["resolve"] == []
+        assert spy["worktree"] == []
+        assert spy["push"] == []
+
+    def test_flagged_eng_create_threads_dev_harness(self, spy):
+        result = valor_session.create_session(
+            message="Run /sdlc for issue #2696",
+            slug="sdlc-2696",
+            project_key="test-2696",
+            dev_harness="codex",
+        )
+
+        assert result.success is True
+        assert spy["push"][0]["dev_harness"] == "codex"
+
+    def test_unflagged_create_threads_none(self, spy):
+        result = valor_session.create_session(
+            message="Run /sdlc for issue #2696",
+            slug="sdlc-2696",
+            project_key="test-2696",
+        )
+
+        assert result.success is True
+        assert spy["push"][0].get("dev_harness") is None

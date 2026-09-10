@@ -32,7 +32,8 @@ telemetered fallback, and the `file_paths` (#1802) delivery slot — see
 | Module | Role |
 |--------|------|
 | `base.py` | The `HarnessAdapter` protocol plus the normalized `TurnRequest` / `TurnResult` / `TurnEvent` dataclasses. |
-| `claude.py` | `ClaudeHarnessAdapter` — the (today, only) concrete adapter for the `claude -p` CLI. Owns argv/env assembly, stream-json parsing, the stale-UUID and image-dimension retry fallbacks, and turn-input/health helpers, extracted byte-identically from the pre-extraction `agent/sdk_client.py` free functions. |
+| `claude.py` | `ClaudeHarnessAdapter` — the concrete adapter for the `claude -p` CLI, driving every top-level turn. Owns argv/env assembly, stream-json parsing, the stale-UUID and image-dimension retry fallbacks, and turn-input/health helpers, extracted byte-identically from the pre-extraction `agent/sdk_client.py` free functions. |
+| `codex.py` | `CodexHarnessAdapter` — the second concrete adapter, driving `codex exec --json` / `exec resume` as the opt-in dev-lane executor inside flagged eng sessions (issue #2001). Same protocol, Codex-specific argv/stdin, preflight, output-schema, and reaping knowledge. Deliberately unreachable from `HeadlessRoleDriver`, which stays statically Claude. See [Codex Exec Dev Lane](codex-exec-dev-lane.md). |
 | `events.py` | The fixed normalized `TurnEvent` type vocabulary, aligned with codex's `ThreadEvent` naming (`session.started`, `turn.spawned`, `item.stdout`, `turn.exited`, `turn.completed`). Deliberately minimal — see Rabbit Holes below. |
 
 `agent/sdk_client.py` re-exports the harness module's public names for its

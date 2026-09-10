@@ -625,3 +625,107 @@ class TestFinalizeSession:
         st.finalize_session("does-not-exist-xyz999")
         st.finalize_session("")
         st.finalize_session(None)
+
+
+# ---------------------------------------------------------------------------
+# Codex dev-lane telemetry (plan #2001 Task 4b)
+# ---------------------------------------------------------------------------
+
+
+class TestRecordCodexDevTurn:
+    def test_dev_turn_event_shape(self, tmp_telemetry):
+        """The machine-readable twin of the PM attribution: harness, model
+        version, turns, usage, outcome — and nothing else sensitive."""
+        import agent.session_telemetry as st
+
+        st.record_codex_dev_turn(
+            "test-codex-001",
+            thread_id="thread-abc",
+            turn_count=2,
+            outcome="ok",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            model_version="0.154.0",
+            wall_clock_ms=1200,
+        )
+        events = read_session_timeline("test-codex-001")
+        assert len(events) == 1
+        event = events[0]
+        assert event["type"] == st.CODEX_DEV_TURN_EVENT == "codex_dev_turn"
+        assert event["harness"] == "codex"
+        assert event["thread_id"] == "thread-abc"
+        assert event["turn_count"] == 2
+        assert event["outcome"] == "ok"
+        assert event["usage"] == {"input_tokens": 10, "output_tokens": 5}
+        assert event["model_version"] == "0.154.0"
+        assert event["wall_clock_ms"] == 1200
+
+    def test_dev_turn_carries_no_prompt_or_secret_surface(self, tmp_telemetry):
+        """Usage totals only: no instruction, prompt, key, token, or stderr."""
+        import agent.session_telemetry as st
+
+        st.record_codex_dev_turn(
+            "test-codex-002",
+            thread_id="t",
+            turn_count=1,
+            outcome="native-failure",
+            usage={},
+            model_version="0.154.0",
+            wall_clock_ms=5,
+        )
+        (event,) = read_session_timeline("test-codex-002")
+        for forbidden in ("instruction", "prompt", "api_key", "stderr", "token"):
+            assert forbidden not in event
+
+    def test_dev_turn_never_raises(self, monkeypatch):
+        """A broken telemetry substrate never masks the turn outcome."""
+        import agent.session_telemetry as st
+
+        monkeypatch.setattr(
+            st, "record_telemetry_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk"))
+        )
+        st.record_codex_dev_turn(
+            "test-codex-003",
+            thread_id="t",
+            turn_count=1,
+            outcome="ok",
+            usage={},
+            model_version="v",
+            wall_clock_ms=1,
+        )
+
+
+class TestBackfillCodexLane:
+    def test_backfill_ingests_ok_lines(self, tmp_path, tmp_telemetry):
+        """Pre-4b probe turns become comparable codex_dev_turn events."""
+        import agent.session_telemetry as st
+
+        lane = tmp_path / "sess.jsonl"
+        lane.write_text(
+            '{"thread_id": "t1", "turn_count": 1, "outcome": "ok", '
+            '"usage": {"input_tokens": 3}, "wall_clock_ms": 100}\n'
+            '{"thread_id": "t1", "turn_count": 2, "outcome": "guard-exhausted", '
+            '"usage": null, "wall_clock_ms": 5}\n'
+        )
+        assert st.backfill_codex_lane("test-codex-004", lane) == 2
+        events = read_session_timeline("test-codex-004")
+        assert [e["turn_count"] for e in events] == [1, 2]
+        assert all(e["backfilled"] is True for e in events)
+        assert all(e["type"] == "codex_dev_turn" for e in events)
+        assert events[1]["outcome"] == "guard-exhausted"
+
+    def test_backfill_skips_malformed_lines(self, tmp_path, tmp_telemetry):
+        import agent.session_telemetry as st
+
+        lane = tmp_path / "sess.jsonl"
+        lane.write_text(
+            "not json\n"
+            '{"thread_id": "t1", "turn_count": 1, "outcome": "ok", '
+            '"usage": {}, "wall_clock_ms": 1}\n'
+            "[1, 2, 3]\n"
+        )
+        assert st.backfill_codex_lane("test-codex-005", lane) == 1
+
+    def test_backfill_missing_file_returns_zero(self, tmp_path, tmp_telemetry):
+        import agent.session_telemetry as st
+
+        assert st.backfill_codex_lane("test-codex-006", tmp_path / "absent.jsonl") == 0
