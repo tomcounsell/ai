@@ -7,7 +7,7 @@ created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2001
 last_comment_id: 5087021248
 revision_applied: true
-revision_applied_at: 2026-09-10T15:18:57Z
+revision_applied_at: 2026-09-10T15:32:10Z
 ---
 
 # Phase 3: Codex Exec as Opt-in Dev-Lane Executor Within Eng Sessions
@@ -113,6 +113,18 @@ env-example/Codex keys 13). Cited refs still hold at this head
 `dev_agent_id`; #1996 OPEN umbrella as checked 2026-09-10). This paragraph
 supersedes the `759a72816` paragraph above, which cited revision `197f2cdbd`
 while HEAD had already moved to `fdb7c1d18`.
+
+**Round-5 re-verification (2026-09-10T15:32:10Z, commit `3fe772516`):** verified at the
+round-5 findings commit itself: `git merge-base --is-ancestor 3fe772516 HEAD`
+passes with HEAD equal to `3fe772516` before this revision. Cited refs still
+hold at this head (`role_driver.py` constructs `ClaudeHarnessAdapter`;
+`models/agent_session.py:356` carries `exec_harness`; `runner.py` still carries
+`dev_agent_id`; #1996 OPEN umbrella as checked 2026-09-10). The four
+round-5 concern-driven body changes in this revision are confirmed present by
+grep count in the working tree (PID `create_time` validation 6,
+`codex_turn_log_failed` degraded mode 3, `DONE guard` terminal rule 5,
+`schema of record` consolidation 3). This paragraph supersedes nothing above;
+it anchors the round-5 revision to its own head.
 
 ## Prior Art
 
@@ -267,8 +279,15 @@ deferral; only ordering was deferred. Task 4b (update provisioning plus
 harness-dimensioned telemetry) is required scope and sits in the DONE path:
 DONE requires Task 4b after Task 5 records `live_probe_pass_count >= 2`. The
 core lane (Tasks 1-3 plus Task 4 settings/migration) proves value first; 4b
-then completes provisioning and telemetry. No off-ramp removes 4b from this
-issue.
+then completes provisioning and telemetry.
+**DONE guard (terminal, parked-4b):** DONE is satisfied either (A) Tasks 1-8
+pass including 4b after Task 5 records `live_probe_pass_count >= 2`, or (B)
+Tasks 1-3 plus 5 pass, the live probes fail for reasons outside the lane
+(missing provision, auth, or infra, never lane defects), the negative evidence
+is recorded on #2001, and 4b is parked to a filed follow-up issue linked from
+this plan. If probes fail because of lane defects (adapter, tool, or
+persistence bugs), DONE is withheld until those defects are fixed; parking 4b
+never satisfies DONE in that case.
 
 ## Prerequisites
 
@@ -319,10 +338,14 @@ continues** → later turn/restart resumes the same Codex thread.
   unlink it in `finally`, including cancellation/failure paths.
 - Wrap the first `thread.started` persist in write-or-kill: if the synchronous
   save fails, terminate the full Codex process tree via `kill_codex_tree(proc)`
-  (direct child plus `psutil` children `recursive=True`, `SIGKILL`, then wait)
-  and return a typed tool error rather than leaving an orphan thread with no
-  persisted handle. The tree kill covers sandboxed grandchildren, not just the
-  direct child.
+  using an enumerate-kill-wait contract with PID start-time validation:
+  enumerate via `psutil.Process(root).children(recursive=True)` capturing
+  `(pid, create_time)`, send `SIGKILL` only when the live `create_time` still
+  matches the captured value (skipping recycled PIDs), then
+  `psutil.wait_procs(procs, timeout=5)` and log survivors with cmdline. Never
+  kill by bare pid alone. Return a typed tool error rather than leaving an
+  orphan thread with no persisted handle. The tree kill covers sandboxed
+  grandchildren, not just the direct child.
 - Persist a monotonic dev-lane fence token alongside thread id and turn count;
   every resume re-checks the token under the lease so a TTL lease expiry that
   races a still-live child cannot resume a superseded thread.
@@ -477,11 +500,14 @@ limit before spawning; never discard the resumable thread automatically.
 **State prerequisite:** Persisted `dev_harness=codex`.
 **Mitigation:** Synchronous inline `session.started` callback saves the handle
 immediately; no deferred task or post-return persistence. The save is
-write-or-kill: a failed persist calls `kill_codex_tree(proc)` (child plus
-recursive `psutil` grandchildren, `SIGKILL`, then wait) and returns a typed
-tool error. The live E2E probe verifies process-group membership covers Codex
-grandchildren so steering reaches the whole tree, and a fixture with a sleep
-grandchild plus forced persist failure asserts zero surviving PIDs.
+write-or-kill: a failed persist calls `kill_codex_tree(proc)` under the
+enumerate-kill-wait contract with PID start-time validation (capture
+`(pid, create_time)`, `SIGKILL` only on `create_time` match, `wait_procs`
+timeout 5, log survivors with cmdline) and returns a typed tool error. The
+live E2E probe verifies process-group membership covers Codex grandchildren so
+steering reaches the whole tree, and a fixture with a sleep grandchild plus
+forced persist failure asserts zero surviving PIDs and asserts a recycled-PID
+stand-in (mismatched `create_time`) is never signalled.
 
 ### Race 2: Steering kills Codex mid-turn
 **Location:** Claude PM process group, MCP server, Codex child
@@ -601,12 +627,13 @@ count unchanged while one success consumes exactly one.
 - [ ] `/update` supports opt-in install/upgrade and version/auth validation
   (REQUIRED scope in the DONE path via Task 4b, ordered after Task 5 records
   `live_probe_pass_count >= 2`; core lane ships first on settings plus
-  migration, then 4b completes provisioning and telemetry).
+  migration, then 4b completes provisioning and telemetry; parked-4b satisfies
+  DONE only per the Appetite DONE guard).
 - [ ] Telemetry distinguishes `harness=claude|codex`, PM turns, Dev turns,
   usage, failure, resume, and guard exhaustion without secret-bearing payloads;
   completion records harness, model version, turns, and usage so the owner can
   judge Codex-vs-Claude on cost, latency, and quality (REQUIRED scope via Task
-  4b; Task 5 asserts only the PM-visible attribution line).
+  4b, or parked-4b per the Appetite DONE guard; Task 5 asserts only the PM-visible attribution line).
 - [ ] Ordered tracking issue filed for the overdue 2026-07-18 prefix-fallback
   telemetry review with hit counts since PR #2038 linked as evidence;
   automatic-selection policy remains explicitly unresolved.
@@ -716,17 +743,30 @@ build directly.
   request, bound every call with `asyncio.wait_for`, never retain session state
   in the server, and map auth/native errors deterministically.
 - Add runtime capability gating, session lease, write-or-kill thread
-  persistence via `kill_codex_tree(proc)` (recursive grandchildren, SIGKILL,
-  wait; fixture with sleep grandchild plus forced persist failure asserts zero
-  surviving PIDs), fence-token resume check, resume/count guard with
+  persistence via `kill_codex_tree(proc)` under the enumerate-kill-wait
+  contract with PID start-time validation (capture `(pid, create_time)` via
+  `psutil` recursive children, `SIGKILL` only on `create_time` match, never
+  bare pid kill, `wait_procs` timeout 5 with survivor cmdline logging; fixture
+  with sleep grandchild plus forced persist failure asserts zero surviving
+  PIDs and a recycled-PID stand-in is never signalled), fence-token resume
+  check, resume/count guard with
   increment-after-live-spawn plus refund-on-spawn-failure accounting, conditional MCP
   config, and Codex PM prime selection.
-- Add a `log_codex_turn` helper writing one append-only JSONL line per executed
-  Codex turn to a session-scoped lane file (thread id, turn count, outcome,
-  usage, wall-clock duration; no prompts, credentials, or raw stderr). Call it
-  on success and on every typed error (auth, version, busy, native failure,
-  timeout, cancellation, spawn error) so the gating live probes leave structured
-  per-turn evidence even before Task 4b builds full telemetry dimensions.
+- Task 3 is the single schema of record for per-turn evidence. Add a
+  `log_codex_turn(lane_path: Path, record: dict) -> Literal["ok", "degraded"]`
+  helper writing one append-only JSONL line per executed Codex turn to a
+  session-scoped lane file with exactly these fields: `thread_id`,
+  `turn_count`, `outcome`, `usage`, `wall_clock_ms`; no prompts, credentials,
+  or raw stderr. Append atomically with `os.O_APPEND` plus `flush()` and
+  `fsync()` per line. Call it on success and on every typed error (auth,
+  version, busy, native failure, timeout, cancellation, spawn error) so the
+  gating live probes leave structured per-turn evidence even before Task 4b
+  builds full telemetry dimensions. Degraded mode is explicit best-effort with
+  a recorded gap: on `OSError` log `codex_turn_log_failed` and return
+  `"degraded"`; the handler still returns the Codex result (a log failure never
+  masks the turn outcome), and Task 5 counts only `"ok"` lines toward
+  `live_probe_pass_count` while forcing a warning with the linked log line for
+  any `"degraded"` return.
 - Keep Codex as a child of the existing PM process group and prove steering /
   cancellation cleanup.
 
@@ -758,7 +798,8 @@ build directly.
 - **Parallel**: false
 - Build `scripts/update/codex_cli.py` and the harness/dev-lane telemetry
   dimensions only after the lane has proven value in two live probes.
-- Ingest the Task 3 `log_codex_turn` JSONL lane file as backfill when building
+- Ingest the Task 3 `log_codex_turn` JSONL lane file (Task 3 is the schema of
+  record; this task defines no new per-turn fields) as backfill when building
   the full dimensions, so probe turns are comparable with post-4b turns rather
   than lost.
 - Emit separate PM/Dev harness telemetry with usage, resume, failure, and guard
@@ -794,11 +835,17 @@ build directly.
 - Assert the PM-visible report contains harness/model-version/turns/usage
   attribution, and verify Codex grandchildren die with the steered process
   group.
-- Assert the `log_codex_turn` lane file holds one line per executed turn with
-  matching thread id, count, outcome, and usage evidence.
-- Probe-failure disposition: if the live probes fail, record the negative
-  evidence on #2001 and park Task 4b as a follow-up instead of leaving the
-  issue in perpetual WIP.
+- Assert the Task 3 `log_codex_turn` lane file (Task 3 is the schema of record;
+  no new per-turn fields are defined here) holds one `"ok"` line per executed
+  turn with matching thread id, count, outcome, and usage evidence;
+  `live_probe_pass_count` counts only `"ok"` lines, and any `"degraded"` return
+  forces a warning in the probe evidence with the `codex_turn_log_failed` log
+  linked.
+- Probe-failure disposition (terminal, see the Appetite DONE guard): if the
+  live probes fail for reasons outside the lane, record the negative evidence
+  on #2001 and park Task 4b to a filed follow-up issue linked from this plan;
+  if they fail because of lane defects, DONE is withheld until the defects are
+  fixed and parking 4b does not satisfy DONE.
 
 ### 6. Security and architecture review
 - **Task ID**: review-codex-boundary
@@ -870,7 +917,7 @@ build directly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | kill_codex_tree states recursive SIGKILL plus wait but no enumerate-kill-wait contract with PID start-time re-validation, risking orphaned double-fork descendants, zombies, or PID-reuse kill | pending | Implement kill_codex_tree(root_pid) as: enumerate via psutil.Process(root).children(recursive=True) capturing (pid, create_time); os.kill(pid, SIGKILL) only if create_time still matches; then psutil.wait_procs(procs, timeout=5); log survivors with cmdline; never bare pkill -P or kill -9 by pid alone |
-| CONCERN | Risk & Robustness | log_codex_turn JSONL is the audit source of truth with one line per turn, but no stated behavior exists for lane-file write failure (disk full, permission, worktree removed), so turn_count can advance while evidence is silently lost | pending | Signature def log_codex_turn(lane_path: Path, record: dict) -> Literal["ok", "degraded"]; wrap open(lane_path, "a") in try/except OSError, on failure logger.error("codex_turn_log_failed") and return "degraded"; Task 5 asserts live_probe_pass_count only over "ok" lines; atomic append with os.O_APPEND and flush()+fsync() per line |
-| CONCERN | Scope & Value | Appetite states 4b REQUIRED in DONE path while Task 5 parks 4b on probe failure, leaving no terminal DONE state when probes fail and turning the off-ramp into a stall | pending | Add guard language such as DONE = Tasks 1-8 pass, OR Tasks 1-3+5 pass with 4b parked and a filed follow-up issue linked from the plan; without this the lane cannot converge on probe failure because REQUIRED and parked contradict |
-| NIT | Scope & Value | Three per-turn evidence surfaces (Task 3 helper JSONL, Task 5 lane-file assertion, Task 4b backfill) risk duplicate telemetry if each layer re-specifies schema and retention | pending | Keep the single Task 3 writer as the schema of record and state Task 5 and Task 4b only read it |
+| CONCERN | Risk & Robustness | kill_codex_tree states recursive SIGKILL plus wait but no enumerate-kill-wait contract with PID start-time re-validation, risking orphaned double-fork descendants, zombies, or PID-reuse kill | enumerate-kill-wait with PID start-time validation in Technical Approach, Race 1, and Task 3, plus a recycled-PID-never-signalled fixture | Implement kill_codex_tree(root_pid) as: enumerate via psutil.Process(root).children(recursive=True) capturing (pid, create_time); os.kill(pid, SIGKILL) only if create_time still matches; then psutil.wait_procs(procs, timeout=5); log survivors with cmdline; never bare pkill -P or kill -9 by pid alone |
+| CONCERN | Risk & Robustness | log_codex_turn JSONL is the audit source of truth with one line per turn, but no stated behavior exists for lane-file write failure (disk full, permission, worktree removed), so turn_count can advance while evidence is silently lost | explicit best-effort-with-recorded-gap degraded mode in Task 3 (`ok`/`degraded`, `codex_turn_log_failed`), Task 5 counts only `ok` lines with a warning on `degraded` | Signature def log_codex_turn(lane_path: Path, record: dict) -> Literal["ok", "degraded"]; wrap open(lane_path, "a") in try/except OSError, on failure logger.error("codex_turn_log_failed") and return "degraded"; Task 5 asserts live_probe_pass_count only over "ok" lines; atomic append with os.O_APPEND and flush()+fsync() per line |
+| CONCERN | Scope & Value | Appetite states 4b REQUIRED in DONE path while Task 5 parks 4b on probe failure, leaving no terminal DONE state when probes fail and turning the off-ramp into a stall | terminal parked-4b DONE guard in Appetite, Task 5 disposition, and Success Criteria (outside-lane failure parks to a linked follow-up; lane-defect failure withholds DONE) | Add guard language such as DONE = Tasks 1-8 pass, OR Tasks 1-3+5 pass with 4b parked and a filed follow-up issue linked from the plan; without this the lane cannot converge on probe failure because REQUIRED and parked contradict |
+| NIT | Scope & Value | Three per-turn evidence surfaces (Task 3 helper JSONL, Task 5 lane-file assertion, Task 4b backfill) risk duplicate telemetry if each layer re-specifies schema and retention | Task 3 declared the single schema of record; Task 5 and Task 4b reference it with no new per-turn fields | Keep the single Task 3 writer as the schema of record and state Task 5 and Task 4b only read it |
