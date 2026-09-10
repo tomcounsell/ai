@@ -691,8 +691,11 @@ runtime) to convert.
   plan requires touching it, and a reorder would invalidate every probe in the coverage
   matrix.
 - **Auditing all ~25 dispatch rows for stand-downs.** The sweep is over the **plan-stage**
-  rows the issue names (1, 2, 2c, 3, plus the 4b/4c duplication). PR-stage and patch-stage
-  rows have different correct step-asides and are a separate class.
+  rows the issue names (1, 2, 2c, 3, plus row 2b's copy and the 4b/4c duplication).
+  PR-stage and patch-stage rows have different correct step-asides and are a separate class.
+- **Widening row 8f so the absent-key state has a row to land on.** The `Blocked` is
+  deliberate; see **No-Gos** and **Success Criterion 4**. The pull to "make the test say
+  `/do-pr-review`" is exactly how this fail-closed escalation would get quietly removed.
 - **Rewriting the recon probes as a reusable harness.** Tempting, and out of scope. Use the
   existing helper functions in the test file.
 - **Chasing `tools/merge_predicate.py` into agreement.** It already agrees. This change moves
@@ -794,15 +797,19 @@ below.
 - [ ] Update `docs/features/gh-stale-state-verdict-gate.md` — document the two-predicate
       split: `_review_verdict_head_is_stale` (inert on an absent signal, for non-terminal
       consumers) vs `_review_verdict_head_is_verified_fresh` (positive evidence required, for
-      terminal `/do-merge` dispatch only), and state the rule that terminal merge dispatch
-      uses the latter.
+      terminal `/do-merge` dispatch only), name all three terminal sites (G3 leg 1, G6, row
+      10), and record that an absent `pr_head_sha` on a merge-ready state escalates to
+      `Blocked(guard_id='NO_RULE')` by design.
 - [ ] Update `.claude/skills-global/do-sdlc/SKILL.md:248` — G3's ladder description: leg 1 now
-      reads "`/do-merge` (REVIEW and DOCS complete, verdict `APPROVED`, head verified fresh)".
+      reads "`/do-merge` (REVIEW and DOCS complete, verdict `APPROVED`, head verified fresh)",
+      and leg 3 gains "AND DOCS not completed".
 - [ ] Update `.claude/skills-global/do-sdlc/SKILL.md:254` — G6's condition row: add "AND the
       REVIEW verdict's head is verified fresh against `context['pr_head_sha']`".
       Edit in place; do not replace-and-rename (it is hardlinked to `~/.claude/skills/`).
-- [ ] Update the plan-stage rows in the same SKILL.md dispatch table so rows 1, 2, 2c and 3
-      record the plan-stage stand-down, matching what row 2b already documents.
+- [ ] Update the same SKILL.md dispatch table's **row 10** entry with the same
+      verified-fresh condition, and leave row 8f's entry unchanged.
+- [ ] Update the plan-stage rows in the same SKILL.md dispatch table so rows 1, 2, 2b, 2c and
+      3 all record the shared plan-stage stand-down.
 - [ ] Update the "Open-PR step-asides" note (`.claude/skills-global/do-sdlc/SKILL.md:263`) to
       name the shared `_plan_stage_stood_down` condition instead of listing rows individually.
 - [ ] Update the module docstring of
@@ -882,26 +889,32 @@ test file, so parallel edits would only manufacture conflicts.
 1. **Set up.** Work in `/Users/valorengels/src/ai/.worktrees/sdlc-3249` on
    `session/sdlc-3249`; confirm it is at `origin/main` and rebase if not. Never edit the
    shared checkout root for code.
-2. **Write the RED tests first.** Add T1–T17 to
+2. **Write the RED tests first.** Add T1–T18 to
    `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`. Run
    them via `scripts/pytest-clean.sh` with targeted node IDs and **capture the failing
-   output**. Confirm T14 (G6, ABSENT key) is RED — if it is green, the test is wrong. Commit
-   the RED tests.
+   output**. Confirm T14 (G6 + row 10 end to end, ABSENT key) and T14b (row 10 in
+   isolation, G6 monkeypatched out of `GUARDS`, ABSENT key) are both RED — if either is
+   green, the test is wrong. Commit the RED tests.
 3. **Add `_review_verdict_head_is_verified_fresh`** next to `_review_verdict_head_is_stale`
    (`:1385`), with the docstring from Solution step 1. Do not modify the existing predicate.
    Commit.
-4. **Apply it to G3 leg 1** (`:518`) per Solution step 2. Run T9–T13; confirm green. Commit.
+4. **Apply it to G3 leg 1** (`:518`) per Solution step 2, **and add leg 3's
+   `docs_status != STATUS_COMPLETED` clause in the same hunk**. Run T9–T13 (T11 and T11b
+   included); confirm green and confirm `TestG3DocsLeg` still passes unmodified. Commit.
 5. **Apply it to G6** (`:976`) per Solution step 3 — the one-line swap plus the `:971-975`
-   comment correction, nothing else. Run T14–T16; confirm T14 flipped RED→green and T15/T16
-   never regressed. Commit.
+   comment extension, nothing else. Commit.
+5b. **Apply it to row 10** (`:2029`) per Solution step 3b. Run T14, T14b, T15, T16, T16b and
+   T18; confirm T14/T14b flipped RED→green with a `Blocked(guard_id='NO_RULE')` assertion,
+   and that T15/T16/T16b/T18 never regressed. Commit.
 6. **Add `_plan_stage_stood_down`** per Solution step 4. Commit.
-7. **Route rows 1, 2, 2c, 3 through it** per Solution step 5, updating each row's step-aside
-   comment to name the helper. Run T1–T6; confirm green, including the T6 negative controls.
-   Commit.
-8. **Fold rows 4b/4c's duplicate `pr_number` checks** per Solution step 6, keeping 4a/4c's
-   narrower `build_status` gates. Run T7, T8 and the whole
-   `test_sdlc_router_decision_with_concerns.py` suite unmodified; any red means revert this
-   task. Commit.
+7. **Route rows 1, 2, 2b, 2c, 3 through it** per Solution step 5, updating each row's
+   step-aside comment to name the helper and keeping row 2b's `#3237` docstring. Run T1–T6
+   (T5b and T5c included); confirm green, including the negative controls, and confirm
+   `TestRow2bStandsDownOnceBuildStarted` passes unmodified. Commit.
+8. **Fold rows 4b/4c's duplicate `pr_number` checks** per Solution step 6, keeping
+   4a/4b/4c's narrower `build_status` gates. Run T7, T8 (all three rows asserted) and the
+   whole `test_sdlc_router_decision_with_concerns.py` suite unmodified; any red means revert
+   this task. Commit.
 9. **Audit the existing suites** named in **Test Impact**
    (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`,
    `tests/unit/test_sdlc_router.py`). For each failure, decide UPDATE-the-expectation vs
@@ -914,27 +927,40 @@ test file, so parallel edits would only manufacture conflicts.
     `.claude/skills-global/do-sdlc/SKILL.md` in place (hardlinked — never replace-and-rename).
     Commit.
 12. **Quality gate**: `python -m ruff check` and `python -m ruff format`. Commit.
-13. **Open the PR.** Body must include: the RED evidence for each new assertion (T14's
-    ABSENT-key RED called out specifically), an explicit paragraph naming the **G6 widening as
-    deliberate** and citing the WS3d comment at `agent/sdlc_router.py:971-975`, and the list of
-    changed existing assertions. Trailers: `Closes #3260`, `Closes #3249`, `Refs #2062`.
+13. **Open the PR.** Body must include: the RED evidence for each new assertion (T14 and
+    T14b's ABSENT-key REDs called out specifically); an explicit paragraph naming the **G6
+    and row-10 widenings as deliberate**, citing the WS3d comment at
+    `agent/sdlc_router.py:971-975` as evidence of G6's fail-closed *intent* (not as an
+    assertion of the absent-key behavior it never made) and quoting the row-10 relocation
+    probe; a sentence explaining that the absent-key state now lands on
+    `Blocked(guard_id='NO_RULE')` by design and why row 8f was deliberately not widened;
+    and the list of changed existing assertions. Trailers: `Closes #3260`, `Closes #3249`,
+    `Refs #2062`.
 
 ## Verification
 
-- **Reachability, not inference.** For each of rows 1, 2, 2c, 3, 4b, 4c and for G3 leg 1 and
-  G6, a direct `decide_next_dispatch` (or `guard_g6_terminal_merge_ready`) probe demonstrates
-  both the pre-fix wrong answer and the post-fix right one. No claim of the form "reading the
-  predicate, it must fire."
+- **Reachability, not inference.** For each of rows 1, 2, 2b, 2c, 3, 4b, 4c, 10 and for G3
+  legs 1 and 3 and G6, a direct `decide_next_dispatch` (or `guard_g6_terminal_merge_ready` /
+  `guard_g3_pr_lock`) probe demonstrates both the pre-fix wrong answer and the post-fix right
+  one. No claim of the form "reading the predicate, it must fire."
 - **RED-before-green ledger.** Each new assertion has a captured failing run from before its
-  fix landed. T14's RED is on the ABSENT-key input specifically; a RED captured on the
-  stale-key input does not count and must be redone.
-- **Negative controls.** T6, T13 and T15 prove the change did not simply disable the rows and
-  guards it touches — the happy paths still route as before.
-- **Non-substitution proof.** T8 (`BUILD == failed`) proves rows 4a/4c kept their narrower
-  gate rather than inheriting the broader helper.
+  fix landed. T14's and T14b's REDs are on the ABSENT-key input specifically; a RED captured
+  on the stale-key input does not count and must be redone. T14b's pre-fix output must be
+  literally `Dispatch(/do-merge, row_id='10')` — anything else means the probe is not
+  exercising row 10.
+- **Negative controls.** T5c, T6, T11b, T13, T15, T16, T16b and T18 prove the change did not
+  simply disable the rows and guards it touches — the happy paths still route as before, and
+  row 8f plus `_review_verdict_head_is_stale` are demonstrably unmodified.
+- **Non-substitution proof.** T8 (`BUILD == failed`) proves rows 4a, 4b **and** 4c kept their
+  narrower gate rather than inheriting the broader helper.
+- **No-surviving-copy proof.** After the sweep, `grep -n 'STATUS_IN_PROGRESS, STATUS_COMPLETED'
+  agent/sdlc_router.py` shows the BUILD half of the condition only inside
+  `_plan_stage_stood_down` — row 2b's copy is gone.
 - **Untouched-surface proof.** `git diff main -- agent/sdlc_router.py` is read end to end and
-  shows: no hunk in `_review_verdict_head_is_stale`, no hunk in `_rule_branch_exists_no_pr`
-  (row 5), no hunk in rows 8f/10, and no hunk in `tools/merge_predicate.py`.
+  shows: no hunk in `_review_verdict_head_is_stale`'s body, no hunk in
+  `_rule_branch_exists_no_pr` (row 5), no hunk in row 8f, and no diff at all in
+  `tools/merge_predicate.py`. Row 10 **does** carry a hunk — exactly one, the predicate swap
+  plus its comment.
 - **Suite green.** `scripts/pytest-clean.sh` over `tests/unit/sdlc_router_decision/` and
   `tests/unit/test_sdlc_router.py`, with a non-zero test count (the `ZERO TESTS EXECUTED`
   guard must not have fired).
