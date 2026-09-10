@@ -604,23 +604,38 @@ existing helper style (`_build_in_progress_states`, `_plan_context`, `_approved_
 | T3 | row 2 | same, no PR, `BUILD=in_progress`, branch exists | `Dispatch(/do-build, row_id='5')` |
 | T4 | row 2c | `CRITIQUE=in_progress`, no verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
 | T5 | row 3 | `NEEDS REVISION` verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
-| T6 | rows 1/2/2c/3 negative control | `BUILD=pending`, no PR | each row still fires its own skill — the sweep must not disable the rows |
+| T5b | **row 2b** | stale critique verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` — 2b converted to the shared helper |
+| T5c | row 2b negative control | genuinely stale critique verdict, `BUILD=pending`, no PR | row 2b still fires `/do-plan-critique` — the conversion is behavior-identical |
+| T6 | rows 1/2/2b/2c/3 negative control | `BUILD=pending`, no PR | each row still fires its own skill — the sweep must not disable the rows |
 | T7 | rows 4b/4c | the `pr_number` and `BUILD=completed` states each row already refuses | unchanged answers (refactor is behavior-identical) |
-| T8 | row 4a/4c narrowing guard | `BUILD=failed`, with-concerns verdict, no PR | rows 4a/4c still decline — proves the narrower gate was not replaced |
+| T8 | rows 4a/**4b**/4c narrowing guard | `BUILD=failed`, with-concerns verdict, no PR | all three rows still decline — proves the narrower `build_status` gate was not replaced by the broader helper. Row 4b must be asserted explicitly, not just 4a/4c |
 | T9 | G3 leg 1 | `REVIEW=completed`, `DOCS=completed`, verdict `CHANGES REQUESTED` at live head | `Dispatch(/do-patch, row_id='G3')` (leg 2) |
 | T10 | G3 leg 1 | markers completed, `APPROVED` recorded against an OLDER head | `Dispatch(/do-pr-review, row_id='G3')` (leg 4) |
-| T11 | G3 leg 1 | markers completed, `APPROVED`, **`pr_head_sha` ABSENT from context** | `/do-pr-review`, NOT `/do-merge` |
+| T11 | G3 legs 1+3 | `REVIEW=completed`, **`DOCS=completed`**, `APPROVED`, **`pr_head_sha` ABSENT** | `Dispatch(/do-pr-review, row_id='G3')` (leg 4). **NOT `/do-merge` and NOT `/do-docs`** — without leg 3's new `docs_status != STATUS_COMPLETED` clause this state returns `Dispatch(/do-docs, row_id='G3')`, which is the driver-verified pre-fix answer |
+| T11b | G3 leg 3 preserved | `REVIEW=completed`, **`DOCS=pending`**, `APPROVED` at the live head | still `Dispatch(/do-docs, row_id='G3')` — pins that the leg-3 narrowing did not disable leg 3 |
 | T12 | G3 leg 1 | markers completed, `APPROVED`, `pr_head_sha == ""` + `pr_head_sha_lookup_failed` | `/do-pr-review`, NOT `/do-merge` |
 | T13 | G3 leg 1 positive control | markers completed, `APPROVED` at the live head | still `Dispatch(/do-merge, row_id='G3')` |
-| T14 | **G6, absent key** | `pr_number`, `pr_merge_state=CLEAN`, `ci_all_passing=True`, `DOCS=completed`, `APPROVED`, **`pr_head_sha` ABSENT** | `guard_g6_terminal_merge_ready` returns `None`; `decide_next_dispatch` → `/do-pr-review` via row 8f |
+| T14 | **G6 + row 10, absent key (end to end)** | `pr_number`, `pr_merge_state=CLEAN`, `ci_all_passing=True`, all stages settled, `DOCS=completed`, `APPROVED`, **`pr_head_sha` ABSENT** | `guard_g6_terminal_merge_ready` returns `None` **and** `decide_next_dispatch` returns `Blocked(guard_id='NO_RULE')`. Assert the `guard_id`, not just "not `/do-merge`" |
+| T14b | **row 10 in isolation, absent key** | same state, `guard_g6_terminal_merge_ready` removed from `GUARDS` (monkeypatched) | `Blocked(guard_id='NO_RULE')`. Pre-fix this returns `Dispatch(/do-merge, row_id='10')` — that is the RED that proves the hole was closed rather than relocated |
 | T15 | G6 positive control | same but `pr_head_sha` matches the verdict's head | still `Dispatch(/do-merge, row_id='G6')` |
-| T16 | G6 stale control | same but `pr_head_sha` differs | still `None` → row 8f (pre-existing behavior, pinned) |
+| T16 | G6 stale control | same but `pr_head_sha` differs | still `None` from G6 → `Dispatch(/do-pr-review, row_id='8f')` (pre-existing behavior, pinned) |
+| T16b | row 10 empty-sentinel control | `pr_head_sha == ""` + `pr_head_sha_lookup_failed` | `Dispatch(/do-pr-review, row_id='8f')` — the empty sentinel keeps landing on 8f; only the ABSENT key escalates |
 | T17 | `_review_verdict_head_is_stale` unchanged | absent key, with a recorded verdict | still returns `False` — pins that the existing contract was not modified |
+| T18 | row 8f untouched | absent key, APPROVED, `pr_number` set | `_rule_review_verdict_head_stale` still returns `False` — pins that 8f kept the inert predicate |
 
-**T14 is the mandatory RED for the G6 widening.** The RED proof must be on the **ABSENT-key**
-case specifically; T16's stale-key path already passes today and proves nothing about this
-change. If T14 is green before the code change, the test is wrong — fix the test, do not
-proceed.
+**T14 and T14b are the mandatory REDs for the #3260 widening, and both must be RED on the
+ABSENT-key input specifically.** T16's stale-key path already passes today and proves
+nothing about this change. T14b is the one that distinguishes *closing* the hole from
+*relocating* it: run it with G6 monkeypatched out of `GUARDS` so row 10 is exercised
+directly. If either is green before the code change, the test is wrong — fix the test, do
+not proceed.
+
+**T14's expected value is `Blocked`, not `/do-pr-review`.** This corrects the ratified
+design's Part B fall-through claim and the critique's proposed remedy alike; the landing was
+established by live probe at revision time (see **Freshness Check**). Row 8f is inert on an
+absent key, row 9 declines on DOCS complete, and row 10 is the last rule — so no row owns
+the state. Asserting `/do-pr-review` here would only pass by also widening row 8f, which is
+a No-Go.
 
 ### Guard-ordering hygiene for the G3 probes
 
@@ -632,10 +647,14 @@ answer first. Follow the recon's shape: set `last_dispatched_skill=/do-plan-crit
 ## Test Impact
 
 - [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py` —
-      UPDATE: extend with T1–T17 above. The existing `TestRow2bStandsDownOnceBuildStarted`
+      UPDATE: extend with T1–T18 above. The existing `TestRow2bStandsDownOnceBuildStarted`
       and `TestG3DocsLeg` classes stay as-is; new classes are added alongside them, and the
       module docstring's line "whose missing `pr_number` step-aside is tracked as #3249" is
-      updated to record that #3249 has landed.
+      updated to record that #3249 has landed. `TestRow2bStandsDownOnceBuildStarted` must
+      stay green **unmodified** after row 2b is converted to `_plan_stage_stood_down` — it
+      is the behavior-identity proof for that conversion. `TestG3DocsLeg` must likewise stay
+      green unmodified after leg 3 gains its `docs_status` clause: its cases run with DOCS
+      pending, which the clause does not touch.
 - [ ] `tests/unit/test_sdlc_router.py:1484-1488` — UPDATE (verify only): this is the direct
       unit test of `_review_verdict_head_is_stale`. That function is deliberately unchanged,
       so these cases must stay green **unmodified**. If any of them needs editing, the
@@ -646,10 +665,12 @@ answer first. Follow the recon's shape: set `last_dispatched_skill=/do-plan-crit
       `BUILD in (in_progress, completed)` or a PR is open is asserting the defect and must be
       UPDATED to the new expected routing, with the change called out in the PR body.
 - [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_terminal.py` and
-      `test_sdlc_router_decision_convergence.py` — AUDIT: these exercise G6 and the merge
-      fast-path. Any case that reaches `/do-merge` without a `pr_head_sha` in context now
-      routes to `/do-pr-review` and must be UPDATED to supply the key (the shape production
-      actually produces) rather than by relaxing the assertion.
+      `test_sdlc_router_decision_convergence.py` — AUDIT: these exercise G6, **row 10** and
+      the merge fast-path. Any case that reaches `/do-merge` (via G6 or row 10) without a
+      `pr_head_sha` in context now returns `Blocked(guard_id='NO_RULE')` and must be UPDATED
+      by supplying the key — the shape production actually produces — never by relaxing the
+      assertion. Expect this to be the largest audit in the lane: row 10 is the router's
+      default merge landing and fixtures that omit `pr_head_sha` are common.
 - [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_with_concerns.py` — AUDIT:
       rows 4b/4c live here. The refactor is behavior-identical, so every case must stay green
       unmodified; a failure means step 6 changed behavior and must be reverted to the literal
