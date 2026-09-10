@@ -129,7 +129,7 @@ async def _run_single_session_loop(
     return complete_mock
 
 
-class TestAlreadyTerminalSkip:
+class TestTC1AlreadyTerminalSkip:
     """TC1 -- a terminal row means another writer owns the outcome; skip."""
 
     @pytest.mark.asyncio
@@ -146,7 +146,7 @@ class TestAlreadyTerminalSkip:
         assert any("already terminal" in r.message for r in caplog.records)
 
 
-class TestTerminalWriteConflictSurvives:
+class TestTC2TerminalWriteConflictSurvives:
     """TC2 -- a terminal-write conflict must not kill the worker."""
 
     @pytest.mark.asyncio
@@ -167,7 +167,7 @@ class TestTerminalWriteConflictSurvives:
         assert any("lost to a concurrent terminal writer" in r.message for r in caplog.records)
 
 
-class TestReadWriteRowDivergence:
+class TestTC3ReadWriteRowDivergence:
     """TC3 -- the redis_key read and the session_id write can disagree."""
 
     @pytest.mark.asyncio
@@ -188,7 +188,7 @@ class TestReadWriteRowDivergence:
         assert any("lost to a concurrent terminal writer" in r.message for r in caplog.records)
 
 
-class TestWorkerKeepsDraining:
+class TestTC4WorkerKeepsDraining:
     """TC4 -- the stranding regression itself: the worker survives to drain."""
 
     @pytest.mark.asyncio
@@ -234,7 +234,7 @@ class TestWorkerKeepsDraining:
         assert chat_id not in _active_workers
 
 
-class TestGuardReadFailureFallback:
+class TestTC5GuardReadFailureFallback:
     """TC5 -- pins the pre-existing read-failure fallback (behaviour-preserving)."""
 
     @pytest.mark.asyncio
@@ -251,7 +251,7 @@ class TestGuardReadFailureFallback:
         assert chat_id not in _active_workers
 
 
-class TestNonConflictWriteFailureContained:
+class TestTC6NonConflictWriteFailureContained:
     """TC6 -- the class is closed, not just StatusConflictError."""
 
     @pytest.mark.asyncio
