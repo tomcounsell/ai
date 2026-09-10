@@ -9,7 +9,7 @@ also_closes: https://github.com/tomcounsell/ai/issues/3260
 lane_slug: sdlc-3249
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-10T02:44:32Z
+revision_applied_at: 2026-09-10T02:40:46Z
 ---
 
 # Router plan-stage stand-down sweep, and G3's merge leg verdict gate
