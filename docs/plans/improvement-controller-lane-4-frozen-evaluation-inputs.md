@@ -7,7 +7,7 @@ created: 2026-09-10
 tracking: https://github.com/tomcounsell/ai/issues/3216
 last_comment_id: 5620338927
 revision_applied: true
-revision_applied_at: 2026-09-10T14:43:59Z
+revision_applied_at: 2026-09-10T14:58:30Z
 ---
 
 # Improvement controller lane 4: frozen evaluation inputs, blinding, and corrected statistics
@@ -73,6 +73,9 @@ reference set of retained architectural corrections.
 **Baseline commit:** `dea9ed5db8620d548435dda8c4c2f469e352f956` (main, 2026-09-10)
 **Build-against commit:** main itself. Lane 2b (PR #3275) merged as `aff4d7e2e`, so the
 charter surface this lane consumes is on main and the `b05dde885` worktree head is retired.
+The only remaining `b05dde885` mentions are historical citations (the Test Impact
+judge-disjointness comparison and the Critique Results record); no task, test, or command in
+this plan builds against it.
 Every reference below was re-verified against this baseline for revision 3.
 **Issue filed at:** 2026-09-07T04:45:09Z
 **Disposition:** Minor drift
@@ -365,7 +368,8 @@ hand-off with no artifact is a claim nobody can check later.
    `exported_at` on every call — the round-2 blocker). The corpus identity is
    `corpus.py::canonical_corpus_digest(jsonl_text)`: split the manifest off line one, pop
    `exported_at` **by name**, dump the remaining manifest with `sort_keys=True`, and hash that
-   joined by a newline to the record lines sorted by each record's `key`. That digest is written
+   joined by a newline to the record lines sorted by each record's `key`, each record body
+   dumped with `sort_keys=True` so intra-record field order cannot differ. That digest is written
    to the verifying artifact store and is the corpus identity for the whole run. Nothing here issues a raw
    Redis command: the export is a documented ORM read, so it is binary-safe on
    `Memory.embedding`'s float32 bytes and cannot desynchronize an index from its hash.
@@ -403,7 +407,8 @@ hand-off with no artifact is a claim nobody can check later.
    preserves keys, saves with `skip_auto_now=True` (so the relevance timestamp carries rather than
    resetting to import time), and carries the exported vectors instead of re-embedding — no Ollama
    call, no non-determinism. **The corpus digest is then recomputed inside each arm by re-running
-   `export_records` against the arm's own pool and applying `canonical_corpus_digest`, and the
+   `export_records` against the arm's own pool and applying `canonical_corpus_digest` (record
+   bodies dumped with `sort_keys=True`, per the step-3 definition), and the
    remaining manifest is asserted byte-equal between arms**; unequal digests or manifests are
    `infra_failure` before anything is measured. That is acceptance criterion 1, asserted at run time rather than
    only in a test. The arms' independent re-export is the gate: exporting once and reusing the bytes
@@ -533,7 +538,8 @@ bigger arm.
 - **`tools/improvement_eval/corpus.py`** — exports the project's memory corpus once per run through
   `Memory.export_records(project_key=..., stream=fh)` (popoto's ORM transfer API), computes
   `canonical_corpus_digest` over the JSONL (manifest split off, `exported_at` popped by name,
-  remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key` —
+  remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key`,
+  each record body dumped with `sort_keys=True` —
   stable across processes where raw bytes are not), and writes digest plus bytes to the verifying
   artifact store. The digest is the corpus identity for the
   run. Restore is `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`,
@@ -652,7 +658,7 @@ lane inside CLAUDE.md's rule that Popoto-managed keys are read and written throu
 is over a canonical digest, never over raw bytes.** After restore, each arm re-runs
 `export_records` against its own pool, applies `corpus.py::canonical_corpus_digest` (manifest
 split off, `exported_at` popped by name, remaining manifest dumped with `sort_keys=True`, record
-lines sorted by key), and reports the digest; the remaining manifest is asserted byte-equal
+lines sorted by key, each record body dumped with `sort_keys=True`), and reports the digest; the remaining manifest is asserted byte-equal
 between arms so a future volatile manifest key surfaces as a mismatch. Unequal digests between
 arms, or a digest differing from the export's, end the run as `infra_failure` before any
 measurement. The acceptance criterion's test exercises that same code path rather than a parallel one.
@@ -1046,8 +1052,17 @@ belongs to lane 3 — or to keep the refusal and make the repair explicit and ch
 the refusal.
 
 **Mitigation:**
-1. `runner.py`'s module docstring records the repair verbatim, through the ORM as CLAUDE.md requires
-   and never through raw Redis:
+1. `runner.py` defines `repair_wedged_experiment(project_key, experiment_id)` — the repair as a
+   real helper, through the ORM as CLAUDE.md requires and never through raw Redis — and its
+   module docstring shows the call as a plain usage example:
+   ```python
+   from tools.improvement_eval.runner import repair_wedged_experiment
+   repair_wedged_experiment(project_key=project_key, experiment_id=experiment_id)
+   ```
+   The operator-facing snippet and the tested code are the same function object, so they cannot
+   drift apart; there is no fence parsing and no hand-copied duplicate. The helper body is the
+   one-liner through `filter(project_key=project_key, id=experiment_id)` (`id`, not
+   `experiment_id`):
    ```python
    e = ImprovementExperiment.query.filter(project_key=project_key, id=experiment_id).first()
    e.state = "frozen"
@@ -1057,8 +1072,8 @@ the refusal.
    "Recovering a wedged experiment" heading, so an operator finds it without reading the source.
 3. `test_crashed_run_leaves_a_documented_repair` pins the disposition rather than leaving it as
    prose: it pre-sets `state="running"`, asserts `evaluate()` returns `infra_failure` with the found
-   state named in `notes` and writes no `accept`/`reject`, then applies the documented ORM repair and
-   asserts the next `evaluate()` proceeds past Gate 0. The wedge and its exit both ship tested.
+   state named in `notes` and writes no `accept`/`reject`, then calls `repair_wedged_experiment`
+   and asserts the next `evaluate()` proceeds past Gate 0. The wedge and its exit both ship tested.
 4. A heartbeat field and an automatic reclaim are named in No-Gos as lane 3's, so the deferral is a
    recorded decision rather than a gap.
 
@@ -1211,7 +1226,9 @@ the resolved value rather than a fallback.
 - [ ] Add a `## Recovering a wedged experiment` section to `docs/features/improvement-evaluation.md`
       giving the ORM repair verbatim (`e = ImprovementExperiment.query.filter(project_key=project_key, id=experiment_id).first();
       e.state = "frozen"; e.save()` — `id`, not `experiment_id`: the experiment key is an
-      `AutoKeyField` and `experiment_id` belongs to `ImprovementEvaluation`), why no automatic reclaim ships in this lane
+      `AutoKeyField` and `experiment_id` belongs to `ImprovementEvaluation`), mirroring
+      `runner.py::repair_wedged_experiment`, which `test_crashed_run_leaves_a_documented_repair`
+      imports and executes directly, why no automatic reclaim ships in this lane
       (`ImprovementExperiment` carries no liveness timestamp — Race 1b), and that a heartbeat and an
       automatic reclaim belong to lane 3.
 - [ ] Add an `## Arm isolation` subsection to `docs/features/improvement-evaluation.md` describing
@@ -1253,8 +1270,8 @@ Not applicable — this repo has no Sphinx, Read the Docs, or MkDocs site.
 - [ ] `tools/improvement_eval/calibration.py` module docstring records the frozen-set rationale and
       the reference-set floor with its number.
 - [ ] `tools/improvement_eval/runner.py` module docstring enumerates the six `infra_failure`
-      conditions, states that a real evaluation lease belongs to lane 3 (Race 1), and carries the
-      verbatim ORM repair for an experiment wedged in `running` (Race 1b).
+      conditions, states that a real evaluation lease belongs to lane 3 (Race 1), and defines
+      `repair_wedged_experiment` with a usage example (Race 1b).
 - [ ] `models/improvement_evaluation.py` class docstring gains `charter_digest` in the field list,
       with a sentence on charter §12's rule that actions complete under the digest they carry.
 
@@ -1269,7 +1286,9 @@ The seven acceptance criteria from issue #3216, unchanged, each with the artifac
       needs, so it is paired with `test_two_arms_rank_identically_across_a_clock_gap`, which queries
       the second arm under a clock patched 30 days forward and asserts identical ranked ids —
       the reproducibility property that `skip_auto_now=True` on restore and the ban on
-      `Query.top_by_decay` together buy.
+      `Query.top_by_decay` together buy. Each parity test first proves sensitivity (fixture seeds
+      records far enough apart in decay time that the mutant restore moves ranked ids versus the
+      baseline; drift asserted before the gate assertion).
 - [ ] **Baseline retrieval parity holds on the frozen corpus, and a parity miss invalidates the run
       before any candidate result is read** — the gate compares ranked memory ids against a baseline
       record that stores the corpus digest it was captured under, and is pinned by
@@ -1407,12 +1426,12 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/improvement_eval/__init__.py` and `errors.py` with `InfraFailure`.
-- `corpus.py`: `export_corpus(project_key)` calls `Memory.export_records(project_key=..., stream=fh)`, computes `canonical_corpus_digest` (manifest split off, `exported_at` popped by name, remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key`), and writes digest plus bytes to the verifying artifact store with a provenance header (record count from the manifest's `matched_count`, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape. `restore_corpus(jsonl_bytes)` calls `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`. No raw Redis command anywhere in this module. Never hash raw JSONL bytes: record order follows set-iteration order and `exported_at` is fresh on every call, so a raw-bytes comparison fires `infra_failure` on every real corpus.
+- `corpus.py`: `export_corpus(project_key)` calls `Memory.export_records(project_key=..., stream=fh)`, computes `canonical_corpus_digest` (manifest split off, `exported_at` popped by name, remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key`, each record body dumped with `sort_keys=True`), and writes digest plus bytes to the verifying artifact store with a provenance header (record count from the manifest's `matched_count`, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape. `restore_corpus(jsonl_bytes)` calls `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`. No raw Redis command anywhere in this module. Never hash raw JSONL bytes: record order follows set-iteration order and `exported_at` is fresh on every call, so a raw-bytes comparison fires `infra_failure` on every real corpus.
 - `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; yields the socket path and the per-arm tmpdir; `finally` terminates the child and removes the tmpdir. It opens no Redis client of its own. Before spawning, assert the socket path fits the platform `AF_UNIX` `sun_path` limit (104 bytes on this platform) and raise `InfraFailure` naming the measured length and the limit — redis-py surfaces an over-long path as a bare `ConnectionError` inside the child at import, which would otherwise reach the runner as an opaque subprocess failure. Never import `tests.db_claim`, never assign `os.environ["REDIS_URL"]`, never call `set_REDIS_DB_settings`.
 - `arm_worker.py`: `python -m tools.improvement_eval.arm_worker`, reading a JSON job spec on stdin and writing JSON on stdout. Modes: `restore`, `retrieve`, `digest`. Launched by `arena.py` with `env={**os.environ, "REDIS_URL": f"unix://{sock}", "POPOTO_CONTENT_PATH": ..., "VALOR_PROJECT_KEY": ..., "POPOTO_EMBEDDING_INVALIDATION": "none"}` — a dict for the call, never an assignment into the parent's environment.
 - After restore, each arm re-runs `export_records` against its own pool, applies `canonical_corpus_digest`, and reports the digest; unequal digests, or a remaining manifest that is not byte-equal between arms, raise `InfraFailure`.
 - `writer_guard.py`: an ORM-level guard in the arm worker that refuses `Memory.save`/`Memory.delete` after restore, plus an independent corpus-digest re-check at arm teardown.
-- `retrieval.py`: arm-scoped adapter over `agent.memory_retrieval.retrieve_memories`, returning ranked memory ids; `baseline_parity()` compares those ids to the recorded baseline captured under the same corpus digest; a miss raises `InfraFailure`. Never calls `Query.top_by_decay`. Two restore-fidelity tests pin the parity gate against symmetric mutations that arm-vs-arm agreement cannot see: `test_restore_without_skip_auto_now_fails_baseline_parity` (a restore without `skip_auto_now` re-stamps relevance — both arms still agree with each other, but the ranking moves relative to the recorded baseline) and `test_restore_without_carry_fails_baseline_parity` (a restore without `carry` re-embeds; same disposition).
+- `retrieval.py`: arm-scoped adapter over `agent.memory_retrieval.retrieve_memories`, returning ranked memory ids; `baseline_parity()` compares those ids to the recorded baseline captured under the same corpus digest; a miss raises `InfraFailure`. Never calls `Query.top_by_decay`. Two restore-fidelity tests pin the parity gate against symmetric mutations that arm-vs-arm agreement cannot see: `test_restore_without_skip_auto_now_fails_baseline_parity` (a restore without `skip_auto_now` re-stamps relevance — both arms still agree with each other, but the ranking moves relative to the recorded baseline) and `test_restore_without_carry_fails_baseline_parity` (a restore without `carry` re-embeds; same disposition). Each test first proves sensitivity: the fixture seeds at least two records far enough apart in decay time (`base_score * elapsed_days ** (-decay_rate)`, so the spacing not the clock does the work) that the mutant restore moves ranked ids versus the baseline, and the test asserts that drift before asserting the gate fires — a gate that cannot see its mutant is decoration.
 
 ### 2. Holm correction, stopping rule, statistics
 - **Task ID**: build-stats
@@ -1436,7 +1455,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Agent Type**: builder
 - **Parallel**: true
 - `blinding.py`: seeded arm assignment with `arm_assignment_digest`; blinded ids; `scan_for_identity(serialized_envelope, experiment)` deriving its token list from the experiment record rather than a hand-maintained list.
-- `envelope.py`: wrap the `judge_id`/`verdict`/`blockers`/`confidence` dict with experiment id, contract digest, charter digest, evaluator version, trial id, raw-response reference, blinded arm id. The inner dict stays consumable by `agent/sdlc_review_consensus.py::compute_consensus` unchanged. The charter digest is accepted as an opaque caller-supplied string: this module must not import `models.improvement_charter`, or the split is nominal and this task is still blocked on lane 2b.
+- `envelope.py`: wrap the `judge_id`/`verdict`/`blockers`/`confidence` dict with experiment id, contract digest, charter digest, evaluator version, trial id, raw-response reference, blinded arm id. The inner dict stays consumable by `agent/sdlc_review_consensus.py::compute_consensus` unchanged. The charter digest is accepted as an opaque caller-supplied string: this module must not import `models.improvement_charter`, or the split is nominal and this task is still blocked on lane 2b. The split unblocks Task 5 only: Task 6 still joins 3b before the runner, so the critical path stays pinned to the charter judge.
 
 ### 3b. `serves_charter` judge and calibration (charter-quoting)
 - **Task ID**: build-charter-judge
@@ -1484,7 +1503,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 - Three disjoint handlers: `InfraFailure` → `verdict="infra_failure"`; `ArtifactIntegrityError` → `state="invalidated"` with no verdict written; a final catch-all → `infra_failure` with the exception type in `notes`. No shared fall-through.
 - `has_verdict(evaluation)` returns True only for `state == "complete"`.
 - Read-modify-write `ImprovementExperiment.state` from `frozen` to `running` as the first write; the loser writes an `infra_failure` evaluation naming the state it found (Race 1), and the docstring records that a real lease is lane 3's.
-- Write the Race 1b crash disposition and its repair into the module docstring, and add `test_crashed_run_leaves_a_documented_repair`: pre-set `state="running"`, assert `infra_failure` with the found state in `notes` and no `accept`/`reject`, apply the documented ORM repair, assert the next `evaluate()` clears Gate 0. The test executes the repair snippet extracted from `runner.__doc__` (the fenced block under the recovery heading) rather than a hand-copied duplicate, so a docstring that stops running turns the test red.
+- Write the Race 1b crash disposition and its repair into the module docstring, and add `test_crashed_run_leaves_a_documented_repair`: pre-set `state="running"`, assert `infra_failure` with the found state in `notes` and no `accept`/`reject`, apply the documented ORM repair, assert the next `evaluate()` clears Gate 0. The test imports `repair_wedged_experiment` from `runner` and executes it directly — no docstring fence parsing, no hand-copied duplicate — so the tested repair and the documented repair are the same function; the docstring shows the same call as a plain usage example.
 - Spawn each arm through `arena.py` + `arm_worker.py`; never construct a Redis client in the runner and never re-point the parent's pool.
 
 ### 7. Mutation proofs
@@ -1494,7 +1513,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Work in a dedicated worktree with sole ownership; no other agent edits that checkout for the duration.
-- For each row of the Failure Path mutation table: apply the mutation, run the named test, record the failure output verbatim, revert, re-run, confirm green.
+- For each row of the Failure Path mutation table: apply the mutation, run the named test, record the failure output verbatim, revert, re-run, confirm green. For the two restore-fidelity rows the test must assert the mutant actually perturbed the gated signal (drift present, ranking moved versus the baseline) before asserting the gate fires; a row whose test goes red without that pre-assertion proves the gate fired, not that it saw the mutant.
 - Record the red output for the three `restore`/`top_by_decay` rows separately — one shared test going red for one mutation is not evidence for the other two.
 - Report any row where the test stayed green — that is a guard that reaches no code, and it blocks the lane.
 
@@ -1582,11 +1601,11 @@ Round 3 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness, Scope & Value | The Task 6 test executing the repair snippet extracted from `runner.__doc__` fails open when the docstring drifts to zero or two-plus fenced blocks, silently testing the wrong code, and couples documentation formatting to test pass/fail without adding frozen-input assurance. | pending | Resolve by removing the extraction indirection entirely: define `repair_wedged_experiment(project_key, experiment_id)` as a real helper in `runner.py` (the ORM one-liner through `filter(project_key=project_key, id=experiment_id)`), show it in the docstring as a plain usage example, and have `test_crashed_run_leaves_a_documented_repair` import and call the helper directly. That keeps the anti-drift property that motivated the design (the doc example and the tested code are the same object) with no fence parsing: extraction helper deleted, `re.findall` count assertion unneeded, `filter(project_key=project_key, id=experiment_id)` asserted by execution rather than by string match. |
-| CONCERN | Risk & Robustness | The two re-pointed parity rows may stay green on their mutants: a seconds-scale `auto_now` drift does not move a per-day decay ranking, and the stored-score path (`agent/memory_retrieval.py:117`) is clock-independent, so the gate may never see the perturbation. | pending | Each row proves sensitivity before asserting the gate fires: after the mutant restore, assert `max(updated_at)` drifted versus the baseline AND seed at least two records far enough apart in decay time that the drift changes ranked ids (the decay arithmetic is `base_score * elapsed_days ** (-decay_rate)` per the Technical Approach, so the fixture not the clock does the work); same sensitivity pre-assertion for the without-`carry` row on `on_embedding_mismatch`. Record red output separately per row per Task 7. |
-| NIT | Risk & Robustness | `canonical_corpus_digest` specifies the manifest remainder dumped with `sort_keys=True` and record lines sorted by key but does not state the record bodies are dumped with `sort_keys=True`, leaving intra-record field order as a residual nondeterminism source. | pending | (nit — no implementation note required) |
-| NIT | Scope & Value | The 3a/3b split unblocks Task 5 but Task 6 still joins 3b before the runner, so the critical path stays pinned to the charter judge while carrying two task tracks, unstated. | pending | (nit — no implementation note required) |
-| NIT | History & Consistency | None of the seven round-2 disposition claims asserts the stale `b05dde885` head string is retired from build-against instructions, so that check has no positive claim to verify against. | pending | (nit — no implementation note required) |
+| BLOCKER | Risk & Robustness, Scope & Value | The Task 6 test executing the repair snippet extracted from `runner.__doc__` fails open when the docstring drifts to zero or two-plus fenced blocks, silently testing the wrong code, and couples documentation formatting to test pass/fail without adding frozen-input assurance. | **Revision 4.** Extraction indirection removed: `repair_wedged_experiment(project_key, experiment_id)` is a real helper in `runner.py`, the docstring shows the call as a usage example, and the test imports and executes the helper directly (Race 1b steps 1/3, Documentation checkbox, inline-docs checkbox, Task 6). | Resolve by removing the extraction indirection entirely: define `repair_wedged_experiment(project_key, experiment_id)` as a real helper in `runner.py` (the ORM one-liner through `filter(project_key=project_key, id=experiment_id)`), show it in the docstring as a plain usage example, and have `test_crashed_run_leaves_a_documented_repair` import and call the helper directly. That keeps the anti-drift property that motivated the design (the doc example and the tested code are the same object) with no fence parsing: extraction helper deleted, `re.findall` count assertion unneeded, `filter(project_key=project_key, id=experiment_id)` asserted by execution rather than by string match. |
+| CONCERN | Risk & Robustness | The two re-pointed parity rows may stay green on their mutants: a seconds-scale `auto_now` drift does not move a per-day decay ranking, and the stored-score path (`agent/memory_retrieval.py:117`) is clock-independent, so the gate may never see the perturbation. | **Revision 4.** Sensitivity pre-assertion required: fixtures seed records far enough apart in decay time that the mutant restore moves ranked ids, drift asserted before the gate assertion (Task 1, Task 7, Success criterion 1). | Each row proves sensitivity before asserting the gate fires: after the mutant restore, assert `max(updated_at)` drifted versus the baseline AND seed at least two records far enough apart in decay time that the drift changes ranked ids (the decay arithmetic is `base_score * elapsed_days ** (-decay_rate)` per the Technical Approach, so the fixture not the clock does the work); same sensitivity pre-assertion for the without-`carry` row on `on_embedding_mismatch`. Record red output separately per row per Task 7. |
+| NIT | Risk & Robustness | `canonical_corpus_digest` specifies the manifest remainder dumped with `sort_keys=True` and record lines sorted by key but does not state the record bodies are dumped with `sort_keys=True`, leaving intra-record field order as a residual nondeterminism source. | **Revision 4.** Each record body dumped with `sort_keys=True` in all five digest definitions (Data Flow 3/5, Technical Approach, Solution Key Elements, Task 1). | (nit — no implementation note required) |
+| NIT | Scope & Value | The 3a/3b split unblocks Task 5 but Task 6 still joins 3b before the runner, so the critical path stays pinned to the charter judge while carrying two task tracks, unstated. | **Revision 4.** Tradeoff stated in Task 3a: the split unblocks Task 5 only. | (nit — no implementation note required) |
+| NIT | History & Consistency | None of the seven round-2 disposition claims asserts the stale `b05dde885` head string is retired from build-against instructions, so that check has no positive claim to verify against. | **Revision 4.** Freshness Check states the only remaining `b05dde885` mentions are historical citations and nothing builds against it. | (nit — no implementation note required) |
 
 ---
 
