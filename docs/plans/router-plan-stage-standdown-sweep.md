@@ -1201,6 +1201,56 @@ substituted for) 4a/4b/4c's narrower `build_status` gates, row 5 untouched, the 
 row 10, and the `Closes #3260` / `Closes #3249` / `Refs #2062` trailers. Dispositions:
 3 addressed, 0 deferred, 0 rejected.
 
+**Round 3 (2026-09-10) — `READY TO BUILD (no concerns)`. CONVERGED.** FULL depth (force-FULL:
+`agent/sdlc_router.py` is a doctrine path), roster 3/3 complete, 3/3 grounded. Mode:
+independent roster (3 critics). **Zero blockers, zero concerns, one NIT.** This was a narrow
+convergence round scoped to verifying the three round-2 concern closures and confirming no
+regression — not a fresh full-depth hunt. All three closures verified landed **in the plan
+body**, not merely recorded in the table above, and independently re-verified by the driver
+against `main` @ `ae8c8fe27`:
+
+1. **Documentation / SKILL.md.** Both bogus dispatch-table checkboxes are gone from
+   **Documentation**; the three real targets remain and their line refs were re-read on disk
+   and confirmed exact — G3's ladder row at `.claude/skills-global/do-sdlc/SKILL.md:248`, G6's
+   condition row at `:254`, the "Open-PR step-asides" note at `:263`. The explicit **do-not**
+   checkbox forbidding a row-numbered table is present. SC12 enumerates exactly three SKILL.md
+   edits. `tests/unit/test_sdlc_skill_md_parity.py` appears in **Test Impact** as AUDIT and in
+   steps 9 and 10 and SC10; all five test names the plan cites
+   (`test_step4_has_no_hand_authored_dispatch_table`, `test_guard_row_ids_in_python`,
+   `test_every_guard_has_skill_md_row`, `test_g6_guard_row_present_in_skill_md`,
+   `test_every_dispatch_rule_has_documented_predicate`) exist in that file.
+2. **Sole-producer correction.** No "sole producer" / "only caller of the router" claim
+   survives in live plan prose (only in the round-2 finding text above, where it is the
+   historical record and correct). spike-1's caller survey, **Data Flow** step 1, the Solution
+   step 3b absent-key note and both Risks rows now say "the only caller that assembles a
+   `context`". Driver-verified verbatim: `agent/session_runner/runner.py:1557` is
+   `decide_next_dispatch(stage_states, meta)` with no `context`, followed by
+   `next_skill = getattr(decision, "skill", None)`; `completion_guard._reroute_message`
+   (`:85-87`) carries the generic fallback; the allow/refuse decision comes from
+   `is_pipeline_complete` (`completion_guard.py:155`). Neither the router nor that runner line
+   is changed in this lane, stated explicitly in spike-1.
+3. **Measured audit bound.** Appetite carries the measured three-fixture table; step 9 carries
+   the stop-and-report threshold (>6 failing fixtures, or any failure not fixable by supplying
+   the real key pair); SC10 pins the same bound; the disposition rule (supply the real key,
+   never weaken the assertion) is unchanged. **Driver spot-check of the count, not taken on
+   faith:** an independent AST sweep over all four audit targets for test functions asserting a
+   `/do-merge` dispatch returned exactly the three named fixtures as lacking `pr_head_sha` —
+   `..._dispatch_rows.py::test_all_completed_dispatches_merge`,
+   `test_sdlc_router.py::test_terminal_merge_ready_dispatches_merge_despite_plan_revising`,
+   `test_sdlc_router.py::test_row10_fires_with_recorded_approved_verdict`. All three also omit
+   `latest_review_head_sha` (the string does not occur anywhere in `test_sdlc_router.py`), so
+   the "supply **both** halves" instruction is right. `..._terminal.py`'s two merge fixtures are
+   covered by its `_ctx()` (`pr_head_sha`) and `_meta()` (`latest_review_head_sha`) helpers and
+   need no edit; `..._convergence.py` contains zero merge assertions. **Measured count
+   independently reproduced: three.**
+
+Every settled non-negotiable was swept for contradiction and none was found. Nothing was
+restructured and no scope was reopened. Dispositions: 1 NIT accepted as residual.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| NIT | History & Consistency (Consistency Auditor) | The **Documentation** checkbox for the `:263` "Open-PR step-asides" note still reads "name the shared `_plan_stage_stood_down` condition **instead of listing rows individually**", while its own next sentence records that the note is written in guard terms and lists no rows. Leftover half-applied phrasing from the round-2 closure; harmless, since SC12 states the three edits cleanly and the note's actual content is unambiguous. | **ACCEPTED as residual (round 3).** No revision pass; NITs do not gate. BUILD applies the trivial wording fix while doing the step-11 documentation pass. | When editing that checkbox at step 11, drop the clause "instead of listing rows individually" and read it as: *add the shared `_plan_stage_stood_down` condition to the "Open-PR step-asides" note, keeping the note's existing guard-level framing (G1/G5/G3/G7).* No table, no row numbers — `test_step4_has_no_hand_authored_dispatch_table` still applies. |
+
 ## Resolved Questions
 
 1. **Should row 2b (`_rule_critique_verdict_stale`, `:1594`) also route through
