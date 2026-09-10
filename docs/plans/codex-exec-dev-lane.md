@@ -7,7 +7,7 @@ created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2001
 last_comment_id: 5087021248
 revision_applied: true
-revision_applied_at: 2026-09-10T15:03:40Z
+revision_applied_at: 2026-09-10T15:18:57Z
 ---
 
 # Phase 3: Codex Exec as Opt-in Dev-Lane Executor Within Eng Sessions
@@ -101,6 +101,18 @@ actionable). No overlapping active plan implements a Codex dev lane
 (`harness-cross-compat.md` assigns Phase 3 to #2001). Disposition remains Minor
 drift. This paragraph supersedes the prior paragraph that cited `6098b52`
 (the parent of `197f2cdbd`) and therefore did not cover the revision.
+
+**Round-4 re-verification (2026-09-10, commit `fcc912757`):** verified at the
+revision itself, not an ancestor: `git merge-base --is-ancestor fcc912757 HEAD`
+passes with HEAD equal to `fcc912757`, and the six concern-driven body changes
+are confirmed present by grep count at that commit (write-or-kill/tree-kill 6,
+one-way downgrade 5, attribution 5, live-probe gate 5, prefix-fallback 7,
+env-example/Codex keys 13). Cited refs still hold at this head
+(`role_driver.py` constructs `ClaudeHarnessAdapter`;
+`models/agent_session.py:356` carries `exec_harness`; `runner.py` still carries
+`dev_agent_id`; #1996 OPEN umbrella as checked 2026-09-10). This paragraph
+supersedes the `759a72816` paragraph above, which cited revision `197f2cdbd`
+while HEAD had already moved to `fdb7c1d18`.
 
 ## Prior Art
 
@@ -501,8 +513,14 @@ never infer continuity from rollout files alone.
 **Trigger:** Overlapping calls both observe the last allowed value.
 **Data prerequisite:** Current count.
 **State prerequisite:** Lease ownership.
-**Mitigation:** Check/increment only while holding the same dev-lane lease and
-save with explicit update fields before spawn.
+**Mitigation:** Check the resume bound while holding the same dev-lane lease
+before spawn, but increment `codex_turn_count` plus the explicit-fields save
+only after `create_subprocess_exec` returns a live child. Every spawn-failure
+branch (auth, version, busy, spawn error) re-saves the unchanged count under
+the same lease before returning the typed error, so failed spawns never burn a
+resumed turn and guard exhaustion reflects real Codex turns only. A
+`test_codex_dev_tool.py` case asserts three consecutive auth failures leave the
+count unchanged while one success consumes exactly one.
 
 ## No-Gos (Out of Scope)
 
@@ -700,8 +718,15 @@ build directly.
 - Add runtime capability gating, session lease, write-or-kill thread
   persistence via `kill_codex_tree(proc)` (recursive grandchildren, SIGKILL,
   wait; fixture with sleep grandchild plus forced persist failure asserts zero
-  surviving PIDs), fence-token resume check, resume/count guard, conditional MCP
+  surviving PIDs), fence-token resume check, resume/count guard with
+  increment-after-live-spawn plus refund-on-spawn-failure accounting, conditional MCP
   config, and Codex PM prime selection.
+- Add a `log_codex_turn` helper writing one append-only JSONL line per executed
+  Codex turn to a session-scoped lane file (thread id, turn count, outcome,
+  usage, wall-clock duration; no prompts, credentials, or raw stderr). Call it
+  on success and on every typed error (auth, version, busy, native failure,
+  timeout, cancellation, spawn error) so the gating live probes leave structured
+  per-turn evidence even before Task 4b builds full telemetry dimensions.
 - Keep Codex as a child of the existing PM process group and prove steering /
   cancellation cleanup.
 
@@ -733,6 +758,9 @@ build directly.
 - **Parallel**: false
 - Build `scripts/update/codex_cli.py` and the harness/dev-lane telemetry
   dimensions only after the lane has proven value in two live probes.
+- Ingest the Task 3 `log_codex_turn` JSONL lane file as backfill when building
+  the full dimensions, so probe turns are comparable with post-4b turns rather
+  than lost.
 - Emit separate PM/Dev harness telemetry with usage, resume, failure, and guard
   events; never log prompts, credentials, or raw unbounded stderr.
 - Log harness, model version, turns, and usage on completion so the owner can
@@ -766,11 +794,18 @@ build directly.
 - Assert the PM-visible report contains harness/model-version/turns/usage
   attribution, and verify Codex grandchildren die with the steered process
   group.
+- Assert the `log_codex_turn` lane file holds one line per executed turn with
+  matching thread id, count, outcome, and usage evidence.
+- Probe-failure disposition: if the live probes fail, record the negative
+  evidence on #2001 and park Task 4b as a follow-up instead of leaving the
+  issue in perpetual WIP.
 
 ### 6. Security and architecture review
 - **Task ID**: review-codex-boundary
-- **Depends On**: test-codex-dev-lane, build-codex-ops-deferred (4b is REQUIRED
-  scope in the DONE path, so review covers provisioning and telemetry too)
+- **Depends On**: build-codex-ops, test-codex-dev-lane,
+  build-codex-ops-deferred (4b is REQUIRED
+  scope in the DONE path, so review covers settings, migration, provisioning,
+  and telemetry too)
 - **Assigned To**: codex-security-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -792,7 +827,8 @@ build directly.
 - File the prefix-fallback telemetry review issue for 2026-07-18 and link it
   from #2001; record automatic selection as an unresolved owner policy.
 - Pull prefix-fallback hit counts since PR #2038 before filing and link that
-  evidence in the filed issue.
+  evidence in the filed issue. Timeboxed to the counts query plus file-and-link
+  with no analysis, so this orthogonal debt cannot stall a proven lane.
 
 ### 8. Final validation
 - **Task ID**: validate-codex-dev-lane
@@ -825,7 +861,7 @@ build directly.
 | Spawn env allowlist | `pytest -q tests/unit/session_runner/test_codex_adapter.py -k spawn_env` | exit code 0 |
 | Tree kill on persist failure | `pytest -q tests/unit/session_runner/test_codex_dev_tool.py -k persist_failure_tree` | exit code 0 |
 | exec_harness boundary | `pytest -q tests/unit/test_agent_session.py -k dev_harness_distinct_from_exec_harness` | exit code 0 |
-| DAG owns each CREATE once | `python -c "import re,pathlib; t=pathlib.Path('docs/plans/codex-exec-dev-lane.md').read_text(); assert t.count('test_update_codex_cli.py') >= 2 and len(re.findall(r'Validates.*test_update_codex_cli', t)) == 1"` | exit code 0 |
+| DAG owns each CREATE once | `python -c "import re,pathlib; t=pathlib.Path('docs/plans/codex-exec-dev-lane.md').read_text(); tasks=t.split('## Verification')[0]; assert t.count('test_update_codex_cli.py') >= 2 and len(re.findall(r'(?m)^\s*-\s*\*\*Validates\*\*.*test_update_codex_cli', tasks)) == 1"` | exit code 0 |
 | Feature docs present | `test -f docs/features/codex-exec-dev-lane.md && test -f docs/infra/harness-cross-compat.md` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
@@ -834,10 +870,10 @@ build directly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Race 5 check-and-increment before spawn burns a resumed turn on every spawn-time failure (auth/version/busy) with no refund, bricking the lane as false guard exhaustion | pending | Move codex_turn_count increment plus the explicit-fields save to after create_subprocess_exec returns a live child; re-save the decremented count under the same lease in every spawn-failure branch; add a test asserting three consecutive auth failures leave the count unchanged while one success consumes exactly one |
-| CONCERN | Risk & Robustness | The two gating live probes run with no harness-dimensioned telemetry since Task 5 asserts only the PM-visible attribution line and full events arrive only in 4b, leaving probe failures undiagnosable from structured events | pending | Add a log_codex_turn helper in Task 3 writing append-only JSONL per turn (thread id, count, outcome, usage, wall time; no prompts, credentials, or raw stderr); call it on success and every typed error; Task 5 asserts one line per executed turn; Task 4b ingests the file as backfill |
-| CONCERN | History & Consistency | Task 6 review Depends On test-codex-dev-lane plus build-codex-ops-deferred but not build-codex-ops, so Task 4 settings and migration output (including the sandbox policy the review claims to verify) is not formally in review scope | pending | Change Task 6 to Depends On build-codex-ops plus test-codex-dev-lane plus build-codex-ops-deferred. Note: Task 4 Depends On build-codex-persistence already names a valid task id; only the missing edge is carried forward |
-| CONCERN | History & Consistency | Freshness ancestor proof cites 197f2cdbd and head 759a72816, both ancestors of the actual revision fdb7c1d18, so the audit trail does not cover the revision under critique | pending | Re-run merge-base --is-ancestor against fdb7c1d18 itself and re-verify the six-change grep count at that head; explain 197f2cdbd as the prior revision if it stays |
-| CONCERN | Aggregator (structural) | New Verification row DAG-owns-each-CREATE-once fails as written (measured exit 1): the Validates regex matches 3 lines not 1, namely the Task 4b line plus the row's own literal plus the historical Critique Results row | pending | Anchor the regex to task Validates lines (multiline match on the Validates marker at line start) and exclude the Verification row text and Critique Results table from the searched span before asserting count equals 1 |
-| NIT | Scope & Value | Task 7 ties the orthogonal overdue prefix-fallback telemetry-review filing (with hit-count archaeology since PR 2038) to Codex DONE, letting another workstream's debt stall a proven lane | pending | Timebox the evidence pull inside Task 7 (counts query plus file-and-link, no analysis) or move the filing to a non-gating item |
-| NIT | Scope & Value | No off-ramp plus the live_probe_pass_count gate means failed probes leave the issue with no defined terminal state short of perpetual WIP | pending | Add one sentence to Appetite or Task 5 specifying the probe-failure disposition (record negative evidence on 2001 and park 4b as a follow-up) |
+| CONCERN | Risk & Robustness | Race 5 check-and-increment before spawn burns a resumed turn on every spawn-time failure (auth/version/busy) with no refund, bricking the lane as false guard exhaustion | increment-after-live-spawn plus refund-on-spawn-failure in Race 5 and Task 3, with a 3-auth-failures-unchanged / 1-success-consumes-one test | Move codex_turn_count increment plus the explicit-fields save to after create_subprocess_exec returns a live child; re-save the decremented count under the same lease in every spawn-failure branch; add a test asserting three consecutive auth failures leave the count unchanged while one success consumes exactly one |
+| CONCERN | Risk & Robustness | The two gating live probes run with no harness-dimensioned telemetry since Task 5 asserts only the PM-visible attribution line and full events arrive only in 4b, leaving probe failures undiagnosable from structured events | `log_codex_turn` JSONL helper in Task 3 (one line per turn on success and every typed error), per-turn assertion in Task 5, backfill ingest in Task 4b | Add a log_codex_turn helper in Task 3 writing append-only JSONL per turn (thread id, count, outcome, usage, wall time; no prompts, credentials, or raw stderr); call it on success and every typed error; Task 5 asserts one line per executed turn; Task 4b ingests the file as backfill |
+| CONCERN | History & Consistency | Task 6 review Depends On test-codex-dev-lane plus build-codex-ops-deferred but not build-codex-ops, so Task 4 settings and migration output (including the sandbox policy the review claims to verify) is not formally in review scope | Task 6 Depends On now build-codex-ops plus test-codex-dev-lane plus build-codex-ops-deferred | Change Task 6 to Depends On build-codex-ops plus test-codex-dev-lane plus build-codex-ops-deferred. Note: Task 4 Depends On build-codex-persistence already names a valid task id; only the missing edge is carried forward |
+| CONCERN | History & Consistency | Freshness ancestor proof cites 197f2cdbd and head 759a72816, both ancestors of the actual revision fdb7c1d18, so the audit trail does not cover the revision under critique | round-4 re-verification paragraph at `fcc912757` itself with merge-base plus grep-count evidence | Re-run merge-base --is-ancestor against fdb7c1d18 itself and re-verify the six-change grep count at that head; explain 197f2cdbd as the prior revision if it stays |
+| CONCERN | Aggregator (structural) | New Verification row DAG-owns-each-CREATE-once fails as written (measured exit 1): the Validates regex matches 3 lines not 1, namely the Task 4b line plus the row's own literal plus the historical Critique Results row | regex anchored to task Validates lines (`(?m)^\s*-\s*\*\*Validates\*\*`) over the pre-Verification span, verified exit 0 before commit | Anchor the regex to task Validates lines (multiline match on the Validates marker at line start) and exclude the Verification row text and Critique Results table from the searched span before asserting count equals 1 |
+| NIT | Scope & Value | Task 7 ties the orthogonal overdue prefix-fallback telemetry-review filing (with hit-count archaeology since PR 2038) to Codex DONE, letting another workstream's debt stall a proven lane | Task 7 timeboxed to counts-query plus file-and-link with no analysis | Timebox the evidence pull inside Task 7 (counts query plus file-and-link, no analysis) or move the filing to a non-gating item |
+| NIT | Scope & Value | No off-ramp plus the live_probe_pass_count gate means failed probes leave the issue with no defined terminal state short of perpetual WIP | probe-failure disposition in Task 5 (record negative evidence on #2001, park 4b as follow-up) | Add one sentence to Appetite or Task 5 specifying the probe-failure disposition (record negative evidence on 2001 and park 4b as a follow-up) |
