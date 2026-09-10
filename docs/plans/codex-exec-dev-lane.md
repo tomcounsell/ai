@@ -7,7 +7,7 @@ created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2001
 last_comment_id: 5087021248
 revision_applied: true
-revision_applied_at: 2026-09-10T14:48:45Z
+revision_applied_at: 2026-09-10T15:03:40Z
 ---
 
 # Phase 3: Codex Exec as Opt-in Dev-Lane Executor Within Eng Sessions
@@ -37,7 +37,7 @@ the explicit flag, behavior and tool exposure are unchanged.
 
 ## Freshness Check
 
-**Baseline commit:** `6098b525bc664f7db55fadfc896d4978f632e621` (re-verified 2026-09-10T14:48:45Z; prior baseline `c8bef664746fe362fc677ea83cf61a1c5fa92e9e`)
+**Baseline commit:** `759a728168fe435930d07ee3e7874dbfa5eb1fb7` (re-verified 2026-09-10T15:03:40Z; prior baselines `6098b52`, `c8bef66`)
 **Issue filed at:** `2026-07-10T06:26:32Z`
 **Disposition:** Minor drift
 
@@ -85,16 +85,22 @@ That is now stale: `codex-cli 0.144.3` is installed and `codex login status`
 reports ChatGPT authentication. The premise is unchanged and the human gate is
 cleared.
 
-**Revision re-verification (2026-09-10, commit `6098b52`):** all six
-concern-driven body changes confirmed present (write-or-kill + fence token +
-grandchildren probe; one-way downgrade; completion attribution; deferred Task
-4b gated on two live probes; overdue-date re-baselining with hit-count
-evidence; `.env.example` acceptance + validator row). Cited refs still hold
-(`role_driver.py` still constructs `ClaudeHarnessAdapter`; `runner.py` still
-carries `dev_agent_id`; #2000/#1925/#1924/#1928 states unchanged). Latest issue
-comment surveyed (`5087021248`, 2026-07-27 backlog note confirming Phase 3
-unbuilt and actionable). No overlapping active plan implements a Codex dev
-lane. Disposition remains Minor drift.
+**Revision re-verification (2026-09-10T15:03:40Z, commit `759a72816`):** verified at the
+current head, not a parent: `git merge-base --is-ancestor 197f2cdbd HEAD`
+passes and the six concern-driven body changes from revision `197f2cdbd`
+(write-or-kill + fence token + grandchildren probe; one-way downgrade;
+completion attribution; deferred Task 4b gated on live probes; overdue-date
+re-baselining with hit-count evidence; `.env.example` acceptance + validator
+row) are confirmed present by grep count at this head. Cited refs still hold
+(`role_driver.py:427` still constructs `ClaudeHarnessAdapter`;
+`models/agent_session.py:356` carries `exec_harness` with a codex-anticipating
+comment; `runner.py` still carries `dev_agent_id`; #1996 OPEN umbrella,
+#2000/#1925/#1924/#1928 CLOSED as checked 2026-09-10). Latest issue comment
+surveyed (`5087021248`, 2026-07-27 backlog note confirming Phase 3 unbuilt and
+actionable). No overlapping active plan implements a Codex dev lane
+(`harness-cross-compat.md` assigns Phase 3 to #2001). Disposition remains Minor
+drift. This paragraph supersedes the prior paragraph that cited `6098b52`
+(the parent of `197f2cdbd`) and therefore did not cover the revision.
 
 ## Prior Art
 
@@ -244,6 +250,14 @@ The appetite is driven by a security-sensitive subprocess boundary, persistent
 cross-process continuity, a new agent tool surface, update propagation, and a
 real multi-turn validation—not by the adapter's raw line count.
 
+**Scope note (Task 4b sequencing):** total scope is unchanged by the 4b
+deferral; only ordering was deferred. Task 4b (update provisioning plus
+harness-dimensioned telemetry) is required scope and sits in the DONE path:
+DONE requires Task 4b after Task 5 records `live_probe_pass_count >= 2`. The
+core lane (Tasks 1-3 plus Task 4 settings/migration) proves value first; 4b
+then completes provisioning and telemetry. No off-ramp removes 4b from this
+issue.
+
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
@@ -292,8 +306,11 @@ continues** → later turn/restart resumes the same Codex thread.
 - Generate the output-schema file per turn in a secure temporary location and
   unlink it in `finally`, including cancellation/failure paths.
 - Wrap the first `thread.started` persist in write-or-kill: if the synchronous
-  save fails, kill the Codex child and return a typed tool error rather than
-  leaving an orphan thread with no persisted handle.
+  save fails, terminate the full Codex process tree via `kill_codex_tree(proc)`
+  (direct child plus `psutil` children `recursive=True`, `SIGKILL`, then wait)
+  and return a typed tool error rather than leaving an orphan thread with no
+  persisted handle. The tree kill covers sandboxed grandchildren, not just the
+  direct child.
 - Persist a monotonic dev-lane fence token alongside thread id and turn count;
   every resume re-checks the token under the lease so a TTL lease expiry that
   races a still-live child cannot resume a superseded thread.
@@ -311,12 +328,26 @@ continues** → later turn/restart resumes the same Codex thread.
   old thread; never silently roll over or discard context.
 - Auth precedence is saved CLI login or `CODEX_API_KEY` for the single exec
   subprocess. Do not add `OPENAI_API_KEY` fallback or inspect/log auth tokens.
+  Construct the child environment explicitly: an allowlist of required entries
+  carried from `os.environ` (e.g. `PATH`, `HOME`, `TMPDIR`) plus the single-use
+  `CODEX_API_KEY` only when saved login is absent. Pass `env=env` to
+  `asyncio.create_subprocess_exec` so the Codex child never inherits the full
+  worker ambient environment. The adapter preflight test fails if
+  `OPENAI_API_KEY` or any non-allowlisted `*_API_KEY`/`*_TOKEN` entry appears
+  in the recorded spawn env.
 - Pin the initial minimum version to the live-probed `0.144.3`. A version bump
   must update fixtures/probes before changing the gate.
 - Provide an operator one-way downgrade (`valor-session update-dev-harness`
   codex-to-claude): gated on the dev-lane lease, it preserves `codex_thread_id`
   for forensics, re-primes the PM for `Agent(dev)`, and carries the downgraded
   value through the queue recreation allowlist.
+- Ownership split with the existing `exec_harness` (`models/agent_session.py`):
+  `exec_harness` stays the top-level spawn selector and remains fixed to
+  `claude` on every flagged eng row; `dev_harness` owns only the in-turn dev
+  lane. The build asserts `session.exec_harness in (None, "claude")` on flagged
+  eng rows and adds round-trip test `test_dev_harness_distinct_from_exec_harness`.
+  No reuse of `exec_harness == "codex"`; the two selectors coexist with this
+  stated boundary.
 
 ## Failure Path Test Strategy
 
@@ -415,8 +446,10 @@ state after acquisition, increment count atomically, and release in `finally`.
 
 ### Risk 5: Credentials or untrusted prompt text escape
 **Impact:** Secrets leak to logs/child processes, or a prompt becomes shell input.
-**Mitigation:** Arg-list subprocesses, prompt on stdin, single-invocation
-`CODEX_API_KEY`, bounded/scrubbed stderr, no auth-file reads, hostile-string tests.
+**Mitigation:** Arg-list subprocesses, prompt on stdin, explicit env allowlist
+plus single-invocation `CODEX_API_KEY` passed via `env=`, bounded/scrubbed
+stderr, no auth-file reads, hostile-string tests, and a spawn-env test that
+rejects `OPENAI_API_KEY` and non-allowlisted secrets.
 
 ### Risk 6: Context grows until a turn fails unpredictably
 **Impact:** An otherwise healthy eng session stalls late in the build.
@@ -432,9 +465,11 @@ limit before spawning; never discard the resumable thread automatically.
 **State prerequisite:** Persisted `dev_harness=codex`.
 **Mitigation:** Synchronous inline `session.started` callback saves the handle
 immediately; no deferred task or post-return persistence. The save is
-write-or-kill: a failed persist kills the Codex child and returns a typed tool
-error. The live E2E probe verifies process-group membership covers Codex
-grandchildren so steering reaches the whole tree.
+write-or-kill: a failed persist calls `kill_codex_tree(proc)` (child plus
+recursive `psutil` grandchildren, `SIGKILL`, then wait) and returns a typed
+tool error. The live E2E probe verifies process-group membership covers Codex
+grandchildren so steering reaches the whole tree, and a fixture with a sleep
+grandchild plus forced persist failure asserts zero surviving PIDs.
 
 ### Race 2: Steering kills Codex mid-turn
 **Location:** Claude PM process group, MCP server, Codex child
@@ -546,12 +581,14 @@ save with explicit update fields before spawn.
 - [ ] Codex thread/version/count survive queue recreation and process restart;
   existing Claude resume scalars also survive that allowlist path.
 - [ ] `/update` supports opt-in install/upgrade and version/auth validation
-  (deferred behind two successful live probes; core lane ships on settings plus
-  migration).
+  (REQUIRED scope in the DONE path via Task 4b, ordered after Task 5 records
+  `live_probe_pass_count >= 2`; core lane ships first on settings plus
+  migration, then 4b completes provisioning and telemetry).
 - [ ] Telemetry distinguishes `harness=claude|codex`, PM turns, Dev turns,
   usage, failure, resume, and guard exhaustion without secret-bearing payloads;
   completion records harness, model version, turns, and usage so the owner can
-  judge Codex-vs-Claude on cost, latency, and quality.
+  judge Codex-vs-Claude on cost, latency, and quality (REQUIRED scope via Task
+  4b; Task 5 asserts only the PM-visible attribution line).
 - [ ] Ordered tracking issue filed for the overdue 2026-07-18 prefix-fallback
   telemetry review with hit counts since PR #2038 linked as evidence;
   automatic-selection policy remains explicitly unresolved.
@@ -617,6 +654,9 @@ build directly.
   storage.
 - Add binary/version/auth preflight, first/resume argv, JSONL normalization,
   schema decoding, bounded error detail, cleanup, and cancellation semantics.
+  Build the child env explicitly (allowlist plus single-use `CODEX_API_KEY`,
+  `env=` passthrough) and fail the spawn-env test on `OPENAI_API_KEY` or
+  non-allowlisted secrets.
 - Capture real success/failure fixtures without committing rollout/auth data.
 
 ### 2. Add immutable selection and persistent Codex continuity
@@ -633,7 +673,10 @@ build directly.
   only; no raw Redis mutation.
 - Add `dev_harness`, `codex_thread_id`, `codex_version`, `codex_turn_count`, a
   monotonic dev-lane fence token, CLI validation, queue persistence/recreation,
-  and migration registration.
+  and migration registration. `exec_harness` is NOT reused: it stays the
+  top-level selector fixed to `claude` on flagged eng rows (`assert
+  session.exec_harness in (None, "claude")`) with round-trip test
+  `test_dev_harness_distinct_from_exec_harness`.
 - Restore the existing Claude resume scalars to the recreation allowlist while
   touching that chokepoint and add a regression test.
 - Add the operator one-way codex-to-claude downgrade gated on the dev-lane
@@ -655,7 +698,9 @@ build directly.
   request, bound every call with `asyncio.wait_for`, never retain session state
   in the server, and map auth/native errors deterministically.
 - Add runtime capability gating, session lease, write-or-kill thread
-  persistence, fence-token resume check, resume/count guard, conditional MCP
+  persistence via `kill_codex_tree(proc)` (recursive grandchildren, SIGKILL,
+  wait; fixture with sleep grandchild plus forced persist failure asserts zero
+  surviving PIDs), fence-token resume check, resume/count guard, conditional MCP
   config, and Codex PM prime selection.
 - Keep Codex as a child of the existing PM process group and prove steering /
   cancellation cleanup.
@@ -663,9 +708,9 @@ build directly.
 ### 4. Add typed settings and the read-compatibility migration
 - **Task ID**: build-codex-ops
 - **Depends On**: build-codex-persistence
-- **Validates**: `tests/unit/test_settings.py`,
-  `tests/unit/test_update_codex_cli.py` (create),
-  `tests/unit/test_session_telemetry.py`
+- **Validates**: `tests/unit/test_settings.py` only (update-provisioning and
+  telemetry tests are deferred to Task 4b and MUST NOT be listed here; the
+  validator rejects any CREATE file listed by two tasks)
 - **Informed By**: spike-1, spike-3
 - **Assigned To**: codex-ops-builder
 - **Agent Type**: builder
@@ -679,8 +724,8 @@ build directly.
 ### 4b. Deferred: update provisioning and harness-dimensioned telemetry (gated)
 
 - **Task ID**: build-codex-ops-deferred
-- **Depends On**: two successful live `codex_live` probes on the provisioned
-  machine (Task 5 evidence)
+- **Depends On**: test-codex-dev-lane (gate: starts only after Task 5 records
+  artifact `codex_live_probes >= 2` with `live_probe_pass_count >= 2`)
 - **Validates**: `tests/unit/test_update_codex_cli.py` (create),
   `tests/unit/test_session_telemetry.py`
 - **Assigned To**: codex-ops-builder
@@ -697,8 +742,19 @@ build directly.
 
 ### 5. Exercise failure paths and the real lifecycle
 - **Task ID**: test-codex-dev-lane
-- **Depends On**: build-codex-dev-tool, build-codex-ops
-- **Validates**: all Test Impact files, `tests/integration/test_codex_dev_lane.py`
+- **Depends On**: build-codex-dev-tool
+- **Validates**: `tests/unit/session_runner/test_codex_adapter.py`,
+  `tests/unit/session_runner/test_codex_dev_tool.py`,
+  `tests/unit/session_runner/test_harness_argv_golden.py`,
+  `tests/unit/session_runner/test_runner_dev_subagent.py`,
+  `tests/unit/test_valor_session_cli.py`,
+  `tests/unit/test_agent_session_queue.py`,
+  `tests/unit/test_agent_session.py`,
+  `tests/unit/test_session_executor_runner_dispatch.py`,
+  `tests/unit/test_settings.py`,
+  `tests/integration/test_codex_dev_lane.py` (excludes the Task 4b-owned
+  `tests/unit/test_update_codex_cli.py` and `tests/unit/test_session_telemetry.py`;
+  Task 5 records `live_probe_pass_count` and artifact `codex_live_probes`)
 - **Assigned To**: codex-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -713,7 +769,8 @@ build directly.
 
 ### 6. Security and architecture review
 - **Task ID**: review-codex-boundary
-- **Depends On**: test-codex-dev-lane
+- **Depends On**: test-codex-dev-lane, build-codex-ops-deferred (4b is REQUIRED
+  scope in the DONE path, so review covers provisioning and telemetry too)
 - **Assigned To**: codex-security-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -765,6 +822,10 @@ build directly.
 | Prefix fallback retained | `python -c "from agent.session_runner.router import PREFIX_TOKEN_RE; assert PREFIX_TOKEN_RE"` | exit code 0 |
 | Migration registered | `python -c "from scripts.update.migrations import MIGRATIONS; assert any('codex' in k.lower() for k in MIGRATIONS)"` | exit code 0 |
 | Env example placeholders | `rg -n 'CODEX_' .env.example` | exit code 0 |
+| Spawn env allowlist | `pytest -q tests/unit/session_runner/test_codex_adapter.py -k spawn_env` | exit code 0 |
+| Tree kill on persist failure | `pytest -q tests/unit/session_runner/test_codex_dev_tool.py -k persist_failure_tree` | exit code 0 |
+| exec_harness boundary | `pytest -q tests/unit/test_agent_session.py -k dev_harness_distinct_from_exec_harness` | exit code 0 |
+| DAG owns each CREATE once | `python -c "import re,pathlib; t=pathlib.Path('docs/plans/codex-exec-dev-lane.md').read_text(); assert t.count('test_update_codex_cli.py') >= 2 and len(re.findall(r'Validates.*test_update_codex_cli', t)) == 1"` | exit code 0 |
 | Feature docs present | `test -f docs/features/codex-exec-dev-lane.md && test -f docs/infra/harness-cross-compat.md` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
@@ -773,9 +834,9 @@ build directly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency | Task 4 Validates still lists tests/unit/test_update_codex_cli.py (create) and tests/unit/test_session_telemetry.py while its body defers both to Task 4b; Task 5 Validates all Test Impact files though 4b builds those files only after Task 5 probe evidence; Task 4b Depends On names prose probes rather than a task id. Task 4 and Task 5 cannot pass as written and the orchestrator cannot sequence the gate. | pending | Task 4 Validates: tests/unit/test_settings.py only. Task 5 Validates: explicit file list excluding test_update_codex_cli.py and test_session_telemetry.py, Depends On build-codex-dev-tool only. Task 4b Depends On: test-codex-dev-lane gated on artifact codex_live_probes>=2 recorded by the validator before 4b starts; Task 4b Validates owns the two deferred files. Validator must reject any CREATE file listed by two tasks. |
-| CONCERN | Risk & Robustness | Auth precedence (saved CLI login or CODEX_API_KEY) is asserted but the spawn specifies only argv/stdin safety with no subprocess environment allowlist, so the Codex child inherits the worker ambient environment and precedence is uncontrolled. | pending | In harness/codex.py construct env explicitly (allowlist from os.environ plus single-use CODEX_API_KEY), pass env=env to asyncio.create_subprocess_exec, and fail the adapter preflight test if OPENAI_API_KEY or other non-allowlisted *_API_KEY entries appear in the recorded spawn env. |
-| CONCERN | Risk & Robustness | Write-or-kill kills the direct Codex child on thread.started persist failure while grandchildren process-group coverage is proven only for steering, stranding sandboxed grandchildren with a live thread and no persisted handle. | pending | Add kill_codex_tree(proc) terminating proc plus psutil children(recursive=True) with SIGKILL plus wait, call from the write-or-kill except branch, and add a fixture with a sleep grandchild and forced persist failure asserting zero surviving PIDs. |
-| CONCERN | History & Consistency | The Revision re-verification paragraph cites commit 6098b52 as confirming all six concern-driven body changes, but 6098b52 is the parent of revision 197f2cdbd (1 vs 5 write-or-kill mentions at the two commits), so the cited verification does not cover the revision. | pending | Rewrite the paragraph at the actual revision head (commit 197f2cdbd) with matching timestamp, or prove containment; verify with git merge-base --is-ancestor plus grep counts before keeping any sha. |
-| CONCERN | History & Consistency | New dev_harness selection field ignores existing exec_harness (models/agent_session.py:353-355) whose comment already anticipates codex, leaving two harness selectors with no ownership split. | pending | Add a Task 2 step: exec_harness stays the top-level selector fixed to claude while dev_harness owns only the dev lane, with invariant assert session.exec_harness in (None, "claude") on flagged eng rows plus round-trip test test_dev_harness_distinct_from_exec_harness; if reuse intended, replace dev_harness with exec_harness == "codex" throughout Tasks 2-5. |
-| CONCERN | Scope & Value | The 4b deferral resequences without reducing scope: Success Criteria still mandate the update path and full telemetry for DONE while Appetite stays Large, so the comparison lane still carries a second production provisioning path as mandatory scope. | pending | Either make 4b a true off-ramp (remove from this issue success criteria, file as follow-up gated on probe results) or state in Appetite that total scope is unchanged and only ordering was deferred. Gate portion merged into the BLOCKER above; acceptance live_probe_pass_count >= 2 recorded in Task 5 evidence. |
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency | Task 4 Validates still lists tests/unit/test_update_codex_cli.py (create) and tests/unit/test_session_telemetry.py while its body defers both to Task 4b; Task 5 Validates all Test Impact files though 4b builds those files only after Task 5 probe evidence; Task 4b Depends On names prose probes rather than a task id. Task 4 and Task 5 cannot pass as written and the orchestrator cannot sequence the gate. | Task 4 Validates now `test_settings.py` only; Task 5 Depends On `build-codex-dev-tool` with an explicit file list excluding both 4b-owned files and recording `codex_live_probes`; Task 4b Depends On `test-codex-dev-lane` gated on that artifact; validator rejects a CREATE file listed twice | Task 5 Validates: explicit file list excluding test_update_codex_cli.py and test_session_telemetry.py, Depends On build-codex-dev-tool only. Task 4b Depends On: test-codex-dev-lane gated on artifact codex_live_probes>=2 recorded by the validator before 4b starts; Task 4b Validates owns the two deferred files. Validator must reject any CREATE file listed by two tasks. |
+| CONCERN | Risk & Robustness | Auth precedence (saved CLI login or CODEX_API_KEY) is asserted but the spawn specifies only argv/stdin safety with no subprocess environment allowlist, so the Codex child inherits the worker ambient environment and precedence is uncontrolled. | explicit env allowlist plus single-use `CODEX_API_KEY` via `env=` in Technical Approach, Risk 5, Task 1, and a spawn-env Verification row rejecting `OPENAI_API_KEY` | (allowlist from os.environ plus single-use CODEX_API_KEY), pass env=env to asyncio.create_subprocess_exec, and fail the adapter preflight test if OPENAI_API_KEY or other non-allowlisted *_API_KEY entries appear in the recorded spawn env. |
+| CONCERN | Risk & Robustness | Write-or-kill kills the direct Codex child on thread.started persist failure while grandchildren process-group coverage is proven only for steering, stranding sandboxed grandchildren with a live thread and no persisted handle. | `kill_codex_tree(proc)` (recursive SIGKILL plus wait) in the write-or-kill branch, Race 1, Tasks 3/5, plus a sleep-grandchild Verification row | Add kill_codex_tree(proc) terminating proc plus psutil children(recursive=True) with SIGKILL plus wait, call from the write-or-kill except branch, and add a fixture with a sleep grandchild and forced persist failure asserting zero surviving PIDs. |
+| CONCERN | History & Consistency | The Revision re-verification paragraph cites commit 6098b52 as confirming all six concern-driven body changes, but 6098b52 is the parent of revision 197f2cdbd (1 vs 5 write-or-kill mentions at the two commits), so the cited verification does not cover the revision. | Freshness Check rewritten at head `759a72816` (2026-09-10) with `merge-base --is-ancestor` plus grep-count evidence; supersedes the `6098b52` paragraph | Rewrite the paragraph at the actual revision head (commit 197f2cdbd) with matching timestamp, or prove containment; verify with git merge-base --is-ancestor plus grep counts before keeping any sha. |
+| CONCERN | History & Consistency | New dev_harness selection field ignores existing exec_harness (models/agent_session.py:353-355) whose comment already anticipates codex, leaving two harness selectors with no ownership split. | `exec_harness`-fixed-to-claude plus `dev_harness`-owns-dev-lane boundary in Technical Approach and Task 2 with invariant and round-trip test | Add a Task 2 step: exec_harness stays the top-level selector fixed to claude while dev_harness owns only the dev lane, with invariant assert session.exec_harness in (None, "claude") on flagged eng rows plus round-trip test test_dev_harness_distinct_from_exec_harness; if reuse intended, replace dev_harness with exec_harness == "codex" throughout Tasks 2-5. |
+| CONCERN | Scope & Value | The 4b deferral resequences without reducing scope: Success Criteria still mandate the update path and full telemetry for DONE while Appetite stays Large, so the comparison lane still carries a second production provisioning path as mandatory scope. | Appetite states total scope unchanged with ordering-only deferral; Success Criteria mark 4b REQUIRED in the DONE path after `live_probe_pass_count >= 2` | Either make 4b a true off-ramp (remove from this issue success criteria, file as follow-up gated on probe results) or state in Appetite that total scope is unchanged and only ordering was deferred. Gate portion merged into the BLOCKER above; acceptance live_probe_pass_count >= 2 recorded in Task 5 evidence. |
