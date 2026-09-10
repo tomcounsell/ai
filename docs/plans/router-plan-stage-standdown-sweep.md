@@ -260,15 +260,241 @@ is hygiene rather than a behavior fix.
 
 ## Solution
 
-_placeholder_
+All code changes are in `agent/sdlc_router.py`. All test changes are in
+`tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`.
+
+### 1. New predicate `_review_verdict_head_is_verified_fresh` (added next to `:1385`)
+
+A narrow sibling of `_review_verdict_head_is_stale`, **not** a modification of it. The
+existing predicate's absent-key contract (*"key ABSENT from context → signal not supplied →
+False (inert; other rules own routing)"*) is legitimate for its non-terminal consumers and
+**must not change**.
+
+```python
+def _review_verdict_head_is_verified_fresh(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Return True only on POSITIVE evidence that the REVIEW verdict judged the live head.
+
+    Narrow sibling of :func:`_review_verdict_head_is_stale`, for TERMINAL
+    ``/do-merge`` dispatch only (G3 leg 1, G6). The two differ on exactly two
+    inputs, both deliberate:
+
+    - ``pr_head_sha`` ABSENT from context → **False** here (no evidence, no
+      merge), where the stale predicate returns False meaning "inert".
+    - no recorded REVIEW verdict → **False** here, where the stale predicate
+      returns False meaning "the no-verdict recovery rows own this".
+
+    Requiring presence is free in production: ``tools/sdlc_next_skill._build_context``
+    sets ``pr_head_sha`` unconditionally whenever ``pr_number`` is set and a
+    REVIEW verdict is recorded — a real SHA, or ``""`` plus
+    ``pr_head_sha_lookup_failed`` on lookup failure. Both conditions hold on
+    every path that reaches either call site, so the key is never absent for a
+    live lane; requiring it closes the hole against non-CLI and future callers.
+    """
+    if "pr_head_sha" not in context:
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return False  # fail-closed lookup-failure sentinel
+    if not _latest_review_verdict(stage_states, meta).strip():
+        return False
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
+        return False  # unattributable verdict is never "verified fresh"
+    return recorded_head.lower() == head_sha.lower()
+```
+
+### 2. G3 leg 1 requires an APPROVED verdict AND verified-fresh head (`:518`)
+
+```python
+if (
+    review_status == STATUS_COMPLETED
+    and docs_status == STATUS_COMPLETED
+    and REVIEW_APPROVED in review_verdict_norm
+    and _review_verdict_head_is_verified_fresh(stage_states, meta, context or {})
+):
+    target = SKILL_DO_MERGE
+    suffix = "review clean and docs complete"
+```
+
+Fall-through is already correct and needs no other edit: `CHANGES REQUESTED` now reaches
+leg 2 (`/do-patch`), and a stale or unverifiable APPROVED reaches leg 4 (`/do-pr-review`).
+
+### 3. G6 uses the same predicate (`:976`) — RATIFIED WIDENING, strictly one line
+
+```python
+if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
+    return None
+```
+
+replacing `if _review_verdict_head_is_stale(stage_states, meta, context):`. The WS3d comment
+directly above (`:971-975`) is updated in the same hunk to describe the absent-key case as
+well, so the comment stops overstating the code — that overstatement is the whole reason
+this hunk is in scope.
+
+**Conditions on this change, non-negotiable:**
+- Strictly the predicate swap plus its comment. Do **not** touch G6's other gates
+  (`pr_number` `:953-955`, `pr_merge_state`, `ci_all_passing`, the DOCS gate, the
+  `REVIEW_APPROVED` gate `:966-969`) and do **not** touch row 8f.
+- **The PR body must name the deliberate widening** and cite the WS3d comment at
+  `agent/sdlc_router.py:971-975`, so a reviewer seeing an out-of-scope hunk understands why
+  it is there.
+- Fall-through is safe and verified: absent key → not verified fresh → `return None` →
+  dispatch table → row 8f → `/do-pr-review`.
+- Add `Refs #2062` alongside the closers.
+
+### 4. New shared predicate `_plan_stage_stood_down` (added above row 1, near `:1121`)
+
+The #3249 condition, expressed **once**:
+
+```python
+def _plan_stage_stood_down(stage_states: dict, meta: dict) -> bool:
+    """Return True when the lane has moved past the plan stage (#3249).
+
+    One definition for the step-aside that rows 1, 2, 2c and 3 were each
+    supposed to carry and hand-copied inconsistently. Two signals:
+
+    - ``pr_number`` set — a PR-stage lane has no plan-stage question left to
+      answer; rows 7-10 own that state.
+    - ``BUILD`` at ``in_progress`` or ``completed`` — the plan was accepted when
+      the build was dispatched. Row 5 (``_rule_branch_exists_no_pr``) owns the
+      pre-PR resume: its predicate is ``BUILD == in_progress OR
+      context['branch_exists'] is True``, so the branch half answers regardless
+      of BUILD status. Nothing is stranded.
+    """
+    if meta.get("pr_number"):
+        return True
+    return stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED)
+```
+
+### 5. Route the four plan-stage rows through it
+
+| Row | Function | Line | Today | Change |
+|-----|----------|------|-------|--------|
+| 1 | `_rule_no_plan` | `:1121` | `pr_number` only | replace with `_plan_stage_stood_down` |
+| 2 | `_rule_plan_not_critiqued` | `:1153` | **neither** | add `_plan_stage_stood_down` as the first check |
+| 2c | `_rule_critique_in_progress_no_verdict` | `:1650` | `pr_number` only | replace with `_plan_stage_stood_down` |
+| 3 | `_rule_critique_needs_revision` | `:1180` | `pr_number` only | replace with `_plan_stage_stood_down` |
+
+Each becomes, as the first statement in the predicate body:
+
+```python
+if _plan_stage_stood_down(stage_states, meta):
+    return False
+```
+
+Row 2's docstring gains a sentence recording that it had no step-aside at all and why
+(#3249); rows 1/2c/3's existing step-aside comments are rewritten to name the shared helper
+rather than restating the condition.
+
+### 6. Fold rows 4b/4c's duplicated `pr_number` checks into the helper
+
+Rows 4b (`~:1214`) and 4c (`~:1249`) each check `meta.get("pr_number")` **twice** in the
+same predicate — the hand-copied duplication #3249 exists to eliminate. Replace the leading
+`if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED: return False`
+with `if _plan_stage_stood_down(stage_states, meta): return False`, and delete the redundant
+second `if meta.get("pr_number"): return False` further down.
+
+**Behavior-identical, and this must be argued explicitly, not assumed.** The helper is
+broader than the check it replaces (it also catches `BUILD == in_progress`), but both rows
+end with `return build_status in (None, "pending", "ready")`, which already excludes
+`in_progress`. So no input changes answer.
+
+**Keep rows 4a/4c's `build_status in (None, "pending", "ready")` gates.** They are strictly
+NARROWER than the shared stand-down — they also exclude `BUILD == failed`. The helper is
+added *alongside* them, **never substituted for them**; substituting would be a behavior
+change. Row 4a is otherwise untouched.
+
+### 7. Docs
+
+Update `docs/features/gh-stale-state-verdict-gate.md` to describe the two-predicate split
+and the terminal-dispatch rule (see **Documentation**).
+
+### What this plan does NOT change
+
+- `_review_verdict_head_is_stale` itself, or its remaining call sites at `:527` (G3 leg 3),
+  `:1998` (row 8f) and `:2029` (row 10).
+- `tools/merge_predicate.py` — authorization stays where it is, and is not relaxed.
+- Row 5. See **No-Gos**.
 
 ## Failure Path Test Strategy
 
-_placeholder_
+All new tests go in
+`tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`, using the
+existing helper style (`_build_in_progress_states`, `_plan_context`, `_approved_pr_states`,
+`_approved_pr_meta`). Run with `scripts/pytest-clean.sh`, targeted node IDs only, never bare
+`pytest`, never `pkill -f pytest`.
+
+**Two hard rules, both from the ratified design:**
+
+1. **Every new assertion is proven RED before it is made green**, and the RED output is
+   captured as evidence in the PR body. An assertion that has never failed proves nothing.
+2. **Reachability is proven by direct `decide_next_dispatch` probes, not by inference** —
+   one probe per row and per guard leg touched. Reading a predicate and concluding it fires
+   is exactly the reasoning that let this class survive three rounds.
+
+### Coverage matrix
+
+| # | Path | Input state | Expected after fix |
+|---|------|-------------|--------------------|
+| T1 | row 1 | `PLAN=in_progress`, no plan doc, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
+| T2 | row 2 | `PLAN=completed`, `CRITIQUE=pending`, open PR #999, `last_dispatched_skill=/do-build`, `REVIEW=pending` | `Dispatch(/do-pr-review, row_id='7')` |
+| T3 | row 2 | same, no PR, `BUILD=in_progress`, branch exists | `Dispatch(/do-build, row_id='5')` |
+| T4 | row 2c | `CRITIQUE=in_progress`, no verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
+| T5 | row 3 | `NEEDS REVISION` verdict, `BUILD=in_progress`, no PR, branch exists | `Dispatch(/do-build, row_id='5')` |
+| T6 | rows 1/2/2c/3 negative control | `BUILD=pending`, no PR | each row still fires its own skill — the sweep must not disable the rows |
+| T7 | rows 4b/4c | the `pr_number` and `BUILD=completed` states each row already refuses | unchanged answers (refactor is behavior-identical) |
+| T8 | row 4a/4c narrowing guard | `BUILD=failed`, with-concerns verdict, no PR | rows 4a/4c still decline — proves the narrower gate was not replaced |
+| T9 | G3 leg 1 | `REVIEW=completed`, `DOCS=completed`, verdict `CHANGES REQUESTED` at live head | `Dispatch(/do-patch, row_id='G3')` (leg 2) |
+| T10 | G3 leg 1 | markers completed, `APPROVED` recorded against an OLDER head | `Dispatch(/do-pr-review, row_id='G3')` (leg 4) |
+| T11 | G3 leg 1 | markers completed, `APPROVED`, **`pr_head_sha` ABSENT from context** | `/do-pr-review`, NOT `/do-merge` |
+| T12 | G3 leg 1 | markers completed, `APPROVED`, `pr_head_sha == ""` + `pr_head_sha_lookup_failed` | `/do-pr-review`, NOT `/do-merge` |
+| T13 | G3 leg 1 positive control | markers completed, `APPROVED` at the live head | still `Dispatch(/do-merge, row_id='G3')` |
+| T14 | **G6, absent key** | `pr_number`, `pr_merge_state=CLEAN`, `ci_all_passing=True`, `DOCS=completed`, `APPROVED`, **`pr_head_sha` ABSENT** | `guard_g6_terminal_merge_ready` returns `None`; `decide_next_dispatch` → `/do-pr-review` via row 8f |
+| T15 | G6 positive control | same but `pr_head_sha` matches the verdict's head | still `Dispatch(/do-merge, row_id='G6')` |
+| T16 | G6 stale control | same but `pr_head_sha` differs | still `None` → row 8f (pre-existing behavior, pinned) |
+| T17 | `_review_verdict_head_is_stale` unchanged | absent key, with a recorded verdict | still returns `False` — pins that the existing contract was not modified |
+
+**T14 is the mandatory RED for the G6 widening.** The RED proof must be on the **ABSENT-key**
+case specifically; T16's stale-key path already passes today and proves nothing about this
+change. If T14 is green before the code change, the test is wrong — fix the test, do not
+proceed.
+
+### Guard-ordering hygiene for the G3 probes
+
+G3 only engages when `last_dispatched_skill` / `proposed_skill` puts it in scope, and G6 can
+answer first. Follow the recon's shape: set `last_dispatched_skill=/do-plan-critique` and
+`pr_merge_state="DIRTY"` on the G3 probes so G6 cannot pre-empt them, and use
+`pr_merge_state="CLEAN"` only on the G6 probes.
 
 ## Test Impact
 
-_placeholder_
+- [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py` —
+      UPDATE: extend with T1–T17 above. The existing `TestRow2bStandsDownOnceBuildStarted`
+      and `TestG3DocsLeg` classes stay as-is; new classes are added alongside them, and the
+      module docstring's line "whose missing `pr_number` step-aside is tracked as #3249" is
+      updated to record that #3249 has landed.
+- [ ] `tests/unit/test_sdlc_router.py:1484-1488` — UPDATE (verify only): this is the direct
+      unit test of `_review_verdict_head_is_stale`. That function is deliberately unchanged,
+      so these cases must stay green **unmodified**. If any of them needs editing, the
+      existing predicate was touched and the change is wrong. T17 pins the same contract from
+      the router-decision side.
+- [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_dispatch_rows.py` — AUDIT:
+      the row-by-row table tests. Any case asserting rows 1/2/2c/3/4b/4c fire while
+      `BUILD in (in_progress, completed)` or a PR is open is asserting the defect and must be
+      UPDATED to the new expected routing, with the change called out in the PR body.
+- [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_terminal.py` and
+      `test_sdlc_router_decision_convergence.py` — AUDIT: these exercise G6 and the merge
+      fast-path. Any case that reaches `/do-merge` without a `pr_head_sha` in context now
+      routes to `/do-pr-review` and must be UPDATED to supply the key (the shape production
+      actually produces) rather than by relaxing the assertion.
+- [ ] `tests/unit/sdlc_router_decision/test_sdlc_router_decision_with_concerns.py` — AUDIT:
+      rows 4b/4c live here. The refactor is behavior-identical, so every case must stay green
+      unmodified; a failure means step 6 changed behavior and must be reverted to the literal
+      duplicated checks.
+
+No expected-failure markers exist for these defects — `grep -rn 'pytest.mark.xfail\|pytest.xfail('
+tests/unit/sdlc_router_decision/` returns nothing, so there are no xfails (decorator or
+runtime) to convert.
 
 ## Rabbit Holes
 
