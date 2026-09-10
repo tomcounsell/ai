@@ -6,7 +6,7 @@
   harness with subscription authentication.
 - `agent/session_runner/harness/` provides a normalized adapter protocol, with
   `claude.py` driving every top-level turn and `codex.py` serving as the
-  opt-in dev-lane executor inside flagged eng sessions — see
+  opt-in dev-lane executor inside flagged eng sessions. See
   [Codex Exec Dev Lane](../features/codex-exec-dev-lane.md).
 - Eng-session developer work runs as a resumable Claude subagent inside the
   top-level PM turn. Its continuation id and cwd are persisted on AgentSession.
