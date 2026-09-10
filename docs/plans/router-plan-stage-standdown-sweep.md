@@ -174,16 +174,38 @@ would have read the same two files.
 
 ### spike-1: Requiring a *present* `pr_head_sha` costs live lanes nothing
 
-- **Assumption**: "On every path that can reach G3 leg 1 or G6, `context['pr_head_sha']` is
-  already present, so a predicate that returns False on an absent key never strands a real lane."
-- **Method**: code-read (`tools/sdlc_next_skill.py:505-533`, resolved inline).
-- **Result**: **CONFIRMED.** `_build_context` sets the key unconditionally when
+- **Assumption**: "On every *gating* path that can reach G3 leg 1 or G6, `context['pr_head_sha']`
+  is already present, so a predicate that returns False on an absent key never strands a real lane."
+- **Method**: code-read (`tools/sdlc_next_skill.py:505-533`, resolved inline). Re-scoped at
+  critique round 2 after a second router caller was found (see the caller survey below).
+- **Result**: **CONFIRMED, with the caller set stated exactly.** `_build_context` sets the key unconditionally when
   `meta['pr_number']` is truthy AND a REVIEW verdict is recorded — a real SHA on success, or
   `""` plus `pr_head_sha_lookup_failed` on failure. The comment at `:507-511` states the
   fail-closed contract explicitly: it "never silently omits the key." The key is omitted
   only when there is no PR or no recorded verdict. G3 leg 1 requires `review_status ==
   completed`, and G6 gates on `pr_number` (`:953-955`) and `REVIEW_APPROVED` (`:966-969`),
   so both producer conditions hold on every reachable path.
+
+  **Caller survey (the correction — `sdlc_next_skill` is not the SOLE router caller).**
+  `tools/sdlc_next_skill.py` is the only caller that *assembles* a `context`. A second
+  in-repo caller, `agent/session_runner/runner.py:1557`, invokes
+  `decide_next_dispatch(stage_states, meta)` with **no `context` argument at all**, so
+  `context` resolves to `{}` and `pr_head_sha` is unconditionally absent there regardless of
+  real freshness. Post-fix, a genuinely merge-ready lane read through that path yields
+  `Blocked(guard_id='NO_RULE')` where it previously yielded `Dispatch(/do-merge)`.
+
+  **Blast radius, traced and bounded.** That call's result is consumed as
+  `next_skill = getattr(decision, "skill", None)` and feeds exactly one thing:
+  `agent/session_runner/completion_guard.py::_reroute_message` (`:85-87`), which already
+  carries a generic fallback (`"the next pipeline stage (run `sdlc-tool next-skill`)"`) for
+  a `None` skill. The allow/refuse decision itself comes from
+  `agent/pipeline_complete.py::is_pipeline_complete` (`completion_guard.py:155`), never from
+  this value. So the effect is **advisory nudge text only** — cosmetic and fail-open, with
+  no gate consequence.
+
+  **Explicitly out of scope for this lane:** do not change `agent/sdlc_router.py` for this,
+  and do not add a `context` argument at `agent/session_runner/runner.py:1557`. That file is
+  a different surface and touching it would widen the diff for a cosmetic degradation.
 - **Confidence**: high.
 - **Impact if false**: live lanes would fall through to `/do-pr-review` instead of merging —
   noisy but not unsafe. This is why the design accepts the closed-by-default posture: the
@@ -218,6 +240,11 @@ The change sits at one point in a three-hop chain and reads a signal produced up
    read) and writes `context['pr_head_sha']` — the SHA on success, `""` plus
    `context['pr_head_sha_lookup_failed'] = True` on failure. **The key is never omitted when
    both conditions hold.**
+
+   `_build_context` is the only caller that assembles a `context`; it is **not** the only
+   caller of the router. `agent/session_runner/runner.py:1557` calls
+   `decide_next_dispatch(stage_states, meta)` with no `context`, so `pr_head_sha` is always
+   absent there — bounded to advisory nudge text, traced in spike-1 and in the Risks table.
 
 2. **Consumer — `agent/sdlc_router.py::decide_next_dispatch` (`:2306`).** Guards run first
    (G1–G6, G9), then `DISPATCH_RULES` in row order. The router itself makes no `gh` calls;
@@ -474,10 +501,14 @@ DOCS is complete. So once G6 and row 10 both decline, **no row owns the state** 
 That is the intended outcome, not a gap:
 - It is fail-closed. The alternative is merging on absent freshness evidence, which is the
   defect.
-- Production cannot reach it. spike-1 traced the sole producer:
-  `tools/sdlc_next_skill._build_context` sets `pr_head_sha` unconditionally whenever
-  `pr_number` is set and a REVIEW verdict is recorded, and both conditions hold on every
-  path that reaches row 10. The `Blocked` is a backstop against non-CLI and future callers.
+- The production *gating* path cannot reach it. spike-1 traced the only caller that
+  assembles a real `context`: `tools/sdlc_next_skill._build_context` sets `pr_head_sha`
+  unconditionally whenever `pr_number` is set and a REVIEW verdict is recorded, and both
+  conditions hold on every path that reaches row 10. The `Blocked` is a backstop against
+  non-CLI and future callers. One other in-repo caller —
+  `agent/session_runner/runner.py:1557`, `decide_next_dispatch(stage_states, meta)` with no
+  `context` argument — reaches this landing by construction; its blast radius is traced and
+  bounded to advisory text (see spike-1 and the Risks table).
 - Widening row 8f to absorb it is **out of scope** (see **No-Gos**): 8f dispatches
   `/do-pr-review`, not a merge, so the inert reading is correct for it, and changing it
   would convert a fail-closed escalation into a silent re-review loop for a state that
@@ -745,7 +776,8 @@ runtime) to convert.
 | The G6 and row-10 widenings read as out-of-scope hunks and get bounced at review | Medium | PR body names them explicitly, cites the WS3d comment at `agent/sdlc_router.py:971-975` as evidence of G6's fail-closed *intent* (not as an assertion of the absent-key behavior, which it never made), and quotes the row-10 relocation probe. Non-negotiable, not optional prose. |
 | The absent-key state now escalates to `Blocked` instead of routing | Low | Intended and fail-closed; spike-1 shows no production producer can emit it. Pinned by T14/T14b on `guard_id`, and stated in Success Criterion 4 so it cannot be "fixed" later by widening row 8f. |
 | A `pr_head_sha`-less fixture in an existing suite now hits `Blocked` and gets "fixed" by relaxing the assertion | Medium | Test Impact names the audit targets and requires supplying the key rather than weakening the expectation. Every changed existing assertion is enumerated in the PR body. |
-| A live lane stalls because `pr_head_sha` is genuinely absent on some path not surveyed | Low | spike-1 traced the sole producer and both call sites' gates. Worst case is a `/do-pr-review` dispatch, not a bad merge — the failure mode is noise, not damage. |
+| A live lane stalls because `pr_head_sha` is genuinely absent on some path not surveyed | Low | spike-1 traced the only caller that assembles a `context` (`tools/sdlc_next_skill._build_context`), both call sites' gates, **and** the one other in-repo router caller (`agent/session_runner/runner.py:1557`, context-less — see the row below). Worst case on a gating path is a `/do-pr-review` dispatch, not a bad merge — the failure mode is noise, not damage. |
+| Merge-ready nudge text degrades from `/do-merge` to the generic fallback on the context-less runner path (`agent/session_runner/runner.py:1557`) | Low | **Cosmetic, fail-open, no gate effect.** That call's result feeds only `completion_guard._reroute_message` (`:85-87`), which already has a generic fallback; the allow/refuse decision comes from `is_pipeline_complete` (`completion_guard.py:155`). Accepted as-is: neither the router nor that runner line is changed in this lane. |
 | The 4b/4c refactor silently changes behavior | Medium | Argued explicitly in Solution step 6 (the trailing `build_status in (None, pending, ready)` already excludes `in_progress`), and pinned by T7/T8 plus the unmodified `test_..._with_concerns.py` suite. Any red there means revert step 6. |
 | Existing tests encode the defect and get "fixed" by relaxing assertions | Medium | Test Impact lists the audit targets by file with explicit dispositions and requires supplying the real context key rather than weakening an assertion. Every changed existing assertion is called out in the PR body. |
 | Standing four rows down strands a lane at `Blocked` | Low | spike-2 plus #3249's recorded second probe pass: every state lands on row 5 or row 7. The residual `Blocked` subcase (BUILD settled AND no live branch) is inherited from #3246 unchanged. |
