@@ -1,10 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-09
 tracking: https://github.com/tomcounsell/ai/issues/3249
+also_closes: https://github.com/tomcounsell/ai/issues/3260
+lane_slug: sdlc-3249
 last_comment_id:
 ---
 
@@ -319,6 +321,16 @@ if (
 Fall-through is already correct and needs no other edit: `CHANGES REQUESTED` now reaches
 leg 2 (`/do-patch`), and a stale or unverifiable APPROVED reaches leg 4 (`/do-pr-review`).
 
+**Deliberate strengthening over #3260's stated AC.** The acceptance criteria in #3260's
+comment thread (comment `5583298719`, carried over from the duplicate #3261) ask for
+`not _review_verdict_head_is_stale(...)`. The ratified design supersedes that with the
+strictly stronger `_review_verdict_head_is_verified_fresh(...)`: it satisfies the AC on every
+input the AC describes and additionally refuses the ABSENT-key case, which the AC's version
+would pass. The same comment's other three ACs — the `REVIEW_APPROVED` requirement, the
+`CHANGES REQUESTED` test, the stale-head test — are T9 and T10, and its RED requirement
+(*"a guard that certifies absence is worthless until it has been seen to fail on the
+known-bad code"*) is this plan's rule 1 under **Failure Path Test Strategy**.
+
 ### 3. G6 uses the same predicate (`:976`) — RATIFIED WIDENING, strictly one line
 
 ```python
@@ -626,19 +638,113 @@ below.
 
 ## Success Criteria
 
-_placeholder_
+1. `_review_verdict_head_is_verified_fresh` exists in `agent/sdlc_router.py`, returns
+   `False` on an ABSENT `pr_head_sha` key, and is called from exactly two sites: G3 leg 1
+   (`:518`) and `guard_g6_terminal_merge_ready` (`:976`).
+2. `_review_verdict_head_is_stale` is byte-identical to its pre-change form, and
+   `tests/unit/test_sdlc_router.py:1484-1488` passes **unmodified**.
+3. G3 leg 1 requires `REVIEW_APPROVED in review_verdict_norm` AND a verified-fresh head.
+   `CHANGES REQUESTED` routes to `/do-patch`; a stale or unverifiable `APPROVED` routes to
+   `/do-pr-review`; a fresh `APPROVED` with DOCS complete still routes to `/do-merge`.
+4. G6 returns `None` on an absent `pr_head_sha`, and `decide_next_dispatch` lands that state
+   on row 8f → `/do-pr-review`. G6's other gates are untouched and its `:971-975` comment now
+   describes the code accurately.
+5. `_plan_stage_stood_down` exists as a single shared predicate and is the **only** place the
+   #3249 condition is written. `grep -c 'meta.get("pr_number")' agent/sdlc_router.py` is
+   strictly lower than before, and no plan-stage row re-states the BUILD condition inline.
+6. Rows 1, 2, 2c and 3 all call it. Row 2 — which had no step-aside at all — stands down on
+   both an open PR and a running/completed BUILD.
+7. Rows 4b and 4c each check `pr_number` exactly **once**, and rows 4a/4c retain their
+   narrower `build_status in (None, "pending", "ready")` gates.
+8. Row 5 (`_rule_branch_exists_no_pr`) is **unchanged**. `git diff` shows no hunk touching it.
+9. T1–T17 all pass, and each new assertion has a captured RED run from before the fix. The
+   T14 RED is on the ABSENT-key case.
+10. Full `tests/unit/sdlc_router_decision/` and `tests/unit/test_sdlc_router.py` are green via
+    `scripts/pytest-clean.sh`; every existing assertion that changed is enumerated in the PR body.
+11. `python -m ruff check` and `python -m ruff format` clean.
+12. Every checkbox under **Documentation** is done.
+13. PR body names the G6 widening as deliberate and cites `agent/sdlc_router.py:971-975`.
+14. Commit trailers carry `Closes #3260`, `Closes #3249`, `Refs #2062`.
 
 ## Team Orchestration
 
-_placeholder_
+Single lane, single builder. No parallel sub-agents: every change lands in one file plus one
+test file, so parallel edits would only manufacture conflicts.
+
+- **Lane**: slug `sdlc-3249`, worktree `/Users/valorengels/src/ai/.worktrees/sdlc-3249`,
+  branch `session/sdlc-3249`. Recorded, not re-derived.
+- **Coordination with parallel lanes**: `pgrep-sweep-finish` (`scripts/`,
+  `tools/process_lookup.py`, `monitoring/`) and the `agent/agent_session_queue.py` lane. File
+  sets are disjoint; no handoff needed, no shared file to negotiate.
+- **Commit early and often** to `session/sdlc-3249` at each numbered task below. A prior lane
+  on this issue died at PLAN and lost everything; small checkpoints are the mitigation.
+- **Plan/docs commits go on `main`** in the shared checkout, never on the feature branch, and
+  are never left uncommitted across an await.
 
 ## Step by Step Tasks
 
-_placeholder_
+1. **Set up.** Work in `/Users/valorengels/src/ai/.worktrees/sdlc-3249` on
+   `session/sdlc-3249`; confirm it is at `origin/main` and rebase if not. Never edit the
+   shared checkout root for code.
+2. **Write the RED tests first.** Add T1–T17 to
+   `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py`. Run
+   them via `scripts/pytest-clean.sh` with targeted node IDs and **capture the failing
+   output**. Confirm T14 (G6, ABSENT key) is RED — if it is green, the test is wrong. Commit
+   the RED tests.
+3. **Add `_review_verdict_head_is_verified_fresh`** next to `_review_verdict_head_is_stale`
+   (`:1385`), with the docstring from Solution step 1. Do not modify the existing predicate.
+   Commit.
+4. **Apply it to G3 leg 1** (`:518`) per Solution step 2. Run T9–T13; confirm green. Commit.
+5. **Apply it to G6** (`:976`) per Solution step 3 — the one-line swap plus the `:971-975`
+   comment correction, nothing else. Run T14–T16; confirm T14 flipped RED→green and T15/T16
+   never regressed. Commit.
+6. **Add `_plan_stage_stood_down`** per Solution step 4. Commit.
+7. **Route rows 1, 2, 2c, 3 through it** per Solution step 5, updating each row's step-aside
+   comment to name the helper. Run T1–T6; confirm green, including the T6 negative controls.
+   Commit.
+8. **Fold rows 4b/4c's duplicate `pr_number` checks** per Solution step 6, keeping 4a/4c's
+   narrower `build_status` gates. Run T7, T8 and the whole
+   `test_sdlc_router_decision_with_concerns.py` suite unmodified; any red means revert this
+   task. Commit.
+9. **Audit the existing suites** named in **Test Impact**
+   (`..._dispatch_rows.py`, `..._terminal.py`, `..._convergence.py`,
+   `tests/unit/test_sdlc_router.py`). For each failure, decide UPDATE-the-expectation vs
+   the-change-is-wrong, and record every changed assertion for the PR body. Confirm
+   `test_sdlc_router.py:1484-1488` needed no edit. Commit.
+10. **Run the full router suites** — `tests/unit/sdlc_router_decision/` and
+    `tests/unit/test_sdlc_router.py` — via `scripts/pytest-clean.sh`. Never bare `pytest`,
+    never `pkill -f pytest`.
+11. **Documentation pass**: every checkbox under **Documentation**. Edit
+    `.claude/skills-global/do-sdlc/SKILL.md` in place (hardlinked — never replace-and-rename).
+    Commit.
+12. **Quality gate**: `python -m ruff check` and `python -m ruff format`. Commit.
+13. **Open the PR.** Body must include: the RED evidence for each new assertion (T14's
+    ABSENT-key RED called out specifically), an explicit paragraph naming the **G6 widening as
+    deliberate** and citing the WS3d comment at `agent/sdlc_router.py:971-975`, and the list of
+    changed existing assertions. Trailers: `Closes #3260`, `Closes #3249`, `Refs #2062`.
 
 ## Verification
 
-_placeholder_
+- **Reachability, not inference.** For each of rows 1, 2, 2c, 3, 4b, 4c and for G3 leg 1 and
+  G6, a direct `decide_next_dispatch` (or `guard_g6_terminal_merge_ready`) probe demonstrates
+  both the pre-fix wrong answer and the post-fix right one. No claim of the form "reading the
+  predicate, it must fire."
+- **RED-before-green ledger.** Each new assertion has a captured failing run from before its
+  fix landed. T14's RED is on the ABSENT-key input specifically; a RED captured on the
+  stale-key input does not count and must be redone.
+- **Negative controls.** T6, T13 and T15 prove the change did not simply disable the rows and
+  guards it touches — the happy paths still route as before.
+- **Non-substitution proof.** T8 (`BUILD == failed`) proves rows 4a/4c kept their narrower
+  gate rather than inheriting the broader helper.
+- **Untouched-surface proof.** `git diff main -- agent/sdlc_router.py` is read end to end and
+  shows: no hunk in `_review_verdict_head_is_stale`, no hunk in `_rule_branch_exists_no_pr`
+  (row 5), no hunk in rows 8f/10, and no hunk in `tools/merge_predicate.py`.
+- **Suite green.** `scripts/pytest-clean.sh` over `tests/unit/sdlc_router_decision/` and
+  `tests/unit/test_sdlc_router.py`, with a non-zero test count (the `ZERO TESTS EXECUTED`
+  guard must not have fired).
+- **Lint.** `python -m ruff check` and `python -m ruff format` clean.
+- **Docs.** Every **Documentation** checkbox ticked; the SKILL.md hardlink intact after the
+  edit.
 
 ## Critique Results
 
@@ -648,4 +754,13 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+None blocking. One scope call is deliberately surfaced rather than taken unilaterally:
+
+1. **Should row 2b (`_rule_critique_verdict_stale`, `:1594`) also route through
+   `_plan_stage_stood_down`?** The ratified design enumerates rows 1/2/2c/3 plus 4b/4c as the
+   targets and cites row 2b (`:1641-1644`) as the *pattern source*, so this plan does **not**
+   convert it. The consequence is that after this lands, row 2b holds the last hand-written
+   copy of a condition the change exists to express once. Converting it is behavior-identical
+   (its inline pair is literally the helper's body), but it is outside the ratified list, so
+   the decision belongs to the critique, not to the builder. **Default if unanswered: leave
+   row 2b as-is and stay inside the ratified scope.**
