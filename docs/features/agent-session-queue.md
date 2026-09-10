@@ -129,18 +129,21 @@ window is too short, and both calls share the same `to_thread()` race. The synch
 | `DRAIN_TIMEOUT` | Module constant (1.5s) controlling the Event wait timeout |
 | `_active_events` | Dict mapping worker_key to asyncio.Event for worker notification |
 
-## Pop-Loop Exception Resilience
+## Worker-Loop Exception Resilience
 
-No exception raised while popping/transitioning a **single** session may terminate the whole
-`_worker_loop` task — if it did, every other pending session for that `worker_key` would be
-stranded until the next restart or the ~5-min session-health sweep. The primary pop site
+No exception raised while popping/transitioning/completing a **single** session may terminate
+the whole `_worker_loop` task — if it did, every other pending session for that `worker_key`
+would be stranded until the next restart or the ~5-min session-health sweep. This covers every
+per-session call site in `_worker_loop`, not just the pop: the primary pop site
 (`_pop_agent_session()`, which drives `pending → running`) has two typed skip-and-continue
-handlers before the final `except BaseException: raise`:
+handlers before the final `except BaseException: raise`, and the completion `finally` (which
+drives the session to its terminal status) has its own typed handling below.
 
 | Exception | Trigger | Handling |
 |-----------|---------|----------|
 | `StatusConflictError` | A session is killed/transitioned out from under the pop (race between reading `status=pending` and `transition_status(→running)` finding it terminal). | Log, bounded per-`session_id` escalation (delete stale terminal duplicate, then last-resort cancel), release slot, `continue`. |
 | `ModelException` (Popoto) | A **corrupted** record (all fields `None` except `status="pending"`) fails the `pending → running` `save()` — Popoto raises `"Model instance parameters invalid. Failed to save."` from `pre_save()` when `is_valid()` is `False`. | Log, best-effort route to `cleanup_corrupted_agent_sessions()` (return value ignored), release slot **before** the backoff `await`, bounded per-`worker_key` spin guard, `await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)`, `continue`. |
+| `StatusConflictError` (completion `finally`) | The authoritative Redis row is already terminal (kill-is-terminal invariant, first terminal write wins) when the completion write for `_complete_agent_session()` runs — either an already-terminal skip fires before the write, or the write itself races a concurrent terminal writer. | Already-terminal rows are skipped before the write is even attempted (INFO, not WARNING — this is an expected concurrent-writer outcome, see [session-lifecycle.md](session-lifecycle.md)). A conflict surfaced by the write itself is caught, logged at INFO, and **not** retried — no escalation, no re-raise (#1803, #2088, #3253). A non-conflict exception from the same write is caught separately at ERROR (`exc_info=True`) as a containment backstop; both handlers deliberately catch `Exception`, not `BaseException`, so `CancelledError`/`KeyboardInterrupt` still propagate for shutdown. |
 
 `ModelException` is the **base** of Popoto's save/transition family (`KeyMutationError`,
 `SkipSaveException` subclass it), so the single clause covers the whole class of Popoto
