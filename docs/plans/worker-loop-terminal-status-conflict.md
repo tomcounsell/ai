@@ -998,6 +998,48 @@ python -m ruff format --check agent/agent_session_queue.py tests/unit/test_worke
 
 ## Critique Results
 
+### Round 3 — 2026-09-10 (FULL depth, independent roster: Risk & Robustness, Scope & Value, History & Consistency)
+
+Verdict: **READY TO BUILD (no concerns)**. Bounded concern-closing re-critique of the
+revision at `cebb1cdde`. All three critics returned `No findings.` independently, and the
+structural checks pass. The concern-re-critique loop exits here.
+
+No findings from the war room.
+
+**What each critic verified against the live checkout** (recorded so the builder does not
+re-investigate, and so a reader can see the pass was grounded rather than nominal):
+
+- **Phantom patch targets.** All three sites confirmed by direct file read:
+  `tests/unit/test_worker_persistent.py:386` (single-line), `:477-482` and `:567-572`
+  (multi-line, with the grep-visible `asq.AgentSession,` argument on `:478` and `:568`).
+  The revision's correction of the third span from the round-2 critique's `:568-573` to
+  `:567-572` is **correct** — `:573` is the closing `):` of the enclosing `with`, not part
+  of the `patch.object(` call. The union predicate was executed as written and is RED
+  pre-fix at exactly the stated counts: `grep -rn 'AgentSession, "get"' tests/` → 1 hit,
+  `grep -rn 'asq\.AgentSession,$' tests/` → 2 hits, union 3. Counts and spans agree across
+  `## Appetite`, `## Failure Path Test Strategy`, `## Test Impact`, T1, T3, SC10 and V8 with
+  no drift.
+- **Doc-surface split.** V5b exists in `## Verification` and its command matches T4's second
+  validate line verbatim; V5 is retitled "queue doc updated"; SC9's Proof names both rows.
+  The doc anchors the plan targets were re-read and are accurate:
+  `docs/features/agent-session-queue.md:132` is still titled "Pop-Loop Exception Resilience"
+  with the pop-scoped sentence at `:135-137` and a two-row handler table, and
+  `docs/features/session-lifecycle.md:143-151` still lists exactly six catch-and-log callers.
+- **Appetite.** The three mechanical patch-target repairs are itemized as a third file;
+  scope is unchanged and still `Small`.
+- **De-risking (T5 / R6).** Verified byte-accurate against `agent/agent_session_queue.py`:
+  `finalize_session(fresh, "cancelled", …)` at `:2743` sits inside the exec-task `try` whose
+  `except Exception` reaches `session_failed = True` at `:2937`; `transition_status(session,
+  "paused", …)` at `:2883` carries its own `except Exception as _ts_err` at `:2888`. The T5
+  sweep command was executed and surfaces no additional unguarded lifecycle write, so R6's
+  downgrade to Low is factually supported. `StatusConflictError` is confirmed already bound
+  at `:2101` — S2 needs no new import.
+- **S2 control flow.** Hand-traced: every branch either logs a skip or sets
+  `_should_complete = True`; there is no fallthrough and exactly one guarded write site. No
+  path was found on which the completion block can raise out of `_worker_loop` after S2.
+
+All three Round-2 rows below carry a non-`pending` `Addressed By`.
+
 ### Round 2 — 2026-09-10 (FULL depth, independent roster: Risk & Robustness, Scope & Value, History & Consistency)
 
 Verdict: **READY TO BUILD (with concerns)**. No blocker survived verification. Every
