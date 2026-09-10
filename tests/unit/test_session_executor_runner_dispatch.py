@@ -931,3 +931,81 @@ class TestReactTransportExecutorGuards:
         assert any("Failed to set reaction" in rec.message for rec in caplog.records)
         rows = list(AgentSession.query.filter(session_id=session.session_id))
         assert rows, "AgentSession row vanished despite the react_cb failure"
+
+
+def _make_flagged_session(**overrides):
+    """An eng session flagged for the Codex dev lane (plan #2001)."""
+    session = _make_session(working_dir="/tmp")
+    session.dev_harness = "codex"
+    session.codex_turn_count = 0
+    session.dev_lane_fence = "fence-test-1"
+    for key, value in overrides.items():
+        setattr(session, key, value)
+    session.save()
+    # Transition to "running" so the executor's status="running" lookup
+    # resolves agent_session (the worker does this before dispatch) — the
+    # preflight reads the flag off that row.
+    session.status = "running"
+    session.save(update_fields=["status"])
+    return session
+
+
+class TestExecutorCodexDevLane:
+    """Fail-fast lane preflight around the unchanged top-level path (#2001).
+
+    The top-level runner construction is identical for flagged and
+    unflagged eng sessions (Claude stays the executor); only flagged
+    sessions run ``preflight_codex_dev_lane`` before the run, and a
+    failed preflight raises instead of failing mid-turn inside the PM.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unflagged_session_never_touches_lane_preflight(self, redis_test_db):
+        session = _make_session(working_dir="/tmp")
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError("lane preflight ran for an unflagged session")
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch("agent.codex_dev_config.preflight_codex_dev_lane", _must_not_run),
+        ):
+            await _execute_agent_session(session)
+
+        assert FakeSessionRunner.instances[0].run_messages
+
+    @pytest.mark.asyncio
+    async def test_flagged_eng_with_broken_lane_raises_before_run(self, redis_test_db):
+        session = _make_flagged_session()
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.codex_dev_config.preflight_codex_dev_lane",
+                return_value="Codex CLI not found.",
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="Codex dev lane preflight failed"):
+                await _execute_agent_session(session)
+
+        assert FakeSessionRunner.instances, "runner should be built before preflight"
+        assert all(not r.run_messages for r in FakeSessionRunner.instances)
+
+    @pytest.mark.asyncio
+    async def test_flagged_eng_with_clear_lane_runs_top_level_unchanged(self, redis_test_db):
+        from agent.session_runner import SessionRunnerAdapter
+
+        session = _make_flagged_session()
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch("agent.codex_dev_config.preflight_codex_dev_lane", return_value=None),
+        ):
+            await _execute_agent_session(session)
+
+        runner = FakeSessionRunner.instances[0]
+        assert runner.run_messages, "flagged session must still run the top-level turn"
+        assert isinstance(runner.init_kwargs.get("adapter"), SessionRunnerAdapter)

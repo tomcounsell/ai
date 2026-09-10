@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.update import (  # noqa: E402
     cal_integration,
+    codex_cli,
     deps,
     env_sync,
     gh_auth,
@@ -174,6 +175,7 @@ class UpdateResult:
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
+    codex_cli_result: codex_cli.CodexCliResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
@@ -1835,6 +1837,23 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
                 _append_warning(result, f"npm:{npm_r.name}: {npm_r.error}")
+
+    # Step 3.95: Codex CLI (opt-in dev lane, plan #2001 Task 4b). Disabled by
+    # default (CODEX__INSTALL_ENABLED=0): reports the installed version, if
+    # any, and touches nothing.
+    log("Checking Codex CLI...", v)
+    result.codex_cli_result = codex_cli.install_or_update()
+    cr = result.codex_cli_result
+    if cr.success:
+        if cr.action == "disabled":
+            log(f"  codex opt-in off{(' (' + cr.version + ' present)') if cr.version else ''}", v)
+        elif cr.action == "skipped":
+            log(f"  codex {cr.version} (up to date)", v)
+        else:
+            log(f"  codex {cr.action}: {cr.version}", v, always=True)
+    else:
+        log(f"  WARN: codex {cr.action}: {cr.error}", v)
+        _append_warning(result, f"codex:{cr.error}")
 
     # Step 3.10: sentry-cli install/update
     log("Checking sentry-cli...", v)

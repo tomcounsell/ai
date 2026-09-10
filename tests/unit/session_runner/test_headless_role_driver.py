@@ -538,3 +538,56 @@ async def test_zero_exit_without_result_event_stays_clean(tmp_path):
     outcome = await driver.run_turn("go")
     assert outcome.failure is None
     assert outcome.turn_ended is True
+
+
+# --------------------------------------------------------------------------
+# Codex dev-lane prime selection (plan #2001, Phase 3)
+# --------------------------------------------------------------------------
+
+
+def _prime_driver(tmp_path, role, dev_harness=None):
+    return HeadlessRoleDriver(
+        role=role,
+        session_id="sess-codex-prime",
+        working_dir=str(tmp_path),
+        prime_path=PRIME_PATH_SLASH,
+        harness_fn=_make_harness(),
+        dev_harness=dev_harness,
+    )
+
+
+def test_pm_codex_harness_selects_codex_prime_variant(tmp_path):
+    """A pm-role driver with dev_harness=codex primes with the Codex variant
+    (teaches codex_dev_run); routing stays Claude schema-first."""
+    driver = _prime_driver(tmp_path, "pm", dev_harness="codex")
+    message, system_prompt = driver._prime_args("build it")
+    assert message == "/roles:prime-pm-codex-role build it"
+    assert system_prompt is None
+
+
+def test_pm_without_harness_keeps_standard_prime(tmp_path):
+    driver = _prime_driver(tmp_path, "pm")
+    message, _ = driver._prime_args("build it")
+    assert message == "/roles:prime-pm-role build it"
+
+
+def test_non_pm_role_ignores_codex_harness(tmp_path):
+    """dev_harness only reroutes the pm prime; dev/teammate keep theirs."""
+    driver = _prime_driver(tmp_path, "dev", dev_harness="codex")
+    message, _ = driver._prime_args("build it")
+    assert message == "/roles:prime-dev-role build it"
+
+
+def test_codex_prime_variant_file_exists():
+    """The selected prime variant resolves to a real command file that
+    teaches codex_dev_run."""
+    from pathlib import Path
+
+    import agent.session_runner.role_driver as role_driver_mod
+    from agent.session_runner.role_driver import _read_prime_body, _slash_command_for
+
+    assert _slash_command_for("pm-codex") == "/roles:prime-pm-codex-role"
+    repo_root = Path(role_driver_mod.__file__).resolve().parent.parent.parent
+    body = _read_prime_body("pm-codex", str(repo_root))
+    assert body, "prime-pm-codex-role.md missing or empty"
+    assert "codex_dev_run" in body

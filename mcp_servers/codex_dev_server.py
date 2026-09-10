@@ -111,8 +111,7 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
         return _refusal(f"No session found for AGENT_SESSION_ID={session_id!r} — refusing.")
     if session.session_type != SessionType.ENG:
         return _refusal(
-            "Codex dev is eng-only "
-            f"(this session is {session.session_type!r}) — refusing."
+            f"Codex dev is eng-only (this session is {session.session_type!r}) — refusing."
         )
     if getattr(session, "dev_harness", None) != "codex":
         return _refusal(
@@ -131,12 +130,13 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
     try:
         from agent.codex_dev_lease import DevLaneBusy, acquire_dev_lease
         from agent.codex_turn_log import lane_path_for, log_codex_turn
+        from agent.session_runner.harness.base import TurnRequest
         from agent.session_runner.harness.codex import (
             CodexHarnessAdapter,
             kill_codex_tree,
             preflight_codex,
         )
-        from agent.session_runner.harness.base import TurnRequest
+        from agent.session_telemetry import record_codex_dev_turn
         from config.settings import settings
     except Exception as exc:  # noqa: BLE001
         return _refusal(f"Codex dev tool unavailable (imports failed: {exc}).")
@@ -145,6 +145,9 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
     sandbox = getattr(codex_cfg, "sandbox", "workspace-write") or "workspace-write"
     turn_timeout_s = float(getattr(codex_cfg, "turn_timeout_s", 600.0) or 600.0)
     max_resumed = int(getattr(codex_cfg, "max_resumed_turns", 10) or 10)
+    # Preflight version for telemetry attribution; bound before any
+    # _log_evidence call (the guard-exhausted path fires pre-preflight).
+    version: str | None = None
 
     try:
         lease = acquire_dev_lease(str(session.id), timeout_s=30.0)
@@ -155,7 +158,7 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
 
     def _log_evidence(outcome: str, tid, count, use, wall_ms) -> str:
         try:
-            return log_codex_turn(
+            status = log_codex_turn(
                 lane_path_for(str(session.session_id or session.id)),
                 {
                     "thread_id": tid,
@@ -170,7 +173,20 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
                 "codex_turn_log_failed lane=%s",
                 lane_path_for(str(session.session_id or session.id)),
             )
-            return "degraded"
+            status = "degraded"
+        # Task 4b harness-dimensioned telemetry: the machine-readable twin
+        # of the PM-visible attribution (usage totals only — never prompts,
+        # credentials, or stderr). Fail-quiet by contract.
+        record_codex_dev_turn(
+            str(session.session_id or session.id),
+            thread_id=tid,
+            turn_count=count,
+            outcome=outcome,
+            usage=use if isinstance(use, dict) else None,
+            model_version=getattr(session, "codex_version", None) or version,
+            wall_clock_ms=wall_ms,
+        )
+        return status
 
     with lease:
         # Re-read persisted context AFTER lease acquisition (Race 3/5).
@@ -196,9 +212,7 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
                 "turn_count": persisted_count,
             }
 
-        worktree = getattr(session, "working_dir", None) or getattr(
-            session, "runner_cwd", None
-        )
+        worktree = getattr(session, "working_dir", None) or getattr(session, "runner_cwd", None)
         if not worktree:
             return _refusal("Session has no working_dir — refusing Codex spawn.")
         api_key = os.environ.get("CODEX_API_KEY")
@@ -334,8 +348,7 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
         usage = dict(result.usage or {})
         model_version = getattr(session, "codex_version", None) or version
         attribution = (
-            f"\n\n[dev harness=codex model={model_version} "
-            f"turns={final_count} usage={usage}]"
+            f"\n\n[dev harness=codex model={model_version} turns={final_count} usage={usage}]"
         )
         report = (result.final_text or "") + attribution
         log_status = _log_evidence("ok", final_thread, final_count, usage, wall_ms)
