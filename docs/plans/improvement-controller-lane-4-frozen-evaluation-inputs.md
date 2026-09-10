@@ -160,7 +160,7 @@ reused rather than reinvented.
   export — it stores aggregate metrics, not the records — so this lane writes a separate exporter
   rather than extending it.
 
-- **The hybrid-retrieval eval harness** (`docs/plans/completed/hybrid-retrieval-eval.md`,
+- **The hybrid-retrieval eval harness** (`docs/archive/plans-completed/hybrid-retrieval-eval.md`,
   `tools/memory_eval/`). Produced `metrics.py` (paired deltas, seeded bootstrap CIs, nDCG),
   `retrieval_arms.py` (two arms with an explicit errored-vs-empty distinction), and
   `provider_gate.py`. **Relevance:** `metrics.py` is imported verbatim by acceptance criterion 7.
@@ -357,9 +357,16 @@ hand-off with no artifact is a claim nobody can check later.
    popoto's ORM-native transfer API — `Memory.export_records(project_key=..., stream=fh)`
    (`popoto/models/base.py:2785`, delegating to `popoto/transfer/export.py`) — which writes a
    manifest line followed by one JSON Lines record per memory, carrying every field plus the
-   auxiliary state each field declares through `export_state` (BM25 posting data, the relevance
-   score, confidence, the embedding vector). The JSONL bytes are hashed and written to the verifying
-   artifact store; that digest is the corpus identity for the whole run. Nothing here issues a raw
+   per-field `roundtrip_policy` roll-up the manifest declares (`popoto/transfer/export.py:130`;
+   the default policy is `rebuild`, so BM25 is rebuilt from content at import rather than carried,
+   while `relevance` and `confidence` travel in the record's `values`/`state`). Raw JSONL bytes
+   are **never** hashed: `export_records` output is non-deterministic across processes (record
+   order follows set-iteration order over `str` keys, and the manifest carries a fresh
+   `exported_at` on every call — the round-2 blocker). The corpus identity is
+   `corpus.py::canonical_corpus_digest(jsonl_text)`: split the manifest off line one, pop
+   `exported_at` **by name**, dump the remaining manifest with `sort_keys=True`, and hash that
+   joined by a newline to the record lines sorted by each record's `key`. That digest is written
+   to the verifying artifact store and is the corpus identity for the whole run. Nothing here issues a raw
    Redis command: the export is a documented ORM read, so it is binary-safe on
    `Memory.embedding`'s float32 bytes and cannot desynchronize an index from its hash.
 
@@ -396,9 +403,12 @@ hand-off with no artifact is a claim nobody can check later.
    preserves keys, saves with `skip_auto_now=True` (so the relevance timestamp carries rather than
    resetting to import time), and carries the exported vectors instead of re-embedding — no Ollama
    call, no non-determinism. **The corpus digest is then recomputed inside each arm by re-running
-   `export_records` against the arm's own pool and comparing**; unequal digests are `infra_failure`
-   before anything is measured. That is acceptance criterion 1, asserted at run time rather than
-   only in a test.
+   `export_records` against the arm's own pool and applying `canonical_corpus_digest`, and the
+   remaining manifest is asserted byte-equal between arms**; unequal digests or manifests are
+   `infra_failure` before anything is measured. That is acceptance criterion 1, asserted at run time rather than
+   only in a test. The arms' independent re-export is the gate: exporting once and reusing the bytes
+   would prove nothing, and pinning `PYTHONHASHSEED` in the child env is not a fix — it removes the
+   ordering source and leaves `exported_at`, as measured.
 
 6. **Writer kill switch** (`writer_guard.py`). Each arm's client is wrapped so corpus-key writes
    raise. The wrapper is the first guard; the second is a digest re-check at arm teardown, which
@@ -521,8 +531,11 @@ bigger arm.
 ### Key Elements
 
 - **`tools/improvement_eval/corpus.py`** — exports the project's memory corpus once per run through
-  `Memory.export_records(project_key=..., stream=fh)` (popoto's ORM transfer API), hashes the JSONL
-  bytes, and writes them to the verifying artifact store. The digest is the corpus identity for the
+  `Memory.export_records(project_key=..., stream=fh)` (popoto's ORM transfer API), computes
+  `canonical_corpus_digest` over the JSONL (manifest split off, `exported_at` popped by name,
+  remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key` —
+  stable across processes where raw bytes are not), and writes digest plus bytes to the verifying
+  artifact store. The digest is the corpus identity for the
   run. Restore is `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`,
   which preserves keys, saves with `skip_auto_now=True`, and carries vectors rather than re-embedding.
 - **`tools/improvement_eval/arena.py`** — spawns one private `redis-server` per arm on a unix socket
@@ -635,11 +648,14 @@ would stamp every record with import time and destroy the corpus's temporal stru
 makes no Ollama call and is deterministic. Using the ORM's own transfer path is also what keeps this
 lane inside CLAUDE.md's rule that Popoto-managed keys are read and written through the ORM.
 
-**Byte-identical corpus reads are asserted at run time, not only in a test.** After restore, each
-arm re-runs `export_records` against its own pool, hashes the result the same way the original export
-was hashed, and reports the digest. Unequal digests between arms, or a digest differing from the
-export's, end the run as `infra_failure` before any measurement. The acceptance criterion's test
-exercises that same code path rather than a parallel one.
+**Byte-identical corpus reads are asserted at run time, not only in a test, and the comparison
+is over a canonical digest, never over raw bytes.** After restore, each arm re-runs
+`export_records` against its own pool, applies `corpus.py::canonical_corpus_digest` (manifest
+split off, `exported_at` popped by name, remaining manifest dumped with `sort_keys=True`, record
+lines sorted by key), and reports the digest; the remaining manifest is asserted byte-equal
+between arms so a future volatile manifest key surfaces as a mismatch. Unequal digests between
+arms, or a digest differing from the export's, end the run as `infra_failure` before any
+measurement. The acceptance criterion's test exercises that same code path rather than a parallel one.
 
 **Retrieval reproducibility is a property of the ranking path, and the plan pins the path.** Identical
 bytes are necessary and not sufficient: `Memory.relevance` is a `DecayingSortedField` whose Lua
@@ -657,8 +673,12 @@ and `import_records`' `skip_auto_now=True` carries the persisted relevance score
 Two arms restored from one export therefore rank identically regardless of when each is queried, and
 an incumbent baseline recorded against that corpus digest reproduces. **`top_by_decay` is an
 anti-criterion for this lane** — a Verification row greps for it under `tools/improvement_eval/` and
-expects zero matches, and `test_two_arms_rank_identically_across_a_clock_gap` runs the two arms with
-a deliberate sleep between them and asserts the ranked ids match, which is the property criterion 1
+expects zero matches, and `test_two_arms_rank_identically_across_a_clock_gap` patches the clock
+the decay path would read (`popoto.models.query.time.time` returning `now + 30*86400`) for the
+second arm and asserts the ranked ids still match: a `top_by_decay` implementation reorders by days
+under that patch while the `retrieve_memories` path, which reads stored `zrevrange` scores at
+`agent/memory_retrieval.py:117`, does not move. No `time.sleep` — a sleep short enough to live in a
+test suite moves nothing on a per-day decay scale. That is the property criterion 1
 actually needs and which an exporter-canonicalization assertion never proved.
 
 **Gate ordering is load-bearing.** The contract-digest re-check runs before the charter is pinned;
@@ -811,14 +831,14 @@ test is observed to fail, the mutation is reverted, and the test is observed to 
 | Parity gate ordering | Move the parity check after the candidate arm | `test_parity_miss_never_invokes_the_candidate_arm` |
 | Corpus identity | Skip the per-arm digest comparison | `test_two_arms_read_a_byte_identical_corpus` |
 | Retrieval reproducibility | Rank through `Query.top_by_decay` instead of `retrieve_memories` | `test_two_arms_rank_identically_across_a_clock_gap` |
-| Relevance carry-over | Drop `skip_auto_now` from the restore (re-stamp relevance at import) | `test_two_arms_rank_identically_across_a_clock_gap` |
+| Relevance carry-over | Drop `skip_auto_now` from the restore (re-stamp relevance at import) | `test_restore_without_skip_auto_now_fails_baseline_parity` |
 | Parent pool isolation | Call `set_REDIS_DB_settings` in the parent instead of spawning `arm_worker` | `test_parent_pool_kwargs_survive_an_arena_context` |
 | Blinding | Return `blinded=True` unconditionally | `test_identity_leak_sets_blinded_false` |
 | Writer kill switch | Remove the client wrapper (leave the digest re-check) | `test_arm_write_is_refused` |
 | Writer kill switch | Remove the digest re-check (leave the wrapper) | `test_escaped_write_surfaces_as_infra_failure` |
 | Verdict disjointness | Merge `infra_failure` into `reject` | `test_infra_failure_and_reject_have_disjoint_causes` |
 | Gate 0 crash disposition | Let Gate 0 accept `state="running"` | `test_crashed_run_leaves_a_documented_repair` |
-| Corpus restore fidelity | Drop `on_embedding_mismatch="carry"` (re-embed on restore) | `test_two_arms_rank_identically_across_a_clock_gap` |
+| Corpus restore fidelity | Drop `on_embedding_mismatch="carry"` (re-embed on restore) | `test_restore_without_carry_fails_baseline_parity` |
 | §7 routing | Ignore `is_open_source` and always use any provider | `test_client_project_judge_stays_on_subscription_providers` |
 | Calibration floor | Return a judge verdict below the floor | `test_reference_set_below_floor_yields_infra_failure` |
 | `metrics.py` untouched | Edit `tools/memory_eval/metrics.py` | `test_metrics_module_is_unmodified` |
@@ -954,11 +974,13 @@ than hand-maintained, so a new identity-bearing field is covered without an edit
 judge quotes. If lane 2b's re-review changes them, this lane's judge and its migration are built on
 a shape that never landed.
 
-**Mitigation:** This plan is written against `b05dde885` and says so in the Freshness Check. The build
-does not start on the charter-consuming components until #3255 merges; the ordering is recorded in
-No-Gos with an `[ORDERED]` tag. The parts that do not touch the charter — the arena, the corpus
-export, Holm, the statistics, the parity gate — have no dependency on lane 2b and are the first tasks
-in the task list precisely so the lane is not idle while it waits.
+**Mitigation:** This plan is written against `dea9ed5db` and says so in the Freshness Check.
+#3255 merged as `aff4d7e2e`, so the charter-consuming components are unblocked and task 3b
+(`build-charter-judge`) proceeds in parallel. The 3a/3b split stays regardless: task 3a
+(`build-blinding`: `blinding.py`, `envelope.py`) has `Depends On: none` and never imports
+`models.improvement_charter`, while task 5 (`validate-components`) depends on `build-arena,
+build-stats, build-blinding, build-records` and task 6 additionally joins 3b — so no single
+external event ever gates five of the nine tasks again, and the claim and the graph agree.
 
 ### Risk 5: `infra_failure` becomes the harness's excuse
 
@@ -1027,7 +1049,7 @@ the refusal.
 1. `runner.py`'s module docstring records the repair verbatim, through the ORM as CLAUDE.md requires
    and never through raw Redis:
    ```python
-   e = ImprovementExperiment.query.filter(project_key=..., experiment_id=...).first()
+   e = ImprovementExperiment.query.filter(project_key=project_key, id=experiment_id).first()
    e.state = "frozen"
    e.save()
    ```
@@ -1072,11 +1094,10 @@ A test asserts the child is gone after both the clean and the raising path.
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] **Building the charter-consuming components before #3255 merges.** The `serves_charter`
-  judge quotes `ImprovementCharter.text` and records `ImprovementCharter.digest`, both of which land
-  in lane 2b (PR #3275, one re-review from merge). The human-gated event is that merge. The
-  non-charter components (arena, corpus export, Holm, statistics, parity gate) have no such
-  dependency and are sequenced first so the lane is never blocked as a whole.
+- [ORDERED] [SATISFIED by `aff4d7e2e`] **Building the charter-consuming components before #3255 merges.** The `serves_charter`
+  judge quotes `ImprovementCharter.text` and records `ImprovementCharter.digest`, both of which landed
+  in lane 2b (PR #3275, merged). Task 3b proceeds. The entry stays as the record of the ordering,
+  and the 3a/3b split stays as the structural guarantee.
 - [SEPARATE-SLUG #3215] **The `valor-improve` operator surface for evaluations.** Running an
   evaluation from the command line, listing verdicts, and the break-glass pause belong to lane 3's
   CLI, which owns the control namespace and the budget settlement this harness draws against. This
@@ -1188,8 +1209,9 @@ the resolved value rather than a fallback.
       `ImprovementEvidence` TTL), what is reported (Cohen's kappa and paired position-swap
       consistency), and that no kappa threshold gates anything yet.
 - [ ] Add a `## Recovering a wedged experiment` section to `docs/features/improvement-evaluation.md`
-      giving the ORM repair verbatim (`e = ImprovementExperiment.query.filter(...).first();
-      e.state = "frozen"; e.save()`), why no automatic reclaim ships in this lane
+      giving the ORM repair verbatim (`e = ImprovementExperiment.query.filter(project_key=project_key, id=experiment_id).first();
+      e.state = "frozen"; e.save()` — `id`, not `experiment_id`: the experiment key is an
+      `AutoKeyField` and `experiment_id` belongs to `ImprovementEvaluation`), why no automatic reclaim ships in this lane
       (`ImprovementExperiment` carries no liveness timestamp — Race 1b), and that a heartbeat and an
       automatic reclaim belong to lane 3.
 - [ ] Add an `## Arm isolation` subsection to `docs/features/improvement-evaluation.md` describing
@@ -1241,11 +1263,11 @@ Not applicable — this repo has no Sphinx, Read the Docs, or MkDocs site.
 The seven acceptance criteria from issue #3216, unchanged, each with the artifact that proves it:
 
 - [ ] **Two arms on private Redis processes produce byte-identical corpus reads** — each arm re-runs
-      `export_records` against its own pool after restore and the digests are compared at run time
-      (unequal digests end the run as `infra_failure`), pinned by
+      `export_records` against its own pool after restore and the `canonical_corpus_digest`s are compared at run time
+      (unequal digests, or a remaining manifest that is not byte-equal between arms, end the run as `infra_failure`), pinned by
       `test_two_arms_read_a_byte_identical_corpus`. Byte identity alone is not the claim the criterion
       needs, so it is paired with `test_two_arms_rank_identically_across_a_clock_gap`, which queries
-      the two arms with a deliberate wall-clock gap between them and asserts identical ranked ids —
+      the second arm under a clock patched 30 days forward and asserts identical ranked ids —
       the reproducibility property that `skip_auto_now=True` on restore and the ban on
       `Query.top_by_decay` together buy.
 - [ ] **Baseline retrieval parity holds on the frozen corpus, and a parity miss invalidates the run
@@ -1316,8 +1338,12 @@ theme, because two builders converging on one file is how a lane livelocks.
   - Role: Owns `tools/improvement_eval/{corpus,arena,arm_worker,writer_guard,retrieval,errors}.py`
     and their tests. The isolation substrate, the arm subprocess, and the parity gate.
   - Agent Type: builder
-  - Domain: Redis/Popoto data — arms must never touch popoto's canonical pool, `REDIS_URL`, or
-    `tests/db_claim.py`; every corpus read goes through the arm's explicitly-constructed client.
+  - Domain: Redis/Popoto data — the **parent** process must never re-point popoto's canonical
+    pool, assign `os.environ['REDIS_URL']`, or import `tests/db_claim.py`. The arm is a child
+    process whose own `REDIS_URL` (a key in the `subprocess.run(env=…)` dict, never an assignment)
+    binds popoto's canonical pool to the arm socket at import; inside that child every corpus read
+    goes through the ORM. No bare `redis.Redis` client answers `Memory.query` on either side, and
+    `arena.py` opens no Redis client of its own.
   - Resume: true
 
 - **Builder (statistics)**
@@ -1381,12 +1407,12 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/improvement_eval/__init__.py` and `errors.py` with `InfraFailure`.
-- `corpus.py`: `export_corpus(project_key)` calls `Memory.export_records(project_key=..., stream=fh)`, hashes the JSONL bytes, and writes them to the verifying artifact store with a provenance header (record count from the manifest's `matched_count`, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape. `restore_corpus(jsonl_bytes)` calls `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`. No raw Redis command anywhere in this module.
-- `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; yields the socket path and the per-arm tmpdir; `finally` terminates the child and removes the tmpdir. It opens no Redis client of its own. Never import `tests.db_claim`, never assign `os.environ["REDIS_URL"]`, never call `set_REDIS_DB_settings`.
+- `corpus.py`: `export_corpus(project_key)` calls `Memory.export_records(project_key=..., stream=fh)`, computes `canonical_corpus_digest` (manifest split off, `exported_at` popped by name, remaining manifest dumped with `sort_keys=True`, record lines sorted by each record's `key`), and writes digest plus bytes to the verifying artifact store with a provenance header (record count from the manifest's `matched_count`, ISO timestamp, git SHA) following `tools/memory_eval/snapshot.py`'s shape. `restore_corpus(jsonl_bytes)` calls `Memory.import_records(fh, on_conflict="overwrite", on_embedding_mismatch="carry")`. No raw Redis command anywhere in this module. Never hash raw JSONL bytes: record order follows set-iteration order and `exported_at` is fresh on every call, so a raw-bytes comparison fires `infra_failure` on every real corpus.
+- `arena.py`: context manager spawning `redis-server --port 0 --unixsocket <tmp>/arm.sock --save '' --appendonly no --dir <tmp>` in its own process group; yields the socket path and the per-arm tmpdir; `finally` terminates the child and removes the tmpdir. It opens no Redis client of its own. Before spawning, assert the socket path fits the platform `AF_UNIX` `sun_path` limit (104 bytes on this platform) and raise `InfraFailure` naming the measured length and the limit — redis-py surfaces an over-long path as a bare `ConnectionError` inside the child at import, which would otherwise reach the runner as an opaque subprocess failure. Never import `tests.db_claim`, never assign `os.environ["REDIS_URL"]`, never call `set_REDIS_DB_settings`.
 - `arm_worker.py`: `python -m tools.improvement_eval.arm_worker`, reading a JSON job spec on stdin and writing JSON on stdout. Modes: `restore`, `retrieve`, `digest`. Launched by `arena.py` with `env={**os.environ, "REDIS_URL": f"unix://{sock}", "POPOTO_CONTENT_PATH": ..., "VALOR_PROJECT_KEY": ..., "POPOTO_EMBEDDING_INVALIDATION": "none"}` — a dict for the call, never an assignment into the parent's environment.
-- After restore, each arm re-runs `export_records` against its own pool and reports the digest; unequal digests raise `InfraFailure`.
+- After restore, each arm re-runs `export_records` against its own pool, applies `canonical_corpus_digest`, and reports the digest; unequal digests, or a remaining manifest that is not byte-equal between arms, raise `InfraFailure`.
 - `writer_guard.py`: an ORM-level guard in the arm worker that refuses `Memory.save`/`Memory.delete` after restore, plus an independent corpus-digest re-check at arm teardown.
-- `retrieval.py`: arm-scoped adapter over `agent.memory_retrieval.retrieve_memories`, returning ranked memory ids; `baseline_parity()` compares those ids to the recorded baseline captured under the same corpus digest; a miss raises `InfraFailure`. Never calls `Query.top_by_decay`.
+- `retrieval.py`: arm-scoped adapter over `agent.memory_retrieval.retrieve_memories`, returning ranked memory ids; `baseline_parity()` compares those ids to the recorded baseline captured under the same corpus digest; a miss raises `InfraFailure`. Never calls `Query.top_by_decay`. Two restore-fidelity tests pin the parity gate against symmetric mutations that arm-vs-arm agreement cannot see: `test_restore_without_skip_auto_now_fails_baseline_parity` (a restore without `skip_auto_now` re-stamps relevance — both arms still agree with each other, but the ranking moves relative to the recorded baseline) and `test_restore_without_carry_fails_baseline_parity` (a restore without `carry` re-embeds; same disposition).
 
 ### 2. Holm correction, stopping rule, statistics
 - **Task ID**: build-stats
@@ -1401,16 +1427,25 @@ theme, because two builders converging on one file is how a lane livelocks.
 - `statistics.py`: per-endpoint thresholds and clustered resampling by project over `bootstrap_ci` **imported** from `tools.memory_eval.metrics`. Do not edit that file.
 - Tests pin monotonicity as a property, the worked example from research finding 1, and the seeded spurious-winner suppression.
 
-### 3. Blinding, judge envelope, `serves_charter`, calibration
-- **Task ID**: build-judges
-- **Depends On**: none for `blinding.py` and `envelope.py`; the charter-quoting parts of `serves_charter.py` and `calibration.py` wait on #3255 merging (No-Gos, `[ORDERED]`)
-- **Validates**: `tests/unit/test_improvement_eval_blinding.py` (create), `tests/unit/test_serves_charter_judge.py` (create), `tests/unit/test_improvement_eval_calibration.py` (create)
-- **Informed By**: spike-4 (reference set decays; freeze it), spike-5 (copy `cross_vendor_judge.py`'s envelope shape), research finding 2 (Cohen's kappa plus paired position-swap)
+### 3a. Blinding and judge envelope (charter-free)
+- **Task ID**: build-blinding
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_eval_blinding.py` (create)
+- **Informed By**: spike-5 (copy `cross_vendor_judge.py`'s envelope shape)
 - **Assigned To**: judge-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - `blinding.py`: seeded arm assignment with `arm_assignment_digest`; blinded ids; `scan_for_identity(serialized_envelope, experiment)` deriving its token list from the experiment record rather than a hand-maintained list.
-- `envelope.py`: wrap the `judge_id`/`verdict`/`blockers`/`confidence` dict with experiment id, contract digest, charter digest, evaluator version, trial id, raw-response reference, blinded arm id. The inner dict stays consumable by `agent/sdlc_review_consensus.py::compute_consensus` unchanged.
+- `envelope.py`: wrap the `judge_id`/`verdict`/`blockers`/`confidence` dict with experiment id, contract digest, charter digest, evaluator version, trial id, raw-response reference, blinded arm id. The inner dict stays consumable by `agent/sdlc_review_consensus.py::compute_consensus` unchanged. The charter digest is accepted as an opaque caller-supplied string: this module must not import `models.improvement_charter`, or the split is nominal and this task is still blocked on lane 2b.
+
+### 3b. `serves_charter` judge and calibration (charter-quoting)
+- **Task ID**: build-charter-judge
+- **Depends On**: none — the #3255 gate is satisfied (`aff4d7e2e` merged); this task proceeds in parallel
+- **Validates**: `tests/unit/test_serves_charter_judge.py` (create), `tests/unit/test_improvement_eval_calibration.py` (create)
+- **Informed By**: spike-4 (reference set decays; freeze it), research finding 2 (Cohen's kappa plus paired position-swap)
+- **Assigned To**: judge-builder
+- **Agent Type**: builder
+- **Parallel**: true
 - `judges/serves_charter.py`: `SERVES_CHARTER_JUDGE_ID = "serves-charter"`; status-discriminated envelope; every response field coerced with a typed fallback; prompt carries `ImprovementCharter.text` verbatim; provider chosen by `tools.improvement_eligibility.is_open_source`.
 - `calibration.py`: read `ImprovementEvidence` rows classified `architectural`, freeze the set to the verifying artifact store, cite it by digest, compute Cohen's kappa and paired position-swap consistency, and raise `InfraFailure` below the declared floor. Report the observed set size on this machine so the floor is chosen against reality.
 
@@ -1429,7 +1464,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 
 ### 5. Validate the components
 - **Task ID**: validate-components
-- **Depends On**: build-arena, build-stats, build-judges, build-records
+- **Depends On**: build-arena, build-stats, build-blinding, build-records
 - **Assigned To**: harness-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -1440,7 +1475,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 
 ### 6. The runner
 - **Task ID**: build-runner
-- **Depends On**: validate-components
+- **Depends On**: validate-components, build-charter-judge
 - **Validates**: `tests/unit/test_improvement_eval_runner.py` (create), `tests/integration/test_improvement_eval_end_to_end.py` (create)
 - **Assigned To**: runner-builder
 - **Agent Type**: builder
@@ -1449,7 +1484,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 - Three disjoint handlers: `InfraFailure` → `verdict="infra_failure"`; `ArtifactIntegrityError` → `state="invalidated"` with no verdict written; a final catch-all → `infra_failure` with the exception type in `notes`. No shared fall-through.
 - `has_verdict(evaluation)` returns True only for `state == "complete"`.
 - Read-modify-write `ImprovementExperiment.state` from `frozen` to `running` as the first write; the loser writes an `infra_failure` evaluation naming the state it found (Race 1), and the docstring records that a real lease is lane 3's.
-- Write the Race 1b crash disposition and its repair into the module docstring, and add `test_crashed_run_leaves_a_documented_repair`: pre-set `state="running"`, assert `infra_failure` with the found state in `notes` and no `accept`/`reject`, apply the documented ORM repair, assert the next `evaluate()` clears Gate 0.
+- Write the Race 1b crash disposition and its repair into the module docstring, and add `test_crashed_run_leaves_a_documented_repair`: pre-set `state="running"`, assert `infra_failure` with the found state in `notes` and no `accept`/`reject`, apply the documented ORM repair, assert the next `evaluate()` clears Gate 0. The test executes the repair snippet extracted from `runner.__doc__` (the fenced block under the recovery heading) rather than a hand-copied duplicate, so a docstring that stops running turns the test red.
 - Spawn each arm through `arena.py` + `arm_worker.py`; never construct a Redis client in the runner and never re-point the parent's pool.
 
 ### 7. Mutation proofs
@@ -1460,6 +1495,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 - **Parallel**: false
 - Work in a dedicated worktree with sole ownership; no other agent edits that checkout for the duration.
 - For each row of the Failure Path mutation table: apply the mutation, run the named test, record the failure output verbatim, revert, re-run, confirm green.
+- Record the red output for the three `restore`/`top_by_decay` rows separately — one shared test going red for one mutation is not evidence for the other two.
 - Report any row where the test stayed green — that is a guard that reaches no code, and it blocks the lane.
 
 ### 8. Documentation
@@ -1553,15 +1589,19 @@ Structural checks: all four repo-mandated sections present and substantive; task
    The plan's current disposition is to set the floor from the measured number and record the
    reasoning in the module docstring, accepting that early calibrations are weak and honestly
    labelled. Confirm that is the intended tradeoff rather than gating the judge until the set grows.
+   **Provisional assumption (charter §9):** the build proceeds on the weak-but-honest disposition —
+   floor from the measured count, rationale in the docstring, no kappa gate. If Tom directs
+   otherwise, only `calibration.py`'s floor constant and its docstring change.
 
-2. **Should the `serves_charter` judge ship in this lane at all if #3255 slips?** The lane's other
-   six acceptance criteria have no dependency on lane 2b. If PR #3275's re-review drags, the honest
-   options are to ship lane 4 without the judge and file it as a follow-up, or to hold the whole
-   lane. The plan currently sequences the judge last so either choice stays available; naming the
-   preference now avoids a decision made under deadline pressure later.
+2. **Should the `serves_charter` judge ship in this lane at all if #3255 slips?** RESOLVED by
+   events: PR #3275 merged as `aff4d7e2e`, so the judge ships in this lane as task 3b
+   (`build-charter-judge`). The 3a/3b split is retained so the dependency graph never again pins
+   the lane's completion to another lane's review.
 
 3. **Is a fixed-batch stopping rule sufficient for the loop's first year?** Research finding 3 says
    alpha-spending is the strictly harder commitment and needs a maximum sample size nobody can yet
    choose. That reasoning holds today. It stops holding the moment the loop wants to run an
    experiment long enough that waiting for a full batch is the dominant cost. Confirm fixed-batch is
    accepted as this lane's complete answer rather than a stepping stone with an implied follow-up.
+   **Provisional assumption (charter §9):** fixed-batch ships as the complete stopping rule and
+   alpha-spending stays a No-Go; a later lane with a measured long-batch cost may reopen it.
