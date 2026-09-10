@@ -705,7 +705,9 @@ runtime) to convert.
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| The G6 widening reads as an out-of-scope hunk and gets bounced at review | Medium | PR body names it explicitly as a ratified widening and cites the WS3d comment at `agent/sdlc_router.py:971-975`. Non-negotiable, not optional prose. |
+| The G6 and row-10 widenings read as out-of-scope hunks and get bounced at review | Medium | PR body names them explicitly, cites the WS3d comment at `agent/sdlc_router.py:971-975` as evidence of G6's fail-closed *intent* (not as an assertion of the absent-key behavior, which it never made), and quotes the row-10 relocation probe. Non-negotiable, not optional prose. |
+| The absent-key state now escalates to `Blocked` instead of routing | Low | Intended and fail-closed; spike-1 shows no production producer can emit it. Pinned by T14/T14b on `guard_id`, and stated in Success Criterion 4 so it cannot be "fixed" later by widening row 8f. |
+| A `pr_head_sha`-less fixture in an existing suite now hits `Blocked` and gets "fixed" by relaxing the assertion | Medium | Test Impact names the audit targets and requires supplying the key rather than weakening the expectation. Every changed existing assertion is enumerated in the PR body. |
 | A live lane stalls because `pr_head_sha` is genuinely absent on some path not surveyed | Low | spike-1 traced the sole producer and both call sites' gates. Worst case is a `/do-pr-review` dispatch, not a bad merge — the failure mode is noise, not damage. |
 | The 4b/4c refactor silently changes behavior | Medium | Argued explicitly in Solution step 6 (the trailing `build_status in (None, pending, ready)` already excludes `in_progress`), and pinned by T7/T8 plus the unmodified `test_..._with_concerns.py` suite. Any red there means revert step 6. |
 | Existing tests encode the defect and get "fixed" by relaxing assertions | Medium | Test Impact lists the audit targets by file with explicit dispositions and requires supplying the real context key rather than weakening an assertion. Every changed existing assertion is called out in the PR body. |
@@ -743,11 +745,16 @@ it — that remains the merge predicate's job.
 - **DO NOT modify `_review_verdict_head_is_stale`.** Its absent-key → `False` contract is
   correct for its non-terminal consumers and is documented in its own docstring. The new
   behavior arrives as a sibling.
-- **DO NOT change rows 8f or 10.** They already call the existing predicate and need no
-  change; row 8f is the landing row this plan depends on.
-- **DO NOT replace rows 4a/4c's `build_status in (None, "pending", "ready")` gates** with the
-  shared helper. Those gates are strictly narrower (they also exclude `BUILD == failed`);
-  substituting would be a behavior change. Add alongside, never substitute.
+- **DO NOT change row 8f** (`_rule_review_verdict_head_stale`, `:1977-1998`). It dispatches
+  `/do-pr-review`, not a merge, so the inert-on-absent-key reading is correct for it.
+  Widening it would convert the deliberate fail-closed `Blocked` on the absent-key state
+  into a silent re-review loop. Row 10 **is** in scope — it is a terminal `/do-merge`
+  dispatch, and leaving it out relocates the #3260 hole instead of closing it (probe
+  evidence in **Freshness Check**).
+- **DO NOT replace rows 4a/4b/4c's `build_status in (None, "pending", "ready")` gates** with
+  the shared helper. All three carry it and all three are strictly narrower (they also
+  exclude `BUILD == failed`); substituting would be a behavior change. Add alongside, never
+  substitute.
 - **DO NOT touch G6's other gates** (`pr_merge_state`, `ci_all_passing`, the DOCS gate) or
   the `REVIEW_APPROVED` gate. One line plus its comment.
 - **DO NOT relax or modify `tools/merge_predicate.py`.**
@@ -811,31 +818,48 @@ below.
 ## Success Criteria
 
 1. `_review_verdict_head_is_verified_fresh` exists in `agent/sdlc_router.py`, returns
-   `False` on an ABSENT `pr_head_sha` key, and is called from exactly two sites: G3 leg 1
-   (`:518`) and `guard_g6_terminal_merge_ready` (`:976`).
+   `False` on an ABSENT `pr_head_sha` key, and is called from exactly **three** sites — the
+   three terminal `/do-merge` dispatches: G3 leg 1 (`:518`),
+   `guard_g6_terminal_merge_ready` (`:976`), and `_rule_ready_to_merge` (row 10, `:2029`).
 2. `_review_verdict_head_is_stale` is byte-identical to its pre-change form, and
    `tests/unit/test_sdlc_router.py:1484-1488` passes **unmodified**.
 3. G3 leg 1 requires `REVIEW_APPROVED in review_verdict_norm` AND a verified-fresh head.
    `CHANGES REQUESTED` routes to `/do-patch`; a stale or unverifiable `APPROVED` routes to
    `/do-pr-review`; a fresh `APPROVED` with DOCS complete still routes to `/do-merge`.
-4. G6 returns `None` on an absent `pr_head_sha`, and `decide_next_dispatch` lands that state
-   on row 8f → `/do-pr-review`. G6's other gates are untouched and its `:971-975` comment now
-   describes the code accurately.
+3b. G3 leg 3 additionally requires `docs_status != STATUS_COMPLETED`. An absent-key
+   `APPROVED` with DOCS complete routes to `/do-pr-review` (leg 4), **not** `/do-docs`; an
+   `APPROVED` at the live head with DOCS pending still routes to `/do-docs`.
+4. G6 returns `None` on an absent `pr_head_sha`, and row 10 declines on the same state, so
+   `decide_next_dispatch` returns `Blocked(reason='no matching dispatch rule',
+   guard_id='NO_RULE')` — a deliberate fail-closed escalation, asserted by `guard_id`. Row
+   8f is unmodified and does not absorb the state. G6's other gates are untouched, and its
+   `:971-975` comment now names the ABSENT-key case alongside the empty sentinel it already
+   described.
+4b. Row 10 declines the absent-key state **in isolation**, proven with G6 monkeypatched out
+   of `GUARDS` (T14b). Pre-fix that same probe returns `Dispatch(/do-merge, row_id='10')`.
+   The stale-key and empty-sentinel states still land on row 8f → `/do-pr-review`.
 5. `_plan_stage_stood_down` exists as a single shared predicate and is the **only** place the
-   #3249 condition is written. `grep -c 'meta.get("pr_number")' agent/sdlc_router.py` is
+   #3249 condition is written — **row 2b included**; no hand-written copy of the condition
+   survives anywhere in the module. `grep -c 'meta.get("pr_number")' agent/sdlc_router.py` is
    strictly lower than before, and no plan-stage row re-states the BUILD condition inline.
-6. Rows 1, 2, 2c and 3 all call it. Row 2 — which had no step-aside at all — stands down on
-   both an open PR and a running/completed BUILD.
-7. Rows 4b and 4c each check `pr_number` exactly **once**, and rows 4a/4c retain their
-   narrower `build_status in (None, "pending", "ready")` gates.
+6. Rows 1, 2, **2b**, 2c and 3 all call it. Row 2 — which had no step-aside at all — stands
+   down on both an open PR and a running/completed BUILD. Row 2b's converted behavior is
+   identical to its pre-change inline pair, proven by `TestRow2bStandsDownOnceBuildStarted`
+   passing unmodified plus T5b/T5c.
+7. Rows 4b and 4c each check `pr_number` exactly **once**, and rows 4a, **4b** and 4c all
+   retain their narrower `build_status in (None, "pending", "ready")` gates.
 8. Row 5 (`_rule_branch_exists_no_pr`) is **unchanged**. `git diff` shows no hunk touching it.
-9. T1–T17 all pass, and each new assertion has a captured RED run from before the fix. The
-   T14 RED is on the ABSENT-key case.
+9. T1–T18 all pass, and each new assertion has a captured RED run from before the fix. The
+   T14 and T14b REDs are on the ABSENT-key case specifically.
 10. Full `tests/unit/sdlc_router_decision/` and `tests/unit/test_sdlc_router.py` are green via
     `scripts/pytest-clean.sh`; every existing assertion that changed is enumerated in the PR body.
 11. `python -m ruff check` and `python -m ruff format` clean.
 12. Every checkbox under **Documentation** is done.
-13. PR body names the G6 widening as deliberate and cites `agent/sdlc_router.py:971-975`.
+13. PR body names the G6 **and row-10** widenings as deliberate; cites
+    `agent/sdlc_router.py:971-975` as evidence of G6's fail-closed *intent* while stating
+    plainly that the ABSENT-key case is the newly closed gap the comment never covered; and
+    quotes the row-10 relocation probe (`Dispatch(/do-merge, row_id='10')` with G6 widened
+    alone) as the reason row 10 is in scope.
 14. Commit trailers carry `Closes #3260`, `Closes #3249`, `Refs #2062`.
 
 ## Team Orchestration
