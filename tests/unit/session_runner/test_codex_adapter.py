@@ -164,7 +164,8 @@ def test_resume_transcript_still_emits_session_started():
     # SESSION_STARTED with the resumed handle. The fixture always includes
     # thread.started, so it proves nothing about the omitted-event case —
     # that case is covered by the server-side resume-budget fallback (which
-    # consumes the turn and logs a warning), not by this test.
+    # consumes the turn silently; persist failure surfaces as logger.error),
+    # not by this test.
     seen: list = []
     captured: dict = {}
     fake = _FakeProc(stdout=_success_stdout(thread_id=THREAD_A))
