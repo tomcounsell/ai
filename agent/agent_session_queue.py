@@ -2997,8 +2997,31 @@ async def _worker_loop(
                     # session was set to "pending" by _enqueue_nudge(), or was
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
+                    #
+                    # The `try` here guards the READ only (#3253) — it used to
+                    # also span the completion WRITE below, so a write-time
+                    # StatusConflictError was caught by this handler and then
+                    # blindly retried against unchanged state, raising the
+                    # same error a second time, uncaught. `_should_complete`
+                    # routes every branch (including the read-failure
+                    # fallback) through the single write site below instead.
+                    _should_complete = False
                     try:
                         fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
+                    except Exception as guard_err:
+                        # READ failure only. Falling through to the completion
+                        # write preserves the pre-existing fallback intent
+                        # ("completing session as fallback") without retrying
+                        # a failed write.
+                        logger.warning(
+                            "[worker:%s] Nudge guard read failed for %s: %s "
+                            "— completing as fallback",
+                            worker_key,
+                            session.agent_session_id,
+                            guard_err,
+                        )
+                        _should_complete = True
+                    else:
                         if not fresh:
                             logger.info(
                                 "[worker:%s] Session %s no longer exists in Redis "
@@ -3015,17 +3038,68 @@ async def _worker_loop(
                                 worker_key,
                                 session.agent_session_id,
                             )
+                        elif fresh.status in TERMINAL_STATUSES:
+                            # The authoritative row is already terminal — a
+                            # writer that owns the outcome (executor finalize
+                            # guard, transcript completion, or health checker)
+                            # already classified this session. Under the
+                            # kill-is-terminal invariant the first terminal
+                            # write wins, so `session_failed` (this worker's
+                            # local, after-the-fact opinion) must not attempt
+                            # to overwrite it. INFO, not WARNING: this is the
+                            # expected outcome of a concurrent writer, not an
+                            # alarm (docs/features/session-lifecycle.md:143).
+                            logger.info(
+                                "[worker:%s] Session %s already terminal in Redis "
+                                "(status=%r) — another writer owns the outcome; "
+                                "skipping completion (worker wanted %r)",
+                                worker_key,
+                                session.agent_session_id,
+                                fresh.status,
+                                "failed" if session_failed else "completed",
+                            )
                         else:
+                            _should_complete = True
+
+                    if _should_complete:
+                        try:
                             await _complete_agent_session(session, failed=session_failed)
-                    except Exception as guard_err:
-                        logger.warning(
-                            "[worker:%s] Nudge guard check failed for %s: %s "
-                            "— completing session as fallback",
-                            worker_key,
-                            session.agent_session_id,
-                            guard_err,
-                        )
-                        await _complete_agent_session(session, failed=session_failed)
+                        except StatusConflictError as conflict_err:
+                            # Expected, correct, defense-in-depth: a concurrent
+                            # writer reached a terminal status first (or the
+                            # CAS re-read saw a different row than our
+                            # redis_key lookup did). MUST NOT propagate —
+                            # escaping this `finally` kills _worker_loop and
+                            # strands every session for this worker_key
+                            # (#1803, #2088, #3253 — this is the third member
+                            # of that family).
+                            logger.info(
+                                "[worker:%s] Completion for %s lost to a "
+                                "concurrent terminal writer: %s",
+                                worker_key,
+                                session.agent_session_id,
+                                conflict_err,
+                            )
+                        except Exception as complete_err:
+                            # Containment backstop, deliberately `Exception`
+                            # and not `BaseException`: CancelledError and
+                            # KeyboardInterrupt must keep propagating so
+                            # worker shutdown still works (mirrors the
+                            # ModelException handler's design at
+                            # docs/features/agent-session-queue.md:148-150).
+                            # This closes the class rather than one instance
+                            # — no exception from the completion write can
+                            # strand the worker_key.
+                            logger.error(
+                                "[worker:%s] Completion write failed for %s (worker continues): %s",
+                                worker_key,
+                                session.agent_session_id,
+                                complete_err,
+                                exc_info=True,
+                            )
+                    # Exactly one `_complete_agent_session` call site remains
+                    # in this block; the read-failure fallback above reaches
+                    # it via `_should_complete` instead of a separate retry.
                 # Release the global concurrency slot after session is done.
                 # This is the normal (bound) release path — registry.release()
                 # is idempotent, so it silently no-ops if an out-of-band killer
