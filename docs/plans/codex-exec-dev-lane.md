@@ -5,7 +5,9 @@ appetite: Large
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2001
-last_comment_id: 4952368338
+last_comment_id: 5087021248
+revision_applied: true
+revision_applied_at: 2026-09-10T14:48:45Z
 ---
 
 # Phase 3: Codex Exec as Opt-in Dev-Lane Executor Within Eng Sessions
@@ -35,7 +37,7 @@ the explicit flag, behavior and tool exposure are unchanged.
 
 ## Freshness Check
 
-**Baseline commit:** `c8bef664746fe362fc677ea83cf61a1c5fa92e9e`
+**Baseline commit:** `6098b525bc664f7db55fadfc896d4978f632e621` (re-verified 2026-09-10T14:48:45Z; prior baseline `c8bef664746fe362fc677ea83cf61a1c5fa92e9e`)
 **Issue filed at:** `2026-07-10T06:26:32Z`
 **Disposition:** Minor drift
 
@@ -82,6 +84,17 @@ implements a Codex dev lane.
 That is now stale: `codex-cli 0.144.3` is installed and `codex login status`
 reports ChatGPT authentication. The premise is unchanged and the human gate is
 cleared.
+
+**Revision re-verification (2026-09-10, commit `6098b52`):** all six
+concern-driven body changes confirmed present (write-or-kill + fence token +
+grandchildren probe; one-way downgrade; completion attribution; deferred Task
+4b gated on two live probes; overdue-date re-baselining with hit-count
+evidence; `.env.example` acceptance + validator row). Cited refs still hold
+(`role_driver.py` still constructs `ClaudeHarnessAdapter`; `runner.py` still
+carries `dev_agent_id`; #2000/#1925/#1924/#1928 states unchanged). Latest issue
+comment surveyed (`5087021248`, 2026-07-27 backlog note confirming Phase 3
+unbuilt and actionable). No overlapping active plan implements a Codex dev
+lane. Disposition remains Minor drift.
 
 ## Prior Art
 
@@ -278,6 +291,12 @@ continues** → later turn/restart resumes the same Codex thread.
   and nonzero exit detail in `TurnResult.error_detail` without logging secrets.
 - Generate the output-schema file per turn in a secure temporary location and
   unlink it in `finally`, including cancellation/failure paths.
+- Wrap the first `thread.started` persist in write-or-kill: if the synchronous
+  save fails, kill the Codex child and return a typed tool error rather than
+  leaving an orphan thread with no persisted handle.
+- Persist a monotonic dev-lane fence token alongside thread id and turn count;
+  every resume re-checks the token under the lease so a TTL lease expiry that
+  races a still-live child cannot resume a superseded thread.
 - Add a stateless FastMCP server under `mcp_servers/`. Resolve
   `AGENT_SESSION_ID` per call, enforce the persisted capability and eng type,
   bound execution with a timeout, and serialize each session's Codex turns with
@@ -294,6 +313,10 @@ continues** → later turn/restart resumes the same Codex thread.
   subprocess. Do not add `OPENAI_API_KEY` fallback or inspect/log auth tokens.
 - Pin the initial minimum version to the live-probed `0.144.3`. A version bump
   must update fixtures/probes before changing the gate.
+- Provide an operator one-way downgrade (`valor-session update-dev-harness`
+  codex-to-claude): gated on the dev-lane lease, it preserves `codex_thread_id`
+  for forensics, re-primes the PM for `Agent(dev)`, and carries the downgraded
+  value through the queue recreation allowlist.
 
 ## Failure Path Test Strategy
 
@@ -333,8 +356,9 @@ continues** → later turn/restart resumes the same Codex thread.
   eng-only selection, and pre-side-effect rejection.
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: persist/recreate Codex
   fields and restore the existing Claude resume fields in the manual allowlist.
-- [ ] `tests/unit/test_settings.py` — UPDATE: Codex defaults, env overrides,
-  sandbox validation, minimum version, and resume bound.
+- [ ] `tests/unit/test_settings.py` — UPDATE: Codex defaults, env overrides
+  (one test per new key), sandbox validation, minimum version, and resume
+  bound; every new key also gains a commented `.env.example` placeholder.
 - [ ] `tests/unit/test_session_telemetry.py` — UPDATE: harness/dev-lane dimensions
   and separate PM-versus-Dev turn accounting.
 - [ ] `tests/unit/session_runner/test_codex_adapter.py` — CREATE with recorded
@@ -407,7 +431,10 @@ limit before spawning; never discard the resumable thread automatically.
 **Data prerequisite:** Valid `thread_id` and owning `AgentSession`.
 **State prerequisite:** Persisted `dev_harness=codex`.
 **Mitigation:** Synchronous inline `session.started` callback saves the handle
-immediately; no deferred task or post-return persistence.
+immediately; no deferred task or post-return persistence. The save is
+write-or-kill: a failed persist kills the Codex child and returns a typed tool
+error. The live E2E probe verifies process-group membership covers Codex
+grandchildren so steering reaches the whole tree.
 
 ### Race 2: Steering kills Codex mid-turn
 **Location:** Claude PM process group, MCP server, Codex child
@@ -447,7 +474,11 @@ save with explicit update fields before spawn.
 - [EXTERNAL] Automatic harness selection by project, cost, latency, or
   capability remains an owner policy decision after comparative telemetry.
   This phase is manual-only and does not silently decide that product policy.
-- [ORDERED] Removing Phase 2's prefix-regex routing fallback waits for the telemetry review scheduled one week after PR #2038 landed (2026-07-18); this phase files the tracking issue but must not remove the fallback.
+- [ORDERED] Removing Phase 2's prefix-regex routing fallback waits for the
+  prefix-fallback telemetry review, originally scheduled for 2026-07-18 (now
+  overdue); this phase pulls prefix-fallback hit counts since PR #2038, files
+  the tracking issue with that evidence linked, but must not remove the
+  fallback.
 - [SEPARATE-SLUG #1925] PydanticAI standardization for non-harness LLM calls is
   a separate completed workstream and is not reopened here.
 
@@ -514,11 +545,18 @@ save with explicit update fields before spawn.
   receive the Codex MCP tool.
 - [ ] Codex thread/version/count survive queue recreation and process restart;
   existing Claude resume scalars also survive that allowlist path.
-- [ ] `/update` supports opt-in install/upgrade and version/auth validation.
+- [ ] `/update` supports opt-in install/upgrade and version/auth validation
+  (deferred behind two successful live probes; core lane ships on settings plus
+  migration).
 - [ ] Telemetry distinguishes `harness=claude|codex`, PM turns, Dev turns,
-  usage, failure, resume, and guard exhaustion without secret-bearing payloads.
-- [ ] Ordered tracking issue filed for the 2026-07-18 prefix-fallback telemetry review;
+  usage, failure, resume, and guard exhaustion without secret-bearing payloads;
+  completion records harness, model version, turns, and usage so the owner can
+  judge Codex-vs-Claude on cost, latency, and quality.
+- [ ] Ordered tracking issue filed for the overdue 2026-07-18 prefix-fallback
+  telemetry review with hit counts since PR #2038 linked as evidence;
   automatic-selection policy remains explicitly unresolved.
+- [ ] Operator one-way codex-to-claude downgrade preserves the Codex thread for
+  forensics and re-primes the PM for `Agent(dev)`.
 - [ ] Tests pass (`/do-test`) and documentation is updated (`/do-docs`).
 
 ## Team Orchestration
@@ -593,10 +631,15 @@ build directly.
 - **Domain: redis-data** — use nullable non-indexed fields, application-level
   enum/bound validation, an idempotent registered migration, and ORM methods
   only; no raw Redis mutation.
-- Add `dev_harness`, `codex_thread_id`, `codex_version`, `codex_turn_count`, CLI
-  validation, queue persistence/recreation, and migration registration.
+- Add `dev_harness`, `codex_thread_id`, `codex_version`, `codex_turn_count`, a
+  monotonic dev-lane fence token, CLI validation, queue persistence/recreation,
+  and migration registration.
 - Restore the existing Claude resume scalars to the recreation allowlist while
   touching that chokepoint and add a regression test.
+- Add the operator one-way codex-to-claude downgrade gated on the dev-lane
+  lease (preserving `codex_thread_id` for forensics, re-priming the PM for
+  `Agent(dev)`), carry the downgraded value through the recreation allowlist,
+  and add a downgrade round-trip test.
 
 ### 3. Build the session-scoped Codex Dev MCP lane
 - **Task ID**: build-codex-dev-tool
@@ -611,12 +654,13 @@ build directly.
 - **Domain: mcp-tool** — derive schema from type hints, resolve context per
   request, bound every call with `asyncio.wait_for`, never retain session state
   in the server, and map auth/native errors deterministically.
-- Add runtime capability gating, session lease, immediate thread persistence,
-  resume/count guard, conditional MCP config, and Codex PM prime selection.
+- Add runtime capability gating, session lease, write-or-kill thread
+  persistence, fence-token resume check, resume/count guard, conditional MCP
+  config, and Codex PM prime selection.
 - Keep Codex as a child of the existing PM process group and prove steering /
   cancellation cleanup.
 
-### 4. Add typed settings, update provisioning, migration, and telemetry
+### 4. Add typed settings and the read-compatibility migration
 - **Task ID**: build-codex-ops
 - **Depends On**: build-codex-persistence
 - **Validates**: `tests/unit/test_settings.py`,
@@ -626,9 +670,30 @@ build directly.
 - **Assigned To**: codex-ops-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add provisional typed knobs and the internally opt-in Codex update module.
+- Add provisional typed knobs, the registered read-compatibility migration, and
+  commented `.env.example` placeholders for every new Codex key with vault
+  propagation; `test_settings.py` covers env overrides for each key.
+- Acceptance requires the new keys present in `.env.example`; the validator
+  checks the example file alongside the migration check.
+
+### 4b. Deferred: update provisioning and harness-dimensioned telemetry (gated)
+
+- **Task ID**: build-codex-ops-deferred
+- **Depends On**: two successful live `codex_live` probes on the provisioned
+  machine (Task 5 evidence)
+- **Validates**: `tests/unit/test_update_codex_cli.py` (create),
+  `tests/unit/test_session_telemetry.py`
+- **Assigned To**: codex-ops-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Build `scripts/update/codex_cli.py` and the harness/dev-lane telemetry
+  dimensions only after the lane has proven value in two live probes.
 - Emit separate PM/Dev harness telemetry with usage, resume, failure, and guard
   events; never log prompts, credentials, or raw unbounded stderr.
+- Log harness, model version, turns, and usage on completion so the owner can
+  decide when Codex output is preferred over Claude on cost, latency, or
+  quality; the live probe asserts the PM-visible report contains that
+  attribution.
 
 ### 5. Exercise failure paths and the real lifecycle
 - **Task ID**: test-codex-dev-lane
@@ -642,6 +707,9 @@ build directly.
 - Execute the hostile-input and native-failure matrix.
 - On this provisioned machine, run the acceptance lifecycle and record stable
   thread id, restart, steer, cleanup, and telemetry evidence.
+- Assert the PM-visible report contains harness/model-version/turns/usage
+  attribution, and verify Codex grandchildren die with the steered process
+  group.
 
 ### 6. Security and architecture review
 - **Task ID**: review-codex-boundary
@@ -666,6 +734,8 @@ build directly.
   issue's dev-lane-only mechanism.
 - File the prefix-fallback telemetry review issue for 2026-07-18 and link it
   from #2001; record automatic selection as an unresolved owner policy.
+- Pull prefix-fallback hit counts since PR #2038 before filing and link that
+  evidence in the filed issue.
 
 ### 8. Final validation
 - **Task ID**: validate-codex-dev-lane
@@ -694,6 +764,7 @@ build directly.
 | No global Codex MCP | `rg -n 'codex.dev|codex_dev' .mcp.json .claude/settings.json config/mcp_library.json` | exit code 1 |
 | Prefix fallback retained | `python -c "from agent.session_runner.router import PREFIX_TOKEN_RE; assert PREFIX_TOKEN_RE"` | exit code 0 |
 | Migration registered | `python -c "from scripts.update.migrations import MIGRATIONS; assert any('codex' in k.lower() for k in MIGRATIONS)"` | exit code 0 |
+| Env example placeholders | `rg -n 'CODEX_' .env.example` | exit code 0 |
 | Feature docs present | `test -f docs/features/codex-exec-dev-lane.md && test -f docs/infra/harness-cross-compat.md` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_runner mcp_servers models/agent_session.py tools/valor_session.py scripts/update tests/unit/session_runner` | exit code 0 |
@@ -702,9 +773,9 @@ build directly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Orphan-thread window before thread.started is parsed plus TTL lease release racing a still-live Codex child; sync inline persist backpressures JSONL parsing. | pending | Wrap thread.started persist in write-or-kill (failed save kills the Codex child and returns a typed tool error); persist a monotonic dev-lane fence token with thread id and count, checked on every resume under the lease; verify process-group membership covers grandchildren in the live E2E probe. |
-| CONCERN | Risk & Robustness | Immutable creation-time dev_harness plus hard resume bound plus no-compaction rule creates a mid-build dead end with no downgrade path; spike-1 showed context doubling 14k to 28k tokens in two turns. | pending | Add an operator one-way codex-to-claude downgrade (e.g. valor-session update-dev-harness) gated on the dev-lane lease, preserving codex_thread_id for forensics and re-priming the PM for Agent(dev); carry the downgraded value through the queue recreation allowlist with a round-trip test. |
-| CONCERN | Scope & Value | All nine success criteria are technical contracts with none stating the user decision this Large build should inform, such as when Codex output is preferred over Claude on cost, latency, or quality. | pending | Extend the telemetry task to log harness, model version, turns, and usage on completion, and assert in the live probe that the PM-visible report contains that attribution. |
-| CONCERN | Scope & Value | A dedicated update module, typed settings catalog, registered migration, and harness-dimensioned telemetry turn an opt-in comparison lane into a second production provisioning path before value is proven. | pending | Keep build-codex-ops scoped to settings plus migration; move scripts/update/codex_cli.py and the telemetry dimensions into a deferred task gated on two successful live probes on the provisioned machine. |
-| CONCERN | History & Consistency | The ordered no-go frames the 2026-07-18 prefix-fallback telemetry review as scheduled future work though that date is about seven weeks past; the Freshness Check still says Minor drift. | pending | Re-baseline the ordered bullet and Success Criteria to state the date is past; add a task step to pull prefix-fallback hit counts since PR #2038 before filing, and link that evidence in the filed issue. |
-| CONCERN | History & Consistency | New typed Codex settings with env overrides and CODEX_API_KEY precedence plus a new update module have no task adding commented .env.example placeholders or vault propagation, so opted-in machines diverge silently. | pending | Extend Task 4 acceptance to require the new keys in .env.example and config settings with env-override tests in test_settings.py; make the validator check the example file alongside the migration check. |
+| CONCERN | Risk & Robustness | Orphan-thread window before thread.started is parsed plus TTL lease release racing a still-live Codex child; sync inline persist backpressures JSONL parsing. | addressed | Wrap thread.started persist in write-or-kill (failed save kills the Codex child and returns a typed tool error); persist a monotonic dev-lane fence token with thread id and count, checked on every resume under the lease; verify process-group membership covers grandchildren in the live E2E probe. |
+| CONCERN | Risk & Robustness | Immutable creation-time dev_harness plus hard resume bound plus no-compaction rule creates a mid-build dead end with no downgrade path; spike-1 showed context doubling 14k to 28k tokens in two turns. | addressed | Add an operator one-way codex-to-claude downgrade (e.g. valor-session update-dev-harness) gated on the dev-lane lease, preserving codex_thread_id for forensics and re-priming the PM for Agent(dev); carry the downgraded value through the queue recreation allowlist with a round-trip test. |
+| CONCERN | Scope & Value | All nine success criteria are technical contracts with none stating the user decision this Large build should inform, such as when Codex output is preferred over Claude on cost, latency, or quality. | addressed | Extend the telemetry task to log harness, model version, turns, and usage on completion, and assert in the live probe that the PM-visible report contains that attribution. |
+| CONCERN | Scope & Value | A dedicated update module, typed settings catalog, registered migration, and harness-dimensioned telemetry turn an opt-in comparison lane into a second production provisioning path before value is proven. | addressed | Keep build-codex-ops scoped to settings plus migration; move scripts/update/codex_cli.py and the telemetry dimensions into a deferred task gated on two successful live probes on the provisioned machine. |
+| CONCERN | History & Consistency | The ordered no-go frames the 2026-07-18 prefix-fallback telemetry review as scheduled future work though that date is about seven weeks past; the Freshness Check still says Minor drift. | addressed | Re-baseline the ordered bullet and Success Criteria to state the date is past; add a task step to pull prefix-fallback hit counts since PR #2038 before filing, and link that evidence in the filed issue. |
+| CONCERN | History & Consistency | New typed Codex settings with env overrides and CODEX_API_KEY precedence plus a new update module have no task adding commented .env.example placeholders or vault propagation, so opted-in machines diverge silently. | addressed | Extend Task 4 acceptance to require the new keys in .env.example and config settings with env-override tests in test_settings.py; make the validator check the example file alongside the migration check. |
