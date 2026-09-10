@@ -254,13 +254,34 @@ def test_success_persists_thread_and_returns_attributed_report(monkeypatch):
     assert "instruction" not in event and "prompt" not in event
 
 
-def test_resume_reuses_persisted_thread(monkeypatch):
+def test_resume_without_session_started_consumes_budget_via_fallback(monkeypatch):
+    # Server-side fallback counterpart: a resume turn whose transcript
+    # OMITS thread.started (no SESSION_STARTED fired) still consumes one
+    # resumed turn against the known thread, so resumed turns never ride
+    # free against max_resumed_turns.
     session, saved = _session(codex_thread_id=THREAD_A, codex_turn_count=2)
     out, calls, _logged = _call(monkeypatch, session, result=_ok_result())
     assert out["ok"] is True
     assert calls["request"].prior_uuid == THREAD_A
-    assert out["turn_count"] == 2  # no new thread.started: count untouched
-    assert saved.get("saves", 0) == 0  # nothing changed: no write needed
+    assert out["turn_count"] == 3
+    assert saved["codex_turn_count"] == 3
+    assert saved["codex_thread_id"] == THREAD_A  # known thread untouched
+
+
+def test_resume_fallback_persist_failure_keeps_count_honest(monkeypatch):
+    # If the fallback save fails, the response reports the persisted
+    # count (no phantom increment) and the turn result still returns.
+    session, saved = _session(codex_thread_id=THREAD_A, codex_turn_count=2)
+
+    def _boom():
+        raise RuntimeError("redis down")
+
+    session.save = _boom
+    out, calls, _logged = _call(monkeypatch, session, result=_ok_result())
+    assert out["ok"] is True
+    assert calls["request"].prior_uuid == THREAD_A
+    assert out["turn_count"] == 2
+    assert "saves" not in saved
 
 
 def test_resume_turn_with_session_started_consumes_budget(monkeypatch):

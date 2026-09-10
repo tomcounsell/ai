@@ -308,6 +308,25 @@ def _run_turn(instruction: str, started_wall: float) -> dict:
             }
 
         wall_ms = int((time.monotonic() - started_wall) * 1000)
+        # Server-side resume-budget fallback: a resume turn (prior thread
+        # set) whose transcript omitted thread.started never fires the
+        # session.started callback above, so without this the turn would
+        # ride free against max_resumed_turns (fail-open toward unbounded
+        # thread growth). Consume one resumed turn against the known thread
+        # instead of silently not counting. A save failure here keeps the
+        # persisted count honest and logs loudly; the turn already ran, so
+        # there is no orphan-thread risk to kill for.
+        if persisted_thread is not None and not persisted_here[0]:
+            try:
+                session.codex_turn_count = persisted_count + 1
+                session.save()
+                persisted_here[0] = True
+            except Exception:  # noqa: BLE001
+                logger.error(
+                    "codex_resume_fallback_persist_failed thread=%s",
+                    persisted_thread,
+                )
+
         final_thread = result.resume_handle or persisted_thread
         final_count = persisted_count + 1 if persisted_here[0] else persisted_count
         # Fence-token resume check: a TTL lease expiry that raced a

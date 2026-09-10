@@ -159,10 +159,12 @@ def test_resume_argv_inserts_resume_and_drops_color():
 
 
 def test_resume_transcript_still_emits_session_started():
-    # Resume-shaped fixture: a resume turn (prior_uuid set) whose transcript
-    # carries thread.started pins the budget-accounting event. If the CLI
-    # ever omits thread.started on resume, this test fails loudly instead
-    # of letting resumed turns silently stop consuming max_resumed_turns.
+    # Resume-shaped fixture: pins the happy-path contract that a resume
+    # turn (prior_uuid set) whose transcript carries thread.started emits
+    # SESSION_STARTED with the resumed handle. The fixture always includes
+    # thread.started, so it proves nothing about the omitted-event case —
+    # that case is covered by the server-side resume-budget fallback (which
+    # consumes the turn and logs a warning), not by this test.
     seen: list = []
     captured: dict = {}
     fake = _FakeProc(stdout=_success_stdout(thread_id=THREAD_A))
