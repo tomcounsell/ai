@@ -216,12 +216,55 @@ New for this issue:
 
 ## Documentation
 
-- `docs/features/promise-gate.md` — Terminal flush section: replace the quoted string, and state
-  the persona-voice constraint next to the existing truth constraint so a future editor sees both.
-- `agent/notification_copy.py` — module docstring gains a bullet for the new constant.
+- [ ] `docs/features/promise-gate.md` — Terminal flush section (~line 79): replace the quoted
+      string with the new wording, and state the persona-voice constraint next to the existing
+      truth constraint so a future editor sees both. This is the only doc in `docs/features/` that
+      quotes the constant.
+- [ ] `agent/notification_copy.py` — module docstring gains a bullet for the new constant, matching
+      the format of the existing `INTERRUPT_NO_RESUME` / `FAILURE_NOTICE` bullets.
 
 No new `docs/infra/` doc: this plan adds no dependency, service, external API call, or deployment
 change.
+
+## Update System
+
+**No migration required.** This plan touches no Popoto model, no model field, and no Redis key
+shape. It changes one module-level string constant and its defining module. `scripts/update/migrations.py`
+needs no new entry and `MIGRATIONS` is unmodified.
+
+No raw Redis operations are introduced; the plan does not touch persistence at all.
+
+**Deploy note (not a migration):** the constant is read in-process by the worker, so the new
+wording takes effect for running services only after `./scripts/valor-service.sh restart`, which
+`/update` performs on the standard post-merge path. No special deploy step beyond that.
+
+## Agent Integration
+
+**No MCP exposure required.** This plan adds no Python tool, no CLI entrypoint, and no callable
+surface. It relocates one string constant between two existing modules. There is nothing for an
+agent to invoke, so no MCP server registration, no `tools/` addition, and no
+`docs/tools-reference.md` entry.
+
+The only agent-visible effect is indirect and intended: when the promise gate blocks a terminal
+flush, the text the human receives changes.
+
+## Test Impact
+
+| Test | File | Disposition | Why |
+|---|---|---|---|
+| `test_substitute_message_passes_the_heuristic` | `tests/unit/test_deferred_self_draft_completed.py` (~L1213) | **UPDATE** | Repoint its import of `TERMINAL_PROMISE_FALLBACK_MESSAGE` to `agent.notification_copy`, and extend it with the new negative-vocabulary assertion (or add a sibling test for that property). The existing heuristic-allow assertion is kept verbatim: it is the #3135 guarantee. |
+| `test_async_email_fallback_promise_substituted` | `tests/unit/test_deferred_self_draft_completed.py` (~L1221) | **UPDATE** (import only) | Asserts the delivered text equals the constant *by identity*, not by literal string, so the wording change does not affect it. Only its import location changes. |
+| `test_promise_reply_substituted_at_terminal_flush` / kill-switch / benign-text tests | `tests/unit/test_deferred_self_draft_completed.py` | **KEEP** | Exercise gate behavior, not the fallback wording. Must stay green as the regression guard that this PR changed copy and nothing else. |
+| (new) vocabulary-guard assertion | `tests/unit/test_deferred_self_draft_completed.py` | **ADD** | Asserts the constant contains none of `filter`, `session`, `gate` (case-insensitive substring check). This is the assertion that makes the persona property durable rather than a one-time edit. |
+
+**No DELETE / REPLACE dispositions.** No existing test becomes obsolete; #3135's coverage is
+preserved in full and extended.
+
+**Narrow run command:** `scripts/pytest-clean.sh tests/unit/test_deferred_self_draft_completed.py`.
+No full-suite run — per `CLAUDE.md`, parallel worktrees collide on Redis state.
+
+**Expected-failure scan:** `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/` found no xfail
+markers related to the promise gate or terminal flush, so there is no xfail to convert.
 
 ## Open Questions
 
