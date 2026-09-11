@@ -258,28 +258,108 @@ Replace `TIMEOUT_NEEDS_ATTENTION_MESSAGE` (`runner.py:258-261`) with the text in
 
 ## Step by Step Tasks
 
-<!-- placeholder -->
+Lane identity is fixed: worktree `/Users/valorengels/src/ai/.worktrees/dev-8e5ee1ed`, branch `session/dev-8e5ee1ed`. Do not create a new worktree or branch.
+
+**Task 1 - Deadline constants and role resolution.**
+Add `ENG_IDLE_TIMEOUT_S` (2400) and `ENG_ABSOLUTE_TIMEOUT_S` (21600) to `runner.py` with the provisional-constant comment shape the file already uses. Replace `turn_timeout_for` with `deadlines_for(session_type)` returning both values; teammate resolves to idle 900 / absolute 900. **Delete `turn_timeout_for` outright** - a grep confirmed its only importers are `tests/unit/session_runner/test_runner_turns.py` and `test_runner_liveness.py`, so no production shim is warranted (repo policy: no legacy bridges). Update `__all__` (`runner.py:2006-2020`) accordingly.
+
+**Task 2 - Constructor and driver wiring.**
+Replace `self._turn_timeout_s` with `self._idle_timeout_s` / `self._absolute_timeout_s`. Keep the explicit `turn_timeout_s=` ctor override working by mapping it onto the absolute ceiling (it is a test seam; `agent/session_executor.py:2231-2238` does not pass it in production), or introduce explicit `idle_timeout_s=` / `absolute_timeout_s=` kwargs and update the test seam. Choose one and be consistent; do not keep both spellings. Re-derive the driver backstop at `runner.py:668-670` from `self._absolute_timeout_s`.
+
+**Task 3 - In-memory activity stamp.**
+Add `self._last_activity_mono`, set it at turn dispatch in `_run_one_turn` next to `started_at`, and update it unconditionally in `_on_stdout_event_liveness` (`runner.py:680-686`) before the cooldown-gated `_stamp_stdout_liveness` call.
+
+**Task 4 - Watcher predicate.**
+Rewrite the deadline check in `_preempt_watcher` (`runner.py:1380-1388`) per Technical Approach C/D: compute `idle` via the `min`-of-idles normalization, check the absolute ceiling first, then the idle deadline, both with `cause="timeout"`. Add a structured log field naming which deadline fired. The steering-poll body below it is untouched.
+
+**Task 5 - Message rewrite.**
+Replace `TIMEOUT_NEEDS_ATTENTION_MESSAGE` (`runner.py:258-261`) with the honest text, and rewrite the comment above it, which currently asserts the same falsehood ("the work is paused, not lost").
+
+**Task 6 - Test rework: the existing suite.**
+- `tests/unit/session_runner/test_runner_liveness.py::test_turn_timeout_for_role_table` and `test_runner_turns.py::test_role_aware_turn_timeout` - rewrite against `deadlines_for`.
+- `test_runner_liveness.py::test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate` - this asserts today that a stream-`init`-then-hang is caught by the whole-turn deadline. Under the new model it is caught by the **idle** deadline. Rework it to assert exactly that, preserving its original intent (the never-started liveness gate must not be the thing that catches it).
+- `test_runner_preempt.py::test_timeout_expiry_is_graceful_preempt_not_error` - update the asserted delivery text; keep every other assertion (SIGTERM sent, `exit_reason == "turn_timeout"`, one `runner_turn` event with `turn_end_source == "timeout"`).
+- `test_runner_preempt.py` dedupe tests (`..._delivered_once_across_two_runs_of_one_row`, `..._redelivered_for_a_later_unrelated_request`) - must still pass; only the text changes.
+- `tests/unit/test_session_executor_runner_dispatch.py` - unchanged; `turn_timeout` still maps to `status="failed"`. Run it to prove that.
+
+**Task 7 - New tests: both arms of the fix.**
+- *Streaming past the old cap survives*: a turn whose stdout events keep arriving runs past 7200s of simulated time without preempt.
+- *Nested-subagent silence survives*: parent stream is silent, but `tool_activity_ts` keeps advancing; no preempt past the old cap. This is the regression test for the reported bug.
+- *Silent turn is preempted*: neither signal advances; the preempt fires at the idle deadline, and not before it.
+- *UNKNOWN contract*: `tool_activity_ts` returns `None` (no hook edge); the deadline is no shorter than the stream-only computation. Assert a missing marker never shortens the budget.
+- *Absolute ceiling*: both signals advance forever; the preempt fires at the ceiling.
+- *Ordering invariant*: the driver backstop strictly exceeds the largest watcher deadline. Assert the relation, not the arithmetic.
+- *Clock skew*: a `toolactivity` marker stamped in the future reads as "just active" and does not produce a negative or absurd idle.
+
+**Task 8 - Prove the guard red.**
+Before landing, run the new nested-subagent test against the pre-fix code and confirm it FAILS. A regression test that has never been red against the known-bad state proves nothing.
+
+**Task 9 - Quality gates.**
+`python -m ruff check` and `python -m ruff format` on the diff. Narrow-scope tests only, via `scripts/pytest-clean.sh`, naming the specific files from Tasks 6-7.
+
+**Task 10 - Docs cascade.**
+`docs/features/headless-session-runner.md` (the deadline model, both signals, the UNKNOWN contract) and `docs/features/config-timeout-catalog.md` (the two new `SESSION_RUNNER_*` keys). `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old 7200/900 split as shipped history; leave it alone.
+
+**Task 11 - File the follow-up.**
+Open a `chore` issue for migrating the `SESSION_RUNNER_*` constant family into `TimeoutSettings` / `TIMEOUTS__*`, explicitly scoped out of this PR.
 
 ## Rabbit Holes
 
-<!-- placeholder -->
+- **Rewriting the health checker or stall classifier.** `agent/session_health.py` and `agent/session_stall_classifier.py` have their own budgets (`NO_OUTPUT_BUDGET_SECONDS`, `IDLE_SUSPECT_SECS`, compaction reprieves). They operate on `status="running"` rows from outside the turn and are a different concern. Touch nothing there.
+- **Migrating the whole `SESSION_RUNNER_*` family into `TimeoutSettings`.** Worthwhile, wide, and unrelated to the behavior fix. Task 11 files it.
+- **Making `tool_activity_ts` more precise.** It already observes 2,266 of 2,267 tool calls. Resist adding a second marker, a heartbeat, or a richer payload.
+- **Re-litigating `is_clean` / `status="failed"`.** The Solution section decides it stays. Changing it would ripple into the Telegram reaction, `mark_work_done`, and branch cleanup for no benefit once healthy turns stop reaching the path.
+- **Optimizing the 2s poll.** A glob plus a small read is not a cost worth a second code path.
+- **The Codex dev lane's own `CODEX__TURN_TIMEOUT_S`.** Separate, correctly scoped, bounded by the dev-lane lease TTL. Leave it.
 
 ## No-Gos
 
-<!-- placeholder -->
+- **No `psutil` or CPU-based activity inference.** Ruled out by spike-3 and by incident #2662; contractually banned in `tools/session_progress.py` and enforced by `tests/unit/test_session_progress.py:410`. This plan does not reintroduce it under a new name.
+- **No treating an absent activity marker as evidence of a wedge.** Absence reads UNKNOWN. A missing hook edge must never shorten a deadline.
+- **No change to the SIGTERM to grace to SIGKILL process-group reap** (`_kill_turn`, and the cancellation-proof `finally` reap) - #1938 / #2146 territory.
+- **No change to `_claim_timeout_notice`** (#3270 per-run SETNX dedupe).
+- **No legacy shim for `turn_timeout_for`.** Grep confirmed only tests import it. Delete it and update the tests.
+- **No full-suite test run** from this worktree; narrow scope only, following the repo's test hygiene rules in `CLAUDE.md`.
+- **No em-dashes in the user-facing message.**
 
 ## Risks
 
-<!-- placeholder -->
+| Risk | Severity | Mitigation |
+|---|---|---|
+| **A genuinely wedged turn now holds a worker slot for up to 40 min.** | Medium | Accepted, and not a regression: today it holds the slot for up to 2h. The external health checker (`NO_OUTPUT_BUDGET_SECONDS` = 1800, `IDLE_SUSPECT_SECS` = 300) still observes `status="running"` rows independently. |
+| **The hook edge is missing in a foreign repo or a misconfigured spawn**, so nested activity is invisible. | Medium | The UNKNOWN contract keeps behavior no worse than today's stream-only view, and the absolute ceiling still bounds the turn. Explicitly tested (Task 7). |
+| **Clock skew between the wall-clock hook stamp and the monotonic stream stamp.** | Low | Never subtract across clocks; convert each to an idle duration in its own clock and take the `min`. Future-stamped markers clamp to "just active". Explicitly tested. |
+| **2400s is still wrong** for some tool call longer than a full `tests/unit/` run. | Low | Env-overridable per the provisional-constant convention; the failure mode is a preempt, which is today's failure mode, not a new one. |
+| **A `TaskOutput` blocking poll with a longer timeout** could be introduced later and silently approach the window. | Low | The 600s case has 4x headroom. Note the coupling in the constant's comment so a future author sees it. |
+| **The reworded message breaks other assertions.** | Low | Grep confirmed a single production call site; the asserting tests are named in Task 6. |
+| **Test rework masks a real behavior change** by being rewritten to match the new code. | Medium | Task 8 requires the new nested-subagent test to be proven RED against the pre-fix SHA. A test that was never red proves nothing. |
 
 ## Success Criteria
 
-<!-- placeholder -->
+- [ ] A turn whose parent stream keeps producing events runs past 7200s without preempt.
+- [ ] A turn whose parent stream is silent but whose `tool_activity_ts` keeps advancing (the nested foreground-subagent case, i.e. the reported bug) runs past 7200s without preempt - **and this test was proven RED on the pre-fix SHA**.
+- [ ] A turn with no activity on either signal is preempted at the idle deadline, and not before it.
+- [ ] `tool_activity_ts` returning `None` never shortens the deadline relative to the stream-only computation.
+- [ ] The absolute ceiling preempts a turn that streams forever.
+- [ ] The driver's `asyncio.wait_for` backstop strictly exceeds the largest watcher deadline (asserted as a relation, not restated arithmetic).
+- [ ] `TIMEOUT_NEEDS_ATTENTION_MESSAGE` asserts nothing false: no claim that work was paused or suspended. Its surrounding comment is corrected too.
+- [ ] `_claim_timeout_notice` per-run dedupe still holds.
+- [ ] `turn_timeout` still maps to `status="failed"` (`tests/unit/test_session_executor_runner_dispatch.py` green, unmodified).
+- [ ] Existing suites green: `tests/unit/session_runner/test_runner_preempt.py`, `test_runner_liveness.py`, `test_runner_turns.py`, `tests/unit/test_session_executor_runner_dispatch.py`, run narrow-scope via `scripts/pytest-clean.sh`.
+- [ ] `python -m ruff check` and `python -m ruff format` clean on the diff.
+- [ ] No CPU-based activity inference anywhere in the diff.
 
 ## Documentation
 
-<!-- placeholder -->
+- `docs/features/headless-session-runner.md` - replace the single-deadline description with the two-deadline model: what each signal observes, why the parent stream alone is insufficient (the 27% figure), and the UNKNOWN contract on an absent marker.
+- `docs/features/config-timeout-catalog.md` - add `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S` and `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S`; correct the entry for the removed `SESSION_RUNNER_ENG_TURN_TIMEOUT_S`.
+- `agent/session_runner/liveness.py` - `tool_activity_ts`'s docstring names `agent_session_queue._session_progress_ts` as "its only production consumer". Add the watcher as the second.
+- `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old split as shipped history. Leave it; do not rewrite history.
 
 ## Open Questions
 
-<!-- placeholder -->
+1. **Is 2400s the right idle window?** It is derived from measured data (2x the longest known single tool call, 4x the `TaskOutput` block), but "longest single tool call" is a moving target - a future 45-minute test-suite invocation would breach it. Accept 2400 as provisional and env-overridable, or size it off the absolute ceiling instead?
+2. **Is 21600s (6h) the right absolute ceiling?** The largest observed healthy turn is 8549s, so 6h gives about 2.5x headroom. Higher makes a runaway more expensive; lower risks clipping a legitimately enormous pipeline.
+3. **Teammate sessions**: the plan keeps their effective behavior identical (idle 900 / absolute 900). Should a teammate turn get a distinct, shorter idle window now that the concept exists?
+4. **`AskUserQuestion`**: in an interactive session it blocks on human think-time (measured median 258s, p95 4214s) with no tool activity in between. Headless `claude -p` sessions should not reach it, but if any path can, a long human pause would read as idle. Worth an explicit assertion that the headless spawn cannot surface it, or an explicit carve-out?
+5. **Should the reworded notice be sent at all?** The plan recommends yes, on the grounds that `wrapup_eligible=False` makes the alternative total silence. Confirm that is the call.
