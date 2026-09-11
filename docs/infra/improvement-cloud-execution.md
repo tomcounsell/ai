@@ -224,10 +224,11 @@ subscription OAuth path. No test was performed (acquiring anything to test
 with is forbidden to this task), so this stays a residual risk and a named
 candidate for the fifth answer, not a decided point.
 
-Note for regeneration: the operating report's recorded provisional
-assumptions currently phrases the sandbox in mode-A terms. Under this mode-B
-verdict the first regeneration replaces that assumption with the verdict
-reference rather than carrying mode-A prose forward.
+Regeneration note: the operating report's recorded provisional
+assumptions now reference this mode-B verdict
+(`tools/improvement_operating_report.py::MODE_B_AUTH_VERDICT`) rather than
+carrying mode-A prose forward. Regenerated 2026-09-11; the fifth answer
+carries the verdict on every run.
 
 ### Export/import destination
 
