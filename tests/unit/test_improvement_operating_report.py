@@ -112,6 +112,39 @@ class TestPerSourceDegradation:
             assert not answers[key].startswith("could not be determined"), key
 
 
+class TestModuleEntryPointSubprocess:
+    def test_report_runs_as_module_and_emits_five_answers(self):
+        """The agent's entry point is `python -m`, not `main()` in-process.
+
+        Runs the module the way the agent would and asserts all five answers
+        appear. The subprocess inherits this process's REDIS_URL, which the
+        test harness points at the claimed test db, so the run stays
+        read-only against test records.
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.improvement_operating_report",
+                "--project-key",
+                "test-3274-empty",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stderr
+        answers = json.loads(proc.stdout)
+        for key in ("sessions", "unattended", "resources", "cost", "prevents"):
+            assert answers[key], f"answer {key!r} is empty"
+
+
 class TestEntryPoint:
     def test_report_invocable_through_module_entry_point(self, capsys):
         assert main(["--project-key", "test-3274-empty"]) == 0

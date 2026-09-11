@@ -37,12 +37,19 @@ TRIAL_REF_PREFIX = "lane7-sandbox-trial-"
 #: confidence, consequence, and the observation that would overturn each.
 #: The scale question and the Decision 8 fuel answer live here rather than in
 #: prose so the fifth answer cannot drift into optimism between runs.
+#: Under the recorded mode-B auth verdict
+#: (docs/infra/improvement-cloud-execution.md, Auth verdict) the sandbox is
+#: phrased in verdict terms rather than mode-A terms: tasks 9/10 do not run,
+#: phase 3 spends nothing, and the fifth answer carries the verdict.
 PROVISIONAL_ASSUMPTIONS: tuple[dict, ...] = (
     {
         "statement": (
             "RSI sessions may consume Claude subscription capacity from a "
             "cloud sandbox by running the official Claude Code CLI on a "
-            "remote host we operate."
+            "remote host we operate. Under the recorded mode-B auth verdict "
+            "(docs/infra/improvement-cloud-execution.md), Cloudflare "
+            "Containers is not affirmed as such a host, so this stays an "
+            "unexercised working position and no subscription-auth trial runs."
         ),
         "evidence": (
             "Anthropic supports the official CLI on remote hosts; token plus "
@@ -67,7 +74,11 @@ PROVISIONAL_ASSUMPTIONS: tuple[dict, ...] = (
     {
         "statement": (
             "A continuously-running sandbox fleet falls inside subscription "
-            "limits' 'ordinary, individual usage' standard."
+            "limits' 'ordinary, individual usage' standard. Under the "
+            "recorded mode-B auth verdict "
+            "(docs/infra/improvement-cloud-execution.md) no such fleet runs, "
+            "so this stays an untested reading with its overturn observation "
+            "armed."
         ),
         "evidence": (
             "Undocumented either way; Decision 8 authorizes proceeding under "
@@ -81,24 +92,47 @@ PROVISIONAL_ASSUMPTIONS: tuple[dict, ...] = (
     },
     {
         "statement": (
-            "The sandbox authenticates in mode A: the vault's subscription "
-            "OAuth credential arrives as a deploy-time provider "
-            "secret and subscription_auth_env consumes it unchanged."
+            "Auth verdict is MODE B (docs/infra/improvement-cloud-execution.md): "
+            "Cloudflare Containers is not affirmed as a remote host we "
+            "operate rather than a hosted service consuming the "
+            "subscription, so tasks 9 and 10 do not run, phase 3 spends "
+            "nothing, and the fifth answer of the section 2 progress report "
+            "carries this verdict."
         ),
         "evidence": (
-            "Task 4 verdict under Decision 8; the runtime is a host we "
-            "operate, not a hosted service consuming the subscription."
+            "Task 4 vendor re-read: Cloudflare's Containers overview describes "
+            "serverless containers run without managing infrastructure, spun "
+            "up on demand by Worker code; no vendor statement permits "
+            "subscription-CLI fleets in managed containers, so ambiguity "
+            "resolves against us by task 4's own rule."
         ),
-        "confidence": "medium",
+        "confidence": "high",
         "consequence": (
-            "If wrong, the trial does not run on subscription auth (mode B), "
-            "and that verdict is the fifth answer."
+            "No subscription-auth trial runs; the lane ships the metered unit "
+            "3, the teardown policy, the resolved resource position, the "
+            "provider decision, and the section 2 report with this verdict as "
+            "its fifth answer."
         ),
         "overturned_by": (
-            "A vendor finding that the chosen runtime is a hosted service "
-            "consuming the subscription on our behalf."
+            "An affirmative vendor finding that the chosen runtime is a host "
+            "we operate rather than a hosted service consuming the "
+            "subscription on our behalf."
         ),
     },
+)
+
+
+#: The recorded mode-B auth verdict, assembled into the fifth answer on every
+#: run. Tasks 9/10 do not run, phase 3 spends nothing, and this verdict is a
+#: standing input alongside the recorded assumptions, the ``unknown`` probe
+#: entries, and the refused acquisitions — so the fifth answer is non-empty
+#: whenever any of those inputs is non-empty.
+MODE_B_AUTH_VERDICT = (
+    "Auth verdict MODE B (docs/infra/improvement-cloud-execution.md): "
+    "Cloudflare Containers is not affirmed as a remote host we operate "
+    "rather than a hosted service consuming the subscription, so no "
+    "subscription-auth trial runs; tasks 9 and 10 do not run and phase 3 "
+    "spends nothing."
 )
 
 
@@ -247,6 +281,7 @@ def _answer_prevents(
     auth_mode_blocked: bool,
 ) -> str:
     blockers: list[str] = []
+    blockers.append(MODE_B_AUTH_VERDICT)
     for assumption in assumptions:
         blockers.append(
             f"Assumption ({assumption['confidence']} confidence): "
@@ -273,8 +308,10 @@ def _answer_prevents(
         blockers.append(f"Refused acquisition ({row['resource']}): {row['reason']}")
     if auth_mode_blocked:
         blockers.append(
-            "No subscription-auth trial: the auth verdict or the vault writer "
-            "needed for acquisition has not landed."
+            "No subscription-auth trial has run: under the recorded mode-B "
+            "auth verdict (docs/infra/improvement-cloud-execution.md) tasks "
+            "9 and 10 do not run, so the trial-dependent answers report "
+            "absence rather than failing."
         )
     if not blockers:
         blockers.append(

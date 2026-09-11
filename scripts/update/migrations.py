@@ -1459,6 +1459,25 @@ def _migrate_confirm_improvement_v2_fields(project_dir: Path) -> str | None:
     )
 
 
+def _migrate_confirm_improvement_infrastructure_ledger_readable(
+    project_dir: Path,
+) -> str | None:
+    """Confirm the InfrastructureReservation ledger model (issue #3274) reads cleanly.
+
+    Purely additive: one brand-new Popoto model, no field added to and no
+    field removed from an existing model, so there is nothing to backfill and
+    no index set to strip. This entry exists so ``run_pending_migrations()``
+    carries a durable marker for the schema version that introduced the unit-3
+    ledger: without it there is no record on a machine that the infrastructure
+    keyspace was ever registered, and a later subtractive migration has no
+    predecessor to reason from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        ("InfrastructureReservation",),
+    )
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "side_effect_job_model": (
         _migrate_side_effect_job_model,
@@ -1597,6 +1616,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         "Register the charter-v2 fields on ImprovementCharter, ImprovementCase, "
         "ImprovementInvestigation, and ImprovementRelease (issue #3255) and "
         "confirm their keyspace resolves",
+    ),
+    "confirm_improvement_infrastructure_ledger_readable": (
+        _migrate_confirm_improvement_infrastructure_ledger_readable,
+        "Register the additive InfrastructureReservation ledger model (issue #3274) "
+        "and confirm its keyspace resolves",
     ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,
