@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
 from agent.session_pickup import _truthy
 from agent.session_runner.liveness import derive_sdk_ever_output, subprocess_hang_verdict
 from agent.session_stall_classifier import (
@@ -2523,21 +2524,6 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
         ttl=INTERRUPTED_SENT_DEDUP_TTL_SECONDS,
         message=INTERRUPT_NO_RESUME,
     )
-
-
-# Honest substitution delivered in place of a promise-flagged deferred draft on
-# terminal paths (issue #2423). At terminal-flush time there is no live agent to
-# self-draft a rewrite, so the flush substitutes rather than suppresses (suppression
-# would reintroduce the #1796 swallowed-reply class). Two constraints on this text
-# (#3135): it must itself pass the promise heuristic, and every clause must be true
-# given only "the filter withheld the final message" — a block verdict carries no
-# information about whether any work completed, so the text may not claim failure
-# or invent a pending request.
-TERMINAL_PROMISE_FALLBACK_MESSAGE = (
-    "An outbound safety filter held back this session's final message. "
-    "The work may have finished normally; if something you expected is "
-    "missing, ask again in a new message."
-)
 
 
 def _gate_terminal_promise(message: str, *, transport: str, session_id: str | None) -> str:

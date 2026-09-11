@@ -209,7 +209,11 @@ assertion alone would not catch it.
    unaffected once its import is repointed).
 5. Update `docs/features/promise-gate.md` Terminal flush section (~line 79) to quote the new
    string and describe the voice constraint alongside the truth constraint.
-6. `grep -rn "outbound safety filter"` returns nothing.
+6. `grep -rn "outbound safety filter"` returns no hit that is **live copy**. Three deliberate
+   mentions remain and are correct: the known-bad anchor in the new test's docstring, the
+   rationale for constraint 3 in `docs/features/promise-gate.md`, and this plan's own problem
+   statement. Naming the exact wording that violated the rule is what stops a future editor
+   reintroducing it; a bare "don't use jargon" comment does not.
 7. `python -m ruff check` and `python -m ruff format`.
 8. Narrow test run: `scripts/pytest-clean.sh tests/unit/test_deferred_self_draft_completed.py`.
 
@@ -256,7 +260,9 @@ New for this issue:
 - A test asserts the text contains none of `filter`, `session`, `gate` (case-insensitive).
 - All pre-existing tests in `tests/unit/test_deferred_self_draft_completed.py` pass, including both
   #3135 tests.
-- `grep -rn "outbound safety filter"` returns no hits.
+- `grep -rn "outbound safety filter"` returns no hit in **live copy** — i.e. the constant's value
+  contains none of it. Deliberate known-bad anchors in the new test's docstring and in
+  `docs/features/promise-gate.md`'s constraint-3 rationale are expected and are not violations.
 - The constant is defined in `agent/notification_copy.py` and nowhere else.
 - Ruff check and format clean.
 - **Human-facing validation (critique finding, Scope & Value):** every other criterion here is
