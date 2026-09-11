@@ -222,6 +222,7 @@ class TestVerifyingArtifactStore:
         assert verifying_store.exists(ref) is False
 
     def test_retention_root_is_separate_from_the_shared_content_path(self, monkeypatch, tmp_path):
+        import models.verifying_artifact_store as artifact_store_module
         from models.verifying_artifact_store import VerifyingArtifactStore, _default_base_path
 
         monkeypatch.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", str(tmp_path / "custom"))
@@ -229,4 +230,15 @@ class TestVerifyingArtifactStore:
         assert VerifyingArtifactStore().base_path == str(tmp_path / "custom")
 
         monkeypatch.delenv("POPOTO_IMPROVEMENT_CONTENT_PATH")
-        assert _default_base_path().endswith(os.path.join("data", "improvement_content"))
+        default = _default_base_path()
+        assert VerifyingArtifactStore().base_path == default
+        # Superseded off the repo checkout (#3274): an image rebuild destroys
+        # the checkout, so the default must not live under it.
+        checkout = os.path.dirname(os.path.dirname(os.path.abspath(artifact_store_module.__file__)))
+        assert not default.startswith(checkout + os.sep)
+        # Still its own root, not the shared popoto content directory.
+        shared = os.environ.get(
+            "POPOTO_CONTENT_PATH", os.path.join(os.path.expanduser("~"), ".popoto", "content")
+        )
+        assert os.path.abspath(default) != os.path.abspath(shared)
+        assert os.path.basename(default) == "improvement_content"

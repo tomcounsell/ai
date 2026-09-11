@@ -20,10 +20,30 @@ and raises :class:`ArtifactIntegrityError` on a mismatch. Callers treat that
 exception as "this evaluation cannot be scored", which is the honest outcome.
 
 The store also keeps improvement artifacts under their own retention root
-(``POPOTO_IMPROVEMENT_CONTENT_PATH``, defaulting to ``data/improvement_content``
-inside the repo) rather than mixing them into the shared popoto content
-directory, so retention and export/import policy for evaluation evidence can
-differ from ordinary content without a path heuristic.
+(``POPOTO_IMPROVEMENT_CONTENT_PATH``, defaulting to
+``~/.popoto/improvement_content``) rather than mixing them into the shared
+popoto content directory, so retention and export/import policy for evaluation
+evidence can differ from ordinary content without a path heuristic. The
+default lives outside any repo checkout on purpose: a container image rebuild
+destroys the checkout, and with it every artifact a trial gathered.
+
+Durable-state topology for cloud sandboxes (lane 7, #3274): each sandbox runs
+a sandbox-local Redis and exports its evidence and artifacts to the durable
+store named here, rather than all sandboxes sharing one network-reachable
+Redis. spike-4 found ``RedisSettings.url`` defaults to
+``redis://localhost:6379/0`` with no TLS, password, or ``rediss://`` handling
+anywhere in settings, while the ``worker:registered_pid:*`` liveness
+convention presumes one shared Redis. The shared option was refused because
+reaching it needs transport security that does not exist: TLS and auth support
+in settings, network boundaries around the machine-global production Redis,
+and credential distribution to hosts that cannot renew anything themselves.
+That is named work for its own task, not a footnote to a sandbox trial. The
+local option costs something too: the dashboard cannot read a sandbox's Redis
+directly, so the export path is load-bearing and every teardown is gated on a
+verified export that fails closed. The cross-process round trip in
+``tests/unit/test_artifact_retention_root.py`` is the phase-2 proof:
+``_default_base_path`` reads the env var fresh on every call, so a second
+local process stands in for the container.
 """
 
 from __future__ import annotations
@@ -48,12 +68,14 @@ def _default_base_path() -> str:
     Reads the env var fresh on every call (not through the cached settings
     singleton) so a test can point the store at a tmp directory after
     ``config.settings`` has already been constructed elsewhere in the process.
+    Without the override the root is ``~/.popoto/improvement_content``: outside
+    any repo checkout so an image rebuild cannot destroy it, and beside (never
+    inside) the shared popoto content directory.
     """
     override = os.environ.get("POPOTO_IMPROVEMENT_CONTENT_PATH")
     if override:
         return override
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(repo_root, "data", "improvement_content")
+    return os.path.join(os.path.expanduser("~"), ".popoto", "improvement_content")
 
 
 class VerifyingArtifactStore(FilesystemStore):
