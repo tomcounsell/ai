@@ -183,3 +183,26 @@ class TestHarnessEnvPassthrough:
                 _harness_env["SENTRY_AUTH_TOKEN"] = tok
 
         assert _harness_env["SENTRY_AUTH_TOKEN"] == "harness-sentry-token-xyz"
+
+    def test_valor_project_key_in_harness_env(self, redis_test_db):
+        """VALOR_PROJECT_KEY is present and equals the resolved project key.
+
+        memory_search and reflections read VALOR_PROJECT_KEY with a "valor"
+        fallback, so without it a non-valor session's harness subprocess
+        silently searches and writes the wrong memory partition. This mirrors
+        the env-construction logic in agent/session_executor.py and resolves
+        through the same choke point the real call site uses.
+        """
+        from config.project_key_resolver import resolve_project_key
+
+        session = _make_session("eng", "eng-project-key-001", redis_test_db)
+        project_key = session.project_key or "valor"
+
+        # Mirror session_executor.py: resolved through the single choke point.
+        _harness_env: dict[str, str] = {
+            "AGENT_SESSION_ID": session.agent_session_id or "",
+            "VALOR_PROJECT_KEY": resolve_project_key(project_key=project_key) or "",
+        }
+
+        assert "VALOR_PROJECT_KEY" in _harness_env
+        assert _harness_env["VALOR_PROJECT_KEY"] == project_key == "test"
