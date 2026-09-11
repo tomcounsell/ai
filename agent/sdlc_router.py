@@ -515,7 +515,12 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
     review_verdict_norm = normalize_verdict(review_verdict)
 
-    if review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED:
+    if (
+        review_status == STATUS_COMPLETED
+        and docs_status == STATUS_COMPLETED
+        and REVIEW_APPROVED in review_verdict_norm
+        and _review_verdict_head_is_verified_fresh(stage_states, meta, context or {})
+    ):
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
     elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
@@ -523,6 +528,7 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
         suffix = "review requested changes"
     elif (
         review_status == STATUS_COMPLETED
+        and docs_status != STATUS_COMPLETED
         and REVIEW_APPROVED in review_verdict_norm
         and not _review_verdict_head_is_stale(stage_states, meta, context or {})
     ):

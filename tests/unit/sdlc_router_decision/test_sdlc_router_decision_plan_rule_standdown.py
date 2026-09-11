@@ -293,7 +293,9 @@ class TestG3DocsLeg:
 
     def test_docs_completed_still_merges(self):
         """Regression fence: leg 1 (merge) keeps precedence when docs are done."""
-        result = guard_g3_pr_lock(_approved_pr_states(docs="completed"), _approved_pr_meta(), {})
+        result = guard_g3_pr_lock(
+            _approved_pr_states(docs="completed"), _approved_pr_meta(), {"pr_head_sha": _HEAD}
+        )
         assert result.skill == SKILL_DO_MERGE
 
     def test_changes_requested_still_patches(self):
