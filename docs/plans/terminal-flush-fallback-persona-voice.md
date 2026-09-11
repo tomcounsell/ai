@@ -1,7 +1,7 @@
 ---
 status: Ready
 revision_applied: true
-revision_applied_at: 2026-09-11T09:01:37Z
+revision_applied_at: 2026-09-11T09:05:42Z
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/3290
@@ -82,14 +82,16 @@ doc section updated. No behavior change, no new control flow.
 
 1. Rewrite the constant in first-person Valor voice.
 2. Relocate it from `agent/session_health.py` to `agent/notification_copy.py`, joining
-   `INTERRUPT_NO_RESUME` and `FAILURE_NOTICE` under the #1877 contract. Import it at its use site.
+   `INTERRUPT_NO_RESUME` and `FAILURE_NOTICE` under the #1877 contract. Import it at **module level**
+   in `agent/session_health.py` (see "Import placement" under Technical Approach for why it must not
+   be function-local).
 3. Extend the existing #3135 test with a second property: the text is free of internal vocabulary.
 4. Update `docs/features/promise-gate.md` where it quotes the old string.
 
 ### Chosen wording
 
 ```
-I didn't send my last message here. It didn't meet the bar I hold myself to.
+I didn't send my last message here. It wasn't good enough.
 If you were waiting on something from me, just ask again.
 ```
 
@@ -98,7 +100,7 @@ Why each clause is defensible given **only** "the gate withheld the message":
 | Clause | Justification |
 |---|---|
 | "I didn't send my last message here." | Exactly what happened. First person, because Valor's own outbound check is Valor's, not a third party's. |
-| "It didn't meet the bar I hold myself to." | True for **every** block class without asserting what the offending text said. See the note below on why the more specific phrasing was rejected. |
+| "It wasn't good enough." | True for **every** block class without asserting what the offending text said. "It" is bound to "my last message" by the preceding sentence, so this says the *message* fell short, never the work. See the notes below on the two phrasings that were rejected. |
 | "If you were waiting on something from me, just ask again." | Conditional. Invents no pending request and promises no future delivery. |
 
 **Rejected phrasing, and why (critique finding, History & Consistency).** The first draft
@@ -108,8 +110,15 @@ matches bare acknowledgments of the *human's* statement: `you're right`, `good p
 `makes sense`, `point taken`, `fair point`. A message blocked for one of those made no
 commitment at all. Shipping "I made a commitment" in that case asserts something false about
 text the human never saw — which is precisely the overreach class #3135 was filed to remove.
-"It didn't meet the bar I hold myself to" is true under both block classes because the bar
-*is* the gate, so the clause is verdict-shaped rather than content-shaped.
+The replacement is true under both block classes because it is verdict-shaped rather than
+content-shaped: it reports that the message failed Valor's own outbound standard, without
+characterizing what the message said.
+
+**Second rejected phrasing, and why (critique round 2, Scope & Value).** The first revision used
+"It didn't meet the bar I hold myself to." That is truthful, but read cold as a chat message it
+is performative — it narrates a standard instead of just saying the thing, which is a subtler form
+of the same off-persona problem Tom reported. "It wasn't good enough." is what a person actually
+says. It carries identical truth constraints and is four words instead of nine.
 
 Deliberately absent: any claim about whether work completed (the #3135 trap), the words
 filter/session/gate/message-gate, em-dashes (repo rule for published text), and any
@@ -187,8 +196,10 @@ assertion alone would not catch it.
 
 1. Add `TERMINAL_PROMISE_FALLBACK_MESSAGE` to `agent/notification_copy.py` with the new wording,
    a module-docstring bullet, and the #3135 constraint comment.
-2. Delete the constant and its comment block from `agent/session_health.py`; import the name from
-   `agent.notification_copy` inside `_gate_terminal_promise`.
+2. Delete the constant and its comment block from `agent/session_health.py`; add a **module-level**
+   `from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE` at the top of
+   `agent/session_health.py`. Do NOT put this import inside `_gate_terminal_promise` — that function
+   fail-opens on `Exception` and would swallow an ImportError into the un-gated delivery path.
 3. `grep -rn "TERMINAL_PROMISE_FALLBACK_MESSAGE"` and update **all three** test import sites
    (L1153, L1217, L1226) to the new location. The grep must return zero references to
    `agent.session_health` for this name before the step is done.
@@ -297,7 +308,7 @@ flush, the text the human receives changes.
 | `test_substitute_message_passes_the_heuristic` | `tests/unit/test_deferred_self_draft_completed.py` (L1217) | **UPDATE** | Repoint its import of `TERMINAL_PROMISE_FALLBACK_MESSAGE` to `agent.notification_copy`, and extend it with the new negative-vocabulary assertion (or add a sibling test for that property). The existing heuristic-allow assertion is kept verbatim: it is the #3135 guarantee. |
 | `test_async_email_fallback_promise_substituted` | `tests/unit/test_deferred_self_draft_completed.py` (L1226) | **UPDATE** (import only) | Asserts the delivered text equals the constant *by identity*, not by literal string, so the wording change does not affect it. Only its import location changes. |
 | `test_promise_reply_substituted_at_terminal_flush` / kill-switch / benign-text tests | `tests/unit/test_deferred_self_draft_completed.py` | **KEEP** | Exercise gate behavior, not the fallback wording. Must stay green as the regression guard that this PR changed copy and nothing else. |
-| (new) vocabulary-guard assertion | `tests/unit/test_deferred_self_draft_completed.py` | **ADD** | Asserts the constant contains none of `filter`, `session`, `gate` (case-insensitive substring check). This is the assertion that makes the persona property durable rather than a one-time edit. |
+| (new) vocabulary-guard assertion | `tests/unit/test_deferred_self_draft_completed.py` | **ADD** | Asserts the constant matches none of `filter`, `session`, `gate` as a **case-insensitive word-boundary regex** (`re.search(rf"\b{term}", text, re.IGNORECASE)`), NOT a raw substring check — a substring check false-positives on `possession`/`obsession`. This is the assertion that makes the persona property durable rather than a one-time edit. |
 
 **No DELETE / REPLACE dispositions.** No existing test becomes obsolete; #3135's coverage is
 preserved in full and extended.
@@ -317,11 +328,26 @@ reported by two critics and re-verified by hand against the test file before bei
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | History & Consistency, Risk & Robustness | Plan said the constant is imported at "two sites" in the test module; there are three (L1153, L1217, L1226). Step 2 deletes the constant with no alias, so the missed site is an `ImportError` at collection time that fails the whole module. | Technical Approach ("Re-export for compatibility" rewritten), Step 3, Test Impact (new row for L1153) | Verified by hand: `grep -n "from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE"` returns L1153 and L1217; L1226 is a parenthesized multi-name import that grep for the bare name also catches. Grep for the name, not for the import line shape. |
-| CONCERN | History & Consistency | Chosen wording "It made a commitment I couldn't back up" is not entailed by a block verdict: `_BEHAVIORAL_CHANGE_PATTERNS` matches bare acknowledgments (`you're right`, `good point`, `makes sense`) that contain no commitment. Same overreach class #3135 was filed to remove. | Solution → Chosen wording (text changed to "It didn't meet the bar I hold myself to"), plus a "Rejected phrasing, and why" note | The replacement clause is verdict-shaped, not content-shaped: the bar *is* the gate, so it is true under both block classes without asserting what the withheld text said. Re-verified `action == "allow"` on the new string. |
+| CONCERN | History & Consistency | Chosen wording "It made a commitment I couldn't back up" is not entailed by a block verdict: `_BEHAVIORAL_CHANGE_PATTERNS` matches bare acknowledgments (`you're right`, `good point`, `makes sense`) that contain no commitment. Same overreach class #3135 was filed to remove. | Solution → Chosen wording (superseded in round 2; final text is "It wasn't good enough."), plus a "Rejected phrasing, and why" note | The replacement clause is verdict-shaped, not content-shaped: the bar *is* the gate, so it is true under both block classes without asserting what the withheld text said. Re-verified `action == "allow"` on the new string. |
 | CONCERN | Risk & Robustness | Plan did not say whether the new `agent.notification_copy` import goes inside `_gate_terminal_promise`'s `try` block, which catches `Exception` broadly and fail-opens by delivering the original un-gated text. | Technical Approach (new "Import placement" paragraph) | Put the import at module level in `agent/session_health.py`. Function-local inside the `try` means an ImportError is swallowed into the fail-open path and ships the promise text the gate exists to withhold. No cycle risk: `notification_copy.py` imports only `__future__`. |
 | CONCERN | Scope & Value | The negative-vocabulary guard bans `session` as a raw substring, but `possession`/`obsession` contain it, so an on-persona future wording could fail the guard for no jargon reason. | Technical Approach → Test design | Use `re.search(rf"\b{term}", text, re.IGNORECASE)`. Leading `\b` only, so inflections (`filtered`, `sessions`, `gated`) are still caught. |
 | CONCERN | Scope & Value | All Success Criteria are mechanical/regex-based; none validate the actual subjective defect Tom reported ("reads as off-persona"). The plan could satisfy every criterion and still ship stilted copy. | Success Criteria (new human-facing validation bullet) | Judgment gate, not an assertion: the final text is read cold as a chat message before the PR opens, and `/do-pr-review` is asked the same question explicitly. |
 | NIT | Scope & Value | "I didn't send my last message here" may momentarily confuse a cold reader, since the substitute is the only message they actually see. | Accepted, not changed | Any alternative that removes the ambiguity ("I wrote something and held it") asserts more about the withheld text than the verdict supports. The mild ambiguity is the cheaper cost. Recorded so a future editor does not re-litigate it blind. |
+
+### Round 2 (re-critique of the revised plan)
+
+All three round-1 critics re-ran against the revised plan and **verified the round-1 findings were
+genuinely resolved in the revision text**, not merely acknowledged in the table above. Round 2 then
+found three defects introduced *by the revision itself*: 1 blocker, 2 concerns.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency | The new "Import placement" paragraph mandates a module-level import, but Solution item 2 ("Import it at its use site") and Step 2 ("import the name from `agent.notification_copy` inside `_gate_terminal_promise`") were never updated to match. The plan instructed the builder to do the exact thing the new paragraph forbids. | Solution item 2 and Step 2 both rewritten to mandate the module-level import and to name the hazard explicitly | Self-inflicted by the round-1 revision: a new constraint was added in one section without propagating to the two sections that already described the old behavior. Confirmed by grep at lines 85 and 191 before fixing. |
+| CONCERN | Risk & Robustness | The Test Impact row for the new vocabulary guard still said "case-insensitive substring check", contradicting the Technical Approach fix that replaced substrings with a word-boundary regex specifically to kill the `possession`/`obsession` false positive. | Test Impact table row rewritten to specify the word-boundary regex and to name the rejected substring approach | Same propagation failure as the blocker: the fix landed in Technical Approach only. The table row is what a builder skims, so it had to carry the corrected form too. |
+| CONCERN | Scope & Value | The round-1 replacement wording, "It didn't meet the bar I hold myself to", is truthful but reads as performative when received cold as a chat message: it narrates a standard rather than simply stating the fact. That is a subtler instance of the same off-persona problem Tom reported. | Solution → Chosen wording (now "It wasn't good enough."), plus a "Second rejected phrasing" note | Identical truth constraints, four words instead of nine. Re-verified: `action == "allow"`, no banned term matches the word-boundary regex, no em-dash. |
+
+Round 2 also confirmed the plan remains proportionate to its Small appetite: the added prose is
+reasoning about the same single-constant change, with no new file touches and no new control flow.
 
 **Scope ruling.** The Scope & Value critic was asked to rule on the Open Question below and
 judged the relocation to `agent/notification_copy.py` **justified scope, not creep** — it matches
