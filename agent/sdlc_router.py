@@ -1426,6 +1426,38 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     return recorded_head.lower() != head_sha.lower()
 
 
+def _review_verdict_head_is_verified_fresh(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Return True only on POSITIVE evidence that the REVIEW verdict judged the live head.
+
+    Narrow sibling of :func:`_review_verdict_head_is_stale`, for TERMINAL
+    ``/do-merge`` dispatch only (G3 leg 1, G6, row 10). The two differ on exactly two
+    inputs, both deliberate:
+
+    - ``pr_head_sha`` ABSENT from context → **False** here (no evidence, no
+      merge), where the stale predicate returns False meaning "inert".
+    - no recorded REVIEW verdict → **False** here, where the stale predicate
+      returns False meaning "the no-verdict recovery rows own this".
+
+    Requiring presence is free in production: ``tools/sdlc_next_skill._build_context``
+    sets ``pr_head_sha`` unconditionally whenever ``pr_number`` is set and a
+    REVIEW verdict is recorded — a real SHA, or ``""`` plus
+    ``pr_head_sha_lookup_failed`` on lookup failure. Both conditions hold on
+    every path that reaches either call site, so the key is never absent for a
+    live lane; requiring it closes the hole against non-CLI and future callers.
+    """
+    if "pr_head_sha" not in context:
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return False  # fail-closed lookup-failure sentinel
+    if not _latest_review_verdict(stage_states, meta).strip():
+        return False
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
+        return False  # unattributable verdict is never "verified fresh"
+    return recorded_head.lower() == head_sha.lower()
+
+
 def _review_verdict_is_stale(stage_states: dict) -> bool:
     """Return True if the REVIEW verdict predates the latest /do-patch dispatch (stale).
 
