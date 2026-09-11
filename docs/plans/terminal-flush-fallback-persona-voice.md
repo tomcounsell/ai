@@ -1,7 +1,7 @@
 ---
 status: Ready
 revision_applied: true
-revision_applied_at: 2026-09-11T09:05:42Z
+revision_applied_at: 2026-09-11T09:08:09Z
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/3290
@@ -150,10 +150,10 @@ identity in tests. Moving its definition changes no call graph.
 
 **Relocation.** Add the constant to `agent/notification_copy.py` with a docstring bullet matching
 the existing two, carrying the #3135 constraints forward into the comment so they remain
-discoverable at edit time. Delete the definition from `agent/session_health.py` and import it
-where `_gate_terminal_promise` needs it. Use a function-local import (`# noqa: PLC0415`) matching
-the existing `INTERRUPT_NO_RESUME` import style at `_deliver_terminal_interrupt_notice`, to stay
-consistent with the file and avoid any import-cycle risk.
+discoverable at edit time. Delete the definition from `agent/session_health.py` and import it at
+module level there. See "Import placement" immediately below for why module level is mandatory and
+why this deliberately does not follow the function-local `INTERRUPT_NO_RESUME` import style at
+`_deliver_terminal_interrupt_notice`.
 
 **Re-export for compatibility.** `agent.session_health.TERMINAL_PROMISE_FALLBACK_MESSAGE` is
 imported by name in `tests/unit/test_deferred_self_draft_completed.py` at **three** sites, verified
@@ -247,7 +247,7 @@ New for this issue:
 |---|---|
 | New wording trips the heuristic it is the fallback for (infinite-narrowing failure). | Verified by direct execution at plan time; locked by a test assertion. |
 | A hidden import site of the constant breaks on relocation. | Step 3 is an explicit repo-wide grep before the move is considered done. |
-| The vocabulary assertion is too blunt and blocks a legitimate future word. | Keep the banned list to the three words that caused this report, checked as substrings, with a comment explaining why each is banned. |
+| The vocabulary assertion is too blunt and blocks a legitimate future word. | Keep the banned list to the three words that caused this report, matched as a leading-`\b` word-boundary regex (never a raw substring, which false-positives on `possession`), with a comment explaining why each is banned. |
 | Reviewer reads this as reopening #3135's truth question. | Plan states explicitly that truth constraints are preserved, not revisited; the test proves it. |
 
 ## Success Criteria
@@ -348,6 +348,28 @@ found three defects introduced *by the revision itself*: 1 blocker, 2 concerns.
 
 Round 2 also confirmed the plan remains proportionate to its Small appetite: the added prose is
 reasoning about the same single-constant change, with no new file touches and no new control flow.
+
+### Round 3 (verification round, LITE)
+
+A single Consolidated Critic re-read the plan to confirm convergence. It verified all three round-2
+findings were genuinely fixed at their cited locations, and confirmed the final wording satisfies
+every No-Go. It then found the **same propagation defect class for a third time**, in two locations
+the round-2 pass had not been pointed at.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Consolidated Critic | The Technical Approach "Relocation" paragraph still carried the original "use a function-local import (`# noqa: PLC0415`)" sentence. Round 2 fixed the two *cited* locations and added the correct "Import placement" paragraph directly below, but never deleted the stale sentence that a builder reading top-to-bottom hits first. | Relocation paragraph rewritten to mandate the module-level import and cross-reference "Import placement" | The stale sentence sat immediately above the paragraph that contradicted it, which is why a cited-location fix missed it. |
+| CONCERN | Consolidated Critic | The Risks table mitigation still read "checked as substrings", a third location contradicting the word-boundary regex. | Risks table row rewritten to specify the leading-`\b` regex and name the `possession` false positive | Found only by grepping `substring` across the whole document rather than revisiting cited lines. |
+
+**Process correction adopted after round 3.** Three consecutive rounds found the identical defect
+class: a constraint changed in one section while other sections kept describing the superseded
+behavior. The cause was fixing critic-cited line numbers instead of sweeping. Both round-3 fixes
+were made by running `grep -n -i` for the *concept* across the entire plan (`function-local|PLC0415|use site|module-level`
+and `substring`) and reconciling every live hit, with the `## Critique Results` rows deliberately
+left alone as historical record. The same sweep-don't-enumerate discipline applies to the build:
+**Step 3's repo-wide grep for `TERMINAL_PROMISE_FALLBACK_MESSAGE` is the gate for the import-site
+change, not the three line numbers this plan happens to name.** Line numbers in this plan are
+navigational aids and may already have drifted; the grep is authoritative.
 
 **Scope ruling.** The Scope & Value critic was asked to rule on the Open Question below and
 judged the relocation to `agent/notification_copy.py` **justified scope, not creep** — it matches
