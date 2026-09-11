@@ -976,10 +976,12 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
         return None
     # WS3d (#2062): never fast-path a head_sha-stale APPROVED verdict — a
     # commit landed after approval (or the live-head lookup failed, which
-    # fails closed toward stale). Fall through to the dispatch table, where
-    # row 8f routes to /do-pr-review at the new head. This makes G6 agree
-    # with tools/merge_predicate's Group (c) freshness check.
-    if _review_verdict_head_is_stale(stage_states, meta, context):
+    # fails closed toward stale). Nor on an ABSENT pr_head_sha signal: an
+    # absent key is not evidence of freshness, so a terminal /do-merge
+    # dispatch requires POSITIVE verification. Fall through to the dispatch
+    # table, where row 8f routes to /do-pr-review at the new head. This makes
+    # G6 agree with tools/merge_predicate's Group (c) freshness check.
+    if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
         return None
     return Dispatch(
         skill=SKILL_DO_MERGE,
