@@ -1,5 +1,7 @@
 ---
 status: Ready
+revision_applied: true
+revision_applied_at: 2026-09-11T09:01:37Z
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/3290
@@ -87,7 +89,7 @@ doc section updated. No behavior change, no new control flow.
 ### Chosen wording
 
 ```
-I didn't send my last message here. It made a commitment I couldn't back up.
+I didn't send my last message here. It didn't meet the bar I hold myself to.
 If you were waiting on something from me, just ask again.
 ```
 
@@ -96,8 +98,18 @@ Why each clause is defensible given **only** "the gate withheld the message":
 | Clause | Justification |
 |---|---|
 | "I didn't send my last message here." | Exactly what happened. First person, because Valor's own outbound check is Valor's, not a third party's. |
-| "It made a commitment I couldn't back up." | Restates the block verdict itself. Both block classes (`forward_deferral`, `behavioral_change`) are precisely "a commitment with no evidence behind it". Claims nothing about the work. |
+| "It didn't meet the bar I hold myself to." | True for **every** block class without asserting what the offending text said. See the note below on why the more specific phrasing was rejected. |
 | "If you were waiting on something from me, just ask again." | Conditional. Invents no pending request and promises no future delivery. |
+
+**Rejected phrasing, and why (critique finding, History & Consistency).** The first draft
+read "It made a commitment I couldn't back up." That is *not* entailed by a block verdict.
+The gate has two block classes, and `_BEHAVIORAL_CHANGE_PATTERNS` (`bridge/promise_gate.py:279-287`)
+matches bare acknowledgments of the *human's* statement: `you're right`, `good point`,
+`makes sense`, `point taken`, `fair point`. A message blocked for one of those made no
+commitment at all. Shipping "I made a commitment" in that case asserts something false about
+text the human never saw — which is precisely the overreach class #3135 was filed to remove.
+"It didn't meet the bar I hold myself to" is true under both block classes because the bar
+*is* the gate, so the clause is verdict-shaped rather than content-shaped.
 
 Deliberately absent: any claim about whether work completed (the #3135 trap), the words
 filter/session/gate/message-gate, em-dashes (repo rule for published text), and any
@@ -135,9 +147,23 @@ the existing `INTERRUPT_NO_RESUME` import style at `_deliver_terminal_interrupt_
 consistent with the file and avoid any import-cycle risk.
 
 **Re-export for compatibility.** `agent.session_health.TERMINAL_PROMISE_FALLBACK_MESSAGE` is
-imported by name in `tests/unit/test_deferred_self_draft_completed.py` (two sites). Per the repo's
-NO LEGACY CODE rule, do **not** leave a compatibility alias: update the test imports to the new
-canonical location instead. Verify by grep that no other module imports the name.
+imported by name in `tests/unit/test_deferred_self_draft_completed.py` at **three** sites, verified
+by grep at revision time: **L1153**, **L1217**, and **L1226** (the last is a parenthesized
+multi-name import). An earlier draft of this plan said "two sites" and its Test Impact table
+omitted L1153; two critics caught it independently. Because Step 2 deletes the constant with **no**
+compatibility alias, a missed import site is an `ImportError` at collection time that takes down
+the entire test module, not just one test. Step 3's grep is therefore a gate, not a formality.
+
+**Import placement (critique finding, Risk & Robustness).** Import the constant at **module level**
+in `agent/session_health.py`, not function-locally inside `_gate_terminal_promise`. That function
+wraps its whole body in `try: ... except Exception:` and **fail-opens by returning the original,
+un-gated message**. A function-local import that failed would therefore be swallowed into the
+fail-open path and silently deliver the very promise text the gate exists to withhold. A
+module-level import fails loudly at import time instead. There is no cycle risk:
+`agent/notification_copy.py` imports nothing but `__future__`, so it cannot import
+`session_health` back. This deliberately diverges from the function-local
+`from agent.notification_copy import INTERRUPT_NO_RESUME` at `_deliver_terminal_interrupt_notice`;
+that site is not inside a fail-open handler, so the same hazard does not apply to it.
 
 **Heuristic verification is deterministic.** The terminal-flush route always uses the regex
 `_evaluate_promise_heuristic`, never the LLM layer, so the allow/block property of the new wording
@@ -145,10 +171,17 @@ is fully testable offline with no API key. Confirmed by direct execution during 
 chosen wording returns `action="allow"`, `reason="no_promise_detected"`.
 
 **Test design.** Extend `test_substitute_message_passes_the_heuristic` into two assertions, or add
-a sibling test. The second property is a *negative vocabulary* assertion over a list of banned
-substrings (`filter`, `session`, `gate`) checked case-insensitively. This is the assertion that
-prevents a future edit silently regressing to narration; the heuristic assertion alone would not
-catch it.
+a sibling test. The second property is a *negative vocabulary* assertion over the banned terms
+`filter`, `session`, `gate`.
+
+Match on **word boundaries**, not raw substrings (critique finding, Scope & Value):
+`re.search(rf"\b{term}", text, re.IGNORECASE)`. A raw `in` check makes the guard fire on innocent
+words that merely contain a banned term — `possession` and `obsession` both contain `session` —
+so a perfectly on-persona future rewrite could fail the guard for no jargon reason. Use a leading
+`\b` only, so that inflections (`filtered`, `sessions`, `gated`) are still caught.
+
+This is the assertion that prevents a future edit silently regressing to narration; the heuristic
+assertion alone would not catch it.
 
 ## Step by Step Tasks
 
@@ -156,7 +189,9 @@ catch it.
    a module-docstring bullet, and the #3135 constraint comment.
 2. Delete the constant and its comment block from `agent/session_health.py`; import the name from
    `agent.notification_copy` inside `_gate_terminal_promise`.
-3. `grep -rn "TERMINAL_PROMISE_FALLBACK_MESSAGE"` and update every import site to the new location.
+3. `grep -rn "TERMINAL_PROMISE_FALLBACK_MESSAGE"` and update **all three** test import sites
+   (L1153, L1217, L1226) to the new location. The grep must return zero references to
+   `agent.session_health` for this name before the step is done.
 4. Extend the #3135 coverage in `tests/unit/test_deferred_self_draft_completed.py`: assert
    heuristic-allow AND absence of the banned vocabulary. Keep
    `test_async_email_fallback_promise_substituted` green (it asserts by identity, so it should be
@@ -213,6 +248,12 @@ New for this issue:
 - `grep -rn "outbound safety filter"` returns no hits.
 - The constant is defined in `agent/notification_copy.py` and nowhere else.
 - Ruff check and format clean.
+- **Human-facing validation (critique finding, Scope & Value):** every other criterion here is
+  mechanical, and the defect Tom reported is a subjective one — a regex-clean string can still read
+  as stilted. Before the PR is opened, the exact final text is read cold, as a chat message, and
+  judged on one question: does this sound like Valor talking to a teammate? The reviewer in
+  `/do-pr-review` is asked the same question explicitly. This criterion is a judgment gate, not an
+  assertion, and it is recorded here so it cannot be quietly skipped.
 
 ## Documentation
 
@@ -252,8 +293,9 @@ flush, the text the human receives changes.
 
 | Test | File | Disposition | Why |
 |---|---|---|---|
-| `test_substitute_message_passes_the_heuristic` | `tests/unit/test_deferred_self_draft_completed.py` (~L1213) | **UPDATE** | Repoint its import of `TERMINAL_PROMISE_FALLBACK_MESSAGE` to `agent.notification_copy`, and extend it with the new negative-vocabulary assertion (or add a sibling test for that property). The existing heuristic-allow assertion is kept verbatim: it is the #3135 guarantee. |
-| `test_async_email_fallback_promise_substituted` | `tests/unit/test_deferred_self_draft_completed.py` (~L1221) | **UPDATE** (import only) | Asserts the delivered text equals the constant *by identity*, not by literal string, so the wording change does not affect it. Only its import location changes. |
+| `test_promise_flagged_deferred_draft_substituted_not_delivered` | `tests/unit/test_deferred_self_draft_completed.py` (L1153) | **UPDATE** (import only) | Third import site, missed by the first draft of this plan and caught by two critics. Asserts the delivered payload equals the constant by identity, so the wording change does not affect it; only its import location moves. Missing it is an `ImportError` at collection time for the whole module. |
+| `test_substitute_message_passes_the_heuristic` | `tests/unit/test_deferred_self_draft_completed.py` (L1217) | **UPDATE** | Repoint its import of `TERMINAL_PROMISE_FALLBACK_MESSAGE` to `agent.notification_copy`, and extend it with the new negative-vocabulary assertion (or add a sibling test for that property). The existing heuristic-allow assertion is kept verbatim: it is the #3135 guarantee. |
+| `test_async_email_fallback_promise_substituted` | `tests/unit/test_deferred_self_draft_completed.py` (L1226) | **UPDATE** (import only) | Asserts the delivered text equals the constant *by identity*, not by literal string, so the wording change does not affect it. Only its import location changes. |
 | `test_promise_reply_substituted_at_terminal_flush` / kill-switch / benign-text tests | `tests/unit/test_deferred_self_draft_completed.py` | **KEEP** | Exercise gate behavior, not the fallback wording. Must stay green as the regression guard that this PR changed copy and nothing else. |
 | (new) vocabulary-guard assertion | `tests/unit/test_deferred_self_draft_completed.py` | **ADD** | Asserts the constant contains none of `filter`, `session`, `gate` (case-insensitive substring check). This is the assertion that makes the persona property durable rather than a one-time edit. |
 
@@ -266,10 +308,31 @@ No full-suite run — per `CLAUDE.md`, parallel worktrees collide on Redis state
 **Expected-failure scan:** `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/` found no xfail
 markers related to the promise gate or terminal flush, so there is no xfail to convert.
 
+## Critique Results
+
+Critique run 2026-09-11 (FULL depth, appetite=Small): 1 blocker, 4 concerns, 1 nit. Verdict
+NEEDS REVISION. All findings addressed in this revision pass. The blocker was independently
+reported by two critics and re-verified by hand against the test file before being accepted.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency, Risk & Robustness | Plan said the constant is imported at "two sites" in the test module; there are three (L1153, L1217, L1226). Step 2 deletes the constant with no alias, so the missed site is an `ImportError` at collection time that fails the whole module. | Technical Approach ("Re-export for compatibility" rewritten), Step 3, Test Impact (new row for L1153) | Verified by hand: `grep -n "from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE"` returns L1153 and L1217; L1226 is a parenthesized multi-name import that grep for the bare name also catches. Grep for the name, not for the import line shape. |
+| CONCERN | History & Consistency | Chosen wording "It made a commitment I couldn't back up" is not entailed by a block verdict: `_BEHAVIORAL_CHANGE_PATTERNS` matches bare acknowledgments (`you're right`, `good point`, `makes sense`) that contain no commitment. Same overreach class #3135 was filed to remove. | Solution → Chosen wording (text changed to "It didn't meet the bar I hold myself to"), plus a "Rejected phrasing, and why" note | The replacement clause is verdict-shaped, not content-shaped: the bar *is* the gate, so it is true under both block classes without asserting what the withheld text said. Re-verified `action == "allow"` on the new string. |
+| CONCERN | Risk & Robustness | Plan did not say whether the new `agent.notification_copy` import goes inside `_gate_terminal_promise`'s `try` block, which catches `Exception` broadly and fail-opens by delivering the original un-gated text. | Technical Approach (new "Import placement" paragraph) | Put the import at module level in `agent/session_health.py`. Function-local inside the `try` means an ImportError is swallowed into the fail-open path and ships the promise text the gate exists to withhold. No cycle risk: `notification_copy.py` imports only `__future__`. |
+| CONCERN | Scope & Value | The negative-vocabulary guard bans `session` as a raw substring, but `possession`/`obsession` contain it, so an on-persona future wording could fail the guard for no jargon reason. | Technical Approach → Test design | Use `re.search(rf"\b{term}", text, re.IGNORECASE)`. Leading `\b` only, so inflections (`filtered`, `sessions`, `gated`) are still caught. |
+| CONCERN | Scope & Value | All Success Criteria are mechanical/regex-based; none validate the actual subjective defect Tom reported ("reads as off-persona"). The plan could satisfy every criterion and still ship stilted copy. | Success Criteria (new human-facing validation bullet) | Judgment gate, not an assertion: the final text is read cold as a chat message before the PR opens, and `/do-pr-review` is asked the same question explicitly. |
+| NIT | Scope & Value | "I didn't send my last message here" may momentarily confuse a cold reader, since the substitute is the only message they actually see. | Accepted, not changed | Any alternative that removes the ambiguity ("I wrote something and held it") asserts more about the withheld text than the verdict supports. The mild ambiguity is the cheaper cost. Recorded so a future editor does not re-litigate it blind. |
+
+**Scope ruling.** The Scope & Value critic was asked to rule on the Open Question below and
+judged the relocation to `agent/notification_copy.py` **justified scope, not creep** — it matches
+the existing #1877 convention, it is a one-constant move, and the plan gave explicit reasoning. No
+finding was raised against it. The Open Question is therefore resolved in favor of keeping the
+relocation in this PR.
+
+---
+
 ## Open Questions
 
-None blocking. One judgment call already made and recorded here for the critique to challenge:
-relocating the constant to `agent/notification_copy.py` is included in this PR rather than
-deferred, on the grounds that it is a one-constant move and that leaving it in place preserves the
-drift pressure that produced the bug. If the critique judges the relocation to be scope creep, the
-wording change alone satisfies every acceptance criterion in #3290 and the move can be dropped.
+**Resolved.** The one judgment call in this plan — whether relocating the constant to
+`agent/notification_copy.py` belongs in this PR or should be deferred — was put to the Scope &
+Value critic, which ruled it justified scope rather than creep. No open questions block the build.
