@@ -81,8 +81,8 @@ PROVISIONAL_ASSUMPTIONS: tuple[dict, ...] = (
     },
     {
         "statement": (
-            "The sandbox authenticates in mode A: the vault's "
-            "CLAUDE_CODE_OAUTH_TOKEN arrives as a deploy-time provider "
+            "The sandbox authenticates in mode A: the vault's subscription "
+            "OAuth credential arrives as a deploy-time provider "
             "secret and subscription_auth_env consumes it unchanged."
         ),
         "evidence": (
