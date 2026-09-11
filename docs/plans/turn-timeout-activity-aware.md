@@ -145,11 +145,116 @@ Every clause is verifiable: the run was stopped (SIGTERM/SIGKILL), the stretch h
 
 ## Data Flow
 
-<!-- placeholder -->
+```
+claude -p subprocess
+  |
+  |-- stream-json on stdout ------> HeadlessRoleDriver.on_stdout_event (0-arg)
+  |                                   -> SessionRunner._on_stdout_event_liveness
+  |                                        -> _stamp_stdout_liveness()  [Redis, cooldown-bounded]
+  |                                        -> NEW: self._last_activity_mono = loop.time()
+  |
+  |-- every tool call, INCLUDING inside an in-process subagent
+  |     -> PreToolUse hook (matcher: "", agent/session_runner/liveness_hook.py)
+  |          -> writes <hook-edge-dir>/<session_id>/<role>_hook_edges.toolactivity
+  |
+  v
+SessionRunner._preempt_watcher  (polls every STEER_POLL_INTERVAL_S = 2.0s)
+  reads:  self._last_activity_mono                    [in-memory, free]
+          liveness.tool_activity_ts(session_id)       [O(1) glob + read, wall-clock epoch]
+  computes: idle = now - max(stream_activity, tool_activity)
+  preempts if:  idle >= IDLE_DEADLINE            (the operative limit)
+             or elapsed >= ABSOLUTE_CEILING      (runaway backstop)
+  |
+  v
+_kill_turn(cause="timeout")  -> SIGTERM pgid -> 10s grace -> SIGKILL   [UNCHANGED]
+  |
+  v
+runner loop (runner.py:956-971)
+  _claim_timeout_notice(session_id, run_id)   [UNCHANGED, #3270 SETNX dedupe]
+  on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)   [REWORDED]
+  summary.exit_reason = ExitReason.TURN_TIMEOUT      [UNCHANGED, still is_clean=False]
+```
+
+**Clock mixing is the one hazard in this flow.** `self._last_activity_mono` is `loop.time()` (monotonic); `tool_activity_ts()` returns a wall-clock epoch float. They must be normalized before being compared — see Technical Approach.
 
 ## Technical Approach
 
-<!-- placeholder -->
+All production changes are in `agent/session_runner/runner.py` unless noted.
+
+### A. New constants (module level, alongside the existing `SESSION_RUNNER_*` family)
+
+```python
+# Idle deadline: preempt only after this long with NO observed activity.
+# Provisional/tunable -- grain of salt. Sized against measured data (#3289):
+# 2x the longest known single tool call (a ~1200s full tests/unit run), 4x the
+# 600s TaskOutput blocking poll, ~19x the p99 stream gap (127s). A foreground
+# subagent does NOT bound this -- its own tool calls tick the activity marker.
+# Override with SESSION_RUNNER_ENG_IDLE_TIMEOUT_S.
+ENG_IDLE_TIMEOUT_S: float = float(os.environ.get("SESSION_RUNNER_ENG_IDLE_TIMEOUT_S", "2400"))
+
+# Absolute wall-clock ceiling: backstop for a runaway that streams forever.
+# Deliberately far above the largest observed healthy turn (8549s) so it is a
+# last resort, not the operative limit.
+# Override with SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S.
+ENG_ABSOLUTE_TIMEOUT_S: float = float(
+    os.environ.get("SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S", "21600")
+)
+```
+
+Teammate sessions are conversational and never host a foreground build. `TEAMMATE_TURN_TIMEOUT_S` (900) becomes the teammate **absolute ceiling**, and the teammate idle deadline is set to the same 900 — so observable teammate behavior is unchanged. `turn_timeout_for` is replaced by a `deadlines_for(session_type) -> TurnDeadlines` returning both values; keep `turn_timeout_for` only if something outside the runner imports it (check `__all__` at `runner.py:2006-2016` and grep before deleting — no legacy shim, per repo policy: if nothing imports it, delete it).
+
+### B. Activity tracking
+
+Add `self._last_activity_mono: float` to the runner, initialized at turn dispatch in `_run_one_turn` alongside `started_at`. Update it in `_on_stdout_event_liveness` (`runner.py:680-686`) **before** delegating to `_stamp_stdout_liveness` — the stamp is cooldown-gated for Redis write-rate reasons and must not gate the in-memory stamp, which is free.
+
+### C. Clock normalization (the subtle part)
+
+`tool_activity_ts()` returns a **wall-clock epoch**; `loop.time()` is **monotonic**. Convert the hook stamp into monotonic space once per poll rather than comparing across clocks:
+
+```python
+tool_ts = tool_activity_ts(session_id)           # epoch seconds, or None
+now_mono = loop.time()
+idle_from_tools = (time.time() - tool_ts) if tool_ts is not None else None
+idle_from_stream = now_mono - self._last_activity_mono
+idle = idle_from_stream if idle_from_tools is None else min(idle_from_stream, idle_from_tools)
+```
+
+Taking `min` of the two idles is the same thing as taking `max` of the two activity timestamps, and it does it without ever subtracting one clock from the other. A `None` from `tool_activity_ts` must **not** make `idle` larger or smaller than the stream-only value — it simply drops out (the UNKNOWN contract). Do not clamp a negative `idle_from_tools` to something surprising: a marker stamped in the future (clock skew) should read as "just active", i.e. `max(0.0, ...)`.
+
+### D. Watcher predicate
+
+Replace the single condition at `runner.py:1386`:
+
+```python
+if self._absolute_timeout_s and (now_mono - started_at) >= self._absolute_timeout_s:
+    await self._kill_turn(handle, turn_task, cause="timeout")
+    return
+if self._idle_timeout_s and idle >= self._idle_timeout_s:
+    await self._kill_turn(handle, turn_task, cause="timeout")
+    return
+```
+
+Both keep `cause="timeout"`, so `_kill_turn`, the `handle.killed` branch at `runner.py:956-971`, the `#3270` dedupe, and the `turn_end_source="timeout"` turn event are all untouched. Log which deadline fired (structured field) so the two are distinguishable in `logs/worker.log` without changing the user-facing path.
+
+**Polling cost:** `tool_activity_ts` is a directory glob plus a small file read, called once per 2s tick. That is negligible, and it is the same call `agent_session_queue._session_progress_ts` already makes on a hotter path. Do **not** add an optimization that only samples near the deadline — it adds a second code path and a staleness window for no measurable gain.
+
+### E. Driver backstop re-derivation
+
+`runner.py:668-670` currently derives the driver's `asyncio.wait_for` from `self._turn_timeout_s`. It must now derive from the **largest deadline that can fire**, i.e. the absolute ceiling:
+
+```python
+turn_timeout_s=self._absolute_timeout_s + self._term_grace_s + DRIVER_BACKSTOP_MARGIN_S,
+```
+
+This preserves the invariant that the watcher always fires before the driver backstop (`role_driver.py:466-520`). Add a test that asserts the ordering directly rather than restating the arithmetic, so a future constant change cannot silently invert it.
+
+### F. Message rewrite
+
+Replace `TIMEOUT_NEEDS_ATTENTION_MESSAGE` (`runner.py:258-261`) with the text in the Solution section, and rewrite its comment — the current comment (`"the work is paused, not lost"`) encodes the same falsehood as the string and must go, not just the string.
+
+### G. What does NOT change
+
+`_kill_turn` and the reap paths (#1938, #2146); `_claim_timeout_notice` (#3270); `ExitReason.TURN_TIMEOUT`'s tuple in `router.py:434`; the `session_executor` non-clean → `status="failed"` mapping; `_stamp_stdout_liveness`'s Redis write and its health-checker consumer; `liveness.py` itself (read-only consumer).
 
 ## Step by Step Tasks
 
