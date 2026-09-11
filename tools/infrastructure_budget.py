@@ -13,9 +13,8 @@ Three rules, enforced by tests rather than comments:
 - **Refusal.** A resource whose charge cannot be forecast is refused, never
   defaulted to zero. ``None``, empty, non-numeric, negative, NaN, and infinite
   rates are each refused with the reason ``no forecastable rate``.
-- **No transfer.** This module imports ``weekly_infrastructure_usd``,
-  ``budget_week_start``, and ``budget_day_boundary``, and never
-  ``daily_paid_inference_usd``. There is no code path between the units, so
+- **No transfer.** This module imports the unit-3 settings only, and never
+  the paid-inference pool's. There is no code path between the units, so
   charter section 8's no-transfer rule holds by construction.
 - **Uncertain metering is not zero cost.** Missing or uncertain metering
   settles at the forecast, never at zero, with a ``logger.warning`` that says
