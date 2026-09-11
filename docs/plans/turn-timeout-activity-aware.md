@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-11
 tracking: https://github.com/tomcounsell/ai/issues/3289
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-11T09:04:42.828245Z
 ---
 
 # Activity-Aware Turn Deadline, and an Honest Timeout Notice
@@ -185,10 +187,15 @@ All production changes are in `agent/session_runner/runner.py` unless noted.
 
 ```python
 # Idle deadline: preempt only after this long with NO observed activity.
-# Provisional/tunable -- grain of salt. Sized against measured data (#3289):
-# 2x the longest known single tool call (a ~1200s full tests/unit run), 4x the
-# 600s TaskOutput blocking poll, ~19x the p99 stream gap (127s). A foreground
-# subagent does NOT bound this -- its own tool calls tick the activity marker.
+# Provisional/tunable -- grain of salt. Sized against the tightest EXTERNAL
+# enforcement that already bounds a single silent tool call: session_health's
+# per-tool wedge sub-loop kills a stale Bash call at
+# TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC = 660s
+# (agent/session_health.py:562-563), and the Bash tool schema caps a declared
+# timeout at 600000ms, so no single silent Bash call can legitimately outlive
+# that. 2400 is ~3.6x that ceiling, 4x the 600s TaskOutput blocking poll, and
+# ~19x the p99 stream gap (127s). A foreground subagent does NOT bound this --
+# its own tool calls tick the activity marker.
 # Override with SESSION_RUNNER_ENG_IDLE_TIMEOUT_S.
 ENG_IDLE_TIMEOUT_S: float = float(os.environ.get("SESSION_RUNNER_ENG_IDLE_TIMEOUT_S", "2400"))
 
@@ -214,7 +221,7 @@ Add `self._last_activity_mono: float` to the runner, initialized at turn dispatc
 ```python
 tool_ts = tool_activity_ts(session_id)           # epoch seconds, or None
 now_mono = loop.time()
-idle_from_tools = (time.time() - tool_ts) if tool_ts is not None else None
+idle_from_tools = max(0.0, time.time() - tool_ts) if tool_ts is not None else None
 idle_from_stream = now_mono - self._last_activity_mono
 idle = idle_from_stream if idle_from_tools is None else min(idle_from_stream, idle_from_tools)
 ```
@@ -255,6 +262,27 @@ Replace `TIMEOUT_NEEDS_ATTENTION_MESSAGE` (`runner.py:258-261`) with the text in
 ### G. What does NOT change
 
 `_kill_turn` and the reap paths (#1938, #2146); `_claim_timeout_notice` (#3270); `ExitReason.TURN_TIMEOUT`'s tuple in `router.py:434`; the `session_executor` non-clean → `status="failed"` mapping; `_stamp_stdout_liveness`'s Redis write and its health-checker consumer; `liveness.py` itself (read-only consumer).
+
+**Adjacent budget, explicitly out of scope: the per-tool wedge sub-loop.**
+`agent/session_health.py`'s `_agent_session_tool_timeout_loop` enforces a
+*per-tool* budget (`TOOL_TIMEOUT_INTERNAL_SEC=30`, `TOOL_TIMEOUT_MCP_SEC=120`,
+`TOOL_TIMEOUT_DEFAULT_SEC=300`, with a Bash-only declared-timeout override at
+`:562-563`) against `AgentSession.current_tool_name`/`current_tool_started_at`,
+which `agent/hooks/pre_tool_use.py:548-554` stamps via `record_tool_boundary`
+on EVERY tool call including tools invoked inside a nested subagent, and which
+PostToolUse clears between calls. That is a different question from this plan's:
+"has this ONE tool call hung?" versus "has this TURN gone silent?". The two do
+not shadow each other -- a healthy long turn refreshes `current_tool_*`
+continuously and sits cleared between calls -- and this PR does not touch it.
+
+Two consequences follow and are recorded rather than fixed here. First, the
+Codex dev lane (`mcp__codex_dev__codex_dev_run`, `settings.codex.turn_timeout_s`
+bounded `le=900`) is wedge-killed at the flat 120s `mcp` tier because the
+declared-timeout override is gated to `tool_name == "Bash"`; a follow-up chore
+issue covers generalizing that override. Second, no new turn-level idle budget
+may be tightened below the per-tool tiers without reconciling the two, or the
+system grows a third competing liveness authority -- exactly what
+`feedback_single_authoritative_liveness` warns against.
 
 ## Step by Step Tasks
 
@@ -298,10 +326,39 @@ Before landing, run the new nested-subagent test against the pre-fix code and co
 `python -m ruff check` and `python -m ruff format` on the diff. Narrow-scope tests only, via `scripts/pytest-clean.sh`, naming the specific files from Tasks 6-7.
 
 **Task 10 - Docs cascade.**
-`docs/features/headless-session-runner.md` (the deadline model, both signals, the UNKNOWN contract) and `docs/features/config-timeout-catalog.md` (the two new `SESSION_RUNNER_*` keys). `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old 7200/900 split as shipped history; leave it alone.
+`docs/features/headless-session-runner.md` (the deadline model, both signals, the UNKNOWN contract) and `docs/features/config-timeout-catalog.md` (the two new `SESSION_RUNNER_*` keys). Also `docs/removed-defenses.md:85` - the `[deadman] loop beacon stale` row's "Why it's dead" cell names `turn_timeout_for` in prose as the live replacement ("headless turns are bounded by `turn_timeout_for` instead"); Task 1 deletes that symbol, so the row must be updated to name `deadlines_for`. A code-symbol grep does not catch this; run a repo-wide text grep for the literal string `turn_timeout_for` across `docs/` and fix every prose hit. `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old 7200/900 split as shipped history; leave it alone.
 
-**Task 11 - File the follow-up.**
-Open a `chore` issue for migrating the `SESSION_RUNNER_*` constant family into `TimeoutSettings` / `TIMEOUTS__*`, explicitly scoped out of this PR.
+**Task 11 - File the follow-ups.**
+Open a `chore` issue for migrating the `SESSION_RUNNER_*` constant family into `TimeoutSettings` / `TIMEOUTS__*`, explicitly scoped out of this PR. Open a second `chore` issue for generalizing `session_health`'s declared-timeout wedge override beyond `tool_name == "Bash"` so the Codex dev lane's `le=900` budget is not flat-capped at the 120s `mcp` tier (`agent/session_health.py:545,562-563`).
+
+**Task 12 - Make "the work so far is saved" actually true (critique BLOCKER).**
+The new message says the work is saved. For the synthetic-slug lane -- any Eng
+session whose slug matches `^dev-[0-9a-f]{8}$`, which is the exact shape of the
+session that produced this bug report -- it currently is not.
+`agent/session_executor.py:2710-2836`'s `finally:` block runs
+`cleanup_after_merge(...)` for those sessions on EVERY terminal exit, having
+first pre-finalized the session row to a terminal status (`:2762-2810`)
+specifically so `agent/worktree_manager.py:2162-2199`'s busy check will not
+refuse, and `cleanup_after_merge` then calls `remove_worktree(...,
+delete_branch=False)` (`worktree_manager.py:2620-2627`), deleting the worktree
+directory regardless of merge state. The single existing skip is
+`_session_recorded_reap_failure(...)` at `:2739`, which covers only the rare
+unconfirmed-SIGKILL case. So on an ordinary timeout preempt the worktree -- and
+every uncommitted change in it -- is deleted by the same terminal path that
+delivers the notice, before the user can reply.
+
+Add a second skip condition alongside the reap-failure skip: do not run the
+synthetic-slug cleanup when the turn ended on `ExitReason.TURN_TIMEOUT`. Resolve
+the exit reason from the same summary the executor already has in scope rather
+than re-reading the session row, and emit the same shape of `logger.warning`
+the reap-failure branch emits (naming the worktree path and the manual
+reclamation command) so a preserved worktree is never silently orphaned.
+Check the interaction with `cleanup_after_merge`'s `blocked_by_session` path.
+
+Test (new, in `tests/unit/test_session_executor_runner_dispatch.py`): a
+synthetic-slug session that exits `turn_timeout` leaves its worktree directory
+on disk; the same session exiting cleanly still has it removed. Neither
+assertion exists today.
 
 ## Rabbit Holes
 
@@ -348,6 +405,8 @@ Open a `chore` issue for migrating the `SESSION_RUNNER_*` constant family into `
 - [ ] Existing suites green: `tests/unit/session_runner/test_runner_preempt.py`, `test_runner_liveness.py`, `test_runner_turns.py`, `tests/unit/test_session_executor_runner_dispatch.py`, run narrow-scope via `scripts/pytest-clean.sh`.
 - [ ] `python -m ruff check` and `python -m ruff format` clean on the diff.
 - [ ] No CPU-based activity inference anywhere in the diff.
+- [ ] A synthetic-slug (`dev-{8hex}`) session that exits `turn_timeout` still has its worktree directory on disk afterwards, so the notice's "the work so far is saved" clause is literally true; the same session exiting cleanly still has it removed (critique BLOCKER, Task 12).
+- [ ] `docs/removed-defenses.md` carries no surviving prose reference to the deleted `turn_timeout_for`.
 
 ## Documentation
 
@@ -406,6 +465,7 @@ Adjacent surfaces checked and deliberately left alone:
 | **NEW** `test_absolute_ceiling_preempts_endless_streamer` | **ADD** | Both signals advance forever. |
 | **NEW** `test_driver_backstop_exceeds_largest_watcher_deadline` | **ADD** | Assert the relation, not the arithmetic. |
 | **NEW** `test_future_stamped_marker_reads_as_just_active` | **ADD** | Clock-skew guard. |
+| **NEW** `tests/unit/test_session_executor_runner_dispatch.py::test_turn_timeout_preserves_synthetic_slug_worktree` | **ADD** | Critique BLOCKER, Task 12. A `dev-{8hex}` session exiting `turn_timeout` must leave its worktree directory on disk; the clean-exit counterpart must still remove it. No assertion on the synthetic-slug cleanup path exists today. |
 
 Execution: narrow scope only, via `scripts/pytest-clean.sh`, naming these files explicitly. Per `CLAUDE.md`, a full `tests/unit/` run takes about 20 minutes and would collide with other lanes' Redis state.
 
