@@ -2064,9 +2064,10 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     # (the #1897 misroute). Row 8e owns the no-verdict state instead.
     if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
         return False
-    # WS3d (#2062): a head_sha-stale APPROVED verdict is not merge-ready —
-    # row 8f owns it (re-review at the new head).
-    if _review_verdict_head_is_stale(stage_states, meta, context):
+    # WS3d (#2062) / #3260: a terminal merge dispatch requires POSITIVE evidence
+    # that the APPROVED verdict judged the live head. An absent pr_head_sha signal
+    # is not evidence — row 10 must decline rather than merge on it.
+    if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
         return False
     needed = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"]
     return _stages_settled(stage_states, needed)
