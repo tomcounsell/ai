@@ -1009,3 +1009,86 @@ class TestExecutorCodexDevLane:
         runner = FakeSessionRunner.instances[0]
         assert runner.run_messages, "flagged session must still run the top-level turn"
         assert isinstance(runner.init_kwargs.get("adapter"), SessionRunnerAdapter)
+
+
+class TestSyntheticSlugWorktreePreservation:
+    """A preempted turn must not take the lane's uncommitted work with it (#3289).
+
+    The executor's terminal ``finally:`` block runs the synthetic-slug worktree
+    cleanup for any session whose slug matches ``^dev-[0-9a-f]{8}$``, deleting
+    the worktree directory. On an ``ExitReason.TURN_TIMEOUT`` exit the user is
+    told the work so far is saved -- so the directory has to still be there.
+    A clean exit still gets the ordinary cleanup.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exit_reason,expect_worktree_on_disk",
+        [
+            ("turn_timeout", True),
+            ("pm_complete", False),
+        ],
+    )
+    async def test_turn_timeout_preserves_synthetic_slug_worktree(
+        self, redis_test_db, exit_reason, expect_worktree_on_disk
+    ):
+        import os
+        import re
+        import shutil
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        # The executor synthesizes ``dev-{agent_session_id[:8]}`` for a slugless
+        # eng session; build the worktree at that exact path so the cleanup
+        # branch's shape guard matches what is on disk.
+        slug = f"dev-{session.agent_session_id[:8]}"
+        assert re.match(r"^dev-[0-9a-f]{8}$", slug), (
+            f"synthetic slug {slug!r} does not match the cleanup regex -- the "
+            "agent_session_id shape changed and this test no longer covers the path"
+        )
+        repo_root = tempfile.mkdtemp()
+        wt_path = os.path.join(repo_root, ".worktrees", slug)
+        os.makedirs(wt_path, exist_ok=True)
+
+        def _fake_cleanup_after_merge(root, cleaned_slug):
+            """Stand-in for the real cleanup: deletes the worktree directory.
+
+            The real ``cleanup_after_merge`` shells out to git against a real
+            repo; here only the deletion is behaviorally relevant.
+            """
+            target = os.path.join(str(root), ".worktrees", cleaned_slug)
+            shutil.rmtree(target, ignore_errors=True)
+            return {"slug": cleaned_slug, "worktree_removed": True, "errors": []}
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        def _on_run(fake_runner: FakeSessionRunner) -> None:
+            agent_session = fake_runner.init_kwargs.get("agent_session")
+            if agent_session is not None:
+                agent_session.exit_reason = exit_reason
+
+        FakeSessionRunner.on_run = staticmethod(_on_run)
+
+        with (
+            _patch_runner(),
+            patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+            patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+            patch("agent.worktree_manager.resolve_main_repo_root", return_value=repo_root),
+            patch("agent.worktree_manager.cleanup_after_merge", _fake_cleanup_after_merge),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert os.path.isdir(wt_path) is expect_worktree_on_disk, (
+            f"exit_reason={exit_reason!r}: expected worktree on disk="
+            f"{expect_worktree_on_disk}, got {os.path.isdir(wt_path)}"
+        )

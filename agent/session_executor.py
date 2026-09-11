@@ -2722,12 +2722,26 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 and isinstance(_slug_for_cleanup, str)
                 and re.match(r"^dev-[0-9a-f]{8}$", _slug_for_cleanup)
             ):
+                from agent.session_runner.router import ExitReason  # noqa: PLC0415
                 from agent.worktree_manager import (  # noqa: PLC0415
                     cleanup_after_merge,
                     resolve_main_repo_root,
                 )
 
                 _wd = locals().get("working_dir")
+                # Exit reason as the executor already knows it: the adapter's
+                # ``publish_exit_summary`` writes ``str(summary.exit_reason)``
+                # onto this very ``agent_session`` object before the runner
+                # returns, which is the same in-scope state the reaction branch
+                # and ``_runner_final_status`` read. No Redis re-read here --
+                # the terminal path must not depend on a fresh round-trip.
+                # ``ExitReason`` is a ``StrEnum``, so this compares equal
+                # whether the attribute holds the member or the wire string
+                # ``"turn_timeout"``.
+                _exit_reason_for_cleanup = getattr(
+                    locals().get("agent_session"), "exit_reason", None
+                )
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
                 if _wd is not None:
                     # Reap-failed marker skip (Fix 3, issue #1938): the runner's
                     # ``_run_one_turn`` finally SYNCHRONOUSLY reaps + confirms its
@@ -2746,6 +2760,23 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             "not be confirmed dead). Reclaim manually: `git worktree "
                             "prune` + remove the worktree dir %r.",
                             _slug_for_cleanup,
+                            _wd,
+                        )
+                    elif _turn_timed_out:
+                        # Turn-timeout skip (#3289): the preempt watcher kills a
+                        # turn that blew its deadline and the user is told "the
+                        # work so far is saved". Deleting the worktree here would
+                        # make that sentence a lie -- every uncommitted change in
+                        # the lane would go with it, before the user could reply.
+                        # The turn ended, not the work: preserve the directory and
+                        # let the operator (or a resumed session) reclaim it.
+                        logger.warning(
+                            "[synthetic-slug] SKIPPING worktree cleanup for %s — turn "
+                            "ended on %s, so the worktree is preserved with its "
+                            "uncommitted work. Reclaim manually: `git worktree prune` "
+                            "+ remove the worktree dir %r.",
+                            _slug_for_cleanup,
+                            ExitReason.TURN_TIMEOUT,
                             _wd,
                         )
                     else:
