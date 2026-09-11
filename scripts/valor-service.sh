@@ -270,8 +270,10 @@ stop_bridge() {
         fi
     fi
 
-    # Fallback: manual kill
-    kill "$pid" 2>/dev/null || true
+    # Fallback: manual kill. Unquoted: $pid is one PID per line and every line
+    # is about to be signalled — a quoted kill would pass the whole list as a
+    # single illegal argument and signal nothing.
+    kill $pid 2>/dev/null || true
 
     # Wait for graceful shutdown (15s to let Telethon close SQLite session)
     for i in {1..15}; do
@@ -285,7 +287,7 @@ stop_bridge() {
 
     # Force kill if still running
     echo "Force killing bridge..."
-    kill -9 "$pid" 2>/dev/null || true
+    kill -9 $pid 2>/dev/null || true
     rm -f "$PID_FILE"
     echo "Bridge stopped (forced)"
 }
@@ -781,7 +783,7 @@ stop_worker() {
         fi
     fi
 
-    kill "$pid" 2>/dev/null || true
+    kill $pid 2>/dev/null || true
 
     for i in {1..10}; do
         if ! is_worker_running; then
@@ -792,7 +794,7 @@ stop_worker() {
     done
 
     echo "Force killing worker..."
-    kill -9 "$pid" 2>/dev/null || true
+    kill -9 $pid 2>/dev/null || true
     echo "Worker stopped (forced)"
 }
 
@@ -802,6 +804,17 @@ disable_worker() {
     # has KeepAlive=true; pairing it with `launchctl disable` makes the
     # disabled state survive the respawn timer until `worker-enable` or
     # `worker-start` re-enables it.
+    #
+    # The refusal gate runs BEFORE any launchd teardown, as in stop_worker:
+    # in the launchd posture `bootout` makes launchd SIGTERM the very worker
+    # hosting this command, which would kill the session mid-command before a
+    # gate placed after the teardown could refuse. On refusal nothing is
+    # torn down. The alternative advice is `launchctl disable` (not
+    # kickstart): it stops the respawn without signalling the live worker,
+    # so it is safe to run from inside the session it hosts.
+    local pid=$(get_worker_pid)
+    service_pid_refuse_self_kill "$pid" "worker" \
+        "launchctl disable gui/$(id -u)/$WORKER_PLIST_NAME" || return 1
     echo "Disabling worker (launchd will not respawn)..."
     launchctl disable "gui/$(id -u)/$WORKER_PLIST_NAME"
     launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
@@ -809,18 +822,22 @@ disable_worker() {
 
     if is_worker_running; then
         # bootout failed or the manual fallback path is running — fall back
-        # to PID kill so the operator's intent is honored.
-        local pid=$(get_worker_pid)
-        service_pid_refuse_self_kill "$pid" "worker" \
-            "launchctl kickstart -k gui/$(id -u)/$WORKER_PLIST_NAME" || return 1
+        # to PID kill so the operator's intent is honored. The fresh probe's
+        # list needs no second gate: a process that is this shell's ancestor
+        # was already alive, already matching the selector, and already
+        # cleared by the hoisted gate above — ancestry is fixed at spawn, so
+        # anything the re-probe adds is younger than this shell and cannot be
+        # its ancestor, and a probe that fails to see a live ancestor refuses
+        # rather than proceeding.
+        pid=$(get_worker_pid)
         echo "Worker still running after bootout; killing PID $pid..."
-        kill "$pid" 2>/dev/null || true
+        kill $pid 2>/dev/null || true
         for i in {1..10}; do
             if ! is_worker_running; then break; fi
             sleep 1
         done
         if is_worker_running; then
-            kill -9 "$pid" 2>/dev/null || true
+            kill -9 $pid 2>/dev/null || true
         fi
     fi
     echo "Worker stopped and launchd auto-respawn disabled. Run worker-start or worker-enable to re-enable."
@@ -1130,6 +1147,15 @@ stop_email() {
     # Transient stop, mirroring worker-stop: if launchd owns the job, `bootout`
     # unloads it — but KeepAlive=true means launchd may respawn it. To keep the
     # email bridge down across the respawn timer, use `email-disable`.
+    #
+    # The refusal gate runs BEFORE the launchd teardown, as stop_worker does:
+    # `bootout` makes launchd SIGTERM the bridge, which would kill a hosted
+    # session mid-command before a later gate could refuse. On refusal
+    # nothing is torn down.
+    local pid=$(get_email_pid)
+    service_pid_refuse_self_kill "$pid" "email bridge" \
+        "launchctl kickstart -k gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
+
     if is_email_launchd_loaded; then
         echo "Stopping email bridge (via launchd)..."
         launchctl bootout "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
@@ -1140,18 +1166,13 @@ stop_email() {
         fi
     fi
 
-    local pid=$(get_email_pid)
-
     if [ -z "$pid" ]; then
         echo "Email bridge is not running"
         return 0
     fi
 
-    service_pid_refuse_self_kill "$pid" "email bridge" \
-        "launchctl kickstart -k gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
-
     echo "Stopping email bridge (PID: $pid)..."
-    kill "$pid" 2>/dev/null || true
+    kill $pid 2>/dev/null || true
 
     for i in {1..10}; do
         if ! is_email_running; then
@@ -1162,7 +1183,7 @@ stop_email() {
     done
 
     echo "Force killing email bridge..."
-    kill -9 "$pid" 2>/dev/null || true
+    kill -9 $pid 2>/dev/null || true
     echo "Email bridge stopped (forced)"
 }
 
@@ -1181,6 +1202,15 @@ disable_email() {
     # KeepAlive=true; pairing it with `launchctl disable` makes the disabled
     # state survive the respawn timer until `email-enable` or `email-start`
     # re-enables it.
+    #
+    # The refusal gate runs BEFORE any launchd teardown, as in disable_worker:
+    # `bootout` makes launchd SIGTERM the bridge, which would kill a hosted
+    # session mid-command before a later gate could refuse. On refusal nothing
+    # is torn down; the alternative advice is `launchctl disable`, which stops
+    # the respawn without signalling the live bridge.
+    local pid=$(get_email_pid)
+    service_pid_refuse_self_kill "$pid" "email bridge" \
+        "launchctl disable gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
     echo "Disabling email bridge (launchd will not respawn)..."
     launchctl disable "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
     launchctl bootout "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
@@ -1188,18 +1218,19 @@ disable_email() {
 
     if is_email_running; then
         # bootout failed or a foreground (nohup) bridge is running — fall back
-        # to PID kill so the operator's intent is honored.
-        local pid=$(get_email_pid)
-        service_pid_refuse_self_kill "$pid" "email bridge" \
-            "launchctl kickstart -k gui/$(id -u)/$EMAIL_PLIST_NAME" || return 1
+        # to PID kill so the operator's intent is honored. The fresh probe's
+        # list needs no second gate, for the same reason as disable_worker: any
+        # ancestor of this shell was cleared by the hoisted gate above, and
+        # nothing younger than this shell can be its ancestor.
+        pid=$(get_email_pid)
         echo "Email bridge still running after bootout; killing PID $pid..."
-        kill "$pid" 2>/dev/null || true
+        kill $pid 2>/dev/null || true
         for i in {1..10}; do
             if ! is_email_running; then break; fi
             sleep 1
         done
         if is_email_running; then
-            kill -9 "$pid" 2>/dev/null || true
+            kill -9 $pid 2>/dev/null || true
         fi
     fi
     echo "Email bridge stopped and launchd auto-respawn disabled. Run email-start or email-enable to re-enable."

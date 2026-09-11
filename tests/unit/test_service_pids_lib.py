@@ -169,21 +169,21 @@ def test_refuse_self_kill_fails_closed_when_the_lookup_cannot_run(tmp_path):
 def test_refuse_self_kill_fails_closed_on_a_generic_python_crash(tmp_path):
     """A generic crash's exit 1 must never be read as the CLI's "not an ancestor".
 
-    Pointing ``_SERVICE_PIDS_ROOT`` at an empty directory makes
-    ``-m tools.process_lookup`` fail to import (``ModuleNotFoundError``), which
-    CPython reports with exit code 1 — the same generic crash code an unhandled
-    exception produces anywhere, and NOT the CLI's dedicated exit code 3 for a
-    conclusive "definitively not an ancestor". Before the guard's exit codes
-    were split, this exact shape (a broken ``_SERVICE_PIDS_ROOT``, a partial
-    checkout, an import error) collided with the real "not an ancestor" answer
-    and made the guard fail OPEN. Regression test for that collision.
+    A stand-in interpreter that exits 1 drives the gate deterministically.
+    Exit 1 is the exact generic crash code the dedicated exit 3 exists to
+    disambiguate from — an import failure, an unhandled exception before
+    argparse even runs — so nothing about the environment can make this
+    scenario wobble. Reverting the guard to ``-eq 1`` fails this test from the
+    fail-open side: the crash is then read as "not an ancestor", the gate
+    proceeds, and the probe exits 9.
     """
-    empty_root = tmp_path / "empty_root"
-    empty_root.mkdir()
+    crash_python = tmp_path / "crash_python"
+    crash_python.write_text("#!/bin/sh\nexit 1\n")
+    crash_python.chmod(0o755)
     result = _run_under_decoy(
         tmp_path,
         'echo "DECOY $DECOY_PID"\n'
-        f'_SERVICE_PIDS_ROOT="{empty_root}"\n'
+        f'_SERVICE_PIDS_PYTHON="{crash_python}"\n'
         'service_pid_refuse_self_kill "$DECOY_PID" worker alt && exit 9\n'
         "exit 0\n",
     )
@@ -191,3 +191,34 @@ def test_refuse_self_kill_fails_closed_on_a_generic_python_crash(tmp_path):
         f"guard failed OPEN on a generic python crash exit code: {result.stdout!r}"
     )
     assert "REFUSING to stop worker" in result.stdout
+
+
+def test_refuse_self_kill_proceeds_on_a_definitive_non_ancestor(tmp_path):
+    """The other half of the exit-code split: a conclusive "no" must proceed.
+
+    An empty ``_SERVICE_PIDS_ROOT`` does not crash the lookup under the
+    standard runner — the venv's editable install resolves
+    ``tools.process_lookup`` regardless of PYTHONPATH — and for a PID that is
+    conclusively no one's ancestor (999999 sits above the macOS pid_max, so it
+    can never be in a process table) the CLI answers with its dedicated exit 3.
+    The gate must read exit 3 as "not an ancestor" and let the kill path
+    proceed: a guard that refused here would turn every kill of an unrelated
+    service into a refusal. Reverting to ``-eq 1`` fails this test from the
+    over-refusing side — exit 3 is then not the "no" code, and the gate
+    refuses. Crash exit 1 refuses, definitive exit 3 proceeds: that
+    discrimination is the entire point of the split.
+    """
+    empty_root = tmp_path / "empty_root"
+    empty_root.mkdir()
+    result = _run_under_decoy(
+        tmp_path,
+        'echo "DECOY $DECOY_PID"\n'
+        f'_SERVICE_PIDS_ROOT="{empty_root}"\n'
+        "service_pid_refuse_self_kill 999999 worker alt\n"
+        'echo "GATE_RC $?"\n'
+        "exit 0\n",
+    )
+    assert "GATE_RC 0" in result.stdout, (
+        f"gate refused a conclusive non-ancestor — exit 3 misread: {result.stdout!r}"
+    )
+    assert "REFUSING" not in result.stdout, result.stdout

@@ -29,9 +29,9 @@
 #         ancestor") so a probe failure can never escalate into signalling our
 #         own host service.
 #
-# Sourcing this file requires SCRIPT_DIR or PROJECT_DIR to already be set by the
-# sourcing script; both `valor-service.sh` and `start_bridge.sh` set them at the
-# top, before any probe runs.
+# Sourcing scripts set PROJECT_DIR (the checkout root) or SCRIPT_DIR (the
+# checkout's scripts/) before any probe runs; with neither set, the root
+# resolves from this file's own location (`<root>/scripts/lib/`).
 #
 # Test isolation: shell harnesses used to shadow `pgrep` on PATH so a sandboxed
 # run could not read — or `kill` against — the real host process table. They now
@@ -42,12 +42,24 @@
 # Resolve once, at source time, so every probe in a run agrees on an
 # interpreter. `tools/process_lookup.py` is stdlib-only by design, so a bare
 # `python3` is a correct fallback on a host whose virtualenv is missing or
-# half-built — which is exactly the state `start_bridge.sh` probes in.
-_SERVICE_PIDS_ROOT="${PROJECT_DIR:-$(dirname "${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}")}"
-if [ -x "$_SERVICE_PIDS_ROOT/.venv/bin/python" ]; then
-    _SERVICE_PIDS_PYTHON="$_SERVICE_PIDS_ROOT/.venv/bin/python"
+# half-built — which is exactly the state `start_bridge.sh` probes in. The
+# venv interpreter wins only after a one-shot health probe: a bare `-x` check
+# passes a present-but-broken venv, and a probe that cannot run reads a live
+# service as absent (#3265's symptom through a new cause). A broken
+# interpreter still fails CLOSED at the guard (no probe exit is 3), but
+# `stop_worker` printing "Worker is not running" against a live worker is its
+# own operational lie.
+if [ -n "${PROJECT_DIR:-}" ]; then
+    _SERVICE_PIDS_ROOT="$PROJECT_DIR"
+elif [ -n "${SCRIPT_DIR:-}" ]; then
+    _SERVICE_PIDS_ROOT="$(dirname "$SCRIPT_DIR")"
 else
-    _SERVICE_PIDS_PYTHON="$(command -v python3 || echo python3)"
+    _SERVICE_PIDS_ROOT="$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"
+fi
+_SERVICE_PIDS_PYTHON="$(command -v python3 || echo python3)"
+if [ -x "$_SERVICE_PIDS_ROOT/.venv/bin/python" ] \
+    && "$_SERVICE_PIDS_ROOT/.venv/bin/python" -c pass >/dev/null 2>&1; then
+    _SERVICE_PIDS_PYTHON="$_SERVICE_PIDS_ROOT/.venv/bin/python"
 fi
 
 # PYTHONPATH is pinned to the checkout that owns this file so a probe run from
