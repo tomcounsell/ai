@@ -11,13 +11,17 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 
 ## What exists today
 
-Lanes 1 and 2. The records, the settings, the evidence collection tick, the
-verifying artifact store, and three dashboard panels. The control journal, the
+Lanes 1, 2, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
+verifying artifact store, and three dashboard panels. Unit 3 (USD 50 per week for infrastructure) has a
+meter with an admission gate, a teardown policy, a generated charter section 2 progress report, two new
+evidence kinds (`spend_receipt` and `resource_probe`), and an artifact retention root outside the
+checkout. The cloud sandbox itself is decided and unbuilt; see
+[Improvement Cloud Execution](improvement-cloud-execution.md). The control journal, the
 research sessions, the evaluation harness, and releases arrive with lanes 3
 through 6, each as its own child issue.
 
 Read the capability matrix before believing anything is working. It grades each
-component on four separate axes — implemented, deployed, measured, effect — and
+component on four separate axes (implemented, deployed, measured, effect) and
 "implemented" supports exactly one claim: the code exists.
 
 ## Three layers
@@ -88,7 +92,7 @@ rather than ending it.
 | Adapter | Reads | Writes |
 |---|---|---|
 | `collect_corrections` | Inbound `AgentSession.chat_message_log` turns and Tom-sourced `Memory` rows, via `reflections.utilities.CORRECTION_PATTERNS` | One `correction` row per session that needed correcting, plus one per correcting memory |
-| `collect_inspirations` | `Memory` rows with `source="human"` — the links Tom sends | One `inspiration` row per memory, preserving the text, its reference, and its date |
+| `collect_inspirations` | `Memory` rows with `source="human"` (the links Tom sends) | One `inspiration` row per memory, preserving the text, its reference, and its date |
 | `collect_expectation_coverage` | Open outbound expectations on Jobs | One `owner_liveness` row per gone owner, plus one coverage row per tick |
 
 `expectation_reconciler` additionally records its shipped-work signal at the
@@ -107,7 +111,7 @@ this system exists. So the detector reads only fields something fills in:
 
 `AgentSession.log_path` is deliberately not read. Its only assigner,
 `bridge/session_transcript.py::start_transcript`, has no production caller, so a
-detector keyed on it can never fire — measured at 0 of 58 rows on the machine
+detector keyed on it can never fire (measured at 0 of 58 rows on the machine
 that owns `valor`. `tests/unit/test_improvement_evidence.py::TestDetectorInputsHaveProductionWriters`
 pins all three facts.
 
@@ -130,7 +134,7 @@ failure this system exists to prevent.
 ### Registration
 
 The tick is registered through `scripts/update/reflection_register.py::register_improvement_collect`,
-called from `scripts/update/run.py` at Step 1.6585 — **before** Step 1.66's
+called from `scripts/update/run.py` at Step 1.6585, **before** Step 1.66's
 vault→config copy, so the entry propagates into this machine's
 `config/reflections.yaml` on the same cycle. Registration writes the vault file
 `~/Desktop/Valor/reflections.yaml`; writing the config copy instead would be
@@ -143,7 +147,7 @@ owns the `valor` project schedules the tick.
 ### The kill switch
 
 `ImprovementSettings.enabled` (`IMPROVEMENT__ENABLED`) gates every write in
-`reflections/improvement_collect.py`. False — the default — means
+`reflections/improvement_collect.py`. False, the default, means
 `run_improvement_collect` returns `status="skipped"` and writes nothing, which
 is exactly what `config/settings.py` and `.env.example` promise it means. So an
 `/update` that registers the reflection does not, by itself, start a
@@ -151,7 +155,7 @@ is exactly what `config/settings.py` and `.env.example` promise it means. So an
 
 Registration is independent of the switch, so turning collection on is a single
 `IMPROVEMENT__ENABLED=true` in the vault `.env` on the machine that owns the
-project — no re-registration, and evidence starts accumulating from that moment.
+project with no re-registration, and evidence starts accumulating from that moment.
 Turning it back off is the same edit in reverse; no hand edit of the vault
 `reflections.yaml` is needed to stop the writes.
 
@@ -175,9 +179,10 @@ boundaries are settings rather than assumptions because charter §8 requires the
 disclosed: a reservation that resets on an undisclosed boundary cannot be
 audited against what was actually spent.
 
-**Nothing meters dollars today.** Both dollar figures are declared limits with
-no meter behind them; `tools/paid_inference_meter.py` arrives with lane 3.
-Uncertain metering is not zero cost.
+**Unit 3 has a meter; unit 2 awaits lane 3.** `tools/infrastructure_budget.py` admits and refuses
+against `weekly_infrastructure_usd` (see Unit-3 metering and teardown below). The paid-inference pool
+stays a declared limit with no meter behind it; `tools/paid_inference_meter.py` arrives with lane 3.
+Uncertain metering is not zero cost: missing metering settles at the forecast, never at zero.
 
 **There is no fixed allocation across areas.** Ranking is by expected
 contribution to the north star (charter §3), recorded per case as
@@ -192,6 +197,53 @@ with its evidence, shown on the dashboard as an assumption rather than a fact.
 One message class is permitted, the evidence-backed charter amendment request,
 and it arrives with lane 3. A Verification row fails the build if a routine
 question path reappears.
+
+## Unit-3 metering and teardown
+
+`tools/infrastructure_budget.py` is unit 3's meter and admission gate. It reads three settings and only
+three: `weekly_infrastructure_usd`, `budget_week_start`, and `budget_day_boundary`. It never reads the
+paid-inference pool, so charter section 8's no-transfer rule holds by construction.
+
+**Window computation.** `current_window` derives `(window_key, window_start, window_end)` from the
+moment, the week-start convention (Monday 00:00 UTC by default, Sunday 00:00 UTC when
+`budget_week_start` is `"sunday"`), and a 7-day length. The key derives from the window start with a
+`-sun` suffix under the Sunday convention, so the two conventions never share a counter. The forecast
+horizon is the remainder of the current window plus the whole next window, prorated from the resource's
+weekly rate at its duty cycle. Every admission decision discloses the window key, both boundaries, the
+forecast, and remaining headroom, and refusals land as ledger rows, so "no forecastable rate" and "week
+exhausted" stay distinguishable states.
+
+**The window counter lives outside Popoto.** Admission reserves against the plain Redis string key
+`improvement:budget:unit3:{window_key}` with one Lua `EVAL` (reserve-then-check in a single atomic
+step). The placement is deliberate: Popoto offers no compare-and-set, so a counter modeled in the ORM
+could not be reserved atomically, and a non-Popoto key sits outside the "never use raw Redis on
+Popoto-managed keys" rule. Decision records (reservations, refusals, releases, settlements) are
+`InfrastructureReservation` Popoto rows read and written through the ORM; only the counter is raw, and
+only because atomicity requires it. Every reservation has a paired, idempotent release. The window key
+expires past the audit horizon (the 30-day evidence TTL plus one window of margin), never at the window
+length, since a counter expiring mid-window would reset headroom to full. When lane 3 lands, the counter
+and its scripts migrate into its control namespace as a named migration.
+
+**Admission refuses what it cannot forecast.** A `None`, empty, non-numeric, negative, NaN, or infinite
+rate is refused, never defaulted to zero. A credit with no expiry covers the current window only. A
+resource whose provider reports nothing settles at its forecast, with a logged warning. The trial's
+live-window stop reads `max(settled, forecast)`, since a per-second metered provider settles after the
+fact and a stop keyed on settled spend alone fires after the money is gone.
+
+**Teardown ladder.** A budget-exhausted window closes admission, classifies each running resource as
+`trial` (an open experiment still gathers evidence from it, or a claimed-and-unfinished session runs on
+it) or `standing`, tears down `standing` resources at window end, and lets `trial` resources run to a
+bounded horizon with the continuation booked as a forecast overrun against the next window before it
+accrues. Every teardown is gated on a verified evidence export that fails closed: an unverified export
+leaves the resource running and writes an escalation `spend_receipt` row. A teardown that cannot be
+confirmed is treated as still running and still charging.
+
+**Operating report.** `tools/improvement_operating_report.py` generates charter section 2's five answers
+from records: which sessions ran in cloud sandboxes, whether the loop continues unattended, what
+resources sustain it, what they cost against unit 3 with both window boundaries disclosed, and what
+still prevents mostly-cloud operation. Each answer degrades independently, and the fifth is assembled
+from recorded assumptions, `unknown` probe entries, and refused acquisitions, so it stays non-empty
+while any of those inputs is non-empty. Sandbox count, uptime, and token volume are deliberately absent.
 
 ## Charter
 
@@ -301,9 +353,13 @@ weak evidence, it is no evidence. `exists()` is overridden to match, so
 `exists()` returning True still implies `load()` succeeds.
 
 Improvement artifacts live under their own retention root
-(`POPOTO_IMPROVEMENT_CONTENT_PATH`, defaulting to `data/improvement_content`) so
+(`POPOTO_IMPROVEMENT_CONTENT_PATH`, defaulting to `~/.popoto/improvement_content`) so
 retention and export policy for evaluation evidence can differ from ordinary
-content without a path heuristic.
+content without a path heuristic. The default sits outside any repo checkout, beside the shared
+popoto content directory, so an image rebuild cannot destroy gathered artifacts. The archive path is
+`.versions/{prefix}/{hash}{ext}` under the root. Lane 3's future `valor-improve export` and `import`
+write against this destination contract; see [Improvement Cloud Execution](improvement-cloud-execution.md)
+for the sandbox-local Redis topology and the export path behind it.
 
 ## Dashboard
 
@@ -349,11 +405,11 @@ Once lane 3 lands, the procedure is:
 prints every paused head, every stale intent, and every outstanding reservation,
 so you see the blast radius before touching anything.
 
-- **Every case paused at once, `doctor` cannot read the namespace** — that is a
+- **Every case paused at once, `doctor` cannot read the namespace**. That is a
   Redis or connectivity problem, not a wedged case. Fix the substrate. The
   controller pauses and reports rather than falling back to projection state,
   by design: a decision made from a stale projection is worse than no decision.
-- **One case paused, others progressing** — that case is wedged. Read its head
+- **One case paused, others progressing**. That case is wedged. Read its head
   and its journal tail before resuming; the journal is the record of what it was
   trying to do.
 
@@ -376,7 +432,7 @@ lease-derived staleness threshold, CAS-transitions them to
 `reconciliation_required`, releases the reservation, and calls the existing
 `finalize_session()` to force the orphaned row terminal. It never mints a second
 identity, and it reads intents rather than a status map, so it does not depend
-on `RECOVERY_OWNERSHIP` — which is explicitly an informational constant, not
+on `RECOVERY_OWNERSHIP`, which is explicitly an informational constant, not
 used for runtime routing.
 
 ## Dependency on #3183
@@ -420,9 +476,9 @@ evidence.
 
 The plan's yardstick, restated so nobody grades on a curve:
 
-1. **Loop operational** — one complete autonomous investigation-to-measurement cycle.
-2. **System improvement demonstrated** — held-out and production gains over incumbent.
-3. **Recursive improvement demonstrated** — a changed research process produces
+1. **Loop operational**: one complete autonomous investigation-to-measurement cycle.
+2. **System improvement demonstrated**: held-out and production gains over incumbent.
+3. **Recursive improvement demonstrated**: a changed research process produces
    greater validated gains per comparable total budget on fresh opportunities.
 
 Repeated edits satisfy none of the latter two. This is system-level recursive
@@ -431,8 +487,9 @@ unbounded acceleration are out of scope.
 
 ## See also
 
-- [Improvement Evaluation](improvement-evaluation.md) — contract fields, manifest, judge envelope, statistics, holdout policy
-- [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md) — the full design
-- [Capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md) — what is implemented, deployed, measured, and unknown
-- [Adding Reflection Tasks](adding-reflection-tasks.md) — how the collection tick is registered
-- [Redis Models](redis-models.md) — the schema-gate rules the eight records follow
+- [Improvement Evaluation](improvement-evaluation.md): contract fields, manifest, judge envelope, statistics, holdout policy
+- [Improvement Cloud Execution](improvement-cloud-execution.md): provider decision, auth verdict, sandbox topology, host updates, evidence path
+- [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md): the full design
+- [Capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md): what is implemented, deployed, measured, and unknown
+- [Adding Reflection Tasks](adding-reflection-tasks.md): how the collection tick is registered
+- [Redis Models](redis-models.md): the schema-gate rules the eight records follow
