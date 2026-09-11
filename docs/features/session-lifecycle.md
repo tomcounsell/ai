@@ -148,6 +148,7 @@ so previously-stranded sessions are back in `pending` — one session per key.
 - `bridge/session_transcript.py` — transcript end → terminal status
 - `bridge/telegram_bridge.py` — intake-classifier acknowledgment → completed
 - `models/session_lifecycle.py` — `_transition_parent` helper itself, so every caller of `_transition_parent` gets the catch for free
+- `agent/agent_session_queue.py:_worker_loop` — per-session completion `finally` (`_complete_agent_session` call), plus an already-terminal skip before the write is even attempted (#3253)
 
 The `agent/agent_session_queue.py:cancel_agent_session` site does **not** need a wrapper — its pre-condition (`session.status != "pending"` early-return) guarantees a non-terminal status, and there is no race window before the `finalize_session()` call.
 
