@@ -1126,6 +1126,25 @@ def evaluate_guards(
 # ---------------------------------------------------------------------------
 
 
+def _plan_stage_stood_down(stage_states: dict, meta: dict) -> bool:
+    """Return True when the lane has moved past the plan stage (#3249).
+
+    One definition for the step-aside that rows 1, 2, 2c and 3 were each
+    supposed to carry and hand-copied inconsistently. Two signals:
+
+    - ``pr_number`` set — a PR-stage lane has no plan-stage question left to
+      answer; rows 7-10 own that state.
+    - ``BUILD`` at ``in_progress`` or ``completed`` — the plan was accepted when
+      the build was dispatched. Row 5 (``_rule_branch_exists_no_pr``) owns the
+      pre-PR resume: its predicate is ``BUILD == in_progress OR
+      context['branch_exists'] is True``, so the branch half answers regardless
+      of BUILD status. Nothing is stranded.
+    """
+    if meta.get("pr_number"):
+        return True
+    return stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED)
+
+
 def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     """No plan exists."""
     # If an open PR exists, a plan must exist too — defer to PR-stage rows.
