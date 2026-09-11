@@ -720,7 +720,9 @@ class SessionRunner:
             # wait_for is only the backstop for a failed watcher, so it is
             # derived from the LARGEST deadline the watcher can fire on.
             turn_timeout_s=(
-                self._absolute_timeout_s + self._term_grace_s + DRIVER_BACKSTOP_MARGIN_S
+                max(self._idle_timeout_s, self._absolute_timeout_s)
+                + self._term_grace_s
+                + DRIVER_BACKSTOP_MARGIN_S
             ),
             harness_fn=harness_fn,
             on_spawn=self._on_turn_spawn,
