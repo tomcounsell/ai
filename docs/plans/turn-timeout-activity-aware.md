@@ -351,10 +351,63 @@ Open a `chore` issue for migrating the `SESSION_RUNNER_*` constant family into `
 
 ## Documentation
 
-- `docs/features/headless-session-runner.md` - replace the single-deadline description with the two-deadline model: what each signal observes, why the parent stream alone is insufficient (the 27% figure), and the UNKNOWN contract on an absent marker.
-- `docs/features/config-timeout-catalog.md` - add `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S` and `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S`; correct the entry for the removed `SESSION_RUNNER_ENG_TURN_TIMEOUT_S`.
-- `agent/session_runner/liveness.py` - `tool_activity_ts`'s docstring names `agent_session_queue._session_progress_ts` as "its only production consumer". Add the watcher as the second.
-- `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old split as shipped history. Leave it; do not rewrite history.
+- [ ] `docs/features/headless-session-runner.md` - replace the single-deadline description with the two-deadline model: what each signal observes, why the parent stream alone is insufficient (the 27% figure), and the UNKNOWN contract on an absent marker.
+- [ ] `docs/features/config-timeout-catalog.md` - add `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S` and `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S`; correct the entry for the removed `SESSION_RUNNER_ENG_TURN_TIMEOUT_S`.
+- [ ] `agent/session_runner/liveness.py` - `tool_activity_ts`'s docstring names `agent_session_queue._session_progress_ts` as "its only production consumer". Add the watcher as the second.
+- [ ] `docs/archive/plans-completed/headless-runner-zombie-liveness.md` records the old split as shipped history. Leave it; do not rewrite history.
+
+## Update System
+
+**No Popoto model changes, so no migration is required.** This plan adds two module-level constants to `agent/session_runner/runner.py` and changes in-memory turn state (`self._last_activity_mono`, `self._idle_timeout_s`, `self._absolute_timeout_s`). None of these are `AgentSession` fields or any other Popoto-persisted attribute.
+
+Explicitly verified against the fields this work reads:
+
+- `agent_session.last_stdout_at` - an existing Popoto field, **read and written exactly as today** by `_stamp_stdout_liveness`. This plan adds no field and changes no write path.
+- `tool_activity_ts()` reads plain files under the hook-edge directory, not Redis and not the ORM.
+- The `#3270` dedupe key `timeout-notice-sent:{session_id}:{run_id}` is a plain Redis string, deliberately not an AgentSession field, and is untouched.
+
+Therefore: **no entry in `scripts/update/migrations.py`, no `MIGRATIONS` registration.** No raw Redis operations are introduced; the only Redis touch in the diff's blast radius is the existing cooldown-gated `save(update_fields=["last_stdout_at"])`, which goes through the ORM.
+
+Deployment note: this changes worker/runner code, so after merge the standard `./scripts/valor-service.sh restart` applies (verify with `tail -5 logs/bridge.log` showing "Connected to Telegram"). No config or secret changes; the two new env keys are optional overrides with in-code defaults.
+
+## Agent Integration
+
+**No new Python tool is introduced, so there is no MCP server exposure to add.**
+
+This work changes the internals of an existing runtime component (`SessionRunner._preempt_watcher`) and consumes an existing internal function (`agent.session_runner.liveness.tool_activity_ts`). Neither is a user-invocable tool, neither belongs in `mcp_servers/`, and nothing here should be reachable from an agent's toolbelt - the turn deadline is runner policy and must not be agent-steerable.
+
+Adjacent surfaces checked and deliberately left alone:
+
+- `mcp_servers/codex_dev_server.py` has its own `settings.codex.turn_timeout_s` for the nested Codex executor. Separate budget, separate lease TTL bound, out of scope.
+- `sdlc-tool` and the `tools.*` CLI family gain no new subcommand.
+- `tools/session_progress.py` already exposes progress reasoning to agents and is **not** modified here - notably, this plan does not relax its CPU-inference ban.
+
+## Test Impact
+
+| Test | Disposition | Why |
+|---|---|---|
+| `tests/unit/session_runner/test_runner_liveness.py::test_turn_timeout_for_role_table` | **REPLACE** | `turn_timeout_for` is deleted. Replaced by a `deadlines_for` role table asserting both idle and absolute values per session type. |
+| `tests/unit/session_runner/test_runner_liveness.py::test_runner_defaults_to_role_aware_timeout` | **UPDATE** | Assert the runner resolves both deadlines from the role, not one. |
+| `tests/unit/session_runner/test_runner_liveness.py::test_explicit_turn_timeout_overrides_role_default` | **UPDATE** | Follows whichever ctor-seam spelling Task 2 settles on. |
+| `tests/unit/session_runner/test_runner_liveness.py::test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate` | **UPDATE** | Same intent (the never-started liveness gate must not be what catches it), new mechanism: it is now the **idle** deadline that catches it. This is the most load-bearing rework in the plan. |
+| `tests/unit/session_runner/test_runner_turns.py::test_role_aware_turn_timeout` | **REPLACE** | Asserts `turn_timeout_for("teammate") < turn_timeout_for("eng")`; rewrite against `deadlines_for`. |
+| `tests/unit/session_runner/test_runner_preempt.py::test_timeout_expiry_is_graceful_preempt_not_error` | **UPDATE** | Only the asserted delivery text changes. Every other assertion (SIGTERM sent, `exit_reason == "turn_timeout"`, one `runner_turn` event with `turn_end_source == "timeout"`) must survive unchanged. |
+| `tests/unit/session_runner/test_runner_preempt.py::test_timeout_notice_delivered_once_across_two_runs_of_one_row` | **UPDATE** | #3270 dedupe must still hold; only the message text changes. |
+| `tests/unit/session_runner/test_runner_preempt.py::test_timeout_notice_redelivered_for_a_later_unrelated_request` | **UPDATE** | Same. |
+| `tests/unit/session_runner/test_runner_preempt.py` kill/reap tests (`test_sigterm_then_sigkill_escalation`, `test_kill_before_spawn_cancels_task_cooperatively`, `test_external_cancel_reaps_turn_process_group`, `test_reap_turn_group_unkillable_group_reports_not_confirmed`) | **KEEP UNCHANGED** | The reap path is explicitly out of scope. If any of these needs editing, that is a signal the diff has grown beyond the plan. |
+| `tests/unit/test_session_executor_runner_dispatch.py` (rows at `:513`, `:556`, `:648`) | **KEEP UNCHANGED** | `turn_timeout` still maps to `status="failed"`. Running these unmodified is the proof of that decision. |
+| `tests/unit/session_runner/test_exit_reason.py` | **KEEP UNCHANGED** | The `ExitReason` tuple is not modified. |
+| `tests/unit/session_runner/test_headless_role_driver.py::` driver timeout test (`:226`) | **KEEP UNCHANGED** | `HEADLESS_TURN_TIMEOUT` semantics are unchanged; only the value fed to the driver changes. |
+| `tests/unit/test_session_progress.py:410` (CPU-ban enforcement) | **KEEP UNCHANGED** | Must stay green as evidence the No-Go held. |
+| **NEW** `test_streaming_turn_survives_past_old_cap` | **ADD** | Stream events keep arriving; no preempt past 7200s simulated. |
+| **NEW** `test_nested_subagent_silence_survives_past_old_cap` | **ADD** | Parent stream silent, `tool_activity_ts` advancing. **The regression test for the reported bug. Must be proven RED on the pre-fix SHA (Task 8).** |
+| **NEW** `test_fully_silent_turn_preempts_at_idle_deadline` | **ADD** | Neither signal advances; preempt fires at the idle deadline and not before. |
+| **NEW** `test_absent_tool_activity_marker_never_shortens_deadline` | **ADD** | The UNKNOWN contract. |
+| **NEW** `test_absolute_ceiling_preempts_endless_streamer` | **ADD** | Both signals advance forever. |
+| **NEW** `test_driver_backstop_exceeds_largest_watcher_deadline` | **ADD** | Assert the relation, not the arithmetic. |
+| **NEW** `test_future_stamped_marker_reads_as_just_active` | **ADD** | Clock-skew guard. |
+
+Execution: narrow scope only, via `scripts/pytest-clean.sh`, naming these files explicitly. Per `CLAUDE.md`, a full `tests/unit/` run takes about 20 minutes and would collide with other lanes' Redis state.
 
 ## Open Questions
 
