@@ -110,7 +110,8 @@ regression:
 `filter` / `session` / `gate` on word boundaries so `possession` does not
 false-positive).
 
-Suppression is not used, because it reintroduces the swallowed-reply class. The gate is fail-open for delivery: an evaluation error delivers the
+Suppression is not used, because it reintroduces the swallowed-reply class.
+The gate is fail-open for delivery: an evaluation error delivers the
 original text rather than swallowing the reply. This route always evaluates
 via the regex heuristic — it never reaches the LLM layer the drafter's main
 path now uses, because there is no agent left to consume an LLM-derived
