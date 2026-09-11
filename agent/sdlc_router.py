@@ -1147,8 +1147,10 @@ def _plan_stage_stood_down(stage_states: dict, meta: dict) -> bool:
 
 def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     """No plan exists."""
-    # If an open PR exists, a plan must exist too — defer to PR-stage rows.
-    if meta.get("pr_number"):
+    # Plan-stage stand-down (#3249): a lane that has left the plan stage has no
+    # "no plan" question to answer — _plan_stage_stood_down owns the check;
+    # rows 5/7-10 own the state.
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     plan_status = stage_states.get("PLAN")
     # "No plan exists" is the absence of a plan file OR a pending PLAN stage.
@@ -1185,7 +1187,14 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
     - ``PLAN == "ready"``     → only counts if ``meta["plan_exists"]`` is True;
       without evidence, the state machine may have pre-advanced to "ready" before
       the plan doc was written (bootstrap race).
+
+    Alone in the plan-stage family this row historically carried no step-aside
+    at all (#3249), so it kept dispatching ``/do-plan-critique`` on a lane with
+    an open PR or a running BUILD. It now stands down via
+    ``_plan_stage_stood_down`` like every sibling.
     """
+    if _plan_stage_stood_down(stage_states, meta):
+        return False
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
     if critique_status not in (None, "pending", "ready"):
@@ -1213,11 +1222,13 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
     ``_rule_review_has_findings``.
 
-    Open-PR step-aside (#1932 gap b1): once a PR exists, a NEEDS REVISION
-    critique verdict must never route back to ``/do-plan`` — this row steps
-    aside and lets row 7 / G3 own PR-stage routing instead.
+    Plan-stage stand-down (#1932 gap b1, #3249): once a PR exists — or the lane
+    has otherwise left the plan stage — a NEEDS REVISION critique verdict must
+    never route back to ``/do-plan``. This row stands down via
+    ``_plan_stage_stood_down`` and lets row 7 / G3 (or row 5, while the build
+    runs) own the routing instead.
     """
-    if meta.get("pr_number"):
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     if _critique_verdict_is_stale(stage_states, meta):
         return False
@@ -1672,23 +1683,21 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
       here, and G4 counts consecutive same-skill dispatches while this loop
       alternates two skills.
 
-    **Stage stand-downs (#3237).** The loop bound terminates a lane that is
-    still in the plan stage; it says nothing about a lane that has already left
-    it. Two stand-downs, mirroring every sibling plan-stage row (1, 3, 4a, 4b,
-    4c), keep this row from answering for a lane whose real state has moved on:
+    **Stage stand-downs (#3237, folded into #3249's ``_plan_stage_stood_down``).**
+    The loop bound terminates a lane that is still in the plan stage; it says
+    nothing about a lane that has already left it. This row stands down via the
+    shared helper like every sibling plan-stage row, so it never answers for a
+    lane whose real state has moved on: a PR-stage lane has no plan-stage
+    verdict worth refreshing, and once BUILD has started the plan was accepted
+    when the build was dispatched, so the concern loop is moot. Without the
+    BUILD half, a lane with an armed concern gate and a BUILD interrupted
+    before it opened its PR had NO exit from the plan loop: row 4c is gated on
+    ``build_status in (None, pending, ready)`` so it cannot answer, and row 5
+    ("Build must create the PR — resume build"), which holds the right answer,
+    is evaluated after this row. Observed on lane #3195 / PR #3222, which
+    escaped only by overriding ``MAX_CONCERN_RECRITIQUE_ROUNDS``.
 
-    - ``pr_number`` set — a PR-stage lane has no plan-stage verdict worth
-      refreshing; rows 7-10 own that state.
-    - ``BUILD`` at ``in_progress`` or ``completed`` — the plan was accepted when
-      the build was dispatched, so the concern loop is moot. Without this, a
-      lane with an armed concern gate and a BUILD interrupted before it opened
-      its PR had NO exit from the plan loop: row 4c is gated on ``build_status
-      in (None, pending, ready)`` so it cannot answer, and row 5 ("Build must
-      create the PR — resume build"), which holds the right answer, is
-      evaluated after this row. Observed on lane #3195 / PR #3222, which
-      escaped only by overriding ``MAX_CONCERN_RECRITIQUE_ROUNDS``.
-
-    Nothing is stranded by either stand-down. The PR-stage rows own the post-PR
+    Nothing is stranded by the stand-down. The PR-stage rows own the post-PR
     state, and row 5 (``_rule_branch_exists_no_pr``) owns the pre-PR one — its
     predicate is ``BUILD == in_progress OR context["branch_exists"] is True``,
     so the branch half answers regardless of BUILD status. A BUILD cannot reach
@@ -1697,9 +1706,7 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     build. ``Blocked('no matching dispatch rule')`` remains only for the
     no-live-branch subcase, where there is nothing left to resume.
     """
-    if meta.get("pr_number"):
-        return False
-    if stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED):
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     if not _critique_verdict_is_stale(stage_states, meta):
         return False
@@ -1720,7 +1727,8 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     disjoint.
 
     Narrowly gated so it cannot fire when:
-      - a PR exists (defer to G3 / PR-stage rows 7-10)
+      - the lane has left the plan stage (``_plan_stage_stood_down``; defer to
+        G3 / PR-stage rows 7-10, or to row 5 while the build runs)
       - any critique verdict IS recorded (let rows 2b/3/4a handle it)
       - CRITIQUE is not in_progress (None/pending → row 2; completed/failed → other rows)
 
@@ -1728,7 +1736,7 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     re-dispatches and escalates to a human. G2 does not bound it (it keys off
     critique_cycle_count, which stays 0 with no recorded verdict).
     """
-    if meta.get("pr_number"):
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     if stage_states.get("CRITIQUE") != STATUS_IN_PROGRESS:
         return False
