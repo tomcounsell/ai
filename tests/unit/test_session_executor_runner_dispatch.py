@@ -1092,3 +1092,67 @@ class TestSyntheticSlugWorktreePreservation:
             f"exit_reason={exit_reason!r}: expected worktree on disk="
             f"{expect_worktree_on_disk}, got {os.path.isdir(wt_path)}"
         )
+
+    @pytest.mark.asyncio
+    async def test_stale_persisted_turn_timeout_does_not_skip_cleanup(self, redis_test_db):
+        """A PREVIOUS run's ``turn_timeout`` must not suppress this run's cleanup.
+
+        ``AgentSession.exit_reason`` is persisted and was only ever written at
+        the END of a run, so a re-run of the same row arrived from Redis still
+        carrying the prior run's value. Any consumer that reads it before this
+        run writes its own -- the synthetic-slug cleanup skip, and with it the
+        #3176 pre-finalize guard it gates -- would then act on the outcome of a
+        run that already finished. The executor clears the field at run start,
+        making it run-scoped.
+
+        RED without the run-start reset: the row's stale ``"turn_timeout"``
+        takes the preserve branch and the worktree survives a run that never
+        timed out.
+        """
+        import os
+        import re
+        import shutil
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        # The prior run's outcome, durable on the row before this run starts.
+        session.exit_reason = "turn_timeout"
+        session.save(update_fields=["status", "exit_reason"])
+
+        slug = f"dev-{session.agent_session_id[:8]}"
+        assert re.match(r"^dev-[0-9a-f]{8}$", slug)
+        repo_root = tempfile.mkdtemp()
+        wt_path = os.path.join(repo_root, ".worktrees", slug)
+        os.makedirs(wt_path, exist_ok=True)
+
+        def _fake_cleanup_after_merge(root, cleaned_slug):
+            shutil.rmtree(os.path.join(str(root), ".worktrees", cleaned_slug), ignore_errors=True)
+            return {"slug": cleaned_slug, "worktree_removed": True, "errors": []}
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        # This run reports NO exit reason -- the raising/cancelled shape, where
+        # ``publish_exit_summary`` never lands.
+        FakeSessionRunner.on_run = staticmethod(lambda fake_runner: None)
+
+        with (
+            _patch_runner(),
+            patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+            patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+            patch("agent.worktree_manager.resolve_main_repo_root", return_value=repo_root),
+            patch("agent.worktree_manager.cleanup_after_merge", _fake_cleanup_after_merge),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert not os.path.isdir(wt_path), (
+            "a stale persisted exit_reason from a previous run suppressed this "
+            "run's cleanup -- exit_reason is not run-scoped"
+        )

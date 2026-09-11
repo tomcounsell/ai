@@ -321,8 +321,9 @@ async def test_driver_subprocess_exception_classified_not_raised(tmp_path):
 def _make_stdout_liveness_runner(session_id: str, *, harness_fn=None, **runner_kwargs):
     """Build a real SessionRunner via _build_driver (no injected `driver=`),
     so the wiring under test (the runner's own on_stdout_event/on_init
-    adapters) actually runs. Extra ``runner_kwargs`` (e.g. ``turn_timeout_s``,
-    ``term_grace_s``) pass straight through to ``SessionRunner``."""
+    adapters) actually runs. Extra ``runner_kwargs`` (e.g. ``idle_timeout_s``,
+    ``absolute_timeout_s``, ``term_grace_s``) pass straight through to
+    ``SessionRunner``."""
     session = FakeSession()
     session.session_id = session_id
 
