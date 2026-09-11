@@ -119,6 +119,23 @@ parameter (milliseconds, harness cap 600000):
 - All four `TOOL_TIMEOUT_*` knobs follow the raw-env convention (not
   `TIMEOUTS__*`); per the criterion below they remain out of `TimeoutSettings`.
 
+## Turn-deadline knobs (session runner)
+
+Raw-env knobs (consumed by `agent/session_runner/runner.py` module
+constants, not `TimeoutSettings` — read once at import, following the file's
+established provisional-constant convention: named, env-overridable, with a
+grain-of-salt comment naming the derivation):
+
+| Knob | Default | Used by |
+|------|---------|---------|
+| `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S` | 2400s (40min) | `ENG_IDLE_TIMEOUT_S`. The operative deadline for PM/eng turns: `_preempt_watcher` preempts a turn after this long with no observed activity on either signal (in-memory stream stamp or the hook-edge `tool_activity_ts` marker). Sized at ~3.6x the tightest external per-tool wedge ceiling (`TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC = 660s`, `agent/session_health.py`). |
+| `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S` | 21600s (6h) | `ENG_ABSOLUTE_TIMEOUT_S`. A runaway backstop for PM/eng turns: bounds total turn wall-clock regardless of activity, deliberately far above the largest observed healthy turn (8549s) so it is a last resort rather than the operative limit. |
+| `SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S` | 900s | `TEAMMATE_TURN_TIMEOUT_S`. Teammate turns resolve BOTH their idle deadline and their absolute ceiling to this single value — teammate sessions are conversational and never host a foreground build, so one tight budget serves both roles. |
+
+See [`docs/features/headless-session-runner.md`](headless-session-runner.md)
+§ "Activity-aware turn deadline" for the full two-deadline model, both
+activity signals, and the UNKNOWN contract on a missing marker.
+
 ## Update-restart drain knobs
 
 Raw-env knobs (consumed by `scripts/remote-update.sh` — a bash consumer, so
