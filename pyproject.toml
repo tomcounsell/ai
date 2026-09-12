@@ -9,7 +9,7 @@ dependencies = [
     # anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. Gated by AUTO_BUMP_SETS in
     # scripts/update/deps.py; see docs/features/llm-stack-compat-gate.md.
     "anthropic==1.5.0",
-    "pydantic-ai-slim[anthropic]==2.42.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
+    "pydantic-ai-slim[anthropic]==2.43.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
     "claude-agent-sdk==0.2.152", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
