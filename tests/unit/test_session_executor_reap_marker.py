@@ -96,18 +96,27 @@ class TestCleanupGating:
         # The skip and the delete are mutually exclusive branches.
         assert "SKIPPING worktree cleanup" in src
 
-    def test_finally_block_carries_pre_finalize_guard(self):
-        """Source guard (#3176): a pre-finalize guard must sit ahead of the
-        cleanup_after_merge call so a still-`running` row (every raising or
-        cancelled exit) does not permanently block its own removal."""
+    def test_finally_block_carries_exit_finalize_guard(self):
+        """Source guard (#3176, #3209): the exit finalize guard must sit in the
+        `finally` AHEAD of the cleanup_after_merge call, so a raising exit's
+        still-`running` row does not permanently block its own removal."""
         import inspect
 
         src = inspect.getsource(session_executor)
-        assert "synthetic-cleanup pre-finalize" in src
-        assert '_auth.status == "running"' in src
-        # The guard's failure mode must resolve `task` defensively — a raise
-        # before `task = BackgroundTask(...)` must not raise NameError here.
-        assert 'locals().get("task")' in src
+        # Anchor on the call site's unique `reason=`, not on the bare helper
+        # name — that also matches the `def`, which trivially precedes
+        # everything and would make this assertion vacuous.
+        guard_pos = src.index('reason="executor exit finalize guard (#3209)"')
+        cleanup_pos = src.index("cleanup_after_merge(_repo_for_cleanup")
+        assert guard_pos < cleanup_pos, (
+            "the finalize guard must run before the synthetic-slug cleanup, "
+            "or the busy check refuses the removal permanently"
+        )
+        assert 'auth.status != "running"' in src
+        # `task` is pre-assigned before the `try`, so a raise before
+        # `task = BackgroundTask(...)` reaches the guard as a plain name
+        # rather than a NameError.
+        assert "\n    task = None\n" in src
 
     def test_finally_block_logs_blocked_cleanup_loudly(self):
         """Source guard (#3176): a refused cleanup (blocked_by_session) must
