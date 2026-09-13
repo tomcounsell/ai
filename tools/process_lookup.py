@@ -43,6 +43,17 @@ responsible for making explicitly — including which way the guard should fail
 when the process tree cannot be read, which is what that function's
 ``on_unreadable`` keyword selects.
 
+Use from shell
+--------------
+
+Shell probes reach this module through ``scripts/lib/service_pids.sh``, which
+runs it as ``python -m tools.process_lookup``. The CLI mirrors ``pgrep``'s
+contract closely enough to be a drop-in for a liveness probe — matching PIDs on
+stdout one per line, exit 0 when at least one matched and 1 when none did — so
+a converted call site keeps its existing ``if ...; then`` shape. Everything
+here is stdlib-only, so the CLI runs under a bare ``python3`` on a host whose
+virtualenv is missing or half-built.
+
 Known limitation
 ----------------
 
@@ -57,7 +68,12 @@ from __future__ import annotations
 import os
 import subprocess
 
-__all__ = ["find_python_service_pids", "is_own_ancestor", "list_processes"]
+__all__ = [
+    "find_command_pids",
+    "find_python_service_pids",
+    "is_own_ancestor",
+    "list_processes",
+]
 
 # Bounded so a wedged `ps` can never hang a watchdog tick or an update run.
 _PS_TIMEOUT_SECONDS = 10
@@ -297,3 +313,94 @@ def find_python_service_pids(
         if script_suffix is not None and _script_matches(found_script, script_suffix):
             pids.append(pid)
     return sorted(pids)
+
+
+def find_command_pids(substring: str) -> list[int]:
+    """PIDs of running processes whose command line contains ``substring``.
+
+    The unstructured counterpart to :func:`find_python_service_pids`, for
+    targets that are not CPython invocations and so have no argv grammar to
+    parse — ``scripts/update/verify.py``'s ``Claude.app`` probe is the only
+    one. Matching is a plain substring test against the joined argv, i.e. the
+    same weak contract ``pgrep -f`` offered, minus the ancestor exclusion. It
+    is deliberately NOT used for the Python services, where a substring match
+    reports ``python -m ruff check bridge/telegram_bridge.py`` as the bridge.
+
+    The caller's own process is excluded so a probe whose own argv mentions the
+    pattern cannot match itself. Ancestors are **not** excluded — that is the
+    entire defect this module exists to close.
+
+    Returns PIDs sorted ascending. Returns ``[]`` when nothing matches or the
+    process table cannot be read; never raises.
+    """
+    if not substring:
+        raise ValueError("find_command_pids requires a non-empty substring")
+
+    self_pid = os.getpid()
+    return sorted(
+        pid for pid, argv in list_processes() if pid != self_pid and substring in " ".join(argv)
+    )
+
+
+def _main(argv: list[str]) -> int:
+    """``python -m tools.process_lookup`` — the entry point shell probes use.
+
+    Prints matching PIDs one per line and exits 0; exits 1 when nothing matched,
+    mirroring ``pgrep`` so a converted shell call site keeps its existing shape.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m tools.process_lookup",
+        description="Ancestor-safe replacement for `pgrep -f` liveness probes.",
+    )
+    parser.add_argument("--module", help="match `python -m <module>`")
+    parser.add_argument("--script-suffix", help="match `python <path>` where <path> ends with this")
+    parser.add_argument(
+        "--command-substring",
+        help="match any process whose command line contains this (non-Python targets)",
+    )
+    parser.add_argument(
+        "--is-own-ancestor",
+        type=int,
+        metavar="PID",
+        help=(
+            "exit 0 if PID is an ancestor of this process; exit 3 if it is "
+            "definitively not; any other exit code is inconclusive and must "
+            "be treated as an ancestor (fail closed); prints nothing"
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.is_own_ancestor is not None:
+        # Exit code contract: 0 = is an ancestor, 3 = conclusively NOT an
+        # ancestor (walked to init with no match). Exit 3 is a dedicated code
+        # rather than reusing exit 1, because exit 1 is also what a generic
+        # Python crash (import error, unhandled exception before argparse
+        # even runs) produces — a caller checking "exit 1 means not an
+        # ancestor" would read that crash as a conclusive "no" and fail open.
+        # Every exit code other than 0 and 3 (1, 2, 127, ...) must be treated
+        # by callers as inconclusive and handled the same as "is an ancestor"
+        # (fail closed), because it means the walk never ran to completion.
+        if is_own_ancestor(args.is_own_ancestor, on_unreadable=True):
+            return 0
+        return 3
+
+    if args.command_substring is not None:
+        if args.module or args.script_suffix:
+            parser.error("--command-substring cannot be combined with the Python selectors")
+        pids = find_command_pids(args.command_substring)
+    elif args.module or args.script_suffix:
+        pids = find_python_service_pids(module=args.module, script_suffix=args.script_suffix)
+    else:
+        parser.error("one of --module, --script-suffix, --command-substring, --is-own-ancestor")
+
+    for pid in pids:
+        print(pid)
+    return 0 if pids else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(_main(sys.argv[1:]))

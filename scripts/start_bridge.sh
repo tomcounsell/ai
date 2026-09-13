@@ -5,6 +5,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/service_pids.sh"
 VENV="$PROJECT_DIR/.venv"
 
 cd "$PROJECT_DIR"
@@ -28,17 +30,32 @@ if [ -f "$PROJECT_DIR/data/upgrade-pending" ]; then
     cat "$PROJECT_DIR/data/upgrade-pending"
 fi
 
-# Kill any existing bridge processes
-EXISTING_PID=$(pgrep -f "python.*telegram_bridge.py" 2>/dev/null || true)
+# Kill any existing bridge processes.
+#
+# Ancestor-safe (#3265): this probe used `pgrep`, which hides the caller's own
+# ancestors. Started from a bridge-hosted session it saw no bridge, skipped the
+# stop, and spawned a SECOND bridge alongside the live one — duplicate Telethon
+# clients on one session file. The lookup now reads `ps`, so an ancestor bridge
+# is visible; the guard below is what makes that visibility safe.
+EXISTING_PID=$(service_pids_bridge || true)
 if [ -n "$EXISTING_PID" ]; then
+    if ! service_pid_refuse_self_kill "$EXISTING_PID" "bridge" \
+        "launchctl kickstart -k gui/$(id -u)/${SERVICE_LABEL_PREFIX:-com.valor}.bridge"; then
+        # A live bridge already hosts this process: the goal of this script is
+        # already satisfied, and killing it would take us down mid-start.
+        exit 0
+    fi
     echo "Stopping existing bridge (PID: $EXISTING_PID)..."
     kill $EXISTING_PID 2>/dev/null || true
     sleep 3
 
-    # Verify process actually stopped
-    if pgrep -f "python.*telegram_bridge.py" >/dev/null 2>&1; then
+    # Verify process actually stopped. Force-kill the PIDs we resolved rather
+    # than re-matching by pattern: a broad `pkill -f` here would also reap any
+    # unrelated process whose command line merely mentions the bridge.
+    REMAINING_PID=$(service_pids_bridge || true)
+    if [ -n "$REMAINING_PID" ]; then
         echo "Force killing bridge..."
-        pkill -9 -f "python.*telegram_bridge.py" 2>/dev/null || true
+        kill -9 $REMAINING_PID 2>/dev/null || true
         sleep 1
     fi
 fi

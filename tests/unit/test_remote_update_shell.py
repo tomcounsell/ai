@@ -73,16 +73,22 @@ fi
 exit 0
 """
 
-# The #2141 liveness cross-check shells out to `pgrep` against the real host
-# process table. On a bridge/worker machine a genuine `python -m worker` is
-# running, so the unstubbed pgrep reports WORKER_ALIVE=true and forces the
-# loaded branch regardless of the `launchctl list` stub — contaminating the
-# not-loaded worker tests. This stub shadows pgrep so the sandbox models worker
-# liveness solely through the launchctl list stub (WORKER_NOT_LISTED). Set
-# WORKER_PGREP_ALIVE to simulate a live worker the launchctl grep misses.
-PGREP_STUB = """#!/bin/bash
-if [ -n "${WORKER_PGREP_ALIVE:-}" ]; then exit 0; fi
-exit 1
+# The #2141 liveness cross-check reads the real host process table. On a
+# bridge/worker machine a genuine `python -m worker` is running, so an unstubbed
+# probe reports WORKER_ALIVE=true and forces the loaded branch regardless of the
+# `launchctl list` stub — contaminating the not-loaded worker tests. Since
+# #3187/#3265 the cross-check goes through `scripts/lib/service_pids.sh` rather
+# than `pgrep`, so the sandbox stubs that file (a PATH shadow of `pgrep` would
+# intercept nothing now). Worker liveness is modelled solely through the
+# launchctl list stub (WORKER_NOT_LISTED); set WORKER_ALIVE_STUB to simulate a
+# live worker the launchctl grep misses.
+SERVICE_PIDS_STUB = """
+service_pids() { [ -n "${WORKER_ALIVE_STUB:-}" ] && { echo 99999; return 0; }; return 1; }
+service_pids_worker() { service_pids --module worker; }
+service_pids_bridge() { service_pids --script-suffix bridge/telegram_bridge.py; }
+service_pids_email() { service_pids --module bridge.email_bridge; }
+service_pid_is_own_ancestor() { return 1; }
+service_pid_refuse_self_kill() { return 0; }
 """
 
 PYTHON_STUB = """#!/bin/bash
@@ -131,6 +137,9 @@ class Harness:
         script_dst = self.upstream / "scripts" / "remote-update.sh"
         script_dst.parent.mkdir(parents=True)
         script_dst.write_text(REAL_SCRIPT.read_text())
+        lib_dst = self.upstream / "scripts" / "lib" / "service_pids.sh"
+        lib_dst.parent.mkdir(parents=True)
+        lib_dst.write_text(SERVICE_PIDS_STUB)
         _commit(self.upstream, "bridge/mod.py", "initial")
 
         # Clone → the fake project dir the script executes in.
@@ -151,9 +160,6 @@ class Harness:
         launchctl = self.stub_bin / "launchctl"
         launchctl.write_text(LAUNCHCTL_STUB)
         launchctl.chmod(0o755)
-        pgrep = self.stub_bin / "pgrep"
-        pgrep.write_text(PGREP_STUB)
-        pgrep.chmod(0o755)
 
         # Worker plist template + installed copy; bridge plist optional.
         (self.proj / "com.valor.worker.plist").write_text("<plist>__PROJECT_DIR__</plist>")

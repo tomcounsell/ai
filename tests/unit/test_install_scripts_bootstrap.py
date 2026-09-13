@@ -10,9 +10,10 @@ real ``com.valor.*.plist`` template it renders, a minimal ``.env``, a stub
 --dry-run``, ``-m tools.reflection_machine_filter ...``) and otherwise delegates
 heredoc-piped scripts (env-var-injection into the rendered plist) to the REAL
 interpreter running this test suite, a stub ``launchctl`` mimicking the errno-5 EIO
-race with a configurable ``kickstart -k`` recovery, a stub ``pgrep`` that always
-reports "not found" (satisfying ``install_email_bridge.sh``'s foreground-process
-pre-check), and an overridden ``$HOME``. No real launchd services are touched.
+race with a configurable ``kickstart -k`` recovery, a stub
+``scripts/lib/service_pids.sh`` that always reports "not found" (satisfying
+``install_email_bridge.sh``'s foreground-process pre-check), and an overridden
+``$HOME``. No real launchd services are touched.
 
 Each of these installers runs under `set -euo pipefail` and is invoked one-per-service
 (no "abort a batch" concern), so — unlike ``valor-service.sh`` — a genuine
@@ -138,9 +139,16 @@ esac
 
 # install_email_bridge.sh refuses to install over a foreground (non-launchd) email
 # bridge process; always report "not found" so that pre-check never blocks the install.
-PGREP_STUB = """#!/bin/bash
-echo "PGREP $*" >> "$CALL_LOG"
-exit 1
+# Since #3187/#3265 that pre-check goes through `scripts/lib/service_pids.sh`, so the
+# sandbox stubs that file into the fake project rather than shadowing `pgrep` on PATH —
+# the real helper reads `ps`, which a PATH shadow of `pgrep` would not intercept.
+SERVICE_PIDS_STUB = """
+service_pids() { echo "SERVICE_PIDS $*" >> "$CALL_LOG"; return 1; }
+service_pids_worker() { service_pids --module worker; }
+service_pids_bridge() { service_pids --script-suffix bridge/telegram_bridge.py; }
+service_pids_email() { service_pids --module bridge.email_bridge; }
+service_pid_is_own_ancestor() { return 1; }
+service_pid_refuse_self_kill() { return 0; }
 """
 
 # A "smart" python stub: special-cases each install script's own precondition
@@ -188,6 +196,7 @@ class InstallHarness:
         (scripts_dir / "lib").mkdir(parents=True)
         (scripts_dir / script_name).write_text((REPO_SCRIPTS / script_name).read_text())
         (scripts_dir / "lib" / "launchctl.sh").write_text(REAL_LAUNCHCTL_LIB.read_text())
+        (scripts_dir / "lib" / "service_pids.sh").write_text(SERVICE_PIDS_STUB)
 
         for plist_name in INSTALL_SCRIPTS[script_name]["plists"]:
             (self.proj / plist_name).write_text((REPO_ROOT / plist_name).read_text())
@@ -201,10 +210,9 @@ class InstallHarness:
         python_stub.chmod(0o755)
 
         self.stub_bin.mkdir()
-        for name, content in (("launchctl", LAUNCHCTL_STUB), ("pgrep", PGREP_STUB)):
-            stub = self.stub_bin / name
-            stub.write_text(content)
-            stub.chmod(0o755)
+        launchctl_stub = self.stub_bin / "launchctl"
+        launchctl_stub.write_text(LAUNCHCTL_STUB)
+        launchctl_stub.chmod(0o755)
 
         (self.home / "Library" / "LaunchAgents").mkdir(parents=True)
 
