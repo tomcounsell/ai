@@ -71,6 +71,7 @@ from agent.session_runner.completion_guard import (
     CompletionDecision,
     evaluate_completion,
 )
+from agent.session_runner.liveness import tool_activity_ts
 from agent.session_runner.role_driver import (
     HeadlessRoleDriver,
     HeadlessTurnOutcome,
@@ -98,13 +99,32 @@ logger = logging.getLogger(__name__)
 # Provisional/tunable — override with SESSION_RUNNER_MAX_TURNS.
 DEFAULT_MAX_TURNS: int = int(os.environ.get("SESSION_RUNNER_MAX_TURNS", "10"))
 
-# Role-aware per-turn timeouts. Eng turns are generous by design — the Dev
-# subagent's whole build runs INSIDE the PM turn (D1); this is an honest
-# ceiling on a protocol that reports completion, not an idle guess. Expiry is
-# a graceful preempt, never a hard error.
-# Provisional/tunable — override with SESSION_RUNNER_ENG_TURN_TIMEOUT_S /
-# SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S.
-ENG_TURN_TIMEOUT_S: float = float(os.environ.get("SESSION_RUNNER_ENG_TURN_TIMEOUT_S", "7200"))
+# Idle deadline: preempt only after this long with NO observed activity.
+# Provisional/tunable -- grain of salt. Sized against the tightest EXTERNAL
+# enforcement that already bounds a single silent tool call: session_health's
+# per-tool wedge sub-loop kills a stale Bash call at
+# TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC = 660s
+# (agent/session_health.py:562-563), and the Bash tool schema caps a declared
+# timeout at 600000ms, so no single silent Bash call can legitimately outlive
+# that. 2400 is ~3.6x that ceiling, 4x the 600s TaskOutput blocking poll, and
+# ~19x the p99 stream gap (127s). A foreground subagent does NOT bound this --
+# its own tool calls tick the activity marker.
+# Override with SESSION_RUNNER_ENG_IDLE_TIMEOUT_S.
+ENG_IDLE_TIMEOUT_S: float = float(os.environ.get("SESSION_RUNNER_ENG_IDLE_TIMEOUT_S", "2400"))
+
+# Absolute wall-clock ceiling: backstop for a runaway that streams forever.
+# Deliberately far above the largest observed healthy turn (8549s) so it is a
+# last resort, not the operative limit.
+# Override with SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S.
+ENG_ABSOLUTE_TIMEOUT_S: float = float(
+    os.environ.get("SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S", "21600")
+)
+
+# Teammate sessions are conversational and never host a foreground build, so
+# one tight budget serves as BOTH their idle deadline and their absolute
+# ceiling — observable teammate behavior is unchanged by the two-deadline
+# model. Expiry is a graceful preempt, never a hard error.
+# Provisional/tunable — override with SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S.
 TEAMMATE_TURN_TIMEOUT_S: float = float(
     os.environ.get("SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S", "900")
 )
@@ -253,11 +273,15 @@ OPERATOR_TERMINAL_MESSAGE = (
 # Delivered when an operator aborts a running session via an is_abort steer.
 STEER_ABORT_USER_MESSAGE = "Session stopped at your request."
 
-# Needs-attention message for a timeout-preempted turn: the work is paused,
-# not lost — the partial transcript remains the resume target.
+# Needs-attention message for a timeout-preempted turn. Nothing is paused:
+# the turn's process group is SIGTERM'd, given a flush grace, then SIGKILL'd,
+# and any foreground subagent dies with it. Every clause below is therefore
+# verifiable — the run was stopped, the stretch had no observed activity
+# (that is literally the preempt predicate), the transcript and worktree are
+# preserved, and a reply resumes the same session via ``claude --resume``.
 TIMEOUT_NEEDS_ATTENTION_MESSAGE = (
-    "This is taking longer than expected. I've paused the work and kept the "
-    "progress so far. Reply to continue from where it left off."
+    "I stopped this run after a long stretch with no activity. The work so "
+    "far is saved. Reply and I'll pick it up from there."
 )
 
 # Persona-safe apology for a turn whose subprocess failed outright.
@@ -270,9 +294,10 @@ def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
     """Claim the right to deliver the timeout needs-attention notice ONCE.
 
     ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` describes a *session-level* condition
-    ("I've paused the work and kept the progress so far"), so re-delivering it
-    on every re-run of the same row is pure noise to the human -- the #3270
-    incident posted the byte-identical text into a chat once per re-enqueue.
+    ("I stopped this run after a long stretch with no activity"), so
+    re-delivering it on every re-run of the same row is pure noise to the
+    human -- the #3270 incident posted the byte-identical text into a chat
+    once per re-enqueue.
 
     Follows this repo's established one-shot-notice convention (Redis SETNX on
     a keyed marker with a TTL, e.g. ``self_draft_completed_flush_sent:``
@@ -341,15 +366,34 @@ def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
     return claimed
 
 
-def turn_timeout_for(session_type: str | None) -> float:
-    """Role-aware per-turn timeout: teammate short, everything else generous.
+@dataclass(frozen=True)
+class TurnDeadlines:
+    """The two deadlines that bound one turn.
+
+    ``idle_s`` is the operative limit: seconds with NO observed activity
+    (stream events, or tool calls made anywhere in the session including
+    inside an in-process subagent) before the watcher preempts.
+    ``absolute_s`` is the wall-clock backstop for a runaway that streams
+    forever.
+    """
+
+    idle_s: float
+    absolute_s: float
+
+
+def deadlines_for(session_type: str | None) -> TurnDeadlines:
+    """Role-aware turn deadlines: teammate tight, everything else generous.
 
     Eng/PM sessions carry the Dev subagent's work inside the PM turn (D1), so
-    they get the generous ceiling; teammate sessions are conversational.
+    they get the activity-aware idle deadline plus a far-off absolute ceiling.
+    Teammate sessions are conversational: one tight budget serves as both.
     """
     if (session_type or "").strip().lower() == "teammate":
-        return TEAMMATE_TURN_TIMEOUT_S
-    return ENG_TURN_TIMEOUT_S
+        return TurnDeadlines(
+            idle_s=TEAMMATE_TURN_TIMEOUT_S,
+            absolute_s=TEAMMATE_TURN_TIMEOUT_S,
+        )
+    return TurnDeadlines(idle_s=ENG_IDLE_TIMEOUT_S, absolute_s=ENG_ABSOLUTE_TIMEOUT_S)
 
 
 @dataclass
@@ -502,7 +546,8 @@ class SessionRunner:
         harness_fn: Callable[..., Awaitable[str]] | None = None,
         resume: ResumeContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        turn_timeout_s: float | None = None,
+        idle_timeout_s: float | None = None,
+        absolute_timeout_s: float | None = None,
         steering_pop_fn: Callable[[], list[dict]] | None = None,
         steering_push_fn: Callable[[dict], None] | None = None,
         steer_poll_interval_s: float = STEER_POLL_INTERVAL_S,
@@ -520,9 +565,15 @@ class SessionRunner:
         self._working_dir = working_dir
         self._session_type = session_type
         self._max_turns = max_turns
-        self._turn_timeout_s = (
-            turn_timeout_s if turn_timeout_s is not None else turn_timeout_for(session_type)
+        _deadlines = deadlines_for(session_type)
+        self._idle_timeout_s = idle_timeout_s if idle_timeout_s is not None else _deadlines.idle_s
+        self._absolute_timeout_s = (
+            absolute_timeout_s if absolute_timeout_s is not None else _deadlines.absolute_s
         )
+        # Monotonic stamp of the last OBSERVED activity on this turn. Set at
+        # turn dispatch and refreshed by every stdout stream event; the
+        # watcher combines it with the hook-edge tool-activity marker.
+        self._last_activity_mono: float = 0.0
         # Stored resume scalars — consumed by build-resume (task 3), not here.
         self._resume = resume
         self._steer_poll_interval_s = steer_poll_interval_s
@@ -666,8 +717,13 @@ class SessionRunner:
             settings_path=settings_path,
             edge_file=edge_file,
             # The watcher's timeout-preempt fires FIRST; the driver's own
-            # wait_for is only the backstop for a failed watcher.
-            turn_timeout_s=self._turn_timeout_s + self._term_grace_s + DRIVER_BACKSTOP_MARGIN_S,
+            # wait_for is only the backstop for a failed watcher, so it is
+            # derived from the LARGEST deadline the watcher can fire on.
+            turn_timeout_s=(
+                max(self._idle_timeout_s, self._absolute_timeout_s)
+                + self._term_grace_s
+                + DRIVER_BACKSTOP_MARGIN_S
+            ),
             harness_fn=harness_fn,
             on_spawn=self._on_turn_spawn,
             on_stdout_event=self._on_stdout_event_liveness,
@@ -680,9 +736,21 @@ class SessionRunner:
         """0-arg ``on_stdout_event`` adapter (issue #1935).
 
         The driver's ``on_stdout_event`` slot is 0-arg
-        (``role_driver.py:175``); this delegates straight to
+        (``role_driver.py:175``); this refreshes the in-memory activity stamp
+        the preempt watcher reads, then delegates to
         :meth:`_stamp_stdout_liveness`.
+
+        The in-memory stamp is updated UNCONDITIONALLY and first: the Redis
+        stamp below it is cooldown-gated purely for write-rate reasons, and
+        that gate must never suppress a free in-process observation that the
+        turn deadline depends on.
         """
+        try:
+            self._last_activity_mono = asyncio.get_running_loop().time()
+        except RuntimeError:
+            # Keep: the driver may invoke this outside a running loop in
+            # tests; a missing stamp must never break the stream callback.
+            pass
         self._stamp_stdout_liveness()
 
     def _on_init_composed(self, data: dict) -> None:
@@ -1087,6 +1155,9 @@ class SessionRunner:
         self._current_handle = handle
         loop = asyncio.get_running_loop()
         started_at = loop.time()
+        # Activity origin for the idle deadline: a turn that has produced
+        # nothing yet counts as active from dispatch, not from epoch zero.
+        self._last_activity_mono = started_at
 
         # turn_start telemetry unblocks the #1917 class: crash-signature
         # extraction treats a trace with no turn_start as deterministically
@@ -1360,6 +1431,41 @@ class SessionRunner:
 
     # -- Preempt watcher (D4, Race 1) ----------------------------------------
 
+    def _turn_idle_seconds(self, now_mono: float) -> float:
+        """Seconds since the last OBSERVED activity on the current turn.
+
+        Two independent signals feed this, on two different clocks:
+
+        - ``self._last_activity_mono`` — the runner's own in-memory stamp,
+          refreshed by every stdout stream event (monotonic, free to read);
+        - :func:`agent.session_runner.liveness.tool_activity_ts` — the
+          hook-edge marker, which ticks on every tool call INCLUDING calls
+          made from inside an in-process subagent (wall-clock epoch). This is
+          the signal that covers the case the parent stream cannot see: a
+          foreground subagent appears in the parent stream as one
+          ``tool_use`` and, much later, one ``tool_result``.
+
+        The two clocks are never subtracted from each other. Each is turned
+        into an idle duration in its own clock and the ``min`` is taken,
+        which is exactly the ``max`` of the two activity timestamps.
+
+        UNKNOWN contract (#2662 precedent): a missing marker reads ``None``
+        and simply drops out, leaving the stream-only value. An absent signal
+        must never SHORTEN a deadline. A marker stamped in the future (clock
+        skew) clamps to 0.0, i.e. "just active".
+        """
+        idle_from_stream = max(0.0, now_mono - self._last_activity_mono)
+        try:
+            session_id = str(getattr(self._agent_session, "session_id", "") or "")
+            tool_ts = tool_activity_ts(session_id)
+        except Exception as e:  # noqa: BLE001 — an unreadable marker reads UNKNOWN
+            logger.debug("[runner] tool activity read failed: %s", e)
+            tool_ts = None
+        if tool_ts is None:
+            return idle_from_stream
+        idle_from_tools = max(0.0, time.time() - float(tool_ts))
+        return min(idle_from_stream, idle_from_tools)
+
     async def _preempt_watcher(
         self,
         handle: _TurnHandle,
@@ -1382,8 +1488,29 @@ class SessionRunner:
             await asyncio.sleep(self._steer_poll_interval_s)
             if turn_task.done() or handle.generation != self._generation:
                 return
-            # Timeout expiry → graceful preempt (never a hard error).
-            if self._turn_timeout_s and (loop.time() - started_at) >= self._turn_timeout_s:
+            # Timeout expiry → graceful preempt (never a hard error). Two
+            # deadlines bound the turn: the ABSOLUTE wall-clock ceiling
+            # (runaway backstop) and the IDLE deadline (the operative limit).
+            now_mono = loop.time()
+            elapsed = now_mono - started_at
+            if self._absolute_timeout_s and elapsed >= self._absolute_timeout_s:
+                logger.warning(
+                    "[runner] turn preempted on deadline (deadline=absolute "
+                    "elapsed=%.1fs limit=%.1fs)",
+                    elapsed,
+                    self._absolute_timeout_s,
+                )
+                await self._kill_turn(handle, turn_task, cause="timeout")
+                return
+            idle = self._turn_idle_seconds(now_mono)
+            if self._idle_timeout_s and idle >= self._idle_timeout_s:
+                logger.warning(
+                    "[runner] turn preempted on deadline (deadline=idle "
+                    "idle=%.1fs limit=%.1fs elapsed=%.1fs)",
+                    idle,
+                    self._idle_timeout_s,
+                    elapsed,
+                )
                 await self._kill_turn(handle, turn_task, cause="timeout")
                 return
             try:
@@ -2003,7 +2130,8 @@ class SessionRunner:
 # Re-exported for the executor wiring (task 4) and tests.
 __all__ = [
     "DEFAULT_MAX_TURNS",
-    "ENG_TURN_TIMEOUT_S",
+    "ENG_ABSOLUTE_TIMEOUT_S",
+    "ENG_IDLE_TIMEOUT_S",
     "MAX_COMPLIANCE_NUDGES",
     "OPERATOR_TERMINAL_MESSAGE",
     "PM_COMPLIANCE_NUDGE",
@@ -2017,5 +2145,6 @@ __all__ = [
     "TIMEOUT_NEEDS_ATTENTION_MESSAGE",
     "ResumeContext",
     "SessionRunner",
-    "turn_timeout_for",
+    "TurnDeadlines",
+    "deadlines_for",
 ]

@@ -98,6 +98,54 @@ message. A per-turn timeout is handled by the identical path
 partial work stays in the transcript and the session surfaces as
 needs-attention rather than silently discarding a long Dev build.
 
+### Activity-aware turn deadline (issue #3289)
+
+`_preempt_watcher` bounds a turn with **two independent deadlines**, resolved
+per session type by `deadlines_for(session_type) -> TurnDeadlines(idle_s,
+absolute_s)` (`agent/session_runner/runner.py`):
+
+- **Idle deadline — the operative limit.** `ENG_IDLE_TIMEOUT_S` (2400s,
+  `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S`) preempts a turn only after that long
+  with **no observed activity**. Activity is the `min` of two idle durations
+  computed in `_turn_idle_seconds`, which is the same thing as the `max` of
+  two activity timestamps taken without ever subtracting across clocks:
+  - the runner's own in-memory monotonic stamp (`self._last_activity_mono`),
+    refreshed by every stdout stream event via `_on_stdout_event_liveness`;
+  - `agent.session_runner.liveness.tool_activity_ts(session_id)`, the
+    hook-edge marker that ticks on **every** tool call, including calls made
+    from inside an in-process foreground subagent — the case the parent
+    stream cannot see. A foreground `Task`/`Agent` call appears in the
+    parent's stream-json as exactly one `tool_use` and, much later, one
+    `tool_result`, with nothing in between; measured, 27% of such windows
+    produced zero parent-stream records for their entire duration. Without
+    this second signal, a healthy multi-hour Dev build reads as silent.
+- **Absolute ceiling — a runaway backstop, not the operative limit.**
+  `ENG_ABSOLUTE_TIMEOUT_S` (21600s, `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S`)
+  bounds total turn wall-clock regardless of activity, for a subprocess that
+  streams forever. It is checked first in the watcher loop, ahead of the
+  idle deadline.
+- **Teammate sessions are unchanged.** `deadlines_for("teammate")` resolves
+  both `idle_s` and `absolute_s` to `TEAMMATE_TURN_TIMEOUT_S` (900s,
+  `SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S`) — teammate turns never host a
+  foreground build, so one tight budget serves both roles and observable
+  teammate behavior is identical to the single-deadline model.
+- **The UNKNOWN contract.** When `tool_activity_ts` returns `None` (no hook
+  edge — e.g. a foreign repo's spawn, or a misconfigured session), the
+  watcher falls back to the stream-event stamp alone; a missing marker never
+  shortens the idle deadline, only ever leaves it at the stream-only value.
+  A marker stamped in the future (clock skew) clamps to 0.0 idle, i.e. "just
+  active." This mirrors the precedent in `tools/session_progress.py`, which
+  bans inferring a wedge from absence of a signal.
+- **Driver backstop.** The `HeadlessRoleDriver`'s own `asyncio.wait_for` is
+  re-derived from `self._absolute_timeout_s` (the larger of the two
+  deadlines the watcher can fire on) plus grace and margin, so the watcher's
+  preempt always fires before the driver's own backstop.
+
+`TIMEOUT_NEEDS_ATTENTION_MESSAGE` makes no claim that the work was "paused":
+the process group is SIGTERM'd then SIGKILL'd, so nothing is paused. It
+tells the human the run was stopped after a silent stretch, that the work so
+far is saved, and that a reply resumes the same session.
+
 ## Subprocess Lifecycle & Teardown Reap (issue #1938)
 
 The runner is the single owner of its subprocess's teardown. On **any** unwind
@@ -384,11 +432,12 @@ signal and still fire.
 
 This is a **presence** check, not a freshness check — it does not by itself
 detect a mid-turn hang. A subprocess that streams `init` and then genuinely
-hangs is caught by the whole-turn deadline (the preempt watcher's
+hangs is caught by the idle deadline (the preempt watcher's
 `_kill_turn(cause="timeout")` and the driver's own `asyncio.wait_for`
 backstop), not by session-health — accepting a wider detection window (up to
-`turn_timeout_s`, 7200s for PM/eng turns) for that rare case in exchange for
-eliminating false zombie verdicts on legitimately toolless-streaming turns.
+`ENG_IDLE_TIMEOUT_S`, 2400s for PM/eng turns, see "Activity-aware turn
+deadline" above) for that rare case in exchange for eliminating false zombie
+verdicts on legitimately toolless-streaming turns.
 
 ## Exit Classification (`ExitReason`, issue #2004)
 
