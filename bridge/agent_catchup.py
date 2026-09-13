@@ -59,6 +59,7 @@ from pydantic import BaseModel
 from agent.llm import run_typed
 from agent.private_tag import strip_private
 from bridge.dedup import get_or_init_dm_coverage_epoch
+from bridge.room_inbox import shadow_append_inbox
 from bridge.routing import (
     find_project_for_dm_dialog,
     persona_to_session_type,
@@ -717,6 +718,32 @@ async def _enqueue_recovery(
         inbound.message_id,
         inbound.sender_name,
         inbound.text[:80],
+    )
+
+    # Durable Room-inbox shadow append (durability plan Task 11 phase 1,
+    # issue #2494): written alongside the untouched recovery enqueue below,
+    # mirroring live intake's append-precedes-dispatch order. NOT
+    # authoritative — dispatch still routes from the enqueue;
+    # shadow_append_inbox never raises into the recovery path. `strip_private`
+    # mirrors live intake's `safe_text`: the inbox is a durable no-TTL list, so
+    # <private> content must never reach it on this path either.
+    #
+    # NOTE: unlike the two mechanical scanners this site has no `claim_message`
+    # gate, and the sweep by design targets messages the live handler DID
+    # deliver but left unanswered -- so those messages already carry a
+    # live-intake inbox entry and this append produces a second entry for the
+    # same chat_id/message_id -- left as-is because deduping at append time
+    # would change `Room.append_inbox` semantics, which is phase-2 drainer work
+    # and out of scope for a shadow release. The entry's stable identity
+    # (chat_id + message_id) lets the authoritative phase bind idempotently.
+    shadow_append_inbox(
+        project,
+        chat_id=chat.chat_id,
+        message_id=inbound.message_id,
+        sender_id=inbound.sender_id,
+        sender_name=inbound.sender_name,
+        text=strip_private(inbound.text),
+        date=inbound.date,
     )
 
     await enqueue_fn(
