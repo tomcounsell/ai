@@ -76,7 +76,6 @@ matching the same safety contract as ``bridge.dedup.record_last_event``.
 
 import json
 import logging
-import os
 import time
 
 import redis
@@ -107,9 +106,10 @@ def _run_continuity_seconds() -> int:
 
 
 def _get_redis() -> redis.Redis:
-    """Return a decode_responses Redis client."""
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
+
+    return text_redis()
 
 
 def record_update_received(redis_client=None) -> None:

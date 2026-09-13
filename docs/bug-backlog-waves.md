@@ -205,10 +205,8 @@ Anchored by the **#2494 umbrella** (`docs/plans/durability-room-job-agentrun.md`
 | # | Issue | Note |
 |---|-------|------|
 | 2494 | **Umbrella:** Room / Job / AgentSession — recovery keys on work owed, not process status | epic, stays open |
-| 3003 | Twenty production call sites bypass the Popoto ORM with hand-built raw Redis clients | fresh, needs own plan |
 | 2699 | `_run_guarded_repairs` has no wall-clock budget; runs Job full-hydration on worker startup | deferred by PR #2671 |
 | 2639 | popoto QueryBuilder executes hydration pipeline twice — every `.filter()` costs 2x | perf |
-| 2848 | Cursor/pipeline `Job.renormalize_last_active_scores` before Job population hits ~10k | low urgency (92 Jobs today) |
 | 2862 | Expectations cannot record a blocked state; corrupt goal JSON fails open then gets overwritten | |
 | 2857 | Recovery scanners persist raw `message.text` without `strip_private` | **blocked on open PR #2856** |
 | 2691 | Reconciler per-chat scan is load-bearing for the wedge verdict but has no health monitoring | |

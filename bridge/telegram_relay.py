@@ -35,8 +35,10 @@ from pydantic import ValidationError
 from telethon.errors import FloodWaitError
 
 from bridge import dead_letters, wire_schemas
+from bridge.relay_errors import OutboxUnavailableError, report_send_path_failure
 from bridge.wire_schemas import OutboxPayload
 from utils.peer import numeric_peer
+from utils.redis_client import scan_keys
 
 logger = logging.getLogger(__name__)
 
@@ -1324,12 +1326,29 @@ async def process_outbox(telegram_client) -> int:
 
     Returns:
         Number of messages successfully sent in this cycle.
+
+    Raises:
+        OutboxUnavailableError: Redis could not be reached to read the queue.
+            A zero return means "nothing to send" and never "the send path is
+            broken" -- see ``bridge/relay_errors.py``.
     """
     sent_count = 0
 
     try:
         r = await asyncio.to_thread(_get_redis_connection)
-        keys = await asyncio.to_thread(r.keys, OUTBOX_KEY_PATTERN)
+        # Bounded SCAN, never KEYS: `text_redis()` carries a socket timeout, and
+        # a full-keyspace KEYS on a production-sized Redis can exceed it. The
+        # resulting TimeoutError would land in the blanket handler below and be
+        # reported as an empty cycle -- the exact shape of the 26-hour outage in
+        # which every Telegram reply was dropped while health stayed green.
+        keys, truncated = await asyncio.to_thread(scan_keys, r, OUTBOX_KEY_PATTERN)
+        if truncated:
+            # Draining is order-independent across keys, so a partial view just
+            # means the rest arrives on the next poll cycle.
+            logger.warning(
+                "Relay: outbox key scan truncated at %d keys; remainder drains on the next cycle",
+                len(keys),
+            )
 
         for key in keys:
             processed = 0
@@ -1561,6 +1580,12 @@ async def process_outbox(telegram_client) -> int:
                         except Exception as re_err:
                             logger.error(f"Relay: failed to re-queue message: {re_err}")
 
+    except redis.RedisError as e:
+        # Could not reach the outbox at all. Never fold this into `sent_count` --
+        # a 0 there is indistinguishable from an empty queue, which is precisely
+        # how every Telegram reply was silently dropped for 26 hours.
+        report_send_path_failure("telegram", e)
+        raise OutboxUnavailableError(f"telegram outbox unreachable: {e}") from e
     except Exception as e:
         logger.error(f"Relay: outbox processing error: {e}", exc_info=True)
 
@@ -1578,11 +1603,23 @@ async def relay_loop(telegram_client) -> None:
     """
     logger.info("Telegram relay started -- processing PM outbox queues")
 
+    consecutive_outages = 0
     while True:
         try:
             sent = await process_outbox(telegram_client)
             if sent > 0:
                 logger.info(f"Relay: processed {sent} message(s)")
+            consecutive_outages = 0
+        except OutboxUnavailableError:
+            # Already logged and Sentry-reported at the raise site. Counted here
+            # so a persistent outage escalates in the log rather than repeating
+            # one indistinguishable line forever.
+            consecutive_outages += 1
+            logger.error(
+                "Relay: outbox unreachable for %d consecutive cycle(s) -- "
+                "no Telegram message is being delivered",
+                consecutive_outages,
+            )
         except Exception as e:
             logger.error(f"Relay loop error: {e}", exc_info=True)
 

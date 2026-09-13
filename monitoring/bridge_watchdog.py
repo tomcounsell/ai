@@ -224,9 +224,18 @@ def is_bridge_running() -> tuple[bool, int | None]:
 
 
 def _get_watchdog_redis() -> redis.Redis:
-    """Return a decode_responses Redis client for watchdog use."""
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    """Return a decode_responses Redis client for watchdog use.
+
+    The keys read here (``bridge:last_update_received`` and friends, written by
+    ``bridge/liveness.py``) are freeform, not Popoto-managed, so the ORM has no
+    model to offer. The client still comes from ``utils.redis_client`` rather
+    than ``REDIS_URL`` so the watchdog reads the same database popoto is
+    pointed at -- a hand-built client resolved its own db at call time and
+    could read production while the bridge under test wrote elsewhere (#3003).
+    """
+    from utils.redis_client import text_redis
+
+    return text_redis()
 
 
 def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, str]:

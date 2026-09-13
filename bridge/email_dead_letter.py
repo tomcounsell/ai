@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 
 from config.settings import settings
+from utils.redis_client import scan_keys
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +29,10 @@ DEAD_LETTER_KEY_PREFIX = "email:dead_letter:"
 
 
 def _get_redis():
-    """Return a Redis connection."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def write_dead_letter(
@@ -81,7 +80,12 @@ def list_dead_letters() -> list[dict]:
     """
     try:
         r = _get_redis()
-        keys = list(r.scan_iter(f"{DEAD_LETTER_KEY_PREFIX}*"))
+        # Bounded on both axes. `scan_iter` with no `count=` walks the whole
+        # keyspace ten keys at a time: each round trip stays inside the shared
+        # client's socket timeout, but the loop's wall time is unbounded.
+        keys, truncated = scan_keys(r, f"{DEAD_LETTER_KEY_PREFIX}*")
+        if truncated:
+            logger.warning("[email] Dead letter listing truncated at %d entries", len(keys))
         entries = []
         for key in keys:
             raw = r.get(key)
