@@ -64,13 +64,105 @@ the accessors' identity story above covers this, so it's spelled out here:
   This is the opposite of `derived_redis()`, whose caller does own the
   connection's lifetime and is expected to close it.
 
-Each module keeps a one-line `_get_redis()` (or `_get_redis_connection()`)
-seam that delegates to the accessor. That seam is where the test suite injects
-doubles, so the conversion changed no test patch target. The two output
+Modules whose tests inject a double keep a one-line `_get_redis()` (or
+`_get_redis_connection()`) seam that delegates to the accessor — the relays,
+`bridge/email_bridge.py`, `bridge/dedup.py`, `bridge/liveness.py`,
+`bridge/routing.py`, `bridge/email_dead_letter.py`, `monitoring/bridge_watchdog.py`,
+`ui/app.py` and the `tools/` senders. That seam is where the suite patches, so
+the conversion changed no test patch target.
+
+It is not universal, and nothing requires it to be. `agent/lock_policy.py`,
+`agent/side_effects.py`, `agent/enqueue_idempotency.py`,
+`agent/codex_dev_lease.py`, `agent/session_completion.py` and
+`bridge/dead_letters.py` call `text_redis()` inline at the use site, with no
+injection point. Those modules' tests exercise a real client against the
+claimed test database instead of a double, so the seam would buy nothing. Add
+one when a test needs to inject, not as a matter of form.
+
+Note that `_get_redis` is a *name*, not a contract: `bridge/routing.py`'s
+returns `bytes_redis()` while every other module's returns `text_redis()`.
+Those two have materially different pool semantics (see above), so a guard
+reasoning about these seams must resolve them per module rather than by name.
+
+The two output
 handlers (`TelegramRelayOutputHandler`, `EmailOutputHandler`) honour an
 explicitly assigned `self._redis` for the same reason and otherwise resolve
 through `text_redis()`; their `redis_url` constructor parameter is gone because
 no production caller ever passed one.
+
+## `scan_keys`: the bounded sweep that replaced `KEYS`
+
+`utils.redis_client.scan_keys(client, match)` is the fourth export and the
+only sanctioned way for production code to enumerate keys by pattern.
+
+`KEYS` is O(keyspace) and single-shot. This Redis has carried millions of keys
+(#2207), and every accessor now carries a socket timeout where the old
+hand-built clients carried none — so a `KEYS` that crosses that timeout raises
+`TimeoutError` on the calling path. On a send path with a blanket `except
+Exception`, that is indistinguishable from an empty queue. `scan_keys` cursors
+instead, `settings.redis.scan_count` keys per round trip, so no single command
+can blow the timeout.
+
+It returns `(keys, truncated)`. `truncated` is True only when the sweep stopped
+at `settings.redis.scan_key_limit` **with the cursor still open**; a sweep that
+completes on exactly the limit is not truncated. Keys are deduplicated in
+first-seen order, because `SCAN` guarantees at-least-once and not exactly-once
+delivery — a key present for the whole iteration can still come back twice if
+the keyspace rehashes mid-sweep, which `keys(pattern)` never did.
+
+What it does **not** bound is the traversal. The only exits are a completed
+cursor cycle or `scan_key_limit` *matched* keys, so a sweep matching nothing
+still walks the whole keyspace a page at a time — and on an idle outbox polled
+every 100ms, that is the common case rather than the rare one. This is not a
+regression (`KEYS` was also O(keyspace), and worse for a single-threaded
+server), but it is the honest description. A traversal budget was considered
+and rejected: it would make an empty result ambiguous between "no keys" and
+"gave up", and the absence contract is precisely what a send path depends on.
+
+Callers draining a queue can ignore `truncated` — the remainder arrives next
+cycle. Callers reasoning about the **absence** of a key must not.
+
+## The send-path failure contract
+
+The other half of this change, and the half with a 26-hour outage behind it:
+every Telegram reply was dropped while health stayed green, because a swallowed
+exception on the send path was indistinguishable from an empty queue. A sweep
+failure must never reach a relay loop as `sent = 0`.
+
+`bridge/relay_errors.py` carries both pieces:
+
+- **`OutboxUnavailableError`** — raised by a relay cycle that could not read
+  its outbox. It is a distinct type precisely so the loop cannot confuse it
+  with an idle cycle.
+- **`report_send_path_failure(transport, exc)`** — reports the outage to
+  Sentry and the log.
+
+Both relays (`bridge/email_relay.py`, `bridge/telegram_relay.py`) catch
+`redis.RedisError` **above** their blanket `except Exception`, report through
+`report_send_path_failure`, and raise `OutboxUnavailableError`. Each loop
+handles that type explicitly and escalates a consecutive-outage counter. The
+ordering of those two handlers is load-bearing: the blanket handler was what
+turned a dropped send path into a green health report.
+
+The email heartbeat stamps **after** the sweep, not before, so a cycle that
+could not read the outbox cannot report itself healthy.
+
+## Tunables
+
+`config/settings.py::RedisSettings`, env prefix `REDIS__`, all four documented
+with commented override lines in `.env.example`. All are provisional — tune
+against observation, do not treat them as derived values.
+
+| Knob | Default | Governs |
+|------|---------|---------|
+| `REDIS__MAX_CONNECTIONS` | 128 | Pool ceiling for the `text_redis()` client. redis-py's default is effectively unbounded (2\*\*31), which lets a burst of coroutines and threadpool workers exceed the server's `maxclients`. Mirrors popoto's own cap. |
+| `REDIS__HEALTH_CHECK_INTERVAL_S` | 30 | Seconds between liveness PINGs on an idle pooled connection; 0 disables. |
+| `REDIS__SCAN_COUNT` | 500 | `SCAN` batch hint — bounds per-round-trip work against `TIMEOUTS__REDIS_SOCKET_S`. |
+| `REDIS__SCAN_KEY_LIMIT` | 10000 | Ceiling on keys one `scan_keys` call returns before reporting truncation. |
+
+Launchd-managed processes (bridge, worker, email) do not read `.env`, so an
+override reaches them only through their plist — step 4 of
+[Config Timeout Catalog](config-timeout-catalog.md).
 
 ## What prevents recurrence
 
@@ -97,6 +189,29 @@ excluded deliberately.
 The same file proves the contract end to end: with `REDIS_URL` pointed at db 0
 for the duration of the call, a converted site's write still lands in the
 claimed test database.
+
+Two further guards cover the policy hazards this conversion introduced, both
+of which are invisible to the constructor scan because the offending code
+calls the accessor correctly and only uses it in the wrong place:
+
+- **`TestBlockingPoolNeverReachesAnEventLoop`** (same file) enforces the
+  `bytes_redis()` rule above. It taints every sync function that reaches
+  `bytes_redis()` — transitively, and across real import edges — then fails on
+  any call to one from an `async def` that is not handed to
+  `asyncio.to_thread`. The taint is module-qualified on purpose: six modules
+  define `_get_redis` and only `bridge/routing.py`'s returns `bytes_redis()`,
+  so a global name set reports five false positives. The transitive step is
+  what earns its keep — the one real instance sat a frame above a correctly
+  wrapped call, inside a coroutine that offloaded all four of its own Redis
+  touches while calling a sync helper that reached the same pool.
+- **`TestNoProductionKeysCall`** (`tests/unit/test_relay_send_path_outage.py`)
+  fails on a `KEYS` or an unbounded `scan_iter` in either relay or the
+  dead-letter module. `.keys` is matched as a bare **attribute**, not a call:
+  both relays spelled the defect `asyncio.to_thread(r.keys, PATTERN)`, a
+  reference handed to a threadpool that never parses as a call, and a
+  call-only matcher reported both send paths clean. The attribute's base must
+  resolve to a Redis-client-bound name, so an ordinary `payload.keys()` does
+  not read as an outage.
 
 This guard and the `PreToolUse` hook `validate_no_raw_redis_delete.py` cover
 different surfaces and both stay. The hook matches the text of a Bash command
