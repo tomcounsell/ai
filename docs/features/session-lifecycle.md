@@ -515,20 +515,77 @@ short-lived and best-effort; the durable record of the cancellation is the
 `finalize_session(..., reason=...)` call, which lands in the `LIFECYCLE`
 transition log.
 
-**Guaranteed terminal finalize on the completion exit.**
-`complete_transcript()` now selects the record to finalize via
+**Guaranteed terminal finalize on every exit the executor owns.**
+`complete_transcript()` selects the record to finalize via
 `get_authoritative_session()` — the same running-preferring tie-break
 pattern described in [Worker Completion — Redis
 Re-read](#worker-completion--redis-re-read) above — instead of the blind
-`[0]`. The load-bearing fix for phantom running, though, is an unconditional
-completion-exit guard in `agent/session_executor.py`, placed after the
-entire `if agent_session: / else:` completion block closes so it covers
-both exits, including the case where the `agent_session` lookup returned
-`None`. It re-reads the authoritative session and, if still `running`,
-calls `finalize_session()`, treating a `StatusConflictError` from a racing
-concurrent finalizer as success. Every non-deferred completion path now
-reaches a terminal status regardless of what `complete_transcript()` did
-upstream.
+`[0]`. The load-bearing fix for phantom running, though, is
+`_finalize_if_still_running` in `agent/session_executor.py`, called from
+`_execute_agent_session`'s `finally`. It re-reads the authoritative session
+and, if still `running`, calls `finalize_session()`, treating a
+`StatusConflictError` from a racing concurrent finalizer as success.
+
+The predicate is `status == "running"`, never `defer_reaction` (#3209). The
+status predicate protects the nudge's write on its own, on both
+`_enqueue_nudge` paths. The main path has already moved this row to
+`pending`, so the guard no-ops. The fallback path is entered *only because*
+`get_authoritative_session(orig_session_id)` returned `None` — no row for
+that `session_id` was visible at all — and it then creates a fresh `pending`
+record under that `session_id`, so the normal post-fallback state is exactly
+one row, the continuation, and the guard no-ops there too. (A transient
+index-visibility flap could leave an original row the nudge's re-read missed;
+if it reappears as `running` the guard finalizes that stranded original and
+still never touches the continuation, which is a distinct record with its own
+`agent_session_id`.)
+
+The status written is `failed`, not `_runner_final_status`, on two exits:
+when the executor is unwinding on an exception, and when the body raised
+before `BackgroundTask` was constructed. `_runner_final_status` returns
+`completed` whenever `task.error` is falsy and the runner exit was clean, and
+it has no notion of unwinding — a session whose executor raised did not
+complete, and recording `completed` would also disagree with the worker's own
+`failed` write in `agent_session_queue`'s outer `finally`, where a terminal →
+different-terminal write raises `StatusConflictError`. An explicit `except
+BaseException` clause in `_execute_agent_session` sets the flag and re-raises;
+the `except asyncio.CancelledError` clause precedes it, so a cancel is never
+misread as a raise.
+
+On the raise path the guard is the *sole* terminal writer, not an earlier
+duplicate. The worker's outer `finally` in `agent_session_queue.py` is still
+entered — it gates on `not session_completed and not finalized_by_execute`,
+and `finalized_by_execute` is set on the non-exceptional return and on the
+deadline-kill/terminal path, never on a raise — but it re-reads the
+authoritative row before writing, and the already-terminal skip branch
+documented above then logs at INFO and performs no completion write at all.
+The guard also lands ahead of the synthetic-slug worktree cleanup, which
+refuses to reclaim a lane whose row still reads `running`.
+
+That is precisely why `raised=True` must force `failed`: with no second
+writer to disagree with, this is the only chance to record the outcome
+honestly, and a `completed` written here for an executor that unwound on an
+exception would stand unchallenged.
+
+Cancellation is the one exit deliberately excluded. `_execute_agent_session`
+carries an `except asyncio.CancelledError` whose only job is to mark the exit
+so the `finally` skips the finalize. The health checker cancels the session
+task and then decides the row's fate itself inside the same await — usually
+`transition_status(entry, "pending")` to requeue it — and `transition_status`
+rejects a terminal source status, so finalizing here would win the race and
+silently retire the retry loop. Worker-shutdown cancellation is owned the
+same way by `_recover_interrupted_agent_sessions_startup`.
+
+The exclusion holds for every session except a synthetic `dev-{aid8}` lane.
+There, the separate #3176 pre-finalize guard further down the same `finally`
+has no cancel carve-out and finalizes the row anyway, so the requeue loses the
+race and its `StatusConflictError` is swallowed at INFO, so the session is not
+retried. Whether its lane is reclaimed in exchange depends on the exit: an
+ordinary cancellation reaches `cleanup_after_merge`, but the turn-timeout and
+reap-failure preserve branches skip it, leaving the directory for a manual
+`git worktree prune`. That is long-standing behavior on both guards'
+part, and the carve-out still earns its keep by holding for every
+non-synthetic session; collapsing the two guards into one authority is tracked
+in #3305.
 
 ## Liveness Counter Re-Anchoring (issue #2716)
 
@@ -683,7 +740,7 @@ reintroduce a gate in front of the flush; that is the exact shape of the origina
 - `models/session_lifecycle.py`'s step-1 LIFECYCLE-log swallow — promoted from DEBUG to WARNING; a
   lifecycle log that cannot be written is a real observability outage on the terminal path, not a
   routine condition.
-- `agent/session_executor.py`'s unconditional completion-exit finalize guard (#2007) — the bare
+- `agent/session_executor.py`'s exit finalize guard (#2007) — the bare
   `pass` on its own `StatusConflictError` catch (meaning "another actor already finalized this
   session, treat as success") now logs at INFO naming the session and the conflict. "Expected, do
   not treat as an error" is a reason to log at INFO, not a reason to log nothing.
