@@ -584,11 +584,23 @@ the drill's worktree cannot reach them, and a surface must be repo-relative.
 limit=READ_LIMIT)` (the same read `ui/data/improvement.py::_rows` performs) filtered to
 `[start, end)`, counts by kind and classification, counts coverage rows by `source_ref` prefix
 `coverage:`, and computes the rate as `corrections_architectural / coverage_ticks` with `None` when
-the denominator is zero. `compare_windows(baseline, window, *, window_days, baseline_days)`
-normalizes both to per-day, sets `detection_declined = window.coverage_ticks_per_day <
+the denominator is zero. The read is capped and newest-first (`READ_LIMIT = 1000`,
+`ui/data/improvement.py:41`; `ImprovementEvidence.recent` at `models/improvement_evidence.py:149`),
+so a busy span can drop its oldest rows without any error; `measure` therefore returns
+`truncated: True` when `len(rows) == limit and rows[-1].created_at > start`, meaning the oldest
+row returned is still inside the requested window and older rows may exist that the read did not
+reach. An undercounted baseline would read as `regressed`, so a truncated window is never
+scored. `compare_windows(baseline, window, *, window_days, baseline_days)` returns
+`verdict="undetermined", reason="EVIDENCE_TRUNCATED"` when either window is truncated; otherwise
+it normalizes both to per-day, sets `detection_declined = window.coverage_ticks_per_day <
 0.8 * baseline.coverage_ticks_per_day`, and returns `verdict`: `held` when the rate did not rise
 past the baseline plus its noise band and detection did not decline, `regressed` when the rate rose
-past the band, `undetermined` when either denominator is zero or detection declined. Charter §11's
+past the band, `undetermined` when either denominator is zero or detection declined. Evidence
+rows expire at 30 days (`models/improvement_evidence.py:68`); `EVIDENCE_TTL_DAYS = 30` in
+`observation.py` is pinned equal to the model's TTL by a test, and `close_window` returns
+`undetermined` with `reason="EVIDENCE_EXPIRED"` when `now - exposed_at > EVIDENCE_TTL_DAYS`,
+because a late operator-invoked close would otherwise count a window whose early rows are gone
+and report the gap as a number. The partial's window row surfaces both reasons. Charter §11's
 "do not treat fewer detected bugs as improvement when detection declined" is the `undetermined`
 branch, and `claim_level_2_supported` is true only on `held` with `window_shortfall_days == 0` and
 the evaluation's held-out effect still positive. The falsifier written to `outcome` is the
@@ -609,8 +621,17 @@ class ResearchProcessSpec:
 def research_process_digest(spec: ResearchProcessSpec) -> str: ...  # "sha256:<hex>" of canonical JSON
 ```
 Canonical JSON is `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`, so key order
-never changes the digest. `investigation_budget_split` keys are validated against
-`INVESTIGATION_KINDS`. This is the one function lane 5 is asked to call when it writes
+never changes the digest. Validation: `unknown = set(split) - set(INVESTIGATION_KINDS)` raises
+`ValueError`; the sum check `0.99 <= sum(split.values()) <= 1.01` applies **only to a non-empty
+split**. Lane 5's plan (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:541-544`)
+writes every revision with `investigation_budget_split={}`, and an empty split is a legitimate
+"no split declared", so the canonical function must digest it rather than refuse it. Two tests pin
+this: `ResearchProcessSpec(..., investigation_budget_split={})` digests to a `sha256:` string, and
+lane 5's fixture values (`selection_rule="ordinal-lexicographic-v1"`, `extra={"ranking_module_digest":
+...}`) digest identically through `research_process_digest` and lane 5's
+`tools/improvement_ranking.py::process_digest` once both exist (the second test is written against
+lane 5's function by import and skipped with a named reason while that module is absent, so it
+bites the day lane 5 lands). This is the one function lane 5 is asked to call when it writes
 `ImprovementModelRevision.research_process_digest`; the comparison accepts any `sha256:` string
 from a revision row, so a lane 5 that computes its own digest is still comparable as long as the
 two arms differ.
@@ -619,11 +640,21 @@ two arms differ.
 no commits. The comparison needs three things a running loop provides, and each is a seam:
 - *A research process to run.* `ArmRunner` is a `Protocol` with one method,
   `run(process_digest, opportunity_ids, budget_cap, arm_run_id) -> ArmResult`. `ReplayArmRunner`
-  (in `arms.py`, exercised by tests) returns gains and budget use from a fixture. `get_arm_runner()`
-  returns the runner registered by `register_arm_runner(...)` and raises `ArmRunnerAbsent` with
-  the reason code `ARM_RUNNER_ABSENT` otherwise; `compare run` prints that code and exits 2. Lane 5's
-  planner tick, once it exists, registers itself; this plan asks for that in the issue comment and
-  builds nothing that waits on it.
+  (in `arms.py`, exercised by tests) returns gains and budget use from a fixture. `compare run`
+  resolves its runner in two ways. `--arm-runner <module>:<attr>` (for example
+  `tools.improvement_plan_arm:PlannerArmRunner`) is resolved with `importlib.import_module(mod)`
+  then `getattr(mod, attr)()`; an `ImportError` or `AttributeError` becomes
+  `ArmRunnerAbsent("ARM_RUNNER_ABSENT", detail=str(exc))` and the CLI exits 2. When the flag is
+  omitted, `get_arm_runner()` returns the runner registered in-process by `register_arm_runner(...)`
+  and raises `ArmRunnerAbsent` otherwise. The flag exists because lane 5 registers
+  `PlannerArmRunner` from the research CLI's entry (`valor-improve`, lane 5 plan `:554-562`), a
+  process `valor-improve-release compare run` never runs in; without the flag the production
+  comparison would be `ARM_RUNNER_ABSENT` forever and the verification row would pass for the
+  wrong reason. The import is lazy, at the moment `compare run` executes, so the incident binary
+  imports nothing from the research CLI at module load and the coupling argument in Agent
+  Integration holds. The registry path stays so a `compare` mounted under lane 3's `valor-improve`
+  works without the flag. Lane 5's planner tick, once it exists, is named by the flag or registers
+  itself; this plan asks for that in the issue comment and builds nothing that waits on it.
 - *A process digest on revisions.* Written by lane 5 through `research_process_digest`. The
   comparison reads `ImprovementModelRevision.query.filter(project_key=..., state="current")` to
   name the incumbent process when `--arm-a` is omitted, and refuses with `INCUMBENT_PROCESS_UNKNOWN`
@@ -636,15 +667,25 @@ refuses a level-3 claim with `BUDGET_UNKNOWN:unit1` in the evaluation's notes. T
 applied: uncertain or missing metering is not zero cost.
 
 **Budget (`budget.py`).** `BudgetCap` and `BudgetUse` carry `unit1_usd`, `unit3_usd`,
-`subscription_turns`, `wall_seconds`, each `float | int | None`. `LedgerBudgetReader.unit3_usd`
-sums `InfrastructureReservation` rows whose `reason` carries the arm run id (`settled_usd` when
-settled, `amount_usd` otherwise); `unit1_usd` returns `None`; `subscription_turns` and
-`wall_seconds` come from the `ArmResult`. `budgets_comparable(a, b, cap, tolerance=0.10)` returns
-`(ok, reasons)`: `False` with `BUDGET_UNKNOWN:<unit>` for any `None` on either side, `False` with
-`BUDGET_EXCEEDED:<arm>:<unit>` when use exceeds the cap, `False` with `BUDGET_MISMATCH:<unit>` when
-the two arms' use differs by more than the tolerance of the cap. The evaluation's `notes` always
-carry both arms' use in every unit, so the budget accounting is shown whether or not the verdict
-is a claim.
+`subscription_turns`, `wall_seconds`, each `float | int | None`. Unit 3 is tagged through the
+resource name, the one field an admitting caller controls: lane 7's `admit()`
+(`tools/infrastructure_budget.py:260`) takes `resource`, `project_key`, `settings`, `now` and writes
+`reason="admitted"` on every admitted row (`:357`), so `reason` cannot carry an arm run id, but the
+row's `resource` is `resource.name` (`:352`). An arm runner admits every reservation it makes with
+`ResourceDecl(name=f"arm:{arm_run_id}:{resource_name}", ...)`; `ReplayArmRunner` does the same
+against the test ledger so the reader is exercised end to end. `LedgerBudgetReader.unit3_usd(arm_run_id)`
+filters `InfrastructureReservation.query.filter(project_key=...)` by
+`row.resource.startswith(f"arm:{arm_run_id}:")`, sums `settled_usd if settled_usd is not None else
+amount_usd` over rows with `state in ("reserved", "settled")`, and **returns `None` when zero rows
+match**, so an arm that admitted nothing through the ledger is `BUDGET_UNKNOWN:unit3` rather than a
+free arm. `unit1_usd` returns `None`; `subscription_turns` and `wall_seconds` come from the
+`ArmResult`. `budgets_comparable(a, b, cap, tolerance=0.10)` returns `(ok, reasons)`: `False` with
+`BUDGET_UNKNOWN:<unit>` for any `None` on either side, `False` with `BUDGET_EXCEEDED:<arm>:<unit>`
+when use exceeds the cap, `False` with `BUDGET_MISMATCH:<unit>` when the two arms' use differs by
+more than the tolerance of the cap. A unit whose cap is explicitly `0` with `0` use on both sides
+is `ok` for that unit (a unit not budgeted is not a mismatch); a `None` cap is never `ok`. The
+evaluation's `notes` always carry both arms' use in every unit, so the budget accounting is shown
+whether or not the verdict is a claim.
 
 **Comparison (`compare.py`).** `freeze(...)` writes the protocol through lane 4's
 `freeze_protocol` and the experiment through the same fields lane 4's `compute_contract_digest`
