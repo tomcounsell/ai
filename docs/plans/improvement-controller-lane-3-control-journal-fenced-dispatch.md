@@ -243,15 +243,30 @@ Lane 2b left promoting `tools/improvement_eligibility.py`'s cache into the contr
 
 ### Exception Handling Coverage
 
-_Filled in the next revision of this document._
+- [ ] `journal._control_redis()` boundary: `redis.exceptions.ConnectionError` and `TimeoutError` become `reason="UNAVAILABLE"` plus one `logger.warning`; `test_improvement_control_journal.py::test_unavailable_is_a_reason_code_not_an_exception` monkeypatches the alias to raise and asserts the result, the log record, and that no key was written.
+- [ ] `finalize_session` step 7 `except Exception` — `tests/unit/test_session_lifecycle.py::test_finalize_survives_slot_release_failure` seeds a session with `action_id` provenance, monkeypatches `on_session_terminal` to raise, and asserts the session still reaches its terminal status and the DEBUG log line fires.
+- [ ] `on_session_terminal` swallowing nothing: it returns `SlotReleaseResult(released: bool, reason)`; a `False` with `reason="NOT_HOLDER"` is a WARNING, because a slot held by someone else at a session's end is the Race 3 signature.
+- [ ] `scheduler_adapter.tick` per-case `except Exception`: each case's failure is logged at WARNING with the case id and the tick continues; `test_tick_isolates_one_bad_case` seeds two cases, breaks one, asserts the other dispatched.
+- [ ] `vault_write` `except subprocess.CalledProcessError` and `FileNotFoundError` (no `op` binary): both return `state="refused"` with a secret-free detail; `test_vault_write.py::test_refused_output_contains_no_credential_bytes` seeds a distinctive value and greps the result, the log capture, and the evidence row.
+- [ ] `paid_inference_meter.settle_from_response` `except (AttributeError, KeyError, TypeError)` on a malformed response: leaves the reservation open (reconcile receipts it `unknown`), logs WARNING; tested with a response object lacking `usage`.
+- [ ] `reflections/improvement_intent_reconcile.run_*` mirrors `run_improvement_collect`'s shape: per-intent try/except, counts returned in the result dict, never raises to the scheduler.
 
 ### Empty/Invalid Input Handling
 
-_Filled in the next revision of this document._
+- [ ] `propose` with an empty or whitespace `--payload` file, a case whose `ranking_rationale` is `None` or `""`, a `priority_area` outside `PRIORITY_AREAS`, or a `charter_digest` that is not the pinned one: each refuses with its reason code and writes nothing (journal length unchanged, artifact store untouched). One parametrized test.
+- [ ] `transition` with `expected_revision=None`, a negative generation, an unknown event name, or an empty `payload_digest`: `INVALID_ARGUMENT` before any Redis call.
+- [ ] `admit` on a case with no head: `INTENT_STATE` (a case must be `investigating` or `experimenting` to admit). `resume` on a case that is not paused: prints "not paused" and exits 0 without a journal write.
+- [ ] `export` on an empty namespace writes an archive with zero cases and says so; `import` of an archive whose `schema` differs from `SCHEMA_VERSION` refuses.
+- [ ] `reserve(requested_max_usd=0)`, negative, NaN, or infinite: `Refusal(reason="INVALID_AMOUNT")`, mirroring `infrastructure_budget._valid_rate`.
+- [ ] `write_credential(title="", value="")` or whitespace: `state="refused"`, reason `EMPTY`, no `op` call (asserted with a recording runner).
+- [ ] The research session's brief is not processed by this lane; `propose` reads a file path the session names and never interprets agent output, so there is no empty-output loop to guard.
 
 ### Error State Rendering
 
-_Filled in the next revision of this document._
+- [ ] `doctor` renders three distinguishable states: reachable-and-clean ("no paused heads, no stale intents, no outstanding reservations"), reachable-with-findings (tables), and `namespace unreachable: <error>` with exit code 2. A test covers each.
+- [ ] The dashboard control partial renders "unavailable" when `get_control_status` raises, "nothing yet, written by lane 3 when a case is admitted" on an empty namespace, and content otherwise; `tests/unit/test_ui_app.py` covers all three, following the goals partial's precedent.
+- [ ] `propose` refusals print the reason code and the one-line human explanation to stderr and exit 1; `--json` carries `{"accepted": false, "reason": ...}`.
+- [ ] `budget` prints `metering="unknown"` receipts in their own block with the window they were charged to, so an unknown never reads as zero.
 
 ## Test Impact
 
@@ -269,15 +284,89 @@ _Filled in the next revision of this document._
 
 ## Rabbit Holes
 
-_Filled in the next revision of this document._
+- Building #3220 here. The session lease with write fencing in `transition_status` and the relay is a two-release shadow rollout on the production path. This lane fences the *case*, not the session.
+- A general-purpose lease module under `utils/` that both this lane and #3220 could share "later". That is the fork #3220 forbids; the protocol plus a deletable interim implementation is the whole hedge.
+- Moving unit 3's counter into the namespace (No-Gos). A rename that touches a live counter for consistency's sake.
+- A Popoto model for intents or reservations "so the dashboard can query them". The namespace is the authority precisely because Popoto has no compare-and-set; the dashboard reads the namespace through `get_control_status`.
+- A generic event-sourcing framework. One head, one list, one transition script, one replay function.
+- Rerouting the cross-vendor judge to OpenRouter to get `usage.cost`. A provider change for a review judge is not metering work.
+- Answering "how much did the subscription cost" in dollars. Unit 1 is concurrency; `total_cost_usd` is recorded on the intent as provenance and never gated on.
+- Wiring the research session's prompt assembly, brief, or ranking snapshot. Lane 5 owns the brief; this lane's adapter takes a `brief_ref` digest and passes it through.
+- A `worker:registered_pid` refactor. `any_worker_alive()` wraps the existing scan and freshness check; the orphan reaper's own loop is untouched.
 
 ## Risks
 
-_Filled in the next revision of this document._
+### Risk 1: The interim lease outlives #3220
+**Impact:** two lease implementations drift, and a builder on #3220 leaves `CaseLease` in place because deleting it looks like scope creep.
+**Mitigation:** `test_interim_lease_retired_when_redis_lease_exists` fails the suite the moment `models/redis_lease.py` exists; the module docstring names the test, the swap point, and #3220; the plan's Documentation task writes the same instruction into the feature doc's dependency table; a comment on #3220 (Task 12) tells its builder exactly which three edits close the hand-off.
+
+### Risk 2: A fence check followed by an unguarded effect
+**Impact:** a stale controller passes `transition` and then performs the enqueue or the slot write outside the script, and two sessions run for one action.
+**Mitigation:** every effect is one script that both checks and records (Decision 3); the seam call is idempotent under the action id so even a double materialize yields one row; the mutation-review round is instructed to mutate each script's generation compare and revision compare separately and confirm a test fails for each.
+
+### Risk 3: `finalize_session` step 7 regresses every session's termination
+**Impact:** an import error or a Redis hiccup inside the new block breaks terminal transitions for ordinary sessions.
+**Mitigation:** the block is gated on `extra_context.get("action_id")` before any import, so ordinary sessions execute one dict lookup; the import is lazy and inside the `try`; `test_finalize_survives_slot_release_failure` asserts the terminal status lands when the hook raises; `test_finalize_without_provenance_never_imports_control` asserts the package is not imported for a plain session.
+
+### Risk 4: The raw-Redis guard blocks the builder's own verification
+**Impact:** a builder typing `python -c "...improve:...delete..."` in Bash trips `validate_no_raw_redis_delete.py` and works around it with something worse.
+**Mitigation:** the package binds `_control_redis()` privately, no file in it names `POPOTO_REDIS_DB` or `popoto`, every compare-and-delete is exercised only from pytest files, and the builder brief says so up front.
+
+### Risk 5: Unit 2 admits what it cannot meter, or gates what it must not
+**Impact:** either a paid call runs with no receipt (charter §8: unknown is not zero) or the SDLC judge is refused because RSI exhausted the day.
+**Mitigation:** a reservation with no settlement is receipted `metering="unknown"` by the reconcile pass and pauses further `purpose="rsi"` admission until an operator runs `budget --acknowledge-unknown`; `purpose="sdlc_review"` receipts are record-only and never counted against the pool or refused.
+
+### Risk 6: The status trio lands in two commits
+**Impact:** a builder adds `admitted` to `NON_TERMINAL_STATUSES`, the suite fails on `test_keys_match_non_terminal_statuses`, and the fix commit lands the owner separately; or `ui/data/sdlc.py` is forgotten and `admitted` reads inactive on the dashboard.
+**Mitigation:** Task 3 is the three edits and their tests as one commit, explicitly; the Verification row greps all three files for `admitted`.
+
+### Risk 7: A research session finds another door
+**Impact:** the session calls `valor-session create` or writes `ImprovementCase.save()` directly, bypassing the journal.
+**Mitigation:** the skill text forbids it; the projection is overwritten by the next `apply` from the head, so a direct save is lost rather than authoritative; `replay-projection` proves it; the "no child-gate bypass" and "no direct case save outside projection" Verification rows grep for both.
 
 ## Race Conditions
 
-_Filled in the next revision of this document._
+### Race 1: Two ticks admit the same case
+**Location:** `intents.admit` script; `agent/reflection_scheduler.py::is_reflection_running` (`:577`), which reads a status field, not a lease.
+**Trigger:** a slow tick overlaps its successor; both read the head at revision N and decide to admit.
+**Data prerequisite:** the head's `revision` and `highest_accepted`.
+**State prerequisite:** the second admit must observe the first's revision advance.
+**Mitigation:** `admit` compares `expected_revision` inside the script; the loser gets `REVISION_MISMATCH` and writes nothing. The slot reservation is in the same script, so a loser never holds a slot. Test: two `admit` calls with the same expected revision, exactly one `admitted` intent and one slot field.
+
+### Race 2: Crash between admission and session creation
+**Location:** `scheduler_adapter.materialize` around the `_push_agent_session` call.
+**Trigger:** the process dies after the intent is `admitted` (or after the seam's `bind` won the key) and before the intent records the bound id.
+**Data prerequisite:** the intent's `idempotency_key` is written at admit time, before the seam is called.
+**State prerequisite:** intent `admitted`; the row may or may not exist; the idempotency key may or may not be bound.
+**Mitigation:** the next tick retries with the same key; `bind` hands back the same preallocated id whether or not the row was created (`agent/enqueue_idempotency.py:59-62`), and `_push_agent_session` creates the row only if it is missing. Test: monkeypatch `AgentSession.async_create` to raise once after `bind`, run the adapter twice, assert one row with the bound id and the intent at `materialized` with `attempts == 2`.
+
+### Race 3: A lane slot outlives the session that held it
+**Location:** `finalize_session` step 7; the `_ns:slots` hash.
+**Trigger:** a watchdog, health sweep, or scheduler kill finalizes a research session on a path that never ran the ordinary completion code; or the row is deleted outright.
+**Data prerequisite:** `action_id` in `extra_context`.
+**State prerequisite:** the slot field for that action id exists and `max_concurrent_research_sessions == 1`, so nothing else can be admitted.
+**Mitigation:** step 7 runs on every `finalize_session` path; the reconcile pass releases a slot whose intent has been `running` past the staleness threshold with a terminal or missing session row. Test ("unreleased lane slot on restart"): seed a slot and a `running` intent whose `agent_session_id` has no row, run the reconcile pass, assert the slot is free and the intent is `reconciliation_required`.
+
+### Race 4: Result submitted under a replaced generation
+**Location:** `journal.transition`; `valor-improve propose --action-id`.
+**Trigger:** controller A stalls past lease expiry, B acquires generation g+1 and transitions, A's research session submits with g.
+**Data prerequisite:** the session's `generation` in `extra_context`.
+**State prerequisite:** `head.highest_accepted == g+1`.
+**Mitigation:** the script refuses `g < highest_accepted` with `STALE_GENERATION`; the CLI stores the artifact as `ImprovementEvidence(kind="other", detail="stale_generation")` and exits 1. The holder's own second write (`g == highest_accepted`) is accepted. Test ("stale-generation rejection at an effect boundary"): both branches.
+
+### Race 5: Liveness check passes, worker dies before pickup
+**Location:** `scheduler_adapter.activate`.
+**Trigger:** `any_worker_alive()` is true, the session flips to `pending`, the worker exits before popping it.
+**Data prerequisite:** none beyond the pending row.
+**State prerequisite:** intent `running`, session `pending`.
+**Mitigation:** this is the ordinary queue's problem and the ordinary health check's job ("starts workers for stalled `pending` sessions", `docs/features/session-recovery-mechanisms.md:33`); the intent's staleness threshold is the backstop. No new mechanism.
+
+### Race 6: Reconcile pass and a live adapter tick touch one intent
+**Location:** `intents.mark_reconciliation_required` and `scheduler_adapter.materialize`.
+**Trigger:** the reconcile reflection judges an `admitted` intent stale while a delayed tick is materializing it.
+**Data prerequisite:** the intent's `state` and `updated_ts`.
+**State prerequisite:** both run under their own lease generation.
+**Mitigation:** both are CAS scripts on the intent's `state`; whichever lands second gets `INTENT_STATE` and stops. A materialize that loses releases nothing (it held nothing new); a reconcile that loses leaves the slot with the live intent.
 
 ## No-Gos (Out of Scope)
 
