@@ -5,7 +5,7 @@ falsifier, and why-not; each level degrades on its own; and no count of
 experiments, patches, or releases anywhere. Level 2 is seeded with a
 lane-4-shaped evaluation row (``runner.py::_write_evaluation``'s exact string
 expressions) and an accepted release; level 3 with a comparison row written
-by ``compare.run`` under the real ledger reader, whose unit 1 is unmetered.
+by ``compare.run`` under the real ledger reader, whose unit 2 is unmetered.
 Rows land in the claimed test DB (autouse ``redis_test_db``,
 tests/conftest.py) under a test-scoped ``project_key``.
 """
@@ -37,7 +37,7 @@ INTERVAL = {"lower": 0.02, "upper": 0.22, "n": 12, "raw_p_value": 0.01, "adjuste
 FALSIFIER = "architectural correction rate over a later 7-day window exceeds the baseline band"
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
-CAP = BudgetCap(unit1_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+CAP = BudgetCap(unit2_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
 FORBIDDEN_TOKENS = ("experiment_count", "patch_count", "merged_patch", "len(experiments)")
 COUNT_KEY = re.compile(r"count|total|number|num_", re.IGNORECASE)
 
@@ -123,7 +123,7 @@ def _settings():
 
 
 def _comparison(gains_b=(0.5, 0.6, 0.5, 0.4)) -> ImprovementEvaluation:
-    """A comparison row as ``compare.run`` writes it under the unmetered unit-1 reader."""
+    """A comparison row as ``compare.run`` writes it under the unmetered unit-2 reader."""
     case_ids = [
         ImprovementCase.create(
             project_key=PK, state="observed", priority_area=area, created_at=datetime.now(UTC)
@@ -245,7 +245,7 @@ def test_level_3_refused_comparison_names_the_budget_reason(charter):
     assert evaluation.verdict == "inconclusive"
     level = claim_report(PK, now=NOW)["levels"][3]
     assert level["supported"] is False
-    assert "BUDGET_UNKNOWN:unit1" in level["why_not"]
+    assert "BUDGET_UNKNOWN:unit2" in level["why_not"]
     assert evaluation.id in level["why_not"]
     assert level["confidence_interval"] is not None
     assert level["confidence_interval"]["n"] == 4
@@ -292,7 +292,7 @@ def test_each_level_degrades_independently(charter, monkeypatch, caplog):
     assert report["levels"][2]["supported"] is False
     assert report["levels"][2]["why_not"].startswith("could not be determined: ")
     assert "release table unreadable" in report["levels"][2]["why_not"]
-    assert "BUDGET_UNKNOWN:unit1" in report["levels"][3]["why_not"]
+    assert "BUDGET_UNKNOWN:unit2" in report["levels"][3]["why_not"]
     assert any("level 2" in rec.getMessage() for rec in caplog.records)
 
 

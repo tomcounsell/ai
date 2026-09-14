@@ -8,8 +8,11 @@ either arm runs, :func:`run` runs both arms and scores them, and one
 carries the answer in lane 4's string shapes.
 
 **Budgets are matched by cap and verified by accounting.** Both arms run
-under the same :class:`BudgetCap` in four units (paid inference in USD,
-infrastructure in USD, subscription turns, wall seconds). The cap is the
+under the same :class:`BudgetCap` in four fields, numbered as the parent
+plan's Gap D numbers them (``docs/plans/recursive-self-improvement.md``):
+unit 1 is the subscription lane slot, accounted as ``subscription_turns``;
+unit 2 is paid inference in USD (``unit2_usd``); unit 3 is infrastructure
+in USD (``unit3_usd``); ``wall_seconds`` is elapsed time. The cap is the
 promise; what each arm actually spent is read back afterwards through a
 ``BudgetReader`` (``budget.accounted_use``): dollars come from records
 (unit 3 from lane 7's ledger rows under the ``arm:<arm_run_id>:`` prefix),
@@ -20,11 +23,12 @@ comparable is ``inconclusive`` whatever the deltas say, because a comparison
 of two processes that spent differently measures the spend and calls it
 the process.
 
-**Unknown unit-1 spend refuses a claim.** Charter section 8: uncertain or
-missing metering is never zero cost. Unit 1 has no meter until lane 3
-(#3215) lands, so ``LedgerBudgetReader.unit1_usd`` answers ``None``, the
-comparability check names ``BUDGET_UNKNOWN:unit1``, and the verdict is
-``inconclusive``. A ``None`` read as ``0`` would let two arms with wildly
+**Unknown unit-2 spend refuses a claim.** Charter section 8: uncertain or
+missing metering is never zero cost. Unit 2, daily paid inference in the
+parent plan's numbering, has no meter until lane 3 (#3215) lands its
+``tools/paid_inference_meter.py``, so ``LedgerBudgetReader.unit2_usd``
+answers ``None``, the comparability check names ``BUDGET_UNKNOWN:unit2``,
+and the verdict is ``inconclusive``. A ``None`` read as ``0`` would let two arms with wildly
 different paid-inference spend look matched and a level-3 claim would
 measure the budget. The evaluation's ``budget=`` notes line carries every
 unit for both arms whether or not the verdict is a claim, so the report can

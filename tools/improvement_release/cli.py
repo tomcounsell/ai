@@ -573,7 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--budget",
         required=True,
-        help="JSON file: {unit1_usd, unit3_usd, subscription_turns, wall_seconds}",
+        help="JSON file: {unit2_usd, unit3_usd, subscription_turns, wall_seconds}",
     )
     p.add_argument("--minimum-worthwhile-effect", type=float, default=0.0)
     _add_common(p)

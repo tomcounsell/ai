@@ -8,8 +8,9 @@ in the claimed test DB (autouse ``redis_test_db``, tests/conftest.py) under a
 test-scoped ``project_key``; the charter is seeded from the real file, cases
 carry a ``priority_area``, and the replay runner admits its unit-3 spend
 through lane 7's ledger so ``LedgerBudgetReader`` reads it on the production
-path. Unit 1 has no meter, so the accept / reject / mismatch fixtures inject a
-reader that meters it; the unit-1-unknown test uses the real reader.
+path. Unit 2 (paid inference) has no meter, so the accept / reject / mismatch
+fixtures inject a reader that meters it; the unit-2-unknown test uses the real
+reader.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ PK = "test-3218-compare"
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
-CAP = BudgetCap(unit1_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+CAP = BudgetCap(unit2_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
 USE = BudgetUse(unit3_usd=1.0, subscription_turns=10, wall_seconds=100)
 AREAS = ("memory", "skills", "memory", "inference")
 
@@ -141,16 +142,16 @@ def _replay(gains_per_case, case_ids, *, use_a=USE, use_b=USE) -> ReplayArmRunne
 
 
 class _MeteredReader(LedgerBudgetReader):
-    """The ledger reader with a unit-1 meter the tests control per arm run."""
+    """The ledger reader with a unit-2 meter the tests control per arm run."""
 
-    def __init__(self, unit1: dict[str, float] | float | None = 2.0) -> None:
+    def __init__(self, unit2: dict[str, float] | float | None = 2.0) -> None:
         super().__init__(PK)
-        self._unit1 = unit1
+        self._unit2 = unit2
 
-    def unit1_usd(self, arm_run_id: str) -> float | None:
-        if isinstance(self._unit1, dict):
-            return self._unit1.get(arm_run_id.rsplit(":", 1)[-1])
-        return self._unit1
+    def unit2_usd(self, arm_run_id: str) -> float | None:
+        if isinstance(self._unit2, dict):
+            return self._unit2.get(arm_run_id.rsplit(":", 1)[-1])
+        return self._unit2
 
 
 class _RaisingRunner:
@@ -225,7 +226,7 @@ def test_freeze_writes_a_frozen_experiment_lane4_can_verify(charter):
     ).hexdigest()
     assert protocol["opportunity_set_digest"] == "sha256:" + expected_set
     assert protocol["budget_cap"] == {
-        "unit1_usd": 10.0,
+        "unit2_usd": 10.0,
         "unit3_usd": 10.0,
         "subscription_turns": 100,
         "wall_seconds": 3600,
@@ -465,14 +466,14 @@ def test_equal_cap_replay_verdicts(charter, gains, verdict):
     budget = budget_of(row)
     assert budget["comparable"] is True and budget["reasons"] == []
     assert budget["cap"] == {
-        "unit1_usd": 10.0,
+        "unit2_usd": 10.0,
         "unit3_usd": 10.0,
         "subscription_turns": 100,
         "wall_seconds": 3600,
     }
     for arm in ("a", "b"):
         assert budget[arm] == {
-            "unit1_usd": 2.0,
+            "unit2_usd": 2.0,
             "unit3_usd": 1.0,
             "subscription_turns": 10,
             "wall_seconds": 100,
@@ -489,16 +490,16 @@ def test_accept_needs_the_lower_bound_above_the_minimum_worthwhile_effect(charte
     assert current_revisions(PK) == []
 
 
-def test_compare_refuses_claim_on_unknown_unit1(charter):
-    """Unit 1 is unmetered: the real reader answers ``None`` and no claim is made."""
+def test_compare_refuses_claim_on_unknown_unit2(charter):
+    """Unit 2 is unmetered: the real reader answers ``None`` and no claim is made."""
     _, evaluation, _ = _run_fixture(ACCEPT_GAINS, reader=LedgerBudgetReader(PK))
     row = _reload_evaluation(evaluation)
     assert row.verdict == "inconclusive"
-    assert "BUDGET_UNKNOWN:unit1" in notes_of(row)
+    assert "BUDGET_UNKNOWN:unit2" in notes_of(row)
     budget = budget_of(row)
     assert budget["comparable"] is False
-    assert budget["reasons"] == ["BUDGET_UNKNOWN:unit1"]
-    assert budget["a"]["unit1_usd"] is None and budget["b"]["unit1_usd"] is None
+    assert budget["reasons"] == ["BUDGET_UNKNOWN:unit2"]
+    assert budget["a"]["unit2_usd"] is None and budget["b"]["unit2_usd"] is None
     assert budget["a"]["unit3_usd"] == 1.0, "unit 3 still read from the ledger"
     assert effect_of(row, "validated_gain") > 0, "the deltas alone would have accepted"
     assert current_revisions(PK) == []
@@ -525,9 +526,9 @@ def test_mismatched_budget_is_inconclusive(charter):
     _, evaluation, _ = _run_fixture(ACCEPT_GAINS, reader=_MeteredReader({"a": 1.0, "b": 6.0}))
     row = _reload_evaluation(evaluation)
     assert row.verdict == "inconclusive"
-    assert "BUDGET_MISMATCH:unit1" in notes_of(row)
-    assert budget_of(row)["a"]["unit1_usd"] == 1.0
-    assert budget_of(row)["b"]["unit1_usd"] == 6.0
+    assert "BUDGET_MISMATCH:unit2" in notes_of(row)
+    assert budget_of(row)["a"]["unit2_usd"] == 1.0
+    assert budget_of(row)["b"]["unit2_usd"] == 6.0
     assert current_revisions(PK) == []
 
 

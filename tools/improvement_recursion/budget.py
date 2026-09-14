@@ -2,18 +2,25 @@
 
 A comparison of two research processes is only a comparison of the
 processes when both arms spent about the same. This module carries one cap
-per arm in four units (paid inference in USD, infrastructure in USD,
-subscription turns, wall seconds), reads what each arm actually spent, and
-decides whether the two arms are comparable. Charter section 8 applied:
-uncertain or missing metering is never zero cost, so any ``None`` refuses.
+per arm in four fields, reads what each arm actually spent, and decides
+whether the two arms are comparable. Charter section 8 applied: uncertain
+or missing metering is never zero cost, so any ``None`` refuses.
+
+The unit numbering is the parent plan's (``docs/plans/recursive-self-
+improvement.md``, Gap D): **unit 1** is the subscription lane slot, a
+concurrency budget rather than money, accounted here as
+``subscription_turns`` (the arm's reported turn count, a proxy for slot
+time); **unit 2** is daily paid inference in USD (``unit2_usd``); **unit 3**
+is weekly infrastructure in USD (``unit3_usd``). ``wall_seconds`` is the
+fourth field, so an arm cannot buy its gain with time.
 
 Unit 3 is read from lane 7's ledger. ``admit()`` writes ``reason="admitted"``
 on every admitted row, so the arm run id rides on the one field an admitting
 caller controls, the resource name: an arm runner admits every reservation
 as ``ResourceDecl(name=f"arm:{arm_run_id}:{resource_name}", ...)`` and
-:class:`LedgerBudgetReader` sums the rows carrying that prefix. Unit 1 has
+:class:`LedgerBudgetReader` sums the rows carrying that prefix. Unit 2 has
 no meter until lane 3 (#3215) lands; the reader answers ``None`` and the
-comparison says ``BUDGET_UNKNOWN:unit1``.
+comparison says ``BUDGET_UNKNOWN:unit2``.
 
 This module imports nothing from ``arms.py``: ``ArmResult`` holds a
 :class:`BudgetUse`, and the dependency runs arms → budget only.
@@ -26,9 +33,9 @@ from typing import Protocol
 
 Amount = float | int | None
 
-#: Field name → label used in refusal reasons (``BUDGET_UNKNOWN:unit1``).
+#: Field name → label used in refusal reasons (``BUDGET_UNKNOWN:unit2``).
 UNIT_LABELS: dict[str, str] = {
-    "unit1_usd": "unit1",
+    "unit2_usd": "unit2",
     "unit3_usd": "unit3",
     "subscription_turns": "subscription_turns",
     "wall_seconds": "wall_seconds",
@@ -43,9 +50,14 @@ DEFAULT_TOLERANCE = 0.10
 
 @dataclass(frozen=True)
 class BudgetCap:
-    """One arm's ceiling in each unit. A ``None`` cap is never comparable."""
+    """One arm's ceiling per field. A ``None`` cap is never comparable.
 
-    unit1_usd: Amount = None
+    ``unit2_usd`` is paid inference (unit 2), ``unit3_usd`` infrastructure
+    (unit 3), ``subscription_turns`` the lane-slot proxy (unit 1), and
+    ``wall_seconds`` elapsed time.
+    """
+
+    unit2_usd: Amount = None
     unit3_usd: Amount = None
     subscription_turns: Amount = None
     wall_seconds: Amount = None
@@ -53,9 +65,12 @@ class BudgetCap:
 
 @dataclass(frozen=True)
 class BudgetUse:
-    """What one arm spent in each unit. ``None`` means unknown, never zero."""
+    """What one arm spent per field, same fields as :class:`BudgetCap`.
 
-    unit1_usd: Amount = None
+    ``None`` means unknown, never zero.
+    """
+
+    unit2_usd: Amount = None
     unit3_usd: Amount = None
     subscription_turns: Amount = None
     wall_seconds: Amount = None
@@ -64,7 +79,7 @@ class BudgetUse:
 class BudgetReader(Protocol):
     """Accounted spend per arm run, from records rather than from the arm."""
 
-    def unit1_usd(self, arm_run_id: str) -> float | None: ...
+    def unit2_usd(self, arm_run_id: str) -> float | None: ...
 
     def unit3_usd(self, arm_run_id: str) -> float | None: ...
 
@@ -75,7 +90,7 @@ def arm_resource_prefix(arm_run_id: str) -> str:
 
 
 class LedgerBudgetReader:
-    """Reads unit 3 from ``InfrastructureReservation`` rows; unit 1 is unmetered.
+    """Reads unit 3 from ``InfrastructureReservation`` rows; unit 2 is unmetered.
 
     ``unit3_usd`` sums ``settled_usd`` where present, else ``amount_usd``,
     over rows in :data:`SPENT_STATES` whose ``resource`` starts with
@@ -86,7 +101,7 @@ class LedgerBudgetReader:
     def __init__(self, project_key: str = "valor") -> None:
         self.project_key = project_key
 
-    def unit1_usd(self, arm_run_id: str) -> float | None:
+    def unit2_usd(self, arm_run_id: str) -> float | None:
         """No paid-inference meter exists until lane 3 (#3215); always unknown."""
         return None
 
@@ -114,7 +129,7 @@ def accounted_use(reader: BudgetReader, arm_run_id: str, reported: BudgetUse) ->
     because no record outside the arm carries them.
     """
     return BudgetUse(
-        unit1_usd=reader.unit1_usd(arm_run_id),
+        unit2_usd=reader.unit2_usd(arm_run_id),
         unit3_usd=reader.unit3_usd(arm_run_id),
         subscription_turns=reported.subscription_turns,
         wall_seconds=reported.wall_seconds,

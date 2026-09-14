@@ -33,7 +33,7 @@ from tools.improvement_recursion.budget import LedgerBudgetReader, accounted_use
 
 PK = "test-3218-arms"
 MONDAY = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
-CAP = BudgetCap(unit1_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+CAP = BudgetCap(unit2_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 
@@ -245,7 +245,7 @@ def test_replay_with_unknown_unit3_admits_nothing():
     result = runner.run(DIGEST_A, ["c1"], CAP, "run-a")
     use = accounted_use(LedgerBudgetReader(PK), "run-a", result.budget_use)
     assert use.unit3_usd is None
-    assert use.unit1_usd is None
+    assert use.unit2_usd is None
 
 
 def test_replay_refuses_an_unknown_process_digest():

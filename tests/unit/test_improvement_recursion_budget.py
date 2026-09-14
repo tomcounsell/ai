@@ -105,8 +105,8 @@ def test_unit3_scoped_by_project_key():
     assert LedgerBudgetReader("test-3218-budget-other").unit3_usd("arm-a") is None
 
 
-def test_unit1_unknown_until_lane3_meters_it():
-    assert LedgerBudgetReader(PK).unit1_usd("arm-a") is None
+def test_unit2_unknown_until_lane3_meters_it():
+    assert LedgerBudgetReader(PK).unit2_usd("arm-a") is None
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +116,10 @@ def test_unit1_unknown_until_lane3_meters_it():
 
 def test_accounted_use_takes_dollars_from_reader_and_the_rest_from_the_arm():
     decision = _admit("arm-a", "gpu", 2.0)
-    reported = BudgetUse(unit1_usd=99.0, unit3_usd=99.0, subscription_turns=4, wall_seconds=12.5)
+    reported = BudgetUse(unit2_usd=99.0, unit3_usd=99.0, subscription_turns=4, wall_seconds=12.5)
     use = accounted_use(LedgerBudgetReader(PK), "arm-a", reported)
     assert use == BudgetUse(
-        unit1_usd=None,
+        unit2_usd=None,
         unit3_usd=pytest.approx(decision.forecast_usd),
         subscription_turns=4,
         wall_seconds=12.5,
@@ -130,11 +130,11 @@ def test_accounted_use_takes_dollars_from_reader_and_the_rest_from_the_arm():
 # budgets_comparable
 # ---------------------------------------------------------------------------
 
-CAP = BudgetCap(unit1_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+CAP = BudgetCap(unit2_usd=10.0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
 
 
 def _use(**overrides) -> BudgetUse:
-    fields = dict(unit1_usd=5.0, unit3_usd=5.0, subscription_turns=50, wall_seconds=1800)
+    fields = dict(unit2_usd=5.0, unit3_usd=5.0, subscription_turns=50, wall_seconds=1800)
     fields.update(overrides)
     return BudgetUse(**fields)
 
@@ -148,12 +148,12 @@ def test_comparable_when_both_arms_within_cap_and_tolerance():
 @pytest.mark.parametrize(
     "a, b, unit",
     [
-        (_use(unit1_usd=None), _use(), "unit1"),
+        (_use(unit2_usd=None), _use(), "unit2"),
         (_use(), _use(unit3_usd=None), "unit3"),
         (_use(subscription_turns=None), _use(subscription_turns=None), "subscription_turns"),
         (_use(wall_seconds=None), _use(), "wall_seconds"),
     ],
-    ids=["a-unit1", "b-unit3", "both-turns", "a-wall"],
+    ids=["a-unit2", "b-unit3", "both-turns", "a-wall"],
 )
 def test_unknown_use_on_either_arm_refuses(a, b, unit):
     ok, reasons = budgets_comparable(a, b, CAP)
@@ -162,10 +162,10 @@ def test_unknown_use_on_either_arm_refuses(a, b, unit):
 
 
 def test_exceeded_names_arm_and_unit():
-    ok, reasons = budgets_comparable(_use(unit3_usd=11.0), _use(unit1_usd=10.5), CAP)
+    ok, reasons = budgets_comparable(_use(unit3_usd=11.0), _use(unit2_usd=10.5), CAP)
     assert ok is False
     assert "BUDGET_EXCEEDED:a:unit3" in reasons
-    assert "BUDGET_EXCEEDED:b:unit1" in reasons
+    assert "BUDGET_EXCEEDED:b:unit2" in reasons
 
 
 def test_use_equal_to_cap_is_not_exceeded():
@@ -175,51 +175,51 @@ def test_use_equal_to_cap_is_not_exceeded():
 
 
 def test_mismatch_beyond_tolerance_of_cap():
-    ok, reasons = budgets_comparable(_use(unit1_usd=4.0), _use(unit1_usd=5.5), CAP)
+    ok, reasons = budgets_comparable(_use(unit2_usd=4.0), _use(unit2_usd=5.5), CAP)
     assert ok is False
-    assert reasons == ["BUDGET_MISMATCH:unit1"]
+    assert reasons == ["BUDGET_MISMATCH:unit2"]
 
 
 def test_mismatch_at_tolerance_boundary_is_ok():
-    ok, reasons = budgets_comparable(_use(unit1_usd=4.0), _use(unit1_usd=5.0), CAP)
+    ok, reasons = budgets_comparable(_use(unit2_usd=4.0), _use(unit2_usd=5.0), CAP)
     assert ok is True
     assert reasons == []
 
 
 def test_tolerance_is_a_fraction_of_the_cap():
-    ok, _ = budgets_comparable(_use(unit1_usd=4.0), _use(unit1_usd=5.5), CAP, tolerance=0.2)
+    ok, _ = budgets_comparable(_use(unit2_usd=4.0), _use(unit2_usd=5.5), CAP, tolerance=0.2)
     assert ok is True
 
 
 def test_zero_cap_with_zero_use_on_both_sides_is_ok():
-    cap = BudgetCap(unit1_usd=0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
-    ok, reasons = budgets_comparable(_use(unit1_usd=0), _use(unit1_usd=0.0), cap)
+    cap = BudgetCap(unit2_usd=0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+    ok, reasons = budgets_comparable(_use(unit2_usd=0), _use(unit2_usd=0.0), cap)
     assert ok is True
     assert reasons == []
 
 
 def test_zero_cap_with_any_use_is_exceeded():
-    cap = BudgetCap(unit1_usd=0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
-    ok, reasons = budgets_comparable(_use(unit1_usd=0), _use(unit1_usd=0.01), cap)
+    cap = BudgetCap(unit2_usd=0, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+    ok, reasons = budgets_comparable(_use(unit2_usd=0), _use(unit2_usd=0.01), cap)
     assert ok is False
-    assert "BUDGET_EXCEEDED:b:unit1" in reasons
+    assert "BUDGET_EXCEEDED:b:unit2" in reasons
 
 
 def test_none_cap_is_never_ok():
-    cap = BudgetCap(unit1_usd=None, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
-    ok, reasons = budgets_comparable(_use(unit1_usd=0), _use(unit1_usd=0), cap)
+    cap = BudgetCap(unit2_usd=None, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+    ok, reasons = budgets_comparable(_use(unit2_usd=0), _use(unit2_usd=0), cap)
     assert ok is False
-    assert reasons == ["CAP_UNKNOWN:unit1"]
+    assert reasons == ["CAP_UNKNOWN:unit2"]
 
 
 def test_reasons_accumulate_across_units():
-    cap = BudgetCap(unit1_usd=None, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
+    cap = BudgetCap(unit2_usd=None, unit3_usd=10.0, subscription_turns=100, wall_seconds=3600)
     ok, reasons = budgets_comparable(
         _use(unit3_usd=None, subscription_turns=200), _use(wall_seconds=1000), cap
     )
     assert ok is False
     assert reasons == [
-        "CAP_UNKNOWN:unit1",
+        "CAP_UNKNOWN:unit2",
         "BUDGET_UNKNOWN:unit3",
         "BUDGET_EXCEEDED:a:subscription_turns",
         "BUDGET_MISMATCH:subscription_turns",
