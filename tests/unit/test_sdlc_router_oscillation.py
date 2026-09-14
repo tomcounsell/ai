@@ -25,6 +25,13 @@ from agent.sdlc_router import (
     record_dispatch,
 )
 
+# #3249/#3260: every terminal /do-merge dispatch (G3 leg 1, G6, row 10) now
+# requires positive evidence that the APPROVED verdict judged the live PR head
+# -- meta's recorded head SHA and the context's live head must agree. An absent
+# ``pr_head_sha`` fails closed. Fixtures below supply both halves of that real
+# production signal rather than asserting a merge on an absent key.
+_SHA_A = "a" * 40
+
 
 def test_g1_critique_loop_blocked():
     """G1: NEEDS REVISION + last /do-plan-critique → forced /do-plan."""
@@ -121,8 +128,15 @@ def test_g3_pr_lock_routes_to_merge_when_review_and_docs_complete():
         "REVIEW": "completed",
         "DOCS": "completed",
     }
-    meta = {"pr_number": 42, "last_dispatched_skill": SKILL_DO_PLAN}
-    result = decide_next_dispatch(states, meta)
+    meta = {
+        "pr_number": 42,
+        "last_dispatched_skill": SKILL_DO_PLAN,
+        # G3 leg 1 is a terminal merge dispatch: it consults the APPROVED
+        # verdict and the head freshness it used to skip (#3249/#3260).
+        "latest_review_verdict": "APPROVED",
+        "latest_review_head_sha": _SHA_A,
+    }
+    result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
     assert isinstance(result, Dispatch)
     assert result.row_id == "G3"
     assert result.skill == SKILL_DO_MERGE
@@ -476,7 +490,17 @@ def test_1036_replay_terminates():
     # APPROVED review verdict — mirror the replay's final turn below. Without it,
     # Row 8e (no-verdict recovery) correctly re-dispatches /do-pr-review, which is
     # pinned by tests/unit/test_sdlc_router.py::TestRow8eNoVerdictRecovery.
-    r4 = decide_next_dispatch(happy, {"pr_number": 1039, "latest_review_verdict": "APPROVED"})
+    # Row 10 is terminal, so the approval must also be shown to have judged the
+    # live head before it may merge (#3249/#3260).
+    r4 = decide_next_dispatch(
+        happy,
+        {
+            "pr_number": 1039,
+            "latest_review_verdict": "APPROVED",
+            "latest_review_head_sha": _SHA_A,
+        },
+        {"pr_head_sha": _SHA_A},
+    )
     assert isinstance(r4, Dispatch)
     assert r4.skill == SKILL_DO_MERGE
     assert r4.row_id == "10", "happy-path terminal must resolve via Row 10 (ready-to-merge)"
@@ -554,16 +578,23 @@ def test_1036_replay_terminates():
             },
             {"pr_number": 1039, "latest_review_verdict": "APPROVED"},
         ),
-        # Docs complete, ready to merge
+        # Docs complete, ready to merge. Terminal, so it carries the live-head
+        # evidence pair the merge rows now require (#3249/#3260) -- without it
+        # the replay would stop short of the merge it exists to demonstrate.
         (
             happy,
-            {"pr_number": 1039, "latest_review_verdict": "APPROVED"},
+            {
+                "pr_number": 1039,
+                "latest_review_verdict": "APPROVED",
+                "latest_review_head_sha": _SHA_A,
+            },
+            {"pr_head_sha": _SHA_A},
         ),
     ]
 
     dispatched_skills: list[str] = []
-    for states, meta in turns:
-        result = decide_next_dispatch(states, meta)
+    for states, meta, *maybe_context in turns:
+        result = decide_next_dispatch(states, meta, maybe_context[0] if maybe_context else {})
         if isinstance(result, Dispatch):
             dispatched_skills.append(result.skill)
         else:
@@ -616,18 +647,30 @@ def _g6_happy_states() -> dict:
 
 
 def _g6_happy_meta() -> dict:
-    """Seed meta for G6 positive tests: CLEAN merge state, CI green."""
+    """Seed meta for G6 positive tests: CLEAN merge state, CI green.
+
+    Carries ``latest_review_head_sha`` because G6 is a terminal merge dispatch
+    and declines on anything short of positive head-freshness evidence
+    (#3249/#3260). The negative tests below reuse this meta unchanged — each
+    still fails G6 on its own gate, not on a missing SHA.
+    """
     return {
         "pr_number": 264,
         "pr_merge_state": "CLEAN",
         "ci_all_passing": True,
         "latest_review_verdict": "APPROVED",
+        "latest_review_head_sha": _SHA_A,
     }
 
 
+def _g6_happy_context() -> dict:
+    """Live-head context matching ``_g6_happy_meta``'s recorded verdict SHA."""
+    return {"pr_head_sha": _SHA_A}
+
+
 def test_g6_terminal_merge_ready_fires():
-    """G6: CLEAN + CI green + DOCS done + APPROVED verdict → /do-merge with row_id G6."""
-    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta())
+    """G6: CLEAN + CI green + DOCS done + APPROVED verdict on the live head → /do-merge."""
+    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta(), _g6_happy_context())
     assert isinstance(result, Dispatch)
     assert result.skill == SKILL_DO_MERGE
     assert result.row_id == "G6"
@@ -638,9 +681,10 @@ def test_1043_pr264_8step_terminates():
 
     Issue #1043 showed /sdlc dispatching /do-pr-review eight times on a
     merge-ready PR. With G6 in place the router must immediately route to
-    /do-merge when all stages are done, CI is green, and the review is APPROVED.
+    /do-merge when all stages are done, CI is green, and the review is APPROVED
+    against the live head.
     """
-    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta())
+    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta(), _g6_happy_context())
     assert isinstance(result, Dispatch)
     assert result.skill == SKILL_DO_MERGE
     assert result.row_id == "G6"
@@ -701,7 +745,7 @@ def test_g6_fires_when_verdict_in_meta_not_stage_states():
     (not in stage_states._verdicts). G6 must read meta first to handle this case.
     """
     states = {k: v for k, v in _g6_happy_states().items() if k != "_verdicts"}
-    result = decide_next_dispatch(states, _g6_happy_meta())
+    result = decide_next_dispatch(states, _g6_happy_meta(), _g6_happy_context())
     assert isinstance(result, Dispatch)
     assert result.skill == SKILL_DO_MERGE
     assert result.row_id == "G6"
@@ -766,12 +810,30 @@ def _states_with_plan() -> dict:
 # isolation from the live gh/git calls.
 
 
+def _g8_meta() -> dict:
+    """Seed meta for the g8 trio: BUILD complete on a lane with an open PR.
+
+    The ``pr_number`` is load-bearing, not decoration. These tests isolate one
+    variable -- the verification flags -- so all three need a state that some
+    row genuinely owns; row 7 (``/do-pr-review``) owns this one. Without a PR,
+    BUILD-completed belongs to no row at all: the plan-stage rows stand down
+    once BUILD has started (#3249), so the lane correctly lands on
+    ``Blocked(NO_RULE)`` and the tests would assert g8's silence via a state
+    that never reaches row matching -- passing for the wrong reason.
+    """
+    return {
+        "pr_number": 42,
+        "same_stage_dispatch_count": 0,
+        "last_dispatched_skill": SKILL_DO_BUILD,
+    }
+
+
 def test_g8_redispatches_same_stage_on_verified_mismatch():
     """g8: stage_artifacts_verified=False + unverified_stage='BUILD' →
     re-dispatch /do-build (the BUILD stage's own skill), row_id='G8'."""
     result = decide_next_dispatch(
         {"BUILD": "completed"},
-        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        _g8_meta(),
         context={"stage_artifacts_verified": False, "unverified_stage": "BUILD"},
     )
     assert isinstance(result, Dispatch)
@@ -783,7 +845,7 @@ def test_g8_silent_when_verified_true():
     """g8 does not fire when stage_artifacts_verified is True (verified clean)."""
     result = decide_next_dispatch(
         {"BUILD": "completed"},
-        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        _g8_meta(),
         context={"stage_artifacts_verified": True, "unverified_stage": None},
     )
     assert isinstance(result, Dispatch)
@@ -795,7 +857,7 @@ def test_g8_silent_when_flag_absent():
     all -- the no-claimed-artifact no-op contract from context assembly."""
     result = decide_next_dispatch(
         {"BUILD": "completed"},
-        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        _g8_meta(),
         context={},
     )
     assert isinstance(result, Dispatch)
