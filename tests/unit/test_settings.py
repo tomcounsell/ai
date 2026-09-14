@@ -172,6 +172,28 @@ class TestImprovementSettingsBudgetUnits:
             ImprovementSettings(**{field: bad_value})
 
 
+class TestImprovementSettingsControlJournal:
+    """Lease TTL, journal bound, and dispatch-attempt bound (#3215, Task 1)."""
+
+    def test_defaults(self):
+        s = ImprovementSettings()
+        assert s.lease_ttl_seconds == 90
+        assert s.journal_max_entries == 1000
+        assert s.max_dispatch_attempts == 3
+
+    def test_env_overrides(self, monkeypatch):
+        # ImprovementSettings is a plain BaseModel; IMPROVEMENT__* env vars
+        # are read by pydantic-settings' env_nested_delimiter only when the
+        # top-level Settings() is constructed, not on a bare ImprovementSettings().
+        monkeypatch.setenv("IMPROVEMENT__LEASE_TTL_SECONDS", "45")
+        monkeypatch.setenv("IMPROVEMENT__JOURNAL_MAX_ENTRIES", "500")
+        monkeypatch.setenv("IMPROVEMENT__MAX_DISPATCH_ATTEMPTS", "5")
+        s = Settings()
+        assert s.improvement.lease_ttl_seconds == 45
+        assert s.improvement.journal_max_entries == 500
+        assert s.improvement.max_dispatch_attempts == 5
+
+
 class TestCodexSettings:
     """CODEX__* knobs for the opt-in Codex dev lane (plan #2001, Phase 3)."""
 
