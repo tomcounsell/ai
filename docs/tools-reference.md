@@ -353,7 +353,6 @@ built rather than discovered afterwards. See
 valor-improve case show --case ID     # the journal head, its revision, and the journal tail
 valor-improve case explain --case ID  # why this case exists, and on what evidence
 valor-improve propose                 # the only way a research session writes a proposed action
-valor-improve release compare         # a release against the incumbent it would replace
 valor-improve pause --case ID --reason TEXT   # break-glass. Never self-clearing
 valor-improve resume --case ID        # re-reads the head first; refuses a case with unreconciled intents
 valor-improve doctor                  # paused heads, stale intents, outstanding reservations
@@ -365,8 +364,11 @@ Research sessions reach research state only through this CLI, which enforces
 journal authorization and never exposes a raw transition. `pause`, `resume`, and
 `doctor` are the break-glass path; the manual procedure lives in
 [Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
+The comparison of a release against its incumbent, once listed here as
+`valor-improve release compare`, ships as `valor-improve-release compare` below.
 
-**What is available today** is the evidence side, and it has no CLI: the
+**What is available today** is the evidence side, which has no CLI, and the
+release side, which has `valor-improve-release`. The
 `improvement-evidence-collect` reflection runs on a 900s tick and writes
 `ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
 Read it directly if you need to:
@@ -377,6 +379,53 @@ from models.improvement_evidence import ImprovementEvidence
 rows = ImprovementEvidence.recent("valor", limit=50)
 corrections = [r for r in rows if r.kind == "correction"]
 ```
+
+### Improvement Release (`valor-improve-release`)
+
+The release lane's operator and incident binary
+(`tools/improvement_release/cli.py`): the release lifecycle from an `accept`
+verdict to `accepted` or `rolled_back`, the rollback drill, the promotion gate,
+the recursive comparison of two research processes, the model-revision repair,
+and the claim report. A separate binary from `valor-improve` on purpose:
+`rollback` and `drill` must work when the control journal is unreachable, so
+nothing here imports the research CLI at load. Every subcommand takes
+`--project-key` (default `valor`), prints one JSON object on stdout, and exits
+0 on success, 2 on a refusal (`{"refused": true, "code": ..., "detail": ...}`),
+1 on an unexpected error. See [Improvement Release](features/improvement-release.md).
+
+```bash
+# Release lifecycle, in order
+valor-improve-release propose --evaluation ID --kind core_workflow --candidate-ref session/x \
+    --surfaces a.py b.py --rollback-plan plan.json --observation obs.json   # accept verdict -> proposed
+valor-improve-release drill --release ID          # execute the rollback plan in a throwaway worktree; writes rollback_drill
+valor-improve-release drill --sweep               # remove drill worktrees older than a day
+valor-improve-release approve --release ID --approved-by "Tom Counsell"   # proposed -> approved; needs a passed drill
+valor-improve-release open-pr --release ID        # gh pr create from the candidate ref; the pipeline merges it
+valor-improve-release expose --release ID         # approved -> observing; exposed_at = mergedAt; baseline frozen
+valor-improve-release close-window --release ID   # score the window; accepted on held, else rollback_recommended
+valor-improve-release close-window --due          # observing releases whose window has ended
+valor-improve-release rollback --release ID --reason TEXT           # revert the merge on freshly fetched origin/main and push
+valor-improve-release rollback --release ID --reason TEXT --branch NAME   # push the revert to NAME; prints the gh pr create command
+valor-improve-release withdraw --release ID --reason TEXT           # proposed or approved -> withdrawn
+valor-improve-release show --release ID           # the row, its drill record, and the drill log
+valor-improve-release gate                        # the promotion gate: automated=false and both unmet preconditions
+
+# Recursive comparison (claim level 3)
+valor-improve-release compare fresh --candidates c1 c2 c3          # split case ids into fresh and excluded, with reasons
+valor-improve-release compare freeze --arm-a a.json --arm-b b.json --opportunities c1 c3 --budget budget.json
+valor-improve-release compare run --experiment ID                  # run both arms with the registered ArmRunner
+valor-improve-release compare run --experiment ID --arm-runner tools.improvement_plan_arm:PlannerArmRunner  # lazy import
+valor-improve-release revision supersede --revision ID --reason TEXT   # the REVISION_CONFLICT remedy: two current revisions
+
+# Claim report
+valor-improve-release report            # three ladder levels as JSON, each supported or not, with interval, correction, falsifier
+valor-improve-release report --render   # the same as text
+```
+
+`propose`, `drill`, `open-pr`, `expose`, and `rollback` accept
+`--runner-log <path>` (one JSON line per `git`/`gh` call). `propose`,
+`approve`, `expose`, and `close-window` accept `--now <iso>`, a test-only
+clock override.
 
 ### Agent Session Scheduler (`tools.agent_session_scheduler`)
 

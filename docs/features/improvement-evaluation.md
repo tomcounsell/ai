@@ -387,17 +387,21 @@ landed #3216.
 
 ## Releases
 
-An `accept` verdict produces an `ImprovementRelease` in `state="proposed"`, which
-is a proposal for a human. It carries the surfaces, the exposure, the
-`rollback_plan`, and the `observation_window_ends_at`, all written **before**
-anything is exposed, so "we can undo this" is a written commitment rather than a
-reassurance offered after something goes wrong.
-
-**Automated promotion is disabled and no record here enables it.** It stays
-disabled until evaluator secrets and production credentials are separated from
-candidate execution, and until a human-amended charter names the reversible
-surfaces. Both are events outside this work. A worktree is not a security
-boundary. The harness never touches `ImprovementRelease`.
+An `accept` verdict is consumed by `tools/improvement_release/lifecycle.py::propose`,
+which reads the evaluation and its experiment's manifest, checks the
+evaluation's `charter_digest` against the pinned charter, refuses any denied
+surface, and writes an `ImprovementRelease` in `state="proposed"`: a proposal
+for a human, carrying the surfaces, the candidate ref, the base revision, the
+exposure plan, the `rollback_plan`, and the observation plan, all written
+before anything is exposed. From there the release is drilled, approved by a
+human, opened as a PR, exposed on its merge, observed for a stated window
+against a baseline frozen at exposure, and accepted or rolled back; see
+[Improvement Release](improvement-release.md). `effect` and
+`confidence_interval` are read back only through
+`tools/improvement_release/evaluation_read.py`, which owns the JSON-string
+shape this harness writes. **Automated promotion is disabled and no record
+here enables it**; `promotion.py` in that package refuses and names both
+unmet preconditions. The harness never touches `ImprovementRelease`.
 
 ## What the dashboard will never show
 
@@ -408,6 +412,7 @@ improvement is the specific dishonesty the plan names, and
 ## See also
 
 - [Improvement Controller](improvement-controller.md), records, evidence collection, control namespace, break-glass
+- [Improvement Release](improvement-release.md), what consumes an `accept` verdict: the release lifecycle, drill, observation window, and the recursive comparison
 - [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md), the full design
 - [`docs/plans/improvement-controller-lane-4-frozen-evaluation-inputs.md`](../plans/improvement-controller-lane-4-frozen-evaluation-inputs.md), the lane 4 plan with the mutation table and verification rows
 - [Capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md), what is implemented versus measured
