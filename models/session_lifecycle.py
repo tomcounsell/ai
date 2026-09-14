@@ -752,6 +752,17 @@ def finalize_session(
     except Exception as e:
         logger.debug("[lifecycle] issue-lease release on finalize failed (non-fatal): %s", e)
 
+    # 7. Improvement lane-slot release (#3215). Gated on action-id provenance so
+    # every other session pays one dict lookup. Best-effort and exception-isolated.
+    try:
+        _ec = getattr(session, "extra_context", None) or {}
+        if _ec.get("action_id"):
+            from tools.improvement_control.intents import on_session_terminal
+
+            on_session_terminal(session, status)
+    except Exception as e:
+        logger.debug("[lifecycle] improvement slot release failed (non-fatal): %s", e)
+
 
 def transition_status(
     session,
