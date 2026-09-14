@@ -115,7 +115,7 @@ class TestReferenceSetFloor:
         assert result.digest
         assert result.artifact_ref.startswith("$CF:")
 
-    def test_one_below_floor_raises_infra_failure(self):
+    def test_reference_set_below_floor_yields_infra_failure(self):
         from tools.improvement_eval import calibration
         from tools.improvement_eval.errors import InfraFailure
 

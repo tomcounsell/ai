@@ -179,7 +179,7 @@ class TestProviderRouting:
         gate.assert_called_once_with("test-3216-open")
         assert route["provider"] != "claude-subscription"
 
-    def test_client_project_stays_on_subscription_providers(self):
+    def test_client_project_judge_stays_on_subscription_providers(self):
         from tools.improvement_eval.judges import serves_charter as sc
 
         with patch("tools.improvement_eligibility.is_open_source", return_value=False) as gate:

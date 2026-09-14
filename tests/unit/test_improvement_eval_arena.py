@@ -116,7 +116,7 @@ class TestSourceHygiene:
 
 
 class TestWriterGuard:
-    def test_save_and_delete_are_refused_while_armed(self):
+    def test_arm_write_is_refused(self):
         from models.memory import Memory
         from tools.improvement_eval import writer_guard
 
@@ -152,6 +152,38 @@ class TestWriterGuard:
         writer_guard.arm()
         writer_guard.disarm()
         assert record.save() is not False
+
+    def test_escaped_write_surfaces_as_infra_failure(self):
+        """A write the wrapper never saw still fails the job at the digest re-check.
+
+        The wrapper is disabled for the job (the "path the wrapper did not
+        cover") and the retrieval step writes a record. Only the independent
+        digest re-check in ``handle_job`` can turn that into an
+        ``InfraFailure``; remove it and this test goes green on a corrupted arm.
+        """
+        from tools.improvement_eval import arm_worker, writer_guard
+        from tools.improvement_eval.corpus import export_corpus
+
+        _seed_memory(PK_ARENA, "escaped write probe")
+        export = export_corpus(PK_ARENA)
+
+        def _writing_retrieval(query_text, project_key, *, limit=10):
+            _seed_memory(project_key, "escaped write landed")
+            return []
+
+        job = {
+            "mode": "retrieve",
+            "jsonl": export.jsonl_text,
+            "project_key": PK_ARENA,
+            "query_text": "anything",
+        }
+        with (
+            mock.patch.object(writer_guard, "arm", lambda: None),
+            mock.patch("tools.improvement_eval.retrieval.retrieve_ranked_ids", _writing_retrieval),
+        ):
+            with pytest.raises(InfraFailure, match="corpus digest changed"):
+                arm_worker.handle_job(job)
+        assert not writer_guard.is_armed()
 
     def test_digest_recheck_passes_on_match_and_fails_on_drift(self):
         from tools.improvement_eval import writer_guard
@@ -217,7 +249,7 @@ def _retrieve_ids(query_text, project_key, limit=10):
 
 
 class TestTwoArmsReadAByteIdenticalCorpus:
-    def test_digests_and_manifests_agree_across_arms_and_origin(self):
+    def test_two_arms_read_a_byte_identical_corpus(self):
         from tools.improvement_eval.arena import arm_redis_server, run_arm_job
         from tools.improvement_eval.corpus import canonical_corpus_digest, export_corpus
 

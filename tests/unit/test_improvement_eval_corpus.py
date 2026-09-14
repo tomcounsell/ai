@@ -222,7 +222,7 @@ class TestRestoreFidelityWithoutSkipAutoNow:
         new = _seed_memory(PK_FIDELITY, self.NEW_CONTENT)
         return old, new
 
-    def test_mutant_restore_moves_ranked_ids_and_trips_the_gate(self):
+    def test_restore_without_skip_auto_now_fails_baseline_parity(self):
         from tools.improvement_eval.corpus import (
             export_corpus,
             restore_corpus,
@@ -251,6 +251,15 @@ class TestRestoreFidelityWithoutSkipAutoNow:
         assert mutant_ids != baseline_ids
         with pytest.raises(InfraFailure):
             baseline_parity(mutant_ids, baseline, export.digest)
+
+        # The shipped restore carries the timestamps: it undoes the mutant
+        # above and reproduces the baseline. A restore that re-stamped
+        # relevance at import would leave the digest moved and this red.
+        restore_corpus(export.jsonl_text)
+        assert canonical_digest_unchanged(export)
+        assert (
+            baseline_parity(_retrieve_ids(self.QUERY, PK_FIDELITY), baseline, export.digest) is None
+        )
 
     def test_proper_restore_keeps_parity(self):
         from tools.improvement_eval.corpus import export_corpus, restore_corpus
@@ -294,9 +303,10 @@ class FakeEmbeddingProvider:
     model = "fake-test-provider"
     dimensions = 2
 
-    def __init__(self, mapping, default=(0.0, 1.0)):
+    def __init__(self, mapping, default=(0.0, 1.0), model="fake-test-provider"):
         self.mapping = mapping
         self.default = default
+        self.model = model
 
     def embed(self, texts, input_type=None):
         return [list(self.mapping.get(text, self.default)) for text in texts]
@@ -317,14 +327,14 @@ class TestRestoreFidelityWithoutCarry:
     CONTENT_B = "carry fidelity dolor sit"
     QUERY = "alpha query terms absent from every record"
 
-    def _patch_provider(self, monkeypatch, mapping, default=(0.0, 1.0)):
+    def _patch_provider(self, monkeypatch, mapping, default=(0.0, 1.0), model="fake-test-provider"):
         import popoto.fields.embedding_field as ef
 
-        provider = FakeEmbeddingProvider(mapping, default=default)
+        provider = FakeEmbeddingProvider(mapping, default=default, model=model)
         monkeypatch.setattr(ef, "_default_embedding_provider", provider)
         return provider
 
-    def test_mutant_reembed_moves_ranked_ids_and_trips_the_gate(self, monkeypatch, tmp_path):
+    def test_restore_without_carry_fails_baseline_parity(self, monkeypatch, tmp_path):
         from tools.improvement_eval.corpus import export_corpus, restore_corpus
         from tools.improvement_eval.retrieval import RankedBaseline, baseline_parity
 
@@ -343,7 +353,15 @@ class TestRestoreFidelityWithoutCarry:
         assert baseline_ids[0] == str(record_a.memory_id)
         baseline = RankedBaseline(ids=baseline_ids, corpus_digest=export.digest)
 
+        # The shipped restore runs under a rotated provider (a different
+        # fingerprint, so popoto sees a provenance mismatch) and must carry
+        # the exported v1 vectors rather than re-embed under v2. Dropping
+        # ``carry`` either refuses the import or recomputes the vectors, and
+        # either way the v1 query no longer reproduces the baseline.
+        self._patch_provider(monkeypatch, {}, default=(0.0, 1.0), model="fake-test-provider-v2")
         restore_corpus(export.jsonl_text)
+        self._patch_provider(monkeypatch, v1)
+        assert canonical_digest_unchanged(export)
         assert baseline_parity(_retrieve_ids(self.QUERY, PK_CARRY), baseline, export.digest) is None
 
         self._patch_provider(monkeypatch, {}, default=(0.0, 1.0))
