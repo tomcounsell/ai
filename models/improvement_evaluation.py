@@ -89,7 +89,10 @@ class ImprovementEvaluation(Model):
     charter_digest = Field(null=True)
     evaluator_version = Field(null=True)
     holdout_partition = Field(null=True)
-    blinded = Field(null=True)
+    # `type=bool` is load-bearing: without it a queried row hydrates the value
+    # as the string "False", which is truthy, and a failed blinding would read
+    # as a success to every consumer.
+    blinded = Field(type=bool, null=True)
     arm_assignment_digest = Field(null=True)
     trials = IntField(default=0)
     effect = Field(null=True)
