@@ -77,7 +77,11 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "owner_liveness",  # expectation_reconciler's owner-liveness evidence
     "spend_receipt",  # unit-3 settlement fallback (lane 7, #3274)
     "resource_probe",  # one immutable probe record per run (lane 7, #3274)
+    "resource_acquired",  # tools/vault_write.py wrote a credential (lane 3, #3215)
     "other",
+    # 8 kinds: exactly DEFAULT_VOCABULARY_MAXIMUM in tests/unit/test_improvement_models.py;
+    # the next kind brings a reasoned VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")]
+    # entry (#3215)
 )
 
 #: How a correction is read. ``unknown`` is the honest default: classification

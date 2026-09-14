@@ -90,6 +90,18 @@ class TestShape:
         assert report["virtual_debit_card"]["state"] == "absent"
 
 
+class TestVaultWriteProbe:
+    """`_probe_vault_write` (`:198-201`) reports the vault writer's presence
+    by file existence alone. Once tools/vault_write.py exists (#3215), the
+    `absent` branch this probe used to always take can no longer be reached
+    on main -- this is the one test that proves it."""
+
+    def test_vault_write_probe_reports_verified_once_the_writer_exists(self):
+        report = probe(runner=make_runner())
+
+        assert report["vault_write"]["state"] == "verified"
+
+
 class TestNeverLeaks:
     def test_a_seeded_credential_appears_nowhere_in_the_report(self):
         report = probe(runner=make_runner())

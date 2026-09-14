@@ -48,10 +48,17 @@ INVESTIGATION_KINDS: tuple[str, ...] = (
     "trace_analysis",  # reading the system's own transcripts and events
     "probe",  # running something to see what happens
     "resource_acquisition",  # checking what a provider actually offers today
+    "charter_amendment",  # a deferred decision that needs Tom's authorization (lane 3, #3215)
 )
 
 #: Where the investigation stands. Low-cardinality on purpose.
-INVESTIGATION_STATES: tuple[str, ...] = ("open", "resolved", "abandoned", "expired")
+INVESTIGATION_STATES: tuple[str, ...] = (
+    "open",
+    "resolved",
+    "abandoned",
+    "expired",
+    "awaiting_authorization",  # sent to Tom, silence is not approval (lane 3, #3215)
+)
 
 
 class ImprovementInvestigation(Model):
