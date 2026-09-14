@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-09-14
 tracking: https://github.com/tomcounsell/ai/issues/3217
-last_comment_id: 5603829577
+last_comment_id: 5662856978
 ---
 
 # Improvement controller lane 5: the first complete research cycle
@@ -103,8 +103,11 @@ reconciliation on the issue itself.
   `resource_probe` to `EVIDENCE_KINDS` (`models/improvement_evidence.py:78-79`), the
   `improvement-assumption-digest` optional sink (`tools/infrastructure_budget.py:568-574`), and
   the retention root outside the checkout. Consumed, not changed.
-- #3218 (lane 6): OPEN, filed 2026-09-07. Owns releases and the recursive comparison; this lane
-  writes no `ImprovementRelease`.
+- #3218 (lane 6): OPEN; its plan exists on `session/sdlc-3218`
+  (`docs/plans/improvement-controller-lane-6-promotion-rollback-and-recursion.md`) and its
+  2026-09-14 comment on #3217 (id 5662856978) names three seams this lane provides (Technical
+  Approach, "Provided to lane 6"). Owns releases and the recursive comparison; this lane writes no
+  `ImprovementRelease`.
 - #3177 (parent): OPEN.
 
 **Commits on main since the issue was filed touching referenced files:**
@@ -125,6 +128,9 @@ reconciliation on the issue itself.
   job spec by two pass-through keys and changes no gate.
 - `recursive-self-improvement.md` (parent, Planning): its lane-5 paragraph is this plan's scope
   statement. This plan carries `tracking:` to #3217, not #3177.
+- `improvement-controller-lane-6-promotion-rollback-and-recursion.md` (on `session/sdlc-3218`,
+  not yet on main): treats this lane as a seam, not a blocker, and asks for three things this plan
+  provides. Coordination, not conflict.
 - `sdlc-control-plane-asserted-facts.md`: no overlap.
 
 **Notes:** Lane 3 has no plan document yet, so its surface is consumed here as a requirements
@@ -525,6 +531,42 @@ each is checked by a Prerequisites row and the build's first commit corrects any
 If lane 3 lands `propose` without a Python-callable seam, the planner shells to the CLI; the
 requirement is the refusal semantics, not the call shape.
 
+#### Provided to lane 6 (#3218), from its 2026-09-14 comment on #3217
+
+Lane 6's plan (`docs/plans/improvement-controller-lane-6-promotion-rollback-and-recursion.md` on
+`session/sdlc-3218`) names three seams it leaves open for this lane. None blocks lane 6; each is
+built here so the recursive comparison can run on real arms later.
+
+1. **Process digest.** Every `ImprovementModelRevision` this lane writes carries
+   `research_process_digest` computed from a `ResearchProcessSpec` with these values:
+   `selection_rule="ordinal-lexicographic-v1"`, `investigation_budget_split={}` (this lane splits
+   nothing), `revision_cadence_seconds=settings.improvement.controller_tick_seconds`,
+   `planner_prompt_digest=sha256` of the brief template text, `skill_digest=sha256` of
+   `.claude/skills/improve-research/SKILL.md`, `extra={"ranking_module_digest": sha256 of
+   tools/improvement_ranking.py}`. When `tools.improvement_recursion.process.research_process_digest`
+   is importable it is called; otherwise `tools/improvement_ranking.py::process_digest` computes
+   the identical canonical form (`json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`,
+   `"sha256:<hex>"`) so the two agree byte for byte once both exist. A test pins the canonical form
+   against a fixture spec.
+2. **Arm runner.** The planner tick's core is a pure function,
+   `reflections/improvement_plan.py::plan_tick(project_key, *, process_spec, case_ids=None,
+   budget_cap=None, arm_run_id=None) -> TickResult`, and `run_improvement_planner` is its
+   reflection wrapper. `tools/improvement_plan_arm.py::PlannerArmRunner.run(process_digest,
+   opportunity_ids, budget_cap, arm_run_id)` runs one tick under the pinned spec restricted to the
+   named opportunities and returns lane 6's `ArmResult`: per-opportunity gains taken from
+   `accept` evaluations **already on record** for those cases and budget use from lane 3's meter
+   keyed by `arm_run_id`. Its docstring states the limit: a multi-tick arm that dispatches and
+   evaluates inside `run` is #3311's. `tools/improvement.py`'s CLI entry calls
+   `register_arm_runner(PlannerArmRunner())` when lane 6's `tools.improvement_recursion.arms` is
+   importable, so `compare run` under the same CLI finds it; a test asserts `get_arm_runner()`
+   returns it after CLI init and that nothing registers at import time.
+3. **`candidate_ref` and `base_revision` on the manifest.** This lane's manifest is
+   `{"protocol_ref", "base_revision", "candidate_ref", "candidate", "incumbent", "envelope",
+   "corpus_digest"}`. `base_revision` is the checkout SHA at freeze (lane 4's key); `candidate_ref`
+   is the same SHA for a parameter-only candidate and is written explicitly so lane 6's `propose`
+   reads it rather than refusing `MANIFEST_LACKS_BASE_REVISION`; a candidate that changes code
+   (#3311) writes the candidate branch's ref there.
+
 #### Consumed from lane 4 (#3216), exact calls
 
 - `tools.improvement_eval.corpus.export_corpus(project_key) -> CorpusExport` (`corpus.py:145`):
@@ -571,8 +613,9 @@ requirement is the refusal semantics, not the call shape.
   `rejected_reason` (free text set by `apply_verdict`), `dedup_identity` (the evidence cluster
   identity the novelty check compares; a plain string, never indexed).
 - `ImprovementExperiment` is unchanged; `candidate_surfaces` holds the envelope keys the candidate
-  varies, and `manifest` holds `{"protocol_ref", "candidate": {...}, "incumbent": {...},
-  "envelope": "retrieval_parameters", "code_sha", "corpus_digest"}`.
+  varies, and `manifest` holds `{"protocol_ref", "base_revision", "candidate_ref", "candidate":
+  {...}, "incumbent": {...}, "envelope": "retrieval_parameters", "corpus_digest"}` (the two ref
+  keys per lane 6's request, "Provided to lane 6").
 - Two migrations in `scripts/update/migrations.py`, registered in `MIGRATIONS`, idempotent:
   `improvement_investigation_stage_field` (additive confirm, on the
   `_migrate_confirm_improvement_v2_fields` precedent at `:1429`) and `retire_sdlc_reflection`
@@ -1224,6 +1267,9 @@ records an override, plus this plan's own.
 - [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
 - [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
   is exactly seven and carries no activity counter
+- [ ] Lane 6's three seams exist: every model revision carries a `research_process_digest` in
+  lane 6's canonical form, `PlannerArmRunner` registers from the CLI entry when lane 6's module is
+  importable, and every manifest carries `base_revision` and `candidate_ref`
 - [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -1396,8 +1442,12 @@ task 0 passes.
   the lexicographic order with `blocked`, `write_snapshot`, `load_snapshot`, `latest_snapshot`,
   the diff
 - `reflections/improvement_plan.py`: `open_cases` with the identity rules and the novelty check,
-  `run_improvement_planner` with the four fail-soft steps, the `enabled` gate, the paused-head
-  refusal, the idempotent single proposal, the `apply_verdict` backstop
+  the pure `plan_tick` core and its `run_improvement_planner` wrapper with the four fail-soft
+  steps, the `enabled` gate, the paused-head refusal, the idempotent single proposal, the
+  `apply_verdict` backstop
+- `process_digest` in `tools/improvement_ranking.py` on lane 6's canonical form, called by
+  `revise-model`; `tools/improvement_plan_arm.py::PlannerArmRunner` and its conditional
+  registration from the CLI entry (tests for both, including "nothing registers at import")
 - `register_improvement_planner` and `register_improvement_assumption_digest` in
   `reflection_register.py` and `scripts/update/run.py`; parametrize the six registration tests
 - CLI `ranking [--at DIGEST]`
@@ -1412,8 +1462,9 @@ task 0 passes.
 - **Assigned To**: experiment-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `tools/improvement_experiment.py`: `ENVELOPES`, `validate_candidate`, `freeze_experiment`,
-  `evaluate_experiment` (reservation then `runner.evaluate`), `apply_verdict`, `repair`
+- `tools/improvement_experiment.py`: `ENVELOPES`, `validate_candidate`, `freeze_experiment`
+  (manifest carries `base_revision` and `candidate_ref`), `evaluate_experiment` (reservation then
+  `runner.evaluate`), `apply_verdict`, `repair`
 - `arm_worker.py::handle_job` and `retrieval.py::retrieve_ranked_ids` pass-throughs, absent keys
   not forwarded
 - `tools/improvement_report.py::build_report` with the three mandatory derived sections
@@ -1486,7 +1537,7 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Digest and brief tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_assumption_digest.py tests/unit/test_improvement_brief.py -q` | exit code 0 |
 | Record, migration, registration, and dashboard tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_models.py tests/unit/test_migrations.py tests/unit/test_reflection_register.py tests/unit/test_ui_app.py -q` | exit code 0 |
 | The complete cycle runs end to end on seeded evidence | `scripts/pytest-clean.sh tests/integration/test_improvement_research_cycle.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check reflections/ tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py ui/data/improvement.py models/improvement_investigation.py models/improvement_evidence.py scripts/update/` | exit code 0 |
+| Lint clean | `python -m ruff check reflections/ tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py tools/improvement_plan_arm.py ui/data/improvement.py models/improvement_investigation.py models/improvement_evidence.py scripts/update/` | exit code 0 |
 | Format clean | `python -m ruff format --check reflections/ tools/ ui/data/ models/` | exit code 0 |
 | Eight investigation kinds, exactly | `python -c "from models.improvement_investigation import INVESTIGATION_KINDS as K; assert set(K)=={'probe','trace_analysis','memory_retrieval','inspiration_intake','web_research','resource_acquisition','skill_acquisition','charter_amendment'}, K"` | exit code 0 |
 | No question kind and no attention queue | `grep -rEn "\"question\"|attention_queue|daily_question|AskUserQuestion" models/improvement_*.py reflections/improvement_*.py tools/improvement_*.py \| wc -l` | match count == 0 |
@@ -1511,6 +1562,9 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Charter unwritten by this lane | `git diff --stat origin/main -- docs/improvement-charter.md models/improvement_charter.py \| wc -l` | match count == 0 |
 | `docs/sdlc/` files untouched by the retirement (eleven on main) | `python -c "import glob,sys; sys.exit(0 if len(glob.glob('docs/sdlc/*.md'))==11 else 1)"` | exit code 0 |
 | Existing auto-generated reflection notes preserved | `git diff --stat origin/main -- docs/sdlc/ \| wc -l` | match count == 0 |
+| Process digest matches lane 6's canonical form | `scripts/pytest-clean.sh tests/unit/test_improvement_ranking.py -k process_digest_canonical -q` | exit code 0 |
+| Manifest carries both refs | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "manifest_carries_base_revision_and_candidate_ref" -q` | exit code 0 |
+| Arm runner registers only from the CLI entry | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k "arm_runner" -q` | exit code 0 |
 | Retrieval envelope refuses `retrieval_mode` | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "refuses_retrieval_mode" -q` | exit code 0 |
 | Plan critique verdict recorded | `grep -c "READY TO BUILD" docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md` | output > 0 |
 
