@@ -258,38 +258,42 @@ class TestG3DocsLeg:
         )
         assert result.skill == SKILL_DO_DOCS
 
-    def test_last_dispatched_plan_skill_reaches_the_docs_leg_via_row_2(self):
-        """Route 2 of 2 — the ``last_dispatched_skill`` channel, with its provenance.
+    def test_last_dispatched_plan_skill_reaches_the_docs_leg(self):
+        """Route 2 of 2 — the ``last_dispatched_skill`` channel.
 
-        A post-PR lane whose CRITIQUE marker still reads ``pending`` reaches the
-        DOCS leg in two hops, with no caller proposing anything:
+        A post-PR lane whose last dispatch was plan-family enters G3 with a PR
+        open, REVIEW approved head-fresh, and DOCS pending — exactly leg 3's
+        state — and gets ``/do-docs`` from G3 rather than a plan-stage skill.
 
-        1. Row 2 (``_rule_plan_not_critiqued``) has **no ``pr_number``
-           step-aside**, so it dispatches ``/do-plan-critique`` even with the PR
-           open and REVIEW approved. That dispatch is recorded as
-           ``last_dispatched_skill``.
-        2. The next decision enters G3 with a plan-family last dispatch, a PR
-           open, REVIEW approved head-fresh, and DOCS pending — exactly leg 3's
-           state.
-
-        Row 2's missing step-aside is tracked separately as #3249 and is
-        deliberately not fixed here; while it stands, this is the route that
-        keeps the DOCS leg load-bearing rather than defence in depth.
+        This channel is pinned directly. Before #3249 it was reached in two hops
+        from row 2 (``_rule_plan_not_critiqued``), which had no ``pr_number``
+        step-aside and so dispatched ``/do-plan-critique`` on an open PR. That
+        route is gone: row 2 now stands down via ``_plan_stage_stood_down``, and
+        the same state lands on row 9 (``/do-docs``) one hop earlier. The leg
+        itself is unchanged, so it is exercised on its own terms here.
         """
         states = _approved_pr_states(critique="pending")
         context = {"pr_head_sha": _HEAD}
 
-        hop1 = decide_next_dispatch(
-            states, _approved_pr_meta(last_dispatched_skill=SKILL_DO_PR_REVIEW), context
+        result = decide_next_dispatch(
+            states, _approved_pr_meta(last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE), context
         )
-        assert hop1.skill == SKILL_DO_PLAN_CRITIQUE
-        assert hop1.row_id == "2"
+        assert result.skill == SKILL_DO_DOCS
+        assert result.row_id == "G3"
 
-        hop2 = decide_next_dispatch(
-            states, _approved_pr_meta(last_dispatched_skill=hop1.skill), context
+    def test_row_two_no_longer_recritiques_an_open_pr(self):
+        """#3249: the state that used to hop through row 2 now skips it entirely.
+
+        The companion to the route above — the pre-#3249 first hop returned
+        ``Dispatch(/do-plan-critique, row_id='2')`` on an open, approved PR.
+        """
+        result = decide_next_dispatch(
+            _approved_pr_states(critique="pending"),
+            _approved_pr_meta(last_dispatched_skill=SKILL_DO_PR_REVIEW),
+            {"pr_head_sha": _HEAD},
         )
-        assert hop2.skill == SKILL_DO_DOCS
-        assert hop2.row_id == "G3"
+        assert result.skill == SKILL_DO_DOCS
+        assert result.row_id == "9"
 
     def test_docs_completed_still_merges(self):
         """Regression fence: leg 1 (merge) keeps precedence when docs are done."""

@@ -1265,13 +1265,13 @@ def _rule_critique_ready_with_concerns_no_revision(
     unreachable and sent every subsequent round straight to /do-build unreviewed --
     the defect #2787 exists to fix.
 
-    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
-    completed — a finished PR must never route back to plan/build.
+    D3: defer to downstream PR-stage rows once the lane has left the plan stage
+    — a finished PR must never route back to plan/build.
     """
-    # Once build has produced a PR (or BUILD has started/completed), this row
-    # must release so routing can advance to review/merge. Without it the row
-    # re-dispatches /do-plan forever for a with-concerns plan whose revision
-    # flag never got set. _plan_stage_stood_down owns the check (#3249).
+    # Once the lane has left the plan stage this row must release so routing can
+    # advance to review/merge. Without it the row re-dispatches /do-plan forever
+    # for a with-concerns plan whose revision flag never got set.
+    # _plan_stage_stood_down owns the check (#3249).
     if _plan_stage_stood_down(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
@@ -1299,10 +1299,13 @@ def _rule_critique_ready_with_concerns_revision_applied(
     usually not watching. The accountability comes from the recorded acceptance,
     not from the halt.
 
-    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
-    completed so row-4c stops re-proposing /do-build on a finished PR.
+    D3: defer to downstream PR-stage rows once the lane has left the plan stage,
+    so row 4c stops re-proposing /do-build on a finished PR.
     """
-    if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+    # Once the lane has left the plan stage this row must release so routing can
+    # advance to review. Without it the row re-dispatches /do-build forever for
+    # every with-concerns plan. _plan_stage_stood_down owns the check (#3249).
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
@@ -1310,12 +1313,6 @@ def _rule_critique_ready_with_concerns_revision_applied(
     if not _concern_revision_is_unjudged(stage_states, meta):
         return False
     if concern_round_count(meta) < MAX_CONCERN_RECRITIQUE_ROUNDS:
-        return False
-    # Once build has produced a PR (or BUILD is already done), this row must
-    # release so routing can advance to review. Without these guards the row
-    # re-dispatches /do-build forever for every with-concerns plan. Mirror the
-    # guards on row 4a (_rule_critique_ready_no_concerns).
-    if meta.get("pr_number"):
         return False
     build_status = stage_states.get("BUILD")
     return build_status in (None, "pending", "ready")
